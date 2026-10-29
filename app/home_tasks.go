@@ -89,6 +89,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		// session), so a task created here is byte-identical to one created
 		// before the field was reachable unless the user chose otherwise.
 		OnComplete:  draft.OnComplete,
+		Host:        draft.Host,
 		ProjectPath: absPath,
 		Program:     program,
 		Enabled:     true,
@@ -100,6 +101,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// is the durable commit; a later refresh failure is classified so this caller
 	// can accept the saved task without presenting a retryable create form.
 	addErr := addTaskThroughDaemon(t)
+	m.noteRemoteCreate(t, addErr)
 	// Only a definitive refusal re-arms the form. A task that may have been
 	// saved — committed, or a reply lost after the daemon received it (#4820) —
 	// closes the form like a success, so the user cannot submit a duplicate, and

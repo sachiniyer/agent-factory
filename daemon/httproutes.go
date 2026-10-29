@@ -663,6 +663,13 @@ var internalHTTPRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/WorkspaceFacts",
+		Description: "Measure an off-box session's workspace (dirty files, unpushed commits, extra branches, stashes, whether it exists) so a kill confirmation can state what it destroys. Unmeasurable workspaces answer measured=false with a reason.",
+		requestType: reflect.TypeOf(WorkspaceFactsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.WorkspaceFacts) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/PauseStatusPoll",
 		Description: "Pause the daemon's liveness poll for one attached session (best-effort attach coordination).",
 		requestType: reflect.TypeOf(PauseStatusPollRequest{}),
@@ -688,6 +695,11 @@ var internalHTTPRoutes = []HTTPRoute{
 func sandboxAllowedPath(path string) bool {
 	return sandboxAllowedPaths[path]
 }
+
+// SandboxAllowedPath is sandboxAllowedPath for other packages' tests: the CLI's
+// end-to-end scope test asks the real table, not a copy of it, whether each route
+// a verb touches is one a sandbox credential is admitted to.
+func SandboxAllowedPath(path string) bool { return sandboxAllowedPath(path) }
 
 // sandboxAllowedPaths is the derived lookup, filled in init() rather than by a
 // var initializer. That is not style: httpRoutes' initializer transitively

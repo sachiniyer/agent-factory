@@ -1,10 +1,14 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
+	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -90,7 +94,7 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	//    Instance; the branch reaches the daemon solely as this Archive() return), and
 	//    a failed Kill sends the session to Lost + recovery-eligible via the caller's
 	//    AbortArchiveToLost (daemon/archive.go). The Lost-restore loop then re-provisions
-	//    from i.Branch (reprovisionRemote → ProvisionSpec.RestoreBranch), and an empty
+	//    from this recorded checkpoint (reprovisionRemote → ProvisionSpec.RestoreBranch), and an empty
 	//    RestoreBranch makes the docker/ssh runtimes SKIP the restore fetch and clone the
 	//    repo's DEFAULT branch — a "successful" recovery onto the wrong branch that
 	//    silently strands the work this push just made durable.
@@ -156,6 +160,7 @@ func (i *Instance) recordArchivePush(branch string) {
 	defer i.mu.Unlock()
 	changed := i.Branch != branch
 	i.Branch = branch
+	i.branchUnpushed = false
 	// A push archive publishes the branch and reaps the host directory, so the
 	// work now lives on origin (#5571 W8.5).
 	i.archivedWorkspace = &ArchivedWorkspaceData{Host: i.Host, Pushed: true, Branch: branch}
@@ -246,12 +251,13 @@ func (i *Instance) reprovisionRemote() error {
 	i.mu.RLock()
 	backend := i.backend
 	accountName := i.Account
+	restoreBranch, unverified := i.restoreCheckpointLocked()
 	spec := ProvisionSpec{
 		RepoRoot:      i.Path,
 		Title:         i.Title,
 		Program:       i.Program,
 		CloneURL:      originRemoteURL(i.Path),
-		RestoreBranch: i.Branch,
+		RestoreBranch: restoreBranch,
 		// The replacement agent-server must land on the SAME branch the fetch
 		// just materialized, not re-derive one from its own branch_prefix
 		// (#5571 W2.4).
@@ -260,6 +266,22 @@ func (i *Instance) reprovisionRemote() error {
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 	}
 	i.mu.RUnlock()
+	if unverified {
+		// af never observed this branch being pushed, but a lost response or a
+		// crash mid-push leaves exactly that picture with the branch on origin.
+		// Ask origin before discarding it (#5972).
+		verdict, err := branchOnOrigin(spec.CloneURL, restoreBranch)
+		switch {
+		case err != nil:
+			// Unknown stays unknown: not discarded, not fetched blindly.
+			return fmt.Errorf("cannot re-provision session %q: af could not check whether its branch %q is on origin (%v); nothing was changed — fix access to the repository's origin from this machine and retry, or push the branch from the session's host", i.Title, restoreBranch, err)
+		case verdict:
+			i.markBranchPushed()
+		default:
+			restoreBranch = ""
+		}
+		spec.RestoreBranch = restoreBranch
+	}
 	spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(spec.RepoRoot)
 	if backend == nil {
 		return fmt.Errorf("cannot re-provision session %q: no backend on record", i.Title)
@@ -312,12 +334,36 @@ func (i *Instance) reprovisionRemote() error {
 	// would refuse a handoff-scoped pin whose registry is not the recorded
 	// enum's (#4430 review round 4), and restore cannot drift onto ambient
 	// credentials.
-	if kind.CarriesAccount() && strings.TrimSpace(accountName) != "" {
+	if accountCarried(kind, i.Path, i.Host) && strings.TrimSpace(accountName) != "" {
 		account, accountErr := selectAccountInNamespace(scopedAgent, accountName)
 		if accountErr != nil {
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
 		}
 		spec.Account = account
+		// The agent command is proven against the account BEFORE anything is
+		// reaped, like the persisted-account checks around it: a program override
+		// that changed since the session was created must leave the recoverable
+		// runtime intact, not delete it and then refuse the replacement.
+		if kind == BackendSSH {
+			rc, rcErr := resolveRepoConfig(i.Path)
+			if rcErr != nil {
+				return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, rcErr)
+			}
+			check := spec
+			if verr := validateRemoteAccountProgram(rc, &check); verr != nil {
+				return fmt.Errorf("cannot re-provision session %q: %w", i.Title, verr)
+			}
+		}
+	} else if strings.TrimSpace(accountName) != "" {
+		// A session recorded under an account is relaunched under THAT account or
+		// not at all (#5571 W7.4). The target can no longer carry it — its host is
+		// not in the global host list any more — and replacing the sandbox anyway
+		// would run the session on the host's own login (or another account) while
+		// the row still reports this one. Refused BEFORE anything is reaped, so the
+		// old runtime stays recoverable.
+		return fmt.Errorf("cannot re-provision session %q: it runs under account %q, but its target %s is not a host in the global host list, so the account cannot be synced; "+
+			"re-add the host under [hosts.<name>] (it is recorded as %q) or clear the session's account, rather than restoring it under another identity",
+			i.Title, accountName, string(kind), i.Host)
 	}
 	rt, err := ResolveRuntime(kind)
 	if err != nil {
@@ -752,4 +798,55 @@ func (i *Instance) RestoreWouldDiscardUnpushedWork() bool {
 	default:
 		return false
 	}
+}
+
+// restoreCheckpointLocked returns the branch a replacement sandbox may fetch
+// from origin, and whether that is still unverified. The displayed i.Branch is
+// the NAME the session works on and, for a session created by this af, may never
+// have been pushed; a runtime fetches a non-empty RestoreBranch unconditionally,
+// so handing it that bare name would fail every replacement and leave the
+// session Lost (#5972). A row an older af wrote carries no unpushed mark, and
+// there a recorded branch could only have come from a push, so it is returned
+// verified. For the marked exception the name is returned with unverified set:
+// the caller asks origin, because af merely not having SEEN a push is not
+// evidence there was none. The caller holds i.mu.
+func (i *Instance) restoreCheckpointLocked() (branch string, unverified bool) {
+	return strings.TrimSpace(i.Branch), i.branchUnpushed && strings.TrimSpace(i.Branch) != ""
+}
+
+// markBranchPushed records that origin was seen to hold the branch.
+func (i *Instance) markBranchPushed() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.branchUnpushed {
+		i.branchUnpushed = false
+		i.touchLocked()
+	}
+}
+
+// branchOnOrigin answers whether origin holds refs/heads/<branch>: true when it
+// does, false only on a positive "origin lacks it", and an error for anything
+// else (no URL, unreachable, auth). A var so tests need no network.
+var branchOnOrigin = branchOnOriginViaGit
+
+func branchOnOriginViaGit(originURL, branch string) (bool, error) {
+	if strings.TrimSpace(originURL) == "" {
+		return false, errors.New("the repository has no origin remote")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", "--heads", originURL, "refs/heads/"+branch)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.WaitDelay = dockerWaitDelay
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var exit *exec.ExitError
+	// --exit-code makes 2 mean "reached origin, no matching ref"; any other
+	// failure says nothing about the ref.
+	if errors.As(err, &exit) && exit.ExitCode() == 2 && ctx.Err() == nil {
+		return false, nil
+	}
+	return false, fmt.Errorf("git ls-remote: %w: %s", err, strings.TrimSpace(string(out)))
 }

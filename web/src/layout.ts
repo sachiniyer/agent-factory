@@ -182,6 +182,39 @@ export function siblingSubtreeOf(root: LayoutNode, leafId: string): LayoutNode |
   return siblingSubtreeOf(root.b, leafId);
 }
 
+/** The leaf that should take the keyboard when `droppedId` disappears from `prev`
+ *  WITHOUT going through closePane (an out-of-band shrink — reconcile only sees the
+ *  new tree). The same successor rule closePane applies: the first surviving leaf of
+ *  the dropped leaf's sibling subtree, the pane that grew into its region (#5983).
+ *  When that whole subtree is gone too, the next-nearest ancestor's sibling is tried
+ *  before giving up, so the successor is always the closest survivor and never an
+ *  unrelated root-first pane. null when `prev` has no surviving relative of the
+ *  dropped leaf; the caller then falls back to the first leaf of the new tree. */
+export function focusSuccessorAfterDrop(
+  prev: LayoutNode | null,
+  droppedId: string,
+  survivors: ReadonlySet<string>,
+): string | null {
+  // Sibling subtrees from the nearest ancestor outward.
+  const siblings: LayoutNode[] = [];
+  let node = prev;
+  while (node && node.kind === "split") {
+    const inA = findLeaf(node.a, droppedId);
+    if (!inA && !findLeaf(node.b, droppedId)) {
+      return null;
+    }
+    siblings.unshift(inA ? node.b : node.a);
+    node = inA ? node.a : node.b;
+  }
+  for (const sib of siblings) {
+    const hit = leaves(sib).find((l) => survivors.has(l.id));
+    if (hit) {
+      return hit.id;
+    }
+  }
+  return null;
+}
+
 /** Drops every leaf bound to `tab` except the one with id `keepId`, collapsing each
  *  removal. Enforces the one-tab-one-pane invariant after a split/replace. */
 function dedupeExcept(root: LayoutNode, tab: number, keepId: string): LayoutNode {
@@ -391,6 +424,42 @@ export function tabsRebound(
   );
 }
 
+const isSynth = (id: string): boolean => /^\d+:/.test(id);
+
+/** The synthesized identities in `prevIds` that a real id in `ids` replaced (#1779:
+ *  the daemon resolves an id-less tab's real id after a snapshot tracked it as
+ *  `kind:name`). Matching is by position between the identities both lists share:
+ *  within each gap between consecutive shared anchors, the k-th vanished synthesized
+ *  id pairs with the k-th new real id. Anything left unpaired was really closed. */
+function adoptedSynthIdentities(prevIds: string[], ids: string[]): Set<string> {
+  const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
+  const gone = new Map<string, string[]>(); // gap key → vanished synthesized ids
+  let key = "";
+  for (const id of prevIds) {
+    if (shared.has(id)) {
+      key = id;
+    } else if (id !== "" && isSynth(id)) {
+      gone.set(key, [...(gone.get(key) ?? []), id]);
+    }
+  }
+  const adopted = new Set<string>();
+  key = "";
+  const fresh = new Map<string, number>(); // gap key → new real ids consumed
+  for (const id of ids) {
+    if (shared.has(id)) {
+      key = id;
+    } else if (id !== "" && !isSynth(id) && !prevIds.includes(id)) {
+      const n = fresh.get(key) ?? 0;
+      const synth = gone.get(key)?.[n];
+      if (synth !== undefined) {
+        adopted.add(synth);
+      }
+      fresh.set(key, n + 1);
+    }
+  }
+  return adopted;
+}
+
 /** Re-points every leaf at wherever ITS OWN tab now sits, given the tab identity
  *  list before and after a resync (#1779).
  *
@@ -496,21 +565,21 @@ export function remapByIdentity(root: LayoutNode, prevIds: string[], ids: string
   const max = ids.length - 1;
   const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
   if (maxLeaf) {
-    const isSynth = (id: string): boolean => /^\d+:/.test(id);
-    // A backfill happened when a real id (not synthesized, not empty) is in `ids`
-    // but was not in `prevIds` — the daemon resolved a tab's id after a prior snapshot
-    // tracked it by the synthesized `kind:name` fallback.
-    const backfill = ids.some((id) => id !== "" && !isSynth(id) && !prevIds.includes(id));
+    // Which synthesized identities were ADOPTED by a real id (backfilled), not merely
+    // "some backfill happened somewhere": a session-wide flag let one id-less tab's
+    // backfill mark every other missing synthesized tab alive, so a closed legacy tab
+    // survived and the clamp evicted the real survivor's pane (#5982).
+    const adopted = adoptedSynthIdentities(prevIds, ids);
     // A !moved leaf is DEAD (its tab was genuinely closed) when its prev identity is a
-    // real id that's gone from `ids`, or a synthesized `kind:name` that's gone with no
-    // backfill (a closed pre-#1738 legacy tab). A backfilled survivor (synthesized id
-    // gone, but a real id took its place) is NOT dead — its pane must be preserved.
+    // real id that's gone from `ids`, or a synthesized `kind:name` that no real id
+    // adopted (a closed pre-#1738 legacy tab). An adopted survivor (synthesized id
+    // gone, a real id took its place) is NOT dead — its pane must be preserved.
     const deadIdentity = (tab: number): boolean => {
       const prev = prevIds[tab];
       if (prev === undefined || prev === "") {
         return true;
       }
-      return !isSynth(prev) || !backfill;
+      return !isSynth(prev) || !adopted.has(prev);
     };
     // (1) Close a dead leaf clamped out of range onto a survivor's slot at `max`.
     for (const leaf of leaves(cur)) {

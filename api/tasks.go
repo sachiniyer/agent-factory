@@ -253,8 +253,9 @@ var tasksAddCmd = &cobra.Command{
 		// The id the daemon STORED, not the one this command generated: a daemon
 		// that mints the id (a sandbox credential's add) discards the request's,
 		// and printing the unstored one leaves the caller unable to get or remove
-		// the task (#5890). An error that committed the add still carries no id,
-		// so the generated one stands.
+		// the task (#5890). A committed add whose reload failed names the stored
+		// id on the error itself; only a failure that stored nothing leaves the
+		// generated one, and then there is no task to address.
 		if storedID != "" {
 			id = storedID
 		}

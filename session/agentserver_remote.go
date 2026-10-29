@@ -75,7 +75,9 @@ type remoteAgentServer struct {
 	// idBrokers is brokers keyed by stable tab id, for the id-addressed plane
 	// (#5571 W4.4); see agentserver_remote_tabid.go. idPlaneKnown/idPlane cache
 	// the sandbox's tab-id-addressing advertisement.
-	idBrokers    map[string]*ptyBroker
+	idBrokers map[string]*ptyBroker
+	// goneTabs are ids whose tab closed: terminal for subscriptions (#5963).
+	goneTabs     map[string]bool
 	idPlaneKnown bool
 	idPlane      bool
 	features     []string
@@ -158,7 +160,7 @@ func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
 	if err == nil {
 		s.idNative() // warm the feature advertisement (#5571 W4.5)
 		if s.inst != nil && resp.Conversation != nil {
-			s.inst.RecordReportedConversation(*resp.Conversation)
+			s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
 		}
 	}
 	return err
@@ -195,7 +197,7 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	// The server captures a conversation the provider only exposes after launch
 	// (a Codex rollout) and reports it on later polls (#5571 W7.2).
 	if s.inst != nil && resp.Conversation != nil {
-		s.inst.RecordReportedConversation(*resp.Conversation)
+		s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
 	}
 	return Observation{
 		Updated:     resp.Updated,
@@ -233,6 +235,17 @@ func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapsho
 // (false, nil — authoritative) from "the sandbox never answered" (false, err —
 // UNKNOWN). Swallowing the error into a bare false made a transport blip
 // indistinguishable from a dead agent, and callers re-provisioned on it (#1794).
+// WorkspaceFacts asks the agent-server to measure its workspace (W8.2). A server
+// predating the route answers 404, which surfaces as an error: the caller reports
+// the workspace as unmeasured, never as clean.
+func (s *remoteAgentServer) WorkspaceFacts() (WorkspaceFacts, error) {
+	var facts WorkspaceFacts
+	if err := s.rc.call("/v1/agent/workspace-facts", struct{}{}, &facts); err != nil {
+		return WorkspaceFacts{}, err
+	}
+	return facts, nil
+}
+
 func (s *remoteAgentServer) Alive() (bool, error) {
 	var resp agentAliveResp
 	if err := s.rc.call("/v1/agent/alive", struct{}{}, &resp); err != nil {
@@ -335,7 +348,16 @@ func (s *remoteAgentServer) StopPreservingWorkspace() error {
 		br.close()
 	}
 	s.closeRelays()
-	return s.rc.call("/v1/agent/stop", struct{}{}, nil)
+	if err := s.rc.call("/v1/agent/stop", struct{}{}, nil); err != nil {
+		// The agent was not proven stopped, so the session carries on: lift the
+		// latch so the next subscribe, input or resize dials a fresh broker rather
+		// than failing "is being terminated" for as long as the row lives (#5869).
+		s.mu.Lock()
+		s.closed = false
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (s *remoteAgentServer) Kill(_ bool) error {
@@ -563,6 +585,14 @@ func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.
 // doJSON is callWithin's plumbing generalized over the HTTP method: GET
 // /v1/health is the one non-POST route on the wire, and it shares the same
 // token, envelope, and error-code reconstruction. A nil req sends no body.
+// agentAnswered wraps an error the agent-server returned in its envelope — it ran
+// the request and refused — as opposed to a transport failure, which leaves the
+// request's effect unknown. The message is unchanged.
+type agentAnswered struct{ err error }
+
+func (e *agentAnswered) Error() string { return e.err.Error() }
+func (e *agentAnswered) Unwrap() error { return e.err }
+
 func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout time.Duration) error {
 	var body io.Reader
 	if req != nil {
@@ -629,7 +659,7 @@ func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout t
 			// classes above (#5571 W4.3).
 			err = fmt.Errorf("%s: %w", env.Error.Message, ErrTabGone)
 		}
-		return err
+		return &agentAnswered{err: err}
 	}
 	if resp != nil {
 		if err := json.Unmarshal(env.Data, resp); err != nil {
@@ -719,8 +749,8 @@ func (c *remoteAgentClient) createTab(id, kind, command, name string) (TabData, 
 // ordinal. ErrTabGone when it names no live tab (reconstructed from the
 // envelope's tab_gone code), which a W4.4 reconciler reads as "already closed"
 // rather than a failure.
-func (c *remoteAgentClient) closeTab(id string) error {
-	return c.call("/v1/agent/tab-close", agentTabCloseReq{ID: id}, nil)
+func (c *remoteAgentClient) closeTab(id, gen string) error {
+	return c.call("/v1/agent/tab-close", agentTabCloseReq{ID: id, Gen: gen}, nil)
 }
 
 // tabs reads the sandbox's roster: every tab with its stable id, kind, name,
@@ -944,6 +974,9 @@ type agentTabCreateResp struct {
 // agentTabCloseReq names the tab to close by stable id only.
 type agentTabCloseReq struct {
 	ID string `json:"id"`
+	// Gen makes the close conditional on the tab's incarnation, checked
+	// atomically on the sandbox (#5996). Empty closes whatever holds the id.
+	Gen string `json:"gen,omitempty"`
 }
 
 // agentTabsResp is the sandbox's roster: every tab as TabData, exit evidence

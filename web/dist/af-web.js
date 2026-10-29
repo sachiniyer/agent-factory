@@ -6206,14 +6206,18 @@ function currentMode() {
     return "dark";
   }
 }
-function surface(mode) {
+function surface(mode, token2 = "--af-surface") {
   const probe = document.createElement("span");
   probe.dataset.afTheme = mode;
   probe.hidden = true;
   document.documentElement.append(probe);
-  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
+  const color = getComputedStyle(probe).getPropertyValue(token2).trim();
   probe.remove();
   return color;
+}
+function themeSurfaces() {
+  const both = (mode) => [surface(mode), surface(mode, "--af-surface-raised")];
+  return { light: both("light"), dark: both("dark") };
 }
 function themeColorMetaContents(choice) {
   return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
@@ -6438,6 +6442,429 @@ async function copyText(text) {
   }
 }
 
+// src/types.ts
+var Liveness = {
+  Unset: 0,
+  Running: 1,
+  Ready: 2,
+  Lost: 3,
+  Dead: 4,
+  Archived: 5,
+  LimitReached: 6
+};
+var TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3,
+  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
+   *  per-session code-server rooted at the session's worktree, reachable only
+   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
+   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
+   *  lockstep with the Go enum. */
+  VSCode: 4,
+  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
+   *  Mirrors session.TabKindDocs (session/tab.go). */
+  Docs: 5
+};
+var InFlightOp = {
+  None: 0,
+  Creating: 1,
+  Killing: 2,
+  Archiving: 3,
+  Restoring: 4,
+  Replacing: 5,
+  Respawning: 6
+};
+var Status = {
+  Running: 0,
+  Ready: 1,
+  Loading: 2,
+  Deleting: 3,
+  Dead: 4,
+  Lost: 5,
+  Archived: 6
+};
+
+// src/time.ts
+function formatDuration(ms) {
+  const age = Math.max(0, ms);
+  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
+  if (age < minute) return "<1m";
+  if (age < hour) return `${Math.floor(age / minute)}m`;
+  if (age < day) return `${Math.floor(age / hour)}h`;
+  return `${Math.floor(age / day)}d`;
+}
+function formatTime(value, now = /* @__PURE__ */ new Date()) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  const delta = date.getTime() - now.getTime();
+  if (Math.abs(delta) < 24 * 60 * 6e4) {
+    const duration = formatDuration(Math.abs(delta));
+    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
+  }
+  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// src/status.ts
+var OPERATOR_KIND_LABELS = {
+  "needs-you": "Needs you",
+  working: "Working",
+  "waiting-limit": "Waiting on a limit",
+  broken: "Broken",
+  archived: "Archived"
+};
+var ROW_KIND_LABELS = {
+  ready: "Ready",
+  working: "Working",
+  lost: "Lost",
+  dead: "Dead",
+  limit: "Limit reached",
+  archived: "Archived"
+};
+var IDLE_REASON_LABELS = {
+  "usage-limit": "usage limit",
+  "process-exited": "process exited",
+  "restore-gave-up": "restore gave up",
+  "restore-waiting-on-environment": "restore waiting on environment",
+  "recreate-pending": "recreate notice pending",
+  "prompt-not-delivered": "prompt not delivered",
+  "delivery-unconfirmed": "delivery unknown",
+  "no-pane-change-since-delivery": "no change after delivery",
+  "settled-after-pane-change": "pane changed"
+};
+function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
+  const label = idleReasonLabel(s.idle_reason);
+  if (!label) {
+    return "";
+  }
+  let detail = label;
+  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
+    const { attempts, error } = s.lost_restore_failure;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "attempt" : "attempts";
+      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+    }
+  }
+  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
+    const { attempts, error } = s.lost_restore_wait;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
+      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
+    }
+  }
+  if (s.last_pane_churn_at) {
+    const churn = new Date(s.last_pane_churn_at);
+    if (!Number.isNaN(churn.getTime())) {
+      const age = `${formatPaneChurnAge(churn, now)} ago`;
+      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
+    }
+  }
+  return detail;
+}
+function idleReasonLabel(reason) {
+  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
+}
+function unreachableDetail(s, now = /* @__PURE__ */ new Date()) {
+  const u = s.unreachable;
+  if (!u?.since || !u.error) {
+    return "";
+  }
+  const since = new Date(u.since);
+  if (Number.isNaN(since.getTime())) {
+    return "";
+  }
+  return `unreachable ${formatPaneChurnAge(since, now)} ago \xB7 ${u.error}`;
+}
+function formatPaneChurnAge(churn, now) {
+  return formatDuration(now.getTime() - churn.getTime());
+}
+var READY_ICON = "circle";
+var DEAD_ICON = "circle";
+var LOST_ICON = "circle-dashed";
+var ARCHIVED_ICON = "archive";
+var LIMIT_ICON = "diamond";
+var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
+function rowStatus(s) {
+  const op = s.in_flight_op ?? InFlightOp.None;
+  if (op !== InFlightOp.None) {
+    return WORKING;
+  }
+  return dotForLiveness(livenessOf(s));
+}
+function isWorking(s) {
+  return rowStatus(s).kind === null;
+}
+function isCreating(s) {
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
+}
+function rowKind(s) {
+  return rowStatus(s).kind ?? "working";
+}
+function operatorKind(s) {
+  const displayed = rowKind(s);
+  if (displayed === "working") {
+    return "working";
+  }
+  if (displayed === "archived") {
+    return "archived";
+  }
+  if (displayed === "limit" || s.idle_reason === "usage-limit") {
+    return "waiting-limit";
+  }
+  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
+    return "broken";
+  }
+  return "needs-you";
+}
+function livenessOf(s) {
+  const lv = s.liveness ?? Liveness.Unset;
+  if (lv !== Liveness.Unset) {
+    return lv;
+  }
+  switch (s.status) {
+    case Status.Ready:
+      return Liveness.Ready;
+    case Status.Dead:
+      return Liveness.Dead;
+    case Status.Lost:
+      return Liveness.Lost;
+    case Status.Archived:
+      return Liveness.Archived;
+    // Running and the transient values (Loading/Deleting, which never persist)
+    // fall through to the working dot, matching render.go's LivenessUnset arm.
+    default:
+      return Liveness.Running;
+  }
+}
+function dotForLiveness(lv) {
+  switch (lv) {
+    case Liveness.Ready:
+      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
+    case Liveness.Lost:
+      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
+    case Liveness.Dead:
+      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
+    case Liveness.Archived:
+      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
+    case Liveness.LimitReached:
+      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
+    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
+    case Liveness.Running:
+    case Liveness.Unset:
+    default:
+      return WORKING;
+  }
+}
+function isArchived(s) {
+  return livenessOf(s) === Liveness.Archived;
+}
+function isLimitReached(s) {
+  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
+}
+function isPendingManualHandoffDeliveryUnconfirmed(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+}
+function ambiguousHandoffDelivery(status) {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+function confirmableHandoffDelivery(status) {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
+function isPendingAgentHandoffDeliveryUnconfirmed(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+}
+function isPendingAgentHandoffDeliveryConfirmable(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function isPendingManualSwapDeliveryConfirmable(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function canHandoff(s) {
+  return s.can_handoff === true;
+}
+function isRootSession(s) {
+  return s.is_root === true;
+}
+function compareSessionsForRail(a, b) {
+  const aArchived = isArchived(a);
+  const aa = aArchived ? 1 : 0;
+  const bb = isArchived(b) ? 1 : 0;
+  if (aa !== bb) {
+    return aa - bb;
+  }
+  const ar = isRootSession(a) ? 0 : 1;
+  const br = isRootSession(b) ? 0 : 1;
+  if (ar !== br) {
+    return ar - br;
+  }
+  const at = a.created_at ?? "";
+  const bt = b.created_at ?? "";
+  if (at !== bt) {
+    const asc = at < bt ? -1 : 1;
+    return aArchived ? -asc : asc;
+  }
+  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
+var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
+function isOffBoxWorkspace(s) {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
+function rowTitle(s) {
+  const lv = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  let title = s.title;
+  if (isOffBoxWorkspace(s)) {
+    title = "[remote] " + title;
+  }
+  if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  }
+  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
+    title = "[deleting] " + title;
+  }
+  if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
+  }
+  const recreate = rootRecreateNote(s);
+  if (recreate) {
+    title = `[${recreate}] ` + title;
+  }
+  if (archiveWarningText(s) !== "") {
+    title = "[archive incomplete] " + title;
+  }
+  if (s.unreachable?.since && s.unreachable?.error) {
+    title = "[unreachable] " + title;
+  }
+  if (s.model_change) {
+    title = "[model changed] " + title;
+  }
+  return title;
+}
+function archiveWarningText(s) {
+  return s.archive_warning?.trim() ?? "";
+}
+var CALLBACK_UNAVAILABLE_PREFIX = "af callback unavailable: ";
+function callbackUnavailableText(s) {
+  const reason = s.callback_unavailable?.trim() ?? "";
+  return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
+}
+function sessionWarningText(s) {
+  return [archiveWarningText(s), callbackUnavailableText(s)].filter((t) => t !== "").join(" \xB7 ");
+}
+function rootRecreateNote(s) {
+  switch (s.root_recreate_context) {
+    case "fresh":
+      return "fresh context";
+    case "unknown":
+      return "context unknown";
+    default:
+      return "";
+  }
+}
+function limitBadgePrefix(s) {
+  if (!s.limit_reset_at) {
+    return "[limit] ";
+  }
+  const reset = new Date(s.limit_reset_at);
+  if (Number.isNaN(reset.getTime())) {
+    return "[limit] ";
+  }
+  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
+}
+function formatLimitReset(reset, now) {
+  const h12 = (reset.getHours() + 11) % 12 + 1;
+  const ampm = reset.getHours() < 12 ? "am" : "pm";
+  const min = reset.getMinutes();
+  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
+  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
+  if (sameDay) {
+    return clock;
+  }
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
+// src/backends.ts
+var HOST_VALUE_PREFIX = "host:";
+function hostFromChoiceValue(value) {
+  return value.startsWith(HOST_VALUE_PREFIX) ? value.slice(HOST_VALUE_PREFIX.length) : "";
+}
+var REPO_DEFAULT = "";
+function backendChoices(catalog) {
+  if (catalog === null) {
+    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
+  }
+  const callbackAdvisory = (opt) => {
+    if (opt?.status !== "available") return "";
+    const parts = [];
+    if (opt.note) parts.push(`Host ${opt.note}`);
+    if (opt.callback_unavailable_reason) parts.push(CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason);
+    return parts.join(" \xB7 ");
+  };
+  const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
+  const choices = [
+    {
+      value: REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default:
+      // that is the misconfigured case, where naming a backend would be inventing
+      // one. The reason says what is wrong with the key.
+      label: catalog.default === "" ? "Repo default" : `Repo default (${resolvedDefault?.label ?? catalog.default})`,
+      // Taken from the daemon, not inferred here. A repo whose declared default is
+      // broken resolves to that broken backend and FAILS — it does not quietly run
+      // local — so the default is not automatically a safe harbour.
+      status: catalog.default_status,
+      reason: catalog.default_status === "available" ? callbackAdvisory(resolvedDefault) : catalog.default_reason ?? ""
+    }
+  ];
+  for (const opt of catalog.backends) {
+    choices.push({
+      value: opt.name,
+      label: opt.label,
+      status: opt.status,
+      reason: opt.status === "available" ? callbackAdvisory(opt) : opt.reason ?? ""
+    });
+  }
+  for (const h2 of catalog.hosts ?? []) {
+    const parts = [`host: ${h2.name}`];
+    if (h2.address) parts[0] += ` (${h2.address})`;
+    if (h2.name === catalog.default_host) parts[0] += " \xB7 default";
+    choices.push({
+      value: HOST_VALUE_PREFIX + h2.name,
+      label: parts[0],
+      status: h2.status,
+      reason: h2.status === "available" ? "" : h2.reason ?? ""
+    });
+  }
+  return choices;
+}
+function backendNotice(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 ? "" : choice.reason;
+}
+function backendSelectable(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 || choice.status === "available";
+}
+
 // src/api.ts
 var TOKEN_KEY = "af.token";
 function loadToken() {
@@ -6612,7 +7039,10 @@ async function createSession(input, token2) {
     prompt: input.prompt
   };
   const backend = (input.backend ?? "").trim();
-  if (backend !== "") {
+  const host = hostFromChoiceValue(backend);
+  if (host !== "") {
+    body.host = host;
+  } else if (backend !== "") {
     body.backend = backend;
   }
   const account = (input.account ?? "").trim();
@@ -6816,6 +7246,26 @@ async function fetchPreviewOrigin(sessionId, tabId, token2) {
     return env?.data?.origin ?? "";
   } catch {
     return "";
+  }
+}
+async function fetchEditorPortOrigin(sessionId, token2) {
+  const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
+  const headers = {};
+  if (token2 !== "") {
+    headers.Authorization = `Bearer ${token2}`;
+  }
+  try {
+    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    if (!resp.ok) {
+      return null;
+    }
+    const env = await resp.json();
+    if (env?.error != null || !env?.data?.origin || !env?.data?.bootstrap_url) {
+      return null;
+    }
+    return { origin: env.data.origin, bootstrapUrl: env.data.bootstrap_url };
+  } catch {
+    return null;
   }
 }
 async function probeWebTab(path, token2, timeoutMs) {
@@ -12002,414 +12452,6 @@ var AccountSelection = class {
   }
 };
 
-// src/types.ts
-var Liveness = {
-  Unset: 0,
-  Running: 1,
-  Ready: 2,
-  Lost: 3,
-  Dead: 4,
-  Archived: 5,
-  LimitReached: 6
-};
-var TabKind = {
-  Agent: 0,
-  Shell: 1,
-  Process: 2,
-  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
-   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
-   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
-  Web: 3,
-  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
-   *  per-session code-server rooted at the session's worktree, reachable only
-   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
-   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
-   *  lockstep with the Go enum. */
-  VSCode: 4,
-  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
-   *  Mirrors session.TabKindDocs (session/tab.go). */
-  Docs: 5
-};
-var InFlightOp = {
-  None: 0,
-  Creating: 1,
-  Killing: 2,
-  Archiving: 3,
-  Restoring: 4,
-  Replacing: 5,
-  Respawning: 6
-};
-var Status = {
-  Running: 0,
-  Ready: 1,
-  Loading: 2,
-  Deleting: 3,
-  Dead: 4,
-  Lost: 5,
-  Archived: 6
-};
-
-// src/time.ts
-function formatDuration(ms) {
-  const age = Math.max(0, ms);
-  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
-  if (age < minute) return "<1m";
-  if (age < hour) return `${Math.floor(age / minute)}m`;
-  if (age < day) return `${Math.floor(age / hour)}h`;
-  return `${Math.floor(age / day)}d`;
-}
-function formatTime(value, now = /* @__PURE__ */ new Date()) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Unknown time";
-  const delta = date.getTime() - now.getTime();
-  if (Math.abs(delta) < 24 * 60 * 6e4) {
-    const duration = formatDuration(Math.abs(delta));
-    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
-  }
-  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-// src/status.ts
-var OPERATOR_KIND_LABELS = {
-  "needs-you": "Needs you",
-  working: "Working",
-  "waiting-limit": "Waiting on a limit",
-  broken: "Broken",
-  archived: "Archived"
-};
-var ROW_KIND_LABELS = {
-  ready: "Ready",
-  working: "Working",
-  lost: "Lost",
-  dead: "Dead",
-  limit: "Limit reached",
-  archived: "Archived"
-};
-var IDLE_REASON_LABELS = {
-  "usage-limit": "usage limit",
-  "process-exited": "process exited",
-  "restore-gave-up": "restore gave up",
-  "restore-waiting-on-environment": "restore waiting on environment",
-  "recreate-pending": "recreate notice pending",
-  "prompt-not-delivered": "prompt not delivered",
-  "delivery-unconfirmed": "delivery unknown",
-  "no-pane-change-since-delivery": "no change after delivery",
-  "settled-after-pane-change": "pane changed"
-};
-function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
-  const label = idleReasonLabel(s.idle_reason);
-  if (!label) {
-    return "";
-  }
-  let detail = label;
-  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
-    const { attempts, error } = s.lost_restore_failure;
-    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "attempt" : "attempts";
-      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
-    }
-  }
-  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
-    const { attempts, error } = s.lost_restore_wait;
-    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
-      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
-    }
-  }
-  if (s.last_pane_churn_at) {
-    const churn = new Date(s.last_pane_churn_at);
-    if (!Number.isNaN(churn.getTime())) {
-      const age = `${formatPaneChurnAge(churn, now)} ago`;
-      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
-    }
-  }
-  return detail;
-}
-function idleReasonLabel(reason) {
-  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
-}
-function unreachableDetail(s, now = /* @__PURE__ */ new Date()) {
-  const u = s.unreachable;
-  if (!u?.since || !u.error) {
-    return "";
-  }
-  const since = new Date(u.since);
-  if (Number.isNaN(since.getTime())) {
-    return "";
-  }
-  return `unreachable ${formatPaneChurnAge(since, now)} ago \xB7 ${u.error}`;
-}
-function formatPaneChurnAge(churn, now) {
-  return formatDuration(now.getTime() - churn.getTime());
-}
-var READY_ICON = "circle";
-var DEAD_ICON = "circle";
-var LOST_ICON = "circle-dashed";
-var ARCHIVED_ICON = "archive";
-var LIMIT_ICON = "diamond";
-var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
-function rowStatus(s) {
-  const op = s.in_flight_op ?? InFlightOp.None;
-  if (op !== InFlightOp.None) {
-    return WORKING;
-  }
-  return dotForLiveness(livenessOf(s));
-}
-function isWorking(s) {
-  return rowStatus(s).kind === null;
-}
-function isCreating(s) {
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
-}
-function rowKind(s) {
-  return rowStatus(s).kind ?? "working";
-}
-function operatorKind(s) {
-  const displayed = rowKind(s);
-  if (displayed === "working") {
-    return "working";
-  }
-  if (displayed === "archived") {
-    return "archived";
-  }
-  if (displayed === "limit" || s.idle_reason === "usage-limit") {
-    return "waiting-limit";
-  }
-  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
-    return "broken";
-  }
-  return "needs-you";
-}
-function livenessOf(s) {
-  const lv = s.liveness ?? Liveness.Unset;
-  if (lv !== Liveness.Unset) {
-    return lv;
-  }
-  switch (s.status) {
-    case Status.Ready:
-      return Liveness.Ready;
-    case Status.Dead:
-      return Liveness.Dead;
-    case Status.Lost:
-      return Liveness.Lost;
-    case Status.Archived:
-      return Liveness.Archived;
-    // Running and the transient values (Loading/Deleting, which never persist)
-    // fall through to the working dot, matching render.go's LivenessUnset arm.
-    default:
-      return Liveness.Running;
-  }
-}
-function dotForLiveness(lv) {
-  switch (lv) {
-    case Liveness.Ready:
-      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
-    case Liveness.Lost:
-      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
-    case Liveness.Dead:
-      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
-    case Liveness.Archived:
-      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
-    case Liveness.LimitReached:
-      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
-    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
-    case Liveness.Running:
-    case Liveness.Unset:
-    default:
-      return WORKING;
-  }
-}
-function isArchived(s) {
-  return livenessOf(s) === Liveness.Archived;
-}
-function isLimitReached(s) {
-  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
-}
-function isPendingManualHandoffDeliveryUnconfirmed(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
-}
-function ambiguousHandoffDelivery(status) {
-  return status === "sent-unverified" || status === "could-not-confirm";
-}
-function confirmableHandoffDelivery(status) {
-  return ambiguousHandoffDelivery(status) || status === "delivered";
-}
-function isPendingAgentHandoffDeliveryUnconfirmed(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
-}
-function isPendingAgentHandoffDeliveryConfirmable(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function isPendingManualSwapDeliveryConfirmable(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  const status = pending?.mission_delivery_status;
-  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function canHandoff(s) {
-  return s.can_handoff === true;
-}
-function isRootSession(s) {
-  return s.is_root === true;
-}
-function compareSessionsForRail(a, b) {
-  const aArchived = isArchived(a);
-  const aa = aArchived ? 1 : 0;
-  const bb = isArchived(b) ? 1 : 0;
-  if (aa !== bb) {
-    return aa - bb;
-  }
-  const ar = isRootSession(a) ? 0 : 1;
-  const br = isRootSession(b) ? 0 : 1;
-  if (ar !== br) {
-    return ar - br;
-  }
-  const at = a.created_at ?? "";
-  const bt = b.created_at ?? "";
-  if (at !== bt) {
-    const asc = at < bt ? -1 : 1;
-    return aArchived ? -asc : asc;
-  }
-  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-}
-var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
-function isOffBoxWorkspace(s) {
-  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
-}
-function rowTitle(s) {
-  const lv = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  let title = s.title;
-  if (isOffBoxWorkspace(s)) {
-    title = "[remote] " + title;
-  }
-  if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  }
-  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
-    title = "[deleting] " + title;
-  }
-  if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
-  }
-  const recreate = rootRecreateNote(s);
-  if (recreate) {
-    title = `[${recreate}] ` + title;
-  }
-  if (archiveWarningText(s) !== "") {
-    title = "[archive incomplete] " + title;
-  }
-  if (s.unreachable?.since && s.unreachable?.error) {
-    title = "[unreachable] " + title;
-  }
-  if (s.model_change) {
-    title = "[model changed] " + title;
-  }
-  return title;
-}
-function archiveWarningText(s) {
-  return s.archive_warning?.trim() ?? "";
-}
-var CALLBACK_UNAVAILABLE_PREFIX = "af callback unavailable: ";
-function callbackUnavailableText(s) {
-  const reason = s.callback_unavailable?.trim() ?? "";
-  return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
-}
-function sessionWarningText(s) {
-  return [archiveWarningText(s), callbackUnavailableText(s)].filter((t) => t !== "").join(" \xB7 ");
-}
-function rootRecreateNote(s) {
-  switch (s.root_recreate_context) {
-    case "fresh":
-      return "fresh context";
-    case "unknown":
-      return "context unknown";
-    default:
-      return "";
-  }
-}
-function limitBadgePrefix(s) {
-  if (!s.limit_reset_at) {
-    return "[limit] ";
-  }
-  const reset = new Date(s.limit_reset_at);
-  if (Number.isNaN(reset.getTime())) {
-    return "[limit] ";
-  }
-  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
-}
-function formatLimitReset(reset, now) {
-  const h12 = (reset.getHours() + 11) % 12 + 1;
-  const ampm = reset.getHours() < 12 ? "am" : "pm";
-  const min = reset.getMinutes();
-  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
-  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
-  if (sameDay) {
-    return clock;
-  }
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
-}
-
-// src/backends.ts
-var REPO_DEFAULT = "";
-function backendChoices(catalog) {
-  if (catalog === null) {
-    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
-  }
-  const callbackAdvisory = (opt) => {
-    if (opt?.status !== "available") return "";
-    const parts = [];
-    if (opt.note) parts.push(`Host ${opt.note}`);
-    if (opt.callback_unavailable_reason) parts.push(CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason);
-    return parts.join(" \xB7 ");
-  };
-  const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
-  const choices = [
-    {
-      value: REPO_DEFAULT,
-      // "Repo default" with no parenthetical when the daemon reports no default:
-      // that is the misconfigured case, where naming a backend would be inventing
-      // one. The reason says what is wrong with the key.
-      label: catalog.default === "" ? "Repo default" : `Repo default (${resolvedDefault?.label ?? catalog.default})`,
-      // Taken from the daemon, not inferred here. A repo whose declared default is
-      // broken resolves to that broken backend and FAILS — it does not quietly run
-      // local — so the default is not automatically a safe harbour.
-      status: catalog.default_status,
-      reason: catalog.default_status === "available" ? callbackAdvisory(resolvedDefault) : catalog.default_reason ?? ""
-    }
-  ];
-  for (const opt of catalog.backends) {
-    choices.push({
-      value: opt.name,
-      label: opt.label,
-      status: opt.status,
-      reason: opt.status === "available" ? callbackAdvisory(opt) : opt.reason ?? ""
-    });
-  }
-  return choices;
-}
-function backendNotice(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 ? "" : choice.reason;
-}
-function backendSelectable(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 || choice.status === "available";
-}
-
 // src/dirpicker.ts
 var INITIAL_PICKER_STATE = { listing: null, error: null, loading: false };
 function pickerLoading(prev) {
@@ -13755,6 +13797,25 @@ function siblingSubtreeOf(root2, leafId) {
   }
   return siblingSubtreeOf(root2.b, leafId);
 }
+function focusSuccessorAfterDrop(prev, droppedId, survivors) {
+  const siblings = [];
+  let node = prev;
+  while (node && node.kind === "split") {
+    const inA = findLeaf(node.a, droppedId);
+    if (!inA && !findLeaf(node.b, droppedId)) {
+      return null;
+    }
+    siblings.unshift(inA ? node.b : node.a);
+    node = inA ? node.a : node.b;
+  }
+  for (const sib of siblings) {
+    const hit = leaves(sib).find((l) => survivors.has(l.id));
+    if (hit) {
+      return hit.id;
+    }
+  }
+  return null;
+}
 function dedupeExcept(root2, tab, keepId) {
   const dupes = leaves(root2).filter((l) => l.tab === tab && l.id !== keepId);
   let cur = root2;
@@ -13851,6 +13912,35 @@ function tabsRebound(prevIds, prevKinds, prevTargets, ids, kinds, targets) {
     targets.map((t) => t ?? "")
   );
 }
+var isSynth = (id) => /^\d+:/.test(id);
+function adoptedSynthIdentities(prevIds, ids) {
+  const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
+  const gone = /* @__PURE__ */ new Map();
+  let key = "";
+  for (const id of prevIds) {
+    if (shared.has(id)) {
+      key = id;
+    } else if (id !== "" && isSynth(id)) {
+      gone.set(key, [...gone.get(key) ?? [], id]);
+    }
+  }
+  const adopted = /* @__PURE__ */ new Set();
+  key = "";
+  const fresh = /* @__PURE__ */ new Map();
+  for (const id of ids) {
+    if (shared.has(id)) {
+      key = id;
+    } else if (id !== "" && !isSynth(id) && !prevIds.includes(id)) {
+      const n = fresh.get(key) ?? 0;
+      const synth = gone.get(key)?.[n];
+      if (synth !== void 0) {
+        adopted.add(synth);
+      }
+      fresh.set(key, n + 1);
+    }
+  }
+  return adopted;
+}
 function remapByIdentity(root2, prevIds, ids) {
   if (prevIds.length === 0) {
     return root2;
@@ -13883,14 +13973,13 @@ function remapByIdentity(root2, prevIds, ids) {
   const max = ids.length - 1;
   const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
   if (maxLeaf) {
-    const isSynth = (id) => /^\d+:/.test(id);
-    const backfill = ids.some((id) => id !== "" && !isSynth(id) && !prevIds.includes(id));
+    const adopted = adoptedSynthIdentities(prevIds, ids);
     const deadIdentity = (tab) => {
       const prev = prevIds[tab];
       if (prev === void 0 || prev === "") {
         return true;
       }
-      return !isSynth(prev) || !backfill;
+      return !isSynth(prev) || !adopted.has(prev);
     };
     for (const leaf of leaves(cur)) {
       if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
@@ -14558,7 +14647,8 @@ var SplitView = class {
       }
     }
     if (!this.focusedId || !wanted.has(this.focusedId)) {
-      this.focusedId = desired[0]?.id ?? null;
+      const successor = this.focusedId && this.builtTree ? focusSuccessorAfterDrop(this.builtTree, this.focusedId, wanted) : null;
+      this.focusedId = successor ?? desired[0]?.id ?? null;
     }
     if (!sameLayout(this.tree, this.builtTree)) {
       const rootEl = this.buildNode(this.tree);
@@ -14865,9 +14955,20 @@ var SplitView = class {
     };
     const external = !proxied;
     let previewSrcOnce = null;
+    let editorPortBootstrap = false;
+    let editorPortOpenHref = "";
     const resolvePreviewSrc = (fresh) => {
-      if (fresh) {
+      if (fresh || editorPortBootstrap) {
         previewSrcOnce = null;
+        editorPortBootstrap = false;
+        editorPortOpenHref = "";
+      }
+      if (previewSrcOnce === null && isVSCode && mayUsePreviewOrigin && !this.archived && !canUsePreviewOrigin(window.location)) {
+        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then((r) => {
+          editorPortBootstrap = r !== null;
+          editorPortOpenHref = r?.origin ?? "";
+          return r?.bootstrapUrl ?? "";
+        });
       }
       if (previewSrcOnce === null) {
         previewSrcOnce = mayUsePreviewOrigin && !this.archived && canUsePreviewOrigin(window.location) ? fetchPreviewOrigin(sessionId, realId, this.token ?? "").then(async (origin) => {
@@ -14902,8 +15003,9 @@ var SplitView = class {
       const base = previewSrc !== "" ? previewSrc : src;
       frame.setAttribute("sandbox", webSandbox(isVSCode, previewSrc !== ""));
       if (previewSrc !== "") {
-        open.href = previewSrc;
-        fbLink.href = previewSrc;
+        const openTo = editorPortOpenHref !== "" ? editorPortOpenHref : previewSrc;
+        open.href = openTo;
+        fbLink.href = openTo;
       } else {
         open.href = openHref;
         fbLink.href = openHref;
@@ -16024,6 +16126,7 @@ function buildTask(input) {
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
     on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
+    host: (input.host ?? "").trim(),
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
@@ -16669,6 +16772,47 @@ function taskFormModal(opts) {
   }).catch(() => {
     onCompleteHint.textContent = "Choices unavailable \xB7 current value kept.";
   });
+  const hostSelect = h("select", { class: "af-input" });
+  hostSelect.setAttribute("aria-label", "Host");
+  const hostHint = h("span", { class: "af-modal-hint", id: "af-task-host-hint" });
+  hostSelect.setAttribute("aria-describedby", hostHint.id);
+  const keepHost = opts.seed?.host ?? "";
+  let hostOptions = [];
+  const renderHosts = () => {
+    const previous = hostSelect.value || keepHost;
+    hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
+    for (const o of hostOptions) {
+      const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} \u2014 unavailable`);
+      if (o.status !== "available") opt.disabled = true;
+      hostSelect.append(opt);
+    }
+    if (keepHost !== "" && !hostOptions.some((o) => o.name === keepHost)) {
+      hostSelect.append(h("option", { value: keepHost }, keepHost));
+    }
+    hostSelect.value = previous;
+    if (hostSelect.value !== previous) hostSelect.value = "";
+    const chosen = hostOptions.find((o) => o.name === hostSelect.value);
+    hostHint.textContent = chosen && chosen.status !== "available" ? chosen.reason ?? "" : "";
+  };
+  const hostField = field("Host", hostSelect);
+  hostField.append(hostHint);
+  renderHosts();
+  hostSelect.addEventListener("change", renderHosts);
+  let hostSeq = 0;
+  const loadHostsFor = (repoPath) => {
+    const seq = ++hostSeq;
+    void opts.loadHosts(repoPath).then((hosts) => {
+      if (seq !== hostSeq) return;
+      hostOptions = hosts;
+      renderHosts();
+    }).catch(() => {
+      if (seq !== hostSeq) return;
+      hostOptions = [];
+      renderHosts();
+      hostHint.textContent = "Hosts unavailable \xB7 current value kept.";
+    });
+  };
+  projectSelect.addEventListener("change", () => loadHostsFor(projectSelect.value));
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
   const keepProgram = opts.seed?.program ?? "";
@@ -16713,6 +16857,7 @@ function taskFormModal(opts) {
     programSelect.value = s.program ?? "";
   }
   loadProgramsFor(projectSelect.value);
+  loadHostsFor(projectSelect.value);
   syncOnComplete();
   body.append(
     field("Name", nameInput),
@@ -16724,6 +16869,7 @@ function taskFormModal(opts) {
     field("Target session", targetInput),
     onCompleteField,
     onCompleteReasonField,
+    hostField,
     field("Program", programSelect)
   );
   const card = handle.el.firstElementChild;
@@ -16760,6 +16906,7 @@ function taskFormModal(opts) {
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
       onComplete: onCompleteSelect.value,
+      host: hostSelect.value,
       program: programSelect.value
     });
   });
@@ -16774,6 +16921,7 @@ function addTaskModal(projects, defaultProject2, callbacks) {
     defaultProject: defaultProject2,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -16787,6 +16935,7 @@ function editTaskModal(projects, task, callbacks) {
     seed: task,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -16808,14 +16957,13 @@ function replaceProjectMenuChildren(menu, children, fallback) {
 
 // src/project_color.ts
 var PROJECT_COLOR_PALETTE = [
-  "#e11d48",
-  "#ea580c",
-  "#ca8a04",
-  "#16a34a",
-  "#0d9488",
-  "#2563eb",
-  "#7c3aed",
-  "#db2777"
+  "#ff5555",
+  "#ffb86c",
+  "#f1fa8c",
+  "#50fa7b",
+  "#8be9fd",
+  "#bd93f9",
+  "#ff79c6"
 ];
 var FAVICON_MARK_PATH = "M96 416 L96 96 L160 96 L160 288 L224 288 L224 192 L320 288 L320 192 L416 288 L416 416 Z";
 var HEX = /^#[0-9a-f]{6}$/;
@@ -16824,15 +16972,42 @@ function projectColor(projects, root2) {
   const color = projects.find((p) => p.root === root2)?.color?.toLowerCase() ?? "";
   return HEX.test(color) ? color : null;
 }
+function rgb(color) {
+  return [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+}
+function hex(c) {
+  return `#${c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+}
+function luminance(c) {
+  const [r, g, b] = c.map((v) => {
+    const x = v / 255;
+    return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrast(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+var INK_DARK = "#1f1f1f";
+var INK_LIGHT = "#ffffff";
 function markInk(color) {
-  const channel = (i) => {
-    const v = parseInt(color.slice(i, i + 2), 16) / 255;
-    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-  };
-  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
-  const darkInkContrast = (luminance + 0.05) / (0.014 + 0.05);
-  const whiteInkContrast = 1.05 / (luminance + 0.05);
-  return darkInkContrast >= whiteInkContrast ? "#1f1f1f" : "#ffffff";
+  const c = rgb(color);
+  const dark = contrast(c, rgb(INK_DARK));
+  const light = contrast(c, rgb(INK_LIGHT));
+  if (Math.max(dark, light) >= 4.5) return dark >= light ? INK_DARK : INK_LIGHT;
+  return contrast(c, [0, 0, 0]) >= light ? "#000000" : INK_LIGHT;
+}
+function projectAccent(color, ...surfaces) {
+  const c = rgb(color);
+  const s = surfaces.map(rgb);
+  const target = luminance(s[0]) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+  for (let step = 0; step <= 20; step++) {
+    const t = step / 20;
+    const candidate = hex(c.map((v, i) => v + (target[i] - v) * t));
+    if (s.every((surface2) => contrast(rgb(candidate), surface2) >= 4.5)) return candidate;
+  }
+  return hex(target);
 }
 function projectFaviconSvg(color) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
@@ -16860,34 +17035,43 @@ function projectFaviconPng(color, size) {
   ctx.fill(new Path2D(FAVICON_MARK_PATH));
   return canvas.toDataURL("image/png");
 }
+var DEFAULT_FAVICON_COLOR = "#2f5fd8";
 var appliedFavicon = null;
 function applyProjectFavicon(color) {
   if (appliedFavicon === color) return;
   appliedFavicon = color;
+  const tile = color ?? DEFAULT_FAVICON_COLOR;
   for (const link of document.querySelectorAll('link[rel="icon"]')) {
     if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    let href = null;
-    if (color !== null) {
-      if (link.type === "image/svg+xml") {
-        href = projectFaviconDataUrl(color);
-      } else {
-        href = projectFaviconPng(color, Number.parseInt(link.sizes.value, 10) || 32);
-      }
-    }
+    const href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile) : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
     link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }
-function applyProjectFrame(main, color) {
+function applyProjectColor(root2, color, surfaces) {
+  const els = /* @__PURE__ */ new Set([root2, document.body]);
   if (color === null) {
-    if (main.dataset.projectColor === void 0) return;
-    delete main.dataset.projectColor;
-    main.style.removeProperty("--af-project-color");
+    for (const el2 of els) {
+      if (el2.dataset.projectColor === void 0) continue;
+      delete el2.dataset.projectColor;
+      for (const name of PROJECT_VARS) el2.style.removeProperty(name);
+    }
     return;
   }
-  if (main.dataset.projectColor === color) return;
-  main.dataset.projectColor = color;
-  main.style.setProperty("--af-project-color", color);
+  const { light, dark } = surfaces();
+  for (const el2 of els) {
+    if (el2.dataset.projectColor === color) continue;
+    el2.dataset.projectColor = color;
+    el2.style.setProperty("--af-project-color", color);
+    el2.style.setProperty("--af-project-ink", markInk(color));
+    el2.style.setProperty("--af-project-accent-light", accentOn(color, light));
+    el2.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
+  }
 }
+function accentOn(color, surfaces) {
+  const [first, ...rest] = surfaces.filter((s) => HEX.test(s));
+  return first === void 0 ? color : projectAccent(color, first, ...rest);
+}
+var PROJECT_VARS = ["--af-project-color", "--af-project-ink", "--af-project-accent-light", "--af-project-accent-dark"];
 function projectColorRow(current, label, onPick) {
   const pick = (color) => (e) => {
     e.stopPropagation();
@@ -16920,7 +17104,8 @@ function projectColorRow(current, label, onPick) {
       input.click();
     }
   });
-  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "No color");
+  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "Default");
+  clear.setAttribute("aria-label", `Default color for ${label}`);
   clear.disabled = current === null;
   clear.dataset.projectFocus = "color:clear";
   clear.addEventListener("click", pick(""));
@@ -17683,6 +17868,7 @@ var AppShell = class {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectColor(this.el, null, themeSurfaces);
     applyProjectFavicon(null);
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
@@ -17726,7 +17912,7 @@ var AppShell = class {
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
-    applyProjectFrame(this.main, color);
+    applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
@@ -19453,6 +19639,7 @@ var pendingRestores = new PendingRestores(
   requestPendingRestoreResync
 );
 var connectionGate = createLatestRequestGate();
+var loadHosts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token).then((catalog) => catalog.hosts ?? []);
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 var resyncTimer = null;
@@ -20848,6 +21035,7 @@ function openAddTask() {
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -20879,6 +21067,7 @@ function openEditTask(task) {
     editTaskModal(projects, task, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -20896,6 +21085,7 @@ function openEditTask(task) {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            host: (input.host ?? "") !== (task.host ?? "") ? input.host ?? "" : void 0,
             project_path: input.projectPath,
             program: input.program
           },

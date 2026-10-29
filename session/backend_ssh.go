@@ -134,6 +134,17 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if listed != nil {
 		spec.AccountSyncHost = hostName
 	}
+	// BEFORE any remote state exists, and before the host is even contacted: the
+	// resolved agent command must be one af PROVES honours the account scope — the
+	// same predicate the local and docker paths apply — or the account is never
+	// synced (#5571 W7.4). A program_overrides wrapper that sets CODEX_HOME itself
+	// would otherwise replace the scoped variable at launch while the session
+	// reported the selected account.
+	if spec.Account.Dir != "" {
+		if err := validateRemoteAccountProgram(cfg, &spec); err != nil {
+			return ProvisionResult{}, err
+		}
+	}
 	var sshCfg config.SSHConfig
 	posture := cfg.SSHHostKeyVerification
 	if listed != nil {
@@ -264,6 +275,8 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			RemoteAddr:         p.remoteAddr,
 			AgentServerVersion: p.agentServerVersion,
 			TokenRef:           p.tokenRef,
+			CallbackRef:        p.callbackRef,
+			CallbackReverse:    p.callbackReverse(),
 		},
 	}
 	// The pin fields are written together, because which of them is safe to write

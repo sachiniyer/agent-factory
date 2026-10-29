@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"sort"
@@ -276,8 +278,11 @@ func TestSandboxAddTaskReturnsTheMintedID(t *testing.T) {
 		Data AddTaskResponse `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(out), &env))
-	id := env.Data.ID
+	require.NotNil(t, env.Data.Task, "the response carries the stored record: %s", out)
+	id := env.Data.Task.ID
 	require.Regexp(t, mintedTaskID, id, "the response names the daemon-minted id: %s", out)
+	assert.Empty(t, env.Data.Task.ProjectPath, "the stored record is the sandbox-safe projection")
+	assert.Empty(t, env.Data.Task.RepoID)
 	assert.NotEqual(t, "caller-chosen", id)
 
 	_, list := f.call(t, f.secret, "/v1/ListTasks", `{}`)
@@ -285,4 +290,21 @@ func TestSandboxAddTaskReturnsTheMintedID(t *testing.T) {
 	assert.NotContains(t, list, "caller-chosen")
 	code, out = f.call(t, f.secret, "/v1/RemoveTask", fmt.Sprintf(`{"id":%q}`, id))
 	assert.Equal(t, http.StatusOK, code, out)
+}
+
+// A task that is STORED but whose scheduler reload fails answers an error with no
+// response body; the stored id rides the error envelope so the caller can still
+// get and remove it (#5890).
+func TestCommittedAddErrorEnvelopeCarriesTheStoredID(t *testing.T) {
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/AddTask", nil)
+	writeHTTPError(rec, r, http.StatusInternalServerError,
+		&mutationCommittedError{err: errors.New("reload failed"), storedID: "ab12cd34"})
+	body := rec.Body.String()
+	assert.Contains(t, body, `"stored_id":"ab12cd34"`)
+	assert.Contains(t, body, `"code":"mutation_committed"`)
+
+	rec = httptest.NewRecorder()
+	writeHTTPError(rec, r, http.StatusInternalServerError, &mutationCommittedError{err: errors.New("reload failed")})
+	assert.NotContains(t, rec.Body.String(), "stored_id", "no stored id, none invented")
 }

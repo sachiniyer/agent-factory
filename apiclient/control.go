@@ -46,6 +46,15 @@ func (c *Client) KillSession(ctx context.Context, req daemon.KillSessionRequest)
 	return c.callCtx(ctx, "KillSession", req, &daemon.KillSessionResponse{})
 }
 
+// WorkspaceFacts asks the daemon to measure an off-box session's workspace for
+// its kill confirmation (#5571 W8.2). It takes a ctx because the measurement
+// crosses to another host and the kill dialog waits on it.
+func (c *Client) WorkspaceFacts(ctx context.Context, req daemon.WorkspaceFactsRequest) (daemon.WorkspaceFactsResponse, error) {
+	var resp daemon.WorkspaceFactsResponse
+	err := c.callCtx(ctx, "WorkspaceFacts", req, &resp)
+	return resp, err
+}
+
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the
 // relocated worktree's new path.
 func (c *Client) ArchiveSession(req daemon.ArchiveSessionRequest) (string, error) {
@@ -218,23 +227,20 @@ func (c *Client) ResumeStatusPoll(req daemon.ResumeStatusPollRequest) error {
 // the daemon over these same HTTP routes the web UI uses, so the transport alone
 // cannot tell them apart and each client says which it is.
 func (c *Client) AddTask(t task.Task, actor task.Actor) error {
-	_, err := c.AddTaskID(t, actor)
+	_, err := c.AddTaskResult(t, actor)
 	return err
 }
 
-// AddTaskID is AddTask returning the canonical id the daemon stored. It differs
-// from t.ID only where the daemon mints the id (a sandbox credential's add), where
-// it is the only way the caller learns it; an older daemon answers no id, and the
-// request's own is returned (#5890).
-func (c *Client) AddTaskID(t task.Task, actor task.Actor) (string, error) {
+// AddTaskResult is AddTask returning the record the daemon stored, or nil when
+// the daemon predates the field or answered a committed-with-warning error. For a
+// remote target it also asks the daemon to validate the task's project path on its
+// own host (#5859).
+func (c *Client) AddTaskResult(t task.Task, actor task.Actor) (*task.Task, error) {
 	var resp daemon.AddTaskResponse
-	if err := c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &resp); err != nil {
-		return "", err
+	if err := c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
+		return nil, err
 	}
-	if resp.ID != "" {
-		return resp.ID, nil
-	}
-	return t.ID, nil
+	return resp.Task, nil
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
@@ -251,7 +257,7 @@ func (c *Client) AddTaskID(t task.Task, actor task.Actor) (string, error) {
 // actor names the calling surface for the audit trail — see AddTask.
 func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -129,11 +130,15 @@ func routedAddTask(t task.Task, actor task.Actor) (string, error) {
 		return "", err
 	}
 	defer client.CloseIdleConnections()
-	id, err := client.AddTaskID(t, actor)
+	rec, err := client.AddTaskResult(t, actor)
 	if err != nil {
-		return "", remoteTaskError(client, "af tasks add", "AddTask", err, remoteNothingWritten)
+		// A committed add whose follow-up failed still names the stored task.
+		return apiproto.StoredID(err), remoteTaskError(client, "af tasks add", "AddTask", err, remoteNothingWritten)
 	}
-	return id, nil
+	if rec != nil && rec.ID != "" {
+		return rec.ID, nil
+	}
+	return t.ID, nil
 }
 
 func routedUpdateTask(id string, patch task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
@@ -261,6 +266,13 @@ func addProjectBinding() (*config.RepoContext, string, error) {
 		// worse, against a path it has and the operator did not mean. That is rule 3
 		// of the shared project contract (a command that BINDS never guesses)
 		// applied across the network.
+		if strings.TrimSpace(repoFlag) == "" && credentialBoundCaller() {
+			// A sandbox credential is bound to one session and so to one project;
+			// the daemon stamps that project on the task whatever path is sent, and
+			// the sandbox does not know the daemon host's layout. Nothing is guessed:
+			// the project is the credential's, not this machine's.
+			return nil, "", nil
+		}
 		if strings.TrimSpace(repoFlag) == "" {
 			return nil, "", fmt.Errorf(
 				"--repo is required against the daemon at %s: a task's project path is resolved on the DAEMON's host, "+

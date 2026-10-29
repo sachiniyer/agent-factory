@@ -307,6 +307,9 @@ type Tab struct {
 	// It is what lets restore treat "session gone" as finished evidence
 	// instead of a command to re-execute.
 	Exit *TabExit
+	// gen is this incarnation's identity (see TabData.Gen). Not persisted: it
+	// scopes a live process, and a restart that loses the process loses it too.
+	gen string
 	// tmux is the tab's tmux session. nil until the instance is started, and
 	// always nil for remote/hook-backed instances, which drive their agent
 	// session through hook commands rather than a local tmux session.
@@ -348,7 +351,7 @@ func newAgentTab(ts *tmux.TmuxSession) *Tab {
 // (#1100); the only automatic use is setupTabs replacing a persisted shell tab
 // that restored dead (#991).
 func newShellTab(ts *tmux.TmuxSession) *Tab {
-	return &Tab{ID: newTabID(), Name: shellTabName, Kind: TabKindShell, tmux: ts}
+	return &Tab{ID: newTabID(), Name: shellTabName, Kind: TabKindShell, tmux: ts, gen: newTabID()}
 }
 
 // newRemoteAgentTab returns the Agent tab for a remote/hook-backed instance

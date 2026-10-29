@@ -52,7 +52,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/QuotaReport` | — | Report per-agent provider quota (what the provider exposes — today "not reported" everywhere) alongside what af's own sessions have observed: running counts, sessions parked at a usage limit, and the earliest recorded reset. |
 | `POST` | `/v1/GetConfig` | — | List every user-facing global config key with its purpose, type, default, and current value. |
 | `POST` | `/v1/ExplainConfig` | `key` | Explain one global config key's provenance: every source candidate with its value, location, and the reason it won, was shadowed, was absent, or is disallowed. |
-| `POST` | `/v1/SetConfigValue` | `key`, `value` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
+| `POST` | `/v1/SetConfigValue` | `key`, `value`, `hosts_edit` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
 | `POST` | `/v1/UnsetConfigValue` | `key` | Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically). |
 | `POST` | `/v1/ListProposals` | `session_id`, `repo_id`, `repo_path` | List a project's proposals, newest edit first. Name the project with exactly one of session_id, repo_id or repo_path (a path on the daemon host). |
 | `POST` | `/v1/GetProposal` | `session_id`, `repo_id`, `repo_path`, `slug` | Describe one proposal for the Docs tab: head commit, docs, unused templates, open question count, and attached sessions. |
@@ -70,8 +70,8 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/SendProposalChanges` | `session_id` | Send the session its unseen proposal edits as a prompt now when the agent is Ready, or on the next tick where it is, and return its push status. |
 | `POST` | `/v1/ListOnComplete` | — | List task spawned-session lifecycle choices and consequences, least destructive first. |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
-| `POST` | `/v1/AddTask` | `task`, `actor` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
-| `POST` | `/v1/UpdateTask` | `id`, `update`, `expect`, `actor` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |
+| `POST` | `/v1/AddTask` | `task`, `actor`, `validate_path` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
+| `POST` | `/v1/UpdateTask` | `id`, `update`, `expect`, `actor`, `validate_path` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |
 | `POST` | `/v1/RemoveTask` | `id`, `expect` | Remove a task by ID. |
 | `POST` | `/v1/RestartTask` | `id`, `expect` | Stop and replace one enabled watch task without overlapping its process tree. |
 | `POST` | `/v1/TriggerTask` | `id`, `expect` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |
@@ -82,6 +82,7 @@ The `Request fields` column above lists each body's TOP-LEVEL keys. Where one of
 
 | Path | Nested fields |
 |------|---------------|
+| `/v1/SetConfigValue` | `hosts_edit.op`, `hosts_edit.name`, `hosts_edit.host`, `hosts_edit.host.host`, `hosts_edit.host.user`, `hosts_edit.host.port`, `hosts_edit.host.identity_file`, `hosts_edit.host.workspace_root`, `hosts_edit.host.host_key_verification`, `hosts_edit.host.use_ssh_config`, `hosts_edit.clear_default` |
 | `/v1/AddTask` | `task.id`, `task.name`, `task.prompt`, `task.cron_expr`, `task.watch_cmd`, `task.target_session`, `task.max_concurrent_runs`, `task.on_complete`, `task.host`, `task.project_path`, `task.repo_id`, `task.sandbox_owner`, `task.program`, `task.enabled`, `task.created_at`, `task.last_run_at`, `task.last_run_status`, `task.last_run_id`, `task.last_run_started_at`, `task.dropped_events`, `task.audit`, `task.overdue`, `task.missed_occurrences`, `task.missed_occurrences_capped`, `task.unschedulable`, `task.unschedulable_reason`, `task.unassessable`, `task.next_run_at`, `task.next_run_far`, `task.arming`, `task.ordinal`, `task.store_generation` |
 | `/v1/UpdateTask` | `update.name`, `update.prompt`, `update.cron_expr`, `update.watch_cmd`, `update.target_session`, `update.max_concurrent_runs`, `update.on_complete`, `update.host`, `update.project_path`, `update.program`, `update.enabled`, `expect.enforce`, `expect.project_path` |
 | `/v1/RemoveTask` | `expect.enforce`, `expect.project_path` |

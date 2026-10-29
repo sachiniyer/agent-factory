@@ -70,7 +70,7 @@ text-greppable selection signal the driver asserts on:
 
 ```
   ▾ alpha          ●      ← selected (expanded); ● = ready
-       └ 1 ◆ Agent *
+       └ 1 Agent · open
   ▸ beta           ●      ← not selected (collapsed)
 ```
 
@@ -103,7 +103,7 @@ actually on it.
 | `Tab` | cycle focus ring | | `1`–`9` | jump to tab |
 | `j`/`k`,`↓`/`↑` | move tree cursor | | `m` | tasks overlay |
 | `←`/`→` | switch focused pane | | `[`/`]` | previous/next section |
-| `D` | kill instance | | `/` | search |
+| `D` | delete session | | `/` | search |
 | `a` | archive | | `r` | restore |
 | `q` | quit |
 | `e` | hooks editor |
@@ -279,11 +279,15 @@ ten-minute run on each merge is intentional while the signal is measured; the
 runner is free for this public repository. The daemon, TUI, stand-in sessions,
 and private tmux server remain inside the ephemeral testbox container.
 
-This is the signal-only first step from #4000: it deliberately has no
-`pull_request` trigger and does not gate merges. Its purpose is to identify the
-exact master commit that makes the scenario red while runtime is measured.
-Failed or cancelled runs upload the full console stream, including the driver's
-last-screen dump, as the `tui-driver-selftest-transcript` artifact.
+Step 1 from #4000 was signal-only — this workflow named the offending master
+commit and gated nothing. It now also gates PRs that touch the TUI surface:
+`pr.yml` calls it as a reusable workflow, gated by its `web-selftest-scope` job
+from the changed-file list, and Build lists the call in `needs`, so a red run
+blocks the merge. The master `push` trigger still does the original job of
+identifying the exact commit that makes the scenario red while runtime is
+measured. Failed or cancelled runs upload the full console stream, including
+the driver's last-screen dump, as the `tui-driver-selftest-transcript`
+artifact.
 
 ### One scenario script (a per-fix real-TUI gate)
 
@@ -519,12 +523,12 @@ invocation".
 
 **A successful swap is a TRANSIENT state.** Park, decide, tear down and replace
 takes about four seconds, so polling for `liveness_name=limit-reached` on the
-path that MOVES is a race the scenario loses. Assert the durable facts instead —
-`account`, `account_auto_selected`, and the daemon's own
-`auto-resumed limit-blocked session … on claude account "…"` line — and keep the
-limit-state assertion for the paths where af must NOT move, where the wall is
-where the session stays. The stand-in walls every identity except the swap
-target for exactly that reason.
+path that MOVES is a race the scenario loses. Wait for the durable facts
+instead — `account`, `account_auto_selected`, and the daemon's own
+`auto-resumed limit-blocked session … on claude account "…"` line, which lands
+a few seconds after the fields — and keep the limit-state assertion for the
+paths where af must NOT move, where the wall is where the session stays. The
+stand-in walls every identity except the swap target for exactly that reason.
 
 For "the replacement really runs as the account", ask the LIVE process rather
 than matching its startup line: enter the pane and echo `$CLAUDE_CONFIG_DIR`. A

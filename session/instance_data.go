@@ -56,6 +56,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		RuntimeStartID:           i.runtimeStartID,
 		Account:                  i.Account,
 		Host:                     i.Host,
+		BranchUnpushed:           i.branchUnpushed,
 		ArchivedWorkspace:        cloneArchivedWorkspace(i.archivedWorkspace),
 		AccountAgent:             i.accountAgent,
 		AccountAutoSelected:      i.accountAutoSelected,
@@ -224,6 +225,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	if len(i.pendingTabCleanup) > 0 {
 		data.PendingTabCleanup = append([]TabCleanupData(nil), i.pendingTabCleanup...)
 	}
+	data.PendingRemoteTabClose = i.remoteCloseDataLocked()
 
 	// Keep writing the legacy single TmuxName field (set from the agent tab) for
 	// one release: a binary rolled back to before #930 PR 2 still finds the
@@ -507,6 +509,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		runtimeStartID:           data.RuntimeStartID,
 		Account:                  data.Account,
 		Host:                     data.Host,
+		branchUnpushed:           data.BranchUnpushed,
 		archivedWorkspace:        cloneArchivedWorkspace(data.ArchivedWorkspace),
 		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
@@ -607,9 +610,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// ever touching the row. Archived sandboxes were already reaped before
 		// becoming Archived, so deleting their record needs no remote cleanup
 		// handle; the archived ForStorage branch scrubs RuntimeCleanup, so the
-		// handle here is naturally nil for those rows.
+		// handle here is naturally nil for those rows — except a preserved
+		// workspace (below).
 		hadPersistedCleanupHandle := isSandboxBackendType(data.BackendType) && data.RuntimeCleanup != nil
-		if liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle) {
+		// A preserved unpushed archive keeps its handle on purpose (#5867): its
+		// workspace is still on the host, and a kill of the row must reap it.
+		preservedArchive := liveness == LiveArchived && hadPersistedCleanupHandle && data.keepsPreservedWorkspaceHandle()
+		if preservedArchive || (liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle)) {
 			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
 			if cleanupErr != nil {
 				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {
@@ -749,6 +756,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// rebuilt from a tombstone.
 		instance.pendingTabCleanup = restoredTabCleanup(data.PendingTabCleanup)
 	}
+	// Pending off-box closes belong to the sandbox backends the branch above never
+	// reaches (#5996): restored for every backend so a restart cannot drop the only
+	// handle on a command still running in a sandbox.
+	instance.pendingRemoteClose = restoredRemoteClose(data.PendingRemoteTabClose)
 
 	// Every return below hands back a row no automatic restore can reach —
 	// inert (started=false), Archived rather than Lost, or vetoed by
@@ -944,6 +955,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
 				Exit:                          tabExitFromData(td.Exit),
+				gen:                           td.Gen,
 				tmux:                          ts,
 				accountScope:                  td.AccountScope,
 				accountScopeProvenanceUnknown: idx > 0 && kind.HasTmux() && ts != nil && siblingScopeUnknown(data.Account, td.AccountScope),

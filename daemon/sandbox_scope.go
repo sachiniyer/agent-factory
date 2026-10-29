@@ -316,6 +316,13 @@ func (s *controlServer) addTaskScoped(ctx context.Context, req AddTaskRequest, r
 			}
 			req.Task = stampSandboxTask(t, id, owner, proj, inst.Title)
 			if err = s.addTask(ctx, req, resp); !errors.Is(err, task.ErrTaskIDExists) {
+				// The stored record returned to the caller is the sandbox-safe
+				// projection (its id, name, prompt, schedule): the full row carries
+				// the daemon's project path and bound repo id.
+				if resp.Task != nil {
+					safe := sandboxSafeTask(*resp.Task)
+					resp.Task = &safe
+				}
 				return err
 			}
 		}

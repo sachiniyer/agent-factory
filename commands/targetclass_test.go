@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"bytes"
+	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
@@ -174,5 +176,44 @@ func TestCentrallyRefusedVerbsNameTheDaemonTheyDeclined(t *testing.T) {
 	for verb := range localOnlyVerbs {
 		c, _, _ := rootCmd.Find(strings.Fields(verb)[1:])
 		require.NoError(t, refuseLocalOnlyUnderRemoteTarget(c), verb)
+	}
+}
+
+// #5857: under --json a central refusal is the verb's {data,error} envelope, not a
+// bare "Error:" line.
+func TestCentralRefusalHonoursTheJSONEnvelope(t *testing.T) {
+	t.Setenv("AF_DAEMON_URL", "http://box.example:8443")
+	for verb := range localOnlyVerbs {
+		c, _, err := rootCmd.Find(strings.Fields(verb)[1:])
+		require.NoError(t, err, verb)
+		jf := c.Flags().Lookup("json")
+		if jf == nil {
+			continue // a verb with no --json has no envelope contract to honour
+		}
+		var stderr, stdout bytes.Buffer
+		c.SetErr(&stderr)
+		c.SetOut(&stdout)
+		require.NoError(t, c.Flags().Set("json", "true"))
+		t.Cleanup(func() { _ = c.Flags().Set("json", "false"); c.SetErr(nil); c.SetOut(nil) })
+
+		err = refuseLocalOnlyUnderRemoteTarget(c)
+		require.Error(t, err, verb)
+		var env struct {
+			Data  any `json:"data"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(stderr.Bytes(), &env), "%s --json refusal must be an envelope, got %q", verb, stderr.String())
+		require.NotNil(t, env.Error, verb)
+		require.Contains(t, env.Error.Message, "the remote daemon at http://box.example:8443", verb)
+		require.True(t, c.SilenceErrors, "cobra must not print a second bare Error: line")
+
+		// Control: without --json nothing is written by the hook itself.
+		require.NoError(t, c.Flags().Set("json", "false"))
+		stderr.Reset()
+		c.SilenceErrors = false
+		require.Error(t, refuseLocalOnlyUnderRemoteTarget(c))
+		require.Empty(t, stderr.String(), verb)
 	}
 }
