@@ -62,31 +62,41 @@ func TestTerminalExitRestoreKeepsTheMainScreen(t *testing.T) {
 		"\x1b[?1004l\x1b[?2004l" +
 		"\x1b[?1l\x1b>" +
 		"\x1b[?7h" +
-		"\x1b[r" +
+		"\x1b7\x1b[r\x1b8" +
 		"\x1b[?1049l" +
-		"\x1b7" + "\x1b[r" + "\x1b8" +
+		"\x1b7\x1b[r\x1b8" +
 		"\x1b[0m" +
 		"\x1b[?25h" +
 		"\r\x1b[J"
 	require.Equal(t, want, terminalExitRestore)
 
-	emu := vt.NewEmulator(40, 8)
-	_, err := emu.WriteString("old output 1\r\nold output 2\r\n$ af\r\n$ ")
-	require.NoError(t, err)
-	// Stale attach residue below the shell's cursor.
-	_, err = emu.WriteString("\x1b7\x1b[6;1Hstale attach frame\x1b8")
-	require.NoError(t, err)
-	before := emu.CursorPosition()
+	// The terminal state at exit: bubbletea has already left the alt screen on a
+	// normal quit ("main"), but a signal can arrive while still on it ("alt").
+	for _, startOn := range []string{"main", "alt"} {
+		t.Run(startOn, func(t *testing.T) {
+			emu := vt.NewEmulator(40, 8)
+			_, err := emu.WriteString("old output 1\r\nold output 2\r\n$ af\r\n$ ")
+			require.NoError(t, err)
+			// Stale attach residue below the shell's cursor.
+			_, err = emu.WriteString("\x1b7\x1b[6;1Hstale attach frame\x1b8")
+			require.NoError(t, err)
+			before := emu.CursorPosition()
+			if startOn == "alt" {
+				_, err = emu.WriteString("\x1b[?1049h")
+				require.NoError(t, err)
+			}
 
-	_, err = emu.WriteString(terminalExitRestore)
-	require.NoError(t, err)
+			_, err = emu.WriteString(terminalExitRestore)
+			require.NoError(t, err)
 
-	got := emu.String()
-	for _, keep := range []string{"old output 1", "old output 2", "$ af"} {
-		assert.Contains(t, got, keep, "main-screen content above the cursor survives")
+			got := emu.String()
+			for _, keep := range []string{"old output 1", "old output 2", "$ af"} {
+				assert.Contains(t, got, keep, "main-screen content above the cursor survives")
+			}
+			assert.NotContains(t, got, "stale attach frame", "the residue below the cursor is erased")
+			assert.Equal(t, before.Y, emu.CursorPosition().Y, "the cursor stays on the shell's line")
+		})
 	}
-	assert.NotContains(t, got, "stale attach frame", "the residue below the cursor is erased")
-	assert.Equal(t, before.Y, emu.CursorPosition().Y, "the cursor stays on the shell's line")
 }
 
 // #6072: on a fatal signal the attach's own termios restore completes BEFORE the
