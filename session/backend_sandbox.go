@@ -173,8 +173,12 @@ type sandboxProvisioner struct {
 	// launchScript is the exact command that started the agent-server, persisted
 	// so a crashed one can be relaunched from the row alone (W1.4). It names the
 	// session dir's env files and flags, never a secret.
-	launchScript       string
-	adoptPending       bool // a restarted server has not adopted its workspace yet (W1.4)
+	launchScript string
+	adoptPending bool // a restarted server has not adopted its workspace yet (W1.4)
+	// persistIdentity is the daemon-installed durable write of the row a W1.4
+	// restart fires before it spawns, before it adopts and when adoption ends.
+	// In memory only; the daemon reinstalls it per reattach attempt.
+	persistIdentity    func(*Instance) error
 	remoteAddr         string
 	agentServerVersion string
 

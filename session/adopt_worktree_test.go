@@ -121,3 +121,86 @@ func TestAdoptExistingWorktreeStopsASurvivingAgentBeforeRebuilding(t *testing.T)
 	_, err := os.Stat(filepath.Join(path, "work.txt"))
 	assert.NoError(t, err, "the worktree is rebuilt once the agent is stopped")
 }
+
+// The restart stops a new agent-server only BEFORE it has been asked to
+// Provision (reattach steps 4 to 6). That is safe because the agent-server's
+// SIGTERM path (daemon/agentserver_headless_workspace.go shutdownWorkspace ->
+// AgentServer.Kill(false) -> LocalBackend.Kill -> teardownTabs) acts only on
+// what the instance holds, and a never-provisioned instance holds no worktree
+// handle or tmux binding. Pinned here so a change to Kill that starts deriving
+// a worktree to delete from the instance's title/branch would fail this, not a
+// user's surviving work.
+func TestKillOfANeverProvisionedHostedInstanceDeletesNoWorkspace(t *testing.T) {
+	_, gw, branch := hostedWorkspace(t)
+	path := gw.GetWorktreePath()
+	require.NoError(t, os.WriteFile(filepath.Join(path, "uncommitted.txt"), []byte("surviving work"), 0o644))
+
+	// The instance a restarted agent-server builds (daemon/agentserver_headless.go):
+	// local runtime, hosted, the recorded branch, and NOTHING provisioned yet.
+	fresh, err := NewInstance(InstanceOptions{
+		Title: "restart-adopt", Path: gw.GetRepoPath(), Program: "claude",
+		Backend: BackendLocal, HostedRemotely: true, BranchName: branch,
+	})
+	require.NoError(t, err)
+	require.Nil(t, fresh.gitWorktree, "precondition: nothing provisioned")
+
+	_ = fresh.AgentServer().Kill(false)
+
+	data, rerr := os.ReadFile(filepath.Join(path, "uncommitted.txt"))
+	require.NoError(t, rerr, "the surviving worktree must be untouched")
+	assert.Equal(t, "surviving work", string(data))
+	assert.Contains(t, gitOut(t, gw.GetRepoPath(), "branch", "--list", branch), branch, "and so must its branch")
+}
+
+// Control for the test above: the same Kill DOES delete the worktree once the
+// instance holds its handle, so the unprovisioned result is the instance's
+// emptiness and not a Kill that never deletes anything.
+func TestKillOfAProvisionedHostedInstanceDeletesItsWorkspace(t *testing.T) {
+	_, gw, branch := hostedWorkspace(t)
+	path := gw.GetWorktreePath()
+	inst, err := NewInstance(InstanceOptions{
+		Title: "restart-adopt", Path: gw.GetRepoPath(), Program: "claude",
+		Backend: BackendLocal, HostedRemotely: true, BranchName: branch,
+	})
+	require.NoError(t, err)
+	inst.mu.Lock()
+	inst.setGitWorktreeLocked(gw)
+	inst.mu.Unlock()
+
+	_ = inst.AgentServer().Kill(false)
+
+	_, statErr := os.Stat(path)
+	assert.True(t, os.IsNotExist(statErr), "an instance that holds the worktree deletes it on Kill (the reason a post-Provision server is never signalled)")
+}
+
+// Git listing no worktree on the session's branch is not proof the workspace is
+// gone: the checkout may have been switched to another branch with its work still
+// on disk. Adoption refuses, stops nothing, and rebuilds nothing (#5995 review).
+func TestAdoptExistingWorktreeRefusesAWorktreeSwitchedToAnotherBranch(t *testing.T) {
+	inst, gw, _ := hostedWorkspace(t)
+	path := gw.GetWorktreePath()
+	require.NoError(t, os.WriteFile(filepath.Join(path, "uncommitted.txt"), []byte("surviving work"), 0o644))
+	gitOut(t, path, "checkout", "-b", "other-branch")
+
+	killed := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "kill-session") {
+				killed = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte(""), nil },
+	}
+	inst.setTmuxLocked(tmux.NewTmuxSessionWithDeps("restart-adopt", "claude", nil, cmdExec))
+
+	err := inst.adoptExistingWorktree()
+	require.Error(t, err)
+	assert.Nil(t, inst.gitWorktree, "nothing is adopted")
+	assert.False(t, killed, "the surviving agent is not stopped on an unproven absence")
+	data, rerr := os.ReadFile(filepath.Join(path, "uncommitted.txt"))
+	require.NoError(t, rerr, "the surviving work is untouched")
+	assert.Equal(t, "surviving work", string(data))
+	entries, _ := filepath.Glob(path + "-*")
+	assert.Empty(t, entries, "no second checkout was created")
+}

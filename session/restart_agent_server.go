@@ -42,14 +42,22 @@ func remotePIDIdentityProbeScript(remotePID, afPath, tokenRef string) string {
 		`else echo ` + agentServerUnknown + `; fi; exit 0`
 }
 
-// agentServerProvedDead reports whether the host proves the recorded agent-server
-// is not running. Any answer short of that is an error.
-func (p *sandboxProvisioner) agentServerProvenDead() error {
-	if p.remotePID == "" || !positivePID(p.remotePID) {
-		return fmt.Errorf("%w: no recorded agent-server PID to prove dead", errAgentServerNotRestartable)
-	}
+// agentServerPIDName is the host-side record of the newest agent-server PID the
+// restart launched. The launch wrapper writes it BEFORE af learns the PID, so a
+// daemon that dies between the spawn and its own persist still leaves the host
+// naming the server it started; the next proof checks it as well as the PID the
+// row recorded.
+const agentServerPIDName = "agent-server.pid"
+
+func (p *sandboxProvisioner) agentServerPIDPath() string {
+	return p.sessionDir + "/" + agentServerPIDName
+}
+
+// probeAgentServerPID returns nil only when the host proves pid is not this
+// row's agent-server.
+func (p *sandboxProvisioner) probeAgentServerPID(pid string) error {
 	out, err := p.Run(sshShortStepTimeout,
-		remotePIDIdentityProbeScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef), nil, false)
+		remotePIDIdentityProbeScript(pid, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef), nil, false)
 	if err != nil {
 		return fmt.Errorf("%w: the host did not answer the identity probe: %v", errAgentServerNotRestartable, err)
 	}
@@ -57,10 +65,38 @@ func (p *sandboxProvisioner) agentServerProvenDead() error {
 	case strings.HasSuffix(got, agentServerProvedDead):
 		return nil
 	case strings.HasSuffix(got, agentServerAliveMark):
-		return fmt.Errorf("%w: its process (pid %s) is still running but did not answer", errAgentServerNotRestartable, p.remotePID)
+		return fmt.Errorf("%w: its process (pid %s) is still running but did not answer", errAgentServerNotRestartable, pid)
 	default:
-		return fmt.Errorf("%w: the host could not tell whether pid %s is still the agent-server", errAgentServerNotRestartable, p.remotePID)
+		return fmt.Errorf("%w: the host could not tell whether pid %s is still the agent-server", errAgentServerNotRestartable, pid)
 	}
+}
+
+// agentServerProvenDead reports whether the host proves that NO agent-server of
+// this row is running: the PID the row recorded and the PID the host recorded at
+// the last launch must each be proved dead. Any other answer is an error.
+func (p *sandboxProvisioner) agentServerProvenDead() error {
+	if p.remotePID == "" || !positivePID(p.remotePID) {
+		return fmt.Errorf("%w: no recorded agent-server PID to prove dead", errAgentServerNotRestartable)
+	}
+	pids := []string{p.remotePID}
+	out, err := p.Run(sshShortStepTimeout, "if [ -r "+shellQuote(p.agentServerPIDPath())+" ]; then cat "+shellQuote(p.agentServerPIDPath())+"; fi", nil, false)
+	if err != nil {
+		return fmt.Errorf("%w: the host did not answer the launch-record read: %v", errAgentServerNotRestartable, err)
+	}
+	if hostPID := strings.TrimSpace(string(out)); hostPID != "" {
+		if !positivePID(hostPID) {
+			return fmt.Errorf("%w: the host's launch record is unreadable", errAgentServerNotRestartable)
+		}
+		if hostPID != p.remotePID {
+			pids = append(pids, hostPID)
+		}
+	}
+	for _, pid := range pids {
+		if err := p.probeAgentServerPID(pid); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // restartAgentServer relaunches the agent-server from the persisted launch
@@ -68,18 +104,32 @@ func (p *sandboxProvisioner) agentServerProvenDead() error {
 // The token and callback credential travel in the session dir's 0600 env files
 // the command sources, so the new process presents the same identity; expectedToken
 // is checked against its banner so a restart can never bind to a stranger.
-func (p *sandboxProvisioner) restartAgentServer(expectedToken string) error {
+//
+// persist makes the row's runtime identity durable. It runs twice: BEFORE the
+// spawn, so the debt (adopt_pending) exists on disk before any process does, and
+// again once the new PID and address are known. A failed write before the spawn
+// aborts without one; a failed write after it stops the (still workspace-free)
+// server rather than leave a process the row does not name.
+func (p *sandboxProvisioner) restartAgentServer(expectedToken string, persist func() error) error {
 	if p.launchScript == "" {
 		return fmt.Errorf("%w: this row predates restartable launches", errAgentServerNotRestartable)
 	}
 	if err := p.agentServerProvenDead(); err != nil {
 		return err
 	}
+	wasPending := p.adoptPending
+	p.adoptPending = true
+	if err := persist(); err != nil {
+		p.adoptPending = wasPending
+		return fmt.Errorf("%w: the restart could not be recorded before launching: %v", errAgentServerNotRestartable, err)
+	}
 	w := &sandboxWorkspace{shell: p, SessionDir: p.sessionDir}
 	// The previous run's log is kept for diagnosis, and its banner removed so the
-	// poll below cannot read the dead server's address.
+	// poll below cannot read the dead server's address. The wrapper records the
+	// new PID on the host before reporting it.
 	script := "mv -f " + shellQuote(w.LogPath()) + " " + shellQuote(w.LogPath()+".prev") + " 2>/dev/null; rm -f " +
-		shellQuote(w.BannerPath()) + "; " + p.launchScript
+		shellQuote(w.BannerPath()) + "; pid=$(" + p.launchScript + ") || exit 1; " +
+		"printf '%s\n' \"$pid\" > " + shellQuote(p.agentServerPIDPath()) + "; echo \"$pid\""
 	out, err := p.Run(sshShortStepTimeout, script, nil, false)
 	if err != nil {
 		return fmt.Errorf("restarting the af agent-server failed: %s: %w", strings.TrimSpace(string(out)), err)
@@ -88,25 +138,26 @@ func (p *sandboxProvisioner) restartAgentServer(expectedToken string) error {
 	if !positivePID(pid) {
 		return fmt.Errorf("restarting the af agent-server returned invalid background PID %q", pid)
 	}
-	// Recorded before anything else can fail: the reap must know the live PID,
-	// and a later reattach that finds this server responsive must know it has
-	// not adopted the workspace yet.
-	p.remotePID, p.adoptPending = pid, true
+	p.remotePID = pid
 	w.RemotePID = pid
-	// Up to here nothing has asked the new server to touch the workspace, so
-	// stopping it is safe; a failure past the spawn must not leave it running
-	// with only the in-memory PID updated (the caller persists the identity).
 	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)
 	if err == nil && banner.Token != expectedToken {
 		err = errors.New("the restarted af agent-server did not report this session's credential")
 	}
+	if err == nil {
+		p.remoteAddr = banner.Addr
+		if banner.Version != "" {
+			p.agentServerVersion = banner.Version
+		}
+		if perr := persist(); perr != nil {
+			err = fmt.Errorf("the restarted af agent-server's identity could not be recorded: %w", perr)
+		}
+	}
 	if err != nil {
+		// Nothing has asked this server to touch the workspace, so stopping it is
+		// safe; leaving it would be a process the row does not name.
 		p.stopUnadoptedServer()
 		return err
-	}
-	p.remoteAddr = banner.Addr
-	if banner.Version != "" {
-		p.agentServerVersion = banner.Version
 	}
 	return nil
 }
@@ -118,6 +169,81 @@ func (p *sandboxProvisioner) restartAgentServer(expectedToken string) error {
 // finished by the next reattach) rather than stopped.
 func (p *sandboxProvisioner) stopUnadoptedServer() {
 	_, _ = p.Run(sshShortStepTimeout, remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef), nil, true)
+}
+
+// SetRuntimeIdentityPersist installs the durable write a W1.4 restart uses to
+// record its runtime identity (see sandboxProvisioner.persistIdentity). A row
+// without a restartable provisioner ignores it.
+func (i *Instance) SetRuntimeIdentityPersist(persist func(*Instance) error) {
+	i.mu.Lock()
+	b := i.backend
+	i.mu.Unlock()
+	if p := reattachProvisioner(b); p != nil {
+		i.mu.Lock()
+		p.persistIdentity = persist
+		i.mu.Unlock()
+	}
+}
+
+// persistRuntimeIdentity copies the provisioner's live identity onto the row's
+// cleanup handle and, when the daemon installed one, writes the row durably.
+// Without a callback (tests, a build without a store) the in-memory handle is
+// all there is, so an absent callback is not an error.
+func (i *Instance) persistRuntimeIdentity(b Backend, p *sandboxProvisioner) error {
+	i.mu.Lock()
+	refreshRuntimeIdentity(b, p)
+	persist := p.persistIdentity
+	i.mu.Unlock()
+	if persist == nil {
+		return nil
+	}
+	return persist(i)
+}
+
+// noteAdoptedRestart settles what a restart-adoption means for the session's
+// agent. Launch(false) either reattached the surviving agent or respawned it
+// (tmux gone), and the launch response does not say which; survival cannot be
+// proved, so the conservative verdict is used: the agent runtime counts as
+// replaced, its idle evidence is cleared, and an in-flight task run ends
+// interrupted. That only stops a replacement's first idle tick from completing
+// the old run and firing on_complete. It runs BEFORE the endpoint is bound, so
+// no observation of the new agent precedes it. The daemon stamps the owning
+// task's status from ConsumeTaskRunInterrupted.
+func (i *Instance) noteAdoptedRestart() {
+	i.ClearIdleEvidence()
+	i.markLoadRuntimeReplaced()
+	i.markAgentRuntimeReplaced(true)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.taskRunActive {
+		i.endTaskRunInterruptedLocked()
+		i.taskRunInterruptedStamp = true
+	}
+}
+
+// retireLaunchScript forgets the stored launch command after the session's agent
+// was swapped: the script still names the ORIGINAL agent, and restarting from it
+// would attach a different program to the surviving tmux handle. A row without a
+// script is reported as not restartable rather than restarted wrongly.
+func (i *Instance) retireLaunchScript() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	switch be := i.backend.(type) {
+	case *sandboxBackend:
+		if be.cleanup != nil {
+			be.cleanup.LaunchScript = ""
+		}
+		if be.provisioner != nil {
+			be.provisioner.launchScript = ""
+		}
+	case *sshBackend:
+		if be.cleanup != nil {
+			be.cleanup.LaunchScript = ""
+		}
+		if be.provisioner != nil {
+			be.provisioner.launchScript = ""
+		}
+	}
 }
 
 // refreshRuntimeIdentity copies the provisioner's live identity onto the

@@ -266,10 +266,10 @@ type Instance struct {
 	// relocationSettleNotify is the daemon-installed persist callback the
 	// respawn fires after SettleWorktreeRelocationClaim resolves a single-
 	// candidate recovery record but BEFORE the spawn proceeds — the settle is
-	// in-memory only, and a daemon exit between it and the later boundary
-	// write would reload the stale record and strand the session inert
-	// (#5295 review). In-memory only; each daemon generation re-installs it
-	// at its recover/respawn entry points.
+	// in-memory only, and a daemon exit before the later boundary write would
+	// reload the stale record and strand the session inert (#5295 review).
+	// In-memory only; each daemon generation re-installs it at its
+	// recover/respawn entry points.
 	relocationSettleNotify func(*Instance) error
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
 	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit

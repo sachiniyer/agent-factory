@@ -31,6 +31,9 @@ type crashedHost struct {
 	failRoute string
 	// badBanner makes the restarted server report another session's credential.
 	badBanner bool
+	// hostPID is what the host's launch record (agent-server.pid) holds, and
+	// strayProbe what the identity probe answers for that PID.
+	hostPID, strayProbe string
 }
 
 func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner, *crashedHost) {
@@ -93,6 +96,10 @@ func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner,
 		defer h.mu.Unlock()
 		h.scripts = append(h.scripts, script)
 		switch {
+		case strings.Contains(script, "agent-server.pid") && strings.HasPrefix(script, "if [ -r"):
+			return []byte(h.hostPID + "\n"), nil
+		case strings.Contains(script, "matches_session") && h.hostPID != "" && strings.Contains(script, "pid='"+h.hostPID+"'"):
+			return []byte(h.strayProbe + "\n"), nil
 		case strings.Contains(script, "matches_session"):
 			return []byte(h.probe + "\n"), nil
 		case strings.Contains(script, "echo relaunched"):
@@ -249,4 +256,107 @@ func TestReattachStopsAndRecordsARestartWhoseBannerIsWrong(t *testing.T) {
 	assert.Empty(t, h.lifecycle, "nothing was adopted")
 	cleanup := inst.backend.(*sandboxBackend).cleanup
 	assert.Equal(t, "4343", cleanup.RemotePID, "the persisted PID follows the spawn")
+}
+
+// The proof that no agent-server runs covers the PID the HOST recorded at the
+// last launch as well as the one the row holds: a daemon that died between a
+// spawn and its own persist left a server only the host names.
+func TestReattachDoesNotRestartBesideAServerOnlyTheHostRecorded(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	p.launchScript = "echo relaunched & echo $!"
+	h.hostPID, h.strayProbe = "5555", agentServerAliveMark
+
+	err := inst.ReattachSandbox()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "5555")
+	assert.False(t, h.ran("echo relaunched"), "a second agent-server must never start beside one the host recorded")
+}
+
+func TestRestartRecordsTheDebtDurablyBeforeSpawningAndTheIdentityBeforeAdopting(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	p.launchScript = "echo relaunched & echo $!"
+	type snap struct {
+		spawned   bool
+		pending   bool
+		pid       string
+		lifecycle int
+	}
+	var snaps []snap
+	inst.SetRuntimeIdentityPersist(func(i *Instance) error {
+		c := i.backend.(*sandboxBackend).cleanup
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		snaps = append(snaps, snap{h.restarted, c.AdoptPending, c.RemotePID, len(h.lifecycle)})
+		return nil
+	})
+
+	require.NoError(t, inst.ReattachSandbox())
+	require.GreaterOrEqual(t, len(snaps), 3)
+	assert.Equal(t, snap{spawned: false, pending: true, pid: "4242"}, snaps[0], "the debt is on disk before any process exists")
+	assert.Equal(t, snap{spawned: true, pending: true, pid: "4343"}, snaps[1], "the identity is on disk before any adoption RPC")
+	last := snaps[len(snaps)-1]
+	assert.False(t, last.pending, "the debt is cleared only after the adoption succeeded")
+	assert.Equal(t, 2, last.lifecycle)
+}
+
+func TestRestartDoesNotSpawnWhenTheDebtCannotBeRecorded(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	p.launchScript = "echo relaunched & echo $!"
+	inst.SetRuntimeIdentityPersist(func(*Instance) error { return errors.New("disk full") })
+
+	err := inst.ReattachSandbox()
+	require.Error(t, err)
+	assert.False(t, h.ran("echo relaunched"), "no process is spawned that the row does not yet name")
+	assert.False(t, p.adoptPending)
+}
+
+func TestRestartStopsAServerItCannotRecordBeforeAdopting(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	p.launchScript = "echo relaunched & echo $!"
+	calls := 0
+	inst.SetRuntimeIdentityPersist(func(*Instance) error {
+		calls++
+		if calls == 2 { // the post-spawn identity write
+			return errors.New("disk full")
+		}
+		return nil
+	})
+
+	require.Error(t, inst.ReattachSandbox())
+	assert.True(t, h.ran("kill \"$pid\""), "a workspace-free server the row cannot name is stopped")
+	assert.Empty(t, h.lifecycle, "and nothing was adopted")
+}
+
+// A restart-adoption cannot prove the agent survived, so a task run in flight
+// ends interrupted BEFORE the endpoint is bound and observations resume.
+func TestRestartAdoptionInterruptsAnInFlightTaskRunBeforeBinding(t *testing.T) {
+	inst, p, _ := newCrashedHost(t, agentServerProvedDead)
+	p.launchScript = "echo relaunched & echo $!"
+	inst.mu.Lock()
+	inst.taskRunActive = true
+	inst.mu.Unlock()
+
+	require.NoError(t, inst.ReattachSandbox())
+	inst.mu.RLock()
+	active := inst.taskRunActive
+	inst.mu.RUnlock()
+	assert.False(t, active, "the old run must not be completable by the replacement's first idle tick")
+	assert.True(t, inst.TaskRunInterrupted())
+	assert.True(t, inst.ConsumeTaskRunInterrupted(), "the daemon stamps the owning task from this")
+}
+
+// After an agent swap the stored launch script names the OLD agent; the row is
+// reported not restartable instead of being restarted as the wrong program.
+func TestAgentSwapRetiresTheStoredLaunchScript(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	p.launchScript = "echo relaunched & echo $!"
+	inst.backend.(*sandboxBackend).cleanup.LaunchScript = p.launchScript
+
+	inst.retireLaunchScript()
+
+	assert.Empty(t, inst.backend.(*sandboxBackend).cleanup.LaunchScript)
+	err := inst.ReattachSandbox()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "predates restartable launches")
+	assert.False(t, h.ran("echo relaunched"))
 }

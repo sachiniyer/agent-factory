@@ -116,18 +116,14 @@ func (i *Instance) ReattachSandbox() error {
 	// adoption debt) onto the row's cleanup handle. Every exit past a spawn goes
 	// through it: a process af started must be durably recorded or a daemon
 	// restart would launch another beside it.
-	persistIdentity := func() {
-		i.mu.Lock()
-		refreshRuntimeIdentity(b, p)
-		i.mu.Unlock()
-	}
+	persistIdentity := func() error { return i.persistRuntimeIdentity(b, p) }
 	adopt := p.adoptPending // a restarted server a previous attempt left unadopted
 	if aliveErr != nil {
 		// The host answered over a working transport but the agent-server did not:
 		// relaunch it if — and only if — the host proves it dead (W1.4).
-		rerr := p.restartAgentServer(token)
+		rerr := p.restartAgentServer(token, persistIdentity)
 		if p.adoptPending {
-			persistIdentity() // a process was spawned, whether or not the restart completed
+			_ = persistIdentity() // a process was spawned, whether or not the restart completed
 		}
 		if rerr != nil {
 			return fmt.Errorf("reattach %q: the agent-server did not answer: %w (not restarted: %v)", i.Title, aliveErr, rerr)
@@ -138,6 +134,7 @@ func (i *Instance) ReattachSandbox() error {
 		// later probe.
 		if endpoint, rc, aliveErr, err = dial(); err != nil || aliveErr != nil {
 			p.stopUnadoptedServer()
+			_ = persistIdentity()
 			return fmt.Errorf("reattach %q: the restarted agent-server did not answer: %w", i.Title, errors.Join(err, aliveErr))
 		}
 		adopt = true
@@ -157,8 +154,13 @@ func (i *Instance) ReattachSandbox() error {
 			p.abandonUnadoptedTunnel()
 			return fmt.Errorf("reattach %q: adopting the restarted agent-server failed (it is left running with its workspace; the next reattach retries): %w", i.Title, aerr)
 		}
+		// The agent may have been respawned rather than reattached: settle that
+		// before the endpoint is bound, so no observation precedes it.
+		i.noteAdoptedRestart()
 		p.adoptPending = false
-		persistIdentity()
+		if perr := persistIdentity(); perr != nil {
+			log.WarningLog.Printf("sandbox runtime: session %q adopted its restarted agent-server but could not record that: %v", i.Title, perr)
+		}
 	}
 
 	// Re-verify under i.mu that the row is still the one this attempt probed: a

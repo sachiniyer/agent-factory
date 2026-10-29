@@ -49,6 +49,18 @@ func (i *Instance) adoptExistingWorktree() error {
 			if gw, err = git.NewGitWorktreeFromStorage(gw.GetRepoPath(), registered, i.Title, branch, "", false, false); err != nil {
 				return fmt.Errorf("cannot adopt the worktree at %s: %w", registered, err)
 			}
+		} else {
+			// "Git lists no worktree on this branch" is an absence, and an absence
+			// proves nothing about THIS session's workspace: the checkout may have
+			// been switched to another branch (its work still on disk), or its
+			// registration pruned. The handle newWorktreeHandle derived is also not
+			// the original path (it avoids an occupied one), so probing it would read
+			// "absent" for a workspace that is present elsewhere. Rebuilding on that
+			// would stop the surviving agent and start empty work. Refuse, and leave
+			// everything alone: the session needs attention, not a rebuild.
+			return fmt.Errorf("cannot adopt the existing workspace: git lists no worktree on branch %q, "+
+				"so whether this session's checkout is gone or merely on another branch is not established; "+
+				"leaving it untouched", branch)
 		}
 	}
 	switch gw.ProbeWorktreePresence() {
