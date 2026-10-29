@@ -396,7 +396,9 @@ func (t lockedTarget) withLock(fn func() error) error {
 	lockPath := t.file + ".lock"
 
 	for {
-		fd, err := unix.Openat(t.dirFD, name, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC, 0644)
+		fd, err := openLockWithRetry(func() (int, error) {
+			return unix.Openat(t.dirFD, name, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC, 0644)
+		})
 		if err != nil {
 			return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 		}
@@ -453,7 +455,7 @@ func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
 		return false, fmt.Errorf("failed to create lock directory: %w", err)
 	}
 
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	f, err := openLockWithRetry(func() (*os.File, error) { return os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644) })
 	if err != nil {
 		return false, fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 	}
@@ -511,7 +513,7 @@ func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) er
 
 	deadline := time.Now().Add(timeout)
 	for {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+		f, err := openLockWithRetry(func() (*os.File, error) { return os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644) })
 		if err != nil {
 			return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 		}
@@ -555,6 +557,38 @@ func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) er
 	}
 }
 
+// lockOpenAttempts and lockOpenBackoff bound openLockWithRetry. Vars so tests
+// can shorten them; production never reassigns.
+var (
+	lockOpenAttempts = 50
+	lockOpenBackoff  = 2 * time.Millisecond
+)
+
+// openLockWithRetry opens a lock file with O_CREAT and rides out a transient
+// ENOENT or EINTR. The lock file is never unlinked by any config writer, and the
+// directory is created or pinned before the open, so an O_CREAT open that reports
+// "no such file or directory" under contention is the filesystem losing a
+// lookup/create race (seen on macOS, run 40931667845), not a missing lock. Acquiring
+// the lock must never fail because another writer is acquiring it, so the open is
+// retried a bounded number of times; a directory that is genuinely gone still
+// fails, with the original error, after the budget.
+func openLockWithRetry[T any](open func() (T, error)) (T, error) {
+	var zero T
+	var err error
+	for attempt := 0; attempt < lockOpenAttempts; attempt++ {
+		var v T
+		v, err = open()
+		if err == nil {
+			return v, nil
+		}
+		if !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.EINTR) {
+			return zero, err
+		}
+		time.Sleep(lockOpenBackoff)
+	}
+	return zero, err
+}
+
 // lockPollInterval is how often WithFileLockTimeout re-attempts a contended
 // flock. A var so tests can shorten it; production never reassigns.
 var lockPollInterval = 20 * time.Millisecond
@@ -573,7 +607,7 @@ func WithFileLock(path string, fn func() error) error {
 	}
 
 	for {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+		f, err := openLockWithRetry(func() (*os.File, error) { return os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644) })
 		if err != nil {
 			return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 		}
