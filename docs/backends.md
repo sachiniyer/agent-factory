@@ -960,9 +960,12 @@ capabilities — `Archive` and `Recover` are both supported. All four are declar
 off-box in one place (`backendProvisionsOffBox`), and all four share a single
 capability declaration, so none of them can differ from the others here without
 that being a deliberate change. Parity is not total: they declare
-`TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`), which is why an off-box session carries only
-its agent tab plus any external HTTPS web tabs (the one metadata-only kind
-admitted off-box). A **Lost** sandbox session (one whose
+`TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`). The static declaration is the floor: an
+off-box session whose agent-server advertises `tab-api` lifts `TabManagement` and
+serves shell and process tabs off-box too. Without that advertisement an off-box
+session carries only its agent tab plus HTTPS web tabs (the one metadata-only kind
+admitted off-box; a loopback target is admitted because off-box runtimes relay
+loopback through the agent-server) and docs tabs. A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) is reachable, so recovery **relaunches
 the agent in place**: the sandbox's agent-server stops the agent (if it is still
 running) and starts it again in its existing workspace with the provider's resume,
