@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 var repoGoneCleanupRetainedTrees = func(worktree *GitWorktree) error {
@@ -210,8 +209,8 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 		}
 		deleteDone <- err
 	}()
-	timer := time.NewTimer(repoGoneCleanupTimeout)
-	defer timer.Stop()
+	deadline, stopDeadline := repoGoneCleanupDeadline()
+	defer stopDeadline()
 	select {
 	case err := <-deleteDone:
 		if err != nil {
@@ -221,7 +220,7 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 				revalidationErr,
 			), nil
 		}
-	case <-timer.C:
+	case <-deadline:
 		// The worker may be stuck in an uninterruptible filesystem syscall and
 		// cannot safely be killed. Its opened handles identify only the claimed
 		// tree, so it may finish in the background; the caller still returns and
