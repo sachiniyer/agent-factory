@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // drainJoinBudget bounds how long drainDaemon waits for joined goroutines (the
@@ -15,16 +16,19 @@ import (
 // in-flight work, never the final save (#5846).
 var drainJoinBudget = 2 * time.Second
 
-// checkpointBeforeJoin writes the durable checkpoint that precedes the join (#5846).
-// It is a plain SaveInstances of the in-memory view, the same write the poll loop
-// makes: it does not seal archive admission, so it changes nothing about what the
-// still-running joined goroutines may do. It is skipped when the home directory
-// is gone (see homeDeleted). A var so a test can observe the ordering.
+// checkpointBeforeJoin writes the durable checkpoint that precedes the join
+// (#5846). It refreshes rows already on disk from the live instances and never
+// adds, removes or re-orders membership (session.Storage.CheckpointLiveRows):
+// goroutines that are still joining, a root-agent replacement above all, may
+// commit while it runs, and a whole-list write from a stale snapshot would put the
+// replaced row back. It does not seal archive admission either. It is skipped when
+// the home directory is gone (see homeDeleted). A var so a test can observe the
+// ordering.
 var checkpointBeforeJoin = func(m *Manager) error {
 	if m.homeDeleted.Load() {
 		return nil
 	}
-	return m.storage.SaveInstances(m.InstancesSnapshot())
+	return m.checkpointLiveRows()
 }
 
 // joinWithin runs join and reports whether it returned inside d. A join that does
@@ -133,4 +137,29 @@ func drainDaemon(
 		log.WarningLog.Printf("shutdown join exceeded %s; keeping the pre-drain checkpoint and skipping the final save so a wedged goroutine cannot hold exit past the SIGKILL grace (#5846)", drainJoinBudget)
 	}
 	return joined
+}
+
+// checkpointLiveRows is the pre-drain checkpoint's body. Membership is
+// re-validated under the repo file lock against the manager's current instance
+// map; m.mu is only TRY-locked there, because a writer that holds m.mu may be
+// waiting on that same file lock, and a skipped row is safe (the final save or the
+// row's own targeted persist covers it) where a lock-order deadlock inside the
+// stop grace is not.
+func (m *Manager) checkpointLiveRows() error {
+	isCurrent := func(inst *session.Instance) bool {
+		for attempt := 0; attempt < 20; attempt++ {
+			if m.mu.TryLock() {
+				defer m.mu.Unlock()
+				for _, cur := range m.instances {
+					if cur == inst {
+						return true
+					}
+				}
+				return false
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		return false
+	}
+	return m.storage.CheckpointLiveRows(m.InstancesSnapshot(), isCurrent)
 }
