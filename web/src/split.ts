@@ -150,6 +150,8 @@ function webFallbackMs(): number {
  *  previewProbeLabel/previewProbeMessage. */
 const PREVIEW_PROBE_HOST = "afprobe.localhost";
 export const PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+export const EDITOR_PROBE_MESSAGE = "af-editor-origin-ok";
+const EDITOR_PROBE_PATH = "/_af/editor-probe";
 
 /** How long to wait for the probe frame to report. Overridable for tests. */
 function previewProbeMs(): number {
@@ -195,19 +197,37 @@ export function previewOriginReachable(origin: string, fresh = false): Promise<b
   } catch {
     return Promise.resolve(false);
   }
-  // A user-initiated ↻ bypasses the cache. A success is pinned for the SPA's lifetime
-  // (see below) — the right thing between two ordinary loads of the same pane, but
-  // `fresh` is the explicit "give me the CURRENT page" gesture. A port that was
-  // reachable when first probed may have stopped being BROWSER-reachable since: the
-  // daemon's preview listener stays bound and keeps vending the same origin, but the
-  // browser's own path to the port can break — the preview-port ssh forward drops
-  // while the main forward stays up. A cached `true` would then navigate the frame to
-  // a dead origin with no fallback; re-probing on demand restores the "fails CLOSED"
-  // path the cache exists to preserve.
-  //
-  // Only the port THIS origin names is dropped — a port that moved is a different key
-  // and was never cached against the new one — so the dedup across panes that share a
-  // port (one probe answers for the whole page) is kept for every non-fresh load.
+  return framedReachable(port, `http://${PREVIEW_PROBE_HOST}:${port}/`, PREVIEW_PROBE_MESSAGE, fresh);
+}
+
+/** Whether THIS BROWSER can reach a W5.2 editor-port origin (#6002). Same framed
+ *  probe and fail-closed contract as `previewOriginReachable`, against the editor
+ *  listener's own probe page; keyed on the full origin (scheme+host+port), since
+ *  that listener sits on the front-door host and may be https. */
+export function editorOriginReachable(origin: string, fresh = false): Promise<boolean> {
+  let key: string;
+  try {
+    key = "editor:" + new URL(origin).origin;
+  } catch {
+    return Promise.resolve(false);
+  }
+  return framedReachable(key, new URL(EDITOR_PROBE_PATH, origin).href, EDITOR_PROBE_MESSAGE, fresh);
+}
+
+/** What the pane tells the user when the editor port cannot be reached and the
+ *  same-origin mirror is used instead. */
+export function editorOriginUnreachableMessage(origin: string): string {
+  let port = "";
+  try {
+    port = new URL(origin).port;
+  } catch {
+    // fall through with an empty port
+  }
+  const which = port !== "" ? `port ${port}` : "the editor port";
+  return `This editor's own address (${which}) is not reachable from this browser, so it is shown on the shared address instead. Expose ${which} the same way as the af port (for example \`tailscale serve --tcp=${port} tcp://127.0.0.1:${port}\`).`;
+}
+
+function framedReachable(port: string, probeSrc: string, probeMessage: string, fresh: boolean): Promise<boolean> {
   if (fresh) {
     previewReachable.delete(port);
   } else {
@@ -249,7 +269,7 @@ export function previewOriginReachable(origin: string, fresh = false): Promise<b
     };
     const onMessage = (e: MessageEvent): void => {
       // Only the frame we just created may answer, and only with the fixed string.
-      if (e.source === frame.contentWindow && e.data === PREVIEW_PROBE_MESSAGE) {
+      if (e.source === frame.contentWindow && e.data === probeMessage) {
         finish(true);
       }
     };
@@ -257,7 +277,7 @@ export function previewOriginReachable(origin: string, fresh = false): Promise<b
     window.addEventListener("message", onMessage);
     // No `load` handler: a browser that cannot resolve the name still fires load on
     // its own error page, so the POSTED MESSAGE is the only trustworthy signal.
-    frame.src = `http://${PREVIEW_PROBE_HOST}:${port}/`;
+    frame.src = probeSrc;
     document.body.appendChild(frame);
   });
   previewReachable.set(port, probe);
@@ -1466,10 +1486,19 @@ export class SplitView {
         // A remote viewer resolves *.localhost to its own machine, so the per-session
         // label cannot partition its editor storage. When the operator declared a port
         // pool, the editor gets its own port on the front-door host instead.
-        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then((r) => {
-          editorPortBootstrap = r !== null;
-          editorPortOpenHref = r?.origin ?? "";
-          return r?.bootstrapUrl ?? "";
+        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then(async (r) => {
+          if (r === null) {
+            return "";
+          }
+          // The daemon allocated a port; only the browser can say whether it can
+          // reach it (#6002). Unreachable keeps the same-origin mirror and says why.
+          if (!(await editorOriginReachable(r.origin, fresh))) {
+            console.warn(editorOriginUnreachableMessage(r.origin));
+            return "";
+          }
+          editorPortBootstrap = true;
+          editorPortOpenHref = r.origin;
+          return r.bootstrapUrl;
         });
       }
       if (previewSrcOnce === null) {
