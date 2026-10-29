@@ -659,6 +659,8 @@ type Instance struct {
 	// Guarded by i.mu; in memory — a restart before the retry loses the mapping,
 	// and the sandbox's own roster then still holds the tab it started.
 	tabCreateIntents map[string]*tabCreateIntent
+	// tabTeardown serializes teardown attempts per tab id (lockTeardown).
+	tabTeardown map[string]*teardownGate
 
 	// tabSpawnClaims reserves the FULL tmux session names of sibling spawns
 	// still in flight — derived under i.mu, released once the append resolves
