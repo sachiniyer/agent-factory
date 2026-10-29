@@ -148,12 +148,29 @@ func routedListBackends(req daemon.ListBackendsRequest) (daemon.ListBackendsResp
 }
 
 // remoteSelfRefusal is the refusal for verbs whose identity comes from THIS
-// process's environment (--self): that session lives on this machine, not on
-// the targeted daemon.
+// process's environment (--self) when the credential does not name the caller:
+// this machine's tmux session is not a row of the targeted daemon.
 func remoteSelfRefusal(flag string) error {
-	return fmt.Errorf("%s resolves the session from this machine's environment and cannot be combined with the daemon target %s. "+
-		"Name the session by <title> instead, or run the command inside the session without --daemon-url",
+	return fmt.Errorf("%s against the daemon at %s needs a sandbox credential that names the calling session "+
+		"(the AF_DAEMON_URL/AF_DAEMON_TOKEN af injects into a sandbox session); this credential does not. "+
+		"Name the session by <title> instead",
 		flag, apiclient.RemoteTargetURL())
+}
+
+// resolveCredentialSelf is `--self` against a remote daemon: the session the
+// presented credential is bound to, as reported by the daemon on the Snapshot
+// route a sandbox credential is admitted to. There is deliberately no tmux
+// fallback: a name read from this machine could match a same-named session on
+// the daemon and act on the wrong one.
+func resolveCredentialSelf() (*session.InstanceData, error) {
+	row, ok, err := callerSessionFn()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, remoteSelfRefusal("--self")
+	}
+	return &row, nil
 }
 
 // remoteCreateInputs is the client-side half of a create against a REMOTE
@@ -169,14 +186,18 @@ func remoteSelfRefusal(flag string) error {
 // program is sent empty so the daemon applies the project's default_program.
 func remoteCreateInputs(inPlace bool) (workspace, program string, err error) {
 	if strings.TrimSpace(repoFlag) == "" {
-		return "", "", fmt.Errorf("--repo is required against the daemon at %s: the project path is resolved on the DAEMON's host, "+
-			"and this machine's current directory names a repository the daemon may not have. "+
-			"Pass --repo <path on the daemon host>", apiclient.RemoteTargetURL())
-	}
-	// A relative path would resolve against the DAEMON's cwd and could pick a
-	// different checkout than the one typed, so refuse it here and name why
-	// (the daemon refuses it too; #5743).
-	if _, rerr := config.ResolveDaemonHostPath(repoFlag); rerr != nil {
+		if !credentialBoundCaller() {
+			return "", "", fmt.Errorf("--repo is required against the daemon at %s: the project path is resolved on the DAEMON's host, "+
+				"and this machine's current directory names a repository the daemon may not have. "+
+				"Pass --repo <path on the daemon host>", apiclient.RemoteTargetURL())
+		}
+		// A sandbox credential is bound to one session and so one project: the
+		// daemon replaces the path with it (the sandbox never names, and cannot
+		// know, the daemon host's layout), so there is nothing to send.
+	} else if _, rerr := config.ResolveDaemonHostPath(repoFlag); rerr != nil {
+		// A relative path would resolve against the DAEMON's cwd and could pick a
+		// different checkout than the one typed, so refuse it here and name why
+		// (the daemon refuses it too; #5743).
 		return "", "", fmt.Errorf("--repo: %w", rerr)
 	}
 	program = createProgramFlag
@@ -198,6 +219,20 @@ func remoteCreateInputs(inPlace bool) (workspace, program string, err error) {
 		return "", "", fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag)
 	}
 	return repoFlag, program, nil
+}
+
+// credentialBoundCaller reports whether the credential this process presents is a
+// sandbox credential bound to a calling session — the daemon says so on the
+// Snapshot route that credential is admitted to. It is false for an operator
+// token, for no token, and when the daemon cannot be asked, so every caller keeps
+// its "name the project explicitly" rule unless the daemon itself vouches for the
+// binding.
+func credentialBoundCaller() bool {
+	if !apiclient.IsRemoteTarget() || !apiclient.HasDaemonToken() {
+		return false
+	}
+	_, ok, err := callerSessionFn()
+	return err == nil && ok
 }
 
 func routedCreateSession(req daemon.CreateSessionRequest) (*session.InstanceData, error) {

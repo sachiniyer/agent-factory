@@ -404,3 +404,81 @@ func TestWaitAdoptedServerReady(t *testing.T) {
 		assert.Contains(t, err.Error(), "did not answer")
 	})
 }
+
+// The restore-checkpoint rules of #5992 and the proven-gone rule of W8.6 hold
+// together: an adoption never consults origin, a verified checkpoint is fetched as
+// is, an unverified one is checked against origin before it is discarded, and a
+// workspace the host proved gone is replaced onto its recorded branch or not at all.
+func TestSettleRestoreCheckpoint(t *testing.T) {
+	prev := branchOnOrigin
+	t.Cleanup(func() { branchOnOrigin = prev })
+	var asked int
+	stub := func(onOrigin bool, err error) {
+		asked = 0
+		branchOnOrigin = func(string, string) (bool, error) { asked++; return onOrigin, err }
+	}
+	newRow := func() *Instance { return &Instance{Title: "t", Branch: "af/b", branchUnpushed: true} }
+	spec := func() *ProvisionSpec {
+		return &ProvisionSpec{CloneURL: "git@example.com:o/r.git", RestoreBranch: "af/b"}
+	}
+
+	t.Run("an adoption fetches nothing and never consults origin", func(t *testing.T) {
+		stub(false, errors.New("origin unreachable"))
+		s := spec()
+		require.NoError(t, newRow().settleRestoreCheckpoint(s, "af/b", true, true, false))
+		assert.Zero(t, asked)
+	})
+	t.Run("a verified checkpoint (a legacy row) is fetched without asking", func(t *testing.T) {
+		stub(false, nil)
+		s := spec()
+		require.NoError(t, newRow().settleRestoreCheckpoint(s, "af/b", false, false, false))
+		assert.Zero(t, asked)
+		assert.Equal(t, "af/b", s.RestoreBranch)
+	})
+	t.Run("an unobserved push that origin holds is fetched and marked pushed", func(t *testing.T) {
+		stub(true, nil)
+		row, s := newRow(), spec()
+		require.NoError(t, row.settleRestoreCheckpoint(s, "af/b", true, false, false))
+		assert.Equal(t, "af/b", s.RestoreBranch)
+		assert.False(t, row.branchUnpushed)
+	})
+	t.Run("an ordinary replacement discards a branch origin lacks", func(t *testing.T) {
+		stub(false, nil)
+		s := spec()
+		require.NoError(t, newRow().settleRestoreCheckpoint(s, "af/b", true, false, false))
+		assert.Equal(t, "", s.RestoreBranch)
+	})
+	t.Run("a proven-gone workspace is replaced onto its branch or not at all", func(t *testing.T) {
+		stub(false, nil)
+		s := spec()
+		err := newRow().settleRestoreCheckpoint(s, "af/b", true, false, true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "nothing to restore it from")
+		assert.Equal(t, "af/b", s.RestoreBranch, "the spec is untouched on a refusal")
+	})
+	t.Run("an origin that cannot be asked refuses in every mode", func(t *testing.T) {
+		for _, replacing := range []bool{false, true} {
+			stub(false, errors.New("auth"))
+			require.Error(t, newRow().settleRestoreCheckpoint(spec(), "af/b", true, false, replacing))
+		}
+	})
+}
+
+// The record of a preserved workspace survives a refused replacement, so a retry
+// reaches the same proven-gone verdict rather than the ordinary path.
+func TestRefusedReplacementKeepsThePreservedRecord(t *testing.T) {
+	inst := &Instance{Title: "t", Branch: "b", archivedWorkspace: &ArchivedWorkspaceData{Dir: "/d"}}
+	backend, teardown, err := restoreRuntimeCleanup("t", "sandbox", &RuntimeCleanupData{Sandbox: &SandboxRuntimeCleanupData{
+		SSHCommand: "ssh recorded-host", SessionDir: "/d",
+	}})
+	require.NoError(t, err)
+	inst.backend, inst.runtimeTeardown = backend, teardown
+	_, err = inst.restorePreservedWorkspaceWith(inst.ArchivedWorkspace(), func(a *AdoptSpec) error {
+		if a != nil {
+			return ErrPreservedWorkspaceGone
+		}
+		return errors.New("branch not on origin")
+	})
+	require.Error(t, err)
+	assert.NotNil(t, inst.ArchivedWorkspace())
+}

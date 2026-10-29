@@ -121,10 +121,18 @@ func (i *Instance) PendingAccountSwap() (from, to string, pending bool) {
 }
 
 // SupportsAutomaticAccountSwap reports whether this runtime can replace its
-// credential boundary without changing backend kind.
+// credential boundary without changing backend kind: a local session, or an ssh or
+// sandbox session on a listed host whose agent-server rotates its account scope in
+// place (#5571 W7.6).
 func (i *Instance) SupportsAutomaticAccountSwap() bool {
 	backend := i.currentBackend()
-	return backend != nil && backend.Type() == "local"
+	if backend == nil {
+		return false
+	}
+	if backend.Type() == "local" {
+		return true
+	}
+	return handoffInPlaceBackend(backend.Type()) && i.offBoxAccountSwapAvailable()
 }
 
 // ValidateAccountSwap checks the complete identity boundary before the current

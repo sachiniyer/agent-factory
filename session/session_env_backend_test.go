@@ -12,6 +12,8 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDockerEnvironmentDoesNotTrustRepoSelectedImageWithResolvedCredentials(t *testing.T) {
@@ -507,4 +509,38 @@ func environmentHasName(environ []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// #5971: an Instance records the branch the runtime reports it ran on, never
+// the daemon's derived name on a runtime's behalf. A hook launch_cmd is not
+// handed the name, so the Instance must not claim it.
+func TestNewInstanceRecordsOnlyTheBranchTheRuntimeUsed(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reported string
+		want     string
+	}{
+		{"runtime that ignores the daemon's name (hook)", "", ""},
+		{"runtime that ran on the daemon's name (docker, ssh)", "frozen/branch-case", "frozen/branch-case"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := initTempGitRepo(t)
+			runtime := &specCapturingRuntime{res: ProvisionResult{Backend: NewFakeBackend(), Branch: tc.reported}}
+			t.Cleanup(SetRuntimeForTest(BackendHook, func() Runtime { return runtime }))
+
+			prefix := "frozen/"
+			instance, err := NewInstance(InstanceOptions{
+				Title:        "branch-case",
+				Path:         repoRoot,
+				Backend:      BackendHook,
+				BranchPrefix: &prefix,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, "frozen/branch-case", runtime.spec.Branch, "the daemon still names a branch for runtimes that take it")
+			instance.mu.RLock()
+			defer instance.mu.RUnlock()
+			assert.Equal(t, tc.want, instance.Branch)
+			assert.Equal(t, tc.want != "", instance.branchUnpushed, "a name af chose at create is not yet a pushed checkpoint")
+		})
+	}
 }

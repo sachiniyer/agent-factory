@@ -174,7 +174,7 @@ func (m *home) saveContentPaneState() error {
 	}
 	for _, edit := range sp.ConsumeDirty() {
 		err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect)
-		m.noteRemoteUpdate(edit.ID, edit.Update, err)
+		m.noteRemoteUpdate(edit.ID, edit.Update, edit.Expect, err)
 		if err != nil {
 			if updateProvedTaskDeleted(err, edit.ID) {
 				// Another writer deleted the task (`af tasks remove`), so no
@@ -226,7 +226,7 @@ func (m *home) saveContentPaneState() error {
 		// so a delete authorized under this project cannot land on a task
 		// another client rebound elsewhere while the pane was open (#3230).
 		err := removeTaskThroughDaemon(tsk.ID, task.ExpectProject(tsk))
-		m.noteRemoteRemove(tsk.ID, err)
+		m.noteRemoteRemove(tsk, err)
 		if err != nil {
 			if apiclient.IsMutationCommitted(err) {
 				// The durable removal landed and the reload below will project

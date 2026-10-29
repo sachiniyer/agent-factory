@@ -205,8 +205,8 @@ func TestRemoteTaskMutationsUpdateTheCacheAndOutrankOlderPolls(t *testing.T) {
 	taskAck = taskMutationAck{record: &task.Task{ID: "new", Name: "new", RepoID: "aaaaaaaaaaaa", ProjectPath: "/srv/box/alpha"}}
 	m.noteRemoteCreate(task.Task{ID: "new", Name: "new", ProjectPath: "~/alpha"}, nil)
 	taskAck = taskMutationAck{record: &task.Task{ID: "edit", Name: "renamed", RepoID: "aaaaaaaaaaaa"}}
-	m.noteRemoteUpdate("edit", task.TaskUpdate{}, nil)
-	m.noteRemoteRemove("gone", nil)
+	m.noteRemoteUpdate("edit", task.TaskUpdate{}, task.ProjectExpectation{}, nil)
+	m.noteRemoteRemove(task.Task{ID: "gone", RepoID: "aaaaaaaaaaaa"}, nil)
 
 	got, err := m.activeTasks(m.repoRoot, m.repoID)
 	require.NoError(t, err)
@@ -244,7 +244,7 @@ func TestRemoteTaskMutationOutcomes(t *testing.T) {
 	m.noteRemoteCreate(task.Task{ID: "b", RepoID: "r"}, nil)
 	require.ElementsMatch(t, []string{"a", "b"}, remoteTaskIDs(m.remote.tasks))
 	name := "renamed"
-	m.noteRemoteUpdate("a", task.TaskUpdate{Name: &name}, nil)
+	m.noteRemoteUpdate("a", task.TaskUpdate{Name: &name}, task.ProjectExpectation{}, nil)
 	for _, tk := range m.remote.tasks {
 		if tk.ID == "a" {
 			require.Equal(t, "renamed", tk.Name)
@@ -296,4 +296,72 @@ func TestQuitAfterARepeatedSaveFailureDiscardsAndLeaves(t *testing.T) {
 	_, _ = h.handleQuit()
 	require.True(t, h.quitting, "the same failure again is the user choosing to leave")
 	require.False(t, h.hooksPane.IsDirty())
+}
+
+// #5900: the cache is keyed by (project, ID). The store tolerates legacy duplicate
+// IDs and a mutation acts on exactly one row, so an acknowledged edit or delete
+// must not rewrite or drop the rows it never touched.
+func TestRemoteTaskCacheKeysRowsByProjectAndID(t *testing.T) {
+	stubRemote(t)
+	m := &home{}
+	m.remote.applyFresh(&remoteReads{tasks: []task.Task{
+		{ID: "dup", Name: "alpha's", ProjectPath: "/srv/box/alpha", RepoID: "aaaaaaaaaaaa", Prompt: "A"},
+		{ID: "dup", Name: "beta's", ProjectPath: "/srv/box/beta", RepoID: "bbbbbbbbbbbb", Prompt: "B"},
+		{ID: "solo", Name: "solo", ProjectPath: "/srv/box/alpha", RepoID: "aaaaaaaaaaaa"},
+	}})
+	byProject := func(project string) []task.Task {
+		var out []task.Task
+		for _, tk := range m.remote.tasks {
+			if tk.ProjectPath == project {
+				out = append(out, tk)
+			}
+		}
+		return out
+	}
+
+	// Edit the BETA row of the duplicate pair (the pane displayed it in beta).
+	taskAck = taskMutationAck{record: &task.Task{ID: "dup", Name: "beta renamed", ProjectPath: "/srv/box/beta", RepoID: "bbbbbbbbbbbb", Prompt: "B"}}
+	m.noteRemoteUpdate("dup", task.TaskUpdate{}, task.ProjectExpectation{Enforce: true, ProjectPath: "/srv/box/beta"}, nil)
+	alpha := byProject("/srv/box/alpha")
+	require.Len(t, alpha, 2)
+	require.Equal(t, "alpha's", alpha[0].Name, "the other project's duplicate keeps its own name")
+	require.Equal(t, "A", alpha[0].Prompt, "and its own prompt")
+	require.Equal(t, "beta renamed", byProject("/srv/box/beta")[0].Name)
+
+	// Edit the first duplicate, now by retargeting it: only that row moves.
+	taskAck = taskMutationAck{record: &task.Task{ID: "dup", Name: "alpha moved", ProjectPath: "/srv/box/gamma", Prompt: "A"}}
+	m.noteRemoteUpdate("dup", task.TaskUpdate{}, task.ProjectExpectation{Enforce: true, ProjectPath: "/srv/box/alpha"}, nil)
+	require.Equal(t, "beta renamed", byProject("/srv/box/beta")[0].Name, "the beta row is untouched by an alpha retarget")
+	require.Len(t, byProject("/srv/box/gamma"), 1)
+	require.Equal(t, []string{"solo"}, remoteTaskIDs(byProject("/srv/box/alpha")))
+
+	// Deleting one duplicate leaves the other.
+	m.noteRemoteRemove(task.Task{ID: "dup", ProjectPath: "/srv/box/beta"}, nil)
+	require.Empty(t, byProject("/srv/box/beta"))
+	require.Len(t, byProject("/srv/box/gamma"), 1, "the same-ID row in another project survives a delete")
+}
+
+// #5899: an edit that commits but whose refresh fails returns no record, and the
+// cache must not carry the OLD schedule's observations over to the new one.
+func TestRemoteScheduleEditWithoutARecordMarksHealthUnknownNotTheOldCronsTimes(t *testing.T) {
+	stubRemote(t)
+	m := &home{}
+	next := time.Now().Add(time.Hour)
+	m.remote.applyFresh(&remoteReads{tasks: []task.Task{{
+		ID: "t", Name: "n", CronExpr: "0 * * * *", ProjectPath: "/srv/box/alpha", RepoID: "aaaaaaaaaaaa",
+		Arming: task.ArmingArmed, NextRunAt: &next, NextRunFar: true, Overdue: true, MissedOccurrences: 3,
+	}}})
+	newCron := "*/5 * * * *"
+	taskAck = taskMutationAck{} // a committed-with-warning reply carries no body
+	m.noteRemoteUpdate("t", task.TaskUpdate{CronExpr: &newCron},
+		task.ProjectExpectation{Enforce: true, ProjectPath: "/srv/box/alpha"}, committedErr{})
+
+	got := m.remote.tasks[0]
+	require.Equal(t, newCron, got.CronExpr, "the accepted definition is applied")
+	require.Equal(t, task.ArmingUnknown, got.Arming, "armed state belonged to the old cron")
+	require.Nil(t, got.NextRunAt, "and so did the next-fire time")
+	require.False(t, got.NextRunFar)
+	require.False(t, got.Overdue)
+	require.Zero(t, got.MissedOccurrences)
+	require.True(t, got.Unassessable, "the row says no verdict is available rather than staying silent")
 }

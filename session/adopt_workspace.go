@@ -205,7 +205,10 @@ func (i *Instance) preservedRemotePID() string {
 // archive kept its workspace: adopt it, or — only when the host proved it gone —
 // replace it on the recorded branch.
 func (i *Instance) restorePreservedWorkspace(w *ArchivedWorkspaceData) (*ArchivedWorkspaceData, error) {
-	return i.restorePreservedWorkspaceWith(w, i.reprovisionRemoteWith)
+	return i.restorePreservedWorkspaceWith(w, func(a *AdoptSpec) error {
+		// A nil adopt here is the replacement of a workspace the host proved gone.
+		return i.reprovisionRemoteOpts(a, a == nil)
+	})
 }
 
 // restorePreservedWorkspaceWith is restorePreservedWorkspace with the provisioning
@@ -228,11 +231,17 @@ func (i *Instance) restorePreservedWorkspaceWith(w *ArchivedWorkspaceData, repro
 		return nil, fmt.Errorf("cannot restore session %q: its preserved workspace is gone and no branch was recorded to restore from: %w", i.Title, err)
 	}
 	log.WarningLog.Printf("restore of %q: the preserved workspace %s is gone from its host; re-provisioning onto branch %q", i.Title, w.Dir, i.Branch)
+	if err := reprovision(nil); err != nil {
+		// The record stays: a retry probes the host again and reaches the same
+		// verdict, instead of falling onto the ordinary path that may start a fresh
+		// branch.
+		return nil, err
+	}
 	i.mu.Lock()
 	i.archivedWorkspace = nil
 	i.touchLocked()
 	i.mu.Unlock()
-	return nil, reprovision(nil)
+	return nil, nil
 }
 
 // rollbackAdoption undoes a reattach whose agent launch failed. The workspace is

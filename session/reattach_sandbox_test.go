@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -74,7 +75,7 @@ func TestReattachSandboxBindsALiveAgentServerWithoutProvisioning(t *testing.T) {
 	inst, _ := reattachFixture(t, "")
 	require.NoError(t, inst.ReattachSandbox())
 	assert.True(t, inst.started)
-	assert.Equal(t, LiveReady, inst.liveness)
+	assert.Equal(t, LiveRunning, inst.liveness, "reachability is not idleness")
 	assert.NotNil(t, inst.remoteClient)
 	require.Len(t, inst.Tabs, 1, "the agent tab is seeded exactly as a launch seeds it")
 }
@@ -218,10 +219,124 @@ func TestOpenTunnelForReattachFallsBackWithoutTheCallbackForward(t *testing.T) {
 		p.reapMu.Unlock()
 	})
 
-	addr, withCallback, err := p.openTunnelForReattach()
+	addr, withCallback, note, err := p.openTunnelForReattach()
 	require.NoError(t, err, "the data plane must open even when the -R cannot")
 	assert.NotEmpty(t, addr)
 	assert.False(t, withCallback, "the caller is told the callback forward did not come up")
+	assert.Contains(t, note, "could not be confirmed")
 	assert.Equal(t, []string{"127.0.0.1:23456:/s.sock"}, p.reverseFwds,
 		"the forward stays on the provisioner so the next supervised re-dial carries it")
+}
+
+// confirmedTunnelFixture swaps the readiness probe and the confirmation for a fixture
+// whose ssh child stays up, like OpenSSH does while a remote-forward reply is
+// still in flight.
+func confirmedTunnelFixture(t *testing.T, confirm func(*sandboxProvisioner) error) *sandboxProvisioner {
+	t.Helper()
+	forceTunnelLifelineExe(t, "")
+	prevWait, prevConfirm := waitForSandboxTunnelFn, confirmCallbackForward
+	waitForSandboxTunnelFn = func(string, string, time.Duration, time.Duration) error { return nil }
+	confirmCallbackForward = confirm
+	t.Cleanup(func() { waitForSandboxTunnelFn, confirmCallbackForward = prevWait, prevConfirm })
+	p := &sandboxProvisioner{sshCmd: `sh -c 'sleep 60' x`, remoteAddr: "127.0.0.1:7", sessionDir: "/work/s"}
+	p.restoreCallbackIdentity("v1.cb", "/work/s/af-callback.sock:/home/u/sandbox-callback.sock")
+	t.Cleanup(func() {
+		p.reapMu.Lock()
+		p.stopTunnel()
+		p.reapMu.Unlock()
+	})
+	return p
+}
+
+// #5896: the -L listener answers before sshd's verdict on the -R arrives, so an
+// unconfirmed forward must NOT be reported as restored.
+func TestOpenTunnelForReattachDoesNotReportAnUnconfirmedCallbackForward(t *testing.T) {
+	p := confirmedTunnelFixture(t, func(*sandboxProvisioner) error { return errors.New("the sandbox host never bound the socket") })
+	addr, withCallback, note, err := p.openTunnelForReattach()
+	require.NoError(t, err, "the data plane still opens")
+	assert.NotEmpty(t, addr)
+	assert.False(t, withCallback)
+	assert.Contains(t, note, "never bound the socket")
+	assert.NotEmpty(t, p.reverseFwds, "the supervisor keeps the forward for its next re-dial")
+}
+
+func TestOpenTunnelForReattachReportsAConfirmedCallbackForward(t *testing.T) {
+	p := confirmedTunnelFixture(t, func(*sandboxProvisioner) error { return nil })
+	_, withCallback, note, err := p.openTunnelForReattach()
+	require.NoError(t, err)
+	assert.True(t, withCallback)
+	assert.Empty(t, note)
+}
+
+func TestConfirmCallbackForwardNeedsTheSocketOnTheSandboxHost(t *testing.T) {
+	prevT, prevP := callbackForwardConfirmTimeout, callbackForwardConfirmPoll
+	callbackForwardConfirmTimeout, callbackForwardConfirmPoll = 400*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { callbackForwardConfirmTimeout, callbackForwardConfirmPoll = prevT, prevP })
+
+	var calls int
+	p := &sandboxProvisioner{callbackSocket: "/work/s/af-callback.sock"}
+	p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		calls++
+		assert.Contains(t, script, "test -S")
+		if calls < 3 {
+			return nil, errors.New("exit status 1") // sshd's reply not processed yet
+		}
+		return nil, nil
+	}
+	require.NoError(t, confirmCallbackForward(p), "the asynchronous reply is polled for")
+
+	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) { return nil, errors.New("exit status 1") }
+	err := confirmCallbackForward(p)
+	require.Error(t, err, "a socket that never appears is a rejected forward")
+	assert.Contains(t, err.Error(), "never bound")
+
+	done := make(chan struct{})
+	close(done)
+	p.tunnel = &tunnelChild{done: done}
+	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) { return nil, nil }
+	err = confirmCallbackForward(p)
+	require.Error(t, err, "an ssh that exited on ExitOnForwardFailure is not a working path even if a stale socket exists")
+
+	empty := &sandboxProvisioner{}
+	require.Error(t, confirmCallbackForward(empty), "an unknown socket path cannot be confirmed")
+}
+
+// #5973: reachability proves the agent-server answers, not that the agent is
+// idle. A reattached row must not read as idle to ClassifyActivity (which
+// `af sessions watch` and task concurrency consume) before an observation says so.
+func TestReattachDoesNotPublishIdleOnReachability(t *testing.T) {
+	inst, _ := reattachFixture(t, "")
+	inst.ID = "reattach-id"
+	require.NoError(t, inst.ReattachSandbox())
+	assert.NotEqual(t, LiveReady, inst.liveness)
+
+	activity, _ := ClassifyActivity(inst.ToInstanceData())
+	assert.NotEqual(t, ActivityIdle, activity, "a still-working agent must not read as idle")
+}
+
+// #5974: adopting the same runtime provisions nothing, so a recorded callback
+// reason survives unless this reattach positively restored the callback.
+func TestReattachPreservesAPersistedCallbackReason(t *testing.T) {
+	t.Run("no callback was ever granted: the create-time reason stays", func(t *testing.T) {
+		inst, _ := reattachFixture(t, "")
+		inst.callbackUnavailable = "the daemon could not mint one"
+		require.NoError(t, inst.ReattachSandbox())
+		assert.Equal(t, "the daemon could not mint one", inst.callbackUnavailable)
+	})
+	t.Run("a recorded reason is kept over a new loss", func(t *testing.T) {
+		inst, p := reattachFixture(t, "")
+		p.restoreCallbackIdentity("v1.cb", "127.0.0.1:23456:/s.sock")
+		inst.callbackUnavailable = "earlier reason"
+		inst.sandboxCreds = &restoringCreds{err: errors.New("key missing")}
+		require.NoError(t, inst.ReattachSandbox())
+		assert.Equal(t, "earlier reason", inst.callbackUnavailable)
+	})
+	t.Run("positive evidence clears it", func(t *testing.T) {
+		inst, p := reattachFixture(t, "")
+		p.restoreCallbackIdentity("v1.cb", "127.0.0.1:23456:/s.sock")
+		inst.callbackUnavailable = "lost on an earlier reattach"
+		inst.sandboxCreds = &restoringCreds{}
+		require.NoError(t, inst.ReattachSandbox())
+		assert.Empty(t, inst.callbackUnavailable, "credential restored and forward confirmed")
+	})
 }

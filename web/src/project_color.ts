@@ -1,6 +1,6 @@
-// Per-project display color: the frame around the session pane and the browser
-// tab's favicon take the selected project's color, so a project's tab or window is
-// easy to find among many. The color itself lives in the daemon's project registry
+// Per-project display color: the selected project's color replaces the theme accent,
+// fills the app bar, and paints the browser tab's favicon, so a project's tab or
+// window is easy to find among many. The color itself lives in the daemon's project registry
 // (`af projects color`, SetProjectColor); this module only paints it.
 
 import { h } from "./dom.js";
@@ -8,14 +8,13 @@ import type { RegisteredProject } from "./api.js";
 
 /** Preset swatches offered in the project menu. Any #rrggbb is accepted. */
 export const PROJECT_COLOR_PALETTE: readonly string[] = [
-  "#e11d48",
-  "#ea580c",
-  "#ca8a04",
-  "#16a34a",
-  "#0d9488",
-  "#2563eb",
-  "#7c3aed",
-  "#db2777",
+  "#ff5555",
+  "#ffb86c",
+  "#f1fa8c",
+  "#50fa7b",
+  "#8be9fd",
+  "#bd93f9",
+  "#ff79c6",
 ];
 
 /** The app mark, byte-identical to icons/icon.svg (project_color.test.ts pins it). */
@@ -31,19 +30,55 @@ export function projectColor(projects: readonly RegisteredProject[], root: strin
   return HEX.test(color) ? color : null;
 }
 
-/** White on a dark tile, near-black on a light one — whichever reads better. */
+type Rgb = readonly [number, number, number];
+
+function rgb(color: string): Rgb {
+  return [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16)) as unknown as Rgb;
+}
+
+function hex(c: Rgb): string {
+  return `#${c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function luminance(c: Rgb): number {
+  const [r, g, b] = c.map((v) => {
+    const x = v / 255;
+    return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrast(a: Rgb, b: Rgb): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+const INK_DARK = "#1f1f1f";
+const INK_LIGHT = "#ffffff";
+
+/** Whichever of near-black or white has more contrast on color. In the
+ *  mid-luminance band where neither reaches 4.5:1, true black or white does. */
 export function markInk(color: string): string {
-  const channel = (i: number): number => {
-    const v = parseInt(color.slice(i, i + 2), 16) / 255;
-    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-  };
-  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
-  // WCAG contrast of each candidate ink against the tile; #1f1f1f's own
-  // luminance is ~0.014, white's 1.0. Mid-light colors can favour the dark ink
-  // where a fixed luminance threshold would pick white (#ca8a04: ~5.6 vs ~2.9).
-  const darkInkContrast = (luminance + 0.05) / (0.014 + 0.05);
-  const whiteInkContrast = 1.05 / (luminance + 0.05);
-  return darkInkContrast >= whiteInkContrast ? "#1f1f1f" : "#ffffff";
+  const c = rgb(color);
+  const dark = contrast(c, rgb(INK_DARK));
+  const light = contrast(c, rgb(INK_LIGHT));
+  if (Math.max(dark, light) >= 4.5) return dark >= light ? INK_DARK : INK_LIGHT;
+  return contrast(c, [0, 0, 0]) >= light ? "#000000" : INK_LIGHT;
+}
+
+/** color, moved toward black or white until it reaches 4.5:1 against every surface
+ *  it can sit on, so it stays legible as accent text there and as a fill behind
+ *  surface text. The surfaces share one theme, so the first sets the direction. */
+export function projectAccent(color: string, ...surfaces: [string, ...string[]]): string {
+  const c = rgb(color);
+  const s = surfaces.map(rgb);
+  const target: Rgb = luminance(s[0]) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+  for (let step = 0; step <= 20; step++) {
+    const t = step / 20;
+    const candidate = hex(c.map((v, i) => v + (target[i] - v) * t) as unknown as Rgb);
+    if (s.every((surface) => contrast(rgb(candidate), surface) >= 4.5)) return candidate;
+  }
+  return hex(target);
 }
 
 /** The favicon SVG with its tile painted in color. */
@@ -83,39 +118,65 @@ function projectFaviconPng(color: string, size: number): string | null {
   return canvas.toDataURL("image/png");
 }
 
+/** The tile color of icons/icon.svg (project_color.test.ts pins it). */
+export const DEFAULT_FAVICON_COLOR = "#2f5fd8";
+
 let appliedFavicon: string | null = null;
 
-/** Points every favicon link at the project-colored mark, or back at the static
- *  icons when color is null. Writes only on a change. */
+/** Points every favicon link at the project-colored mark, or back at the default
+ *  mark when color is null. Writes only on a change. */
 export function applyProjectFavicon(color: string | null): void {
   if (appliedFavicon === color) return;
   appliedFavicon = color;
+  // Chrome keeps showing the last data: favicon when a link's href returns to a
+  // URL it already loaded, so the default is redrawn as a data: URL too.
+  const tile = color ?? DEFAULT_FAVICON_COLOR;
   for (const link of document.querySelectorAll<HTMLLinkElement>('link[rel="icon"]')) {
     if (link.dataset.afDefaultHref === undefined) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    let href: string | null = null;
-    if (color !== null) {
-      if (link.type === "image/svg+xml") {
-        href = projectFaviconDataUrl(color);
-      } else {
-        href = projectFaviconPng(color, Number.parseInt(link.sizes.value, 10) || 32);
-      }
-    }
+    const href =
+      link.type === "image/svg+xml"
+        ? projectFaviconDataUrl(tile)
+        : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
     link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }
 
-/** Paints the session-pane frame with color, or removes it. */
-export function applyProjectFrame(main: HTMLElement, color: string | null): void {
+/** Sets the project color on the app root, where CSS turns it into the accent for
+ *  both themes and the app bar fill, or removes it. document.body is stamped too:
+ *  controls mounted straight onto it — the phone keybar, its paste sheet — never
+ *  inherit from the app root. surfaces are the light and dark theme surfaces the
+ *  accent must stay legible against. */
+export function applyProjectColor(
+  root: HTMLElement,
+  color: string | null,
+  surfaces: () => { light: readonly string[]; dark: readonly string[] },
+): void {
+  const els = new Set([root, document.body]);
   if (color === null) {
-    if (main.dataset.projectColor === undefined) return;
-    delete main.dataset.projectColor;
-    main.style.removeProperty("--af-project-color");
+    for (const el of els) {
+      if (el.dataset.projectColor === undefined) continue;
+      delete el.dataset.projectColor;
+      for (const name of PROJECT_VARS) el.style.removeProperty(name);
+    }
     return;
   }
-  if (main.dataset.projectColor === color) return;
-  main.dataset.projectColor = color;
-  main.style.setProperty("--af-project-color", color);
+  const { light, dark } = surfaces();
+  for (const el of els) {
+    if (el.dataset.projectColor === color) continue;
+    el.dataset.projectColor = color;
+    el.style.setProperty("--af-project-color", color);
+    el.style.setProperty("--af-project-ink", markInk(color));
+    el.style.setProperty("--af-project-accent-light", accentOn(color, light));
+    el.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
+  }
 }
+
+function accentOn(color: string, surfaces: readonly string[]): string {
+  const [first, ...rest] = surfaces.filter((s) => HEX.test(s));
+  return first === undefined ? color : projectAccent(color, first, ...rest);
+}
+
+const PROJECT_VARS = ["--af-project-color", "--af-project-ink", "--af-project-accent-light", "--af-project-accent-dark"];
 
 /** The project menu's color row: the preset swatches, a custom picker, and a clear
  *  button. Each choice reports through onPick; "" clears. */
@@ -151,7 +212,8 @@ export function projectColorRow(current: string | null, label: string, onPick: (
       input.click();
     }
   });
-  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "No color");
+  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "Default");
+  clear.setAttribute("aria-label", `Default color for ${label}`);
   clear.disabled = current === null;
   clear.dataset.projectFocus = "color:clear";
   clear.addEventListener("click", pick(""));

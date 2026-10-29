@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -392,3 +395,49 @@ type killOnlyServer struct {
 }
 
 func (r *killOnlyServer) Kill(bool) error { r.killed++; return nil }
+
+func TestHeadlessWorkspaceFactsMissingWorkspace(t *testing.T) {
+	hs := &headlessServer{inst: &session.Instance{Path: filepath.Join(t.TempDir(), "gone")}}
+	var facts session.WorkspaceFacts
+	if err := hs.WorkspaceFacts(struct{}{}, &facts); err != nil {
+		t.Fatal(err)
+	}
+	if facts.Exists {
+		t.Fatalf("a deleted workspace must report Exists=false, got %+v", facts)
+	}
+}
+
+// The kill warning must describe the agent's linked worktree, not the clone root
+// it hangs off (#5796 review).
+func TestHeadlessWorkspaceFactsMeasuresLinkedWorktree(t *testing.T) {
+	root := t.TempDir() // the clone root: deliberately not a git repo
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "-C", wt, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "scratch"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := session.FromInstanceData(session.InstanceData{
+		Title: "linked", Path: root, Status: session.Archived, BackendType: "local",
+		Worktree: session.GitWorktreeData{RepoPath: root, WorktreePath: wt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &headlessServer{inst: inst}
+	var facts session.WorkspaceFacts
+	if err := hs.WorkspaceFacts(struct{}{}, &facts); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh repo has no upstream, so the unpushed count is honestly unverified;
+	// that is the one fact this fixture cannot measure and it must say so.
+	if !facts.Exists || facts.DirtyFiles != 1 {
+		t.Fatalf("expected the linked worktree's one untracked file; got %+v", facts)
+	}
+	for _, u := range facts.Unverified {
+		if u != "unpushed_commits" {
+			t.Fatalf("only the unpushed count may be unverified without an upstream; got %+v", facts)
+		}
+	}
+}

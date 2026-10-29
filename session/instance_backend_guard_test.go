@@ -58,6 +58,7 @@ var backendReadersUnderLock = map[string]bool{
 	"agentServerLocked":             true,
 	"reprovisionRemote":             true,
 	"reprovisionRemoteWith":         true,
+	"reprovisionRemoteOpts":         true,
 	"resetRemoteRuntime":            true,
 	"clearDischargedRuntimeCleanup": true,
 	"toInstanceDataLocked":          true,

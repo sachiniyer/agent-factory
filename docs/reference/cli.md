@@ -921,6 +921,9 @@ Settable keys:
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
+  network.editor_origin_ports  port pool for per-session VS Code editor origins, e.g. "9100-9119" or "9100,9105-9107", or ""
+                             to disable (default ""). Each session's editor gets one loopback port, kept across restarts;
+                             expose the same ports behind your front door (tailscale serve --https=<port>). Next daemon start.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
@@ -945,7 +948,7 @@ Settable keys:
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
-  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root} (global-only)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config} (global-only)
   default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
@@ -1669,8 +1672,9 @@ Set the display color of a registered project.
 <project> is a prj_ id or a path inside the project's checkout. <color> is a hex
 color such as '#2f5fd8' or '2f5fd8'. Pass "" to clear the color.
 
-The web client paints the frame around the session and the browser tab's
-favicon with this color, so you can find the project's tab or window quickly.
+The web client uses this color as its accent, fills the top bar with it, and
+paints the browser tab's favicon with it, so you can find the project's tab or
+window quickly.
 
 Against a remote daemon (--daemon-url) <project> is a prj_ id or an absolute
 checkout path on the daemon's host, resolved by that daemon's registry.
@@ -2665,14 +2669,21 @@ Fails if the session is not restorable, or if its origin repository is gone.
 The restored worktree path is printed on success.
 
 For a sandbox session (docker/ssh/hook) whose sandbox still ANSWERS but whose
-agent is gone, restore first pushes the sandbox's work to origin, because
-recovery re-clones from there and anything unpushed would be destroyed. If that
-push fails, or if af cannot tell whether the sandbox is gone or merely
-unreachable, the restore REFUSES and the session stays recoverable.
+agent is gone, restore relaunches the agent in place: the sandbox's
+agent-server stops the agent and starts it again in its existing workspace,
+so the branch, the tree and any uncommitted work are untouched, and nothing
+is pushed, reaped, re-cloned or re-provisioned. A sandbox whose agent-server
+does not advertise the relaunch feature on /v1/health (an older build, before
+the relaunch route existed) falls back to replacing the sandbox: that pushes
+its work to origin first, because recovery re-clones from there and anything
+unpushed would be destroyed. If that push fails, or if af cannot tell whether
+the sandbox is gone or merely unreachable, the restore REFUSES and the session
+stays recoverable.
 
---force-reap replaces the sandbox anyway, without the push. It discards whatever
-that sandbox has not pushed, so it is for a sandbox you know is expendable. It
-applies to this one session and this one command; there is no global equivalent.
+--force-reap replaces the sandbox anyway, skipping the relaunch and the push.
+It discards whatever that sandbox has not pushed, so it is for a sandbox you
+know is expendable. It applies to this one session and this one command; there
+is no global equivalent.
 
 ```
 af sessions restore <title> [flags]
@@ -3203,9 +3214,9 @@ af sessions watch [title] [flags]
 
 Identify the current Agent Factory session
 
-Returns the session info for the current tmux session by matching the tmux session name against stored sessions.
+Returns the session info for the current session. With a daemon credential (AF_DAEMON_TOKEN), the daemon reports the session that credential is bound to — the narrowed projection a sandbox receives withholds the tmux name. Otherwise it matches the current tmux session name against stored sessions.
 
-Requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error.
+The tmux path requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error on that path.
 
 Identity is not scoped: you are the session you are, in whatever project it belongs to. --repo therefore acts as an assertion — it checks that the resolved session really is in that project, and errors if it is not.
 

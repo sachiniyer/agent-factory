@@ -24,6 +24,21 @@ func routedPing() (daemon.PingResponse, error) {
 	defer c.CloseIdleConnections()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// A sandbox credential is not admitted to /v1/health (the scope table denies
+	// it), so probing it first would be refused for exactly the caller that most
+	// needs `sessions create --host`. Its capabilities ride on Snapshot instead — a
+	// route it IS admitted to — and appear only on a sandbox credential's response,
+	// so a bearer-token holder asks that first and everyone else (or a daemon that
+	// predates the field) falls through to the health probe.
+	if apiclient.HasDaemonToken() {
+		snap, snapErr := c.SnapshotWithAlarmsCtx(ctx, daemon.SnapshotRequest{})
+		if snapErr == nil && snap.Caller != "" && snap.Capabilities != nil {
+			return daemon.PingResponse{
+				OK: true, HostPick: snap.Capabilities.HostPick,
+				DeliverHostPick: snap.Capabilities.DeliverHostPick, TaskHost: snap.Capabilities.TaskHost,
+			}, nil
+		}
+	}
 	return c.Health(ctx)
 }
 

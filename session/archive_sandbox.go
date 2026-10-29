@@ -1,10 +1,14 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
+	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -90,7 +94,7 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	//    Instance; the branch reaches the daemon solely as this Archive() return), and
 	//    a failed Kill sends the session to Lost + recovery-eligible via the caller's
 	//    AbortArchiveToLost (daemon/archive.go). The Lost-restore loop then re-provisions
-	//    from i.Branch (reprovisionRemote → ProvisionSpec.RestoreBranch), and an empty
+	//    from this recorded checkpoint (reprovisionRemote → ProvisionSpec.RestoreBranch), and an empty
 	//    RestoreBranch makes the docker/ssh runtimes SKIP the restore fetch and clone the
 	//    repo's DEFAULT branch — a "successful" recovery onto the wrong branch that
 	//    silently strands the work this push just made durable.
@@ -156,6 +160,7 @@ func (i *Instance) recordArchivePush(branch string) {
 	defer i.mu.Unlock()
 	changed := i.Branch != branch
 	i.Branch = branch
+	i.branchUnpushed = false
 	// A push archive publishes the branch and reaps the host directory, so the
 	// work now lives on origin (#5571 W8.5).
 	i.archivedWorkspace = &ArchivedWorkspaceData{Host: i.Host, Pushed: true, Branch: branch}
@@ -260,10 +265,18 @@ func (i *Instance) reprovisionRemote() error {
 // adopt nil it replaces the runtime; with adopt set it provisions over the
 // preserved workspace and reaps nothing.
 func (i *Instance) reprovisionRemoteWith(adopt *AdoptSpec) error {
+	return i.reprovisionRemoteOpts(adopt, false)
+}
+
+// reprovisionRemoteOpts is the one body. replacePreserved marks the replacement of
+// a preserved workspace the host has PROVEN gone (#5571 W8.6): the only time a row
+// that still owes a preserved workspace may be replaced, and then onto the recorded
+// checkpoint or not at all.
+func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool) error {
 	// Backstop for a caller that reaches the replacing path directly: it reaps the
 	// host directory, which for a row archived without a push is the only copy of
 	// the work (#5571 W8.5). The restore routes go through provisionForRestore.
-	if adopt == nil && i.preservedWorkspaceOwed() != nil {
+	if adopt == nil && !replacePreserved && i.preservedWorkspaceOwed() != nil {
 		return fmt.Errorf("session %q: its preserved workspace must be reattached, not replaced (#5571 W8.6)", i.Title)
 	}
 	// Bound the hook's lifetime to this attempt: clear it on every exit so a
@@ -277,12 +290,13 @@ func (i *Instance) reprovisionRemoteWith(adopt *AdoptSpec) error {
 	i.mu.RLock()
 	backend := i.backend
 	accountName := i.Account
+	restoreBranch, unverified := i.restoreCheckpointLocked()
 	spec := ProvisionSpec{
 		RepoRoot:      i.Path,
 		Title:         i.Title,
 		Program:       i.Program,
 		CloneURL:      originRemoteURL(i.Path),
-		RestoreBranch: i.Branch,
+		RestoreBranch: restoreBranch,
 		// The replacement agent-server must land on the SAME branch the fetch
 		// just materialized, not re-derive one from its own branch_prefix
 		// (#5571 W2.4).
@@ -296,6 +310,9 @@ func (i *Instance) reprovisionRemoteWith(adopt *AdoptSpec) error {
 		spec.RestoreBranch = ""
 	}
 	i.mu.RUnlock()
+	if err := i.settleRestoreCheckpoint(&spec, restoreBranch, unverified, adopt != nil, replacePreserved); err != nil {
+		return err
+	}
 	spec.GitUserName, spec.GitUserEmail = operatorGitIdentity(spec.RepoRoot)
 	if backend == nil {
 		return fmt.Errorf("cannot re-provision session %q: no backend on record", i.Title)
@@ -820,4 +837,89 @@ func (i *Instance) RestoreWouldDiscardUnpushedWork() bool {
 	default:
 		return false
 	}
+}
+
+// restoreCheckpointLocked returns the branch a replacement sandbox may fetch
+// from origin, and whether that is still unverified. The displayed i.Branch is
+// the NAME the session works on and, for a session created by this af, may never
+// have been pushed; a runtime fetches a non-empty RestoreBranch unconditionally,
+// so handing it that bare name would fail every replacement and leave the
+// session Lost (#5972). A row an older af wrote carries no unpushed mark, and
+// there a recorded branch could only have come from a push, so it is returned
+// verified. For the marked exception the name is returned with unverified set:
+// the caller asks origin, because af merely not having SEEN a push is not
+// evidence there was none. The caller holds i.mu.
+func (i *Instance) restoreCheckpointLocked() (branch string, unverified bool) {
+	return strings.TrimSpace(i.Branch), i.branchUnpushed && strings.TrimSpace(i.Branch) != ""
+}
+
+// markBranchPushed records that origin was seen to hold the branch.
+func (i *Instance) markBranchPushed() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.branchUnpushed {
+		i.branchUnpushed = false
+		i.touchLocked()
+	}
+}
+
+// branchOnOrigin answers whether origin holds refs/heads/<branch>: true when it
+// does, false only on a positive "origin lacks it", and an error for anything
+// else (no URL, unreachable, auth). A var so tests need no network.
+var branchOnOrigin = branchOnOriginViaGit
+
+func branchOnOriginViaGit(originURL, branch string) (bool, error) {
+	if strings.TrimSpace(originURL) == "" {
+		return false, errors.New("the repository has no origin remote")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", "--heads", originURL, "refs/heads/"+branch)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.WaitDelay = dockerWaitDelay
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var exit *exec.ExitError
+	// --exit-code makes 2 mean "reached origin, no matching ref"; any other
+	// failure says nothing about the ref.
+	if errors.As(err, &exit) && exit.ExitCode() == 2 && ctx.Err() == nil {
+		return false, nil
+	}
+	return false, fmt.Errorf("git ls-remote: %w: %s", err, strings.TrimSpace(string(out)))
+}
+
+// settleRestoreCheckpoint decides the branch a replacement sandbox may fetch
+// (#5972), writing it to spec.RestoreBranch.
+//
+//   - An adoption fetches nothing, so there is no checkpoint to prove and origin is
+//     not consulted: it must not be refused for an origin it never reads.
+//   - A verified checkpoint (a legacy row with no unpushed mark) is used as is.
+//   - An unverified one is asked of origin: present, it is fetched (and marked
+//     pushed); absent, it is discarded and the replacement starts from the default
+//     branch — except when replacing a preserved workspace the host proved gone,
+//     where a different tree must not stand in for the session's, so it refuses
+//     (W8.6); unknown stays unknown and refuses.
+func (i *Instance) settleRestoreCheckpoint(spec *ProvisionSpec, restoreBranch string, unverified, adopting, replacePreserved bool) error {
+	if !unverified || adopting {
+		return nil
+	}
+	// af never observed this branch being pushed, but a lost response or a crash
+	// mid-push leaves exactly that picture with the branch on origin. Ask origin
+	// before discarding it (#5972).
+	verdict, err := branchOnOrigin(spec.CloneURL, restoreBranch)
+	switch {
+	case err != nil:
+		// Unknown stays unknown: not discarded, not fetched blindly.
+		return fmt.Errorf("cannot re-provision session %q: af could not check whether its branch %q is on origin (%v); nothing was changed — fix access to the repository's origin from this machine and retry, or push the branch from the session's host", i.Title, restoreBranch, err)
+	case verdict:
+		i.markBranchPushed()
+	case replacePreserved:
+		return fmt.Errorf("cannot restore session %q: its preserved workspace is gone from its host and its branch %q is not on origin, so there is nothing to restore it from; nothing was changed", i.Title, restoreBranch)
+	default:
+		restoreBranch = ""
+	}
+	spec.RestoreBranch = restoreBranch
+	return nil
 }
