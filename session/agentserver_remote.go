@@ -77,10 +77,12 @@ type remoteAgentServer struct {
 	// the sandbox's tab-id-addressing advertisement.
 	idBrokers map[string]*ptyBroker
 	// goneTabs are ids whose tab closed: terminal for subscriptions (#5963).
-	goneTabs     map[string]bool
-	idPlaneKnown bool
-	idPlane      bool
-	features     []string
+	goneTabs map[string]bool
+	// agentTabSynced is the agent-tab id the sandbox is known to hold (#5997).
+	agentTabSynced string
+	idPlaneKnown   bool
+	idPlane        bool
+	features       []string
 
 	// relays are the open loopback port relays (W5.1); Kill closes them.
 	relays map[*trackedRelayConn]struct{}

@@ -527,6 +527,8 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tab-create", rpcHandler(hs.TabCreate))
 	mux.HandleFunc("/v1/agent/tab-close", rpcHandler(hs.TabClose))
 	mux.HandleFunc("/v1/agent/tabs", rpcHandler(hs.Tabs))
+	// #5997: the daemon names the agent tab. Advertised as "agent-tab-id".
+	mux.HandleFunc("/v1/agent/agent-tab-id", rpcHandler(hs.AgentTabID))
 
 	// WS data plane — same paths, same broker, same wire as the daemon (§1.1: all
 	// over the same routes the daemon mux already serves).
@@ -558,6 +560,10 @@ var agentServerWireFeatures = []string{
 	// "tab-id-addressing": ?tab_id= on the WS stream and tab_id on preview —
 	// the id-addressed data plane (ws_pty.go's bindTab picks the binding).
 	"tab-id-addressing",
+	// "agent-tab-id": POST /v1/agent/agent-tab-id — the daemon tells the sandbox
+	// which stable id its agent tab carries, so the agent tab is addressed by id
+	// like every other tab (#5997).
+	session.AgentTabIDFeature,
 	// "relaunch": POST /v1/agent/relaunch — stop the agent and start it again
 	// in this workspace with the provider's resume (#5571 W7.1).
 	session.RelaunchFeature,
