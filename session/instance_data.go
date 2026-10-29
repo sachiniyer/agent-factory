@@ -596,7 +596,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// stop Launch seeding the agent tab and leave a web tab in index 0.
 		// From both sources: rows that were on the roster when the record was written,
 		// and rows a previous recovery staged but never drained.
-		instance.pendingMetadataTabs = append(metadataTabsFrom(data), data.PendingTabs...)
+		instance.pendingMetadataTabs = append(metadataTabsFrom(data, instance.backend.Capabilities()), data.PendingTabs...)
 		// The recorded conversation survives the reload (#5826): the agent tab is
 		// seeded by the next Launch, so the handle waits in reportedConversation,
 		// is sent on that launch, and is written back by every checkpoint meanwhile.
