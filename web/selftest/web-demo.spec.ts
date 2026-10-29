@@ -212,7 +212,7 @@ function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: 
           // PTY input can update operator state while Chromium takes the image.
           // Validate both sides so update mode cannot bless a transient Working row.
           const ready = await observe();
-          expect(ready.states.every(state => state === "Needs you")).toBe(true);
+          expect(ready.states.every(state => state === "needs-you")).toBe(true);
           const pixels = await withManifestSizeFrozen(page, () => page.screenshot({
             animations: "disabled", caret: "hide", style: visualStyle,
             timeout: remaining(5_000),

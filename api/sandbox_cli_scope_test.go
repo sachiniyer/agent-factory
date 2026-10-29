@@ -147,6 +147,9 @@ func TestSandboxCredentialDrivesEveryAdmittedVerbThroughTheRealCLI(t *testing.T)
 		{"tab-create", func(t *testing.T) error {
 			return runWithFlags(t, sessionsTabCreateCmd, map[string]string{"kind": "shell"}, "me")
 		}, []string{"/v1/CreateTab"}},
+		{"attention --self", func(t *testing.T) error {
+			return runWithFlags(t, newSessionsAttentionCmd(), map[string]string{"self": "true", "reason": "pick A or B"})
+		}, []string{"/v1/Snapshot", "/v1/SetAttention"}},
 		{"tasks add", func(t *testing.T) error {
 			return runWithFlags(t, tasksAddCmd, map[string]string{"name": "n", "prompt": "p", "cron": "0 * * * *", "target-session": "peer"})
 		}, []string{"/v1/AddTask"}},

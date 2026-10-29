@@ -10,7 +10,7 @@ import (
 )
 
 // setAttentionViaDaemon is the daemon seam, overridable in tests.
-var setAttentionViaDaemon = daemon.SetAttention
+var setAttentionViaDaemon = routedSetAttention
 
 func newSessionsAttentionCmd() *cobra.Command {
 	var self, clear bool
