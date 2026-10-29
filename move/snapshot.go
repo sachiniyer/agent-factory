@@ -399,12 +399,13 @@ func (s *Snapshot) VerifyCommand() string {
 	// (they make add -A skip a file the move script changed, so a stale destination
 	// would verify), then fold the working tree in with add -A. A flagged file that
 	// is absent keeps its flag, as in clearHidingFlags: clearing it would stage a
-	// deletion nobody made. Quoted (unusual) paths are cleared without the
-	// existence test, which only errs toward comparing more.
+	// deletion nobody made. Paths travel NUL-terminated end to end (ls-files -z,
+	// xargs -0, update-index -z), so quoting never reaches the shell and the
+	// existence test and the clear see exactly the same list.
 	return `d=$(mktemp -d) && idx=$(git rev-parse --path-format=absolute --git-path index) && top=$(git rev-parse --show-toplevel) && ` +
 		`{ [ ! -f "$idx" ] || cp "$idx" "$d/index"; } && ` +
-		`{ cd "$top" && git ls-files -v | while IFS= read -r l; do case "$l" in [a-zS]\ *) p=${l#??}; case "$p" in \"*) printf '%s\n' "$p";; *) if [ -e "$p" ] || [ -L "$p" ]; then printf '%s\n' "$p"; fi;; esac;; esac; done > "$d/hidden"; } && ` +
-		`export GIT_INDEX_FILE="$d/index" && git update-index --no-assume-unchanged --stdin < "$d/hidden" && git update-index --no-skip-worktree --stdin < "$d/hidden" && ` +
+		`{ cd "$top" && git ls-files -v -z | xargs -0 sh -c 'for l in "$@"; do case "$l" in [a-zS]\ *) p=${l#??}; if [ -e "$p" ] || [ -L "$p" ]; then printf "%s\0" "$p"; fi;; esac; done' sh > "$d/hidden"; } && ` +
+		`export GIT_INDEX_FILE="$d/index" && git update-index --no-assume-unchanged -z --stdin < "$d/hidden" && git update-index --no-skip-worktree -z --stdin < "$d/hidden" && ` +
 		`git add -A && git write-tree; rc=$?; rm -rf "$d"; exit $rc`
 }
 
