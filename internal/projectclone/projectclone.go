@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/afhome"
@@ -21,6 +23,19 @@ import (
 // cloneTimeout bounds one clone. A large repository over a slow link needs
 // minutes; a stalled one must not hold a daemon goroutine forever.
 const cloneTimeout = 15 * time.Minute
+
+const (
+	// originCheckTimeout bounds the "is the existing checkout ours" probe.
+	originCheckTimeout = 30 * time.Second
+	// waitDelay is how long a finished or killed git may keep the output pipes
+	// open (a grandchild that inherited them) before the drain is abandoned.
+	waitDelay = 10 * time.Second
+	// Budget is the longest one Clone call can take: the probe, the clone, and
+	// the drain after each kill, plus slack for the bookkeeping around them. A
+	// caller that waits for a clone must wait at least this long — the server
+	// side of the contract, so no client keeps a shorter private number (#6093).
+	Budget = originCheckTimeout + cloneTimeout + 2*waitDelay + 30*time.Second
+)
 
 // scpLike is git's "user@host:path" form. The pieces are restricted to the
 // characters a hostname and a repository path can need, which keeps option-like
@@ -144,6 +159,22 @@ func gitRunner(ctx context.Context, dir string, env []string, args ...string) ([
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = env
+	// A clone over ssh runs ssh and credential helpers as children of git, and
+	// they inherit the output pipes. Killing git alone leaves them holding the
+	// pipes, so the drain would never end. Run git as a process-group leader,
+	// kill the whole group on cancel, and abandon the drain after waitDelay
+	// regardless (#6094).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = waitDelay
 	return cmd.CombinedOutput()
 }
 
@@ -185,7 +216,9 @@ func Clone(ctx context.Context, root, rawURL string) (string, error) {
 		return "", fmt.Errorf("refusing clone destination %q outside %s", dest, root)
 	}
 	if _, err := os.Lstat(dest); err == nil {
-		origin, oerr := RunGit(ctx, root, cloneEnv(), "config", "--file", filepath.Join(dest, ".git", "config"), "--get", "remote.origin.url")
+		pctx, pcancel := context.WithTimeout(ctx, originCheckTimeout)
+		origin, oerr := RunGit(pctx, root, cloneEnv(), "config", "--file", filepath.Join(dest, ".git", "config"), "--get", "remote.origin.url")
+		pcancel()
 		if oerr == nil && strings.TrimSpace(string(origin)) == rawURL {
 			return dest, nil
 		}
@@ -201,4 +234,55 @@ func Clone(ctx context.Context, root, rawURL string) (string, error) {
 		return "", fmt.Errorf("git clone %s failed on the daemon host: %v: %s", rawURL, err, strings.TrimSpace(string(out)))
 	}
 	return dest, nil
+}
+
+// Flights tracks the clones in progress, keyed by destination, so concurrent
+// registrations neither race to create one directory nor queue behind an
+// unrelated clone. Its mutex guards the table only: it is never held while git
+// runs or its output drains (#6094).
+type Flights struct {
+	mu sync.Mutex
+	m  map[string]*flight
+}
+
+type flight struct {
+	url  string
+	done chan struct{}
+	path string
+	err  error
+}
+
+// Do runs run for dest unless a clone of the same url into dest is already in
+// progress, in which case it waits for that clone (bounded by ctx) and shares
+// its outcome. A clone of a DIFFERENT url into the same dest is refused at once
+// rather than queued: it could only end in "already exists".
+func (f *Flights) Do(ctx context.Context, dest, url string, run func() (string, error)) (string, error) {
+	f.mu.Lock()
+	if cur, ok := f.m[dest]; ok {
+		f.mu.Unlock()
+		if cur.url != url {
+			return "", fmt.Errorf("%s is being cloned from %s right now; wait for that to finish or register a different repository", dest, cur.url)
+		}
+		select {
+		case <-cur.done:
+			return cur.path, cur.err
+		case <-ctx.Done():
+			return "", fmt.Errorf("waiting for the clone of %s already in progress: %w", url, ctx.Err())
+		}
+	}
+	if f.m == nil {
+		f.m = map[string]*flight{}
+	}
+	cur := &flight{url: url, done: make(chan struct{})}
+	f.m[dest] = cur
+	f.mu.Unlock()
+
+	defer func() {
+		f.mu.Lock()
+		delete(f.m, dest)
+		f.mu.Unlock()
+		close(cur.done)
+	}()
+	cur.path, cur.err = run()
+	return cur.path, cur.err
 }

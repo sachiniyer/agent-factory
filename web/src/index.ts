@@ -96,7 +96,7 @@ import {
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
-import { restoreShortcutFocus } from "./shortcut-focus.js";
+import { shortcutRepeatGuard, tabCreateKey } from "./tab_create.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
@@ -131,15 +131,15 @@ import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
   isActionableSession,
+  isOpenableSession,
   orderedSessions,
   clearLoginDraft,
   renderLogin,
   sessionTabs,
-  canManageTabs,
   restoreRequiresConfirmation,
   isOffBoxWorkspace,
   canMutateTabRoster,
-  canCreateTabKind,
+  offeredNewTabKinds,
   canCloseTabs,
   tabIdentity,
   tabRealId,
@@ -349,6 +349,7 @@ function mount(): void {
   // included, so it can interrupt the agent (#2517) — and only the ctrl+] detach
   // chord is swallowed here (stopPropagation) so it never leaks into the PTY.
   document.addEventListener("keydown", onKeydown, true);
+  document.addEventListener("keyup", (e) => tabShortcutRepeat.release(e.code), true);
 
   // Follow the OS theme while the choice is System (redesign PR1).
   watchSystemTheme();
@@ -704,7 +705,7 @@ function openFromRail(id: string): void {
  *  switchTab already sets focus:"rail" for exactly this reason. */
 function focusTerminal(): void {
   const selected = selectedSessionData();
-  if (!selected || !isActionableSession(selected)) {
+  if (!selected || !isOpenableSession(selected)) {
     // A kill-only startup-unknown row has a stable management target but no
     // confirmed runtime binding. Keep every caller behind the same daemon-owned
     // lifecycle fence as row clicks; focusing whatever SplitView happens to
@@ -1766,6 +1767,11 @@ function guardedTabRebind(
     .catch((e) => surfaceTabError(e));
 }
 
+/** Session+kind creates in flight. The daemon names each CreateTab uniquely, so a
+ *  double-click would otherwise start two shells or VS Code servers. */
+const pendingTabCreates = new Set<string>();
+const tabShortcutRepeat = shortcutRepeatGuard();
+
 /** Creates the tab kind chosen in the New tab menu on the selected session, then
  *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
  *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
@@ -1780,22 +1786,30 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
   // so a loopback client can still create tabs.
   // Per KIND, not one bool: the daemon answers separately for each, so a session
   // that may open a web tab but not a shell must be offered exactly that (#3060).
-  if (!sel || tok === null || !canCreateTabKind(sel, kind)) {
+  if (!sel || tok === null || !offeredNewTabKinds(sel).includes(kind)) {
+    return;
+  }
+  const selId = sel.id ?? "";
+  const pendingKey = tabCreateKey(connectionGeneration, selId, kind);
+  if (pendingTabCreates.has(pendingKey)) {
     return;
   }
   clearTabError();
-  const selId = sel.id ?? "";
   const create = kind === "vscode" ? createVSCodeTab : createTab;
   // createTab returns the daemon's resolved, collision-suffixed name; hold it so the
   // rebind lands on the tab THIS create made.
   let createdName = "";
   guardedTabRebind(
     selId,
-    () =>
-      create(selId, sel.title, tok).then((name) => {
-        createdName = name;
-        return fetchProjectedSnapshot(tok);
-      }),
+    () => {
+      pendingTabCreates.add(pendingKey);
+      return create(selId, sel.title, tok)
+        .then((name) => {
+          createdName = name;
+          return fetchProjectedSnapshot(tok);
+        })
+        .finally(() => pendingTabCreates.delete(pendingKey));
+    },
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
     // round trip would make it THEIR tab. Resolving the name to its current ordinal in
@@ -3036,7 +3050,7 @@ function syncSplit(state: AppState): void {
   // so bind SplitView only when the daemon also projected a lifecycle capability.
   // This is the stream-side choke point complement to focusTerminal's keyboard
   // fence: neither merely selecting nor attaching can reuse an uncertain binding.
-  const runtimeSelected = selected && isActionableSession(selected) ? selected : null;
+  const runtimeSelected = selected && isOpenableSession(selected) ? selected : null;
   const runtimeSessionId = runtimeSelected ? selId : null;
   // The ordered tab identities, so the split view can (a) know the live tab count and
   // (b) reject a drop whose drag-time snapshot no longer matches (a mid-drag reorder).
@@ -3385,6 +3399,11 @@ function isNativeControl(el: HTMLElement | null): boolean {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  if (tabShortcutRepeat.swallow(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   const state = store.get();
   if (state.phase !== "app") {
     return;
@@ -3408,7 +3427,7 @@ function onKeydown(e: KeyboardEvent): void {
   // stale, so we never honor terminal mode without a live, visible pane. The pure state
   // machine (nav.ts) decides the rest; index.ts only performs the effect.
   const selected = selectedSessionData();
-  const actionableSelected = selected && isActionableSession(selected) ? selected : null;
+  const actionableSelected = selected && isOpenableSession(selected) ? selected : null;
   const focus: KeyboardFocus =
     state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
   // The selected session's tab shape drives the nav-mode tab keys (1-9 / t / w).
@@ -3432,18 +3451,20 @@ function onKeydown(e: KeyboardEvent): void {
         // daemon's lifecycle capability, exactly like pointer-open. A kill-only
         // startup-unknown row remains visible/removable but cannot become a pane
         // target through j/k.
-        .filter(isActionableSession)
+        .filter(isOpenableSession)
         .map((s) => s.id),
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      newTabKinds: actionableSelected
+        ? offeredNewTabKinds(actionableSelected)
+        : [],
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
       tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false,
     },
-    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") },
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey, meta: e.metaKey },
   );
   if (action.kind === "none") {
     // Not ours — including Escape while a terminal is focused, which now FORWARDS to
@@ -3476,18 +3497,12 @@ function onKeydown(e: KeyboardEvent): void {
       if (shell) shell.switchTab(action.index);
       else switchTab(action.index);
       break;
-    case "newTab": {
-      const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      shell?.openNewTabPicker(() => {
-        focusRail();
-        // Control+] commonly leaves document.body as the nominal focus target.
-        // Focusing body is a no-op, which can leave the picker item focused after
-        // its hidden ancestors close; the next shortcut is then swallowed as a
-        // native-button key. Give rail navigation a stable DOM focus target.
-        restoreShortcutFocus(navigationTarget, root?.querySelector<HTMLElement>(".af-rail") ?? null);
-      });
+    case "newTab":
+      if (!e.repeat) {
+        tabShortcutRepeat.arm(e.code);
+        createSessionTab(action.tabKind);
+      }
       break;
-    }
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);
       else closeSessionTab(store.get().activeTab);

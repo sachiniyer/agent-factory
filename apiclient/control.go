@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/projectclone"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -463,6 +465,9 @@ func (c *Client) RegisterProject(path string) (config.Project, error) {
 	return c.registerProject(daemon.RegisterProjectRequest{Path: path})
 }
 
+// registerURLSlack is the transport margin added to the daemon's clone budget.
+const registerURLSlack = time.Minute
+
 // RegisterProjectURL asks the daemon to clone a git URL on ITS host, with its
 // credentials, under its projects_root, and register the checkout (W9.10).
 func (c *Client) RegisterProjectURL(url string) (config.Project, error) {
@@ -471,7 +476,14 @@ func (c *Client) RegisterProjectURL(url string) (config.Project, error) {
 
 func (c *Client) registerProject(req daemon.RegisterProjectRequest) (config.Project, error) {
 	var resp daemon.RegisterProjectResponse
-	if err := c.call("RegisterProject", req, &resp); err != nil {
+	// A URL registration runs the clone inside the request, so the wait is
+	// derived from the daemon's own clone budget rather than a private shorter
+	// number that would report failure for a clone that then succeeds (#6093).
+	wait := time.Duration(0)
+	if req.URL != "" {
+		wait = projectclone.Budget + registerURLSlack
+	}
+	if err := c.callCtxMin(context.Background(), wait, "RegisterProject", req, &resp); err != nil {
 		return config.Project{}, err
 	}
 	return resp.Project, nil

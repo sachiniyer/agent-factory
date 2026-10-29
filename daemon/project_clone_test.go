@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -53,4 +54,33 @@ func TestControlServer_RegisterProject_ByGitURL(t *testing.T) {
 		require.Error(t, cs.RegisterProject(req, &r), "%+v", req)
 		require.False(t, r.OK)
 	}
+}
+
+// A config that exists but cannot be loaded refuses the registration instead of
+// cloning into the default root the operator did not choose (#6095).
+func TestProjectsRoot_BrokenConfigRefusesRatherThanUsingTheDefault(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte("projects_root = [not toml"), 0o600))
+
+	prev := cloneProject
+	cloneProject = func(context.Context, string, string) (string, error) {
+		t.Fatal("cloned although the config could not be read")
+		return "", nil
+	}
+	t.Cleanup(func() { cloneProject = prev })
+
+	_, err := cloneProjectForURL("https://github.com/owner/repo.git")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "config")
+	require.NotContains(t, err.Error(), filepath.Join(home, "projects"))
+}
+
+// An absent config is not an error: the default root applies.
+func TestProjectsRoot_AbsentConfigUsesTheDefault(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	root, err := projectsRoot()
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(home, "projects"), root)
 }

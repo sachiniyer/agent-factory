@@ -100,12 +100,10 @@ func captureVSCodeOwner(key, instanceID string, pid int, processNonce string) (v
 	}, nil
 }
 
-// allPersistedVSCodeOwners returns only regular files with the exact owner-file
-// shape. Callers decode and validate their contents before acting; the filename
-// is discovery, never destructive authority.
-func allPersistedVSCodeOwners() ([]string, error) { return allPersistedVSCodeOwnersIn("") }
-
-// allPersistedVSCodeOwnersIn lists the owner records of one namespace only.
+// allPersistedVSCodeOwnersIn lists the owner records of one namespace only:
+// regular files with the exact owner-file shape. Callers decode and validate
+// their contents before acting; the filename is discovery, never destructive
+// authority.
 func allPersistedVSCodeOwnersIn(ns string) ([]string, error) {
 	dir, err := vscodeSocketDirPathIn(ns)
 	if err != nil {
@@ -137,8 +135,6 @@ func allPersistedVSCodeOwnersIn(ns string) ([]string, error) {
 	}
 	return paths, nil
 }
-
-func persistedVSCodeOwners(key string) ([]string, error) { return persistedVSCodeOwnersIn("", key) }
 
 func persistedVSCodeOwnersIn(ns, key string) ([]string, error) {
 	paths, err := allPersistedVSCodeOwnersIn(ns)

@@ -676,7 +676,7 @@ concurrent writers wait their turn instead of failing or retrying.
 
 A host in the global `hosts` list is probed for `git`, `tmux` (3.2 or newer) and
 `gh` without creating a session on it. `af doctor` shows one row per listed host
-(ready, blocked with the missing tool, or unreachable), and the daemon repeats
+(ready, blocked with the missing tool, unreachable, or unknown), and the daemon repeats
 the probe about every ten minutes, so the host pickers show a recent verdict
 instead of "not probed yet". An unreachable host or an unreadable reply records
 nothing: it can neither mark a host ready nor clear an earlier blocked verdict.
@@ -775,7 +775,7 @@ to look at it, or to hand the agent something: every client (TUI, web, phone,
 run in the workspace.
 
 1. **Status and diff.** Open a shell tab — `af sessions tab-create <title> --kind
-   shell`, the TUI's new-tab key, or the web's `+` menu — and run `git status`
+   shell`, the TUI's new-tab key, or the web's **Terminal** button — and run `git status`
    and `git diff`. It is the agent's own workspace, so the branch and uncommitted
    changes are the agent's. The shell is listed once the sandbox's agent-server
    serves the tab API; against one that does not, the picker says so instead of
@@ -1011,8 +1011,10 @@ What the sandbox host needs, and what af does to it:
   daemon already gives sandboxes a working callback.
   When that is not the case the create is **not** refused: the session is created
   without a callback credential and the reason is reported (`callback_unavailable_reason`
-  in the backend picker). Only the `/v1/Snapshot` route is admitted for this
-  credential, answering with the caller's own session.
+  in the backend picker). The credential admits a bounded `af` surface —
+  `Snapshot` returns the caller's project (the sandbox-safe projection
+  withholds the tmux name and the repository paths), and every other admitted
+  route is bounded by its handler to the caller's own project.
 - **Daemon restart.** The agent-server is started with `nohup`, so it
   outlives a daemon restart on the host, and on start the daemon reattaches
   to it: it re-dials the tunnel and rebinds the same agent-server, with no

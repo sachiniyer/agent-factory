@@ -403,17 +403,13 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
 }
 
 async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<unknown>, prefix: string): Promise<void> {
-  const actions = page.getByRole("button", { name: prefix ? "More app controls" : "Session actions", exact: true });
+  const actions = page.getByRole("button", { name: prefix ? "More app controls" : "More session actions", exact: true });
   await actions.click();
   await expect(page.locator(prefix ? ".af-appbar-tools" : ".af-term-head .af-term-menu")).toBeVisible();
   await shot(`${prefix}session-actions`);
-  if (!prefix) await page.locator(".af-tab-new").click();
-  await expect(page.locator(".af-tab-menu")).toBeVisible();
-  await shot(`${prefix}tab-types`);
-  if (!prefix) await page.locator(".af-tab-new").click();
   await actions.click();
   await page.locator(".af-pane-host .xterm").first().click();
-  await expect(page.locator(".af-term-keyboard")).toBeVisible();
+  await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
   if (!prefix) await expect(page.locator(".af-terminal-keybar")).toHaveCount(0);
   await shot(`${prefix}terminal-keyboard`);
   if (prefix === "phone-") {
@@ -424,7 +420,7 @@ async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<
     await ctrl.click();
   }
   await page.keyboard.press("Control+]");
-  await expect(page.locator(".af-term-keyboard")).toBeHidden();
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 }
 
 /** Phone geometry and keyboard access supplement the pixel oracle. */
@@ -437,9 +433,10 @@ async function assertPhoneHeader(page: Page): Promise<void> {
   await more.focus();
   await page.keyboard.press("Enter");
   const menu = page.locator(".af-appbar-tools");
-  for (const selector of [".af-viewnav", ".af-project-menu", ".af-tab-menu", ".af-copy-link-phone"]) {
+  for (const selector of [".af-viewnav", ".af-project-menu", ".af-copy-link"]) {
     await expect(menu.locator(selector)).toBeVisible();
   }
+  await expect(header.locator(".af-term-new-shell")).toBeVisible();
   const controls = menu.locator("button:visible:not(:disabled), a:visible[href]");
   const states = page.locator(".af-rail-list .af-row");
   const seededRows = await states.count();
@@ -930,7 +927,7 @@ for (const scoped of [true, false]) {
     }, error: null } }));
     await openAfterInitialResync(page, async () => { await page.goto("/"); });
     await row(page, SESSION_JSON).click();
-    await page.getByRole("button", { name: "Session actions", exact: true }).click();
+    await page.getByRole("button", { name: "More session actions", exact: true }).click();
     await page.getByRole("button", { name: "Handoff", exact: true }).click();
     const dialog = page.getByRole("dialog");
     const agent = dialog.getByRole("combobox", { name: "New agent", exact: true });

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,6 +51,9 @@ type headlessServer struct {
 	// adopted is set when this server was started over a preserved worktree
 	// (#5571 W8.6); its non-first-time launch respawns the agent there.
 	adopted bool
+	// repoPath is the repository this workspace runs against; with the title it
+	// names the workspace across an agent-server restart (see editorNamespace).
+	repoPath string
 	// as is the single workspace's agent-server — the local in-process
 	// implementation over tmux (same runtime as the daemon's local sessions),
 	// exposed here over the wire.
@@ -410,6 +414,14 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		tabs:    instance,
 		title:   opts.Title,
 		events:  newEventsHub(),
+		// The workspace's crash-stable editor identity (#6092): repo + title.
+		repoPath: opts.RepoPath,
+	}
+
+	// A previous agent-server for this workspace may have been killed hard and left
+	// its editor running (#6092); end it now rather than when someone next opens one.
+	if err := hs.acquireEditorNamespace(); err != nil && !errors.Is(err, errEditorWorkspaceBusy) {
+		log.WarningLog.Printf("agent-server: sweeping a previous server's editor: %v", err)
 	}
 
 	// The bearer token this server expects comes from a 0600 file beside this
@@ -527,6 +539,8 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tab-create", rpcHandler(hs.TabCreate))
 	mux.HandleFunc("/v1/agent/tab-close", rpcHandler(hs.TabClose))
 	mux.HandleFunc("/v1/agent/tabs", rpcHandler(hs.Tabs))
+	// #5997: the daemon names the agent tab. Advertised as "agent-tab-id".
+	mux.HandleFunc("/v1/agent/agent-tab-id", rpcHandler(hs.AgentTabID))
 
 	// WS data plane — same paths, same broker, same wire as the daemon (§1.1: all
 	// over the same routes the daemon mux already serves).
@@ -558,6 +572,10 @@ var agentServerWireFeatures = []string{
 	// "tab-id-addressing": ?tab_id= on the WS stream and tab_id on preview —
 	// the id-addressed data plane (ws_pty.go's bindTab picks the binding).
 	"tab-id-addressing",
+	// "agent-tab-id": POST /v1/agent/agent-tab-id — the daemon tells the sandbox
+	// which stable id its agent tab carries, so the agent tab is addressed by id
+	// like every other tab (#5997).
+	session.AgentTabIDFeature,
 	// "relaunch": POST /v1/agent/relaunch — stop the agent and start it again
 	// in this workspace with the provider's resume (#5571 W7.1).
 	session.RelaunchFeature,

@@ -517,16 +517,16 @@
         "pointer": "apiclient AddTask/UpdateTask set validate_path for a remote target; a local TUI validates in ui/task_pane_edit.go"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/api.ts addTask/updateTask send validate_path:true; the daemon's refusal (daemon/task_path_validation.go) renders in the modal via setError"
       },
       "cli": {
         "status": "yes",
         "pointer": "apiclient AddTask/UpdateTask set validate_path for a remote target (af tasks add/update --daemon-url); a local CLI validates on this machine"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5859",
-      "notes": "The daemon refuses a task whose project path is not a git repository on ITS host when the request sets validate_path. Remote CLI and TUI clients set it automatically; the web task form still sends neither the flag nor a client-side check, so a typo'd path is accepted and fails at fire time. When the web modal sends validate_path, flip its cell to yes and delete the two web_rpcs field_coverage gaps."
+      "notes": "The daemon refuses a task whose project path is not a git repository on ITS host when the request sets validate_path (daemon/task_path_validation.go). Remote CLI and TUI clients set it through apiclient; a local TUI/CLI run the same check client-side (ui/task_pane_edit.go validateForm, which re-checks on EVERY save per #924). The web now sends validate_path:true on both AddTask and UpdateTask — the web has no filesystem to check against and its project select derives options from live state (sessions ∪ tasks ∪ registry), so a path gone stale since the read is refused at save with the daemon's actionable message instead of failing at fire. Because the edit modal's patch always carries project_path, an edit re-validates the submitted repo the same way the local TUI form does on every save; a patch without the field (the enable toggle) skips the check exactly as it does on the Go clients."
     },
     {
       "id": "project.add",
@@ -1298,7 +1298,7 @@
         "pointer": "api/sessions_tabs.go:27 --kind vscode"
       },
       "verdict": "parity",
-      "notes": "Closed by #2077. The TUI creates Kind:vscode through the same daemon CreateTab RPC as `af sessions tab-create --kind vscode`; its pane shows the existing web-UI placeholder because a terminal cannot render the editor. The web exposes the choice from a labelled New tab menu."
+      "notes": "Closed by #2077. The TUI creates Kind:vscode through the same daemon CreateTab RPC as `af sessions tab-create --kind vscode`; its pane shows the existing web-UI placeholder because a terminal cannot render the editor. The web exposes it as a VS Code button in the session header and the Shift+T shortcut."
     },
     {
       "id": "session.tab.create.web",
@@ -2958,17 +2958,11 @@
         }
       },
       "UpdateTask": {
-        "validate_path": {
-          "gap": "task.path-validate"
-        },
         "actor": {
           "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
         }
       },
       "AddTask": {
-        "validate_path": {
-          "gap": "task.path-validate"
-        },
         "actor": {
           "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
         },

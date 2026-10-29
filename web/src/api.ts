@@ -1263,9 +1263,14 @@ function requireTaskID(id: string, action: string): void {
 }
 
 /** Adds a task (mirrors `af tasks add`). The daemon re-validates (trigger, program)
- *  and owns the write; the created task also arrives via a task.created event. */
+ *  and owns the write; the created task also arrives via a task.created event.
+ *  validate_path asks the daemon to check the picked project is still a git repo
+ *  on ITS host (#5859): the select's options are derived from live state, so a
+ *  path gone stale since it was read — a checkout deleted out from under a
+ *  project row — would otherwise save silently and only fail when the task
+ *  fires. The refusal renders in the modal. */
 export async function addTask(task: TaskData, token: string): Promise<void> {
-  await af("AddTask", { task }, token);
+  await af("AddTask", { task, validate_path: true }, token);
 }
 
 /** Builds the project compare-and-swap from the record the caller displayed —
@@ -1288,10 +1293,13 @@ function projectExpectation(task: TaskMutationRef): ProjectExpectation {
  *  (last_run_*, created_at) untouched. Refuses a task with no stable id, before
  *  issuing the request. Takes the DISPLAYED record: the request pins its project
  *  binding, so a task rebound by another client while this pane was stale is
- *  refused rather than patched (#3230). */
+ *  refused rather than patched (#3230). validate_path rides every patch; the
+ *  daemon applies it only when the patch carries project_path — which the edit
+ *  form always sends — so an edit re-checks the submitted repo the same way
+ *  the TUI form's validateForm re-checks it on every save (#5859). */
 export async function updateTask(task: TaskMutationRef, update: TaskUpdate, token: string): Promise<void> {
   requireTaskID(task.id, "update a task");
-  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token);
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task), validate_path: true }, token);
 }
 
 /** Fires a task NOW (mirrors `af tasks trigger`). The daemon runs it through the same

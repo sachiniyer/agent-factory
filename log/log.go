@@ -57,17 +57,60 @@ func (d dirtyWriter) Write(p []byte) (int, error) {
 // log call before Initialize do not nil-panic. Initialize replaces these with
 // real file/stderr loggers. Without this, code paths like `af upgrade` that
 // forget to call Initialize crash inside the SIGTERM fallback (#514).
+//
+// The three pointers are assigned HERE, once, and never again: Initialize and
+// Close re-aim them with SetOutput/SetPrefix/SetFlags, which *log.Logger
+// serializes internally. Reassigning the pointers instead raced with every
+// goroutine that logs through them — a package variable with no lock on the read
+// side — and surfaced as a flaky -race failure whenever a test called Initialize
+// while a hook or monitor goroutine from an earlier test was still logging.
+// Tests that capture output must use CaptureOutput, not assign these.
 func init() {
 	InfoLog = log.New(redactedLogSink(io.Discard), "", 0)
-	WarningLog = log.New(redactedLogSink(io.Discard), "", 0)
-	ErrorLog = log.New(redactedLogSink(io.Discard), "", 0)
+	WarningLog = log.New(dirtyWriter{redactedLogSink(io.Discard)}, "", 0)
+	ErrorLog = log.New(dirtyWriter{redactedLogSink(io.Discard)}, "", 0)
 }
 
-// mu guards writes to globalLogFile and the exported *log.Logger pointers
-// performed by Initialize and Close. Readers (e.g. InfoLog.Printf) rely on
-// init-once-before-use semantics: Initialize is expected to complete before
-// any goroutine reads the logger pointers. *log.Logger itself is internally
-// thread-safe, so we do not take this lock on the logging hot path.
+// route points the three loggers at one sink, with the INFO/WARNING/ERROR
+// prefixes and the shared flags. WARNING and ERROR keep their dirtyWriter so a
+// write still marks the run dirty. Pointers are never reassigned (see init).
+func route(sink io.Writer, daemon bool) {
+	fmtS := "%s"
+	if daemon {
+		fmtS = "[DAEMON] %s"
+	}
+	const flags = log.Ldate | log.Ltime | log.Lshortfile
+	InfoLog.SetOutput(redactedLogSink(sink))
+	InfoLog.SetPrefix(fmt.Sprintf(fmtS, "INFO:"))
+	InfoLog.SetFlags(flags)
+	WarningLog.SetOutput(dirtyWriter{redactedLogSink(sink)})
+	WarningLog.SetPrefix(fmt.Sprintf(fmtS, "WARNING:"))
+	WarningLog.SetFlags(flags)
+	ErrorLog.SetOutput(dirtyWriter{redactedLogSink(sink)})
+	ErrorLog.SetPrefix(fmt.Sprintf(fmtS, "ERROR:"))
+	ErrorLog.SetFlags(flags)
+}
+
+// CaptureOutput redirects one of the package loggers to w for the test and
+// restores its previous output, prefix and flags on cleanup. It is the only
+// supported way for a test to observe log output: assigning log.WarningLog (the
+// old idiom) races with any goroutine still logging through the pointer.
+func CaptureOutput(t testing.TB, l *log.Logger, prefix string, w io.Writer) {
+	t.Helper()
+	prevOut, prevPrefix, prevFlags := l.Writer(), l.Prefix(), l.Flags()
+	l.SetOutput(w)
+	l.SetPrefix(prefix)
+	l.SetFlags(0)
+	t.Cleanup(func() {
+		l.SetOutput(prevOut)
+		l.SetPrefix(prevPrefix)
+		l.SetFlags(prevFlags)
+	})
+}
+
+// mu guards globalLogFile and the re-aiming of the exported loggers performed by
+// Initialize and Close. The pointers themselves never change after init(), and
+// *log.Logger is internally thread-safe, so the logging hot path takes no lock.
 var mu sync.Mutex
 
 // logPathOverride, when non-empty, wins over all environment-based
@@ -465,13 +508,7 @@ func Initialize(daemon bool) {
 	f, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not open log file %s: %v, logging to stderr\n", logFileName, err)
-		fmtS := "%s"
-		if daemon {
-			fmtS = "[DAEMON] %s"
-		}
-		InfoLog = log.New(redactedLogSink(os.Stderr), fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
-		WarningLog = log.New(dirtyWriter{redactedLogSink(os.Stderr)}, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
-		ErrorLog = log.New(dirtyWriter{redactedLogSink(os.Stderr)}, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
+		route(os.Stderr, daemon)
 		return
 	}
 
@@ -483,13 +520,7 @@ func Initialize(daemon bool) {
 		w.size = fi.Size()
 	}
 
-	fmtS := "%s"
-	if daemon {
-		fmtS = "[DAEMON] %s"
-	}
-	InfoLog = log.New(redactedLogSink(w), fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
-	WarningLog = log.New(dirtyWriter{redactedLogSink(w)}, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
-	ErrorLog = log.New(dirtyWriter{redactedLogSink(w)}, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
+	route(w, daemon)
 
 	globalLogFile = w
 }

@@ -81,7 +81,12 @@ func (i *Instance) intentIDLocked(kind TabKind, command, requestedName string) s
 	}
 	for key, in := range i.tabCreateIntents {
 		if time.Since(in.at) > tabIntentTTL {
-			delete(i.tabCreateIntents, key)
+			// The replay window is over, but an unadopted intent still names an
+			// execution that may exist: it stays for the sweep to adopt or prove
+			// gone (#6023). It is no longer offered to a retry.
+			if in.adopted {
+				delete(i.tabCreateIntents, key)
+			}
 			continue
 		}
 		if in.kind != kind || in.command != command || in.requested != requestedName {
@@ -233,7 +238,7 @@ func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 	rs := i.remoteTabServerCachedLocked()
 	work := len(i.pendingRemoteClose) > 0
 	for _, in := range i.tabCreateIntents {
-		if !in.adopted && time.Since(in.at) <= tabIntentTTL {
+		if !in.adopted {
 			work = true
 			break
 		}
@@ -329,11 +334,20 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) (changed bool, ado
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	for key, in := range i.tabCreateIntents {
-		if time.Since(in.at) > tabIntentTTL {
+		expired := time.Since(in.at) > tabIntentTTL
+		td, ok := byID[in.id]
+		if expired && !in.adopted && (!ok || td.Command != in.command) {
+			// A roster read that succeeded and lacks the id (or holds another
+			// command under it), past the replay window, proves the execution is
+			// gone or never was: the only point an unresolved intent may be
+			// discarded (#6023).
 			delete(i.tabCreateIntents, key)
 			continue
 		}
-		td, ok := byID[in.id]
+		if expired && in.adopted {
+			delete(i.tabCreateIntents, key)
+			continue
+		}
 		// Only the intent whose request the sandbox's tab actually is: a different
 		// shape recorded on the same id describes no execution there.
 		if !ok || in.adopted || td.Command != in.command {
