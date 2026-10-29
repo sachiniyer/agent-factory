@@ -172,8 +172,8 @@ func TestRetryJoinsInFlightIntentWhenNoneIsFree(t *testing.T) {
 	require.Equal(t, 1, sb.execs("deploy.sh"))
 	var lost string
 	inst.mu.RLock()
-	for id := range inst.tabCreateIntents {
-		lost = id
+	for _, in := range inst.tabCreateIntents {
+		lost = in.id
 	}
 	inst.mu.RUnlock()
 	require.NotEmpty(t, lost)
@@ -284,7 +284,7 @@ func TestRefusedConflictingCreateKeepsTheOriginalIntent(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, 0, sb.execs("B.sh"), "B must not run")
 	inst.mu.RLock()
-	_, kept := inst.tabCreateIntents["shared-id"]
+	_, kept := inst.tabCreateIntents[intentKey("shared-id", TabKindProcess, "A.sh", "")]
 	inst.mu.RUnlock()
 	require.True(t, kept, "B's refusal consumed A's intent")
 

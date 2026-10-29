@@ -46,6 +46,27 @@ type tabCreateIntent struct {
 	adopted bool
 }
 
+// intentKey identifies an intent: the id AND the request shape it was minted
+// for. Every operation on behalf of a request touches only the intent under its
+// own key, whatever its outcome, so a different request that reuses the id can
+// neither read, overwrite nor consume another request's record (#6030).
+func intentKey(id string, kind TabKind, command, requestedName string) string {
+	return id + "\x00" + TabKindName(kind) + "\x00" + command + "\x00" + requestedName
+}
+
+// intentHeldByOtherShapeLocked reports whether id is the recorded identity of an
+// uncertain create for a DIFFERENT request that is still unresolved. An adopted
+// intent is on the roster, where the id collision check judges any conflict. Caller holds i.mu.
+func (i *Instance) intentHeldByOtherShapeLocked(id string, kind TabKind, command, requestedName string) bool {
+	for _, in := range i.tabCreateIntents {
+		if in.id == id && !in.adopted && (in.kind != kind || in.command != command || in.requested != requestedName) &&
+			time.Since(in.at) <= tabIntentTTL {
+			return true
+		}
+	}
+	return false
+}
+
 // intentIDLocked returns the id an uncertain earlier attempt at this exact
 // request minted, or "". Intents are kept per minted id, so two same-shape
 // creates whose answers were both lost each keep their own (#6021); a retry
@@ -58,15 +79,15 @@ func (i *Instance) intentIDLocked(kind TabKind, command, requestedName string) s
 	older := func(a, b *tabCreateIntent) bool {
 		return b == nil || a.at.Before(b.at) || (a.at.Equal(b.at) && a.id < b.id)
 	}
-	for id, in := range i.tabCreateIntents {
+	for key, in := range i.tabCreateIntents {
 		if time.Since(in.at) > tabIntentTTL {
-			delete(i.tabCreateIntents, id)
+			delete(i.tabCreateIntents, key)
 			continue
 		}
 		if in.kind != kind || in.command != command || in.requested != requestedName {
 			continue
 		}
-		if _, inFlight := i.tabCreateInFlight[id]; inFlight {
+		if _, inFlight := i.tabCreateInFlight[in.id]; inFlight {
 			if older(in, running) {
 				running = in
 			}
@@ -93,10 +114,7 @@ func (i *Instance) intentIDLocked(kind TabKind, command, requestedName string) s
 // original attempt, whose execution may still be running unseen, so its intent
 // stays (#6030). Caller holds i.mu.
 func (i *Instance) consumeIntentLocked(id string, kind TabKind, command, requestedName string) {
-	if in := i.tabCreateIntents[id]; in != nil &&
-		in.kind == kind && in.command == command && in.requested == requestedName {
-		delete(i.tabCreateIntents, id)
-	}
+	delete(i.tabCreateIntents, intentKey(id, kind, command, requestedName))
 }
 
 // recordIntentLocked keeps id as the identity of this attempt after an uncertain
@@ -105,7 +123,7 @@ func (i *Instance) recordIntentLocked(id string, kind TabKind, command, requeste
 	if i.tabCreateIntents == nil {
 		i.tabCreateIntents = map[string]*tabCreateIntent{}
 	}
-	i.tabCreateIntents[id] = &tabCreateIntent{
+	i.tabCreateIntents[intentKey(id, kind, command, requestedName)] = &tabCreateIntent{
 		id: id, kind: kind, command: command, requested: requestedName, name: displayName, at: time.Now(),
 	}
 }
@@ -134,6 +152,14 @@ func (i *Instance) isOffBoxTabLocked(tab *Tab) bool {
 func (i *Instance) stageRemoteCloseLocked(tab *Tab) *RemoteTabCleanupData {
 	if !i.isOffBoxTabLocked(tab) {
 		return nil
+	}
+	// Closing the tab ends the execution an adopted intent was keeping a late
+	// retry joinable to; left behind, it would point a later request at a closed
+	// (or re-created) id.
+	for key, in := range i.tabCreateIntents {
+		if in.id == tab.ID && in.adopted {
+			delete(i.tabCreateIntents, key)
+		}
 	}
 	h := RemoteTabCleanupData{TabID: tab.ID, Gen: tab.gen}
 	for _, p := range i.pendingRemoteClose {
@@ -303,7 +329,9 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) (changed bool, ado
 			continue
 		}
 		td, ok := byID[in.id]
-		if !ok || in.adopted {
+		// Only the intent whose request the sandbox's tab actually is: a different
+		// shape recorded on the same id describes no execution there.
+		if !ok || in.adopted || td.Command != in.command {
 			continue
 		}
 		if _, have := i.tabIndexByIDLocked(in.id); !have && i.started && i.tabSpawnBlockedLocked() == nil {

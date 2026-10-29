@@ -58,6 +58,10 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 			// then answers the one execution instead of running the command again.
 			id = i.intentIDLocked(kind, command, requestedName)
 		}
+		if i.intentHeldByOtherShapeLocked(id, kind, command, requestedName) {
+			i.mu.Unlock()
+			return nil, fmt.Errorf("tab id %q is held by an earlier create of a different command whose outcome is unknown; retry that request or use another id", id)
+		}
 		if refused, existing, found := i.tabIDCollisionLocked(id, kind, command); found {
 			// The retry resolved to a tab already on the roster (adopted by the
 			// sweep): it has joined the one execution, so the intent is spent.
