@@ -22,7 +22,7 @@ const agentStoppedTailLines = 8
 // Every alternative is anchored to the start of a line after codex's bullet
 // glyph, so transcript prose that merely quotes the words does not match.
 var codexStoppedNotice = regexp.MustCompile(
-	`^\s*[■•]\s*(?:Reconnect failed\b|Server connection could not be restored|Automatic reconnect could not restore)`)
+	`^\s*[\x{25A0}\x{2022}]\s*(?:Reconnect failed\b|Server connection could not be restored|Automatic reconnect could not restore)`)
 
 // AgentStoppedContent reports whether the captured pane shows POSITIVE evidence
 // that the agent is NOT working and will not resume on its own: the agent itself
