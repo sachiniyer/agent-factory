@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -23,6 +24,9 @@ import (
 //     No other client — a second takeover on the same login session included —
 //     is attached to the private session, so none of them sees this binding, and
 //     none of their bindings can be removed by this client leaving (#6075).
+//   - the private session starts with the shared session's options (mouse
+//     included), so scrolling and selection work in the takeover pane whatever the
+//     server's global mouse setting is (#6073).
 //   - the table starts as a copy of root, so the takeover pane keeps every binding
 //     the session's normal pane has (mouse wheel and selection included) and gains
 //     only the detach route (#6073).
@@ -85,6 +89,7 @@ func (r takeoverRoute) attachArgs() []string {
 		"new-session", "-d", "-t", r.session, "-s", r.group, ";",
 		"set-option", "-t", r.group, "prefix", r.prefix(), ";",
 		"set-option", "-t", r.group, "prefix2", "None", ";",
+		"run-shell", r.mirrorSessionOptionsScript(), ";",
 		"run-shell", r.mirrorRootScript(), ";",
 		"set-option", "-t", r.group, "key-table", r.table, ";",
 		"bind-key", "-T", r.table, r.key, "detach-client", ";",
@@ -106,6 +111,22 @@ func (r takeoverRoute) attachArgs() []string {
 func (r takeoverRoute) mirrorRootScript() string {
 	return "tmux list-keys -T root | sed -E 's/^bind-key( +-r)? +-T root +/bind-key\\1 -T " + r.table + " /' | tmux source-file - || true"
 }
+
+// mirrorSessionOptionsScript copies the shared session's locally set options onto
+// the client's private session, run by the server right after the private session
+// is created (#6073). A grouped session shares windows but starts from the
+// server's GLOBAL options, so anything af set on the source (`mouse on` for
+// scrolling and selection, history-limit, the status line…) would otherwise be
+// gone in the takeover pane, and with the global mouse option off the pane loses
+// scrolling and selection. `show-options` prints only options set on that session,
+// in a form `source-file` accepts. It runs BEFORE the routing options below, so
+// the takeover's own prefix, key-table, status hint and destroy-unattached win
+// over a copied value. A failed copy must not abort the takeover.
+func (r takeoverRoute) mirrorSessionOptionsScript() string {
+	return "tmux show-options -t " + shellQuote("="+r.session) + " | sed -E 's/^/set-option -t " + r.group + " /' | tmux source-file - || true"
+}
+
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // cleanupArgs are the commands that retire this client's routing: its own table
 // and its own private session, never the shared one.

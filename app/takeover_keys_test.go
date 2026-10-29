@@ -27,6 +27,7 @@ type fakeTmux struct {
 }
 
 type fakeSession struct {
+	local   map[string]string // options set on this session itself (what show-options prints)
 	opts    map[string]string
 	grouped string
 }
@@ -38,7 +39,10 @@ func newFakeTmux(shared ...string) *fakeTmux {
 		"root": {"WheelUpPane": "copy-mode -e", "WheelDownPane": "send-keys -M", "MouseDrag1Pane": "copy-mode -M", "MouseDown1Pane": "select-pane -t =", "C-x": "user-binding"},
 	}}
 	for _, s := range shared {
-		f.sessions[s] = &fakeSession{opts: map[string]string{"prefix": "C-b", "key-table": "root"}}
+		f.sessions[s] = &fakeSession{
+			local: map[string]string{"mouse": "on", "history-limit": "50000"},
+			opts:  map[string]string{"prefix": "C-b", "key-table": "root", "mouse": "on", "history-limit": "50000"},
+		}
 	}
 	return f
 }
@@ -70,7 +74,8 @@ func (f *fakeTmux) run(t *testing.T, args []string) {
 				}
 			}
 			require.Contains(t, f.sessions, of, "a grouped session needs the shared one to exist")
-			f.sessions[group] = &fakeSession{grouped: of, opts: map[string]string{"prefix": "C-b", "key-table": "root"}}
+			// A grouped session starts from the server's GLOBAL options: mouse off.
+			f.sessions[group] = &fakeSession{grouped: of, local: map[string]string{}, opts: map[string]string{"prefix": "C-b", "key-table": "root", "mouse": "off"}}
 		case "set-option":
 			require.Equal(t, "-t", c[1])
 			sess, ok := f.sessions[c[2]]
@@ -90,6 +95,18 @@ func (f *fakeTmux) run(t *testing.T, args []string) {
 		case "run-shell":
 			// The mirror: retarget `list-keys -T root` into this client's table.
 			script := c[1]
+			if strings.Contains(script, "show-options") {
+				// The session-options mirror: the source's locally set options land on
+				// the client's private session.
+				m := regexp.MustCompile(`set-option -t (af-takeover-\S+) `).FindStringSubmatch(script)
+				require.NotNil(t, m, "the options mirror names the client's own session: %s", script)
+				src := f.sessions[strings.Trim(regexp.MustCompile(`show-options -t '=([^']+)'`).FindStringSubmatch(script)[1], "'")]
+				require.NotNil(t, src)
+				for k, v := range src.local {
+					f.sessions[m[1]].opts[k] = v
+				}
+				continue
+			}
 			require.Contains(t, script, "list-keys -T root")
 			m := regexp.MustCompile(`-T (af-detach-\S+) /`).FindStringSubmatch(script)
 			require.NotNil(t, m, "the mirror names the client's own table: %s", script)
@@ -296,14 +313,35 @@ func TestTakeoverKeepsEveryRootBindingAndAddsOnlyTheDetachRoute(t *testing.T) {
 		assert.Contains(t, got, k, "mouse binding %s survives in the takeover pane", k)
 	}
 
-	// A root binding on the detach key itself loses to the detach route.
+	// A root binding on the detach key itself loses to the detach route in the
+	// client's own table, and root keeps its binding.
 	f2 := newFakeTmux("login")
 	f2.tables["root"]["C-w"] = "user-binding"
-	f2.run(t, newTakeoverRoute("login", cw, "ctrl+w").attachArgs())
-	for _, tbl := range f2.tables {
-		if v, ok := tbl["C-w"]; ok && tbl["WheelUpPane"] != "" {
-			assert.Equal(t, "detach-client", v, "the configured key wins over a root binding")
-		}
-	}
+	r2 := newTakeoverRoute("login", cw, "ctrl+w")
+	f2.run(t, r2.attachArgs())
+	assert.Equal(t, "detach-client", f2.tables[r2.table]["C-w"], "the configured key wins in the private table")
+	assert.Equal(t, "user-binding", f2.tables["root"]["C-w"], "root deliberately keeps its own binding")
 	assert.Contains(t, r.mirrorRootScript(), "-T root +/bind-key", "the real script retargets the root listing")
+}
+
+// #6073 (mouse): the private session inherits the shared session's own options, so
+// scrolling and selection survive even when the server's global mouse is off, while
+// the takeover's routing options are not clobbered by the copy.
+func TestTakeoverPrivateSessionKeepsTheSourceOptions(t *testing.T) {
+	cw, _ := config.ParseDetachKey("ctrl-w")
+	r := newTakeoverRoute("login", cw, "ctrl+w")
+	f := newFakeTmux("login")
+	f.run(t, r.attachArgs())
+
+	g := f.sessions[r.group].opts
+	assert.Equal(t, "on", g["mouse"], "mouse scrolling and selection work in the takeover pane")
+	assert.Equal(t, "50000", g["history-limit"], "scrollback is the source's")
+	assert.Equal(t, "C-b", g["prefix"])
+	assert.Equal(t, r.table, g["key-table"], "the copy does not clobber the takeover's routing")
+	assert.Equal(t, "ctrl+w leaves", g["status-right"])
+
+	script := r.mirrorSessionOptionsScript()
+	assert.Contains(t, script, "show-options -t '=login'")
+	assert.Less(t, strings.Index(strings.Join(r.attachArgs(), " "), "show-options"), strings.Index(strings.Join(r.attachArgs(), " "), "key-table"),
+		"the copy runs before the routing options so they win")
 }
