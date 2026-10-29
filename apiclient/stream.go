@@ -1,8 +1,10 @@
 package apiclient
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -114,8 +116,7 @@ func (c *Client) DialStream(ctx context.Context, s StreamSession, tabID string, 
 	}
 	conn, resp, err := websocket.Dial(dialCtx, u, &opts)
 	if err != nil {
-		return nil, &TransportError{Err: fmt.Errorf("apiclient: dial pty stream: %w",
-			agentproto.RedactAccessTokenError(err, c.token))}
+		return nil, &TransportError{Err: dialStreamError(err, resp, c.token)}
 	}
 	// Raise the read limit off the 32 KiB default: a full-screen repaint of a wide
 	// pane, or a ?since replay of the whole ring, is a single large binary frame.
@@ -132,6 +133,54 @@ func (c *Client) DialStream(ctx context.Context, s StreamSession, tabID string, 
 // exported from daemon to keep the client's dependency on the daemon package to
 // the request/response structs it already shares.
 const streamSeqHeader = "X-Af-Stream-Seq"
+
+// streamDialErrorBodyLimit bounds the pre-upgrade body a malicious or buggy peer
+// could stream on a non-101 response. The daemon's failure envelope is tiny; this
+// only caps the read, not the message notServedDetail renders from it.
+const streamDialErrorBodyLimit = 1 << 20 // 1 MiB
+
+// dialStreamError wraps a failed WS handshake with the daemon's JSON error body
+// so the user sees the daemon's refusal instead of an opaque status mismatch.
+//
+// coder/websocket's dial error carries only the handshake status ("expected
+// response status code 101 Switching Protocols but got 500"), and the previous
+// handler dropped the accompanying response, so the daemon's actionable message
+// never reached the CLI: an attach to an Archived session printed a generic
+// transport fault with no hint that the session is archived or that
+// `af sessions restore` exists. The stream route refuses a non-live target BEFORE
+// websocket.Accept (agentServerForStreamTarget's liveness gate), so the refusal
+// is a plain non-101 HTTP response whose body is the envelope writeHTTPError
+// wrote; reading it here makes that message the one the user reads.
+//
+// The access-token redaction runs on the whole composed error: the dial URL
+// carries ?access_token= for a remote target, so the raw handshake error can
+// embed it, and any echoed body is covered by the same pass. Best-effort: a body
+// that is not the daemon's envelope falls back to a snippet (notServedDetail),
+// and an empty body adds nothing — the handshake status alone is the answer.
+func dialStreamError(dialErr error, resp *http.Response, token string) error {
+	if detail := streamDialErrorDetail(resp); detail != "" {
+		dialErr = fmt.Errorf("%w: %s", dialErr, detail)
+	}
+	return fmt.Errorf("apiclient: dial pty stream: %w",
+		agentproto.RedactAccessTokenError(dialErr, token))
+}
+
+// streamDialErrorDetail reads the failed handshake's response body and returns
+// the daemon's envelope message (or a snippet for a non-envelope intermediary
+// body), preserving resp.Body's Close contract. It returns "" when there is no
+// response to read (a transport-level failure before any HTTP answer) or the
+// body is empty, so the caller does not append noise to the handshake status.
+func streamDialErrorDetail(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, streamDialErrorBodyLimit))
+	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+		return ""
+	}
+	return notServedDetail(raw)
+}
 
 // PreviewSnapshot is the typed preview response used by terminal-aware clients.
 // Keeping modes beside content prevents a preview target from inheriting the

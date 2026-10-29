@@ -613,6 +613,21 @@ func (m *Manager) agentServerForStreamTarget(target streamTarget) (session.Agent
 		}
 		return nil, nil, fmt.Errorf("session %q not found", name)
 	}
+	// Refuse a non-live target with the same actionable off-ramp SendPrompt's
+	// promptTargetLivenessError returns (#1529). The stream path resolves any
+	// title-matching row and resolveStreamTarget/findSession restore it inertly
+	// with no liveness filter, so an Archived (or Lost/Dead) session resolves
+	// and the dial proceeds. Without this gate an Archived session upgrades the
+	// WS and then fails deep at broker subscribe ("has no local PTY to stream")
+	// with a generic 500 whose body the WebSocket client discards — the exact
+	// "confusing fall-through" #1529 was written to prevent, unguarded on the
+	// one attach path the TUI's interactiveGuard does not cover. Refusing here
+	// keeps the failure BEFORE websocket.Accept (streamHandler returns it as a
+	// plain non-101 HTTP response whose JSON body apiclient surfaces), and
+	// mirrors the TUI's pre-attach guard with the restore command off-ramp.
+	if err := promptTargetLivenessError(title, instance.GetLiveness()); err != nil {
+		return nil, nil, err
+	}
 	// Reject a new subscription while a kill is in flight for this session, the
 	// same killsInFlight gate SendPrompt checks (#1632). Streaming previously
 	// skipped it, so a Subscribe could race KillSession's teardown; the
