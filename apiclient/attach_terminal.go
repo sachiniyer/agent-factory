@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -69,6 +70,25 @@ type terminalHandback struct {
 	stopWatch func()
 }
 
+// activeHandback is the hand-back of the attach in flight, if any. It exists so a
+// caller that must die on a signal while an attach owns the terminal (the TUI's
+// exit guard, #6072) restores termios through THIS owner instead of racing it: a
+// second signal handler that re-raised first killed the process before the
+// attach's own term.Restore ran, leaving the terminal raw.
+var activeHandback atomic.Pointer[terminalHandback]
+
+// RestoreAttachedTerminal hands the terminal back through the in-flight attach's
+// own restore, and is a no-op when no attach is running or it already restored
+// (restore is idempotent under h.mu, so racing the attach's watcher, its deferred
+// release and any number of callers restores exactly once and never re-applies a
+// stale state). Callers that are about to terminate the process call it BEFORE
+// re-raising the signal.
+func RestoreAttachedTerminal() {
+	if h := activeHandback.Load(); h != nil {
+		h.restore()
+	}
+}
+
 // handbackRetakeGrace is how long the signal watcher waits after re-raising a
 // signal before concluding that it could not terminate the process. A fatal
 // disposition kills us well inside this window; anything still running after it
@@ -84,6 +104,7 @@ var handbackRetakeGrace = 200 * time.Millisecond
 // to guard.
 func beginTerminalHandback(out io.Writer, oldState *term.State) *terminalHandback {
 	h := &terminalHandback{out: out, oldState: oldState}
+	activeHandback.Store(h)
 	if oldState == nil {
 		return h
 	}
@@ -210,6 +231,7 @@ func (h *terminalHandback) retake() {
 // first leaves only the harmless window: a signal after the terminal is already
 // back.
 func (h *terminalHandback) release() {
+	activeHandback.CompareAndSwap(h, nil)
 	h.mu.Lock()
 	h.finished = true // no retake can follow the final hand-back
 	h.restoreLocked()
