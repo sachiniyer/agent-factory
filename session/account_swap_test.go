@@ -592,6 +592,50 @@ func TestRespawnForAccountSwapUsesThePreflightedProgramSnapshot(t *testing.T) {
 		"the stopped runtime must be replaced with the exact command admitted by preflight")
 }
 
+// RuntimeProgram records the clean base the swap actually launched, frozen at
+// preflight and carried in the launch plan. A program_overrides edit between
+// preflight and RespawnForAccountSwap must not leak into it: recording the
+// re-resolved command would claim a command that never ran, and the next
+// same-agent swap would trust that false evidence (#6049 review).
+func TestRespawnForAccountSwapRecordsThePreflightedBaseNotTheReresolvedOne(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude"}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+
+	const agentName = "af_swap_runtime_base"
+	var newSessions int
+	var spawns []string
+	inst := lostInstanceForRecover(t, agentName, agentName+tmuxTabSeparator+shellTabName,
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	inst.mu.Lock()
+	inst.Tabs[1].Kind = TabKindProcess
+	inst.Tabs[1].Command = "git status --short"
+	inst.Tabs[1].tmux.SetProgram("git status --short")
+	inst.mu.Unlock()
+	inst.Path = initTempGitRepo(t)
+	inst.SetLimitReached(time.Time{})
+	require.NoError(t, inst.BeginLimitResume())
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+
+	cfg.ProgramOverrides[tmux.ProgramClaude] = "claude --model changed-after-preflight"
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err = inst.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	require.NoError(t, inst.RespawnForAccountSwap())
+	require.NotEmpty(t, spawns)
+
+	recorded := inst.RuntimeProgram()
+	require.NotEmpty(t, recorded, "the launched base must be recorded")
+	require.NotContains(t, recorded, "changed-after-preflight",
+		"RuntimeProgram must not be re-resolved from configuration at the respawn boundary")
+	require.Equal(t, "claude", recorded, "RuntimeProgram records the base frozen at preflight, which is what launched")
+	require.NotContains(t, spawns[0], "changed-after-preflight")
+}
+
 func TestStopForAccountSwapStopsEveryCredentialBearingPane(t *testing.T) {
 	var mu sync.Mutex
 	var killed []string

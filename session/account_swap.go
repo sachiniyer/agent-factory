@@ -21,8 +21,16 @@ type accountSwapStopper interface {
 }
 
 type accountSwapLaunchPlan struct {
-	account             string
-	base                string
+	account string
+	base    string
+	// runtimeBase is the clean base command this plan launches, frozen at
+	// preflight, for RuntimeProgram: the base without af's injected flags
+	// (base can be the pane's frozen program, which carries them), and never
+	// re-resolved from configuration at the respawn boundary — a
+	// program_overrides edit between preflight and respawn must not make
+	// RuntimeProgram claim a command that never ran (#6049 review). Empty when no
+	// clean base of the launched agent is known; nothing is then recorded.
+	runtimeBase         string
 	program             string
 	proof               sessionenv.AccountLaunchProof
 	conversation        AgentConversationData
@@ -224,6 +232,10 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
 	resolution := resolveLaunchProgramForInstance(i)
+	// The override-resolved command at THIS moment, kept before the branches
+	// below replace resolution.command: it is the clean base to record when the
+	// launch base turns out to be the pane's flagged program (runtimeBase).
+	freshBase := resolution.command
 	// paneGeneratedArgs seeds the launch proof (accountLaunchProof) with the
 	// pane's still-recorded af-authored argument declaration when the swap base
 	// is the pane's frozen program. That program already carries af's own
@@ -333,6 +345,18 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		}
 	}
 	resolvedProgram := resolution.command
+	// What RuntimeProgram records for this launch, decided now and carried in the
+	// plan. The launch base is clean unless it is the pane's frozen program with
+	// af's own declared flags (the pane-fallback state): then the clean base is
+	// the preflight-time override-resolution, accepted only when it is the same
+	// agent as the one being launched, so evidence never names a different one.
+	runtimeBase := resolvedProgram
+	if len(paneGeneratedArgs) > 0 {
+		runtimeBase = ""
+		if freshBase != "" && tmux.DetectAgentFromCommand(freshBase) == tmux.DetectAgentFromCommand(resolvedProgram) {
+			runtimeBase = freshBase
+		}
+	}
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
 		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap must choose which conversation the replacement opens (the carried one or a fresh one), so remove those arguments and retry", i.Title, name, strings.Join(args, " "))
 	}
@@ -508,7 +532,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		return fmt.Errorf("account swap for %q lost the limit-resume fence during launch preflight", i.Title)
 	}
 	i.accountSwapLaunch = &accountSwapLaunchPlan{
-		account: name, base: resolvedProgram, program: launchProgram,
+		account: name, base: resolvedProgram, runtimeBase: runtimeBase, program: launchProgram,
 		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
 		agent: agent, crossAgent: crossAgent, manual: manual,
 		carry: carry, carryFallback: carryFallback,

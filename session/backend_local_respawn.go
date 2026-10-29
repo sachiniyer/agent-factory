@@ -362,17 +362,20 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
 	if restoreResult == tmux.RestoreRespawned {
-		// RuntimeProgram holds the override-resolved base command, not the
-		// pane-fallback base an account swap's proof may have been declared
-		// against: a same-agent pane-fallback swap selects the pane's frozen
-		// program (which already carries af's own injected flags) as its base,
-		// and recording that base here would poison RuntimeProgram with af's
-		// words. The fresh resolution is the clean override-resolved base for
-		// the agent this respawn launches (the same agent for an account-only
-		// swap; the committed target for a cross-agent handoff, whose
-		// recordHandoffSwapLocked already rewrote i.Program), which is the
-		// value RuntimeProgram's contract describes (#6049).
-		i.setRuntimeLaunch(resolution.command, ts)
+		// RuntimeProgram holds the clean base command that was actually launched,
+		// not the pane-fallback base an account swap's proof may have been
+		// declared against (that base carries af's own injected flags, and
+		// recording it would poison RuntimeProgram with af's words). An account
+		// swap carries the clean base its preflight froze (runtimeBase) and the
+		// configuration is NOT resolved again here: a program_overrides edit
+		// between preflight and respawn would otherwise record a command that
+		// never ran, and the next same-agent swap would trust it (#6049 review).
+		// Any other respawn launches the base it just resolved.
+		runtimeBase := resolution.command
+		if prepared != nil {
+			runtimeBase = prepared.runtimeBase
+		}
+		i.setRuntimeLaunch(runtimeBase, ts)
 		// A respawn produced a replacement process: the run-end classifier at
 		// ConfirmLive reads this verdict to interrupt a still-in-flight task
 		// run rather than let the fresh agent's first idle edge complete it
