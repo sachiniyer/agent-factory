@@ -27,6 +27,10 @@ type crashedHost struct {
 	probe     string
 	// failDial makes the transport refuse to open once the server was restarted.
 	failDial bool
+	// failRoute names an adoption RPC ("provision"/"launch") the server refuses.
+	failRoute string
+	// badBanner makes the restarted server report another session's credential.
+	badBanner bool
 }
 
 func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner, *crashedHost) {
@@ -55,7 +59,12 @@ func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner,
 			body, _ := io.ReadAll(r.Body)
 			h.mu.Lock()
 			h.lifecycle = append(h.lifecycle, route+" "+strings.TrimSpace(string(body)))
+			refuse := h.failRoute == route
 			h.mu.Unlock()
+			if refuse {
+				http.Error(w, "refused", http.StatusInternalServerError)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]bool{"ok": true}})
 		})
 	}
@@ -89,6 +98,8 @@ func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner,
 		case strings.Contains(script, "echo relaunched"):
 			h.restarted = true
 			return []byte("4343\n"), nil
+		case strings.HasPrefix(script, "cat ") && h.badBanner:
+			return []byte(`{"addr":"127.0.0.1:9999","token":"someone-else","version":"9.9.9"}` + "\n" + remoteProcAlive + "\n"), nil
 		case strings.HasPrefix(script, "cat "):
 			return []byte(`{"addr":"127.0.0.1:9999","token":"` + token + `","version":"9.9.9"}` + "\n" + remoteProcAlive + "\n"), nil
 		}
@@ -189,4 +200,53 @@ func TestReattachStopsAnUnadoptedRestartWhenTheSecondDialFails(t *testing.T) {
 	cleanup := inst.backend.(*sandboxBackend).cleanup
 	assert.Equal(t, "4343", cleanup.RemotePID, "the persisted identity follows the restart so a retry probes the right process")
 	assert.Equal(t, "127.0.0.1:9999", cleanup.RemoteAddr)
+}
+
+// Every failure exit of a restart keeps the workspace, records every process af
+// started, and leaves no stale writer (#5995 review).
+
+// Provision/Launch failing means the new server may hold the surviving
+// worktree, and an ordinary agent-server deletes its worktree on SIGTERM. It is
+// left running and recorded as owing adoption; the next reattach finishes it.
+func TestReattachLeavesAHalfAdoptedRestartRunningAndFinishesItNextTime(t *testing.T) {
+	for _, route := range []string{"provision", "launch"} {
+		t.Run(route+" refused", func(t *testing.T) {
+			inst, p, h := newCrashedHost(t, agentServerProvedDead)
+			p.launchScript = "echo relaunched & echo $!"
+			h.failRoute = route
+
+			err := inst.ReattachSandbox()
+			require.Error(t, err)
+			assert.False(t, h.ran("kill \"$pid\""), "a server that may hold the workspace is never signalled")
+			assert.Nil(t, inst.remoteClient)
+			cleanup := inst.backend.(*sandboxBackend).cleanup
+			assert.Equal(t, "4343", cleanup.RemotePID, "the running server is durably recorded")
+			assert.True(t, cleanup.AdoptPending, "and so is the adoption it still owes")
+
+			// Next attempt: the server answers, so it is adopted rather than just bound.
+			h.mu.Lock()
+			h.failRoute, h.lifecycle = "", nil
+			h.mu.Unlock()
+			require.NoError(t, inst.ReattachSandbox())
+			require.Len(t, h.lifecycle, 2, "the pending adoption is completed")
+			assert.NotNil(t, inst.remoteClient)
+			assert.False(t, inst.backend.(*sandboxBackend).cleanup.AdoptPending)
+		})
+	}
+}
+
+// A banner that never arrives (or carries another credential) leaves a process
+// af started: it is stopped (nothing has touched the workspace yet) and its PID
+// persisted, not just held in memory.
+func TestReattachStopsAndRecordsARestartWhoseBannerIsWrong(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	p.launchScript = "echo relaunched & echo $!"
+	h.badBanner = true
+
+	err := inst.ReattachSandbox()
+	require.Error(t, err)
+	assert.True(t, h.ran("kill \"$pid\""), "the stranger-credentialed process is stopped")
+	assert.Empty(t, h.lifecycle, "nothing was adopted")
+	cleanup := inst.backend.(*sandboxBackend).cleanup
+	assert.Equal(t, "4343", cleanup.RemotePID, "the persisted PID follows the spawn")
 }

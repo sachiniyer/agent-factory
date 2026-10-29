@@ -108,44 +108,57 @@ func (i *Instance) ReattachSandbox() error {
 		}
 		return endpoint, rc, nil, nil
 	}
-	endpoint, _, aliveErr, err := dial()
+	endpoint, rc, aliveErr, err := dial()
 	if err != nil {
 		return fmt.Errorf("reattach %q: %w", i.Title, err)
 	}
-	restarted := false
+	// persistIdentity writes the provisioner's live identity (PID, address,
+	// adoption debt) onto the row's cleanup handle. Every exit past a spawn goes
+	// through it: a process af started must be durably recorded or a daemon
+	// restart would launch another beside it.
+	persistIdentity := func() {
+		i.mu.Lock()
+		refreshRuntimeIdentity(b, p)
+		i.mu.Unlock()
+	}
+	adopt := p.adoptPending // a restarted server a previous attempt left unadopted
 	if aliveErr != nil {
 		// The host answered over a working transport but the agent-server did not:
 		// relaunch it if — and only if — the host proves it dead (W1.4).
-		if rerr := p.restartAgentServer(token); rerr != nil {
+		rerr := p.restartAgentServer(token)
+		if p.adoptPending {
+			persistIdentity() // a process was spawned, whether or not the restart completed
+		}
+		if rerr != nil {
 			return fmt.Errorf("reattach %q: the agent-server did not answer: %w (not restarted: %v)", i.Title, aliveErr, rerr)
 		}
-		restarted = true
 		log.InfoLog.Printf("sandbox runtime: session %q: restarted its crashed agent-server (pid %s, %s)", i.Title, p.remotePID, p.remoteAddr)
-		// A restarted server that this attempt cannot adopt is stopped, not left:
-		// a later reattach would find it responsive and take the bind-only path,
-		// skipping adoption for good. The new PID/address are still persisted so
-		// the next attempt proves THAT process dead and restarts again.
-		abortRestart := func() {
-			_, _ = p.Run(sshShortStepTimeout, remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef), nil, true)
-			i.mu.Lock()
-			refreshRuntimeIdentity(b, p)
-			i.mu.Unlock()
-		}
-		var rc *remoteAgentClient
+		// Nothing has asked this server to touch the workspace yet, so one this
+		// attempt cannot even reach is stopped rather than left to answer a
+		// later probe.
 		if endpoint, rc, aliveErr, err = dial(); err != nil || aliveErr != nil {
-			abortRestart()
+			p.stopUnadoptedServer()
 			return fmt.Errorf("reattach %q: the restarted agent-server did not answer: %w", i.Title, errors.Join(err, aliveErr))
 		}
+		adopt = true
+	}
+	if adopt {
 		// The surviving workspace is adopted through the ordinary restore path
 		// (firstTimeSetup=false): Provision re-derives and proves the worktree
 		// handle before Launch reattaches a live tmux session or re-spawns one
 		// that is gone, so a pane that outlived the crash keeps its agent.
+		//
+		// From here the server may hold the workspace, so a failure NEVER stops
+		// it: an ordinary agent-server destroys its worktree on SIGTERM. It stays
+		// running and recorded (adoptPending), and the next reattach finishes the
+		// adoption.
 		srv := &remoteAgentServer{rc: rc}
 		if aerr := errors.Join(srv.Provision(false), srv.Launch(false)); aerr != nil {
 			p.abandonUnadoptedTunnel()
-			abortRestart()
-			return fmt.Errorf("reattach %q: adopting the restarted agent-server failed: %w", i.Title, aerr)
+			return fmt.Errorf("reattach %q: adopting the restarted agent-server failed (it is left running with its workspace; the next reattach retries): %w", i.Title, aerr)
 		}
+		p.adoptPending = false
+		persistIdentity()
 	}
 
 	// Re-verify under i.mu that the row is still the one this attempt probed: a
@@ -154,11 +167,6 @@ func (i *Instance) ReattachSandbox() error {
 	// the replacement and point the row at a reaped runtime.
 	i.mu.Lock()
 	stillCurrent := i.remoteClient == nil && i.backend == b && !i.userKilled && i.liveness != LiveArchived
-	if restarted {
-		// The restart changed the PID and address the persisted handle names; the
-		// new server is live and adopted whether or not this attempt binds it.
-		refreshRuntimeIdentity(b, p)
-	}
 	// Adopting the same runtime provisions nothing, so the recorded callback
 	// state travels with it (#5974): bindProvisionResult installs the result's
 	// reason verbatim, and an empty one would read as a healthy reprovision.

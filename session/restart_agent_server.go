@@ -88,21 +88,36 @@ func (p *sandboxProvisioner) restartAgentServer(expectedToken string) error {
 	if !positivePID(pid) {
 		return fmt.Errorf("restarting the af agent-server returned invalid background PID %q", pid)
 	}
-	// Recorded before anything else can fail: the reap must know the live PID.
-	p.remotePID = pid
+	// Recorded before anything else can fail: the reap must know the live PID,
+	// and a later reattach that finds this server responsive must know it has
+	// not adopted the workspace yet.
+	p.remotePID, p.adoptPending = pid, true
 	w.RemotePID = pid
+	// Up to here nothing has asked the new server to touch the workspace, so
+	// stopping it is safe; a failure past the spawn must not leave it running
+	// with only the in-memory PID updated (the caller persists the identity).
 	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)
-	if err != nil {
-		return err
+	if err == nil && banner.Token != expectedToken {
+		err = errors.New("the restarted af agent-server did not report this session's credential")
 	}
-	if banner.Token != expectedToken {
-		return errors.New("the restarted af agent-server did not report this session's credential")
+	if err != nil {
+		p.stopUnadoptedServer()
+		return err
 	}
 	p.remoteAddr = banner.Addr
 	if banner.Version != "" {
 		p.agentServerVersion = banner.Version
 	}
 	return nil
+}
+
+// stopUnadoptedServer stops the restarted agent-server before it has been asked
+// to adopt anything (best effort; the identity check keeps it off a reused PID).
+// It must NOT be used once Provision has been sent: a server that holds the
+// workspace tears it down on SIGTERM, and a half-adopted workspace is kept (and
+// finished by the next reattach) rather than stopped.
+func (p *sandboxProvisioner) stopUnadoptedServer() {
+	_, _ = p.Run(sshShortStepTimeout, remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef), nil, true)
 }
 
 // refreshRuntimeIdentity copies the provisioner's live identity onto the
@@ -113,10 +128,12 @@ func refreshRuntimeIdentity(b Backend, p *sandboxProvisioner) {
 	case *sandboxBackend:
 		if be.cleanup != nil {
 			be.cleanup.RemotePID, be.cleanup.RemoteAddr, be.cleanup.AgentServerVersion = p.remotePID, p.remoteAddr, p.agentServerVersion
+			be.cleanup.AdoptPending = p.adoptPending
 		}
 	case *sshBackend:
 		if be.cleanup != nil {
 			be.cleanup.RemotePID, be.cleanup.RemoteAddr, be.cleanup.AgentServerVersion = p.remotePID, p.remoteAddr, p.agentServerVersion
+			be.cleanup.AdoptPending = p.adoptPending
 		}
 	}
 }

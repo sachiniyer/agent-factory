@@ -174,6 +174,7 @@ type sandboxProvisioner struct {
 	// so a crashed one can be relaunched from the row alone (W1.4). It names the
 	// session dir's env files and flags, never a secret.
 	launchScript       string
+	adoptPending       bool // a restarted server has not adopted its workspace yet (W1.4)
 	remoteAddr         string
 	agentServerVersion string
 
