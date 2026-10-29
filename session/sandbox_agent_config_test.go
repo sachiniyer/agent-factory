@@ -204,3 +204,47 @@ func TestAgentConfigNeverLandsInAnotherSessionsScope(t *testing.T) {
 	assert.FileExists(t, filepath.Join(a.AccountDir(), "settings.json"))
 	assert.NoDirExists(t, b.AccountDir())
 }
+
+// The operator's selected agent config survives an account swap exactly as it
+// survives a restart: the rotation replaces the whole live scope with the staged
+// one, so the incoming scope must carry it before the agent restarts.
+func TestAgentConfigSurvivesAnOffBoxAccountSwap(t *testing.T) {
+	f := newSwapFixture(t)
+	opHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(opHome, "settings.json"), []byte(`{"model":"opus"}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(opHome, "CLAUDE.md"), []byte("be terse"), 0o600))
+	// This test process is both the daemon box and the sandbox: the operator's home
+	// is CLAUDE_CONFIG_DIR while af stages, the host's scope while the (in-process)
+	// agent-server rotates.
+	hostScope := os.Getenv("CLAUDE_CONFIG_DIR")
+	t.Setenv("CLAUDE_CONFIG_DIR", opHome)
+	f.w.spec.AgentConfigFiles = []string{"claude:settings.json", "claude:CLAUDE.md"}
+	f.inst.agentSrv = hostEnvServer{f.srv, t, hostScope}
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.NoError(t, err)
+
+	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the new account is live")
+	assert.Equal(t, `{"model":"opus"}`, readOrEmpty(filepath.Join(f.dir, "account", "settings.json")), "the model settings came along")
+	assert.Equal(t, "be terse", readOrEmpty(filepath.Join(f.dir, "account", "CLAUDE.md")), "and the instructions")
+}
+
+// A session with no declared config gets none, as before.
+func TestNoAgentConfigIsStagedWhenNoneIsDeclared(t *testing.T) {
+	f := newSwapFixture(t)
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(f.dir, "account", "settings.json"))
+}
+
+// hostEnvServer runs the fake agent-server's swap with the host's environment.
+type hostEnvServer struct {
+	*acctSwapServer
+	t     *testing.T
+	scope string
+}
+
+func (s hostEnvServer) SwapAccountInPlace() (string, error) {
+	s.t.Setenv("CLAUDE_CONFIG_DIR", s.scope)
+	return s.acctSwapServer.SwapAccountInPlace()
+}

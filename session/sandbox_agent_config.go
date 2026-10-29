@@ -56,6 +56,14 @@ func (w *sandboxWorkspace) sandboxAgentConfigEntries() []string {
 // the operator's declaration must not fail a create — and nothing is sent when no
 // file resolves.
 func (w *sandboxWorkspace) syncAgentConfigIn(timeout time.Duration) error {
+	return w.syncAgentConfigInto(timeout, w.AccountDir())
+}
+
+// syncAgentConfigInto places the declared files in scope dir on the host: the live
+// account scope at provision, and the incoming scope during an account handoff, so
+// the personalization survives the swap exactly as it survives a restart (the
+// rotation replaces the whole live directory with the staged one).
+func (w *sandboxWorkspace) syncAgentConfigInto(timeout time.Duration, scopeDir string) error {
 	files := w.sandboxAgentConfigEntries()
 	if len(files) == 0 {
 		return nil
@@ -88,7 +96,7 @@ func (w *sandboxWorkspace) syncAgentConfigIn(timeout time.Duration) error {
 	if sent == 0 {
 		return nil
 	}
-	dir := shellQuote(w.AccountDir())
+	dir := shellQuote(scopeDir)
 	script := "umask 077 && mkdir -p " + dir + " && tar -xf - -C " + dir
 	if out, err := w.shell.Run(timeout, script, bytes.NewReader(buf.Bytes()), true); err != nil {
 		return fmt.Errorf("placing the operator's %s config on the host failed: %s: %w", agent, strings.TrimSpace(string(out)), err)
