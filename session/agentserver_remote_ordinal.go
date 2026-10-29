@@ -1,9 +1,6 @@
 package session
 
-import (
-	"fmt"
-	"slices"
-)
+import "fmt"
 
 // --- data plane: one remote WS per tab, fanned by the shared ptyBroker ---
 
@@ -122,29 +119,25 @@ func (s *remoteAgentServer) wireTarget(tabID string) (tab int, byID string, err 
 }
 
 // sandboxOrdinal is tabID's slot in the SANDBOX's own roster.
+//
+// The agent tab is the one tab whose identity cannot be confused: it is pinned to
+// slot 0 on BOTH rosters by construction and can neither close nor reorder. It
+// therefore needs no roster read and no capability answer, and stays attachable
+// whatever the health probe says — an unknown must never become a refusal for a
+// tab that cannot be mistaken for another (#6082). Every other tab is resolved
+// against the sandbox's own roster, fetched for this dial.
 func (s *remoteAgentServer) sandboxOrdinal(tabID string) (int, error) {
-	agentTab := false
 	if s.inst != nil {
 		if idx, ok := s.inst.TabIndexByID(tabID); ok && idx == 0 {
-			agentTab = true
+			return 0, nil
 		}
 	}
 	roster, err := s.rc.tabs()
 	if err != nil {
-		s.mu.Lock()
-		legacy := s.idPlaneKnown && !slices.Contains(s.features, tabAPIFeature)
-		s.mu.Unlock()
-		if legacy && agentTab {
-			// A server without the tab API has a fixed roster whose only tab is
-			// the agent tab, pinned to slot 0.
-			return 0, nil
-		}
 		return 0, fmt.Errorf("remote session %q cannot resolve tab %q against the sandbox's roster: %w", s.rc.title, tabID, err)
 	}
 	for idx, td := range roster {
-		// The daemon's agent tab is the sandbox's agent-kind tab until the
-		// sandbox has been told its id (#5997); every other tab is matched by id.
-		if td.ID == tabID || (agentTab && td.Kind == TabKindAgent) {
+		if td.ID == tabID {
 			return idx, nil
 		}
 	}
