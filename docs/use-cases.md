@@ -145,9 +145,10 @@ af tasks add \
 
 ## Remote machines
 
-Remote hooks let a repo define scripts for provisioning and deleting sessions
-on another backend. Remote sessions appear in the same TUI, with the same Agent
-tab and attach flow.
+The off-box backends (`docker`, `ssh`, `sandbox`, and remote hooks) run a
+session on another machine or container; with remote hooks a repo defines the
+scripts that provision and delete it. See [backends](backends.md). Remote
+sessions appear in the same TUI, with the same Agent tab.
 
 This is useful when agents need a beefier machine, a specific network, or a
 remote development environment while you still want one local control surface.

@@ -16,6 +16,7 @@ import {
   createTab,
   errorText,
   fetchSessionSnapshot,
+  fetchEditorPortOrigin,
   fetchPreviewOrigin,
   handoffSession,
   isMutationCommittedError,
@@ -150,6 +151,16 @@ for (const backend of ["local", "docker", "ssh", "hook"]) {
     assert.equal(cap.body.repo_path, "/repos/af");
   });
 }
+
+test("createSession sends a listed-host row as `host` and no backend", async () => {
+  // A host pick IS the ssh placement (#5571 W6.3): the daemon refuses a host paired
+  // with any other backend, so the web must send the name alone.
+  const cap = stubFetch();
+  await createSession(createInput({ backend: "host:box1" }), "tok");
+
+  assert.equal(cap.body.host, "box1");
+  assert.equal("backend" in cap.body, false, "the host: prefix is a UI encoding and must never reach the daemon as a backend");
+});
 
 test("createSession omits backend entirely when the user chose the repo default", async () => {
   // This is the subtle half. Sending "local" here would look equivalent and is
@@ -587,6 +598,24 @@ test("triggerTask / removeTask post the stable id", async () => {
   await removeTask(displayedTask(), "tok");
   assert.equal(cap.url, "/v1/RemoveTask");
   assert.equal(cap.body.id, "t-abc123");
+});
+
+test("triggerTask surfaces a committed run's warning instead of plain success (#5762)", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: { ok: true, code: "mutation_committed", warning: "session created, but its start could not be confirmed" },
+      error: null,
+    }),
+  });
+  const err = await triggerTask(displayedTask(), "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError, "a committed run must reject, not resolve as success");
+  assert.equal(isMutationCommittedError(err), true);
+  assert.match((err as ApiError).message, /start could not be confirmed/);
 });
 
 test("task mutations pin the displayed record's project binding (#3230)", async () => {
@@ -1546,4 +1575,41 @@ test("handoffSession sends an operator-selected account with optional agent", as
  await handoffSession("id", "feature", "", "tok", "personal");
  assert.equal(cap.body.account, "personal");
  assert.equal(cap.body.to, "");
+});
+
+// --- fetchEditorPortOrigin (W5.2) -------------------------------------------
+
+test("fetchEditorPortOrigin POSTs with the bearer and returns origin and bootstrap URL", async () => {
+  const cap: { url: string; method?: string; auth?: string } = { url: "" };
+  (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    cap.url = url;
+    cap.method = init.method;
+    cap.auth = (init.headers as Record<string, string> | undefined)?.Authorization;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { origin: "https://box.ts.net:9100", bootstrap_url: "https://box.ts.net:9100/_af/editor-bootstrap?t=x" },
+        error: null,
+      }),
+    } as unknown as Response;
+  };
+  const got = await fetchEditorPortOrigin("sess 1", "tok");
+  assert.deepEqual(got, {
+    origin: "https://box.ts.net:9100",
+    bootstrapUrl: "https://box.ts.net:9100/_af/editor-bootstrap?t=x",
+  });
+  assert.equal(cap.url, "/v1/editor-origin?session=sess%201");
+  assert.equal(cap.method, "POST", "minting allocates, so it must not be a GET");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("fetchEditorPortOrigin is null when the feature is off or the call fails", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> =>
+    ({ ok: false, status: 404, json: async () => ({ error: "off" }) }) as unknown as Response;
+  assert.equal(await fetchEditorPortOrigin("s", ""), null);
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => {
+    throw new Error("network");
+  };
+  assert.equal(await fetchEditorPortOrigin("s", ""), null);
 });

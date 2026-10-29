@@ -179,14 +179,17 @@ Open a rail row’s **…** menu for **Archive** and **Delete session**. Other a
 reveal the menu on hover or keyboard focus. Archive and Delete session each open a confirmation:
 
 - **Archive** tears down a local session's terminal and moves its worktree into
-  the archive. For Docker, SSH, or remote-hook sessions, it pushes the branch to
-  origin and tears down the remote sandbox; there is no local worktree to move.
+  the archive. Docker and remote-hook sessions push the branch to `origin` and
+  tear down the remote sandbox (no local worktree to move); an SSH or sandbox
+  session stops the agent and leaves the workspace on its host.
 - **Restore**, in the archive action's place on an archived row, moves a local
   worktree back and respawns the agent. A local restore starts at once, with no
   confirmation: a dialog shows its progress and offers **Retry restore** if the
   daemon refuses it. For a remote session, it asks for confirmation first, then
   provisions a fresh sandbox from the pushed branch and relaunches the agent; the
-  old sandbox's conversation does not return. Reveal **Archived** in the filter first.
+  old sandbox's conversation does not return. Restoring an SSH or sandbox session
+  archived without a push is refused for now (its workspace stays on its host).
+  Reveal **Archived** in the filter first.
 - **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
@@ -575,6 +578,55 @@ What to know before turning it on:
   unless you have a reason not to.
 - **It is off by default.** No second port opens unless you set the key, and a bind
   conflict is logged and skipped, never fatal.
+
+### Per-session editor origins for remote viewers
+
+A VS Code editor keeps its workbench state, terminal history included, in the browser's
+origin-scoped storage, so each session's editor needs its own origin. On the daemon's own
+machine that is a `*.localhost` name; a viewer on another machine resolves `*.localhost` to
+*its* loopback, so behind a single front-door hostname the only thing left to separate origins
+is the **port**. Declare a pool and each session's editor gets one port from it:
+
+```toml
+[network]
+editor_origin_ports = "9100-9119"
+```
+
+The editor then lives at `https://<same hostname>:<port>`. The daemon persists each
+session's port (`editor-origin-ports.json` in the af home), so the origin, and the storage
+under it, survive daemon restarts; the port is taken back once the session is archived or
+gone and the pool is full. It binds the ports on **loopback only**; you expose them the way you
+expose the main UI, for example:
+
+```sh
+for p in $(seq 9100 9119); do tailscale serve --bg --https=$p 127.0.0.1:$p; done
+```
+
+**The credential is a per-session key, not network reachability.** An editor is a shell in the
+worktree, so a port anyone on the tailnet can open would be a side door around the operator
+token. The web UI asks `POST /v1/editor-origin?session=<id>` (behind the operator token) for a
+single-use bootstrap URL on the editor's origin; opening it sets an `HttpOnly`,
+`SameSite=Strict` cookie (`Secure` behind an HTTPS front door) and redirects, so the key does not
+stay in a URL. A port serves only its own session's editor and accepts only that session's
+cookie: another session's key, a replayed bootstrap URL, or the key of an archived or killed
+session is refused. Keys are in memory, so a daemon restart means the next editor open
+bootstraps again. The path `/_af/editor-bootstrap` is reserved on these ports.
+
+**A reassigned port never shows a previous session's storage.** Browser storage belongs to the
+origin, and an origin is a port, so when a full pool hands the port of an archived or gone
+session to a new one, every browser that visited the old editor still holds its localStorage,
+IndexedDB, caches and service workers for that origin. Each assignment therefore gets a fresh
+epoch, remembered per browser in a second `HttpOnly` cookie. A bootstrap from a browser whose
+epoch is missing or older is answered with a page that clears the origin's storage before
+entering the editor, using `Clear-Site-Data` where the browser honours it (secure contexts) and
+a script everywhere else, including a plain-HTTP tailnet origin. A browser that already carries
+the current epoch, for example after a daemon restart, keeps its storage. Reassignment prefers the
+port that has been free longest, which shortens the window in which any browser can still hold an
+old owner's state.
+
+Unset (the default), nothing is bound and a remote viewer keeps the same-origin editor. If the
+pool is full the editor stays on the same-origin mirror and the daemon's error names
+`network.editor_origin_ports`. See [`network.editor_origin_ports`](configuration.md).
 
 ##### VS Code tabs get one too — per session
 

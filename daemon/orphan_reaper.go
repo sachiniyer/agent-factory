@@ -29,10 +29,21 @@ var stopSandboxTunnels = session.StopAllSandboxTunnels
 // query to. It must match the af.home label runContainer stamps.
 var configDirForReap = config.GetConfigDir
 
-// sweepStartupOrphanContainers runs after instance restore, but before the
-// manager readiness barrier opens. Therefore every af.home-scoped container the
-// sweep can see predates create admission; a new CreateSession cannot manufacture
-// a candidate midway through the destructive pass (#2632).
+// sweepStartupOrphanContainers arms the startup orphan-container sweep; it does
+// NOT run it. It used to run the destructive pass right here, before the manager
+// readiness barrier opened, which made daemon readiness wait on the Docker
+// engine: the pass spends up to 30s on `docker info` and another 30s on
+// `docker ps` against an unavailable engine, so a daemon with a hung or slow
+// Docker sat in "starting (restoring sessions)" for every client (#5815). A
+// housekeeping sweep must not gate readiness on an external dependency.
+//
+// The pass is armed through the same flag the incomplete-view deferral uses, so
+// it runs after readiness on a tracked worker (launchDeferredOrphanSweepIfReady,
+// launched by RunDaemon and re-tried by the poll loop). That path takes
+// createSweepMu across the protected-slug snapshot AND the container listing, so
+// a CreateSession admitted after the barrier opens cannot publish a container the
+// stale protected set misses (#2632) — the guarantee the pre-readiness position
+// used to give by excluding creates entirely.
 //
 // When skippedRepos is non-empty the daemon's session view is known-incomplete:
 // a repo whose instances.json was corrupted/unreadable, OR parsed but whose
@@ -42,28 +53,23 @@ var configDirForReap = config.GetConfigDir
 // containers the sweep cannot distinguish from genuine orphans — the same
 // "cannot distinguish orphaned from live, err toward sparing" principle the
 // sweep's slug-collision branch already follows (session/orphan_reaper.go). The
-// sweep is deferred instead, and runDeferredOrphanSweepIfReady re-runs it once
-// the poll loop drains the skip set (a skipped repo whose instances.json now
-// parses AND re-materializes its rows drains the set, so the protected set is
-// complete again). This bounds the #2194 regression to one polling interval:
-// genuine orphans survive un-reaped only until the view is complete, while a
-// skipped repo's live container is never force-killed.
+// armed sweep therefore waits until the poll loop drains the skip set (a skipped
+// repo whose instances.json now parses AND re-materializes its rows drains the
+// set, so the protected set is complete again): genuine orphans survive
+// un-reaped only until the view is complete, while a skipped repo's live
+// container is never force-killed.
 func sweepStartupOrphanContainers(manager *Manager) {
-	homeID, err := configDirForReap()
-	if err != nil {
+	if _, err := configDirForReap(); err != nil {
 		log.WarningLog.Printf("orphan sweep: cannot resolve the AF home; skipping: %v", err)
 		return
 	}
 	manager.mu.Lock()
 	skipped := len(manager.skippedRepos)
-	if skipped > 0 {
-		manager.deferredOrphanSweepArmed = true
-		manager.mu.Unlock()
-		log.WarningLog.Printf("orphan sweep: deferring the destructive pass; %d repo(s) have an incomplete instances view (corrupted/unreadable instances.json or rows that failed to load) — their live containers cannot be distinguished from genuine orphans. The sweep will re-run once the skip set drains on the next polling refresh.", skipped)
-		return
-	}
+	manager.deferredOrphanSweepArmed = true
 	manager.mu.Unlock()
-	sweepOrphanContainers(homeID, manager.dockerReapProtectedSlugs())
+	if skipped > 0 {
+		log.WarningLog.Printf("orphan sweep: deferring the destructive pass; %d repo(s) have an incomplete instances view (corrupted/unreadable instances.json or rows that failed to load) — their live containers cannot be distinguished from genuine orphans. The sweep will re-run once the skip set drains on the next polling refresh.", skipped)
+	}
 }
 
 // sweepStartupOrphanSandboxTunnels runs beside sweepStartupOrphanContainers,
@@ -96,16 +102,15 @@ func sweepStartupOrphanSandboxTunnels() {
 // deferred or the skip set has not yet drained; if any repo is still skipped
 // the sweep stays deferred and re-evaluates on the next poll.
 //
-// Unlike the startup sweep, the deferred sweep runs AFTER the manager readiness
-// barrier has opened (finishInstanceRestore at daemon.go:322), so a CreateSession
+// Unlike the old synchronous startup pass, this sweep runs AFTER the manager readiness
+// barrier has opened (finishInstanceRestore), so a CreateSession
 // can be admitted concurrently. A create sets pendingCreates under m.mu and only
 // then provisions its container (manager_create.go), so without a guard a create
 // admitted after the protected-slug snapshot but before SweepOrphanContainers
 // lists containers would publish a container whose slug is absent from the
 // stale protected set — the destructive pass would force-reap a live session
-// (#2632). The startup path is safe only because the not-yet-open readiness
-// barrier excludes creates entirely; this poll-time path uses the dedicated
-// createSweepMu admission barrier instead, held across the protected-slug
+// (#2632). Both the startup-armed sweep (#5815) and the poll-time recovery
+// use the dedicated createSweepMu admission barrier, held across the protected-slug
 // snapshot AND the SweepOrphanContainers call: a create that has not yet set
 // pendingCreates blocks on createSweepMu until the sweep releases it, and one
 // that already set it is in the protected set. m.mu is released before the

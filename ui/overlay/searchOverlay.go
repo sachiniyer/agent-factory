@@ -155,12 +155,11 @@ const (
 	tierNone
 )
 
-// searchTierOf classifies the match between pattern and str, using the same
-// NFC normalization and per-rune case folding as fuzzyMatch so ranking never
-// disagrees with the match test. An empty pattern returns one tier for every
-// candidate — including the empty string — so an empty query can never
-// reorder the list: uniform tiers plus the stable sort preserve the old
-// "empty query lists everything in sidebar order" behaviour.
+// searchTierOf classifies the match between pattern and str, using NFC
+// normalization and per-rune case folding. An empty pattern returns one
+// tier for every candidate — including the empty string — so an empty query
+// can never reorder the list: uniform tiers plus the stable sort preserve
+// the old "empty query lists everything in sidebar order" behaviour.
 func searchTierOf(pattern, str string) searchTier {
 	patternRunes := []rune(norm.NFC.String(pattern))
 	if len(patternRunes) == 0 {
@@ -228,14 +227,6 @@ func subsequenceMatch(pattern, str []rune) bool {
 		}
 	}
 	return false
-}
-
-// fuzzyMatch returns true if all runes in pattern appear in str in order,
-// ignoring case. Both strings are NFC-normalized first so canonically
-// equivalent input (e.g. a decomposed "é" typed on macOS vs a composed one
-// from copy-paste) still matches.
-func fuzzyMatch(pattern, str string) bool {
-	return subsequenceMatch([]rune(norm.NFC.String(pattern)), []rune(norm.NFC.String(str)))
 }
 
 // runeEqualFold reports whether two runes are equal under Unicode simple

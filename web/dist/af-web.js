@@ -6206,14 +6206,18 @@ function currentMode() {
     return "dark";
   }
 }
-function surface(mode) {
+function surface(mode, token2 = "--af-surface") {
   const probe = document.createElement("span");
   probe.dataset.afTheme = mode;
   probe.hidden = true;
   document.documentElement.append(probe);
-  const color = getComputedStyle(probe).getPropertyValue("--af-surface").trim();
+  const color = getComputedStyle(probe).getPropertyValue(token2).trim();
   probe.remove();
   return color;
+}
+function themeSurfaces() {
+  const both = (mode) => [surface(mode), surface(mode, "--af-surface-raised")];
+  return { light: both("light"), dark: both("dark") };
 }
 function themeColorMetaContents(choice) {
   return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
@@ -6438,6 +6442,429 @@ async function copyText(text) {
   }
 }
 
+// src/types.ts
+var Liveness = {
+  Unset: 0,
+  Running: 1,
+  Ready: 2,
+  Lost: 3,
+  Dead: 4,
+  Archived: 5,
+  LimitReached: 6
+};
+var TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3,
+  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
+   *  per-session code-server rooted at the session's worktree, reachable only
+   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
+   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
+   *  lockstep with the Go enum. */
+  VSCode: 4,
+  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
+   *  Mirrors session.TabKindDocs (session/tab.go). */
+  Docs: 5
+};
+var InFlightOp = {
+  None: 0,
+  Creating: 1,
+  Killing: 2,
+  Archiving: 3,
+  Restoring: 4,
+  Replacing: 5,
+  Respawning: 6
+};
+var Status = {
+  Running: 0,
+  Ready: 1,
+  Loading: 2,
+  Deleting: 3,
+  Dead: 4,
+  Lost: 5,
+  Archived: 6
+};
+
+// src/time.ts
+function formatDuration(ms) {
+  const age = Math.max(0, ms);
+  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
+  if (age < minute) return "<1m";
+  if (age < hour) return `${Math.floor(age / minute)}m`;
+  if (age < day) return `${Math.floor(age / hour)}h`;
+  return `${Math.floor(age / day)}d`;
+}
+function formatTime(value, now = /* @__PURE__ */ new Date()) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  const delta = date.getTime() - now.getTime();
+  if (Math.abs(delta) < 24 * 60 * 6e4) {
+    const duration = formatDuration(Math.abs(delta));
+    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
+  }
+  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// src/status.ts
+var OPERATOR_KIND_LABELS = {
+  "needs-you": "Needs you",
+  working: "Working",
+  "waiting-limit": "Waiting on a limit",
+  broken: "Broken",
+  archived: "Archived"
+};
+var ROW_KIND_LABELS = {
+  ready: "Ready",
+  working: "Working",
+  lost: "Lost",
+  dead: "Dead",
+  limit: "Limit reached",
+  archived: "Archived"
+};
+var IDLE_REASON_LABELS = {
+  "usage-limit": "usage limit",
+  "process-exited": "process exited",
+  "restore-gave-up": "restore gave up",
+  "restore-waiting-on-environment": "restore waiting on environment",
+  "recreate-pending": "recreate notice pending",
+  "prompt-not-delivered": "prompt not delivered",
+  "delivery-unconfirmed": "delivery unknown",
+  "no-pane-change-since-delivery": "no change after delivery",
+  "settled-after-pane-change": "pane changed"
+};
+function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
+  const label = idleReasonLabel(s.idle_reason);
+  if (!label) {
+    return "";
+  }
+  let detail = label;
+  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
+    const { attempts, error } = s.lost_restore_failure;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "attempt" : "attempts";
+      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+    }
+  }
+  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
+    const { attempts, error } = s.lost_restore_wait;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
+      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
+    }
+  }
+  if (s.last_pane_churn_at) {
+    const churn = new Date(s.last_pane_churn_at);
+    if (!Number.isNaN(churn.getTime())) {
+      const age = `${formatPaneChurnAge(churn, now)} ago`;
+      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
+    }
+  }
+  return detail;
+}
+function idleReasonLabel(reason) {
+  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
+}
+function unreachableDetail(s, now = /* @__PURE__ */ new Date()) {
+  const u = s.unreachable;
+  if (!u?.since || !u.error) {
+    return "";
+  }
+  const since = new Date(u.since);
+  if (Number.isNaN(since.getTime())) {
+    return "";
+  }
+  return `unreachable ${formatPaneChurnAge(since, now)} ago \xB7 ${u.error}`;
+}
+function formatPaneChurnAge(churn, now) {
+  return formatDuration(now.getTime() - churn.getTime());
+}
+var READY_ICON = "circle";
+var DEAD_ICON = "circle";
+var LOST_ICON = "circle-dashed";
+var ARCHIVED_ICON = "archive";
+var LIMIT_ICON = "diamond";
+var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
+function rowStatus(s) {
+  const op = s.in_flight_op ?? InFlightOp.None;
+  if (op !== InFlightOp.None) {
+    return WORKING;
+  }
+  return dotForLiveness(livenessOf(s));
+}
+function isWorking(s) {
+  return rowStatus(s).kind === null;
+}
+function isCreating(s) {
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
+}
+function rowKind(s) {
+  return rowStatus(s).kind ?? "working";
+}
+function operatorKind(s) {
+  const displayed = rowKind(s);
+  if (displayed === "working") {
+    return "working";
+  }
+  if (displayed === "archived") {
+    return "archived";
+  }
+  if (displayed === "limit" || s.idle_reason === "usage-limit") {
+    return "waiting-limit";
+  }
+  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
+    return "broken";
+  }
+  return "needs-you";
+}
+function livenessOf(s) {
+  const lv = s.liveness ?? Liveness.Unset;
+  if (lv !== Liveness.Unset) {
+    return lv;
+  }
+  switch (s.status) {
+    case Status.Ready:
+      return Liveness.Ready;
+    case Status.Dead:
+      return Liveness.Dead;
+    case Status.Lost:
+      return Liveness.Lost;
+    case Status.Archived:
+      return Liveness.Archived;
+    // Running and the transient values (Loading/Deleting, which never persist)
+    // fall through to the working dot, matching render.go's LivenessUnset arm.
+    default:
+      return Liveness.Running;
+  }
+}
+function dotForLiveness(lv) {
+  switch (lv) {
+    case Liveness.Ready:
+      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
+    case Liveness.Lost:
+      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
+    case Liveness.Dead:
+      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
+    case Liveness.Archived:
+      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
+    case Liveness.LimitReached:
+      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
+    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
+    case Liveness.Running:
+    case Liveness.Unset:
+    default:
+      return WORKING;
+  }
+}
+function isArchived(s) {
+  return livenessOf(s) === Liveness.Archived;
+}
+function isLimitReached(s) {
+  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
+}
+function isPendingManualHandoffDeliveryUnconfirmed(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+}
+function ambiguousHandoffDelivery(status) {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+function confirmableHandoffDelivery(status) {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
+function isPendingAgentHandoffDeliveryUnconfirmed(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+}
+function isPendingAgentHandoffDeliveryConfirmable(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function isPendingManualSwapDeliveryConfirmable(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function canHandoff(s) {
+  return s.can_handoff === true;
+}
+function isRootSession(s) {
+  return s.is_root === true;
+}
+function compareSessionsForRail(a, b) {
+  const aArchived = isArchived(a);
+  const aa = aArchived ? 1 : 0;
+  const bb = isArchived(b) ? 1 : 0;
+  if (aa !== bb) {
+    return aa - bb;
+  }
+  const ar = isRootSession(a) ? 0 : 1;
+  const br = isRootSession(b) ? 0 : 1;
+  if (ar !== br) {
+    return ar - br;
+  }
+  const at = a.created_at ?? "";
+  const bt = b.created_at ?? "";
+  if (at !== bt) {
+    const asc = at < bt ? -1 : 1;
+    return aArchived ? -asc : asc;
+  }
+  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
+var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
+function isOffBoxWorkspace(s) {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
+function rowTitle(s) {
+  const lv = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  let title = s.title;
+  if (isOffBoxWorkspace(s)) {
+    title = "[remote] " + title;
+  }
+  if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  }
+  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
+    title = "[deleting] " + title;
+  }
+  if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
+  }
+  const recreate = rootRecreateNote(s);
+  if (recreate) {
+    title = `[${recreate}] ` + title;
+  }
+  if (archiveWarningText(s) !== "") {
+    title = "[archive incomplete] " + title;
+  }
+  if (s.unreachable?.since && s.unreachable?.error) {
+    title = "[unreachable] " + title;
+  }
+  if (s.model_change) {
+    title = "[model changed] " + title;
+  }
+  return title;
+}
+function archiveWarningText(s) {
+  return s.archive_warning?.trim() ?? "";
+}
+var CALLBACK_UNAVAILABLE_PREFIX = "af callback unavailable: ";
+function callbackUnavailableText(s) {
+  const reason = s.callback_unavailable?.trim() ?? "";
+  return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
+}
+function sessionWarningText(s) {
+  return [archiveWarningText(s), callbackUnavailableText(s)].filter((t) => t !== "").join(" \xB7 ");
+}
+function rootRecreateNote(s) {
+  switch (s.root_recreate_context) {
+    case "fresh":
+      return "fresh context";
+    case "unknown":
+      return "context unknown";
+    default:
+      return "";
+  }
+}
+function limitBadgePrefix(s) {
+  if (!s.limit_reset_at) {
+    return "[limit] ";
+  }
+  const reset = new Date(s.limit_reset_at);
+  if (Number.isNaN(reset.getTime())) {
+    return "[limit] ";
+  }
+  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
+}
+function formatLimitReset(reset, now) {
+  const h12 = (reset.getHours() + 11) % 12 + 1;
+  const ampm = reset.getHours() < 12 ? "am" : "pm";
+  const min = reset.getMinutes();
+  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
+  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
+  if (sameDay) {
+    return clock;
+  }
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
+// src/backends.ts
+var HOST_VALUE_PREFIX = "host:";
+function hostFromChoiceValue(value) {
+  return value.startsWith(HOST_VALUE_PREFIX) ? value.slice(HOST_VALUE_PREFIX.length) : "";
+}
+var REPO_DEFAULT = "";
+function backendChoices(catalog) {
+  if (catalog === null) {
+    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
+  }
+  const callbackAdvisory = (opt) => {
+    if (opt?.status !== "available") return "";
+    const parts = [];
+    if (opt.note) parts.push(`Host ${opt.note}`);
+    if (opt.callback_unavailable_reason) parts.push(CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason);
+    return parts.join(" \xB7 ");
+  };
+  const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
+  const choices = [
+    {
+      value: REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default:
+      // that is the misconfigured case, where naming a backend would be inventing
+      // one. The reason says what is wrong with the key.
+      label: catalog.default === "" ? "Repo default" : `Repo default (${resolvedDefault?.label ?? catalog.default})`,
+      // Taken from the daemon, not inferred here. A repo whose declared default is
+      // broken resolves to that broken backend and FAILS — it does not quietly run
+      // local — so the default is not automatically a safe harbour.
+      status: catalog.default_status,
+      reason: catalog.default_status === "available" ? callbackAdvisory(resolvedDefault) : catalog.default_reason ?? ""
+    }
+  ];
+  for (const opt of catalog.backends) {
+    choices.push({
+      value: opt.name,
+      label: opt.label,
+      status: opt.status,
+      reason: opt.status === "available" ? callbackAdvisory(opt) : opt.reason ?? ""
+    });
+  }
+  for (const h2 of catalog.hosts ?? []) {
+    const parts = [`host: ${h2.name}`];
+    if (h2.address) parts[0] += ` (${h2.address})`;
+    if (h2.name === catalog.default_host) parts[0] += " \xB7 default";
+    choices.push({
+      value: HOST_VALUE_PREFIX + h2.name,
+      label: parts[0],
+      status: h2.status,
+      reason: h2.status === "available" ? "" : h2.reason ?? ""
+    });
+  }
+  return choices;
+}
+function backendNotice(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 ? "" : choice.reason;
+}
+function backendSelectable(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 || choice.status === "available";
+}
+
 // src/api.ts
 var TOKEN_KEY = "af.token";
 function loadToken() {
@@ -6612,7 +7039,10 @@ async function createSession(input, token2) {
     prompt: input.prompt
   };
   const backend = (input.backend ?? "").trim();
-  if (backend !== "") {
+  const host = hostFromChoiceValue(backend);
+  if (host !== "") {
+    body.host = host;
+  } else if (backend !== "") {
     body.backend = backend;
   }
   const account = (input.account ?? "").trim();
@@ -6739,6 +7169,10 @@ async function rebindProject(id, path, token2, expectedRoot = null, expectedChec
   const resp = await af("RebindProject", request, token2);
   return resp.project;
 }
+async function setProjectColor(id, color, token2) {
+  const resp = await af("SetProjectColor", { id, color }, token2);
+  return resp.project;
+}
 async function listProjects(token2, signal) {
   const resp = await af("ListProjects", {}, token2, signal);
   return resp.projects ?? [];
@@ -6814,6 +7248,26 @@ async function fetchPreviewOrigin(sessionId, tabId, token2) {
     return "";
   }
 }
+async function fetchEditorPortOrigin(sessionId, token2) {
+  const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
+  const headers = {};
+  if (token2 !== "") {
+    headers.Authorization = `Bearer ${token2}`;
+  }
+  try {
+    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    if (!resp.ok) {
+      return null;
+    }
+    const env = await resp.json();
+    if (env?.error != null || !env?.data?.origin || !env?.data?.bootstrap_url) {
+      return null;
+    }
+    return { origin: env.data.origin, bootstrapUrl: env.data.bootstrap_url };
+  } catch {
+    return null;
+  }
+}
 async function probeWebTab(path, token2, timeoutMs) {
   const headers = {};
   if (token2 !== "") {
@@ -6867,7 +7321,10 @@ async function updateTask(task, update, token2) {
 }
 async function triggerTask(task, token2) {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  const result = await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 async function removeTask(task, token2) {
   requireTaskID(task.id, "remove a task");
@@ -6914,6 +7371,10 @@ async function listAccounts(token2, repoPath = "") {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af("ListAccounts", body, token2);
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
+}
+async function quotaReport(token2) {
+  const resp = await af("QuotaReport", {}, token2);
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -7748,6 +8209,59 @@ function appendStatus(row, status, agent, name) {
   row.append(h("div", { class: "af-accounts-echo" }, status.message));
 }
 
+// src/quota.ts
+function emptyQuotaState() {
+  return { agents: [], warnings: [], loaded: false, error: "" };
+}
+var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
+function renderQuotaSection(state) {
+  const section = h("section", { class: "af-quota" });
+  section.setAttribute("aria-label", "Usage");
+  if (state.loaded === false && !state.error) {
+    section.append(h("p", {}, "Connecting\u2026"));
+    return section;
+  }
+  const head = h(
+    "div",
+    { class: "af-quota-head" },
+    h("span", { class: "af-quota-title" }, "Usage"),
+    h("span", { class: "af-view-count" }, String(state.agents.length))
+  );
+  section.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
+  if (state.error !== "") {
+    section.append(
+      h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`)
+    );
+    return section;
+  }
+  for (const warning of state.warnings) {
+    section.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
+  }
+  if (state.agents.length === 0) {
+    section.append(
+      h("p", { class: "af-quota-empty" }, "No agent CLIs are configured, so there is nothing to report.")
+    );
+    return section;
+  }
+  const list = h("div", { class: "af-quota-list" });
+  for (const agent of state.agents) {
+    const row = h(
+      "div",
+      { class: "af-quota-row" },
+      h("span", { class: "af-quota-agent" }, agent.program),
+      h("span", { class: "af-quota-cell" }, agent.quota),
+      h(
+        "span",
+        { class: agent.limited_sessions > 0 ? "af-quota-cell af-quota-limited" : "af-quota-cell" },
+        agent.observed
+      )
+    );
+    list.append(row, h("p", { class: "af-quota-detail" }, agent.detail));
+  }
+  section.append(list);
+  return section;
+}
+
 // src/scrollkeep.ts
 function listToken(parts) {
   return parts.map((p) => p ?? "none").join("\0");
@@ -7862,6 +8376,9 @@ var ConfigPane = class {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   accounts = emptyAccountsState();
+  /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
+   *  Accounts. Same "not config" rule: see quota.ts. */
+  quota = emptyQuotaState();
   theme = "system";
   showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
@@ -7890,11 +8407,12 @@ var ConfigPane = class {
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
+  lastQuota = null;
   lastTheme = null;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts, theme = this.theme) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastTheme === theme) {
+  update(entries, path, status, accounts, quota, theme = this.theme) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota && this.lastTheme === theme) {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
@@ -7907,12 +8425,14 @@ var ConfigPane = class {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastQuota = quota;
     this.lastTheme = theme;
     this.theme = theme;
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    this.quota = quota;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -8073,7 +8593,8 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
+      renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+      renderQuotaSection(this.quota)
     );
   }
   /** Theme and the saved token live in this browser's localStorage, not in
@@ -11951,408 +12472,6 @@ var AccountSelection = class {
   }
 };
 
-// src/types.ts
-var Liveness = {
-  Unset: 0,
-  Running: 1,
-  Ready: 2,
-  Lost: 3,
-  Dead: 4,
-  Archived: 5,
-  LimitReached: 6
-};
-var TabKind = {
-  Agent: 0,
-  Shell: 1,
-  Process: 2,
-  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
-   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
-   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
-  Web: 3,
-  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
-   *  per-session code-server rooted at the session's worktree, reachable only
-   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
-   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
-   *  lockstep with the Go enum. */
-  VSCode: 4,
-  /** A proposal Docs tab (no PTY, no URL): the proposal named by `proposal`.
-   *  Mirrors session.TabKindDocs (session/tab.go). */
-  Docs: 5
-};
-var InFlightOp = {
-  None: 0,
-  Creating: 1,
-  Killing: 2,
-  Archiving: 3,
-  Restoring: 4,
-  Replacing: 5,
-  Respawning: 6
-};
-var Status = {
-  Running: 0,
-  Ready: 1,
-  Loading: 2,
-  Deleting: 3,
-  Dead: 4,
-  Lost: 5,
-  Archived: 6
-};
-
-// src/time.ts
-function formatDuration(ms) {
-  const age = Math.max(0, ms);
-  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
-  if (age < minute) return "<1m";
-  if (age < hour) return `${Math.floor(age / minute)}m`;
-  if (age < day) return `${Math.floor(age / hour)}h`;
-  return `${Math.floor(age / day)}d`;
-}
-function formatTime(value, now = /* @__PURE__ */ new Date()) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Unknown time";
-  const delta = date.getTime() - now.getTime();
-  if (Math.abs(delta) < 24 * 60 * 6e4) {
-    const duration = formatDuration(Math.abs(delta));
-    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
-  }
-  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-// src/status.ts
-var OPERATOR_KIND_LABELS = {
-  "needs-you": "Needs you",
-  working: "Working",
-  "waiting-limit": "Waiting on a limit",
-  broken: "Broken",
-  archived: "Archived"
-};
-var ROW_KIND_LABELS = {
-  ready: "Ready",
-  working: "Working",
-  lost: "Lost",
-  dead: "Dead",
-  limit: "Limit reached",
-  archived: "Archived"
-};
-var IDLE_REASON_LABELS = {
-  "usage-limit": "usage limit",
-  "process-exited": "process exited",
-  "restore-gave-up": "restore gave up",
-  "restore-waiting-on-environment": "restore waiting on environment",
-  "recreate-pending": "recreate notice pending",
-  "prompt-not-delivered": "prompt not delivered",
-  "delivery-unconfirmed": "delivery unknown",
-  "no-pane-change-since-delivery": "no change after delivery",
-  "settled-after-pane-change": "pane changed"
-};
-function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
-  const label = idleReasonLabel(s.idle_reason);
-  if (!label) {
-    return "";
-  }
-  let detail = label;
-  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
-    const { attempts, error } = s.lost_restore_failure;
-    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "attempt" : "attempts";
-      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
-    }
-  }
-  if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
-    const { attempts, error } = s.lost_restore_wait;
-    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "environmental failure" : "environmental failures";
-      detail = `restore is waiting on the environment (${attempts} ${noun}): ${error}`;
-    }
-  }
-  if (s.last_pane_churn_at) {
-    const churn = new Date(s.last_pane_churn_at);
-    if (!Number.isNaN(churn.getTime())) {
-      const age = `${formatPaneChurnAge(churn, now)} ago`;
-      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
-    }
-  }
-  return detail;
-}
-function idleReasonLabel(reason) {
-  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
-}
-function unreachableDetail(s, now = /* @__PURE__ */ new Date()) {
-  const u = s.unreachable;
-  if (!u?.since || !u.error) {
-    return "";
-  }
-  const since = new Date(u.since);
-  if (Number.isNaN(since.getTime())) {
-    return "";
-  }
-  return `unreachable ${formatPaneChurnAge(since, now)} ago \xB7 ${u.error}`;
-}
-function formatPaneChurnAge(churn, now) {
-  return formatDuration(now.getTime() - churn.getTime());
-}
-var READY_ICON = "circle";
-var DEAD_ICON = "circle";
-var LOST_ICON = "circle-dashed";
-var ARCHIVED_ICON = "archive";
-var LIMIT_ICON = "diamond";
-var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
-function rowStatus(s) {
-  const op = s.in_flight_op ?? InFlightOp.None;
-  if (op !== InFlightOp.None) {
-    return WORKING;
-  }
-  return dotForLiveness(livenessOf(s));
-}
-function isWorking(s) {
-  return rowStatus(s).kind === null;
-}
-function isCreating(s) {
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
-}
-function rowKind(s) {
-  return rowStatus(s).kind ?? "working";
-}
-function operatorKind(s) {
-  const displayed = rowKind(s);
-  if (displayed === "working") {
-    return "working";
-  }
-  if (displayed === "archived") {
-    return "archived";
-  }
-  if (displayed === "limit" || s.idle_reason === "usage-limit") {
-    return "waiting-limit";
-  }
-  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
-    return "broken";
-  }
-  return "needs-you";
-}
-function livenessOf(s) {
-  const lv = s.liveness ?? Liveness.Unset;
-  if (lv !== Liveness.Unset) {
-    return lv;
-  }
-  switch (s.status) {
-    case Status.Ready:
-      return Liveness.Ready;
-    case Status.Dead:
-      return Liveness.Dead;
-    case Status.Lost:
-      return Liveness.Lost;
-    case Status.Archived:
-      return Liveness.Archived;
-    // Running and the transient values (Loading/Deleting, which never persist)
-    // fall through to the working dot, matching render.go's LivenessUnset arm.
-    default:
-      return Liveness.Running;
-  }
-}
-function dotForLiveness(lv) {
-  switch (lv) {
-    case Liveness.Ready:
-      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
-    case Liveness.Lost:
-      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
-    case Liveness.Dead:
-      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
-    case Liveness.Archived:
-      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
-    case Liveness.LimitReached:
-      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
-    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
-    case Liveness.Running:
-    case Liveness.Unset:
-    default:
-      return WORKING;
-  }
-}
-function isArchived(s) {
-  return livenessOf(s) === Liveness.Archived;
-}
-function isLimitReached(s) {
-  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
-}
-function isPendingManualHandoffDeliveryUnconfirmed(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
-}
-function ambiguousHandoffDelivery(status) {
-  return status === "sent-unverified" || status === "could-not-confirm";
-}
-function confirmableHandoffDelivery(status) {
-  return ambiguousHandoffDelivery(status) || status === "delivered";
-}
-function isPendingAgentHandoffDeliveryUnconfirmed(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
-}
-function isPendingAgentHandoffDeliveryConfirmable(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function isPendingManualSwapDeliveryConfirmable(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  const status = pending?.mission_delivery_status;
-  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function canHandoff(s) {
-  return s.can_handoff === true;
-}
-function isRootSession(s) {
-  return s.is_root === true;
-}
-function compareSessionsForRail(a, b) {
-  const aArchived = isArchived(a);
-  const aa = aArchived ? 1 : 0;
-  const bb = isArchived(b) ? 1 : 0;
-  if (aa !== bb) {
-    return aa - bb;
-  }
-  const ar = isRootSession(a) ? 0 : 1;
-  const br = isRootSession(b) ? 0 : 1;
-  if (ar !== br) {
-    return ar - br;
-  }
-  const at = a.created_at ?? "";
-  const bt = b.created_at ?? "";
-  if (at !== bt) {
-    const asc = at < bt ? -1 : 1;
-    return aArchived ? -asc : asc;
-  }
-  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-}
-var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
-function isOffBoxWorkspace(s) {
-  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
-}
-function rowTitle(s) {
-  const lv = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  let title = s.title;
-  if (isOffBoxWorkspace(s)) {
-    title = "[remote] " + title;
-  }
-  if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  }
-  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
-    title = "[deleting] " + title;
-  }
-  if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
-  }
-  const recreate = rootRecreateNote(s);
-  if (recreate) {
-    title = `[${recreate}] ` + title;
-  }
-  if (archiveWarningText(s) !== "") {
-    title = "[archive incomplete] " + title;
-  }
-  if (s.unreachable?.since && s.unreachable?.error) {
-    title = "[unreachable] " + title;
-  }
-  if (s.model_change) {
-    title = "[model changed] " + title;
-  }
-  return title;
-}
-function archiveWarningText(s) {
-  return s.archive_warning?.trim() ?? "";
-}
-var CALLBACK_UNAVAILABLE_PREFIX = "af callback unavailable: ";
-function callbackUnavailableText(s) {
-  const reason = s.callback_unavailable?.trim() ?? "";
-  return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
-}
-function sessionWarningText(s) {
-  return [archiveWarningText(s), callbackUnavailableText(s)].filter((t) => t !== "").join(" \xB7 ");
-}
-function rootRecreateNote(s) {
-  switch (s.root_recreate_context) {
-    case "fresh":
-      return "fresh context";
-    case "unknown":
-      return "context unknown";
-    default:
-      return "";
-  }
-}
-function limitBadgePrefix(s) {
-  if (!s.limit_reset_at) {
-    return "[limit] ";
-  }
-  const reset = new Date(s.limit_reset_at);
-  if (Number.isNaN(reset.getTime())) {
-    return "[limit] ";
-  }
-  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
-}
-function formatLimitReset(reset, now) {
-  const h12 = (reset.getHours() + 11) % 12 + 1;
-  const ampm = reset.getHours() < 12 ? "am" : "pm";
-  const min = reset.getMinutes();
-  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
-  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
-  if (sameDay) {
-    return clock;
-  }
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
-}
-
-// src/backends.ts
-var REPO_DEFAULT = "";
-function backendChoices(catalog) {
-  if (catalog === null) {
-    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
-  }
-  const callbackAdvisory = (opt) => opt?.status === "available" && opt.callback_unavailable_reason ? CALLBACK_UNAVAILABLE_PREFIX + opt.callback_unavailable_reason : "";
-  const resolvedDefault = catalog.backends.find((opt) => opt.name === catalog.default);
-  const choices = [
-    {
-      value: REPO_DEFAULT,
-      // "Repo default" with no parenthetical when the daemon reports no default:
-      // that is the misconfigured case, where naming a backend would be inventing
-      // one. The reason says what is wrong with the key.
-      label: catalog.default === "" ? "Repo default" : `Repo default (${resolvedDefault?.label ?? catalog.default})`,
-      // Taken from the daemon, not inferred here. A repo whose declared default is
-      // broken resolves to that broken backend and FAILS — it does not quietly run
-      // local — so the default is not automatically a safe harbour.
-      status: catalog.default_status,
-      reason: catalog.default_status === "available" ? callbackAdvisory(resolvedDefault) : catalog.default_reason ?? ""
-    }
-  ];
-  for (const opt of catalog.backends) {
-    choices.push({
-      value: opt.name,
-      label: opt.label,
-      status: opt.status,
-      reason: opt.status === "available" ? callbackAdvisory(opt) : opt.reason ?? ""
-    });
-  }
-  return choices;
-}
-function backendNotice(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 ? "" : choice.reason;
-}
-function backendSelectable(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 || choice.status === "available";
-}
-
 // src/dirpicker.ts
 var INITIAL_PICKER_STATE = { listing: null, error: null, loading: false };
 function pickerLoading(prev) {
@@ -13702,6 +13821,25 @@ function siblingSubtreeOf(root2, leafId) {
   }
   return siblingSubtreeOf(root2.b, leafId);
 }
+function focusSuccessorAfterDrop(prev, droppedId, survivors) {
+  const siblings = [];
+  let node = prev;
+  while (node && node.kind === "split") {
+    const inA = findLeaf(node.a, droppedId);
+    if (!inA && !findLeaf(node.b, droppedId)) {
+      return null;
+    }
+    siblings.unshift(inA ? node.b : node.a);
+    node = inA ? node.a : node.b;
+  }
+  for (const sib of siblings) {
+    const hit = leaves(sib).find((l) => survivors.has(l.id));
+    if (hit) {
+      return hit.id;
+    }
+  }
+  return null;
+}
 function dedupeExcept(root2, tab, keepId) {
   const dupes = leaves(root2).filter((l) => l.tab === tab && l.id !== keepId);
   let cur = root2;
@@ -13798,7 +13936,47 @@ function tabsRebound(prevIds, prevKinds, prevTargets, ids, kinds, targets) {
     targets.map((t) => t ?? "")
   );
 }
-function remapByIdentity(root2, prevIds, ids) {
+var isSynth = (id) => /^\d+:/.test(id);
+function synthIdentities(kinds, names) {
+  return kinds.map((k, i) => `${k}:${names[i] ?? ""}`);
+}
+function adoptedSynthIdentities(prevIds, ids, nextSynth) {
+  const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
+  const isNewReal = (id) => id !== "" && !isSynth(id) && !prevIds.includes(id);
+  const adopted = /* @__PURE__ */ new Set();
+  const vanished = new Set(prevIds.filter((id) => id !== "" && isSynth(id) && !ids.includes(id)));
+  const unpaired = /* @__PURE__ */ new Set();
+  ids.forEach((id, i) => {
+    if (!isNewReal(id)) {
+      return;
+    }
+    const synth = nextSynth?.[i];
+    if (synth !== void 0 && vanished.has(synth) && !adopted.has(synth)) {
+      adopted.add(synth);
+    } else {
+      unpaired.add(i);
+    }
+  });
+  const gapOfNew = /* @__PURE__ */ new Set();
+  let key = "";
+  ids.forEach((id, i) => {
+    if (shared.has(id)) {
+      key = id;
+    } else if (unpaired.has(i)) {
+      gapOfNew.add(key);
+    }
+  });
+  key = "";
+  for (const id of prevIds) {
+    if (shared.has(id)) {
+      key = id;
+    } else if (vanished.has(id) && gapOfNew.has(key)) {
+      adopted.add(id);
+    }
+  }
+  return adopted;
+}
+function remapByIdentity(root2, prevIds, ids, nextSynth) {
   if (prevIds.length === 0) {
     return root2;
   }
@@ -13830,14 +14008,13 @@ function remapByIdentity(root2, prevIds, ids) {
   const max = ids.length - 1;
   const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
   if (maxLeaf) {
-    const isSynth = (id) => /^\d+:/.test(id);
-    const backfill = ids.some((id) => id !== "" && !isSynth(id) && !prevIds.includes(id));
+    const adopted = adoptedSynthIdentities(prevIds, ids, nextSynth);
     const deadIdentity = (tab) => {
       const prev = prevIds[tab];
       if (prev === void 0 || prev === "") {
         return true;
       }
-      return !isSynth(prev) || !backfill;
+      return !isSynth(prev) || !adopted.has(prev);
     };
     for (const leaf of leaves(cur)) {
       if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
@@ -14027,6 +14204,8 @@ function webFallbackMs() {
 }
 var PREVIEW_PROBE_HOST = "afprobe.localhost";
 var PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+var EDITOR_PROBE_MESSAGE = "af-editor-origin-ok";
+var EDITOR_PROBE_PATH = "/_af/editor-probe";
 function previewProbeMs() {
   const override = globalThis.__afPreviewProbeMs;
   return typeof override === "number" ? override : 2500;
@@ -14039,6 +14218,27 @@ function previewOriginReachable(origin, fresh = false) {
   } catch {
     return Promise.resolve(false);
   }
+  return framedReachable(port, `http://${PREVIEW_PROBE_HOST}:${port}/`, PREVIEW_PROBE_MESSAGE, fresh);
+}
+function editorOriginReachable(origin, fresh = false) {
+  let key;
+  try {
+    key = "editor:" + new URL(origin).origin;
+  } catch {
+    return Promise.resolve(false);
+  }
+  return framedReachable(key, new URL(EDITOR_PROBE_PATH, origin).href, EDITOR_PROBE_MESSAGE, fresh);
+}
+function editorOriginUnreachableMessage(origin) {
+  let port = "";
+  try {
+    port = new URL(origin).port;
+  } catch {
+  }
+  const which = port !== "" ? `port ${port}` : "the editor port";
+  return `This editor's own address (${which}) is not reachable from this browser, so it is shown on the shared address instead. Expose ${which} the same way as the af port (for example \`tailscale serve --tcp=${port} tcp://127.0.0.1:${port}\`).`;
+}
+function framedReachable(port, probeSrc, probeMessage, fresh) {
   if (fresh) {
     previewReachable.delete(port);
   } else {
@@ -14068,13 +14268,13 @@ function previewOriginReachable(origin, fresh = false) {
       resolve(ok);
     };
     const onMessage = (e) => {
-      if (e.source === frame.contentWindow && e.data === PREVIEW_PROBE_MESSAGE) {
+      if (e.source === frame.contentWindow && e.data === probeMessage) {
         finish(true);
       }
     };
     const timer = window.setTimeout(() => finish(false), previewProbeMs());
     window.addEventListener("message", onMessage);
-    frame.src = `http://${PREVIEW_PROBE_HOST}:${port}/`;
+    frame.src = probeSrc;
     document.body.appendChild(frame);
   });
   previewReachable.set(port, probe);
@@ -14206,6 +14406,7 @@ var SplitView = class {
     const archivedChanged = archived !== this.archived;
     this.archived = archived;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
+    const nextSynth = synthIdentities(tabKinds, tabNames);
     if (sessionId === null || token2 === null) {
       this.teardown();
       this.sessionId = null;
@@ -14217,7 +14418,7 @@ var SplitView = class {
     if (sessionId === this.sessionId) {
       this.tabCount = tabCount;
       const before = this.tree;
-      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
+      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds, nextSynth);
       this.tree = validate(settled, tabCount);
       this.retain(sessionId, this.tree, tabIds);
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
@@ -14233,7 +14434,7 @@ var SplitView = class {
     this.forgetFocusHistory();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
-    this.tree = validate(this.retainedTree(sessionId, tabIds) ?? singleLeaf(initialTab), tabCount);
+    this.tree = validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount);
     this.retain(sessionId, this.tree, tabIds);
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
@@ -14251,25 +14452,25 @@ var SplitView = class {
    *  bar then highlights Agent over a pane showing tab N, and the next close computes
    *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
-  settledTab(sessionId, tabIds) {
+  settledTab(sessionId, tabIds, nextSynth) {
     if (sessionId === this.sessionId) {
       if (!this.tree || !this.focusedId) {
         return 0;
       }
-      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds);
+      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds, nextSynth);
       return findLeaf(remapped, this.focusedId)?.tab ?? 0;
     }
-    const retained = this.retainedTree(sessionId, tabIds);
+    const retained = this.retainedTree(sessionId, tabIds, nextSynth);
     return retained ? leaves(retained)[0]?.tab ?? 0 : 0;
   }
   /** The retained tree for `sessionId`, remapped onto `tabIds` — the only supported
    *  way to read one. Returns null for a session never shown. */
-  retainedTree(sessionId, tabIds) {
+  retainedTree(sessionId, tabIds, nextSynth) {
     const rec = this.trees.get(sessionId);
     if (!rec) {
       return null;
     }
-    return remapByIdentity(rec.tree, rec.ids, tabIds);
+    return remapByIdentity(rec.tree, rec.ids, tabIds, nextSynth);
   }
   /** Retains `tree` for `sessionId` together with the identities it is bound against. */
   retain(sessionId, tree, ids) {
@@ -14505,7 +14706,8 @@ var SplitView = class {
       }
     }
     if (!this.focusedId || !wanted.has(this.focusedId)) {
-      this.focusedId = desired[0]?.id ?? null;
+      const successor = this.focusedId && this.builtTree ? focusSuccessorAfterDrop(this.builtTree, this.focusedId, wanted) : null;
+      this.focusedId = successor ?? desired[0]?.id ?? null;
     }
     if (!sameLayout(this.tree, this.builtTree)) {
       const rootEl = this.buildNode(this.tree);
@@ -14812,9 +15014,27 @@ var SplitView = class {
     };
     const external = !proxied;
     let previewSrcOnce = null;
+    let editorPortBootstrap = false;
+    let editorPortOpenHref = "";
     const resolvePreviewSrc = (fresh) => {
-      if (fresh) {
+      if (fresh || editorPortBootstrap) {
         previewSrcOnce = null;
+        editorPortBootstrap = false;
+        editorPortOpenHref = "";
+      }
+      if (previewSrcOnce === null && isVSCode && mayUsePreviewOrigin && !this.archived && !canUsePreviewOrigin(window.location)) {
+        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then(async (r) => {
+          if (r === null) {
+            return "";
+          }
+          if (!await editorOriginReachable(r.origin, fresh)) {
+            console.warn(editorOriginUnreachableMessage(r.origin));
+            return "";
+          }
+          editorPortBootstrap = true;
+          editorPortOpenHref = r.origin;
+          return r.bootstrapUrl;
+        });
       }
       if (previewSrcOnce === null) {
         previewSrcOnce = mayUsePreviewOrigin && !this.archived && canUsePreviewOrigin(window.location) ? fetchPreviewOrigin(sessionId, realId, this.token ?? "").then(async (origin) => {
@@ -14849,8 +15069,9 @@ var SplitView = class {
       const base = previewSrc !== "" ? previewSrc : src;
       frame.setAttribute("sandbox", webSandbox(isVSCode, previewSrc !== ""));
       if (previewSrc !== "") {
-        open.href = previewSrc;
-        fbLink.href = previewSrc;
+        const openTo = editorPortOpenHref !== "" ? editorPortOpenHref : previewSrc;
+        open.href = openTo;
+        fbLink.href = openTo;
       } else {
         open.href = openHref;
         fbLink.href = openHref;
@@ -15971,6 +16192,12 @@ function buildTask(input) {
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
     on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
+    max_concurrent_runs: (
+      // Same shape gate as on_complete above: a cap the task cannot carry is
+      // stored as 0 (unlimited), never a value ValidateTrigger refuses (#4180).
+      capUnavailableReason(input.trigger, input.targetSession) === null ? input.maxConcurrentRuns ?? 0 : 0
+    ),
+    host: (input.host ?? "").trim(),
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
@@ -15979,6 +16206,29 @@ function buildTask(input) {
 }
 function onCompleteUnavailableReason(targetSession) {
   return targetSession.trim() ? "Target session will be reused." : null;
+}
+function capUnavailableReason(trigger, targetSession) {
+  if (trigger !== "watch") {
+    return "Cron fires already coalesce.";
+  }
+  if (targetSession.trim() !== "") {
+    return "Deliveries into one session already serialize.";
+  }
+  return null;
+}
+function parseCapInput(raw) {
+  const v = raw.trim();
+  if (v === "") {
+    return 0;
+  }
+  if (!/^[+-]?\d+$/.test(v)) {
+    return null;
+  }
+  const n = Number(v);
+  if (n < 0 || !Number.isSafeInteger(n)) {
+    return null;
+  }
+  return n === 0 ? 0 : n;
 }
 function triggerSummary(t) {
   if (t.watch_cmd && t.watch_cmd.trim() !== "") {
@@ -16595,6 +16845,19 @@ function taskFormModal(opts) {
     onCompleteReason.textContent = reason ?? "";
   };
   targetInput.addEventListener("input", syncOnComplete);
+  const capInput = h("input", { type: "text", inputMode: "numeric", class: "af-input", placeholder: "0 \xB7 unlimited", autocomplete: "off" });
+  capInput.setAttribute("aria-label", "Max concurrent runs");
+  const capField = field("Max concurrent runs", capInput);
+  const capReason = h("p", { class: "af-muted" });
+  const capReasonField = fieldGroup("Max concurrent runs", capReason);
+  const syncCap = () => {
+    const reason = capUnavailableReason(triggerSelect.value === "watch" ? "watch" : "cron", targetInput.value);
+    capField.hidden = reason !== null;
+    capReasonField.hidden = reason === null;
+    capReason.textContent = reason ?? "";
+  };
+  targetInput.addEventListener("input", syncCap);
+  triggerSelect.addEventListener("change", syncCap);
   let onCompleteOptions = [];
   const renderOnCompleteHint = () => {
     onCompleteHint.textContent = onCompleteOptions.find((option) => option.value === onCompleteSelect.value)?.hint ?? "";
@@ -16616,6 +16879,47 @@ function taskFormModal(opts) {
   }).catch(() => {
     onCompleteHint.textContent = "Choices unavailable \xB7 current value kept.";
   });
+  const hostSelect = h("select", { class: "af-input" });
+  hostSelect.setAttribute("aria-label", "Host");
+  const hostHint = h("span", { class: "af-modal-hint", id: "af-task-host-hint" });
+  hostSelect.setAttribute("aria-describedby", hostHint.id);
+  const keepHost = opts.seed?.host ?? "";
+  let hostOptions = [];
+  const renderHosts = () => {
+    const previous = hostSelect.value || keepHost;
+    hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
+    for (const o of hostOptions) {
+      const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} \u2014 unavailable`);
+      if (o.status !== "available") opt.disabled = true;
+      hostSelect.append(opt);
+    }
+    if (keepHost !== "" && !hostOptions.some((o) => o.name === keepHost)) {
+      hostSelect.append(h("option", { value: keepHost }, keepHost));
+    }
+    hostSelect.value = previous;
+    if (hostSelect.value !== previous) hostSelect.value = "";
+    const chosen = hostOptions.find((o) => o.name === hostSelect.value);
+    hostHint.textContent = chosen && chosen.status !== "available" ? chosen.reason ?? "" : "";
+  };
+  const hostField = field("Host", hostSelect);
+  hostField.append(hostHint);
+  renderHosts();
+  hostSelect.addEventListener("change", renderHosts);
+  let hostSeq = 0;
+  const loadHostsFor = (repoPath) => {
+    const seq = ++hostSeq;
+    void opts.loadHosts(repoPath).then((hosts) => {
+      if (seq !== hostSeq) return;
+      hostOptions = hosts;
+      renderHosts();
+    }).catch(() => {
+      if (seq !== hostSeq) return;
+      hostOptions = [];
+      renderHosts();
+      hostHint.textContent = "Hosts unavailable \xB7 current value kept.";
+    });
+  };
+  projectSelect.addEventListener("change", () => loadHostsFor(projectSelect.value));
   const programSelect = h("select", { class: "af-input" });
   programSelect.setAttribute("aria-label", "Program");
   const keepProgram = opts.seed?.program ?? "";
@@ -16657,10 +16961,13 @@ function taskFormModal(opts) {
     syncTriggerFields();
     promptArea.value = s.prompt ?? "";
     targetInput.value = s.target_session ?? "";
+    capInput.value = s.max_concurrent_runs ? String(s.max_concurrent_runs) : "";
     programSelect.value = s.program ?? "";
   }
   loadProgramsFor(projectSelect.value);
+  loadHostsFor(projectSelect.value);
   syncOnComplete();
+  syncCap();
   body.append(
     field("Name", nameInput),
     field("Project", projectSelect),
@@ -16671,6 +16978,9 @@ function taskFormModal(opts) {
     field("Target session", targetInput),
     onCompleteField,
     onCompleteReasonField,
+    capField,
+    capReasonField,
+    hostField,
     field("Program", programSelect)
   );
   const card = handle.el.firstElementChild;
@@ -16697,6 +17007,15 @@ function taskFormModal(opts) {
       handle.setError("Enter a watch command.");
       return;
     }
+    let maxConcurrentRuns = 0;
+    if (capUnavailableReason(trigger, targetInput.value) === null) {
+      const parsed = parseCapInput(capInput.value);
+      if (parsed === null) {
+        handle.setError("Max concurrent runs must be a non-negative integer.");
+        return;
+      }
+      maxConcurrentRuns = parsed;
+    }
     handle.setError(null);
     opts.onSubmit({
       name,
@@ -16707,6 +17026,8 @@ function taskFormModal(opts) {
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
       onComplete: onCompleteSelect.value,
+      maxConcurrentRuns,
+      host: hostSelect.value,
       program: programSelect.value
     });
   });
@@ -16721,6 +17042,7 @@ function addTaskModal(projects, defaultProject2, callbacks) {
     defaultProject: defaultProject2,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -16734,6 +17056,7 @@ function editTaskModal(projects, task, callbacks) {
     seed: task,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
@@ -16751,6 +17074,174 @@ function replaceProjectMenuChildren(menu, children, fallback) {
   }
   const replacement = Array.from(menu.querySelectorAll("[data-project-focus]")).find((control) => control.dataset.projectFocus === key && !control.disabled);
   (replacement ?? fallback).focus({ preventScroll: true });
+}
+
+// src/project_color.ts
+var PROJECT_COLOR_PALETTE = [
+  "#ff5555",
+  "#ffb86c",
+  "#f1fa8c",
+  "#50fa7b",
+  "#8be9fd",
+  "#bd93f9",
+  "#ff79c6"
+];
+var FAVICON_MARK_PATH = "M96 416 L96 96 L160 96 L160 288 L224 288 L224 192 L320 288 L320 192 L416 288 L416 416 Z";
+var HEX = /^#[0-9a-f]{6}$/;
+function projectColor(projects, root2) {
+  if (root2 === null) return null;
+  const color = projects.find((p) => p.root === root2)?.color?.toLowerCase() ?? "";
+  return HEX.test(color) ? color : null;
+}
+function rgb(color) {
+  return [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+}
+function hex(c) {
+  return `#${c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+}
+function luminance(c) {
+  const [r, g, b] = c.map((v) => {
+    const x = v / 255;
+    return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrast(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+var INK_DARK = "#1f1f1f";
+var INK_LIGHT = "#ffffff";
+function markInk(color) {
+  const c = rgb(color);
+  const dark = contrast(c, rgb(INK_DARK));
+  const light = contrast(c, rgb(INK_LIGHT));
+  if (Math.max(dark, light) >= 4.5) return dark >= light ? INK_DARK : INK_LIGHT;
+  return contrast(c, [0, 0, 0]) >= light ? "#000000" : INK_LIGHT;
+}
+function projectAccent(color, ...surfaces) {
+  const c = rgb(color);
+  const s = surfaces.map(rgb);
+  const target = luminance(s[0]) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+  for (let step = 0; step <= 20; step++) {
+    const t = step / 20;
+    const candidate = hex(c.map((v, i) => v + (target[i] - v) * t));
+    if (s.every((surface2) => contrast(rgb(candidate), surface2) >= 4.5)) return candidate;
+  }
+  return hex(target);
+}
+function projectFaviconSvg(color) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
+}
+function projectFaviconDataUrl(color) {
+  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color))}`;
+}
+function projectFaviconPng(color, size) {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx || typeof Path2D === "undefined") return null;
+  ctx.scale(size / 512, size / 512);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(112, 0);
+  ctx.arcTo(512, 0, 512, 512, 112);
+  ctx.arcTo(512, 512, 0, 512, 112);
+  ctx.arcTo(0, 512, 0, 0, 112);
+  ctx.arcTo(0, 0, 512, 0, 112);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = markInk(color);
+  ctx.fill(new Path2D(FAVICON_MARK_PATH));
+  return canvas.toDataURL("image/png");
+}
+var DEFAULT_FAVICON_COLOR = "#2f5fd8";
+var appliedFavicon = null;
+function applyProjectFavicon(color) {
+  if (appliedFavicon === color) return;
+  appliedFavicon = color;
+  const tile = color ?? DEFAULT_FAVICON_COLOR;
+  for (const link of document.querySelectorAll('link[rel="icon"]')) {
+    if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
+    const href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile) : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
+    link.setAttribute("href", href ?? link.dataset.afDefaultHref);
+  }
+}
+function applyProjectColor(root2, color, surfaces) {
+  const els = /* @__PURE__ */ new Set([root2, document.body]);
+  if (color === null) {
+    for (const el2 of els) {
+      if (el2.dataset.projectColor === void 0) continue;
+      delete el2.dataset.projectColor;
+      for (const name of PROJECT_VARS) el2.style.removeProperty(name);
+    }
+    return;
+  }
+  const { light, dark } = surfaces();
+  for (const el2 of els) {
+    if (el2.dataset.projectColor === color) continue;
+    el2.dataset.projectColor = color;
+    el2.style.setProperty("--af-project-color", color);
+    el2.style.setProperty("--af-project-ink", markInk(color));
+    el2.style.setProperty("--af-project-accent-light", accentOn(color, light));
+    el2.style.setProperty("--af-project-accent-dark", accentOn(color, dark));
+  }
+}
+function accentOn(color, surfaces) {
+  const [first, ...rest] = surfaces.filter((s) => HEX.test(s));
+  return first === void 0 ? color : projectAccent(color, first, ...rest);
+}
+var PROJECT_VARS = ["--af-project-color", "--af-project-ink", "--af-project-accent-light", "--af-project-accent-dark"];
+function projectColorRow(current, label, onPick) {
+  const pick = (color) => (e) => {
+    e.stopPropagation();
+    onPick(color);
+  };
+  const swatches = PROJECT_COLOR_PALETTE.map((color) => {
+    const swatch = h("button", { type: "button", class: "af-project-swatch" });
+    swatch.style.setProperty("--af-swatch", color);
+    swatch.setAttribute("aria-label", `Color ${label} ${color}`);
+    swatch.setAttribute("title", color);
+    swatch.setAttribute("aria-pressed", current === color ? "true" : "false");
+    swatch.dataset.projectFocus = `color:${color}`;
+    swatch.addEventListener("click", pick(color));
+    return swatch;
+  });
+  const input = h("input", { type: "color", class: "af-project-color-input", tabIndex: -1 });
+  input.value = current ?? PROJECT_COLOR_PALETTE[5];
+  input.setAttribute("aria-hidden", "true");
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("change", () => onPick(input.value));
+  const custom2 = h("button", { type: "button", class: "af-project-swatch af-project-swatch-custom" }, "+");
+  custom2.setAttribute("aria-label", `Custom color for ${label}`);
+  custom2.setAttribute("title", "Custom color");
+  custom2.dataset.projectFocus = "color:custom";
+  custom2.addEventListener("click", (e) => {
+    e.stopPropagation();
+    try {
+      input.showPicker();
+    } catch {
+      input.click();
+    }
+  });
+  const clear = h("button", { type: "button", class: "af-ghost af-project-color-clear" }, "Default");
+  clear.setAttribute("aria-label", `Default color for ${label}`);
+  clear.disabled = current === null;
+  clear.dataset.projectFocus = "color:clear";
+  clear.addEventListener("click", pick(""));
+  const row = h(
+    "div",
+    { class: "af-project-color" },
+    h("span", { class: "af-project-color-label" }, "Color"),
+    ...swatches,
+    custom2,
+    input,
+    clear
+  );
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", `Color for ${label}`);
+  return row;
 }
 
 // src/tabreorder.ts
@@ -17471,6 +17962,8 @@ var AppShell = class {
     this.sessionFirst?.setActive(false);
     this.appControls.dispose();
     for (const menu of this.railMenus.values()) menu.dispose();
+    applyProjectColor(this.el, null, themeSurfaces);
+    applyProjectFavicon(null);
   }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
    *  history entry name the session and project rather than a static "Agent Factory".
@@ -17512,6 +18005,9 @@ var AppShell = class {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
     this.syncDocumentTitle(state);
+    const color = projectColor(state.registeredProjects, state.selectedProject);
+    applyProjectColor(this.el, color, themeSurfaces);
+    applyProjectFavicon(color);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -17567,7 +18063,7 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.themeChoice);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -18020,6 +18516,11 @@ var AppShell = class {
     footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      children.push(
+        projectColorRow(projectColor(state.registeredProjects, currentSummary.root), currentSummary.name, (color) => {
+          this.actions.setProjectColor(currentSummary.root, color);
+        })
+      );
       const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
       if (currentRecord) {
         const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind\u2026");
@@ -18073,10 +18574,18 @@ var AppShell = class {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
+    const name = h("span", { class: "af-project-item-name" }, p.name);
+    const dotColor = record ? projectColor([record], record.root) : null;
+    if (dotColor !== null) {
+      const dot = h("span", { class: "af-project-dot" });
+      dot.style.setProperty("--af-swatch", dotColor);
+      dot.setAttribute("aria-hidden", "true");
+      name.prepend(dot, " ");
+    }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      h("span", { class: "af-project-item-name" }, p.name),
+      name,
       h("span", { class: "af-project-item-path" }, p.path)
     );
     const meta = h(
@@ -18979,6 +19488,37 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
   }
 }
 
+// src/project_color_writes.ts
+function createLatestWriter(write, onError) {
+  const waiting = /* @__PURE__ */ new Map();
+  const draining = /* @__PURE__ */ new Map();
+  const drain = async (key) => {
+    for (let next = waiting.get(key); next !== void 0; next = waiting.get(key)) {
+      waiting.delete(key);
+      try {
+        await write(key, next.value);
+      } catch (e) {
+        onError(e, key, next.value);
+      }
+    }
+    draining.delete(key);
+  };
+  return {
+    set(key, value) {
+      waiting.set(key, { value });
+      const running = draining.get(key);
+      if (running) return running;
+      const started = drain(key);
+      draining.set(key, started);
+      return started;
+    },
+    cancel(key) {
+      waiting.delete(key);
+      return draining.get(key) ?? Promise.resolve();
+    }
+  };
+}
+
 // src/tab_delete_target.ts
 function captureTabDeleteTarget(target) {
   const identity = tabIdentity(target);
@@ -18996,6 +19536,7 @@ var store = new Store({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -19038,6 +19579,7 @@ var pendingRestores = new PendingRestores(
   requestPendingRestoreResync
 );
 var connectionGate = createLatestRequestGate();
+var loadHosts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token).then((catalog) => catalog.hosts ?? []);
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 var resyncTimer = null;
@@ -19267,6 +19809,10 @@ function tabIdsOf(list, id) {
   const s = id ? list.find((x) => x.id === id) : null;
   return s ? sessionTabs(s).map(tabIdentity) : [];
 }
+function tabSynthOf(list, id) {
+  const s = id ? list.find((x) => x.id === id) : null;
+  return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
+}
 var resolvingRoute = false;
 var routeSelection = null;
 var createSelectionIntent = new CreateSelectionIntent();
@@ -19302,7 +19848,7 @@ function moveSelection(id) {
     focus: "rail",
     // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
     // are the same statement even if the roster shrank since the tree was retained.
-    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id)))
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id), tabSynthOf(store.get().sessions, id)))
   });
 }
 function openFromRail(id) {
@@ -19344,6 +19890,7 @@ function switchView(view) {
   if (view === "config") {
     refreshConfig();
     refreshAccounts();
+    refreshQuota();
   }
 }
 function setStatusFilter(kind, on) {
@@ -19370,7 +19917,7 @@ function switchProject(root2) {
     selectedProject: root2,
     selectedId: keep,
     focus: "rail",
-    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep))) : 0
+    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep), tabSynthOf(store.get().sessions, keep))) : 0
   });
 }
 function selectedSession2() {
@@ -19688,18 +20235,40 @@ function openDeleteProject(root2, label) {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root2, tok).then(() => {
-          if (modal === m) closeModal();
-        }).catch((e) => {
-          if (isMutationCommittedError(e)) {
-            if (modal === m) closeModal();
-            requestResync();
-            refreshRegisteredProjects();
-            surfaceTabError(e);
-            return;
+        const connection = connectionGeneration;
+        void projectColorWriter.cancel(root2).then(async () => {
+          if (!isCurrentConnection(connection, tok)) return;
+          const learned = projectColorRegistrations.get(root2);
+          if (learned && "uncertain" in learned) {
+            try {
+              await registerProject(root2, tok);
+            } catch (e) {
+              if (!isMutationCommittedError(e) && isMutationOutcomeUncertain(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(new Error(`The project registration outcome could not be confirmed. ${errorText(e)}`));
+                return;
+              }
+            }
+            projectColorRegistrations.delete(root2);
           }
-          m.setBusy(false);
-          m.setError(errorText(e));
+          if (!isCurrentConnection(connection, tok)) return;
+          return deleteProject(root2, tok).then(() => {
+            projectColorRegistrations.delete(root2);
+            if (modal === m) closeModal();
+          }).catch((e) => {
+            if (isMutationCommittedError(e)) {
+              projectColorRegistrations.delete(root2);
+              if (modal === m) closeModal();
+              requestResync();
+              refreshRegisteredProjects();
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
         });
       },
       onCancel: closeModal
@@ -20197,6 +20766,21 @@ var accountsRefetcher = createFencedRefetcher({
 function refreshAccounts() {
   accountsRefetcher.refresh();
 }
+var quotaRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true }
+    });
+  },
+  onError: (err) => {
+    store.set({ quota: { ...store.get().quota, error: errorText(err) } });
+  }
+});
+function refreshQuota() {
+  quotaRefetcher.refresh();
+}
 function setAccountStatus(agent, name, message, error) {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
 }
@@ -20336,6 +20920,15 @@ var projectsRefetcher = createFencedRefetcher({
   onError: (e) => store.set({ projectsError: errorText(e) })
 });
 function commitRegisteredProjects(projects) {
+  const byRoot = new Map(projects.map((p) => [p.root, p.id]));
+  for (const [root2, learned] of projectColorRegistrations) {
+    if ("uncertain" in learned) {
+      const id = byRoot.get(root2);
+      if (id !== void 0) projectColorRegistrations.set(root2, { id });
+    } else if (byRoot.get(root2) !== learned.id) {
+      projectColorRegistrations.delete(root2);
+    }
+  }
   const selectedProject = reconcileProject(
     store.get().sessions,
     store.get().tasks,
@@ -20347,6 +20940,39 @@ function commitRegisteredProjects(projects) {
 }
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
+}
+var projectColorRegistrations = /* @__PURE__ */ new Map();
+var projectColorWriter = createLatestWriter(
+  async (root2, { color, tok, connection, projectId: known }) => {
+    const current = () => isCurrentConnection(connection, tok);
+    if (!current()) return;
+    const learned = projectColorRegistrations.get(root2);
+    const projectId = known ?? (learned && "id" in learned ? learned.id : null) ?? await (async () => {
+      try {
+        const project = await registerProject(root2, tok);
+        projectColorRegistrations.set(root2, { id: project.id });
+        return project.id;
+      } catch (e) {
+        if (isMutationOutcomeUncertain(e)) projectColorRegistrations.set(root2, { uncertain: true });
+        throw e;
+      }
+    })();
+    if (!current()) return;
+    await setProjectColor(projectId, color, tok);
+    if (current()) refreshRegisteredProjects();
+  },
+  (e, _root, { tok, connection }) => {
+    if (isCurrentConnection(connection, tok)) surfaceMutationError(e);
+  }
+);
+function isCurrentConnection(connection, tok) {
+  return connection === connectionGeneration && token === tok;
+}
+function doSetProjectColor(root2, color) {
+  const tok = token;
+  if (tok === null) return;
+  const projectId = store.get().registeredProjects.find((r) => r.root === root2)?.id ?? null;
+  void projectColorWriter.set(root2, { color, tok, connection: connectionGeneration, projectId });
 }
 function requestProjectsResync() {
   if (projectsResyncTimer !== null) {
@@ -20363,6 +20989,7 @@ function openAddTask() {
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -20394,6 +21021,7 @@ function openEditTask(task) {
     editTaskModal(projects, task, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -20411,6 +21039,8 @@ function openEditTask(task) {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            max_concurrent_runs: value.max_concurrent_runs ?? 0,
+            host: (input.host ?? "") !== (task.host ?? "") ? input.host ?? "" : void 0,
             project_path: input.projectPath,
             program: input.program
           },
@@ -20450,7 +21080,12 @@ function doTriggerTask(task) {
   if (tok === null) {
     return;
   }
-  void triggerTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void triggerTask(task, tok).then(refreshTasks).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      refreshTasks();
+    }
+    surfaceTabError(e);
+  });
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -20641,6 +21276,7 @@ var actions = {
   deleteProject: openDeleteProject,
   addProject: openAddProject,
   rebindProject: openRebindProject,
+  setProjectColor: doSetProjectColor,
   setTheme
 };
 function syncSplit(state) {
@@ -20700,6 +21336,7 @@ function stopStream() {
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
   accountsRefetcher.invalidate();
+  quotaRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
@@ -20751,7 +21388,7 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
       selectedId = null;
     }
   }
-  const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId)) : 0;
+  const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId), tabSynthOf(sessions, selectedId)) : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({
     sessions,

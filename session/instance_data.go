@@ -56,6 +56,8 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		RuntimeStartID:           i.runtimeStartID,
 		Account:                  i.Account,
 		Host:                     i.Host,
+		BranchUnpushed:           i.branchUnpushed,
+		ArchivedWorkspace:        cloneArchivedWorkspace(i.archivedWorkspace),
 		AccountAgent:             i.accountAgent,
 		AccountAutoSelected:      i.accountAutoSelected,
 		AccountLimitObservations: append([]AccountLimitObservationData(nil), i.accountLimitObservations...),
@@ -76,7 +78,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// Project the per-kind tab verdict rather than leaving clients to infer one
 		// from BackendType (#3060). Computed here, on the snapshot every surface
 		// reads, so the TUI, the web UI and the API all get the same answer.
-		data.TabKinds = tabKindAllowances(i.backend.Capabilities())
+		data.TabKinds = tabKindAllowances(i.capabilitiesLocked())
 		// NOT Capabilities.TabManagement any more. tabMutationTarget dropped that gate
 		// when the first off-box tab was admitted (#3062), so projecting it would tell
 		// clients to hide close/rename/reorder for tabs the daemon now accepts —
@@ -197,17 +199,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// would land in that slot (#3062).
 	data.PendingTabs = append(data.PendingTabs, i.pendingMetadataTabs...)
 	for _, tab := range i.Tabs {
-		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL, Proposal: tab.Proposal, PushMode: tab.PushMode}
-		if tab.tmux != nil {
-			td.TmuxName = tab.tmux.SanitizedName()
-		}
-		td.Conversation = conversationDataPtr(tab.Conversation)
-		if len(tab.Handoffs) > 0 {
-			td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
-		}
-		td.Exit = tab.Exit.data()
-		td.AccountScope = tab.accountScope
-		data.Tabs = append(data.Tabs, td)
+		data.Tabs = append(data.Tabs, i.tabDataLocked(tab))
 	}
 	// An archived off-box row is inert, but the web rail still renders its
 	// metadata-only tabs as restore placeholders. After a daemon restart those
@@ -233,6 +225,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	if len(i.pendingTabCleanup) > 0 {
 		data.PendingTabCleanup = append([]TabCleanupData(nil), i.pendingTabCleanup...)
 	}
+	data.PendingRemoteTabClose = i.remoteCloseDataLocked()
 
 	// Keep writing the legacy single TmuxName field (set from the agent tab) for
 	// one release: a binary rolled back to before #930 PR 2 still finds the
@@ -242,6 +235,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	}
 	if len(i.Tabs) > 0 {
 		data.AgentConversation = conversationDataPtr(i.Tabs[0].Conversation)
+	} else if i.reportedConversation.HasID() {
+		// A reloaded off-box row has no agent tab until Launch seeds one, but it
+		// still holds the conversation its agent-server reported (#5826): writing
+		// the row back must not drop the resume handle.
+		data.AgentConversation = conversationDataPtr(i.reportedConversation)
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -511,6 +509,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		runtimeStartID:           data.RuntimeStartID,
 		Account:                  data.Account,
 		Host:                     data.Host,
+		branchUnpushed:           data.BranchUnpushed,
+		archivedWorkspace:        cloneArchivedWorkspace(data.ArchivedWorkspace),
 		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
@@ -566,11 +566,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// Pick backend based on persisted BackendType.
 	switch {
 	case isSandboxBackendType(data.BackendType):
-		// A sandbox session (docker/ssh/hook, #1592 Phase 4 PR6/PR7) has no
+		// A sandbox session (docker/ssh/sandbox/hook, #1592 Phase 4 PR6/PR7) has no
 		// daemon-side worktree or tmux to reconstruct — its workspace lived in a
-		// container/remote/user-provisioned sandbox that does not survive a daemon
-		// restart; only its pushed branch on origin does. Rebuild only an INERT
-		// sandbox backend so the row still classifies as its runtime
+		// container/remote/user-provisioned sandbox. The load itself is inert: an
+		// ssh/sandbox row that persisted a runtime identity is reattached afterwards
+		// by restoreInstances (W1.5); any other row relies on its pushed branch on
+		// origin. Rebuild only an INERT sandbox backend so the row still classifies as its runtime
 		// (Type/Capabilities) for archive + restore; the live runtime is
 		// re-provisioned on restore (re-running launch_cmd for hook), never
 		// reconstructed here.
@@ -589,6 +590,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// From both sources: rows that were on the roster when the record was written,
 		// and rows a previous recovery staged but never drained.
 		instance.pendingMetadataTabs = append(metadataTabsFrom(data), data.PendingTabs...)
+		// The recorded conversation survives the reload (#5826): the agent tab is
+		// seeded by the next Launch, so the handle waits in reportedConversation,
+		// is sent on that launch, and is written back by every checkpoint meanwhile.
+		instance.reportedConversation = persistedConversationOf(data)
 		// A kill tombstone is a durable promise to FINISH teardown after a restart;
 		// an unknown cleanup outcome is the same obligation without terminal kill
 		// intent. An ordinary sandbox row carries a persisted RuntimeCleanup handle
@@ -605,9 +610,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// ever touching the row. Archived sandboxes were already reaped before
 		// becoming Archived, so deleting their record needs no remote cleanup
 		// handle; the archived ForStorage branch scrubs RuntimeCleanup, so the
-		// handle here is naturally nil for those rows.
+		// handle here is naturally nil for those rows — except a preserved
+		// workspace (below).
 		hadPersistedCleanupHandle := isSandboxBackendType(data.BackendType) && data.RuntimeCleanup != nil
-		if liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle) {
+		// A preserved unpushed archive keeps its handle on purpose (#5867): its
+		// workspace is still on the host, and a kill of the row must reap it.
+		preservedArchive := liveness == LiveArchived && hadPersistedCleanupHandle && data.keepsPreservedWorkspaceHandle()
+		if preservedArchive || (liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle)) {
 			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
 			if cleanupErr != nil {
 				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {
@@ -747,6 +756,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// rebuilt from a tombstone.
 		instance.pendingTabCleanup = restoredTabCleanup(data.PendingTabCleanup)
 	}
+	// Pending off-box closes belong to the sandbox backends the branch above never
+	// reaches (#5996): restored for every backend so a restart cannot drop the only
+	// handle on a command still running in a sandbox.
+	instance.pendingRemoteClose = restoredRemoteClose(data.PendingRemoteTabClose)
 
 	// Every return below hands back a row no automatic restore can reach —
 	// inert (started=false), Archived rather than Lost, or vetoed by
@@ -819,9 +832,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return inertReturn(), nil
 	}
 
-	// A non-archived sandbox session (docker/ssh/hook) cannot be driven on load: its
-	// container/remote is gone after a daemon restart and only its pushed branch
-	// on origin survives (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
+	// A non-archived sandbox session (docker/ssh/sandbox/hook) cannot be driven on
+	// load: the reattach (W1.5) is a separate step, run by restoreInstances after
+	// the rows are published, and only for ssh/sandbox rows with a persisted
+	// runtime identity. Everything else (docker, hook, pre-W1.1 rows, a failed
+	// reattach) recovers by re-provisioning from the branch pushed to origin
+	// (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
 	// false, so the status poll and the Lost-restore loop both pass it by (the
 	// #1028 started=false fence) — and let an explicit restore re-provision a fresh
 	// sandbox from the branch. Skipping Start also avoids driving the recursive
@@ -939,6 +955,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
 				Exit:                          tabExitFromData(td.Exit),
+				gen:                           td.Gen,
 				tmux:                          ts,
 				accountScope:                  td.AccountScope,
 				accountScopeProvenanceUnknown: idx > 0 && kind.HasTmux() && ts != nil && siblingScopeUnknown(data.Account, td.AccountScope),

@@ -47,12 +47,13 @@ var (
 		return client.PruneSessions(req)
 	}
 	sessionsArchiveSelf     bool
+	sessionsArchivePush     bool
 	sendPromptViaDaemon     = routedSendPrompt
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
-	createTabViaDaemon      = daemon.CreateTab
-	closeTabViaDaemon       = daemon.CloseTab
-	renameTabViaDaemon      = daemon.RenameTab
-	reorderTabViaDaemon     = daemon.ReorderTab
+	createTabViaDaemon      = routedCreateTab
+	closeTabViaDaemon       = routedCloseTab
+	renameTabViaDaemon      = routedRenameTab
+	reorderTabViaDaemon     = routedReorderTab
 	previewSessionViaDaemon = func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
 		if !apiclient.IsRemoteTarget() {
 			return daemon.PreviewSessionSnapshot(req)
@@ -457,7 +458,9 @@ pointing at one).`,
 			Prompt:   createPromptFlag,
 			InPlace:  inPlace,
 			Backend:  createBackendFlag,
-			Host:     createHostFlag,
+			// A remote daemon owns the account and preflight answers (#5744).
+			ValidateFirst: apiclient.IsRemoteTarget(),
+			Host:          createHostFlag,
 		})
 		if err != nil {
 			return jsonError(err)
@@ -812,10 +815,10 @@ var sessionsAttachCmd = &cobra.Command{
 var sessionsWhoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Identify the current Agent Factory session",
-	Long: "Returns the session info for the current tmux session by matching the tmux session name against stored sessions.\n\n" +
-		"Requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. " +
+	Long: "Returns the session info for the current session. With a daemon credential (AF_DAEMON_TOKEN), the daemon reports the session that credential is bound to — the narrowed projection a sandbox receives withholds the tmux name. Otherwise it matches the current tmux session name against stored sessions.\n\n" +
+		"The tmux path requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. " +
 		"When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; " +
-		"otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error.\n\n" +
+		"otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error on that path.\n\n" +
 		"Identity is not scoped: you are the session you are, in whatever project it " +
 		"belongs to. --repo therefore acts as an assertion — it checks that the " +
 		"resolved session really is in that project, and errors if it is not.",
@@ -928,6 +931,13 @@ func localCreateInputs(createTitle string, inPlace bool) (string, string, error)
 	}
 	if createHostFlag != "" && createBackendFlag != "" && createBackendFlag != config.BackendSSH {
 		return "", "", fmt.Errorf("--host places the session on a listed host over ssh and is incompatible with --backend %s; drop one of them", createBackendFlag)
+	}
+	if createHostFlag != "" {
+		// The same refusal every pick surface gives, before the daemon reserves
+		// anything. This machine's global list is the daemon's (a local create).
+		if err := config.ValidateHostPick(cfg.Hosts, createHostFlag); err != nil {
+			return "", "", err
+		}
 	}
 	if inPlace && createHostFlag != "" {
 		return "", "", fmt.Errorf("--here runs in the local working tree and is incompatible with --host")

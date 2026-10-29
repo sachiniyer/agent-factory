@@ -373,6 +373,13 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	if inst == nil || !lostSessionWantsRestore(inst.LifecycleView()) {
 		return
 	}
+	// A row that still owes a preserved workspace (#5571 W8.6) is restored only by
+	// an explicit restore. Its refusals are decisions about work that may exist
+	// nowhere else (a workspace the host proved gone, an origin that cannot be
+	// asked), and re-asking the host on a timer cannot change them.
+	if inst.OwesPreservedWorkspace() {
+		return
+	}
 
 	// Two keys, deliberately. `key` is the repo/title daemon key: it addresses the
 	// SLOT, which is what the exclusive-operation gates (killsInFlight, the
@@ -578,7 +585,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst) {
 			return
 		}
-		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(repoID, inst)); err != nil {
+		if err := m.preserveUnlessRelaunchable(repoID, key, inst); err != nil {
 			// The durable terminal verdict is a session fact, safe to read
 			// before the state lock — the same discipline lostRestoreFailed
 			// applies: arming an environmental retry for a session the entry

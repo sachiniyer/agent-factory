@@ -103,9 +103,17 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 		case "port":
 			return []byte("127.0.0.1:49152\n"), nil
 		case "exec":
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "sh -c") && strings.Contains(joined, "id -u") {
+				// prepareNonAccountUser probes the image's default USER. This
+				// fake image defaults to root, so the probe reports 0:0 and the
+				// step returns early with no chown — mirroring a root-default
+				// BYO image, the path every shipped/tested image takes.
+				return []byte("0:0\n"), nil
+			}
 			// readBanner polls via `sh -c 'cat <banner>; kill -0 <pid> && …'` —
 			// the banner JSON plus the alive marker is a live server's answer.
-			if joined := strings.Join(args, " "); strings.Contains(joined, "cat "+dockerBannerPath) {
+			if strings.Contains(joined, "cat "+dockerBannerPath) {
 				return []byte(`{"addr":":8000","token":"test-only","title":"engine-bound"}` + "\n" + remoteProcAlive + "\n"), nil
 			}
 			return nil, nil

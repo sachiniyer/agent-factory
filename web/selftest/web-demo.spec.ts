@@ -137,6 +137,39 @@ interface Pass {
   seededRows: number;
 }
 
+// The Config view prints the config manifest's size twice: the header count
+// ("Config 40") and the folded advanced tier's button ("Show 39 advanced
+// settings"). Every PR that adds a key therefore changed pixels in every config
+// golden — #5849, #5836, #5802, #5580 and #4536 all went red on it at once, and
+// each refresh was invalidated by the next key-adding merge. Visual captures
+// state both numbers as a fixed "N" instead. The header, the button, their boxes
+// and the layout around them are still captured; only the number — data, not
+// layout — is normalised, and only for the instant of the screenshot: the DOM
+// text is put back, so the app's own copy stays under test elsewhere.
+async function withManifestSizeFrozen<T>(page: Page, capture: () => Promise<T>): Promise<T> {
+  const swap = (freeze: boolean) => page.evaluate((freeze) => {
+    const targets: Array<[string, RegExp, (m: RegExpExecArray) => string]> = [
+      [".af-config-head .af-view-count", /^(\d+|N)$/, () => "N"],
+      [".af-config-toggle", /^Show (\d+|N) advanced settings$/, () => "Show N advanced settings"],
+    ];
+    for (const [selector, pattern, frozen] of targets) {
+      for (const el of document.querySelectorAll<HTMLElement>(selector)) {
+        if (freeze) {
+          const m = pattern.exec(el.textContent ?? "");
+          if (!m) continue;
+          el.dataset.afRealText = el.textContent ?? "";
+          el.textContent = frozen(m);
+        } else if (el.dataset.afRealText !== undefined) {
+          el.textContent = el.dataset.afRealText;
+          delete el.dataset.afRealText;
+        }
+      }
+    }
+  }, freeze);
+  await swap(true);
+  try { return await capture(); } finally { await swap(false).catch(() => {}); }
+}
+
 function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: string) => Promise<void> {
   return async (name: string) => {
     if (visual) {
@@ -178,10 +211,10 @@ function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: 
           // Validate both sides so update mode cannot bless a transient Working row.
           const ready = await observe();
           expect(ready.states.every(state => state === "Needs you")).toBe(true);
-          const pixels = await page.screenshot({
+          const pixels = await withManifestSizeFrozen(page, () => page.screenshot({
             animations: "disabled", caret: "hide", style: visualStyle,
             timeout: remaining(5_000),
-          });
+          }));
           expect(await observe()).toEqual(ready);
           expect(pixels).toMatchSnapshot(`${name}${suffix}.png`, { maxDiffPixels: 0, threshold: 0.2 });
         }).toPass({ timeout: remaining(30_000) });

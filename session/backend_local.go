@@ -106,7 +106,7 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 			gitWorktree, branchName, err = git.NewGitWorktreeInPlace(i.Path)
 		} else {
 			branchPrefix := i.branchPrefix
-			if !i.branchPrefixResolved {
+			if i.branchName == "" && !i.branchPrefixResolved {
 				var cfg *config.Config
 				cfg, err = config.LoadConfig()
 				if err != nil {
@@ -116,7 +116,12 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 				}
 			}
 			if err == nil {
-				gitWorktree, branchName, err = git.NewGitWorktree(i.Path, i.Title, branchPrefix)
+				if i.branchName != "" {
+					// The daemon already named this branch (#5571 W2.4).
+					gitWorktree, branchName, err = git.NewGitWorktreeNamed(i.Path, i.Title, i.branchName)
+				} else {
+					gitWorktree, branchName, err = git.NewGitWorktree(i.Path, i.Title, branchPrefix)
+				}
 			}
 		}
 		if err != nil {
@@ -195,14 +200,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 		} else {
 			i.mu.Lock()
-			if !i.started {
-				i.started = true
-				// Start(false) reconstructs this process-local flag on load.
-				// Actual respawns record their own runtime mutation below.
-				if firstTimeSetup {
-					i.touchLocked()
-				}
-			}
+			// Start(false) reconstructs this process-local flag on load; actual
+			// respawns record their own runtime mutation below.
+			i.markStartedLocked(firstTimeSetup)
 			i.mu.Unlock()
 		}
 	}()
@@ -257,7 +257,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if workDir != "" {
 			resolution := resolveLaunchProgramForInstance(i)
 			runtimeProgram = resolution.command
-			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command), i.CallbackUnavailable() != "")
+			program := injectSystemPromptWithEnv(resolution.command, resolveSkillTarget(i, resolution.command), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 		}
@@ -362,7 +362,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			base := resolution.command
 			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
-			program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.CallbackUnavailable() != "")
+			program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}
 		setLaunchProgram(tmuxSession, program, proof)

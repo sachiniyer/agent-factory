@@ -627,6 +627,25 @@ func agentServerProgram(args []string) (string, bool) {
 		idx += 3
 	}
 	for idx < len(args) {
+		// --branch is the daemon-named branch (#5571 W2.4): any non-empty value,
+		// since it only names a git ref and is never executed.
+		if args[idx] == "--branch" && idx+1 < len(args) && args[idx+1] != "" {
+			idx += 2
+			continue
+		}
+		// --adopt-worktree names the preserved worktree an archived session is
+		// reattached to (#5571 W8.6): an absolute path the daemon proved present,
+		// bound as the workspace and never executed.
+		if args[idx] == "--adopt-worktree" && idx+1 < len(args) && strings.HasPrefix(args[idx+1], "/") {
+			idx += 2
+			continue
+		}
+		// --policy-file names the daemon-resolved operator policy to READ
+		// (#5571 W2.5): an absolute path, never executed.
+		if args[idx] == "--policy-file" && idx+1 < len(args) && strings.HasPrefix(args[idx+1], "/") {
+			idx += 2
+			continue
+		}
 		if args[idx] != "--session-env" || idx+1 >= len(args) || !validName(args[idx+1]) {
 			return "", false
 		}

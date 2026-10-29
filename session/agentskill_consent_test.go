@@ -78,17 +78,17 @@ func seedAfOwnedSkill(t *testing.T, home string) string {
 func TestGlobalAgentSkills_DefaultWritesNothingIntoTheUsersConfig(t *testing.T) {
 	cases := []struct {
 		agent string
-		run   func() (string, error)
+		run   func(t *testing.T) (string, error)
 		path  func(home string) string
 	}{
-		{"amp", ensureAmpSkillDir, ampSkillPath},
-		{"codex", func() (string, error) { return ensureCodexSkillDir(skillTarget{}) }, func(h string) string {
+		{"amp", func(*testing.T) (string, error) { return ensureAmpSkillDir() }, ampSkillPath},
+		{"codex", func(t *testing.T) (string, error) { return ensureCodexSkillDir(ambientSkillTarget(t, "codex")) }, func(h string) string {
 			return filepath.Join(h, ".codex", "skills", "agent-factory", "SKILL.md")
 		}},
-		{"gemini", func() (string, error) { return ensureGeminiSkillDir(skillTarget{}) }, func(h string) string {
+		{"gemini", func(t *testing.T) (string, error) { return ensureGeminiSkillDir(ambientSkillTarget(t, "gemini")) }, func(h string) string {
 			return filepath.Join(h, ".gemini", "skills", "agent-factory", "SKILL.md")
 		}},
-		{"devin", ensureDevinSkillDir, func(h string) string {
+		{"devin", func(*testing.T) (string, error) { return ensureDevinSkillDir() }, func(h string) string {
 			return filepath.Join(h, ".config", "devin", "skills", "agent-factory", "SKILL.md")
 		}},
 	}
@@ -97,7 +97,7 @@ func TestGlobalAgentSkills_DefaultWritesNothingIntoTheUsersConfig(t *testing.T) 
 			home := agentHome(t)
 			writeAfConfig(t, false) // the default; written explicitly so the intent is visible
 
-			dir, err := tc.run()
+			dir, err := tc.run(t)
 			if err != nil {
 				t.Fatalf("a declined write must not be an error: %v", err)
 			}
@@ -260,13 +260,13 @@ func TestGlobalAgentSkills_AfOwnedSeamsAreUnaffected(t *testing.T) {
 	agentHome(t)
 	writeAfConfig(t, false)
 
-	if got := injectSystemPrompt("claude", skillTarget{}, false); !strings.Contains(got, "--plugin-dir") {
+	if got := injectSystemPrompt("claude", skillTarget{}, fullGuidanceCaps); !strings.Contains(got, "--plugin-dir") {
 		t.Errorf("claude's af-owned plugin seam must be unaffected by the global-config gate, got %q", got)
 	}
-	if got := injectSystemPrompt("aider", skillTarget{}, false); !strings.Contains(got, "--read") {
+	if got := injectSystemPrompt("aider", skillTarget{}, fullGuidanceCaps); !strings.Contains(got, "--read") {
 		t.Errorf("aider's af-owned --read seam must be unaffected by the global-config gate, got %q", got)
 	}
-	if got := injectSystemPrompt("opencode", skillTarget{}, false); !strings.Contains(got, "OPENCODE_CONFIG=") {
+	if got := injectSystemPrompt("opencode", skillTarget{}, fullGuidanceCaps); !strings.Contains(got, "OPENCODE_CONFIG=") {
 		t.Errorf("opencode's af-owned config seam must be unaffected by the global-config gate, got %q", got)
 	}
 }

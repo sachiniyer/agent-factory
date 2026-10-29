@@ -19,25 +19,21 @@ import (
 // that misstates its reason invites the operator to conclude af just has not
 // wired it up, and to file the same issue again.
 
-// ssh must not be told af cannot put the account there, because it can.
-func TestSSHAccountRefusalNamesTheRoundTripNotPlacement(t *testing.T) {
+// An explicit account on an ssh target that is NOT a listed host (#5571 W7.4) is
+// refused at admission, naming the account and the remedy. It must not claim af
+// cannot place the account there: it can, and does, on a listed host.
+func TestSSHAccountRefusalOnAnUnlistedTargetNamesTheListedHostRemedy(t *testing.T) {
 	err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: BackendSSH})
 	require.Error(t, err)
 	msg := err.Error()
 
 	assert.Contains(t, msg, "work", "the operator must see WHICH account was refused")
 	assert.Contains(t, msg, "ssh")
-	assert.NotContains(t, strings.ToLower(msg), "cannot place",
-		"af CAN place a directory on an ssh host — claiming otherwise reads as unfinished wiring")
-	assert.Contains(t, msg, "deliberately does not",
-		"the refusal must read as a decision, not a gap")
-
-	// The actual reason, in the operator's terms: writes do not come home.
-	assert.Contains(t, msg, "cannot establish that those writes come back",
-		"the reason is the write-back af cannot guarantee, stated as the property rather than a mechanism")
-	assert.Contains(t, msg, "rotates refresh tokens",
-		"and the worst case — invalidating the copy on THIS machine — is the part that decides it")
-	assert.Contains(t, msg, "--account", "and it must name the way out")
+	assert.NotContains(t, strings.ToLower(msg), "cannot place")
+	assert.Contains(t, msg, "global host list", "the reason: credentials go only to a host the operator listed")
+	assert.Contains(t, msg, "[hosts.<name>]", "the remedy: list the host")
+	assert.Contains(t, msg, "--host", "and pick it")
+	assert.Contains(t, msg, "omit --account", "or drop the account")
 }
 
 // sandbox and hook must give the ROUND-TRIP reason, not a location one.
@@ -188,7 +184,9 @@ func TestCarriesAccountContractIsStatedAsWriteBack(t *testing.T) {
 // over source text collides with the text that explains the substring — the same
 // trap as naming a test after the option it forbids.
 func TestRefusalDoesNotPresentCopyingAsUnavoidable(t *testing.T) {
-	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
+	// ssh is not listed: on a listed host the account IS carried, by W7.3's synced
+	// scope with write-back (#5571 W7.4); its refusal is the listed-host remedy.
+	for _, kind := range []BackendKind{BackendSandbox, BackendHook} {
 		err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot establish that those writes come back",
@@ -232,7 +230,8 @@ func TestOffBoxAccountRefusalReadsAsPermanentNotUnimplemented(t *testing.T) {
 	hedges := []string{"not yet", "cannot yet", "does not yet", "for now", "currently unsupported",
 		"coming soon", "planned", "in the future", "temporarily"}
 
-	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
+	// ssh is not listed: see TestRefusalDoesNotPresentCopyingAsUnavoidable.
+	for _, kind := range []BackendKind{BackendSandbox, BackendHook} {
 		t.Run(string(kind), func(t *testing.T) {
 			err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
 			require.Error(t, err)

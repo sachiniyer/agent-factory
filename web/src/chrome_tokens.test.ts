@@ -8,6 +8,14 @@ const tokens = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
 const tokenNames = new Set([...tokens.matchAll(/(--af-[\w-]+):/g)].map((m) => m[1]));
 // Fonts and stacking levels are fixed structural rules, outside the 23-token budget.
 const structural = new Set(["--af-font-ui", "--af-font-mono", "--af-z-appbar", "--af-z-drawer", "--af-z-popover", "--af-z-modal"]);
+// User-chosen project colors, set inline by project_color.ts from the registry.
+const userData = new Set([
+  "--af-project-color",
+  "--af-project-ink",
+  "--af-project-accent-light",
+  "--af-project-accent-dark",
+  "--af-swatch",
+]);
 
 function violations(css: string): string[] {
   const errors: string[] = [];
@@ -29,7 +37,7 @@ function violations(css: string): string[] {
       }
       if (/-?\d*\.?\d+(?:px|rem|em)\b/.test(value)) errors.push(`${selector.trim()}: ${property}: literal metric`);
       for (const [, name] of value.matchAll(/var\((--[\w-]+)/g)) {
-        if (!tokenNames.has(name) && !structural.has(name)) errors.push(`${selector.trim()}: ${name}: legacy token`);
+        if (!tokenNames.has(name) && !structural.has(name) && !userData.has(name)) errors.push(`${selector.trim()}: ${name}: legacy token`);
       }
     }
   }

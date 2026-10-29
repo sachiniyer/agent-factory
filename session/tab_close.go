@@ -14,8 +14,25 @@ import "fmt"
 // same critical section. An ordinal resolved from an earlier snapshot is never
 // applied to the live roster (#2200).
 func (i *Instance) CloseTabByID(tabID string) error {
+	return i.closeTabByID(tabID, "")
+}
+
+// CloseTabByIDIfGen is CloseTabByID that closes only the INCARNATION gen names:
+// the generation is compared in the same critical section that removes the row,
+// so a close retried against a reused id can never take down a newer tab
+// between a check and the act (#5996). A mismatch is ErrTabGone — the
+// incarnation asked about no longer exists. An empty gen is an unconditional
+// close.
+func (i *Instance) CloseTabByIDIfGen(tabID, gen string) error {
+	return i.closeTabByID(tabID, gen)
+}
+
+func (i *Instance) closeTabByID(tabID, gen string) error {
 	i.mu.Lock()
 	idx, exists := i.tabIndexByIDLocked(tabID)
+	if exists && gen != "" && i.Tabs[idx].gen != gen {
+		exists = false
+	}
 	if !exists {
 		i.mu.Unlock()
 		return fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
@@ -25,33 +42,49 @@ func (i *Instance) CloseTabByID(tabID string) error {
 		return fmt.Errorf("the agent tab of session %q can't be closed: it is the session's own agent, pinned to the first slot — archive or kill the session instead", i.Title)
 	}
 	tab := i.removeTabLocked(idx)
+	handle, rh := i.stageCleanupLocked(tab)
 	i.mu.Unlock()
-	return i.closeRemovedTabRetainingCleanup(tab)
+	return i.settleRemovedTab(tab, handle, rh)
 }
 
-// closeRemovedTabRetainingCleanup is closeRemovedTab for the two variants with
-// no commit boundary of their own: it records a cleanup handle when teardown
-// leaves the tmux session unaccounted for.
-//
-// These variants cannot pre-stage the handle the way CloseTabByIDWithCommit
-// does, because they never persist — CreateTab's rollback reaches CloseTabByID
-// precisely BECAUSE its write just failed, so no handle could reach disk at that
-// moment anyway. Retaining it in memory is still strictly better than dropping
-// it: this daemon stops re-deriving the surviving session's name for a new tab,
-// and the next successful persist of the session carries the handle to disk
-// where the startup sweep can spend it.
-func (i *Instance) closeRemovedTabRetainingCleanup(tab *Tab) error {
+// stageCleanupLocked records, in the SAME critical section that removes the tab,
+// the handle teardown will spend: the tmux session name for a local tab, the
+// stable id plus incarnation for an off-box one. Staging before teardown rather
+// than after its failure closes #5961: a create overlapping the close would
+// otherwise find the closing tab's still-live tmux name free and collide with it
+// (uniqueTabTmuxName reserves pending tokens). Caller holds i.mu.
+func (i *Instance) stageCleanupLocked(tab *Tab) (*TabCleanupData, *RemoteTabCleanupData) {
+	handle, staged := stageTabCleanup(i.pendingTabCleanup, tab)
+	i.pendingTabCleanup = staged
+	return handle, i.stageRemoteCloseLocked(tab)
+}
+
+// settleRemovedTab tears the removed tab down and retires its staged handles on
+// CONFIRMED teardown only. These variants cannot pre-persist the handle the way
+// CloseTabByIDWithCommit does (CreateTab's rollback reaches CloseTabByID
+// precisely BECAUSE its write failed), so the handle lives in memory until the
+// next successful persist carries it to disk.
+func (i *Instance) settleRemovedTab(tab *Tab, handle *TabCleanupData, rh *RemoteTabCleanupData) error {
 	err := i.closeRemovedTab(tab)
-	if err == nil {
-		return nil
+	if err != nil {
+		return err
 	}
-	if handle, _ := stageTabCleanup(nil, tab); handle != nil {
-		i.mu.Lock()
-		i.pendingTabCleanup = append(i.pendingTabCleanup, *handle)
-		i.touchLocked()
-		i.mu.Unlock()
+	i.mu.Lock()
+	i.retireCleanupLocked(handle, rh)
+	i.mu.Unlock()
+	return nil
+}
+
+// retireCleanupLocked drops confirmed-teardown handles. Caller holds i.mu.
+func (i *Instance) retireCleanupLocked(handle *TabCleanupData, rh *RemoteTabCleanupData) {
+	if handle != nil {
+		before := len(i.pendingTabCleanup)
+		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, handle)
+		if len(i.pendingTabCleanup) != before {
+			i.touchLocked()
+		}
 	}
-	return err
+	i.retireRemoteCloseLocked(rh)
 }
 
 // CommittedTabClose separates the durable roster decision from the best-effort
@@ -111,8 +144,7 @@ func (i *Instance) CloseTabByIDWithCommit(
 
 	updatedAt := i.UpdatedAt
 	tab := i.removeTabLocked(idx)
-	handle, staged := stageTabCleanup(i.pendingTabCleanup, tab)
-	i.pendingTabCleanup = staged
+	handle, rh := i.stageCleanupLocked(tab)
 	data := i.toInstanceDataLocked()
 	if err := commit(data); err != nil {
 		// Nothing can change the roster while i.mu is held, so reinserting at idx
@@ -124,6 +156,7 @@ func (i *Instance) CloseTabByIDWithCommit(
 		copy(i.Tabs[idx+1:], i.Tabs[idx:])
 		i.Tabs[idx] = tab
 		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, handle)
+		i.retireRemoteCloseLocked(rh)
 		i.UpdatedAt = updatedAt
 		i.mu.Unlock()
 		return CommittedTabClose{}, err
@@ -131,19 +164,16 @@ func (i *Instance) CloseTabByIDWithCommit(
 	i.mu.Unlock()
 
 	teardownErr := i.closeRemovedTab(tab)
-	if teardownErr != nil || handle == nil {
-		// Unconfirmed: the handle stays, and the daemon's startup sweep owns the
-		// retry. Nothing to settle for a tmux-less tab either — it never staged one.
+	if teardownErr != nil || (handle == nil && rh == nil) {
+		// Unconfirmed: the handle stays, and the daemon's startup sweep (tmux) or
+		// status sweep (off-box) owns the retry. Nothing to settle for a tab that
+		// staged no handle either.
 		return CommittedTabClose{TeardownErr: teardownErr}, nil
 	}
 	// Confirmed dead. Retire the handle and hand the caller the projection that
 	// records the retirement.
 	i.mu.Lock()
-	before := len(i.pendingTabCleanup)
-	i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, handle)
-	if len(i.pendingTabCleanup) != before {
-		i.touchLocked()
-	}
+	i.retireCleanupLocked(handle, rh)
 	settled := i.toInstanceDataLocked()
 	i.mu.Unlock()
 	return CommittedTabClose{Settled: &settled}, nil
@@ -229,7 +259,7 @@ func (i *Instance) closeRemovedTab(tab *Tab) error {
 	i.endTabPTYStream(tab.ID)
 
 	if tab.tmux == nil {
-		return nil
+		return i.closeOffBoxTab(tab)
 	}
 	// Pane state deliberately ignored: closing ONE tab touches no worktree, so
 	// nothing destructive follows an unknown here. (A Close that fails after the

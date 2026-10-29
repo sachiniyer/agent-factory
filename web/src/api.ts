@@ -25,7 +25,7 @@
 // a stored token (see shouldForgetToken) — a rotated token re-prompts once instead
 // of wedging the app.
 
-import type { BackendCatalog } from "./backends.js";
+import { type BackendCatalog, hostFromChoiceValue } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
 import type {
   OnCompleteOption,
@@ -34,6 +34,7 @@ import type {
   ConfigResponse,
   ConfigSetResponse,
   ExplainConfigResponse,
+  QuotaReportResponse,
   RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
@@ -449,7 +450,13 @@ export async function createSession(input: CreateSessionInput, token: string): P
   // default that `af sessions create` (with no --backend) honours. Absent is the
   // only way to mean "let the repo decide" (#1933).
   const backend = (input.backend ?? "").trim();
-  if (backend !== "") {
+  const host = hostFromChoiceValue(backend);
+  if (host !== "") {
+    // A listed-host row of the same <select> (#5571 W6.3): the pick is `host`, and
+    // NO backend is sent — a host IS the ssh placement, and the daemon refuses a
+    // host paired with any other backend.
+    body.host = host;
+  } else if (backend !== "") {
     body.backend = backend;
   }
   // `account` is sent ONLY when the user picked one, for the same reason: absent is
@@ -707,6 +714,8 @@ export interface RegisteredProject {
   root: string;
   relative_root: string;
   path_exists: boolean;
+  /** The user-chosen display color (#rrggbb); absent when none is set. */
+  color?: string;
   /** The repository identity this project RESOLVED to (config.Project.RepoID,
    *  `repo_id` on the wire) — a short hex hash from config.RepoIDFromRoot, NOT the
    *  registry `id` (`prj_...`). Empty for a record written before this field
@@ -805,6 +814,14 @@ export async function rebindProject(
     return resp.project;
   }
   const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", request, token);
+  return resp.project;
+}
+
+/** Sets (or, with "", clears) a registered project's display color (mirrors
+ *  `af projects color`). The daemon normalizes it to #rrggbb and emits
+ *  projects.changed, so every open client repaints from the refetched registry. */
+export async function setProjectColor(id: string, color: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("SetProjectColor", { id, color }, token);
   return resp.project;
 }
 
@@ -1084,6 +1101,42 @@ export async function fetchPreviewOrigin(sessionId: string, tabId: string, token
   }
 }
 
+/** A session editor's own origin for a REMOTE viewer (W5.2): the origin itself, and a
+ *  single-use bootstrap URL on it that sets the session's HttpOnly key cookie and
+ *  redirects to the editor root. */
+export interface EditorPortOrigin {
+  origin: string;
+  bootstrapUrl: string;
+}
+
+/**
+ * Asks the daemon for a session's editor-port origin (POST /v1/editor-origin, behind
+ * the operator token). Returns null when the feature is off (network.editor_origin_ports
+ * unset), the pool is full, or anything fails — the caller keeps the same-origin
+ * mirror, which is what every release before this one used. Each call mints a NEW
+ * single-use bootstrap URL, so callers must not cache or replay the result.
+ */
+export async function fetchEditorPortOrigin(sessionId: string, token: string): Promise<EditorPortOrigin | null> {
+  const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
+  const headers: Record<string, string> = {};
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  try {
+    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    if (!resp.ok) {
+      return null;
+    }
+    const env = (await resp.json()) as Envelope<{ origin?: string; bootstrap_url?: string }>;
+    if (env?.error != null || !env?.data?.origin || !env?.data?.bootstrap_url) {
+      return null;
+    }
+    return { origin: env.data.origin, bootstrapUrl: env.data.bootstrap_url };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Probes a proxied web tab's mirror path and reports whether its dev server is up.
  *
@@ -1240,7 +1293,13 @@ export async function updateTask(task: TaskMutationRef, update: TaskUpdate, toke
  *  DISPLAYED record and pins its project binding (#3230). */
 export async function triggerTask(task: TaskMutationRef, token: string): Promise<void> {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  const result = await af<{ warning?: string }>("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  if (result.warning) {
+    // The run reached a committed outcome — e.g. it auto-created its target
+    // session but could not confirm the start. Surface it through the shared
+    // mutation-committed path like every sibling mutation, not as plain success.
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** Removes a task (mirrors `af tasks remove`). Refuses a task with no stable
@@ -1374,6 +1433,15 @@ export async function listAccounts(token: string, repoPath = ""): Promise<Accoun
   // targets by the agent the resolved command launches, and dropping the map
   // here would silently return them to enum semantics (#4430 review round 5).
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
+}
+
+/** Reads the daemon's per-agent usage/quota report (#2983): the same
+ *  records→quota.Build read `af quota` makes, with the words rendered
+ *  server-side — so this surface shows exactly what the CLI prints rather than
+ *  re-deriving vocabulary from fields. */
+export async function quotaReport(token: string): Promise<QuotaReportResponse> {
+  const resp = await af<QuotaReportResponse>("QuotaReport", {}, token);
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.

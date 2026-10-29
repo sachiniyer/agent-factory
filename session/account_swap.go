@@ -64,7 +64,7 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	} else {
 		program = prepareLaunchConversation(i, program)
 	}
-	program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.CallbackUnavailable() != "")
+	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 	return program, accountLaunchProof(declarationBase, program, trustBase, nil, "")
 }
 
@@ -121,10 +121,18 @@ func (i *Instance) PendingAccountSwap() (from, to string, pending bool) {
 }
 
 // SupportsAutomaticAccountSwap reports whether this runtime can replace its
-// credential boundary without changing backend kind.
+// credential boundary without changing backend kind: a local session, or an ssh or
+// sandbox session on a listed host whose agent-server rotates its account scope in
+// place (#5571 W7.6).
 func (i *Instance) SupportsAutomaticAccountSwap() bool {
 	backend := i.currentBackend()
-	return backend != nil && backend.Type() == "local"
+	if backend == nil {
+		return false
+	}
+	if backend.Type() == "local" {
+		return true
+	}
+	return handoffInPlaceBackend(backend.Type()) && i.offBoxAccountSwapAvailable()
 }
 
 // ValidateAccountSwap checks the complete identity boundary before the current
@@ -382,8 +390,9 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// The CANDIDATE account and program, not the still-recorded fields: validation
 	// must leave the outgoing identity intact, while the af skill has to land in
 	// the root the replacement pane will actually read.
-	launchProgram = injectSystemPrompt(launchProgram,
-		resolveSkillTargetForAccount(launchProgram, accountNamespace, name), i.CallbackUnavailable() != "")
+	launchProgram = injectSystemPromptWithEnv(launchProgram,
+		resolveSkillTargetForAccount(launchProgram, accountNamespace, name, workDir), i.guidanceCaps(),
+		launchEnvFor(i, workDir))
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
 	// started. Worktree-less projections cannot launch, so they retain the
