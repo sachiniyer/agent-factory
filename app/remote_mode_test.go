@@ -298,6 +298,36 @@ func TestQuitAfterARepeatedSaveFailureDiscardsAndLeaves(t *testing.T) {
 	require.False(t, h.hooksPane.IsDirty())
 }
 
+// #5898: the discard confirmation answers the edits that failed to save. Input
+// that is not another quit attempt — editing resumes, a click — drops it, so a
+// later identical error warns again instead of discarding the new edits unseen.
+func TestQuitDiscardConfirmationDoesNotSurviveOtherInput(t *testing.T) {
+	h := dirtyHooksHome(t)
+	stubHooksSaveFailure(t)
+
+	_, _ = h.handleQuit()
+	require.False(t, h.quitting)
+	require.NotEmpty(t, h.quitSaveFailure, "the refused quit arms the confirmation")
+
+	// A repeated quit keeps it armed: the message that carries it calls handleQuit.
+	done := h.invalidateQuitConfirmationAfter()
+	_, _ = h.handleQuit()
+	done()
+	require.True(t, h.quitting, "the repeated quit still discards and leaves")
+
+	h = dirtyHooksHome(t)
+	_, _ = h.handleQuit()
+	require.NotEmpty(t, h.quitSaveFailure)
+
+	// Any other input in between disarms it.
+	h.invalidateQuitConfirmationAfter()()
+	require.Empty(t, h.quitSaveFailure)
+
+	_, _ = h.handleQuit()
+	require.False(t, h.quitting, "the same error after other input is a fresh refusal, not a discard")
+	require.True(t, h.hooksPane.IsDirty(), "the edit is still kept")
+}
+
 // #5900: the cache is keyed by (project, ID). The store tolerates legacy duplicate
 // IDs and a mutation acts on exactly one row, so an acknowledged edit or delete
 // must not rewrite or drop the rows it never touched.

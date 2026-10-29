@@ -12,6 +12,7 @@ import (
 )
 
 func (m *home) handleQuit() (tea.Model, tea.Cmd) {
+	m.quitAttempted = true
 	// Save any dirty task/hooks state. On failure the panes were reloaded to
 	// match disk; abort the quit and surface the error so the user sees the
 	// dropped edit instead of losing it silently on the way out.
@@ -67,6 +68,24 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	m.closeAllLiveTermPanes()
 	m.quitting = true
 	return m, cleanQuitCmd()
+}
+
+// invalidateQuitConfirmationAfter drops an armed discard confirmation when the
+// input it wraps was anything but another quit attempt. The confirmation is the
+// user's answer to the edits that failed to save, so any input in between — a
+// keystroke that resumes editing, a click — may change that edit set, and a
+// later identical error must warn again instead of discarding edits the user
+// never saw refused (#5898). Call as `defer m.invalidateQuitConfirmationAfter()()`.
+func (m *home) invalidateQuitConfirmationAfter() func() {
+	if m.quitSaveFailure == "" {
+		return func() {}
+	}
+	m.quitAttempted = false
+	return func() {
+		if !m.quitAttempted {
+			m.quitSaveFailure = ""
+		}
+	}
 }
 
 // saveContentPaneState persists any changes from the hooks/task panes and

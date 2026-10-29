@@ -183,6 +183,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
 	case tea.MouseMsg:
+		defer m.invalidateQuitConfirmationAfter()()
 		if m.recovery != nil {
 			m.recovery = nil
 			return m, nil
@@ -196,6 +197,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fully sufficient.
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
+		defer m.invalidateQuitConfirmationAfter()()
 		if m.recovery != nil {
 			m.recovery = nil
 			return m, nil
