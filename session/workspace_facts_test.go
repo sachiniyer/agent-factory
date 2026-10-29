@@ -176,7 +176,6 @@ func TestMeasureWorkspaceAtACorruptStashIsUnverifiedNotZero(t *testing.T) {
 
 	f := MeasureWorkspaceAt(checkout, clone)
 	assert.Contains(t, f.Unverified, "stashes", "an unreadable stash is unknown")
-	assert.GreaterOrEqual(t, f.Stashes, 1, "the ref exists, so at least one stash does")
 }
 
 func TestMeasureWorkspaceAtNoStashIsAVerifiedZero(t *testing.T) {
@@ -191,4 +190,78 @@ func mustOut(t *testing.T, cmd *exec.Cmd) []byte {
 	out, err := cmd.Output()
 	require.NoError(t, err)
 	return out
+}
+
+// refTableRepo initialises a repository on the reftable ref backend, or skips when
+// this git cannot (it needs 2.45).
+func refTableRepo(t *testing.T) (clone, checkout string) {
+	t.Helper()
+	root := t.TempDir()
+	clone = filepath.Join(root, "workspace")
+	require.NoError(t, os.MkdirAll(clone, 0o755))
+	cmd := exec.Command("git", "-C", clone, "init", "-q", "-b", "main", "--ref-format=reftable")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("this git cannot create a reftable repository: %v: %s", err, out)
+	}
+	commitIn(t, clone, "base")
+	checkout = filepath.Join(root, "workspace-sess")
+	wsGit(t, clone, "worktree", "add", "-q", "-b", "af/sess", checkout)
+	commitIn(t, checkout, "agent work")
+	return clone, checkout
+}
+
+// #5999: on a reftable repository there are no loose refs, reflog files or
+// packed-refs, so a stash read from those files is a "verified zero" over an
+// intact stash. The measurement asks git instead.
+func TestMeasureWorkspaceAtCountsAStashOnAReftableRepository(t *testing.T) {
+	clone, checkout := refTableRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, "tracked"), []byte("t"), 0o644))
+	wsGit(t, checkout, "add", "tracked")
+	wsGit(t, checkout, "-c", "user.name=t", "-c", "user.email=t@t", "stash", "push", "-q")
+	_, statErr := os.Stat(filepath.Join(clone, ".git", "refs", "stash"))
+	require.Error(t, statErr, "premise: reftable keeps no loose refs/stash file")
+
+	f := MeasureWorkspaceAt(checkout, clone)
+	assert.Equal(t, 1, f.Stashes, "the stash is counted though no ref file names it")
+	assert.Empty(t, f.Unverified)
+
+	// And with the checkout gone, from the clone alone.
+	require.NoError(t, os.RemoveAll(checkout))
+	f = MeasureWorkspaceAt(checkout, clone)
+	assert.True(t, f.CheckoutMissing)
+	assert.Equal(t, 1, f.Stashes)
+}
+
+func TestMeasureWorkspaceAtReftableWithNoStashIsAVerifiedZero(t *testing.T) {
+	clone, checkout := refTableRepo(t)
+	f := MeasureWorkspaceAt(checkout, clone)
+	assert.Zero(t, f.Stashes)
+	assert.NotContains(t, f.Unverified, "stashes")
+	assert.Equal(t, 2, f.UnpushedCommits, "branches are read through git on reftable too")
+}
+
+// #6000: a worktree path containing a newline is one record, not a truncated one
+// that is silently skipped.
+func TestMeasureWorkspaceAtCountsAWorktreeWhosePathHasANewline(t *testing.T) {
+	clone, _ := cloneWithLinkedCheckout(t)
+	odd := filepath.Join(t.TempDir(), "odd\nbranch refs/heads/fake")
+	wsGit(t, clone, "worktree", "add", "-q", "--detach", odd)
+	require.NoError(t, os.WriteFile(filepath.Join(odd, "dirty.txt"), []byte("d"), 0o644))
+	commitIn(t, odd, "work in the oddly named worktree")
+
+	f := MeasureWorkspaceAt("", clone)
+	assert.Equal(t, 1, f.DirtyFiles, "the uncommitted file in the newline-named worktree is counted")
+	assert.GreaterOrEqual(t, f.UnpushedCommits, 3, "base, the agent's commit and the detached one")
+	assert.Empty(t, f.Unverified, "a NUL-terminated listing is trusted")
+}
+
+func TestWorktreeListWithoutZIsDistrustedWhenAPathSpansLines(t *testing.T) {
+	// The line-by-line reading of an older git: a path continued onto a second line
+	// is not a keyword, so the listing cannot be trusted.
+	trees, ok := parseWorktreeList("worktree /a\nHEAD abc\nbranch refs/heads/main\n\nworktree /b\nodd\nHEAD def\n", "\n")
+	assert.False(t, ok)
+	assert.Nil(t, trees)
+	trees, ok = parseWorktreeList("worktree /a\nHEAD abc\nbranch refs/heads/main\n\nworktree /b\nHEAD def\ndetached\n", "\n")
+	assert.True(t, ok)
+	assert.Len(t, trees, 2)
 }

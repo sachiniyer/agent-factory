@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -177,25 +176,26 @@ type linkedWorktree struct {
 }
 
 // worktrees lists every worktree of the repository from `git worktree list
-// --porcelain`. ok is false when git cannot answer or the answer is malformed.
+// --porcelain -z`: NUL-terminated, so a path with a newline in it is one record,
+// not a truncated one that is silently skipped. ok is false when git cannot
+// answer or the answer is malformed.
+//
+// A git that predates -z (before 2.36) is read line by line instead, and a line
+// that is not one of the porcelain keywords is a path continued across a newline:
+// that listing cannot be trusted, so it is not ok rather than guessed at.
 func (m *repoMeasure) worktrees() ([]linkedWorktree, bool) {
-	out, err := runWorkspaceGit(m.dir, "worktree", "list", "--porcelain")
+	out, err := runWorkspaceGit(m.dir, "worktree", "list", "--porcelain", "-z")
+	sep := "\x00"
 	if err != nil {
-		return nil, false
-	}
-	var trees []linkedWorktree
-	for _, line := range strings.Split(string(out), "\n") {
-		switch {
-		case strings.HasPrefix(line, "worktree "):
-			trees = append(trees, linkedWorktree{path: strings.TrimPrefix(line, "worktree ")})
-		case len(trees) == 0:
-		case strings.HasPrefix(line, "branch "):
-			trees[len(trees)-1].branch = strings.TrimPrefix(strings.TrimPrefix(line, "branch "), "refs/heads/")
-		case strings.HasPrefix(line, "prunable"):
-			trees[len(trees)-1].gone = true
+		var legacyErr error
+		out, legacyErr = runWorkspaceGit(m.dir, "worktree", "list", "--porcelain")
+		if legacyErr != nil {
+			return nil, false
 		}
+		sep = "\n"
 	}
-	if len(trees) == 0 {
+	trees, ok := parseWorktreeList(string(out), sep)
+	if !ok {
 		return nil, false
 	}
 	for i := range trees {
@@ -302,56 +302,53 @@ func (m *repoMeasure) measureBranches(trees []linkedWorktree) {
 	}
 }
 
-// measureStash counts stash entries. Absence is concluded only from the ref being
-// absent EVERYWHERE git keeps it — loose file, reflog, packed-refs — not from an
-// error message: a corrupt refs/stash (a missing object, a damaged reflog) makes
-// the reflog read fail while the stashed work is still recoverable, and that is
-// unknown, never zero.
+// measureStash counts stash entries through git's own ref-backend-agnostic
+// plumbing, never by reading ref files: a reftable repository keeps no loose refs,
+// reflog files or packed-refs, so a file check reports a verified zero there while
+// the stash is intact. Absence is concluded only when every question git is asked
+// agrees: `rev-parse --verify --quiet refs/stash` says no such ref (exit 1, no
+// output), `for-each-ref` lists nothing without a warning, and `stash list` is
+// empty and succeeds. A ref that exists but whose reflog or objects git cannot read
+// makes the read fail, and that is unknown, never zero.
 func (m *repoMeasure) measureStash() {
-	out, err := runWorkspaceGit(m.dir, "rev-parse", "--git-common-dir")
+	_, _, code, err := runWorkspaceGitStatus(m.dir, "rev-parse", "--verify", "--quiet", "refs/stash")
 	if err != nil {
 		m.unverified("stashes")
 		return
 	}
-	common := strings.TrimSpace(string(out))
-	if common == "" {
+	var present bool
+	switch code {
+	case 0:
+		present = true
+	case 1:
+		// No such ref as far as rev-parse can tell. A ref that exists but is broken
+		// also lands here, so the other two questions have to agree.
+	default:
 		m.unverified("stashes")
 		return
 	}
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(m.dir, common) // relative to the directory git ran in
-	}
-	present := false
-	for _, rel := range []string{"refs/stash", "logs/refs/stash"} {
-		if _, err := os.Stat(filepath.Join(common, rel)); err == nil {
-			present = true
-		} else if !errors.Is(err, os.ErrNotExist) {
-			m.unverified("stashes")
-			return
-		}
-	}
-	packed, perr := os.ReadFile(filepath.Join(common, "packed-refs"))
-	switch {
-	case perr == nil:
-		for _, line := range strings.Split(string(packed), "\n") {
-			if strings.HasSuffix(strings.TrimSpace(line), " refs/stash") {
-				present = true
-			}
-		}
-	case !errors.Is(perr, os.ErrNotExist):
+	refs, stderr, rcode, err := runWorkspaceGitStatus(m.dir, "for-each-ref", "--format=%(refname)", "refs/stash")
+	if err != nil || rcode != 0 || strings.TrimSpace(stderr) != "" {
 		m.unverified("stashes")
 		return
 	}
-	if !present {
-		return // confirmed absent: a verified zero
+	if strings.TrimSpace(string(refs)) != "" {
+		present = true
 	}
-	reflog, err := runWorkspaceGit(m.dir, "reflog", "show", "--format=%H", "refs/stash")
-	n := countLines(reflog)
-	if err != nil {
+	list, _, lcode, err := runWorkspaceGitStatus(m.dir, "stash", "list", "--format=%H")
+	n := countLines(list)
+	if err != nil || lcode != 0 {
 		m.unverified("stashes")
+		if present && n == 0 {
+			n = 1 // the ref exists, so at least one stash does
+		}
+		m.facts.Stashes = n
+		return
 	}
-	if n == 0 {
-		n = 1 // the ref exists, so at least one stash does
+	if present && n == 0 {
+		// The ref is there and the list is empty: git is contradicting itself.
+		m.unverified("stashes")
+		n = 1
 	}
 	m.facts.Stashes = n
 }
@@ -364,11 +361,25 @@ func countLines(b []byte) int {
 	return len(strings.Split(s, "\n"))
 }
 
-// runWorkspaceGit runs `git -C dir args...` in its own process group so the
-// deadline reaps git and any child together. A failed read is always an error:
-// callers decide what absence means from the repository's own state, never from
-// the wording of a message.
+// runWorkspaceGit runs `git -C dir args...` and returns its stdout. A non-zero
+// exit is an error: callers decide what absence means from the repository's own
+// answers, never from the wording of a message.
 func runWorkspaceGit(dir string, args ...string) ([]byte, error) {
+	out, stderr, code, err := runWorkspaceGitStatus(dir, args...)
+	if err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("git %s: exit status %d: %s", args[0], code, strings.TrimSpace(stderr))
+	}
+	return out, nil
+}
+
+// runWorkspaceGitStatus runs `git -C dir args...` in its own process group so the
+// deadline reaps git and any child together. A non-zero exit is reported through
+// code, not err; err is for a git that could not run to completion (not found,
+// timed out, killed).
+func runWorkspaceGitStatus(dir string, args ...string) (out []byte, stderr string, code int, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), workspaceGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
@@ -383,11 +394,48 @@ func runWorkspaceGit(dir string, args ...string) ([]byte, error) {
 		return nil
 	}
 	cmd.WaitDelay = 2 * time.Second
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	out, runErr := cmd.Output()
+	var exitErr *exec.ExitError
+	switch {
+	case runErr == nil:
+		return out, errBuf.String(), 0, nil
+	case errors.As(runErr, &exitErr) && ctx.Err() == nil:
+		return out, errBuf.String(), exitErr.ExitCode(), nil
 	}
-	return out, nil
+	return nil, errBuf.String(), -1, fmt.Errorf("git %s: %w", args[0], runErr)
+}
+
+// parseWorktreeList reads `git worktree list --porcelain` output split on sep: NUL
+// for -z, newline for an older git. With newline records, a field that is not a
+// porcelain keyword is a path continued across a newline, which the legacy form
+// cannot express: the listing is not trusted.
+func parseWorktreeList(out, sep string) ([]linkedWorktree, bool) {
+	var trees []linkedWorktree
+	for _, field := range strings.Split(out, sep) {
+		switch {
+		case strings.HasPrefix(field, "worktree "):
+			trees = append(trees, linkedWorktree{path: strings.TrimPrefix(field, "worktree ")})
+		case field == "" || len(trees) == 0:
+			// A blank separator line, or nothing to attach to yet.
+			if field != "" && sep == "\n" {
+				return nil, false
+			}
+		case strings.HasPrefix(field, "branch "):
+			trees[len(trees)-1].branch = strings.TrimPrefix(strings.TrimPrefix(field, "branch "), "refs/heads/")
+		case strings.HasPrefix(field, "prunable"):
+			trees[len(trees)-1].gone = true
+		case strings.HasPrefix(field, "HEAD "), field == "detached", field == "bare",
+			strings.HasPrefix(field, "locked"):
+		default:
+			if sep == "\n" {
+				return nil, false // a path continued onto another line
+			}
+		}
+	}
+	if len(trees) == 0 {
+		return nil, false
+	}
+	return trees, true
 }
