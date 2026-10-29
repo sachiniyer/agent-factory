@@ -133,31 +133,24 @@ func (s *remoteAgentServer) dropBrokerByID(tabID string, br *ptyBroker) {
 // there, and the old one ends in the ordinary way.
 func (s *remoteAgentServer) planeFor(tabID string) (native bool) {
 	s.mu.Lock()
-	idb := s.idBrokers[tabID]
+	idb, ob := s.idBrokers[tabID], s.ordBound[tabID]
 	s.mu.Unlock()
 	if idb != nil && idb.liveSubscribers() > 0 {
 		return true
 	}
-	if s.inst != nil {
-		if idx, err := s.ordinalOf(tabID); err == nil {
-			s.mu.Lock()
-			ob := s.brokers[idx]
-			s.mu.Unlock()
-			if ob != nil && ob.liveSubscribers() > 0 {
-				return false
-			}
-		}
+	if ob != nil && ob.liveSubscribers() > 0 {
+		return false
 	}
 	return s.nativeFor(tabID)
 }
 
 func (s *remoteAgentServer) SubscribeTab(tabID string, since Seq) (PTYSubscription, error) {
 	if !s.planeFor(tabID) {
-		idx, err := s.ordinalOf(tabID)
+		br, err := s.ensureBoundBroker(tabID)
 		if err != nil {
 			return nil, err
 		}
-		return s.Subscribe(idx, since)
+		return br.subscribe(since)
 	}
 	br, err := s.ensureBrokerByID(tabID)
 	if err != nil {
@@ -184,10 +177,7 @@ func (s *remoteAgentServer) InputTab(tabID string, b []byte) error {
 	if native {
 		br, err = s.ensureBrokerByID(tabID)
 	} else {
-		var idx int
-		if idx, err = s.ordinalOf(tabID); err == nil {
-			br, err = s.ensureBroker(idx)
-		}
+		br, err = s.ensureBoundBroker(tabID)
 	}
 	if err != nil {
 		return err
@@ -201,11 +191,11 @@ func (s *remoteAgentServer) InputTab(tabID string, b []byte) error {
 
 func (s *remoteAgentServer) ResizeTab(tabID string, rows, cols uint16) error {
 	if !s.planeFor(tabID) {
-		idx, err := s.ordinalOf(tabID)
+		br, err := s.ensureBoundBroker(tabID)
 		if err != nil {
 			return err
 		}
-		return s.Resize(idx, rows, cols)
+		return br.resize(rows, cols)
 	}
 	br, err := s.ensureBrokerByID(tabID)
 	if err != nil {
@@ -229,11 +219,15 @@ func (s *remoteAgentServer) closeTabStream(tabID string) {
 		s.goneTabs = map[string]bool{}
 	}
 	s.goneTabs[tabID] = true
-	br := s.idBrokers[tabID]
+	br, ob := s.idBrokers[tabID], s.ordBound[tabID]
 	delete(s.idBrokers, tabID)
+	delete(s.ordBound, tabID)
 	s.mu.Unlock()
 	if br != nil {
 		br.close()
+	}
+	if ob != nil {
+		ob.close()
 	}
 }
 

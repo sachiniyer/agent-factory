@@ -35,6 +35,10 @@ type remoteClientlessChannel struct {
 	// tabID, when set, addresses the tab by stable id (#5571 W4.4) and tab is
 	// unused: stream dial and repaint both bind the id inside the sandbox.
 	tabID string
+	// resolve, when set, yields the tab's CURRENT ordinal from the stable id it
+	// was bound to, at each dial and repaint, so a reorder after the subscription
+	// began cannot move the channel to another tab (ordinal plane only).
+	resolve func() (int, error)
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
@@ -79,6 +83,14 @@ func (c *remoteClientlessChannel) tabLabel() string {
 	return strconv.Itoa(c.tab)
 }
 
+// ordinal is the ordinal this channel addresses right now.
+func (c *remoteClientlessChannel) ordinal() (int, error) {
+	if c.resolve != nil {
+		return c.resolve()
+	}
+	return c.tab, nil
+}
+
 func newRemoteClientlessChannel(rc *remoteAgentClient, tab int) *remoteClientlessChannel {
 	return &remoteClientlessChannel{rc: rc, tab: tab}
 }
@@ -102,7 +114,12 @@ func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		return nil, fmt.Errorf("remote clientless capture already started")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	conn, err := c.rc.dialStream(ctx, c.tab, c.tabID, c.remoteSeq)
+	tab, err := c.ordinal()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	conn, err := c.rc.dialStream(ctx, tab, c.tabID, c.remoteSeq)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -257,7 +274,11 @@ func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	if c.tabID != "" {
 		return c.rc.previewGridByID(c.tabID)
 	}
-	return c.rc.previewGrid(c.tab)
+	tab, err := c.ordinal()
+	if err != nil {
+		return PaneSnapshot{}, err
+	}
+	return c.rc.previewGrid(tab)
 }
 
 // activeConn returns the live capture socket and its context, or an error if

@@ -18,9 +18,10 @@ import (
 // input and resize until its capture is open (activeConn: "remote pty stream is
 // not open").
 type planeChannel struct {
-	mu   sync.Mutex
-	open bool
-	w    *io.PipeWriter
+	mu    sync.Mutex
+	open  bool
+	w     *io.PipeWriter
+	sends int
 }
 
 func (c *planeChannel) StartCapture() (io.ReadCloser, error) {
@@ -54,7 +55,22 @@ func (c *planeChannel) gate() error {
 	return nil
 }
 
-func (c *planeChannel) SendRaw([]byte) error            { return c.gate() }
+func (c *planeChannel) SendRaw([]byte) error {
+	if err := c.gate(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.sends++
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *planeChannel) sent() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sends
+}
+
 func (c *planeChannel) Resize(uint16, uint16) error     { return c.gate() }
 func (c *planeChannel) Snapshot() (PaneSnapshot, error) { return PaneSnapshot{}, nil }
 func (c *planeChannel) PaneDead() bool                  { return false }
@@ -66,13 +82,13 @@ type planeHarness struct {
 	modern  bool
 	failing bool
 	s       *remoteAgentServer
-	ord     map[int]*planeChannel
+	ord     map[string]*planeChannel
 	id      map[string]*planeChannel
 }
 
 func newPlaneHarness(t *testing.T, tabIDs ...string) *planeHarness {
 	t.Helper()
-	h := &planeHarness{ord: map[int]*planeChannel{}, id: map[string]*planeChannel{}}
+	h := &planeHarness{ord: map[string]*planeChannel{}, id: map[string]*planeChannel{}}
 	ws := newTabWireServer(t)
 	ws.mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
@@ -98,11 +114,11 @@ func newPlaneHarness(t *testing.T, tabIDs ...string) *planeHarness {
 		tabs = append(tabs, &Tab{ID: id, Name: id, Kind: TabKindShell})
 	}
 	h.s = &remoteAgentServer{rc: ws.client(t, srv.URL), inst: &Instance{Title: "sb", Tabs: tabs}}
-	h.s.ordinalChannel = func(tab int) clientlessChannel {
+	h.s.boundChannel = func(id string) clientlessChannel {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		c := &planeChannel{}
-		h.ord[tab] = c
+		h.ord[id] = c
 		return c
 	}
 	h.s.idChannel = func(id string) clientlessChannel {
@@ -154,10 +170,42 @@ func TestTransientProbeMissThenSwitchKeepsTheLiveSubscription(t *testing.T) {
 	assert.True(t, idChan.isOpen(), "the new subscription rides the id plane")
 }
 
+func (h *planeHarness) sendsOf(id string) (n int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c := h.ord[id]; c != nil {
+		n += c.sent()
+	}
+	if c := h.id[id]; c != nil {
+		n += c.sent()
+	}
+	return n
+}
+
+func (h *planeHarness) totalSends() (n int) {
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.ord)+len(h.id))
+	for id := range h.ord {
+		ids = append(ids, id)
+	}
+	for id := range h.id {
+		ids = append(ids, id)
+	}
+	h.mu.Unlock()
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			n += h.sendsOf(id)
+		}
+	}
+	return n
+}
+
 func openPlaneOnce(h *planeHarness, id string, idx int) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	o, i := h.ord[idx], h.id[id]
+	o, i := h.ord[id], h.id[id]
 	switch {
 	case i != nil && i.isOpen() && (o == nil || !o.isOpen()):
 		return "id"
@@ -170,7 +218,7 @@ func openPlaneOnce(h *planeHarness, id string, idx int) string {
 }
 
 // Model: random subscribe / end / input / resize steps interleaved with probe
-// outcomes of unknown and confirmed. While a tab has any live subscription, all
+// outcomes of unknown and confirmed, and a reorder of the roster. While a tab has any live subscription, all
 // of them stay on one plane, none is dropped, and input and resize succeed.
 func TestPlaneSwitchModel(t *testing.T) {
 	const seeds, depth = 200, 24
@@ -201,7 +249,12 @@ func TestPlaneSwitchModel(t *testing.T) {
 		for step := 0; step < depth; step++ {
 			k := rng.Intn(len(tabIDs))
 			id, idx := tabIDs[k], k+1
-			switch rng.Intn(7) {
+			switch rng.Intn(8) {
+			case 7:
+				trace = append(trace, "reorder")
+				h.s.inst.mu.Lock()
+				h.s.inst.Tabs[1], h.s.inst.Tabs[2] = h.s.inst.Tabs[2], h.s.inst.Tabs[1]
+				h.s.inst.mu.Unlock()
 			case 0:
 				trace = append(trace, "probe-unknown")
 				h.setProbe(true, false)
@@ -233,9 +286,16 @@ func TestPlaneSwitchModel(t *testing.T) {
 				}
 			case 5:
 				trace = append(trace, "input("+id+")")
+				before := h.totalSends()
+				mine := h.sendsOf(id)
 				err := h.s.InputTab(id, []byte("x"))
-				if len(live[id]) > 0 && err != nil {
-					fail("input on a tab with %d live subscriptions: %v", len(live[id]), err)
+				if len(live[id]) > 0 {
+					if err != nil {
+						fail("input on a tab with %d live subscriptions: %v", len(live[id]), err)
+					}
+					if h.sendsOf(id) != mine+1 || h.totalSends() != before+1 {
+						fail("input for %s reached another tab's stream", id)
+					}
 				}
 			default:
 				trace = append(trace, "resize("+id+")")
@@ -248,7 +308,7 @@ func TestPlaneSwitchModel(t *testing.T) {
 				if len(subs) == 0 {
 					continue
 				}
-				if got := openPlane(tab, map[string]int{"t1": 1, "t2": 2}[tab]); got != plane[tab] {
+				if got := openPlane(tab, 0); got != plane[tab] {
 					fail("%s live subscriptions are on %s, started on %s", tab, got, plane[tab])
 				}
 			}
@@ -259,4 +319,27 @@ func TestPlaneSwitchModel(t *testing.T) {
 			}
 		}
 	}
+}
+
+// An ordinal-plane channel resolves its ordinal from the stable id each time it
+// dials or repaints, so a reorder cannot move it to another tab (#5952).
+func TestOrdinalBoundChannelFollowsTheIDNotTheSlot(t *testing.T) {
+	h := newPlaneHarness(t, "t1", "t2")
+	ch := &remoteClientlessChannel{rc: h.s.rc, resolve: func() (int, error) { return h.s.ordinalOf("t1") }}
+	idx, err := ch.ordinal()
+	require.NoError(t, err)
+	assert.Equal(t, 1, idx)
+
+	h.s.inst.mu.Lock()
+	h.s.inst.Tabs[1], h.s.inst.Tabs[2] = h.s.inst.Tabs[2], h.s.inst.Tabs[1]
+	h.s.inst.mu.Unlock()
+	idx, err = ch.ordinal()
+	require.NoError(t, err)
+	assert.Equal(t, 2, idx, "t1 moved to slot 2 and the channel followed the id")
+
+	h.s.inst.mu.Lock()
+	h.s.inst.Tabs = h.s.inst.Tabs[:2]
+	h.s.inst.mu.Unlock()
+	_, err = ch.ordinal()
+	assert.ErrorIs(t, err, ErrTabGone, "a closed tab is gone, not whichever tab holds its slot")
 }

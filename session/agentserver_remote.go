@@ -80,13 +80,16 @@ type remoteAgentServer struct {
 	goneTabs map[string]bool
 	// agentTabSynced is the agent-tab id the sandbox is known to hold (#5997).
 	agentTabSynced string
-	// ordinalChannel and idChannel, when set, replace the remote WS channel a
+	// ordBound holds the brokers of tabs opened through the ordinal plane,
+	// keyed by the stable id they resolved to (agentserver_remote_ordinal.go).
+	ordBound map[string]*ptyBroker
+	// boundChannel and idChannel, when set, replace the remote WS channel a
 	// broker is built over (test seams; production leaves them nil).
-	ordinalChannel func(tab int) clientlessChannel
-	idChannel      func(tabID string) clientlessChannel
-	idPlaneKnown   bool
-	idPlane        bool
-	features       []string
+	boundChannel func(tabID string) clientlessChannel
+	idChannel    func(tabID string) clientlessChannel
+	idPlaneKnown bool
+	idPlane      bool
+	features     []string
 
 	// relays are the open loopback port relays (W5.1); Kill closes them.
 	relays map[*trackedRelayConn]struct{}
@@ -290,15 +293,9 @@ func (s *remoteAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryS
 func (s *remoteAgentServer) StopPreservingWorkspace() error {
 	s.mu.Lock()
 	s.closed = true
-	brokers := s.brokers
-	s.brokers = nil
-	idBrokers := s.idBrokers
-	s.idBrokers = nil
+	all := s.takeBrokersLocked()
 	s.mu.Unlock()
-	for _, br := range brokers {
-		br.close()
-	}
-	for _, br := range idBrokers {
+	for _, br := range all {
 		br.close()
 	}
 	s.closeRelays()
@@ -320,15 +317,9 @@ func (s *remoteAgentServer) Kill(_ bool) error {
 	// racing Subscribe can't resurrect one, then kill the remote workspace over REST.
 	s.mu.Lock()
 	s.closed = true
-	brokers := s.brokers
-	s.brokers = nil
-	idBrokers := s.idBrokers
-	s.idBrokers = nil
+	all := s.takeBrokersLocked()
 	s.mu.Unlock()
-	for _, br := range brokers {
-		br.close()
-	}
-	for _, br := range idBrokers {
+	for _, br := range all {
 		br.close()
 	}
 	s.closeRelays()
