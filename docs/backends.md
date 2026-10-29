@@ -998,9 +998,11 @@ What the sandbox host needs, and what af does to it:
 - **Git identity is repo-local.** After the clone, provisioning writes the
   committer identity into the workspace's own `.git/config` (`git config
   --local`): the operator's `user.name`/`user.email` as git resolves them on
-  the daemon host, with "Agent Factory" / `af@agent-factory.local` as a
-  fallback when neither is set. The host user's global git config is left
-  untouched.
+  the daemon host. Each field falls back separately to its placeholder
+  ("Agent Factory" for `user.name`, `af@agent-factory.local` for
+  `user.email`) only when that field is unset, so configuring just one keeps
+  the configured value and substitutes the placeholder for the other. The
+  host user's global git config is left untouched.
 - **Credentials.** The clone uses value-free GitHub credentials: no token value is
   written into the clone's config. The per-session agent-server token goes
   through stdin into a `0600` file in the session directory, never through argv
