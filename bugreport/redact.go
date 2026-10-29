@@ -376,6 +376,12 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// and the branch of a preserved off-box workspace (#5571 W8.5). Whether the
 	// archive published is diagnosable from the archive report; the locators are not.
 	d.ArchivedWorkspace = nil
+	// Placement (#5571 W6.4) is a derived projection of fields this redactor
+	// already handles: Host is the redacted host pick, Location a workspace or
+	// worktree path, and Kind/Backend restate BackendType. Dropping it, rather than
+	// redacting it field by field, keeps a second copy of those locators out of the
+	// bundle.
+	d.Placement = nil
 	if d.Title != "" {
 		d.Title = redactedMarker
 	}

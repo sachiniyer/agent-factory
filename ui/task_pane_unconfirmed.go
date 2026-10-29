@@ -144,6 +144,9 @@ func (s *TaskPane) editLanded(draft, record task.Task) bool {
 	if patch.Name != nil && *patch.Name != record.Name {
 		return false
 	}
+	if patch.Host != nil && *patch.Host != record.Host {
+		return false
+	}
 	if patch.Prompt != nil && *patch.Prompt != record.Prompt {
 		return false
 	}

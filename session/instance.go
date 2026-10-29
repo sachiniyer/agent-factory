@@ -399,9 +399,21 @@ type Instance struct {
 	// runtime cleanup handle, which a teardown clears: restore and recovery
 	// re-provision from this so a pick never silently moves to another machine.
 	Host string `json:"host,omitempty"`
+	// branchUnpushed: Branch is the name af chose at create and nothing has
+	// published it, so it is not a restore checkpoint (#5972). Persisted as
+	// BranchUnpushed; false for any row an older af wrote.
+	branchUnpushed bool
 	// archivedWorkspace records where this archived off-box session's work lives
 	// (#5571 W8.5); nil for a live row or one archived before the field.
 	archivedWorkspace *ArchivedWorkspaceData
+	// placement is the daemon-projected place this row runs (#5571 W6.4). Set on
+	// a client row built from a snapshot, which has no runtime to derive it from.
+	placement *PlacementData
+	// projectedTabManagement is the daemon's verdict that this off-box session
+	// serves shell and process tabs (#5953). A client row built from a snapshot has
+	// no live agent-server to read the advertisement from, so it adopts the
+	// projection instead.
+	projectedTabManagement bool
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's
@@ -639,6 +651,18 @@ type Instance struct {
 	// spawn must reserve against both in the same critical section. It is
 	// deliberately NOT part of the roster: nothing renders or respawns from it.
 	pendingTabCleanup []TabCleanupData
+
+	// pendingRemoteClose is pendingTabCleanup for off-box tabs: closes the
+	// sandbox never confirmed (#5957). Persisted with the session; retried by
+	// ReconcileOffBoxTabs. Guarded by i.mu.
+	pendingRemoteClose []RemoteTabCleanupData
+	// tabCreateIntents holds the minted ids of remote creates whose outcome was
+	// uncertain, keyed by request shape, so a retry reuses the id (#5958).
+	// Guarded by i.mu; in memory — a restart before the retry loses the mapping,
+	// and the sandbox's own roster then still holds the tab it started.
+	tabCreateIntents map[string]*tabCreateIntent
+	// tabTeardown serializes teardown attempts per tab id (lockTeardown).
+	tabTeardown map[string]*teardownGate
 
 	// tabSpawnClaims reserves the FULL tmux session names of sibling spawns
 	// still in flight — derived under i.mu, released once the append resolves
@@ -943,36 +967,4 @@ func (i *Instance) AttachShellTab(name, tmuxName, tabID string) (*Tab, error) {
 		return nil, fmt.Errorf("session was killed during tab attach")
 	}
 	return tab, nil
-}
-
-// DropClosedTab removes the tab at idx from the in-memory list WITHOUT killing
-// its tmux session (#960 PR 2). It is the no-kill counterpart of CloseTab, used
-// when the daemon's CloseTab RPC has already torn the tmux session down: the
-// daemon owns the kill+persist, and the TUI only needs to drop the now-dead tab
-// from its local view for instant display. Killing again here would shell out a
-// second tmux kill-session that errors ("session not found") on the already-gone
-// session and surface a spurious failure. The agent tab (idx 0) is undroppable;
-// errors on idx 0 or any out-of-range index, mirroring CloseTab.
-func (i *Instance) DropClosedTab(idx int) error {
-	i.mu.Lock()
-	if idx <= 0 || idx >= len(i.Tabs) {
-		i.mu.Unlock()
-		return fmt.Errorf("tab cannot be closed")
-	}
-	tab := i.Tabs[idx]
-	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
-	i.touchLocked()
-	i.mu.Unlock()
-
-	// Release the TUI-side attach PTY (ptmx fd + blocked cmd.Wait goroutine) the
-	// dropped tab held, matching CloseTab. No kill: the daemon's CloseTab RPC
-	// already tore the tmux session down (#960 PR 2), so CloseAttachOnly only
-	// releases this client's attach resources. Done outside the lock so the tmux
-	// teardown never runs while holding i.mu.
-	if tab.tmux != nil {
-		if err := tab.tmux.CloseAttachOnly(); err != nil {
-			log.WarningLog.Printf("DropClosedTab: releasing attach client for tab %q: %v", tab.Name, err)
-		}
-	}
-	return nil
 }

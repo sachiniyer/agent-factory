@@ -453,6 +453,8 @@ func (s *TaskPane) FocusedField() string {
 		return "target"
 	case taskFocusOnComplete:
 		return "on_complete"
+	case taskFocusMaxRuns:
+		return "max_runs"
 	case taskFocusHost:
 		return "host"
 	case taskFocusPath:

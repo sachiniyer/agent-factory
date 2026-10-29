@@ -414,6 +414,7 @@ af agent-server [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--adopt-worktree` | `string` | Bind this existing linked worktree instead of creating one (set by the provisioning daemon when it reattaches an archived workspace) |
 | `--branch` | `string` | Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title) |
 | `--listen` | `string` | HTTP TCP bind address (host:port); :0 lets the kernel pick a free port (default `127.0.0.1:0`) |
 | `--policy-file` | `string` | Operator policy file written by the provisioning daemon; when set, this server reads no config from the host's af home |
@@ -935,6 +936,7 @@ Settable keys:
   branch_prefix              string
   on_archive_command         shell command run before a local worktree moves into the archive, or "" to disable
   worktree_root              subdirectory | sibling
+  projects_root              absolute path on the daemon host where af projects add <git-url> clones (default <af home>/projects)
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
@@ -1647,10 +1649,17 @@ With --daemon-url (or AF_DAEMON_URL) the registration goes to that daemon and th
 path is a path ON ITS HOST, sent as typed: absolute or starting with ~, never
 relative.
 
+Instead of a path, give a git URL (https://host/owner/repo, ssh://host/owner/repo
+or git@host:owner/repo) and the DAEMON clones it on its own host, with its own
+credentials (ssh keys, credential helper), under its projects_root (default
+<af home>/projects), then registers it. The URL is validated by the daemon: file://,
+local paths, option-like values and URLs with an embedded password are refused.
+Re-adding the same URL returns the existing project.
+
 'register' is a deprecated alias for 'add'.
 
 ```
-af projects add <path>
+af projects add <path-or-git-url>
 ```
 
 **Aliases:** `register`
@@ -2244,8 +2253,11 @@ named one — use it from inside a session when your work is done. --self and a
 An ssh or sandbox session publishes nothing by default: the agent stops and the
 workspace stays on its host, owned by the archived row, and the output names where
 (archived_workspace). Pass --push to push the branch to origin first; docker and
-hook sessions always push. Restoring a session archived without a push is not
-available yet (#5571 W8.6) — the work is untouched on the host. In-place (--here) sessions cannot be archived because af does not own
+hook sessions always push. Restoring a session archived without a push
+reattaches that workspace — the tree, index and ignored files come back exactly as
+archived and the agent resumes its conversation; nothing is cloned, pushed or
+re-hooked. If the host proves the workspace gone, restore re-provisions onto the
+recorded branch or fails. In-place (--here) sessions cannot be archived because af does not own
 their worktree. Local archives print the relocated worktree path on success.
 
 ```
@@ -2897,13 +2909,15 @@ the session (auto-suffixed -2, -3, …). So the name you pass is not always the
 name you get — the resolved tab name is printed on success, and that is the one
 the other tab verbs address.
 
-For remote sessions, web tabs are admitted. That kind is metadata-only: it needs
+For remote sessions, web and VS Code tabs are admitted. A VS Code tab opens the
+editor running on the session's host, rooted at the workspace (code-server or
+openvscode-server must be installed there). A web tab is metadata-only: it needs
 no PTY and spawns no process. An external HTTPS URL is iframed
 directly, and a loopback target (including --port) is served from the session's
 own workspace through the agent-server's port relay, so it shows what listens on
 that port in the sandbox rather than on the daemon host. Plain-HTTP external URLs
-cannot be framed by an HTTPS Agent Factory UI. Shell, process, and VS Code tabs
-still require local runtime/worktree resources.
+cannot be framed by an HTTPS Agent Factory UI. Shell and process tabs still
+require local runtime/worktree resources.
 
 ```
 af sessions tab-create <title> [flags]
@@ -3248,11 +3262,11 @@ af sessions watch [title] [flags]
 
 Identify the current Agent Factory session
 
-Returns the session info for the current session. With a daemon credential (AF_DAEMON_TOKEN), the daemon reports the session that credential is bound to — the narrowed projection a sandbox receives withholds the tmux name. Otherwise it matches the current tmux session name against stored sessions.
+Returns the session info for the current session. With a session-bound daemon credential (a sandbox credential, supplied as AF_DAEMON_TOKEN or --token), the daemon reports the session that credential is bound to — the narrowed projection a sandbox receives withholds the tmux name and the repository paths. An ordinary operator token (including the output of 'af token show') is bound to no session, so it resolves nothing by itself: whoami then falls back to the tmux path. Otherwise it matches the current tmux session name against stored sessions.
 
 The tmux path requires TMUX and TMUX_PANE. Queries that pane on the inherited tmux socket. When tmux supports session environment stamping (3.2+), AF_SESSION must match the pane; otherwise inherited markers are ignored. Missing context or a stamped identity mismatch is an error on that path.
 
-Identity is not scoped: you are the session you are, in whatever project it belongs to. --repo therefore acts as an assertion — it checks that the resolved session really is in that project, and errors if it is not.
+Identity is not scoped: you are the session you are, in whatever project it belongs to. --repo therefore acts as an assertion — it checks that the resolved session really is in that project, and errors if it is not. The assertion needs the session's recorded repository: a session-bound credential receives a projection without it, so there --repo is validated as a project but is not compared — a success does not verify the project.
 
 ```
 af sessions whoami

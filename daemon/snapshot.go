@@ -596,6 +596,11 @@ func onlyOwnedBySandbox(instances []session.InstanceData, owner string) []sessio
 // running, what state it is in. What is excluded is anything describing the HOST,
 // anything about other sessions, and the conversation/prompt payloads a sandbox
 // already has locally and does not need served back.
+//
+// Program is deliberately NOT here: it is text the sandbox itself supplied (a full
+// command, possibly naming a path), the sandbox does not need it served back, and
+// returning caller-supplied text is exactly what makes a response depend on the
+// host's layout. Every string this returns is classified in sandboxStringClasses.
 func sandboxSafeInstanceData(d session.InstanceData) session.InstanceData {
 	return session.InstanceData{
 		ID:                       d.ID,
@@ -607,7 +612,6 @@ func sandboxSafeInstanceData(d session.InstanceData) session.InstanceData {
 		InFlightOp:               d.InFlightOp,
 		LifecycleAction:          d.LifecycleAction,
 		CurrentAgent:             d.CurrentAgent,
-		Program:                  d.Program,
 		BackendType:              d.BackendType,
 		TaskRunActive:            d.TaskRunActive,
 		LimitResetAt:             d.LimitResetAt,

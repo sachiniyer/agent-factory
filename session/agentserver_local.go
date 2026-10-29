@@ -138,6 +138,23 @@ func backendIsRemoteWorkspace(b Backend) bool {
 	return b != nil && b.Capabilities().Workspace == WorkspaceRemote
 }
 
+// RemoteRuntimeUnbound reports whether this is a remote-workspace row whose
+// agent-server transport is not currently bound — the deadRemoteAgentServer
+// shape, where AgentServer() returns a stateless refusal because remoteClient
+// is nil (#2005). A reloaded ssh/sandbox row the startup reattach has not yet
+// re-bound lands here (#5571 W1.5), as does a row left client-less by a failed
+// lost recovery. In this state there is no agent-server to poll: the readiness
+// wait would burn its full budget against a sentinel and then latch the terminal
+// startup-unknown marker, so the daemon's handoff recovery refuses to retry a
+// mission on an unbound row rather than wedging a runtime reattach was about to
+// bind — the row keeps its fence and pending mission and stays eligible for the
+// reattach/restore that owns it.
+func (i *Instance) RemoteRuntimeUnbound() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.remoteClient == nil && backendIsRemoteWorkspace(i.backend)
+}
+
 var _ AgentServer = (*localAgentServer)(nil)
 
 type baselineUpdateBackend interface {

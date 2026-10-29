@@ -1483,6 +1483,8 @@ body[data-project-color] [data-af-theme="dark"] {
 .af-term-menu[hidden], .af-term-keyboard[hidden] { display: none; }
 .af-term-new-slot, .af-term-new-slot .af-tab-new-wrap, .af-term-menu button { width: 100%; }
 .af-term-menu button { text-align: left; }
+.af-term-placement { color: var(--af-ink-muted); font-size: var(--af-type-body); padding: var(--af-space-1) var(--af-space-2); overflow-wrap: anywhere; }
+.af-term-placement[hidden] { display: none; }
 .af-term-keyboard, .af-pane-keyboard { color: var(--af-ink); font-size: var(--af-type-body); }
 .af-pane-keyboard { display: none; }
 .af-kb-terminal .af-pane-focused .af-pane-keyboard { display: inline; }

@@ -200,14 +200,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 		} else {
 			i.mu.Lock()
-			if !i.started {
-				i.started = true
-				// Start(false) reconstructs this process-local flag on load.
-				// Actual respawns record their own runtime mutation below.
-				if firstTimeSetup {
-					i.touchLocked()
-				}
-			}
+			// Start(false) reconstructs this process-local flag on load; actual
+			// respawns record their own runtime mutation below.
+			i.markStartedLocked(firstTimeSetup)
 			i.mu.Unlock()
 		}
 	}()
@@ -262,7 +257,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if workDir != "" {
 			resolution := resolveLaunchProgramForInstance(i)
 			runtimeProgram = resolution.command
-			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command), i.guidanceCaps())
+			program := injectSystemPromptWithEnv(resolution.command, resolveSkillTarget(i, resolution.command), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 		}
@@ -367,7 +362,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			base := resolution.command
 			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
-			program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.guidanceCaps())
+			program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}
 		setLaunchProgram(tmuxSession, program, proof)

@@ -175,6 +175,12 @@ func (i *Instance) SetSandboxBranch(branch string) {
 		i.Branch = branch
 		i.touchLocked()
 	}
+	// The caller learned this name from a push that just landed, so it is a
+	// restore checkpoint now, not just a chosen name (#5972).
+	if branch != "" && i.branchUnpushed {
+		i.branchUnpushed = false
+		i.touchLocked()
+	}
 }
 
 // MarkUserKilled records kill intent on the instance (#1108). Callers persist

@@ -9,8 +9,10 @@ A session's **backend** decides *where* its workspace and agent run. Every
 backend exposes the same session surface — attach, preview, prompt delivery, the
 live PTY stream — so the TUI, CLI, and daemon drive a containerised session much
 like a local one. Tab admission follows what each kind needs: shell/process tabs
-need a local PTY and process, and VS Code needs a daemon-side worktree/editor, so
-those remain local-only. A metadata-only web tab spawns neither and can be added
+need a local PTY and process, so those remain local-only; a VS Code tab on an
+off-box session opens the editor running on the session's host, rooted at the
+workspace and relayed through the agent-server (code-server or openvscode-server
+must be installed there; af detects it and never installs it). A metadata-only web tab spawns neither and can be added
 to an off-box session (docker, ssh, sandbox, hook) when its target is an external
 HTTPS URL, or a loopback address (including `--port`): the daemon's web-tab proxy
 reaches the workspace's own `127.0.0.1:<port>` through the agent-server's port
@@ -763,6 +765,38 @@ the host. The file carries `global_agent_skills`, `worktree_root`, `branch_prefi
 edits and hooks saved in the TUI included. It never carries `sandbox.ssh`, `hosts`,
 `move_cmd` or accounts.
 
+
+### Inspect a sandbox session's work
+
+The agent's work lives in the sandbox's workspace, not on the daemon host, so
+`git status` in your own checkout shows nothing. You do not need ssh to the host
+to look at it, or to hand the agent something: every client (TUI, web, phone,
+`af` against a remote daemon) opens the same tabs a local session has, and they
+run in the workspace.
+
+1. **Status and diff.** Open a shell tab — `af sessions tab-create <title> --kind
+   shell`, the TUI's new-tab key, or the web's `+` menu — and run `git status`
+   and `git diff`. It is the agent's own workspace, so the branch and uncommitted
+   changes are the agent's. The shell is listed once the sandbox's agent-server
+   serves the tab API; against one that does not, the picker says so instead of
+   creating a tab.
+2. **Browse and edit files.** Open a VS Code tab — `af sessions tab-create <title>
+   --kind vscode`. The editor runs on the host, rooted at the workspace, and the
+   daemon relays it, so a remote client reaches it through the same authenticated
+   origin as any other tab. The host needs `code-server` or `openvscode-server`;
+   af detects one and does not install it, and a missing one shows the install
+   hint in the tab. See [VS Code tabs](web.md#vs-code-tabs).
+3. **Hand the agent a file.** Put the file in the workspace — drag it into the VS
+   Code explorer, or paste its contents into a shell tab (`cat > notes.md`) — then
+   tell the agent where it is with `af sessions send-prompt <title> "read
+   notes.md"`. The agent sees what is on disk in the workspace; there is no
+   separate upload channel.
+
+An **archived** sandbox that was archived without pushing keeps its workspace on
+the host (see [Archive & restore](#archive-restore)): there is no live agent to
+ask, so read the files from the host, or restore the session to get the tabs
+back.
+
 ---
 
 ## Hook backend (bring-your-own-provisioner)
@@ -780,7 +814,7 @@ server's authed endpoint (`{url, token}`); the daemon then
 drives the session over that `ws://` stream — so a hook session matches a local,
 docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
 Like the other off-box backends it admits web tabs (external HTTPS, or loopback via the port relay); shell,
-process, and VS Code tabs need a daemon-side worktree.
+and process tabs need a daemon-side worktree; a VS Code tab opens the editor on the session's host.
 
 ```json
 {
@@ -835,12 +869,15 @@ them. The script runs on the daemon box, never from repository config.
   only); `AF_SSH_DEST` — the destination (`user@host` or an ssh alias);
   `AF_SSH_FULL` — the complete command including the destination. So
   `rsync -e "$AF_SSH" file "$AF_SSH_DEST:dir/"` and
-  `$AF_SSH "$AF_SSH_DEST" 'cmd'` reach the same machine af does. The same three
+  `sh -c "$AF_SSH \"\$@\"" af-ssh "$AF_SSH_DEST" 'cmd'` reach the same machine af does.
+  The variables are shell command lines that may contain quoted options (a
+  `ProxyCommand` with spaces), so never expand them unquoted: run them through
+  `sh -c` with positional arguments, as `examples/move-script/move.sh` does. The same three
   values are in the JSON as `ssh`, `ssh_dest` and `ssh_full`. A free-form
   `sandbox.ssh` command already embeds its host and af cannot split it, so there
   `AF_SSH` and `AF_SSH_DEST` are empty and only `AF_SSH_FULL` is set: run
-  `$AF_SSH_FULL 'cmd'` and, instead of `rsync -e`, pipe tar:
-  `tar -C src -c . | $AF_SSH_FULL 'tar -C dir -x'`.
+  `sh -c "$AF_SSH_FULL \"\$@\"" af-ssh-full 'cmd'` and, instead of `rsync -e`, pipe tar:
+  `tar -C src -c . | sh -c "$AF_SSH_FULL \"\$@\"" af-ssh-full 'tar -C dir -x'`.
 - **exit:** `0` continues; anything else aborts. Any failure before the session
   row switches leaves the local session running exactly as before and reaps the
   half-built sandbox workspace.
@@ -923,14 +960,24 @@ capabilities — `Archive` and `Recover` are both supported. All four are declar
 off-box in one place (`backendProvisionsOffBox`), and all four share a single
 capability declaration, so none of them can differ from the others here without
 that being a deliberate change. Parity is not total: they declare
-`TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`), which is why an off-box session carries only
-its agent tab plus any external HTTPS web tabs (the one metadata-only kind
-admitted off-box). A **Lost** sandbox session (one whose
+`TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`). The static declaration is the floor: an
+off-box session whose agent-server advertises `tab-api` lifts `TabManagement` and
+serves shell and process tabs off-box too. Without that advertisement an off-box
+session carries only its agent tab plus HTTPS web tabs (the one metadata-only kind
+admitted off-box; a loopback target is admitted because off-box runtimes relay
+loopback through the agent-server) and docs tabs. A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) is reachable, so recovery **relaunches
 the agent in place**: the sandbox's agent-server stops the agent (if it is still
 running) and starts it again in its existing workspace with the provider's resume,
-rebuilding the worktree on the recorded branch if it was deleted. The branch, the
-tree and any uncommitted work are otherwise untouched, and nothing is pushed,
+rebuilding the worktree if it was deleted: on the recorded branch when that
+branch still exists (its tip is kept), or — when the branch is gone too — by
+recreating it from the recorded base commit (falling back to the origin default
+branch, then `HEAD`), which is only attempted when the agent's exact recorded
+conversation can be resumed; otherwise the rebuild is refused and the session
+stays Lost. A rebuilt worktree runs the repository's `post_worktree_commands`
+again, so installs or builds with side effects repeat on that recovery. When the
+worktree still exists, the branch, the tree and any uncommitted work are untouched
+and no hooks re-run. Either way nothing is pushed,
 reaped, re-cloned or re-provisioned. The same relaunch serves `retry-limit` on a
 dead agent. A sandbox built before the relaunch route existed (it advertises the
 `relaunch` feature on `/v1/health`) falls back to replacing the sandbox: recovery

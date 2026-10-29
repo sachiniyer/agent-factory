@@ -122,6 +122,10 @@ var errVSCodeStartExited = errors.New("the VS Code server exited before it finis
 type vscodeSupervisor struct {
 	mu      sync.Mutex
 	servers map[string]*vscodeServer
+	// namespace selects the owner-record/socket directory this supervisor lives in
+	// (vscodeNamespaceDirName). Empty is the daemon's; an agent-server sets its
+	// own so the daemon's sweeps and its never see each other's editors.
+	namespace string
 	// reconciling reserves one session key while a prior daemon's persisted
 	// owner is inspected and stopped outside mu. Same-key operations retry;
 	// unrelated sessions never wait through process-group teardown.
@@ -439,7 +443,7 @@ func (v *vscodeSupervisor) spawnLocked(
 	// Before the first editor of this daemon's life, clear out any left by the
 	// last one. Safe here precisely because nothing has spawned yet.
 	v.sweepAbandonedSockets()
-	socketPath, err := vscodeSocketPath(key)
+	socketPath, err := vscodeSocketPathIn(v.namespace, key)
 	if err != nil {
 		return nil, err
 	}

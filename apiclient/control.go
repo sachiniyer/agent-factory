@@ -460,8 +460,18 @@ func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResp
 // through, replacing the legacy in-process root_agents write. The path is
 // resolved on the daemon's filesystem. HTTP twin of RegisterProject.
 func (c *Client) RegisterProject(path string) (config.Project, error) {
+	return c.registerProject(daemon.RegisterProjectRequest{Path: path})
+}
+
+// RegisterProjectURL asks the daemon to clone a git URL on ITS host, with its
+// credentials, under its projects_root, and register the checkout (W9.10).
+func (c *Client) RegisterProjectURL(url string) (config.Project, error) {
+	return c.registerProject(daemon.RegisterProjectRequest{URL: url})
+}
+
+func (c *Client) registerProject(req daemon.RegisterProjectRequest) (config.Project, error) {
 	var resp daemon.RegisterProjectResponse
-	if err := c.call("RegisterProject", daemon.RegisterProjectRequest{Path: path}, &resp); err != nil {
+	if err := c.call("RegisterProject", req, &resp); err != nil {
 		return config.Project{}, err
 	}
 	return resp.Project, nil

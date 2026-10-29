@@ -6509,6 +6509,24 @@ function formatLimitReset(reset, now) {
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
 }
+function placementShort(s) {
+  const p = s.placement;
+  if (!p || p.kind !== "remote") return "";
+  return p.host || p.backend || "";
+}
+function placementDetail(s) {
+  const p = s.placement;
+  if (!p) return "";
+  const parts = [];
+  if (p.kind === "remote") {
+    parts.push(placementShort(s));
+    if (p.host && p.backend) parts.push(p.backend);
+  } else {
+    parts.push("local");
+  }
+  if (p.location) parts.push(p.location);
+  return parts.filter(Boolean).join(" \xB7 ");
+}
 
 // src/attention_seen.ts
 function attentionSeen(state, paneExposed) {
@@ -7930,6 +7948,17 @@ function sessionFirstComposition(moves) {
     }
   } };
 }
+function applyTerminalTitle(el2, title) {
+  el2.textContent = title;
+  el2.title = title;
+  el2.setAttribute("aria-label", title);
+}
+function applyTerminalPlacement(el2, detail, remote) {
+  const shown = remote && detail !== "";
+  el2.hidden = !shown;
+  el2.textContent = shown ? detail : "";
+  el2.title = shown ? `Where this session runs: ${detail}` : "";
+}
 function terminalChrome(opts) {
   const menu = actionsDisclosure();
   const action = (label, className, run) => {
@@ -7940,8 +7969,10 @@ function terminalChrome(opts) {
     });
     return button;
   };
-  const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
-  title.setAttribute("aria-label", opts.title);
+  const title = h("span", { class: "af-term-title" });
+  applyTerminalTitle(title, opts.title);
+  const placement = h("span", { class: "af-term-placement" });
+  applyTerminalPlacement(placement, opts.placement?.detail ?? "", opts.placement?.remote ?? false);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
@@ -7972,9 +8003,9 @@ function terminalChrome(opts) {
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
+  menu.panel.append(placement, newTabSlot, copy, handoff, deliver, actions2, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -8519,6 +8550,7 @@ var ConfigPane = class {
     const explainFocusedKey = active instanceof HTMLElement && active.classList.contains("af-config-explain-trigger") ? active.getAttribute("data-key") : null;
     const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
     const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
+    const saveFocusedKey = active instanceof HTMLButtonElement && active.closest(".af-config-list") !== null && active.classList.contains("af-config-save") ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -8543,6 +8575,10 @@ var ConfigPane = class {
           focusedConfigTextCaret.end ?? focusedConfigTextCaret.start
         );
       }
+    } else if (saveFocusedKey !== null) {
+      this.el.querySelector(
+        `.af-config-list [aria-label="${CSS.escape(saveFocusedKey)}"]`
+      )?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -13982,35 +14018,47 @@ function tabsRebound(prevIds, prevKinds, prevTargets, ids, kinds, targets) {
   );
 }
 var isSynth = (id) => /^\d+:/.test(id);
-function adoptedSynthIdentities(prevIds, ids) {
+function synthIdentities(kinds, names) {
+  return kinds.map((k, i) => `${k}:${names[i] ?? ""}`);
+}
+function adoptedSynthIdentities(prevIds, ids, nextSynth) {
   const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
-  const gone = /* @__PURE__ */ new Map();
+  const isNewReal = (id) => id !== "" && !isSynth(id) && !prevIds.includes(id);
+  const adopted = /* @__PURE__ */ new Set();
+  const fallback = /* @__PURE__ */ new Set();
+  const vanished = new Set(prevIds.filter((id) => id !== "" && isSynth(id) && !ids.includes(id)));
+  const unpaired = /* @__PURE__ */ new Set();
+  ids.forEach((id, i) => {
+    if (!isNewReal(id)) {
+      return;
+    }
+    const synth = nextSynth?.[i];
+    if (synth !== void 0 && vanished.has(synth) && !adopted.has(synth)) {
+      adopted.add(synth);
+    } else {
+      unpaired.add(i);
+    }
+  });
+  const gapOfNew = /* @__PURE__ */ new Set();
   let key = "";
+  ids.forEach((id, i) => {
+    if (shared.has(id)) {
+      key = id;
+    } else if (unpaired.has(i)) {
+      gapOfNew.add(key);
+    }
+  });
+  key = "";
   for (const id of prevIds) {
     if (shared.has(id)) {
       key = id;
-    } else if (id !== "" && isSynth(id)) {
-      gone.set(key, [...gone.get(key) ?? [], id]);
+    } else if (vanished.has(id) && !adopted.has(id) && gapOfNew.has(key)) {
+      fallback.add(id);
     }
   }
-  const adopted = /* @__PURE__ */ new Set();
-  key = "";
-  const fresh = /* @__PURE__ */ new Map();
-  for (const id of ids) {
-    if (shared.has(id)) {
-      key = id;
-    } else if (id !== "" && !isSynth(id) && !prevIds.includes(id)) {
-      const n = fresh.get(key) ?? 0;
-      const synth = gone.get(key)?.[n];
-      if (synth !== void 0) {
-        adopted.add(synth);
-      }
-      fresh.set(key, n + 1);
-    }
-  }
-  return adopted;
+  return { exact: adopted, fallback };
 }
-function remapByIdentity(root2, prevIds, ids) {
+function remapByIdentity(root2, prevIds, ids, nextSynth) {
   if (prevIds.length === 0) {
     return root2;
   }
@@ -14042,7 +14090,8 @@ function remapByIdentity(root2, prevIds, ids) {
   const max = ids.length - 1;
   const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
   if (maxLeaf) {
-    const adopted = adoptedSynthIdentities(prevIds, ids);
+    const { exact, fallback } = adoptedSynthIdentities(prevIds, ids, nextSynth);
+    const adopted = /* @__PURE__ */ new Set([...exact, ...fallback]);
     const deadIdentity = (tab) => {
       const prev = prevIds[tab];
       if (prev === void 0 || prev === "") {
@@ -14050,8 +14099,10 @@ function remapByIdentity(root2, prevIds, ids) {
       }
       return !isSynth(prev) || !adopted.has(prev);
     };
+    const exactHolderAtMax = moved.has(maxLeaf.id) || exact.has(prevIds[maxLeaf.tab] ?? "");
+    const tentative = (tab) => fallback.has(prevIds[tab] ?? "");
     for (const leaf of leaves(cur)) {
-      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+      if (!moved.has(leaf.id) && leaf.tab >= ids.length && (deadIdentity(leaf.tab) || exactHolderAtMax && tentative(leaf.tab))) {
         cur = closeLeaf(cur, leaf.id) ?? cur;
       }
     }
@@ -14238,6 +14289,8 @@ function webFallbackMs() {
 }
 var PREVIEW_PROBE_HOST = "afprobe.localhost";
 var PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+var EDITOR_PROBE_MESSAGE = "af-editor-origin-ok";
+var EDITOR_PROBE_PATH = "/_af/editor-probe";
 function previewProbeMs() {
   const override = globalThis.__afPreviewProbeMs;
   return typeof override === "number" ? override : 2500;
@@ -14250,6 +14303,27 @@ function previewOriginReachable(origin, fresh = false) {
   } catch {
     return Promise.resolve(false);
   }
+  return framedReachable(port, `http://${PREVIEW_PROBE_HOST}:${port}/`, PREVIEW_PROBE_MESSAGE, fresh);
+}
+function editorOriginReachable(origin, fresh = false) {
+  let key;
+  try {
+    key = "editor:" + new URL(origin).origin;
+  } catch {
+    return Promise.resolve(false);
+  }
+  return framedReachable(key, new URL(EDITOR_PROBE_PATH, origin).href, EDITOR_PROBE_MESSAGE, fresh);
+}
+function editorOriginUnreachableMessage(origin) {
+  let port = "";
+  try {
+    port = new URL(origin).port;
+  } catch {
+  }
+  const which = port !== "" ? `port ${port}` : "the editor port";
+  return `This editor's own address (${which}) is not reachable from this browser, so it is shown on the shared address instead. Expose ${which} the same way as the af port (for example \`tailscale serve --tcp=${port} tcp://127.0.0.1:${port}\`).`;
+}
+function framedReachable(port, probeSrc, probeMessage, fresh) {
   if (fresh) {
     previewReachable.delete(port);
   } else {
@@ -14279,13 +14353,13 @@ function previewOriginReachable(origin, fresh = false) {
       resolve(ok);
     };
     const onMessage = (e) => {
-      if (e.source === frame.contentWindow && e.data === PREVIEW_PROBE_MESSAGE) {
+      if (e.source === frame.contentWindow && e.data === probeMessage) {
         finish(true);
       }
     };
     const timer = window.setTimeout(() => finish(false), previewProbeMs());
     window.addEventListener("message", onMessage);
-    frame.src = `http://${PREVIEW_PROBE_HOST}:${port}/`;
+    frame.src = probeSrc;
     document.body.appendChild(frame);
   });
   previewReachable.set(port, probe);
@@ -14417,6 +14491,7 @@ var SplitView = class {
     const archivedChanged = archived !== this.archived;
     this.archived = archived;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
+    const nextSynth = synthIdentities(tabKinds, tabNames);
     if (sessionId === null || token2 === null) {
       this.teardown();
       this.sessionId = null;
@@ -14428,7 +14503,7 @@ var SplitView = class {
     if (sessionId === this.sessionId) {
       this.tabCount = tabCount;
       const before = this.tree;
-      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
+      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds, nextSynth);
       this.tree = validate(settled, tabCount);
       this.retain(sessionId, this.tree, tabIds);
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
@@ -14444,7 +14519,7 @@ var SplitView = class {
     this.forgetFocusHistory();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
-    this.tree = validate(this.retainedTree(sessionId, tabIds) ?? singleLeaf(initialTab), tabCount);
+    this.tree = validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount);
     this.retain(sessionId, this.tree, tabIds);
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
@@ -14462,25 +14537,25 @@ var SplitView = class {
    *  bar then highlights Agent over a pane showing tab N, and the next close computes
    *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
-  settledTab(sessionId, tabIds) {
+  settledTab(sessionId, tabIds, nextSynth) {
     if (sessionId === this.sessionId) {
       if (!this.tree || !this.focusedId) {
         return 0;
       }
-      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds);
+      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds, nextSynth);
       return findLeaf(remapped, this.focusedId)?.tab ?? 0;
     }
-    const retained = this.retainedTree(sessionId, tabIds);
+    const retained = this.retainedTree(sessionId, tabIds, nextSynth);
     return retained ? leaves(retained)[0]?.tab ?? 0 : 0;
   }
   /** The retained tree for `sessionId`, remapped onto `tabIds` — the only supported
    *  way to read one. Returns null for a session never shown. */
-  retainedTree(sessionId, tabIds) {
+  retainedTree(sessionId, tabIds, nextSynth) {
     const rec = this.trees.get(sessionId);
     if (!rec) {
       return null;
     }
-    return remapByIdentity(rec.tree, rec.ids, tabIds);
+    return remapByIdentity(rec.tree, rec.ids, tabIds, nextSynth);
   }
   /** Retains `tree` for `sessionId` together with the identities it is bound against. */
   retain(sessionId, tree, ids) {
@@ -15033,10 +15108,17 @@ var SplitView = class {
         editorPortOpenHref = "";
       }
       if (previewSrcOnce === null && isVSCode && mayUsePreviewOrigin && !this.archived && !canUsePreviewOrigin(window.location)) {
-        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then((r) => {
-          editorPortBootstrap = r !== null;
-          editorPortOpenHref = r?.origin ?? "";
-          return r?.bootstrapUrl ?? "";
+        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then(async (r) => {
+          if (r === null) {
+            return "";
+          }
+          if (!await editorOriginReachable(r.origin, fresh)) {
+            console.warn(editorOriginUnreachableMessage(r.origin));
+            return "";
+          }
+          editorPortBootstrap = true;
+          editorPortOpenHref = r.origin;
+          return r.bootstrapUrl;
         });
       }
       if (previewSrcOnce === null) {
@@ -16197,6 +16279,11 @@ function buildTask(input) {
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
     on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
+    max_concurrent_runs: (
+      // Same shape gate as on_complete above: a cap the task cannot carry is
+      // stored as 0 (unlimited), never a value ValidateTrigger refuses (#4180).
+      capUnavailableReason(input.trigger, input.targetSession) === null ? input.maxConcurrentRuns ?? 0 : 0
+    ),
     host: (input.host ?? "").trim(),
     project_path: input.projectPath,
     program: input.program,
@@ -16206,6 +16293,29 @@ function buildTask(input) {
 }
 function onCompleteUnavailableReason(targetSession) {
   return targetSession.trim() ? "Target session will be reused." : null;
+}
+function capUnavailableReason(trigger, targetSession) {
+  if (trigger !== "watch") {
+    return "Cron fires already coalesce.";
+  }
+  if (targetSession.trim() !== "") {
+    return "Deliveries into one session already serialize.";
+  }
+  return null;
+}
+function parseCapInput(raw) {
+  const v = raw.trim();
+  if (v === "") {
+    return 0;
+  }
+  if (!/^[+-]?\d+$/.test(v)) {
+    return null;
+  }
+  const n = Number(v);
+  if (n < 0 || !Number.isSafeInteger(n)) {
+    return null;
+  }
+  return n === 0 ? 0 : n;
 }
 function triggerSummary(t) {
   if (t.watch_cmd && t.watch_cmd.trim() !== "") {
@@ -16822,6 +16932,19 @@ function taskFormModal(opts) {
     onCompleteReason.textContent = reason ?? "";
   };
   targetInput.addEventListener("input", syncOnComplete);
+  const capInput = h("input", { type: "text", inputMode: "numeric", class: "af-input", placeholder: "0 \xB7 unlimited", autocomplete: "off" });
+  capInput.setAttribute("aria-label", "Max concurrent runs");
+  const capField = field("Max concurrent runs", capInput);
+  const capReason = h("p", { class: "af-muted" });
+  const capReasonField = fieldGroup("Max concurrent runs", capReason);
+  const syncCap = () => {
+    const reason = capUnavailableReason(triggerSelect.value === "watch" ? "watch" : "cron", targetInput.value);
+    capField.hidden = reason !== null;
+    capReasonField.hidden = reason === null;
+    capReason.textContent = reason ?? "";
+  };
+  targetInput.addEventListener("input", syncCap);
+  triggerSelect.addEventListener("change", syncCap);
   let onCompleteOptions = [];
   const renderOnCompleteHint = () => {
     onCompleteHint.textContent = onCompleteOptions.find((option) => option.value === onCompleteSelect.value)?.hint ?? "";
@@ -16849,8 +16972,9 @@ function taskFormModal(opts) {
   hostSelect.setAttribute("aria-describedby", hostHint.id);
   const keepHost = opts.seed?.host ?? "";
   let hostOptions = [];
+  let hostTouched = false;
   const renderHosts = () => {
-    const previous = hostSelect.value || keepHost;
+    const previous = hostSelection(hostTouched, hostSelect.value, keepHost);
     hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
     for (const o of hostOptions) {
       const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} \u2014 unavailable`);
@@ -16868,7 +16992,10 @@ function taskFormModal(opts) {
   const hostField = field("Host", hostSelect);
   hostField.append(hostHint);
   renderHosts();
-  hostSelect.addEventListener("change", renderHosts);
+  hostSelect.addEventListener("change", () => {
+    hostTouched = true;
+    renderHosts();
+  });
   let hostSeq = 0;
   const loadHostsFor = (repoPath) => {
     const seq = ++hostSeq;
@@ -16925,11 +17052,13 @@ function taskFormModal(opts) {
     syncTriggerFields();
     promptArea.value = s.prompt ?? "";
     targetInput.value = s.target_session ?? "";
+    capInput.value = s.max_concurrent_runs ? String(s.max_concurrent_runs) : "";
     programSelect.value = s.program ?? "";
   }
   loadProgramsFor(projectSelect.value);
   loadHostsFor(projectSelect.value);
   syncOnComplete();
+  syncCap();
   body.append(
     field("Name", nameInput),
     field("Project", projectSelect),
@@ -16940,6 +17069,8 @@ function taskFormModal(opts) {
     field("Target session", targetInput),
     onCompleteField,
     onCompleteReasonField,
+    capField,
+    capReasonField,
     hostField,
     field("Program", programSelect)
   );
@@ -16967,6 +17098,15 @@ function taskFormModal(opts) {
       handle.setError("Enter a watch command.");
       return;
     }
+    let maxConcurrentRuns = 0;
+    if (capUnavailableReason(trigger, targetInput.value) === null) {
+      const parsed = parseCapInput(capInput.value);
+      if (parsed === null) {
+        handle.setError("Max concurrent runs must be a non-negative integer.");
+        return;
+      }
+      maxConcurrentRuns = parsed;
+    }
     handle.setError(null);
     opts.onSubmit({
       name,
@@ -16977,6 +17117,7 @@ function taskFormModal(opts) {
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
       onComplete: onCompleteSelect.value,
+      maxConcurrentRuns,
       host: hostSelect.value,
       program: programSelect.value
     });
@@ -17010,6 +17151,9 @@ function editTaskModal(projects, task, callbacks) {
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
+}
+function hostSelection(touched, current, seed) {
+  return touched ? current : seed;
 }
 
 // src/project-menu-focus.ts
@@ -18867,6 +19011,7 @@ var AppShell = class {
     }
     const chrome = terminalChrome({
       title: selected.title,
+      placement: { detail: placementDetail(selected), remote: selected.placement?.kind === "remote" },
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
@@ -19308,9 +19453,8 @@ var AppShell = class {
     if (!selected || !this.headTitle) {
       return;
     }
-    this.headTitle.textContent = selected.title;
-    this.headTitle.title = selected.title;
-    this.headTitle.setAttribute("aria-label", selected.title);
+    applyTerminalTitle(this.headTitle, selected.title);
+    if (this.terminalChrome) applyTerminalPlacement(this.terminalChrome.placement, placementDetail(selected), selected.placement?.kind === "remote");
     if (this.terminalChrome) {
       this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
@@ -19535,6 +19679,12 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
     branchParts.push(
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch)
     );
+  }
+  const place = placementShort(s);
+  if (place) {
+    const placed = h("span", { class: "af-row-place" }, place);
+    placed.title = placementDetail(s);
+    branchParts.push(" \xB7 ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const stateLabel = h("span", { class: "af-visually-hidden" }, ` ${OPERATOR_KIND_LABELS[operator]}`);
@@ -19958,6 +20108,10 @@ function tabIdsOf(list, id) {
   const s = id ? list.find((x) => x.id === id) : null;
   return s ? sessionTabs(s).map(tabIdentity) : [];
 }
+function tabSynthOf(list, id) {
+  const s = id ? list.find((x) => x.id === id) : null;
+  return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
+}
 var resolvingRoute = false;
 var routeSelection = null;
 var createSelectionIntent = new CreateSelectionIntent();
@@ -19993,7 +20147,7 @@ function moveSelection(id) {
     focus: "rail",
     // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
     // are the same statement even if the roster shrank since the tree was retained.
-    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id)))
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id), tabSynthOf(store.get().sessions, id)))
   });
 }
 function openFromRail(id) {
@@ -20062,7 +20216,7 @@ function switchProject(root2) {
     selectedProject: root2,
     selectedId: keep,
     focus: "rail",
-    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep))) : 0
+    activeTab: keep ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep), tabSynthOf(store.get().sessions, keep))) : 0
   });
 }
 function selectedSession2() {
@@ -21175,6 +21329,7 @@ function openEditTask(task) {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            max_concurrent_runs: value.max_concurrent_runs ?? 0,
             host: (input.host ?? "") !== (task.host ?? "") ? input.host ?? "" : void 0,
             project_path: input.projectPath,
             program: input.program
@@ -21526,7 +21681,7 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
       selectedId = null;
     }
   }
-  const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId)) : 0;
+  const settled = selectedId ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId), tabSynthOf(sessions, selectedId)) : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   store.set({
     sessions,

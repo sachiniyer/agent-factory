@@ -78,10 +78,24 @@ func (s *remoteAgentServer) ordinalOf(tabID string) (int, error) {
 // each bound to an id-addressed remote WS, so the id reaches the sandbox, which
 // binds it atomically inside its own roster (#1779).
 func (s *remoteAgentServer) ensureBrokerByID(tabID string) (*ptyBroker, error) {
+	// A closing or closed id is terminal (#5963). Two fences, either of which
+	// suffices for any interleaving with a close: the daemon roster no longer
+	// holding the id (the close removes the row first), and the gone mark
+	// closeTabStream sets (the close ends the stream strictly after that
+	// removal). The roster is read BEFORE s.mu — the lock order is i.mu then
+	// s.mu — and the mark is re-read under s.mu, where the broker is inserted.
+	if s.inst != nil {
+		if _, ok := s.inst.TabIndexByID(tabID); !ok {
+			return nil, fmt.Errorf("session %q tab id %q: %w", s.inst.Title, tabID, ErrTabGone)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, fmt.Errorf("remote session %q is being terminated", s.rc.title)
+	}
+	if s.goneTabs[tabID] {
+		return nil, fmt.Errorf("remote session %q tab id %q: %w", s.rc.title, tabID, ErrTabGone)
 	}
 	if br := s.idBrokers[tabID]; br != nil {
 		return br, nil
@@ -178,12 +192,24 @@ func (s *remoteAgentServer) closeTabStream(tabID string) {
 		return
 	}
 	s.mu.Lock()
+	if s.goneTabs == nil {
+		s.goneTabs = map[string]bool{}
+	}
+	s.goneTabs[tabID] = true
 	br := s.idBrokers[tabID]
 	delete(s.idBrokers, tabID)
 	s.mu.Unlock()
 	if br != nil {
 		br.close()
 	}
+}
+
+// clearTabGone lifts the terminal mark when the daemon re-creates a tab under a
+// closed id, so the new incarnation can be streamed.
+func (s *remoteAgentServer) clearTabGone(tabID string) {
+	s.mu.Lock()
+	delete(s.goneTabs, tabID)
+	s.mu.Unlock()
 }
 
 // newRemoteIDClientlessChannel is newRemoteClientlessChannel for the id plane.

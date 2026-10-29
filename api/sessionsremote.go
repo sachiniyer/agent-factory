@@ -327,6 +327,10 @@ func routedRegisterProject(req daemon.RegisterProjectRequest) (config.Project, e
 		return config.Project{}, err
 	}
 	defer c.CloseIdleConnections()
+	if req.URL != "" {
+		p, err := c.RegisterProjectURL(req.URL)
+		return p, remoteMutationError("projects add", err)
+	}
 	p, err := c.RegisterProject(req.Path)
 	return p, remoteMutationError("projects add", err)
 }

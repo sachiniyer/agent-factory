@@ -633,6 +633,13 @@ func agentServerProgram(args []string) (string, bool) {
 			idx += 2
 			continue
 		}
+		// --adopt-worktree names the preserved worktree an archived session is
+		// reattached to (#5571 W8.6): an absolute path the daemon proved present,
+		// bound as the workspace and never executed.
+		if args[idx] == "--adopt-worktree" && idx+1 < len(args) && strings.HasPrefix(args[idx+1], "/") {
+			idx += 2
+			continue
+		}
 		// --policy-file names the daemon-resolved operator policy to READ
 		// (#5571 W2.5): an absolute path, never executed.
 		if args[idx] == "--policy-file" && idx+1 < len(args) && strings.HasPrefix(args[idx+1], "/") {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/hostlayout"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -238,7 +239,9 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		}
 		return res, err
 	}
-	res.Branch = spec.Branch
+	// res.Branch is whatever the runtime reports it ran on: a hook launch_cmd is
+	// never handed the daemon's name, so recording it here would display (and
+	// later restore) a branch that was never used (#5971).
 
 	// A refused or absent credential did not stop provisioning — it must stop
 	// being silent instead. The reason rides the result onto the instance's
@@ -516,6 +519,8 @@ func NewInstanceID() string {
 }
 
 func NewInstance(opts InstanceOptions) (*Instance, error) {
+	// An instance's project path is host layout from the moment it exists.
+	hostlayout.Default.Note(opts.Path)
 	t := opts.CreatedAt
 	if t.IsZero() {
 		t = time.Now()
@@ -658,7 +663,8 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		Title:        opts.Title,
 		// The daemon-named branch of an off-box session, known from the first
 		// frame rather than after the first push (#5571 W2.4). Empty for local.
-		Branch: res.Branch,
+		Branch:         res.Branch,
+		branchUnpushed: res.Branch != "",
 		// A task delivery's run begins here and ends when the agent goes idle
 		// (#1892). Only a task-spawned session has a run to bound; a user's session
 		// is never counted against a cap.

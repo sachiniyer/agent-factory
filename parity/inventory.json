@@ -548,6 +548,25 @@
       "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); all three surfaces route through it — `af projects add` (register is a deprecated alias) over the gob control socket, the TUI's picker '+ Add project' via apiclient (registerProjectThroughDaemon), and the web switcher's '+ Add project' via af() — so the checkout is resolved on the daemon's filesystem and the single writer (#960) owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Parity now that the TUI add writes the durable registry instead of the legacy in-process root_agents entry, and all three switchers union the registry into their project lists (project.list)."
     },
     {
+      "id": "project.add.url",
+      "title": "Register a project by git URL: the daemon clones it under projects_root",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/switch_project.go handleAddProject (a git URL) → registerProjectURLThroughDaemon (apiclient RegisterProjectURL)"
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/projects.go newProjectsAddCmd (a git URL argument) → daemon.RegisterProjectRequest.URL"
+      },
+      "verdict": "real-gap",
+      "issue": "#5571",
+      "notes": "W9.10. The daemon clones the URL on ITS host with ITS credentials under the global projects_root and registers the checkout; the URL is validated there (https/ssh/scp-like only; file://, paths, option-like values and embedded passwords refused). The CLI and the TUI add-project prompt accept a URL; the web add-project modal still takes only a daemon-host path. When the modal learns to send `url`, flip the web cell to yes and delete the web_rpcs field_coverage gap for RegisterProject.url."
+    },
+    {
       "id": "project.browse",
       "title": "Browse the daemon host's directories to find a repo to add",
       "tui": {
@@ -1501,19 +1520,19 @@
       "id": "task.max-concurrent-runs",
       "title": "Cap a watch task's in-flight session count",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/task_pane_edit.go renderCapField — Max runs row, create and edit"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/tasks.ts taskFormModal cap input; edit sent inline at web/src/index.ts openEditTask"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:645 af tasks add/update --max-concurrent-runs"
+        "pointer": "api/api.go:862 af tasks add/update --max-concurrent-runs"
       },
-      "verdict": "unclear",
-      "notes": "A watch-task concurrency cap (task.Task/TaskUpdate.MaxConcurrentRuns) added on master. The CLI sets it via --max-concurrent-runs; the TUI task form and web do not expose it. Same class as the other task-edit gaps: the TUI can edit tasks (so this is a missing FIELD, #1935-adjacent) and the web cannot edit tasks at all (#1935). Niche enough that whether the UIs should surface it is an owner call. Not filed pending that."
+      "verdict": "parity",
+      "notes": "Surfaced on both UIs in #4180, following the on_complete gated-field pattern exactly: a text input on watch/no-target shapes, the daemon's own reason in place of it otherwise. Both UIs ask ONE predicate — task.CapUnavailableReason, with the web's twin pinned by task/testdata/cap_vectors.json — and parse input by the shared task.ParseCapInput rule (empty = 0 = unlimited; negatives, non-integers, and values above the safe-integer ceiling refused identically)."
     },
     {
       "id": "task.on-complete",
@@ -2064,6 +2083,7 @@
       "af accounts login --help": "meta.discovery",
       "af accounts login --json": "cli.json-envelope",
       "af accounts login --no-attach": "session.account-login",
+      "af agent-server --adopt-worktree": "meta.internal",
       "af agent-server --branch": "meta.internal",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
@@ -2648,9 +2668,6 @@
           "task.dropped_events": {
             "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
           },
-          "task.max_concurrent_runs": {
-            "gap": "task.max-concurrent-runs"
-          },
           "task.sandbox_owner": {
             "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
           },
@@ -2686,7 +2703,7 @@
             "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.max_concurrent_runs": {
-            "gap": "task.max-concurrent-runs"
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's Max runs row (ui/task_pane_edit.go renderCapField) writes task.Task.MaxConcurrentRuns and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
           },
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
@@ -2843,6 +2860,11 @@
           "ok": "The web addresses the session by its stable id, which wins over {title, repo_id} in SetAttentionRequest."
         }
       },
+      "RegisterProject": {
+        "url": {
+          "gap": "project.add.url"
+        }
+      },
       "SetConfigValue": {
         "hosts_edit": {
           "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
@@ -2941,9 +2963,6 @@
         },
         "actor": {
           "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
-        },
-        "update.max_concurrent_runs": {
-          "gap": "task.max-concurrent-runs"
         }
       },
       "AddTask": {
@@ -3003,9 +3022,6 @@
         },
         "task.dropped_events": {
           "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
-        },
-        "task.max_concurrent_runs": {
-          "gap": "task.max-concurrent-runs"
         },
         "task.sandbox_owner": {
           "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."

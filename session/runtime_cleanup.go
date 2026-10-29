@@ -59,6 +59,10 @@ type SandboxRuntimeCleanupData struct {
 	// callback was granted or the row predates this field.
 	CallbackRef     string `json:"callback_ref,omitempty"`
 	CallbackReverse string `json:"callback_reverse,omitempty"`
+	// LaunchUnconfirmed is set when an agent-server was launched but its pid was
+	// never obtained (#5571 W8.6): reap then refuses to remove the directory without
+	// stopping a server that may still run, across a daemon restart too.
+	LaunchUnconfirmed bool `json:"launch_unconfirmed,omitempty"`
 }
 
 type DockerRuntimeCleanupData struct {
@@ -130,6 +134,10 @@ type SSHRuntimeCleanupData struct {
 	// callback was granted or the row predates this field.
 	CallbackRef     string `json:"callback_ref,omitempty"`
 	CallbackReverse string `json:"callback_reverse,omitempty"`
+	// LaunchUnconfirmed is set when an agent-server was launched but its pid was
+	// never obtained (#5571 W8.6): reap then refuses to remove the directory without
+	// stopping a server that may still run, across a daemon restart too.
+	LaunchUnconfirmed bool `json:"launch_unconfirmed,omitempty"`
 }
 
 type HookRuntimeCleanupData struct {
@@ -352,6 +360,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		p.agentServerVersion = data.SSH.AgentServerVersion
 		p.tokenRef = data.SSH.TokenRef
 		p.restoreCallbackIdentity(data.SSH.CallbackRef, data.SSH.CallbackReverse)
+		p.launchAttempted = data.SSH.LaunchUnconfirmed
 		// The accept-new store is prepared inside each ATTEMPT, never here: this
 		// function composes a closure while persisted instances are being loaded,
 		// and a transiently unwritable AF home must not be captured as a permanently
@@ -390,6 +399,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 			tokenRef:           data.Sandbox.TokenRef,
 		}
 		p.restoreCallbackIdentity(data.Sandbox.CallbackRef, data.Sandbox.CallbackReverse)
+		p.launchAttempted = data.Sandbox.LaunchUnconfirmed
 		teardown := p.reap
 		return &sandboxBackend{
 			provisioner: p,

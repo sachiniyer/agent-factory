@@ -58,6 +58,10 @@ func ParseBackendKind(s string) (BackendKind, error) {
 // source, and optional restore branch used to start an `af agent-server` for one
 // workspace. Each runtime reads its own settings from the resolved repo config.
 type ProvisionSpec struct {
+	// Adopt, when set, provisions over a workspace an archive preserved on the
+	// host instead of creating one (#5571 W8.6): nothing is cloned, fetched or
+	// reaped, and the dir is verified read-only first.
+	Adopt *AdoptSpec
 	// RepoRoot is the absolute repo root the session is created against.
 	RepoRoot string
 	// Title is the session title. A sandbox runtime uses it as the single
@@ -194,8 +198,10 @@ type ProvisionResult struct {
 	// serialized by the runtime; docker/SSH latch answered outcomes and leave
 	// unknown outcomes retryable, while hook runs its idempotent delete once.
 	Teardown func() error
-	// Branch is the branch name the daemon passed the runtime (ProvisionSpec.Branch),
-	// recorded on the new Instance so surfaces show it from the first frame.
+	// Branch is the branch the runtime actually put the agent-server on: set only
+	// by a runtime that handed ProvisionSpec.Branch to it (docker, sandbox/ssh),
+	// and left empty by one that did not (hook), so the Instance never records a
+	// name nothing used (#5971).
 	Branch string
 
 	// CallbackUnavailable carries the reason no callback credential was
