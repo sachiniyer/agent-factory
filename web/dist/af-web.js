@@ -19510,11 +19510,9 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
-  const branchParts = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator])
-  ];
+  const branchParts = [];
   if ((selected || outageDetail !== "") && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, ` \xB7 ${idleDetail}`);
+    const idle = h("span", { class: "af-idle-reason" }, idleDetail);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (outageDetail !== "" && s.unreachable) {
       idle.dataset.unreachableSince = s.unreachable.since ?? "";
@@ -19595,7 +19593,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       },
       now
     );
-    idle.textContent = detail ? ` \xB7 ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row");
     if (row) {
       const reason = detail ? `; ${detail}` : "";

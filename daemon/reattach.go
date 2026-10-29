@@ -62,6 +62,7 @@ func (m *Manager) reattachRestoredRuntimes() {
 					return
 				}
 				err := inst.ReattachSandbox()
+				inst.SettleAttentionAfterReattach()
 				if err != nil && !errors.Is(err, session.ErrReattachIneligible) {
 					log.WarningLog.Printf("daemon: could not reattach session %q to its sandbox after restart: %v", inst.Title, err)
 				}

@@ -86,7 +86,10 @@ func TestAttentionDoesNotSurviveALoadIntoAStoppedState(t *testing.T) {
 	require.False(t, inst.HasAttention())
 }
 
-func TestAttentionDoesNotSurviveASandboxLoadedLost(t *testing.T) {
+// A sandbox row loads provisionally Lost and the daemon then reattaches it to the
+// agent that is still waiting, so the request must survive the load; it goes only
+// when the reattach attempt leaves the row not live.
+func TestAttentionSurvivesASandboxLoadedLostUntilReattachSettles(t *testing.T) {
 	inst, err := FromInstanceData(InstanceData{
 		ID:          "id",
 		Title:       "s",
@@ -98,7 +101,21 @@ func TestAttentionDoesNotSurviveASandboxLoadedLost(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, LiveLost, inst.GetLiveness())
-	require.False(t, inst.HasAttention())
+	require.True(t, inst.HasAttention(), "a reattachable row keeps its request through the provisional Lost")
+
+	inst.SettleAttentionAfterReattach()
+	require.False(t, inst.HasAttention(), "a reattach that left the row Lost has no agent to answer")
+
+	live, err := FromInstanceData(InstanceData{
+		ID: "id2", Title: "s2", Path: t.TempDir(), Branch: "root/s2", BackendType: "docker",
+		Liveness: LiveRunning, Attention: &Attention{SetAt: time.Unix(100, 0)},
+	})
+	require.NoError(t, err)
+	live.mu.Lock()
+	live.liveness = LiveRunning // what a successful ReattachSandbox sets
+	live.mu.Unlock()
+	live.SettleAttentionAfterReattach()
+	require.True(t, live.HasAttention(), "a reattached row stays live and keeps its request")
 }
 
 func TestAttentionClearsWhenTheAgentStops(t *testing.T) {

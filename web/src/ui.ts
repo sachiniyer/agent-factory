@@ -3369,11 +3369,9 @@ export function sessionRow(
   // TUI keeps it for the same reason (#5571 W1.3).
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
-  const branchParts: Array<Node | string> = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
-  ];
+  const branchParts: Array<Node | string> = [];
   if ((selected || outageDetail !== "") && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, ` · ${idleDetail}`);
+    const idle = h("span", { class: "af-idle-reason" }, idleDetail);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (outageDetail !== "" && s.unreachable) {
       // Repaint hook: refreshIdleReasonAges re-ages the outage without a
@@ -3477,7 +3475,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       } as SessionData,
       now,
     );
-    idle.textContent = detail ? ` · ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row") as HTMLElement | null;
     if (row) {
       const reason = detail ? `; ${detail}` : "";

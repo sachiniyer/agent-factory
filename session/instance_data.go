@@ -858,7 +858,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			instance.assignLivenessLocked(LiveLost)
 			instance.touchLocked()
 		}
-		instance.dropAttentionIfStoppedLocked()
+		// Attention rides this provisional Lost on purpose: the daemon reattaches
+		// the row to the agent that is still running and waiting for the user
+		// (ReattachSandbox). SettleAttentionAfterReattach drops it when that
+		// reattach does not bring the row back to a live state.
 		instance.mu.Unlock()
 		return inertReturn(), nil
 	}

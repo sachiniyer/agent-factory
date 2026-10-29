@@ -168,6 +168,19 @@ func (i *Instance) dropAttentionIfStoppedLocked() {
 	}
 }
 
+// SettleAttentionAfterReattach is the other half of the sandbox loader leaving a
+// request on its provisional Lost row: once the reattach attempt is over, a row
+// that is still not live has no agent to answer, so the request goes with it.
+// A reattached row is live and keeps it.
+func (i *Instance) SettleAttentionAfterReattach() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.attention != nil && attentionStoppedLocked(i) {
+		i.attention = nil
+		i.touchLocked()
+	}
+}
+
 // attentionStoppedLocked reports whether no agent can answer a request: the
 // session is not live, or a kill has committed. Caller holds i.mu.
 func attentionStoppedLocked(i *Instance) bool {
