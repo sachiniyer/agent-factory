@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
@@ -136,5 +138,105 @@ func TestStreamHandler_LiveSessionStillUpgrades(t *testing.T) {
 	// the request proceeded to the recorder-bound upgrade.
 	if rec.Code == http.StatusNotFound && contains(rec.Body.String(), `is Archived`) {
 		t.Fatalf("a Running session was refused by the liveness gate; the gate must admit live sessions (body: %s)", rec.Body.String())
+	}
+}
+
+// TestStreamTargetLivenessError_FitsDialBufferForLongTitle pins the cap the WS
+// stream path applies so a long title cannot push the refusal envelope past the
+// 1 KiB body coder/websocket.Dial buffers on a non-101 handshake. Session titles
+// are uncapped by validateTitleShapeLocked (it checks shape, not length), and the
+// Archived refusal embeds the title twice (the %q label and the shellsuggest
+// restore command), so without the cap a long-enough title truncates the JSON and
+// the client's notServedDetail falls back to a 200-byte title snippet — losing the
+// "is Archived" status and the restore off-ramp the gate exists to surface. A
+// short title stays byte-identical to the send-prompt path.
+func TestStreamTargetLivenessError_FitsDialBufferForLongTitle(t *testing.T) {
+	// A short title fits verbatim: the stream refusal is the same error the
+	// send-prompt path returns, so the cap is a no-op for the common case.
+	shortTitle := "archived-target"
+	short := streamTargetLivenessError(shortTitle, session.LiveArchived)
+	prompt := promptTargetLivenessError(shortTitle, session.LiveArchived)
+	if short == nil || prompt == nil {
+		t.Fatalf("Archived liveness must refuse; got stream=%v prompt=%v", short, prompt)
+	}
+	if short.Error() != prompt.Error() {
+		t.Fatalf("a short title must keep the stream refusal byte-identical to the send-prompt path\nstream: %q\nprompt: %q", short.Error(), prompt.Error())
+	}
+	if streamRefusalEnvelopeSize(short.Error()) > streamLivenessErrorBodyLimit {
+		t.Fatalf("short refusal envelope %d exceeds the dial buffer %d", streamRefusalEnvelopeSize(short.Error()), streamLivenessErrorBodyLimit)
+	}
+
+	// A title long enough to overflow the buffer verbatim is capped: the rendered
+	// envelope fits the 1 KiB dial buffer and still names the liveness status and
+	// the restore off-ramp.
+	longTitle := strings.Repeat("x", 600)
+	long := streamTargetLivenessError(longTitle, session.LiveArchived)
+	if long == nil {
+		t.Fatal("Archived liveness must refuse even for a long title")
+	}
+	if size := streamRefusalEnvelopeSize(long.Error()); size > streamLivenessErrorBodyLimit {
+		t.Fatalf("capped refusal envelope %d exceeds the dial buffer %d (message: %q)", size, streamLivenessErrorBodyLimit, long.Error())
+	}
+	if !strings.Contains(long.Error(), "is Archived") {
+		t.Fatalf("capped refusal lost the liveness status: %q", long.Error())
+	}
+	if !strings.Contains(long.Error(), "af sessions restore") {
+		t.Fatalf("capped refusal lost the restore off-ramp: %q", long.Error())
+	}
+	// The cap must not be a no-op for a title this long: the verbatim refusal
+	// would overflow, so the stream path must have trimmed it.
+	if long.Error() == promptTargetLivenessError(longTitle, session.LiveArchived).Error() {
+		t.Fatal("a 600-byte title's verbatim refusal overflows the dial buffer; the stream path must trim it")
+	}
+	// The marker signals the trim so a reader does not mistake the prefix for the
+	// whole title.
+	if !strings.Contains(long.Error(), streamLivenessTitleTruncationMarker) {
+		t.Fatalf("capped refusal must mark the trimmed title with %q: %q", streamLivenessTitleTruncationMarker, long.Error())
+	}
+
+	// A nil liveness (a live session) stays nil — the cap is only applied to a
+	// refusal, never invents one.
+	if got := streamTargetLivenessError(longTitle, session.LiveRunning); got != nil {
+		t.Fatalf("a live session must not be refused; got %v", got)
+	}
+}
+
+// TestStreamHandler_RefusesArchivedLongTitleFitsDialBuffer is the end-to-end half:
+// the /stream route's refusal body for a long-title Archived session must fit the
+// 1 KiB body coder/websocket.Dial buffers and still carry the restore off-ramp —
+// the property the cap preserves on the wire.
+func TestStreamHandler_RefusesArchivedLongTitleFitsDialBuffer(t *testing.T) {
+	longTitle := strings.Repeat("x", 600)
+	manager, repoID := seedReadyArchivedManager(t, longTitle)
+	mux := newHTTPMux(&controlServer{manager: manager})
+
+	rec := streamGet(t, mux, fmt.Sprintf("/v1/sessions/%s/stream?repo_id=%s", longTitle, repoID))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for an archived session (body: %s)", rec.Code, rec.Body.String())
+	}
+	if rec.Code == http.StatusSwitchingProtocols || rec.Header().Get("Sec-WebSocket-Accept") != "" {
+		t.Fatal("the archived refusal upgraded the connection first; it must be a plain HTTP 404 before websocket.Accept")
+	}
+	body := rec.Body.String()
+	if len(body) > streamLivenessErrorBodyLimit {
+		t.Fatalf("refusal body %d bytes exceeds the WS dial buffer %d; the long title pushed the guidance out of reach (body: %s)",
+			len(body), streamLivenessErrorBodyLimit, body)
+	}
+	if !strings.Contains(body, `is Archived`) {
+		t.Fatalf("stream refusal for a long title must still name the session as Archived, got: %s", body)
+	}
+	if !strings.Contains(body, "af sessions restore") {
+		t.Fatalf("stream refusal for a long title must still surface the restore off-ramp, got: %s", body)
+	}
+	// The envelope the client parses (notServedDetail unmarshals it) must be valid
+	// JSON, not a truncated fragment the cap was meant to prevent.
+	var env struct {
+		Error *apiproto.EnvelopeError `json:"error"`
+	}
+	if err := json.NewDecoder(strings.NewReader(body)).Decode(&env); err != nil {
+		t.Fatalf("refusal body must be valid JSON the dial client can unmarshal; the cap keeps it whole: %v (body: %s)", err, body)
+	}
+	if env.Error == nil || env.Error.Message == "" {
+		t.Fatalf("refusal body must carry the daemon failure envelope, got: %s", body)
 	}
 }

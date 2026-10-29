@@ -625,7 +625,14 @@ func (m *Manager) agentServerForStreamTarget(target streamTarget) (session.Agent
 	// keeps the failure BEFORE websocket.Accept (streamHandler returns it as a
 	// plain non-101 HTTP response whose JSON body apiclient surfaces), and
 	// mirrors the TUI's pre-attach guard with the restore command off-ramp.
-	if err := promptTargetLivenessError(title, instance.GetLiveness()); err != nil {
+	// streamTargetLivenessError caps an over-long title so the refusal still fits
+	// the WS dial's 1 KiB body buffer (see streamLivenessErrorBodyLimit): the
+	// send-prompt path is an unconstrained HTTP RPC and keeps the verbatim
+	// promptTargetLivenessError, but a WS handshake buffers only the first 1 KiB
+	// of a non-101 body, so a title long enough to push the JSON envelope past
+	// that limit would be truncated before the client reads it and the off-ramp
+	// would be lost to a 200-byte title snippet.
+	if err := streamTargetLivenessError(title, instance.GetLiveness()); err != nil {
 		return nil, nil, err
 	}
 	// Reject a new subscription while a kill is in flight for this session, the
