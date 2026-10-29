@@ -20,10 +20,14 @@ import (
 )
 
 type controlServer struct {
-	manager    *Manager
-	scheduler  *taskScheduler
-	watchers   *watcherSupervisor
-	shutdownCh chan struct{}
+	// createSessionFn replaces createSession in the sandbox-scoped CreateSession
+	// handler. Nil in production; a test sets it to exercise the response boundary
+	// on a successful create without provisioning a host.
+	createSessionFn func(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error
+	manager         *Manager
+	scheduler       *taskScheduler
+	watchers        *watcherSupervisor
+	shutdownCh      chan struct{}
 	// shutdownOnce is shared by every per-connection controlServer
 	// startControlServer builds: one Shutdown must fire once for the whole
 	// listener, not once per connection. It is nil on servers that cannot shut

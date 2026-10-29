@@ -184,7 +184,7 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	allowed := map[string]bool{
 		"ID": true, "TaskID": true, "Title": true, "Branch": true, "Status": true,
 		"Liveness": true, "InFlightOp": true, "LifecycleAction": true,
-		"CurrentAgent": true, "Program": true, "BackendType": true,
+		"CurrentAgent": true, "BackendType": true,
 		"TaskRunActive": true, "LimitResetAt": true, "CreatedAt": true, "UpdatedAt": true,
 		"IdleReason": true, "LastPromptAttemptAt": true,
 		"LastPromptDeliveryStatus": true, "LastPaneChurnAt": true,

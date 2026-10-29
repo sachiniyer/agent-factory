@@ -1,16 +1,19 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,7 +34,19 @@ import (
 // useScheduler gives the fixture's server a task scheduler, so task mutations
 // reach their real handlers instead of stopping at "no scheduler".
 func (f *scopeFixture) useScheduler() {
-	f.gated = withAuth(newHTTPMux(&controlServer{manager: f.mgr, scheduler: newTaskScheduler()}), &authGate{
+	cs := &controlServer{manager: f.mgr, scheduler: newTaskScheduler()}
+	// A successful create, without provisioning a host: the full InstanceData the
+	// manager would return, built from the request, so the response boundary is
+	// driven on a create that SUCCEEDS (the path a refusal never reaches).
+	cs.createSessionFn = func(_ context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error {
+		resp.Instance = session.InstanceData{
+			ID: "created-1", Title: req.Title, Program: req.Program, Branch: "af/" + req.Title,
+			Path: f.me.Path, TmuxName: "af_" + req.Title, BackendType: req.Backend,
+			Worktree: session.GitWorktreeData{RepoPath: f.me.Path, WorktreePath: f.me.Path + "/.wt/" + req.Title},
+		}
+		return nil
+	}
+	f.gated = withAuth(newHTTPMux(cs), &authGate{
 		expectedToken: func() (string, error) { return "operator-token", nil },
 		sandboxTokens: &f.mgr.sandboxTokens,
 	}, nil)
@@ -142,17 +157,20 @@ func TestSandboxResponsesWithholdWhatAProjectionJustNoted(t *testing.T) {
 	_ = inst.ToInstanceData() // the projection a create response is built from
 
 	handler := scrubbedSandboxResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"data":{"last_run_status":"errored: ` + fresh + `","prompt":"` + fresh + `"},"error":null}`))
+		_, _ = w.Write([]byte(`{"data":{"tasks":[{"id":"t1","last_run_status":"errored: ` + fresh + `","prompt":"` + fresh + `"}]},"error":null}`))
 	}))
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/x", nil))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/ListTasks", nil))
 	var env struct {
-		Data map[string]string `json:"data"`
+		Data struct {
+			Tasks []map[string]string `json:"tasks"`
+		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
-	assert.NotContains(t, env.Data["last_run_status"], fresh, "a daemon-originated field is scrubbed")
-	assert.Contains(t, env.Data["last_run_status"], hostlayout.Withheld)
-	assert.Equal(t, fresh, env.Data["prompt"], "a caller-text value comes back exactly as stored")
+	require.Len(t, env.Data.Tasks, 1)
+	assert.NotContains(t, env.Data.Tasks[0]["last_run_status"], fresh, "a daemon-originated field is scrubbed")
+	assert.Contains(t, env.Data.Tasks[0]["last_run_status"], hostlayout.Withheld)
+	assert.Equal(t, fresh, env.Data.Tasks[0]["prompt"], "a caller-originated value comes back exactly as stored")
 }
 
 // Errors never reflect input: a typed refusal passes unchanged, any other message
@@ -195,11 +213,72 @@ func TestSandboxErrorsAreTypedOrFixed(t *testing.T) {
 	}
 }
 
-// DIFFERENTIAL: a response never depends on whether a caller-supplied string is
-// in the host layout (#6014 review: the scrub made guessed paths an existence
-// oracle). For every admitted route and every string field of its request, a guess
-// that IS in the layout (A) and one that is not (B) must produce responses that
-// are identical except for the literal guess, or contain neither.
+// requestTypes is the request type of every route admitted to the sandbox scope.
+var requestTypes = map[string]reflect.Type{
+	"/v1/Snapshot":       reflect.TypeFor[SnapshotRequest](),
+	"/v1/SendPrompt":     reflect.TypeFor[SendPromptRequest](),
+	"/v1/ArchiveSession": reflect.TypeFor[ArchiveSessionRequest](),
+	"/v1/CreateSession":  reflect.TypeFor[CreateSessionRequest](),
+	"/v1/CreateTab":      reflect.TypeFor[CreateTabRequest](),
+	"/v1/CloseTab":       reflect.TypeFor[CloseTabRequest](),
+	"/v1/RenameTab":      reflect.TypeFor[RenameTabRequest](),
+	"/v1/ReorderTab":     reflect.TypeFor[ReorderTabRequest](),
+	"/v1/ListTasks":      reflect.TypeFor[ListTasksRequest](),
+	"/v1/AddTask":        reflect.TypeFor[AddTaskRequest](),
+	"/v1/RemoveTask":     reflect.TypeFor[RemoveTaskRequest](),
+}
+
+// stringFieldPaths lists the JSON path of every settable string field of t,
+// recursing into nested structs (a task inside AddTask, an expectation inside
+// RemoveTask). time.Time and collections are not strings a caller types.
+func stringFieldPaths(t reflect.Type, prefix []string) [][]string {
+	t = derefType(t)
+	var out [][]string
+	for name, f := range jsonFieldsOf(t) {
+		path := append(append([]string{}, prefix...), name)
+		ft := derefType(f.typ)
+		switch {
+		case ft.Kind() == reflect.String:
+			out = append(out, path)
+		case ft.Kind() == reflect.Struct && ft != reflect.TypeFor[time.Time]():
+			out = append(out, stringFieldPaths(ft, path)...)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return strings.Join(out[i], ".") < strings.Join(out[j], ".") })
+	return out
+}
+
+func setJSONPath(m map[string]any, path []string, val string) {
+	for _, k := range path[:len(path)-1] {
+		next, ok := m[k].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			m[k] = next
+		}
+		m = next
+	}
+	m[path[len(path)-1]] = val
+}
+
+func cloneJSONMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if sub, ok := v.(map[string]any); ok {
+			v = cloneJSONMap(sub)
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// DIFFERENTIAL, driven from the REQUEST TYPES: a response never depends on whether
+// a caller-supplied string is in the host layout (#6014 review: the scrub made a
+// guessed path an existence oracle). For every admitted route, every settable
+// string field of its request type, and every route shape that changes validation
+// (a listed host or none, each backend), a guess that IS in the layout (A) and one
+// that is not (B) must produce responses identical except for the literal guess, or
+// containing neither. Because the fields come from reflection, a field added to a
+// request type later is covered with no edit here.
 func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) {
 	f := newScopeFixture(t)
 	f.useScheduler()
@@ -209,55 +288,44 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 	require.Equal(t, hostlayout.Default.ScrubString(guessB), guessB, "and guess B is not")
 	addStoreTask(t, task.Task{ID: "t-mine", Prompt: "p", CronExpr: "0 * * * *", TargetSession: "peer", ProjectPath: f.me.Path})
 
-	const G = "%G%"
-	type shape struct{ route, body string }
-	task_ := func(field string) string {
-		base := map[string]string{"prompt": "p", "cron_expr": "0 * * * *", "target_session": "peer"}
-		base[field] = G
-		raw, _ := json.Marshal(map[string]any{"task": base})
-		return string(raw)
+	// Baseline bodies per route and validation shape; the field under test is set
+	// on top of each. CreateSession varies host and backend, which change which
+	// checks run before anything else.
+	type baseShape struct {
+		name string
+		body map[string]any
 	}
-	obj := func(base map[string]string, field string) string {
-		m := map[string]string{}
-		for k, v := range base {
-			m[k] = v
+	bases := map[string][]baseShape{
+		"/v1/Snapshot":       {{"empty", map[string]any{}}},
+		"/v1/SendPrompt":     {{"to a peer", map[string]any{"prompt": "hi", "title": "peer"}}},
+		"/v1/ArchiveSession": {{"unknown", map[string]any{"title": "nope"}}},
+		"/v1/CreateTab":      {{"own session", map[string]any{"id": f.me.ID, "command": "x"}}},
+		"/v1/CloseTab":       {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope"}}},
+		"/v1/RenameTab":      {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope", "new_name": "n"}}},
+		"/v1/ReorderTab":     {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope"}}},
+		"/v1/ListTasks":      {{"empty", map[string]any{}}},
+		"/v1/AddTask": {{"cron to a peer", map[string]any{"task": map[string]any{
+			"prompt": "p", "cron_expr": "0 * * * *", "target_session": "peer"}}}},
+		"/v1/RemoveTask": {{"own task", map[string]any{"id": "t-mine"}}},
+	}
+	for _, host := range []string{"", "h1"} {
+		for _, backend := range []string{"", "ssh", "local", "docker", "sandbox"} {
+			bases["/v1/CreateSession"] = append(bases["/v1/CreateSession"], baseShape{
+				fmt.Sprintf("host=%q backend=%q", host, backend),
+				map[string]any{"title": "x", "host": host, "backend": backend},
+			})
 		}
-		m[field] = G
-		raw, _ := json.Marshal(m)
-		return string(raw)
 	}
-	var shapes []shape
-	add := func(route string, base map[string]string, fields ...string) {
-		for _, fld := range fields {
-			shapes = append(shapes, shape{route, obj(base, fld)})
-		}
-	}
-	add("/v1/Snapshot", nil, "repo_id")
-	add("/v1/SendPrompt", map[string]string{"prompt": "hi", "title": "peer"}, "prompt", "title", "id", "repo_id")
-	add("/v1/ArchiveSession", map[string]string{"title": "nope"}, "title", "id", "repo_id")
-	add("/v1/CreateSession", map[string]string{"title": "x", "host": "h1"}, "title", "prompt", "host", "backend", "repo_path", "account")
-	for _, fld := range []string{"id", "title", "command", "name", "kind", "url", "proposal"} {
-		shapes = append(shapes, shape{"/v1/CreateTab", obj(map[string]string{"id": f.me.ID, "command": "x"}, fld)})
-	}
-	add("/v1/CloseTab", map[string]string{"id": f.me.ID, "tab_name": "nope"}, "id", "title", "tab_name")
-	add("/v1/RenameTab", map[string]string{"id": f.me.ID, "tab_name": "nope", "new_name": "n"}, "id", "title", "tab_name", "new_name")
-	add("/v1/ReorderTab", map[string]string{"id": f.me.ID, "tab_name": "nope"}, "id", "title", "tab_name")
-	shapes = append(shapes, shape{"/v1/ListTasks", `{}`})
-	for _, fld := range []string{"prompt", "name", "target_session", "cron_expr", "watch_cmd", "project_path", "host", "on_complete", "program"} {
-		shapes = append(shapes, shape{"/v1/AddTask", task_(fld)})
-	}
-	add("/v1/RemoveTask", map[string]string{"id": "t-mine"}, "id")
-	shapes = append(shapes, shape{"/v1/RemoveTask", `{"id":"t-mine","expect":{"enforce":true,"project_path":"` + G + `"}}`})
 
-	covered := map[string]bool{}
-	for _, sh := range shapes {
-		covered[sh.route] = true
-	}
+	// Completeness: every admitted route has a request type and a base shape, so a
+	// newly admitted route cannot silently stop being covered.
 	for _, rt := range servedHTTPRoutes() {
 		if rt.sandboxAllowed {
-			require.Truef(t, covered[rt.Path], "%s is admitted to the sandbox scope but has no shape in the differential test", rt.Path)
+			require.Containsf(t, requestTypes, rt.Path, "%s is admitted to the sandbox scope but has no request type in the differential test", rt.Path)
+			require.NotEmptyf(t, bases[rt.Path], "%s has no base shape", rt.Path)
 		}
 	}
+	require.Len(t, requestTypes, len(sandboxAllowedPaths), "the test names a route the scope does not admit")
 
 	stamp := regexp.MustCompile(`\d{4}-\d{2}-\d{2}T[0-9:.+\-Z]+`)
 	hexish := regexp.MustCompile(`[0-9a-f]{8,}`)
@@ -277,15 +345,37 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 			addStoreTask(t, task.Task{ID: "t-mine", Prompt: "p", CronExpr: "0 * * * *", TargetSession: "peer", ProjectPath: f.me.Path})
 		}
 	}
-	for _, sh := range shapes {
-		ensureMine()
-		codeA, outA := f.call(t, f.secret, sh.route, strings.ReplaceAll(sh.body, G, guessA))
-		ensureMine()
-		codeB, outB := f.call(t, f.secret, sh.route, strings.ReplaceAll(sh.body, G, guessB))
-		assert.Equalf(t, codeA, codeB, "%s %s: the status depends on whether the guess is in the layout", sh.route, sh.body)
-		assert.Equalf(t, normalize(outA, guessA), normalize(outB, guessB),
-			"%s %s: the response depends on whether the caller's guess is in the host layout (an existence oracle)", sh.route, sh.body)
+
+	routes := make([]string, 0, len(requestTypes))
+	for route := range requestTypes {
+		routes = append(routes, route)
 	}
+	sort.Strings(routes)
+	checked := 0
+	for _, route := range routes {
+		paths := stringFieldPaths(requestTypes[route], nil)
+		for _, base := range bases[route] {
+			for _, path := range paths {
+				mk := func(guess string) string {
+					body := cloneJSONMap(base.body)
+					setJSONPath(body, path, guess)
+					raw, err := json.Marshal(body)
+					require.NoError(t, err)
+					return string(raw)
+				}
+				ensureMine()
+				codeA, outA := f.call(t, f.secret, route, mk(guessA))
+				ensureMine()
+				codeB, outB := f.call(t, f.secret, route, mk(guessB))
+				where := fmt.Sprintf("%s [%s] field %s", route, base.name, strings.Join(path, "."))
+				assert.Equalf(t, codeA, codeB, "%s: the status depends on whether the guess is in the layout", where)
+				assert.Equalf(t, normalize(outA, guessA), normalize(outB, guessB),
+					"%s: the response depends on whether the caller's guess is in the host layout (an existence oracle)", where)
+				checked++
+			}
+		}
+	}
+	require.Greater(t, checked, 100, "the reflection-driven matrix shrank unexpectedly (%d cases)", checked)
 
 	// A later read must not depend on it either: the stored text a sandbox
 	// supplied comes back verbatim whether or not it is in the layout.
@@ -295,6 +385,97 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 		_, list := f.call(t, f.secret, "/v1/ListTasks", `{}`)
 		assert.Contains(t, list, guess, "and so does a later listing")
 	}
+
+	// And the create that SUCCEEDS no longer returns the program text at all.
+	_, out := f.call(t, f.secret, "/v1/CreateSession", `{"title":"x","host":"h1","program":"claude --append-system-prompt `+guessA+`"}`)
+	assert.NotContains(t, out, "append-system-prompt", "a sandbox's program text is omitted from the create response")
+	assert.Contains(t, out, "created-1", "anti-vacuous: the create succeeded and returned the projected row")
+}
+
+// Every string a sandbox response can carry is classified (sandbox_classify.go):
+// reflection over each admitted route's response type, and over what the
+// InstanceData and Task projections actually let through, fails on any string
+// field with no class, and on any class entry for a field that no longer exists.
+func TestSandboxStringFieldsAreAllClassified(t *testing.T) {
+	instT, taskT := reflect.TypeFor[session.InstanceData](), reflect.TypeFor[task.Task]()
+	isStringKind := func(t reflect.Type) bool { return derefElem(t).Kind() == reflect.String }
+
+	// 1. The response types.
+	seen := map[reflect.Type]bool{}
+	var walk func(reflect.Type)
+	walk = func(rtype reflect.Type) {
+		rtype = derefElem(rtype)
+		if rtype.Kind() != reflect.Struct || seen[rtype] || rtype == instT || rtype == taskT || rtype == reflect.TypeFor[time.Time]() {
+			return
+		}
+		seen[rtype] = true
+		for name, f := range jsonFieldsOf(rtype) {
+			if isStringKind(f.typ) {
+				_, ok := sandboxStringClasses[f.owner][name]
+				assert.Truef(t, ok, "%s.%s is a string a sandbox response can carry but has no class in sandboxStringClasses: declare it daemon-originated (scrubbed) or caller-originated (verbatim), or omit it", f.owner.Name(), name)
+			}
+			walk(f.typ)
+		}
+	}
+	for _, rt := range servedHTTPRoutes() {
+		if rt.sandboxAllowed {
+			typ, ok := sandboxResponseTypes[rt.Path]
+			require.Truef(t, ok, "%s is admitted to the sandbox scope but has no response type in sandboxResponseTypes", rt.Path)
+			walk(typ)
+		}
+	}
+
+	// 2. What the projections let through, measured: populate EVERY string field,
+	// project, and require each surviving one to be classified.
+	fill := func(v reflect.Value) {
+		for i := 0; i < v.NumField(); i++ {
+			if f := v.Field(i); f.CanSet() && f.Kind() == reflect.String {
+				f.SetString("x")
+			}
+		}
+	}
+	check := func(proj any, owner reflect.Type) {
+		pv := reflect.ValueOf(proj)
+		for name, f := range jsonFieldsOf(owner) {
+			if f.typ.Kind() != reflect.String {
+				continue
+			}
+			var field reflect.Value
+			for i := 0; i < pv.NumField(); i++ {
+				if owner.Field(i).Tag.Get("json") != "" && strings.Split(owner.Field(i).Tag.Get("json"), ",")[0] == name {
+					field = pv.Field(i)
+				}
+			}
+			if field.IsValid() && !field.IsZero() {
+				_, ok := sandboxStringClasses[owner][name]
+				assert.Truef(t, ok, "%s.%s survives the sandbox projection but has no class in sandboxStringClasses", owner.Name(), name)
+			}
+		}
+	}
+	var inst session.InstanceData
+	fill(reflect.ValueOf(&inst).Elem())
+	check(sandboxSafeInstanceData(inst), instT)
+	assert.Empty(t, sandboxSafeInstanceData(inst).Program, "Program is caller-supplied text the sandbox does not need back: omitted")
+	var tk task.Task
+	fill(reflect.ValueOf(&tk).Elem())
+	check(sandboxSafeTask(tk), taskT)
+
+	// 3. No stale entries.
+	for owner, classes := range sandboxStringClasses {
+		fields := jsonFieldsOf(owner)
+		for name := range classes {
+			f, ok := fields[name]
+			assert.Truef(t, ok && isStringKind(f.typ), "sandboxStringClasses names %s.%s, which is not a string field", owner.Name(), name)
+		}
+	}
+}
+
+// derefElem unwraps pointers, slices, arrays and maps to the element type.
+func derefElem(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map {
+		t = t.Elem()
+	}
+	return t
 }
 
 // No admitted route streams: the response boundary buffers a whole response, and

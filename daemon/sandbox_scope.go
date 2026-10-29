@@ -255,7 +255,11 @@ func (s *controlServer) createSessionScoped(ctx context.Context, req CreateSessi
 		// The project is the owner's, never the caller's: the sandbox's own
 		// working directory is not a path on this host.
 		req.RepoPath = proj.path
-		if err := s.createSession(ctx, req, resp); err != nil {
+		create := s.createSession
+		if s.createSessionFn != nil {
+			create = s.createSessionFn
+		}
+		if err := create(ctx, req, resp); err != nil {
 			return err
 		}
 		// The create response is the manager's complete InstanceData: the

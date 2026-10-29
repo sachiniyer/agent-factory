@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
@@ -59,20 +60,14 @@ func noteStaticHostLayout() {
 //     text is where reflection lives (validation, decode and lookup errors echo
 //     what they were given), and it is where daemon paths leak, so it is closed
 //     entirely rather than scrubbed.
-//   - SUCCESS bodies are scrubbed except for the values of the keys that carry
-//     text a sandbox itself supplied (a prompt, a name, a title, a target session,
-//     a command, a tab name, a cron expression, a branch derived from the title):
-//     those come back exactly as stored, whatever they contain.
+//   - SUCCESS bodies are walked by the route's response type. Each string field
+//     is CLASSIFIED (sandbox_classify.go): daemon-originated strings are scrubbed,
+//     caller-originated ones (a title, a prompt, a tab name) come back verbatim.
+//     Caller-supplied text a sandbox does not need back (a session's program) is
+//     omitted by the projection instead.
 //
 // TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership pins it with a
 // differential test over every admitted route.
-
-// sandboxCallerTextKeys are the response keys whose values are text a sandbox
-// supplied. They are returned verbatim, never scrubbed.
-var sandboxCallerTextKeys = map[string]bool{
-	"prompt": true, "name": true, "title": true, "target_session": true,
-	"command": true, "tab_name": true, "new_name": true, "cron_expr": true, "branch": true,
-}
 
 const (
 	sandboxGenericRequestMsg = "the request was not accepted"
@@ -111,7 +106,7 @@ func sanitizeSandboxBody(route string, status int, body []byte) []byte {
 			sanitizeSandboxError(route, status, e)
 			env["data"] = nil
 		} else {
-			env["data"] = scrubSandboxValue(env["data"], false)
+			env["data"] = scrubSandboxValue(env["data"], sandboxResponseTypes[route], false)
 		}
 	}
 	var out bytes.Buffer
@@ -141,32 +136,58 @@ func sanitizeSandboxError(route string, status int, e map[string]any) {
 	}
 }
 
-// scrubSandboxValue walks a decoded JSON value, withholding layout strings from
-// every string and key except the values of caller-text keys. A "warning" (a
-// committed-with-follow-up-failure note) is free daemon text that can echo what
-// the caller sent, so it is replaced like an error message.
-func scrubSandboxValue(v any, callerText bool) any {
-	switch t := v.(type) {
+// scrubSandboxValue walks a decoded JSON value TYPE-DIRECTED by the route's
+// response type, withholding layout strings from every daemon-originated string
+// and leaving caller-originated ones verbatim (sandbox_classify.go). A key the
+// type does not declare, or a string with no classification, is scrubbed — the
+// safe default for layout; TestSandboxStringFieldsAreAllClassified keeps that
+// case empty. A free-text "warning" (a committed-with-follow-up-failure note) can
+// echo what the caller sent, so it is replaced like an error message.
+func scrubSandboxValue(v any, t reflect.Type, caller bool) any {
+	t = derefType(t)
+	switch val := v.(type) {
 	case string:
-		if callerText {
-			return t
+		if caller {
+			return val
 		}
-		return hostlayout.Default.ScrubString(t)
+		return hostlayout.Default.ScrubString(val)
 	case []any:
-		for i := range t {
-			t[i] = scrubSandboxValue(t[i], callerText)
+		var elem reflect.Type
+		if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
+			elem = t.Elem()
 		}
-		return t
+		for i := range val {
+			val[i] = scrubSandboxValue(val[i], elem, caller)
+		}
+		return val
 	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, val := range t {
+		out := make(map[string]any, len(val))
+		var fields map[string]jsonField
+		var mapElem reflect.Type
+		switch {
+		case t != nil && t.Kind() == reflect.Struct:
+			fields = jsonFieldsOf(t)
+		case t != nil && t.Kind() == reflect.Map:
+			mapElem = t.Elem()
+		}
+		for k, child := range val {
 			if k == "warning" {
-				if s, ok := val.(string); ok && s != "" {
+				if s, ok := child.(string); ok && s != "" {
 					out[hostlayout.Default.ScrubString(k)] = sandboxCommittedMsg
 					continue
 				}
 			}
-			out[hostlayout.Default.ScrubString(k)] = scrubSandboxValue(val, callerText || sandboxCallerTextKeys[k])
+			var childType reflect.Type
+			childCaller := caller
+			if f, ok := fields[k]; ok {
+				childType = f.typ
+				if sandboxStringClasses[f.owner][k] == classCaller {
+					childCaller = true
+				}
+			} else if mapElem != nil {
+				childType = mapElem
+			}
+			out[hostlayout.Default.ScrubString(k)] = scrubSandboxValue(child, childType, childCaller)
 		}
 		return out
 	default:
