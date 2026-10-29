@@ -28,8 +28,12 @@ type Instance struct {
 	// replacement invalidates it before later manager bookkeeping, which orders a
 	// predecessor side effect either wholly before the replacement or drops it.
 	agentObservationGeneration atomic.Uint64
-	liveBoundaryMu             sync.Mutex
-	liveBoundary               *runtimeLiveBoundary
+	// forceSandboxReplacement is the operator's explicit "replace this sandbox"
+	// intent (`sessions restore --force-reap`) for the recovery in flight; it makes
+	// recovery skip the in-place relaunch. See relaunchOrRecoverSandbox.
+	forceSandboxReplacement atomic.Bool
+	liveBoundaryMu          sync.Mutex
+	liveBoundary            *runtimeLiveBoundary
 	// ID is the instance's stable identity (#1195): a random UUID minted once at
 	// NewInstance, persisted, and never mutated. The reconcile uses it to tell
 	// "same session" from "title reused" (#765) without leaning on CreatedAt
@@ -296,6 +300,13 @@ type Instance struct {
 	// client-side projection. Persisted; surfaces render it under
 	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
 	callbackUnavailable string
+	// hostedRemotely marks an instance running INSIDE a sandbox, where the daemon
+	// holds the session as a remote workspace. It decides which capability
+	// projection the injected guidance is rendered from (guidance.go, #5571 W3.3).
+	hostedRemotely bool
+	// advertisedFeatures is what the hosting agent-server advertises on
+	// /v1/health; guidance lifts the static remote floor by it (#5878).
+	advertisedFeatures []string
 	// worktreeMissing is true once a bounded probe proved the tracked worktree
 	// path absent with no af relocation owning it — deleted outside af (#5102).
 	// Persisted with the worktree record; see worktree_missing.go for who sets
@@ -388,6 +399,21 @@ type Instance struct {
 	// runtime cleanup handle, which a teardown clears: restore and recovery
 	// re-provision from this so a pick never silently moves to another machine.
 	Host string `json:"host,omitempty"`
+	// branchUnpushed: Branch is the name af chose at create and nothing has
+	// published it, so it is not a restore checkpoint (#5972). Persisted as
+	// BranchUnpushed; false for any row an older af wrote.
+	branchUnpushed bool
+	// archivedWorkspace records where this archived off-box session's work lives
+	// (#5571 W8.5); nil for a live row or one archived before the field.
+	archivedWorkspace *ArchivedWorkspaceData
+	// placement is the daemon-projected place this row runs (#5571 W6.4). Set on
+	// a client row built from a snapshot, which has no runtime to derive it from.
+	placement *PlacementData
+	// projectedTabManagement is the daemon's verdict that this off-box session
+	// serves shell and process tabs (#5953). A client row built from a snapshot has
+	// no live agent-server to read the advertisement from, so it adopts the
+	// projection instead.
+	projectedTabManagement bool
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's
@@ -396,6 +422,11 @@ type Instance struct {
 	// Account is ambient or the record predates the field — those selections
 	// could only have used the Program enum's namespace.
 	accountAgent string
+	// restartingSameAgent is raised, in-sandbox only, for the duration of an
+	// account swap (#5571 W7.6): the replacement is the SAME agent on another
+	// account, which the handoff validation otherwise refuses as "already running".
+	// Every boundary of the handoff chain (prepare, record, swap) reads it.
+	restartingSameAgent bool
 	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
 	accountAutoSelected bool
 	// pendingAccountSwap survives until the replacement notice and task land.
@@ -430,6 +461,9 @@ type Instance struct {
 	// direct constructor that should resolve the value when provisioning begins.
 	branchPrefix         string
 	branchPrefixResolved bool
+	// branchName is a caller-chosen branch that overrides the prefix+title
+	// derivation for a fresh local worktree (InstanceOptions.BranchName).
+	branchName string
 
 	// carriedConversation is a provider conversation a PREVIOUS record held that
 	// this create should come up on instead of starting a new one (#2616). It
@@ -443,6 +477,17 @@ type Instance struct {
 	// the resolved command can actually express it, and the conversation the
 	// session ends up with is whatever the launch plan committed to Tabs[0].
 	carriedConversation AgentConversationData
+
+	// reportedConversation is the last conversation a remote agent-server reported
+	// (recordReportedConversationFrom), held until the daemon-side agent tab exists to
+	// carry it. Guarded by mu.
+	reportedConversation AgentConversationData
+	// conversationUnpersisted is set when a remote agent-server reported a
+	// conversation identity that changed the row and the change has not yet been
+	// durably written (#5826). The daemon's poll persistence reads it as a
+	// durable change of its own and clears it only after the write succeeds, so
+	// a failed write is retried on the next tick. Guarded by mu.
+	conversationUnpersisted bool
 
 	// carriedTabs is the tab roster a PREVIOUS record held, to be rebuilt onto
 	// this instance once its agent tab is live (#2628). It has the same single
@@ -604,6 +649,44 @@ type Instance struct {
 	// spawn must reserve against both in the same critical section. It is
 	// deliberately NOT part of the roster: nothing renders or respawns from it.
 	pendingTabCleanup []TabCleanupData
+
+	// pendingRemoteClose is pendingTabCleanup for off-box tabs: closes the
+	// sandbox never confirmed (#5957). Persisted with the session; retried by
+	// ReconcileOffBoxTabs. Guarded by i.mu.
+	pendingRemoteClose []RemoteTabCleanupData
+	// tabCreateIntents holds the minted ids of remote creates whose outcome was
+	// uncertain, keyed by request shape, so a retry reuses the id (#5958).
+	// Guarded by i.mu; in memory — a restart before the retry loses the mapping,
+	// and the sandbox's own roster then still holds the tab it started.
+	tabCreateIntents map[string]*tabCreateIntent
+	// tabTeardown serializes teardown attempts per tab id (lockTeardown).
+	tabTeardown map[string]*teardownGate
+
+	// tabSpawnClaims reserves the FULL tmux session names of sibling spawns
+	// still in flight — derived under i.mu, released once the append resolves
+	// (#5571 W4.3). uniqueTabTmuxNameReserving consults it alongside the roster
+	// and pendingTabCleanup so two concurrent creates never derive the same
+	// name: without it a loser's new-session collides inside tmux on the
+	// winner's name and Start's failed-spawn cleanup kill-sessions that name —
+	// the winner's live session. Guarded by i.mu; lazily allocated since an
+	// instance that never spawns a sibling never needs it.
+	tabSpawnClaims map[string]bool
+
+	// tabDisplayClaims is tabSpawnClaims for the roster DISPLAY name: names
+	// derived by in-flight creates but not yet on i.Tabs. Guarded by i.mu.
+	tabDisplayClaims map[string]bool
+
+	// tabCreateInFlight reserves the stable ids of supplied-id creates still
+	// in flight — claimed under i.mu at the early check, released when the
+	// owning create returns (#5571 W4.3). The roster dedupes same-id creates
+	// only AFTER they spawn, which cannot undo a duplicate command's side
+	// effects — a replayed `deploy.sh` that ran twice already deployed twice.
+	// The claim serializes same-id creates instead: a second request joins on
+	// the owner's done channel and resolves through the roster recheck, so a
+	// matching retry adopts without spawning and a mismatched one refuses
+	// before spawning. Guarded by i.mu; lazily allocated.
+	tabCreateInFlight map[string]*tabCreateClaim
+
 	// unreachableSince/unreachableErr are the live-probe OUTAGE observation
 	// (#5571 W1.3): set when a remote observation goes unanswered, retired on
 	// the next answered probe or any other transport evidence (attach stream,
@@ -762,22 +845,6 @@ func (i *Instance) TabIndexByID(id string) (int, bool) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.tabIndexByIDLocked(id)
-}
-
-// TabAlive reports whether the tab at idx has a live tmux session, as a LOSSY
-// bool: true means "alive OR could-not-determine (wedged/timeout)", false means
-// "no binding, or definitively gone". It is deliberately kept lossy because its
-// only consumers (ui/tab_pane.go) act solely on !TabAlive — they swap to the
-// "Terminal session not available" fallback. A wedged server reads as alive here,
-// which keeps the read-only TUI rendering the pane instead of falsely declaring a
-// merely-unreachable terminal dead: the safe direction for a view (#1962). A
-// caller that needs existence as EVIDENCE must use TmuxSession.ProbeSession
-// directly and handle !known.
-func (i *Instance) TabAlive(idx int) bool {
-	i.mu.RLock()
-	ts := i.tabTmuxAtLocked(idx)
-	i.mu.RUnlock()
-	return ts != nil && ts.ExistsOrUnknown()
 }
 
 // TabCount returns the number of tabs the instance currently holds.

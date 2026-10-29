@@ -164,3 +164,15 @@ func TestSetDefaultHostRefusesUnlisted(t *testing.T) {
 	_, err = SetGlobalConfigValue("hosts", `{"b":{"host":"h"}}`)
 	require.Error(t, err)
 }
+
+// ValidateHostPick is the one refusal every pick surface shares.
+func TestValidateHostPick(t *testing.T) {
+	hosts := map[string]HostConfig{"b": {Host: "b.example"}, "a": {Host: "a.example"}}
+	require.NoError(t, ValidateHostPick(hosts, ""))
+	require.NoError(t, ValidateHostPick(hosts, "a"))
+	err := ValidateHostPick(hosts, "c")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `host "c" is not in the host list [a b]`)
+	assert.Contains(t, err.Error(), "add it under [hosts.c] in the global config")
+	require.Error(t, ValidateHostPick(nil, "a"))
+}

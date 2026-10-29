@@ -3,6 +3,7 @@ package task
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -87,7 +88,13 @@ type Task struct {
 	// session's owned branch. A run whose output already landed in a pushed
 	// branch or a PR usually wants kill; a run that might need inspecting wants
 	// archive. af must not pick for the user, so the default does neither.
-	OnComplete  string `json:"on_complete,omitempty"`
+	OnComplete string `json:"on_complete,omitempty"`
+	// Host names a listed host (the operator's global `hosts` table) the sessions
+	// this task creates are placed on, over ssh (#5571 W6.3). Empty keeps the
+	// historical behavior: the repo's backend / default_host decide. It is a
+	// NAME, never an address, and a write that names a host the list does not
+	// carry is refused (validateTaskHost). Additive: no tasks schema bump.
+	Host        string `json:"host,omitempty"`
 	ProjectPath string `json:"project_path"`
 	// RepoID is the owning project's repo ID, resolved ONCE at bind time and
 	// retained. It is derived, never patchable — AddTask sets it and UpdateTask
@@ -107,7 +114,15 @@ type Task struct {
 	// migration on purpose: the backfill would have to shell out to git for
 	// every task inside the tasks.json load path, and rows pick the field up as
 	// they are next written anyway.
-	RepoID        string     `json:"repo_id,omitempty"`
+	RepoID string `json:"repo_id,omitempty"`
+	// SandboxOwner is the id of the sandbox session whose credential created this
+	// task (#5571 W3.5). It is durable provenance the DAEMON writes — a sandbox's
+	// own value is overwritten — and every delivery re-checks against it: the
+	// target must still be an existing off-box session in the owner's project, and
+	// the delivery never auto-creates. Empty for every operator-created task.
+	// UpdateTask is refused to a sandbox credential, so it cannot be edited away
+	// by the agent it constrains.
+	SandboxOwner  string     `json:"sandbox_owner,omitempty"`
 	Program       string     `json:"program"`
 	Enabled       bool       `json:"enabled"`
 	CreatedAt     time.Time  `json:"created_at"`
@@ -337,6 +352,12 @@ func AddTask(t Task) error {
 	return err
 }
 
+// ErrTaskIDExists is returned when an add names the ID of a task already in the
+// store. The store refuses it atomically, under the tasks-file lock: an append
+// that shadowed an existing row would let a second record re-arm, replace or
+// impersonate the first (#5571 W3.5, Codex P1 on #5823).
+var ErrTaskIDExists = errors.New("a task with this id already exists")
+
 // AddTaskChecked is AddTask with a final pre-commit validator. The validator
 // runs after RepoID derivation and trigger validation, under the tasks-file
 // lock, so an error guarantees that no task was appended. It must not shell out
@@ -359,7 +380,11 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 	// session" and then behave as one at delivery time (#1892).
 	t.canonicalizeTargetSession()
 	t.canonicalizeOnComplete()
+	t.Host = strings.TrimSpace(t.Host)
 	if err := t.ValidateTrigger(); err != nil {
+		return Task{}, err
+	}
+	if err := validateTaskHost(t.Host); err != nil {
 		return Task{}, err
 	}
 	// Empty Program means "fall back to the configured default_program at
@@ -386,6 +411,11 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
+		}
+		for i := range tasks {
+			if tasks[i].ID == t.ID {
+				return fmt.Errorf("%w: %q", ErrTaskIDExists, t.ID)
+			}
 		}
 		if validate != nil {
 			if err := validate(t); err != nil {
@@ -437,6 +467,16 @@ func repoIDForPath(projectPath string) string {
 // operation, that the task is still bound to the project the caller authorized
 // it against — see ProjectExpectation.
 func RemoveTask(id string, expect ProjectExpectation) error {
+	return RemoveTaskChecked(id, expect, nil)
+}
+
+// RemoveTaskChecked is RemoveTask with an admission predicate evaluated against
+// the record loaded UNDER the tasks-file lock, immediately before the delete. A
+// scoped caller (a sandbox credential bounded to one project) authorizes the
+// task there, not on a record it read earlier: a rebind or an update that lands
+// between a read and the delete can then never carry the removal across its
+// boundary (#5889). A non-nil admit error aborts with nothing changed.
+func RemoveTaskChecked(id string, expect ProjectExpectation, admit func(Task) error) error {
 	if err := ValidateTaskID(id); err != nil {
 		return err
 	}
@@ -457,8 +497,14 @@ func RemoveTask(id string, expect ProjectExpectation) error {
 		found := false
 		for _, t := range tasks {
 			if t.ID == id {
-				// Verify against the record just loaded under the lock, not one
-				// the caller carried in — that freshness is the whole point.
+				// Admission and verification run against the record just loaded
+				// under the lock, not one the caller carried in — that freshness
+				// is the whole point.
+				if admit != nil {
+					if err := admit(t); err != nil {
+						return err
+					}
+				}
 				if err := expect.Verify(t); err != nil {
 					return err
 				}
@@ -469,7 +515,7 @@ func RemoveTask(id string, expect ProjectExpectation) error {
 		}
 
 		if !found {
-			return fmt.Errorf("task with id %q not found", id)
+			return &NotFoundError{ID: id}
 		}
 
 		return saveTasks(filtered)
@@ -681,17 +727,11 @@ func updateTaskStatusLocked(taskID string, lastRunAt *time.Time, lastRunStatus s
 	return updated, applied, nil
 }
 
-// capApplies reports whether this task's shape can carry a concurrency cap: it
-// bounds sessions a watch task spawns per event, so it is meaningful only for a
-// watch task that creates them (#1892). Cron fires already coalesce on RunTask's
-// lock, and target-session deliveries already serialize into one session.
-//
-// The TargetSession test goes through CanonicalTargetSession, the same function
-// deliverTaskPrompt's runtime "create a session per event" condition uses — the
-// two must agree on what an empty target session is, or a cap could validate
-// against one condition and be bypassed at delivery by the other.
+// capApplies reports whether this task's shape can carry a concurrency cap. It
+// is the record-shaped call into CapApplies, the one predicate every surface
+// asks (#4180): the store's ground truth for the trigger is IsWatch.
 func (t Task) capApplies() bool {
-	return t.IsWatch() && CanonicalTargetSession(t.TargetSession) == ""
+	return CapApplies(t.IsWatch(), t.TargetSession)
 }
 
 // clearInapplicableCap drops a stale positive cap from a task whose shape can no

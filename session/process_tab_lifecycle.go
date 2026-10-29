@@ -65,7 +65,7 @@ func restoreProcessTab(i *Instance, tab *Tab, worktreePath string) {
 	// tmux holds the pane when the command exits and pane_dead records it.
 	tab.tmux.ApplyRemainOnExit()
 	if tab.Exit == nil {
-		stampProcessTabExit(i, tab)
+		stampProcessTabExit(i, tab.ID, tab.tmux)
 	}
 	if err := tab.tmux.ReattachOnly(worktreePath, true); err != nil {
 		log.WarningLog.Printf("reattach process tab %q for %q failed: %v", tab.Name, i.Title, err)
@@ -78,20 +78,64 @@ func restoreProcessTab(i *Instance, tab *Tab, worktreePath string) {
 // nothing else writes a row whose runtime was not replaced, and a reboot before
 // any later mutation would lose the pane and the only record of how its command
 // ended (#4506 review).
-func stampProcessTabExit(i *Instance, tab *Tab) bool {
-	dead, status, statusKnown, at, known := tab.tmux.ProbePaneExit()
+func stampProcessTabExit(i *Instance, tabID string, tabTmux *tmux.TmuxSession) bool {
+	dead, status, statusKnown, at, known := tabTmux.ProbePaneExit()
 	if !known || !dead {
 		return false
 	}
 	exit := &TabExit{Status: status, StatusKnown: statusKnown, At: at}
-	stamped := updateTabByID(i, tab.ID, func(copy *Tab) {
+	// Fenced on the probed incarnation (#5960): the probe ran against tabTmux
+	// outside the lock, and the id can since have been closed and re-created for
+	// a different command. The id alone cannot tell the two apart; the tmux
+	// handle can. A row that already records an ending keeps it.
+	stamped := false
+	updateTabByID(i, tabID, func(copy *Tab) {
+		if copy.tmux != tabTmux || copy.Exit != nil {
+			return
+		}
 		copy.Exit = exit
+		stamped = true
 		i.touchLocked()
 	})
 	if stamped {
 		i.markLoadRuntimeReplaced()
 	}
 	return stamped
+}
+
+// RecordProcessTabExits probes every process tab with no recorded exit and
+// stamps the ones whose command tmux reports finished (#5571 W4.3). It is the
+// roster-read counterpart of stampProcessTabExit's restore path: exit evidence
+// is only discovered when something looks, and on a LIVE instance nothing looks
+// — so a process tab that exits while the agent-server runs would report an
+// un-stamped Exit on /v1/agent/tabs forever. The roster handler runs this
+// first; the probe is the same bounded has-session/pane_dead pair the restore
+// path spends. Inert or tmux-less rows are skipped rather than probed: absence
+// is not evidence of how the command ended (restoreProcessTab's rule), and
+// inventing one would fabricate the record this field exists to keep honest.
+// The eligible rows AND their tmux handles are captured under i.mu: the kill
+// path nils tab.tmux under the same lock (clearClosedTmuxRefs), so reading the
+// handle unlocked races it and could hand ProbePaneExit a nil receiver; the
+// captured handle stays valid past a concurrent kill — its probe just reports
+// the now-gone session as such — and the ID-based update lands on the row's
+// current copy or skips it when the row already records an ending.
+func (i *Instance) RecordProcessTabExits() {
+	type probe struct {
+		id   string
+		tmux *tmux.TmuxSession
+	}
+	i.mu.RLock()
+	var probes []probe
+	for _, tab := range i.Tabs {
+		if tab.Kind != TabKindProcess || tab.Exit != nil || tab.inert || tab.tmux == nil {
+			continue
+		}
+		probes = append(probes, probe{id: tab.ID, tmux: tab.tmux})
+	}
+	i.mu.RUnlock()
+	for _, p := range probes {
+		stampProcessTabExit(i, p.id, p.tmux)
+	}
 }
 
 // stampProcessTabStopped records that af stopped a process tab's running
@@ -119,7 +163,7 @@ func stampProcessTabStopped(i *Instance, tab *Tab, reason string) {
 // would destroy that output and the exit status for nothing (#4506 review).
 func keepFinishedProcessPane(i *Instance, tab *Tab) bool {
 	if tab.Exit == nil {
-		stampProcessTabExit(i, tab)
+		stampProcessTabExit(i, tab.ID, tab.tmux)
 	}
 	return tab.tmux.FinishedAndQuiet()
 }

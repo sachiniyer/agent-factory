@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/rpc"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -328,12 +330,17 @@ func TestListBackends_UnreadableConfigIsUnknownNotUnavailable(t *testing.T) {
 		assert.NotEmptyf(t, opt.Reason, "%s must say what stopped the check", name)
 	}
 
-	// local reads no repo config, and a create with no explicit backend still runs
-	// local through this failure — so calling it unknown would be its own lie, and
-	// the user can still create a session while they fix the file.
+	// local reads no repo config, so choosing it explicitly still works while the
+	// user fixes the file — calling it unknown would be its own lie.
 	assert.Equal(t, BackendAvailable, optionByName(t, resp, config.BackendLocal).Status)
-	assert.Equal(t, config.BackendLocal, resp.Default)
-	assert.Equal(t, BackendAvailable, resp.DefaultStatus)
+	// A create with NO explicit backend no longer falls back to local through this
+	// failure (#5801): it refuses with the config error, so the default is not a
+	// usable backend and the catalog says it could not be evaluated, with the
+	// reason, instead of promising local.
+	assert.Equal(t, "", resp.Default)
+	assert.Equal(t, BackendUnknown, resp.DefaultStatus)
+	assert.Contains(t, resp.DefaultReason, "cannot determine the backend")
+	assert.Contains(t, resp.DefaultReason, "config.json", "the reason names the file")
 }
 
 // TestListBackends_NewBackendReachesClientsWithNoClientChange is THE anti-drift
@@ -466,5 +473,39 @@ func TestBackendCatalog_CallbackAdvisoryOnlyOnInjectingKinds(t *testing.T) {
 			assert.Empty(t, opt.CallbackUnavailableReason,
 				"backend %s never injects a callback, so it has nothing to lose", opt.Name)
 		}
+	}
+}
+
+// TestSandboxOptionCarriesTheCachedHostVerdict (#5571 W2.3 part B): the catalog
+// reads the readiness cache and never dials — unprobed and stale hosts stay
+// selectable but carry a note, only a fresh blocking verdict is unavailable.
+func TestSandboxOptionCarriesTheCachedHostVerdict(t *testing.T) {
+	cfg := &config.ResolvedConfig{}
+	cfg.SandboxSSH = "ssh backends-test-host"
+
+	opt := BackendOption{Name: "sandbox", Status: BackendAvailable}
+	applyHostReadiness(&opt, session.BackendSandbox, cfg)
+	if opt.Status != BackendAvailable || opt.Readiness != "unprobed" || opt.Note == "" {
+		t.Fatalf("never-probed host: got %+v, want available + unprobed note", opt)
+	}
+
+	session.RecordHostReadiness(cfg.SandboxSSH, errors.New("git is not on the host's PATH"))
+	opt = BackendOption{Name: "sandbox", Status: BackendAvailable}
+	applyHostReadiness(&opt, session.BackendSandbox, cfg)
+	if opt.Status != BackendUnavailable || !strings.Contains(opt.Reason, "git is not on the host's PATH") {
+		t.Fatalf("fresh blocking verdict: got %+v, want unavailable naming the fix", opt)
+	}
+
+	session.RecordHostReadiness(cfg.SandboxSSH, nil)
+	opt = BackendOption{Name: "sandbox", Status: BackendAvailable}
+	applyHostReadiness(&opt, session.BackendSandbox, cfg)
+	if opt.Status != BackendAvailable || opt.Readiness != "ready" || opt.Note != "" {
+		t.Fatalf("fresh pass: got %+v, want plain available", opt)
+	}
+
+	other := BackendOption{Name: "docker", Status: BackendAvailable}
+	applyHostReadiness(&other, session.BackendDocker, cfg)
+	if other.Readiness != "" || other.Note != "" {
+		t.Fatalf("a backend with no remote host must carry no readiness: %+v", other)
 	}
 }

@@ -7,7 +7,7 @@ user_invocable: true
 # Dispatch AF Session
 
 Dispatch focused implementation work to an `af` session with the standard
-Captain Claude contract. **The session that writes the PR gates and merges it.**
+Captain Claude contract. **The session that writes the PR owns it through to landing.**
 Root does not sit between a finished PR and master — that queue is what turns a
 green PR into a week-old PR.
 
@@ -21,8 +21,13 @@ green PR into a week-old PR.
 
    Task: <specific implementation request>
 
-   You own this PR end to end, including the merge. Follow the gate-pr skill
-   and merge it yourself when its gates pass. Do not hand the PR back to root.
+   You own this PR end to end. Follow the gate-pr skill; under throughput
+   mode the auto-merger squash-merges once Build + Lint are green on your
+   current head (you do not merge by hand). Exception: while `AUTO_MERGE_TOKEN`
+   is unset, a PR that touches `.github/workflows/**` is skipped by design (the
+   merger's `GITHUB_TOKEN` cannot merge workflow files), so for that PR say so
+   in a PR comment and ask for a maintainer merge. Otherwise do not hand the PR
+   back to root.
 
    Local gates (cheap only, before opening the PR):
    - gofmt -l .
@@ -47,11 +52,11 @@ green PR into a week-old PR.
    push, and concurrent container runs take the shared box down. Push, let CI
    run the rest, and fix what it reports on your PR head.
 
-   Merge gates (gate-pr, after the PR is open):
-   - every triggered check finished, none failed
-   - a Codex review for the exact head SHA — no review is NOT a clean review
-   - zero unresolved inline findings, each cleared by an in-reply-to RESOLVED
-   - merge with: gh pr merge <n> --squash --match-head-commit <gated sha>
+   After push (throughput mode): Build + Lint green on the PR's current head
+   is the only merge gate — the auto-merger (`.github/auto-merge.md`)
+   squash-merges it. A P1 Codex finding blocks until you fix it and reply
+   `RESOLVED in <sha>`; P2/P3 are advisory — fix if cheap, else reply
+   `ACCEPTED: <reason>`. Label `no-auto-merge` to hold a PR.
 
    Sign the PR as Captain Claude.
    Include: Closes #<n>

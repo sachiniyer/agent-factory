@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -75,47 +77,22 @@ func seedDiskInstanceWithID(t *testing.T, repoID, id, title, repoPath string) {
 	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
 }
 
-// The minter reads LIVE config, never a snapshot captured when it was built.
-//
-// A stored closure holding create-time config was the previous shape: if the
-// operator later disabled require_token, ApplyConfig revoked every outstanding
-// credential and a re-mint through that closure still saw RequireToken=true — so
-// it succeeded against a listener that by then authenticated nobody, and the
-// invalidation predated the new mint's fence, so the fence could not catch it.
-func TestSandboxCredentials_MintReadsTheLivePosture(t *testing.T) {
+// The minter reads the endpoint's LIVE state, never a snapshot captured when it
+// was built, and does not consult the client listener's address or auth posture
+// (#5571 W3.4).
+func TestSandboxCredentials_MintReadsTheLiveEndpoint(t *testing.T) {
 	m := applyConfigTestManager(t)
 	creds := newSandboxCredentials(m, "sess-a")
 
-	// A dialable listen_addr first. DefaultConfig's is loopback, which is refused
-	// for a reason of its own — a sandbox dialling it reaches itself — and that
-	// refusal would mask the posture one this test is about. (My first version
-	// asserted the require_token hint here and got the loopback message, because
-	// dialability is checked first.) The network address makes this a tokenless
-	// non-loopback posture, so the opt-in goes in first — without it #5137
-	// refuses the listen_addr write itself.
-	_, err := config.SetGlobalConfigValue("allow_unauthenticated_network", "true")
-	require.NoError(t, err)
-	_, err = config.SetGlobalConfigValue("listen_addr", "10.0.0.5:8443")
-	require.NoError(t, err)
-	_, err = m.ApplyConfig()
-	require.NoError(t, err)
+	// Default config: loopback listener, require_token false. Both used to refuse.
+	_, err := creds.Mint()
+	require.Error(t, err, "no endpoint is listening yet")
 
-	// require_token is still false, so a mint must REFUSE: a scoped credential
-	// against a listener that demands none enforces nothing.
-	_, err = creds.Mint()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), requireTokenFixHint)
-
-	// Flip the posture LIVE. The same minter, already built, must see it — that is
-	// the whole point: the previous shape captured its config at construction.
-	_, err = config.SetGlobalConfigValue("require_token", "true")
-	require.NoError(t, err)
-	_, err = m.ApplyConfig()
-	require.NoError(t, err)
-
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
 	cred, err := creds.Mint()
-	require.NoError(t, err, "the minter must read the posture live, not the one captured when it was built")
-	assert.Equal(t, "http://10.0.0.5:8443", cred.URL)
+	require.NoError(t, err, "the minter must read the endpoint live, not the state captured when it was built")
+	assert.Equal(t, "/tmp/af-home/sandbox-callback.sock", cred.Socket)
+	assert.Empty(t, cred.URL, "the sandbox-side address is the provisioner's, never a TCP port")
 	assert.NotEmpty(t, cred.Token)
 
 	// And it revokes through the same object — what the runtime lifecycle calls
@@ -126,4 +103,71 @@ func TestSandboxCredentials_MintReadsTheLivePosture(t *testing.T) {
 	creds.Revoke()
 	_, ok = m.sandboxTokens.sessionFor(cred.Token)
 	assert.False(t, ok, "revoking through the credentials object must reach the registry")
+}
+
+// The callback credential survives a daemon restart (#5571 W3.6): the registry
+// is memory-only, but the secret is derived from the persisted ref, so a fresh
+// registry re-registers the very secret the sandbox already holds.
+func TestSandboxCallbackCredentialSurvivesARegistryRestart(t *testing.T) {
+	m := applyConfigTestManager(t)
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	cred, err := newSandboxCredentials(m, "sess-a").Mint()
+	require.NoError(t, err)
+	require.NotEmpty(t, cred.Ref, "the grant must carry the ref the row persists")
+
+	// A restarted daemon: an empty registry over the same AF home (same key).
+	m.sandboxTokens.revokeAll()
+	_, ok := m.sandboxTokens.sessionFor(cred.Token)
+	require.False(t, ok, "anti-vacuous: nothing is registered before the restore")
+
+	require.NoError(t, newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref))
+	owner, ok := m.sandboxTokens.sessionFor(cred.Token)
+	require.True(t, ok, "the secret the sandbox already holds must be accepted again with no re-delivery")
+	assert.Equal(t, "sess-a", owner)
+
+	// The ref is bound to the session: restoring it for another session
+	// registers a different secret, never the first session's.
+	require.NoError(t, newSandboxCredentials(m, "sess-b").RestoreCallback(cred.Ref))
+	owner, ok = m.sandboxTokens.sessionFor(cred.Token)
+	require.True(t, ok)
+	assert.Equal(t, "sess-a", owner, "session b's restore must not take over session a's credential")
+}
+
+// A restore never invents a key: with the key gone the credential the sandbox
+// holds cannot be re-derived, and a fresh key would only derive a stranger.
+func TestSandboxCallbackRestoreRefusesWithoutTheKey(t *testing.T) {
+	m := applyConfigTestManager(t)
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	cred, err := newSandboxCredentials(m, "sess-a").Mint()
+	require.NoError(t, err)
+
+	keyPath, err := runtimetoken.KeyPath()
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(keyPath))
+	require.Error(t, newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref))
+	_, statErr := os.Stat(keyPath)
+	assert.True(t, os.IsNotExist(statErr), "a failed restore must not write a replacement key")
+}
+
+// A restore whose callback endpoint is not bound registers nothing and says why
+// (#5897): sshd would accept the persisted -R to a socket nobody listens on, so
+// reporting the callback restored would leave every call dead.
+func TestSandboxCallbackRestoreRefusesWhileTheEndpointIsDown(t *testing.T) {
+	m := applyConfigTestManager(t)
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	cred, err := newSandboxCredentials(m, "sess-a").Mint()
+	require.NoError(t, err)
+	m.sandboxTokens.revokeAll()
+
+	m.setSandboxEndpointSocket("") // the endpoint failed to bind on this start
+	err = newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), errSandboxEndpointDown().Error())
+	_, ok := m.sandboxTokens.sessionFor(cred.Token)
+	assert.False(t, ok, "no credential may be registered for a callback path that is dead")
+
+	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
+	require.NoError(t, newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref))
+	_, ok = m.sandboxTokens.sessionFor(cred.Token)
+	assert.True(t, ok, "control: with the endpoint bound the same restore registers")
 }

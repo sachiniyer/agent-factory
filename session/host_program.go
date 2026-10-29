@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
@@ -67,23 +69,18 @@ func remoteProgramForHost(resolved *config.ResolvedConfig, agent string) string 
 const hostProgramProbeTimeout = 15 * time.Second
 const hostProgramProbeWaitDelay = time.Second
 
-// The executable name always reaches the login shell as a POSITIONAL
-// ARGUMENT, never interpolated into the -c script: program_overrides text is
-// operator/repository-authored and untrusted, so `"$SHELL" -l -c 'command -v
-// -- "$1"' af-probe "$name"` is the only admissible shape (#5571 W2.1). The
-// `--` keeps a name that begins with `-` a name rather than an option. The
-// `which` fallback gets the same treatment — a `which` that cannot parse `--`
-// simply answers "not found", which is the safe direction.
-const (
-	// $1 is the name, $2 a per-probe nonce, $3 the command-local PATH to look
-	// the name up in ("" for the login PATH). The nonce fences the answer: a
-	// login profile's own output lands before the first fence and is ignored,
-	// so the report is exactly what `command -v` printed between the fences
-	// (#5727). The login PATH is captured before $3 is applied so the pane
-	// still adopts it.
-	hostProbeCommandV = `lp=$PATH; if [ -n "$3" ]; then PATH=$3; fi; printf '\n%s\n' "$2"; command -v -- "$1"; printf '\n%s\n%s\n' "$2" "$lp"`
-	hostProbePathOnly = `printf '\n%s\n%s\n' "$1" "$PATH"`
-)
+// The executable name never reaches a shell. The pane runs its program under
+// `sh -c`, so the only thing that can run is a file found by walking PATH —
+// the login shell's functions, aliases and builtins do not exist there, and
+// `command -v` would answer for them (#5768). The login shell is therefore
+// asked for one thing only, its PATH, and the walk happens in Go over that
+// PATH or over the command's own. program_overrides text is operator- or
+// repository-authored and untrusted, so keeping it out of every script is also
+// what keeps it inert (#5571 W2.1).
+//
+// $1 is a per-probe nonce that fences the answer: a login profile's own output
+// lands before the fence and is ignored (#5727).
+const hostProbePathOnly = `printf '\n%s\n%s\n' "$1" "$PATH"`
 
 // hostProgramRunner executes one probe argv on the local host. Tests inject a
 // fake so the exact argv — login flags, positional argument, uninterpolated
@@ -102,13 +99,11 @@ type hostProgramProber struct {
 	// image PATH under docker, sshd's default under ssh. It is the fallback
 	// lookup and the merge tail for the adopted PATH.
 	processPATH string
-	// lookPath is exec.LookPath in production.
-	lookPath func(string) (string, error)
 	// run executes the probe argv.
 	run hostProgramRunner
-	// statFile is os.Stat in production; the resolved answer must be a
-	// regular, executable file on this host.
-	statFile func(string) (os.FileInfo, error)
+	// canExecute is canExecuteFile in production: the resolved answer must be
+	// a regular file this user can execute.
+	canExecute func(string) bool
 	// nonce returns a fresh fence token per probe.
 	nonce func() string
 }
@@ -133,9 +128,8 @@ func ResolveProgramOnHost(ctx context.Context, program string) (command, loginPA
 		shell:       loginShellName(os.Getenv),
 		host:        host,
 		processPATH: os.Getenv("PATH"),
-		lookPath:    exec.LookPath,
 		run:         execProbeRunner,
-		statFile:    os.Stat,
+		canExecute:  canExecuteFile,
 		nonce:       randomProbeNonce,
 	})
 }
@@ -146,117 +140,113 @@ func resolveProgramOnHost(ctx context.Context, program string, p hostProgramProb
 		if errors.Is(err, sessionenv.ErrNoProgramExecutable) {
 			return "", "", fmt.Errorf("agent program %q has no executable word", program)
 		}
-		// Not one literal simple command (a pipeline, a dynamic word): af
-		// cannot say which word is the executable, so it does not guess — the
-		// command runs as written under the adopted login PATH.
-		_, loginPATH := p.probePath(ctx)
-		return program, mergeHostPATH(loginPATH, p.processPATH), nil
+		if errors.Is(err, sessionenv.ErrProgramDynamic) && !pathShapedWord(program, exe) {
+			return "", "", fmt.Errorf("agent program %q computes its executable name at run time, so af cannot resolve it on %s: write the executable as a literal name or an absolute path", program, p.host)
+		}
+		// Not one simple command (a pipeline), or a computed path
+		// ($HOME/bin/claude): af cannot say what runs, so it does not guess —
+		// the command runs as written under the adopted login PATH.
+		return program, p.adoptedPATH(ctx), nil
 	}
 	if exe.Opaque || strings.ContainsRune(exe.Name, '/') {
-		// Path-qualified (the operator's explicit choice) or a lookup the
-		// command reshapes in a way a probe cannot reproduce: verbatim on this
-		// filesystem. The login PATH is still adopted.
-		_, loginPATH := p.probePath(ctx)
-		return program, mergeHostPATH(loginPATH, p.processPATH), nil
+		// Path-qualified (the operator's explicit choice, whatever PATH the
+		// command computes — a slash word never consults PATH, #5781) or a
+		// lookup the command reshapes in a way a probe cannot reproduce:
+		// verbatim on this filesystem. The login PATH is still adopted.
+		return program, p.adoptedPATH(ctx), nil
+	}
+	if exe.PATHDynamic {
+		return "", "", fmt.Errorf("agent program %q computes its PATH at run time, so af cannot resolve %q on %s: write the PATH as a literal value or the executable as an absolute path", program, exe.Name, p.host)
 	}
 
-	resolved, loginPATH, _ := p.probe(ctx, exe.Name, exe.PATH)
-	if resolved != "" {
-		return program[:exe.Start] + quoteHostPathIfNeeded(resolved) + program[exe.End:], mergeHostPATH(loginPATH, p.processPATH), nil
+	adopted := p.adoptedPATH(ctx)
+	// The command's own PATH, when it names one, is the whole lookup — the
+	// process PATH must not silently override it (#5726). Otherwise the pane
+	// gets the login PATH merged with the spawning environment's, so that is
+	// what is searched: a docker image sets PATH in its ENV where no profile
+	// can see it.
+	search := adopted
+	if exe.HasPATH {
+		search = exe.PATH
 	}
-	// The login shell is not the only PATH that matters: a docker image sets
-	// PATH in its ENV where no profile can see it, so the process's own PATH
-	// is the last lookup before refusing — but never when the command named
-	// its own PATH, which the process PATH would silently override (#5726).
-	if !exe.HasPATH {
-		if abs, err := p.lookPath(exe.Name); err == nil && p.validExecutable(abs) {
-			return program[:exe.Start] + quoteHostPathIfNeeded(abs) + program[exe.End:], p.processPATH, nil
-		}
+	abs, decided := p.findOnPATH(exe.Name, search)
+	if !decided {
+		// A relative or empty PATH entry comes before any absolute match, and
+		// it means the pane's working directory, which is not known here. The
+		// pane's own shell is the only thing that can answer, so it does.
+		return program, adopted, nil
 	}
-	_, loginPATH = p.probePath(ctx)
+	if abs != "" {
+		return program[:exe.Start] + quoteHostPathIfNeeded(abs) + program[exe.End:], adopted, nil
+	}
 	if exe.HasPATH {
 		return "", "", fmt.Errorf("agent program %q not found on %s in the command's own PATH %q", exe.Name, p.host, exe.PATH)
 	}
-	return "", "", fmt.Errorf("agent program %q not found on %s (login-shell PATH %q)", exe.Name, p.host, loginPATH)
+	return "", "", fmt.Errorf("agent program %q not found on %s (login-shell PATH %q)", exe.Name, p.host, search)
 }
 
-// probe runs the lookup probe with the executable name as $1 and returns the
-// validated answer plus the login PATH.
-func (p hostProgramProber) probe(ctx context.Context, name, localPATH string) (resolved, loginPATH string, err error) {
-	nonce := p.nonce()
-	out, err := p.run(ctx, []string{p.shell, "-l", "-c", hostProbeCommandV, "af-probe", name, nonce, localPATH})
-	if err != nil && len(out) == 0 {
-		return "", "", err
-	}
-	report, path, ok := parseHostProbeOutput(string(out), nonce)
-	if !ok {
-		return "", "", nil
-	}
-	// Exactly one non-empty line, absolute, naming an executable regular file.
-	// Anything else — an alias definition, a function name, profile noise that
-	// slipped inside the fences, two answers — is a failed resolution, never a
-	// guess.
-	var lines []string
-	for _, line := range strings.Split(report, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			lines = append(lines, line)
+// pathShapedWord reports whether a computed executable word still contains a
+// slash. Such a word never goes through a PATH lookup — the shell runs the
+// path it expands to — so there is nothing to resolve.
+func pathShapedWord(program string, exe sessionenv.ProgramExecutable) bool {
+	return exe.End > exe.Start && strings.ContainsRune(program[exe.Start:exe.End], '/')
+}
+
+// adoptedPATH is the login PATH merged with the PATH this process already had.
+func (p hostProgramProber) adoptedPATH(ctx context.Context) string {
+	return mergeHostPATH(p.probePath(ctx), p.processPATH)
+}
+
+// findOnPATH walks path the way the pane's sh does: each entry is joined to the
+// name as plain text — never cleaned, so a symlink or ".." component in an
+// entry is resolved by the kernel against the real tree, not collapsed
+// lexically (#5783) — and the first entry whose file this user can execute
+// wins; one it cannot (wrong mode, foreign owner, a directory) is skipped, not
+// pinned (#5782). decided is false when a relative or empty entry is reached
+// first: that is the pane's working directory, so the caller leaves the lookup
+// to the shell.
+func (p hostProgramProber) findOnPATH(name, path string) (found string, decided bool) {
+	for _, dir := range strings.Split(path, ":") {
+		if !strings.HasPrefix(dir, "/") {
+			return "", false
+		}
+		candidate := strings.TrimRight(dir, "/") + "/" + name
+		if p.canExecute != nil && p.canExecute(candidate) {
+			return candidate, true
 		}
 	}
-	if len(lines) != 1 || !filepath.IsAbs(lines[0]) || !p.validExecutable(lines[0]) {
-		return "", path, nil
-	}
-	return lines[0], path, nil
+	return "", true
 }
 
-// validExecutable reports whether path is a regular file with an execute bit.
-func (p hostProgramProber) validExecutable(path string) bool {
-	if !filepath.IsAbs(path) || p.statFile == nil {
+// canExecuteFile reports whether the calling user may run path: a regular file
+// (symlinks followed) that the kernel grants execute permission to for the
+// effective uid and gid, which is the question execve answers.
+func canExecuteFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
-	info, err := p.statFile(path)
-	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+	return unix.Faccessat(unix.AT_FDCWD, path, unix.X_OK, unix.AT_EACCESS) == nil
 }
 
-// probePath fetches only the login PATH (no executable lookup).
-func (p hostProgramProber) probePath(ctx context.Context) (string, string) {
+// probePath fetches the login shell's PATH. Output before the nonce fence (a
+// login profile's) is discarded; a probe that fails or never prints the fence
+// yields "".
+func (p hostProgramProber) probePath(ctx context.Context) string {
 	nonce := p.nonce()
 	out, _ := p.run(ctx, []string{p.shell, "-l", "-c", hostProbePathOnly, "af-probe", nonce})
-	_, path, _ := parseHostProbeOutput(string(out), nonce)
-	return "", path
+	return parseHostProbeOutput(string(out), nonce)
 }
 
-// parseHostProbeOutput cuts the probe output at its nonce fences: the report
-// is what sits between the first two fence lines, the login PATH is the line
-// after the second. Output before the first fence (a login profile's) is
-// discarded; ok is false when the fences are not both present.
-func parseHostProbeOutput(out, nonce string) (report, loginPATH string, ok bool) {
+// parseHostProbeOutput returns the line after the first nonce fence.
+func parseHostProbeOutput(out, nonce string) string {
 	lines := strings.Split(out, "\n")
-	first, second := -1, -1
 	for i, line := range lines {
-		if strings.TrimSpace(line) != nonce {
-			continue
-		}
-		if first < 0 {
-			first = i
-		} else {
-			second = i
-			break
+		if strings.TrimSpace(line) == nonce && i+1 < len(lines) {
+			return strings.TrimSpace(lines[i+1])
 		}
 	}
-	if first < 0 {
-		return "", "", false
-	}
-	if second < 0 {
-		// PATH-only probe: a single fence, the PATH follows it.
-		if first+1 < len(lines) {
-			return "", strings.TrimSpace(lines[first+1]), true
-		}
-		return "", "", true
-	}
-	if second+1 < len(lines) {
-		loginPATH = strings.TrimSpace(lines[second+1])
-	}
-	return strings.Join(lines[first+1:second], "\n"), loginPATH, true
+	return ""
 }
 
 // randomProbeNonce returns an unguessable fence for one probe.
@@ -289,8 +279,11 @@ func mergeHostPATH(login, inherited string) string {
 	seen := map[string]bool{}
 	var merged []string
 	for _, list := range []string{login, inherited} {
+		if list == "" {
+			continue
+		}
 		for _, dir := range strings.Split(list, ":") {
-			if dir == "" || seen[dir] {
+			if seen[dir] {
 				continue
 			}
 			seen[dir] = true
@@ -298,6 +291,34 @@ func mergeHostPATH(login, inherited string) string {
 		}
 	}
 	return strings.Join(merged, ":")
+}
+
+// PinPATHDir returns path with dir as its first entry, removing any later
+// copy. Login-PATH adoption rebuilds PATH from the login profile, which would
+// otherwise put an older `af` installed on that PATH ahead of the session
+// directory holding the staged, version-checked one (#5877). An empty dir
+// leaves path alone.
+func PinPATHDir(path, dir string) string {
+	if dir == "" {
+		return path
+	}
+	parts := []string{dir}
+	for _, entry := range strings.Split(path, ":") {
+		if entry != dir {
+			parts = append(parts, entry)
+		}
+	}
+	return strings.Join(parts, ":")
+}
+
+// SessionBinDir is the directory the agent-server was launched from when it
+// was started as <sessionDir>/af — the one place the provisioner puts the
+// staged binary — or "" for any other argv[0] (a bare name, another binary).
+func SessionBinDir(argv0 string) string {
+	if !filepath.IsAbs(argv0) || filepath.Base(argv0) != "af" {
+		return ""
+	}
+	return filepath.Dir(argv0)
 }
 
 // loginShellName picks the shell the probes run under: $SHELL when the

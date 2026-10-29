@@ -90,6 +90,9 @@ type ResolvedConfig struct {
 // the historical global `af config get/list` contract while still returning
 // presence-aware provenance for --explain.
 func ResolveGlobalConfig() (*ResolvedConfig, error) {
+	if policy := activeAgentPolicy(); policy != nil {
+		return &ResolvedConfig{Config: *policy.globalConfig()}, nil
+	}
 	global, err := LoadConfig()
 	if err != nil {
 		return nil, err
@@ -416,6 +419,9 @@ func resolveConfigRootsWithOptions(
 	observation inRepoLoadObservation,
 	opts resolveOptions,
 ) (*ResolvedConfig, error) {
+	if policy := activeAgentPolicy(); policy != nil {
+		return policy.resolvedRepo(identityRoot), nil
+	}
 	if observation != suppressInRepoLoadObservation && observation != recordInRepoLoadObservation {
 		return nil, fmt.Errorf("invalid in-repo load observation mode %d", observation)
 	}

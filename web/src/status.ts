@@ -485,10 +485,10 @@ export function compareSessionsForRail(a: SessionData, b: SessionData): number {
 }
 
 /** The backend types whose workspace lives off-box (session/archive_sandbox.go
- *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
- *  them can service tab management: every Add*Tab path needs a daemon-side git
- *  worktree they do not have, so the daemon's Capabilities().TabManagement is
- *  false for all three (#1874).
+ *  backendKindForType: docker, ssh, "sandbox", and "remote" — the hook runtime).
+ *  None of them can service tab management: every Add*Tab path needs a
+ *  daemon-side git worktree they do not have, so the daemon's
+ *  Capabilities().TabManagement is false for all four (#1874).
  *
  *  This list is the ONE place the web names backend types. It exists only because
  *  the session envelope carries `backend_type` but not the daemon's capability
@@ -620,4 +620,28 @@ function formatLimitReset(reset: Date, now: Date): string {
   }
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
+/** One word for a narrow rail row: the host's name, else the runtime type; empty
+ *  for a local session or a daemon that projects no placement. Mirrors Go
+ *  PlacementData.Short. */
+export function placementShort(s: SessionData): string {
+  const p = s.placement;
+  if (!p || p.kind !== "remote") return "";
+  return p.host || p.backend || "";
+}
+
+/** The full one-line place for a detail view. Mirrors Go PlacementData.Detail. */
+export function placementDetail(s: SessionData): string {
+  const p = s.placement;
+  if (!p) return "";
+  const parts: string[] = [];
+  if (p.kind === "remote") {
+    parts.push(placementShort(s));
+    if (p.host && p.backend) parts.push(p.backend);
+  } else {
+    parts.push("local");
+  }
+  if (p.location) parts.push(p.location);
+  return parts.filter(Boolean).join(" · ");
 }

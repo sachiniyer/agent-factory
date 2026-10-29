@@ -372,6 +372,16 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// to diagnose the session shape, and unlike ordinary snapshots instances.json
 	// carries it specifically so teardown can resume after restart.
 	d.RuntimeCleanup = nil
+	// ArchivedWorkspace names the host alias, the session directory on that host
+	// and the branch of a preserved off-box workspace (#5571 W8.5). Whether the
+	// archive published is diagnosable from the archive report; the locators are not.
+	d.ArchivedWorkspace = nil
+	// Placement (#5571 W6.4) is a derived projection of fields this redactor
+	// already handles: Host is the redacted host pick, Location a workspace or
+	// worktree path, and Kind/Backend restate BackendType. Dropping it, rather than
+	// redacting it field by field, keeps a second copy of those locators out of the
+	// bundle.
+	d.Placement = nil
 	if d.Title != "" {
 		d.Title = redactedMarker
 	}
@@ -734,7 +744,6 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 	r.noteTitle(t.TargetSession)
 	rt := redactedTask{
 		ID:            t.ID,
-		Name:          t.Name,
 		CronExpr:      t.CronExpr,
 		ProjectPath:   r.collapsePathField(t.ProjectPath),
 		Program:       redactProgram(t.Program),
@@ -744,6 +753,11 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 	}
 	if t.TargetSession != "" {
 		rt.TargetSession = redactedMarker
+	}
+	if t.Name != "" {
+		// The name is free text the user typed (a client, codename or person),
+		// like a tab name, so it is dropped rather than shipped (#4318).
+		rt.Name = redactedMarker
 	}
 	if strings.TrimSpace(t.Prompt) != "" {
 		rt.HasPrompt = true

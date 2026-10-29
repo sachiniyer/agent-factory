@@ -75,7 +75,8 @@ type InstanceData struct {
 	CanKill bool `json:"can_kill,omitempty"`
 	// CanHandoff is the projection-only agent-swap capability shared by the TUI and
 	// web (#2013): true when this session's agent can be handed off in place — a
-	// local-worktree backend (Capabilities().Handoff) in a runtime state that admits
+	// local-worktree backend, or an ssh/sandbox one whose agent-server advertises
+	// agent-swap (Capabilities().Handoff), in a runtime state that admits
 	// the swap (ValidateRuntimeAction(RuntimeActionHandoff)). It is derived live by
 	// ToInstanceData from the SAME two predicates the TUI's handoff gate reads
 	// (app/handle_handoff.go), so a browser — which cannot run those Go predicates —
@@ -306,6 +307,15 @@ type InstanceData struct {
 	Account string `json:"account,omitempty"`
 	// Host is the listed host the session was placed on (#5571 W6.3); additive.
 	Host string `json:"host,omitempty"`
+	// BranchUnpushed is true only for a branch af named at create and has not
+	// seen pushed (#5972). It marks the exception rather than the proof so every
+	// row an older af wrote — where a recorded branch could only have come from
+	// a push — stays restorable: absent means "pushed", as it always did.
+	BranchUnpushed bool `json:"branch_unpushed,omitempty"`
+	// ArchivedWorkspace says where an archived off-box session's work lives
+	// (#5571 W8.5): the preserved directory on its host, or the pushed branch.
+	// Absent on every row archived before the field, and on live rows.
+	ArchivedWorkspace *ArchivedWorkspaceData `json:"archived_workspace,omitempty"`
 	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
 	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
 	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
@@ -340,6 +350,10 @@ type InstanceData struct {
 	// respawns from them. Additive + omitempty on the TabData.ID rollforward
 	// precedent: records written before this field simply have none.
 	PendingTabCleanup []TabCleanupData `json:"pending_tab_cleanup,omitempty"`
+	// PendingRemoteTabClose is PendingTabCleanup for off-box tabs: closes the
+	// sandbox never confirmed (#5571, #5957). The roster row is gone, so this
+	// record is the only handle on a command that may still be running there.
+	PendingRemoteTabClose []RemoteTabCleanupData `json:"pending_remote_tab_close,omitempty"`
 	// RebuildTeardownPending records that a recovery rebuilt this worktree at a
 	// new identity while sessions bound to it still answered has-session, and
 	// the teardown of those stale panes is unconfirmed. The next attempt cannot
@@ -416,6 +430,17 @@ type InstanceData struct {
 	// nil therefore means only "not projected", and ForStorage sets it back to nil
 	// so a derived verdict still never reaches instances.json.
 	TabRosterMutable *bool `json:"tab_roster_mutable,omitempty"`
+	// Placement is where the session runs (#5571 W6.4): derived on every snapshot
+	// so each surface can show host, local-versus-off-box and workspace location.
+	// ForStorage sets it back to nil, so a derived fact never reaches
+	// instances.json.
+	Placement *PlacementData `json:"placement,omitempty"`
+	// TabManagement is Capabilities.TabManagement projected (#5953): whether this
+	// session may gain shell and process tabs. For an off-box row the daemon lifts
+	// it from the agent-server's advertisement, which a client's snapshot row
+	// cannot read, so without the projection the TUI refuses new remote tabs.
+	// A pointer so that false survives the wire; ForStorage clears it.
+	TabManagement *bool `json:"tab_management,omitempty"`
 	// RuntimeCleanupStateUnknown is the independent retention marker for a sandbox
 	// teardown whose completion could not be determined. The next restore must
 	// retry RuntimeCleanup before it can safely provision a replacement. It is not
@@ -577,102 +602,6 @@ func archiveWarningOperation(liveness Liveness) string {
 	default:
 		return "restore"
 	}
-}
-
-// TabData is the serializable form of a session.Tab. The full list is persisted
-// (and restored by exact TmuxName) so every tab — agent and shell alike —
-// reconnects to its tmux session across an af/daemon restart (#930). The field
-// is omitempty + additive, mirroring the BranchCreatedByUs back-compat
-// precedent: instances.json written before #930 PR 2 simply has no Tabs, and
-// FromInstanceData synthesizes [agent, shell] from the legacy TmuxName/Program.
-// TabKindAllowance is the projected verdict for one creatable tab kind.
-type TabKindAllowance struct {
-	// Kind is the `--kind` spelling, the same vocabulary the CLI validates against
-	// (session.TabKindNameList), so a client switches on the name the user types.
-	Kind string `json:"kind"`
-	// Allowed is RefuseTabKind returning nil for this kind on this session.
-	Allowed bool `json:"allowed"`
-	// Reason is the daemon's refusal text, empty when allowed. Rendered verbatim by
-	// clients; it names the requirement that is actually unmet (#3053).
-	Reason string `json:"reason,omitempty"`
-}
-
-type TabData struct {
-	// ID is the tab's stable identity (#1738), minted at creation and never
-	// reused. It is the collision-proof key the PTY stream (?tab_id=) and the web
-	// DnD/pane bindings address the tab by, so a reorder/close can't misroute.
-	// omitempty + additive, mirroring the InstanceData.ID / BranchCreatedByUs
-	// rollforward precedent: a record written before #1738 has no id, and
-	// restoreLocalTabs backfills a fresh one on load.
-	ID   string `json:"id,omitempty"`
-	Name string `json:"name"`
-	// The wire names it as `kind_name`, the word `tab_kinds[].kind` uses too.
-	Kind     TabKind `json:"kind"`
-	Command  string  `json:"command,omitempty"`
-	TmuxName string  `json:"tmux_name,omitempty"`
-	// URL is the target of a TabKindWeb tab (the iframe/proxy address); empty for
-	// every other kind. Surfaced in the snapshot so the web UI can iframe it and
-	// so `af sessions get` shows the target.
-	URL string `json:"url,omitempty"`
-	// Proposal is the slug a docs tab edits; empty for every other kind.
-	Proposal string `json:"proposal,omitempty"`
-	// PushMode is a docs tab's push mode, "auto" or "manual"; empty means auto.
-	PushMode string `json:"push_mode,omitempty"`
-	// WebProxied is derived at JSON encoding with IsLoopbackWebTarget, the
-	// daemon proxy's predicate. A pointer preserves explicit false for web tabs;
-	// non-web tabs omit it. Stored/input values never override the derivation.
-	WebProxied *bool `json:"web_proxied,omitempty"`
-	// Conversation is the provider-specific conversation id for this tab, when
-	// the underlying agent exposes a durable resume id. Omitted for legacy rows
-	// and providers where af can only resume "latest".
-	Conversation *AgentConversationData `json:"conversation,omitempty"`
-	// Handoffs is the tab's append-only agent-swap ledger (#2013), oldest first.
-	// omitempty + additive on the same rollforward precedent as ID and
-	// Conversation: a record written before #2013 has none, which is
-	// indistinguishable from a session that was never handed off — and those two
-	// deserve the same treatment, so nothing has to be backfilled.
-	Handoffs []AgentHandoff `json:"handoffs,omitempty"`
-	// Exit records how a process tab's command ended (#4479): the pane was seen
-	// dead, not merely missing, or af stopped it and says why. nil for tabs af
-	// never saw finish — the load path maps that to "still in flight", never to
-	// "re-run me".
-	Exit *TabExitData `json:"exit,omitempty"`
-	// AccountScope is the account af launched this tab's pane under (#4506
-	// review). A sibling whose recorded scope is not the session's account is
-	// stopped once at load, because its pane may run on another identity. Empty
-	// for a pane launched on the ambient identity, and for rows written before
-	// this field existed.
-	AccountScope string `json:"account_scope,omitempty"`
-}
-
-// TabExitData is the wire form of Tab.Exit: only the fields a reader needs to
-// render or reason about a finished command.
-type TabExitData struct {
-	Status      int  `json:"status,omitempty"`
-	StatusKnown bool `json:"status_known,omitempty"`
-	// At is omitted, not zero-valued, when tmux reported no death time:
-	// omitempty never omits a struct, and "0001-01-01T00:00:00Z" would present
-	// an invented completion time to every reader (#4506 review).
-	At time.Time `json:"at,omitzero"`
-	// StoppedBy is set when af stopped the command rather than it exiting:
-	// "account-scope" or "account-swap" (#4506 review).
-	StoppedBy string `json:"stopped_by,omitempty"`
-}
-
-// TabCleanupData is one durable cleanup handle for a closed tab whose tmux
-// teardown was never confirmed. It deliberately carries only what a retry needs
-// — no Kind, Command, or URL — so it cannot be mistaken for, or restored as, a
-// TabData: a tombstone that could round-trip into a tab would resurrect exactly
-// the closed tab #2669 exists to keep buried.
-type TabCleanupData struct {
-	// TabID is the closed tab's stable id (#1738). Ids are never reused, so it
-	// names the exact close this handle belongs to and keeps the retry's logs and
-	// deduplication honest across restarts.
-	TabID string `json:"tab_id,omitempty"`
-	// TmuxName is the cleanup handle proper: the EXACT tmux session name the retry
-	// must kill, and the token a later spawn must not re-derive. An entry with no
-	// name would be untargetable, so CloseTab never records one.
-	TmuxName string `json:"tmux_name"`
 }
 
 // Storage handles saving and loading instances using the state interface.

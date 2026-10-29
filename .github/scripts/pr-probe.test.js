@@ -74,6 +74,7 @@ test("a normal PR reports exactly the check names it reported before probe mode"
       "Web",
       "Web and performance scope",
       "Web selftest",
+      "TUI driver selftest",
       "Performance and visual baselines",
       "Test (macOS)",
       "Build",
@@ -158,7 +159,7 @@ test("a probe has its own concurrency group", () => {
   // Every other event keeps the pr-… group it always had.
   assert.match(
     PR_YML,
-    /^concurrency:\n(?: {2}#.*\n)* {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n {2}cancel-in-progress: true$/m,
+    /^concurrency:\n(?: {2}#.*\n)* {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n {2}cancel-in-progress: \$\{\{ github\.ref != 'refs\/heads\/master' \}\}$/m,
   );
 });
 

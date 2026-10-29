@@ -29,6 +29,7 @@ import {
   deleteProject,
   registerProject,
   rebindProject,
+  setProjectColor,
   type RegisteredProject,
   errorText,
   explainConfig,
@@ -48,6 +49,7 @@ import {
   listTasks,
   setConfigValue,
   listAccounts,
+  quotaReport,
   registerAccount as registerAccountRPC,
   startAccountLogin,
   loadToken,
@@ -72,9 +74,11 @@ import {
   terminalFontSizesFromConfig,
 } from "./terminal-font.js";
 import { emptyAccountsState } from "./accounts.js";
+import { emptyQuotaState } from "./quota.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
+import type { HostOption } from "./backends.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import {
   addProjectModal,
@@ -102,6 +106,7 @@ import {
   tabToKeepOnClose,
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
+import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
@@ -141,6 +146,7 @@ import {
   type KillableSession,
   type NewTabKind,
 } from "./ui.js";
+import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
 import type { AccountsResponse, SessionData, SkippedRepo, TaskData, WireEvent } from "./types.js";
 
@@ -162,6 +168,7 @@ const store = new Store<AppState>({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -224,6 +231,12 @@ const connectionGate = createLatestRequestGate();
  *  Tokenless ("") is a valid credential (#1696), so a null token — not a falsy one —
  *  is the "not authorized yet" case. Rejecting there is safe: every caller degrades
  *  to the repo default rather than blocking its form. */
+/** The listed hosts for a project (ListBackends.hosts, #5571 W6.3). */
+const loadHosts = (repoPath: string): Promise<HostOption[]> =>
+  token === null
+    ? Promise.reject(new Error("not authorized"))
+    : listBackends(repoPath, token).then((catalog) => catalog.hosts ?? []);
+
 const loadPrograms = (repoPath: string): Promise<ProgramCatalog> =>
   token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 /** The create form's account registry (#3844). The registry itself is not
@@ -584,6 +597,13 @@ function tabIdsOf(list: SessionData[], id: string | null): string[] {
   return s ? sessionTabs(s).map(tabIdentity) : [];
 }
 
+/** Each tab's legacy kind:name, parallel to tabIdsOf — pairs a backfilled real id
+ *  with the id-less tab it replaced (layout.remapByIdentity, #6001). */
+function tabSynthOf(list: SessionData[], id: string | null): string[] {
+  const s = id ? list.find((x) => x.id === id) : null;
+  return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
+}
+
 // Resolve only against an authenticated snapshot, never a partially loaded rail.
 let resolvingRoute = false;
 let routeSelection: string | null = null;
@@ -628,7 +648,7 @@ function moveSelection(id: string): void {
     focus: "rail",
     // Clamped like syncSplit's initialTab, so the store's claim and the pane's binding
     // are the same statement even if the roster shrank since the tree was retained.
-    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id))),
+    activeTab: clampActiveTab(store.get().sessions, id, splitView.settledTab(id, tabIdsOf(store.get().sessions, id), tabSynthOf(store.get().sessions, id))),
   });
 }
 
@@ -712,6 +732,9 @@ function switchView(view: View): void {
     // section shows them as they are NOW, including an account registered from
     // the CLI or logged in from the TUI since this tab was opened.
     refreshAccounts();
+    // And the usage report (#2983): a session parked at a limit since this tab
+    // was opened is exactly the signal the section exists to show.
+    refreshQuota();
   }
 }
 
@@ -765,7 +788,7 @@ function switchProject(root: string): void {
     selectedId: keep,
     focus: "rail",
     activeTab: keep
-      ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep)))
+      ? clampActiveTab(store.get().sessions, keep, splitView.settledTab(keep, tabIdsOf(store.get().sessions, keep), tabSynthOf(store.get().sessions, keep)))
       : 0,
   });
 }
@@ -1198,19 +1221,52 @@ function openDeleteProject(root: string, label: string): void {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root, tok)
-          .then(() => { if (modal === m) closeModal(); })
-          .catch((e) => {
-            if (isMutationCommittedError(e)) {
-              if (modal === m) closeModal();
-              requestResync();
-              refreshRegisteredProjects();
-              surfaceTabError(e);
-              return;
+        const connection = connectionGeneration;
+        void projectColorWriter.cancel(root).then(async () => {
+          if (!isCurrentConnection(connection, tok)) return;
+          // A registration whose outcome never reached us can still commit
+          // daemon-side: a delete sent now would run first as a no-op and the
+          // registration would land after it. Re-drive the idempotent call so
+          // the registration is determinate before the delete.
+          const learned = projectColorRegistrations.get(root);
+          if (learned && "uncertain" in learned) {
+            try {
+              await registerProject(root, tok);
+            } catch (e) {
+              if (!isMutationCommittedError(e) && isMutationOutcomeUncertain(e)) {
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(new Error(`The project registration outcome could not be confirmed. ${errorText(e)}`));
+                return;
+              }
+              // Committed or determinately refused: either way the record's
+              // fate is settled, so the delete is safe to send.
             }
-            m.setBusy(false);
-            m.setError(errorText(e));
-          });
+            projectColorRegistrations.delete(root);
+          }
+          // The registration recovery await may outlive the credential it ran
+          // under: re-fence so a disconnect or re-login cannot let the delete
+          // land with the old token.
+          if (!isCurrentConnection(connection, tok)) return;
+          return deleteProject(root, tok)
+            .then(() => {
+              projectColorRegistrations.delete(root);
+              if (modal === m) closeModal();
+            })
+            .catch((e) => {
+              if (isMutationCommittedError(e)) {
+                projectColorRegistrations.delete(root);
+                if (modal === m) closeModal();
+                requestResync();
+                refreshRegisteredProjects();
+                surfaceTabError(e);
+                return;
+              }
+              m.setBusy(false);
+              m.setError(errorText(e));
+            });
+        });
       },
       onCancel: closeModal,
     }),
@@ -2121,6 +2177,30 @@ function refreshAccounts(): void {
   accountsRefetcher.refresh();
 }
 
+/** The usage/quota read (#2983), fenced like the accounts read and for the same
+ *  reason: entering the view fetches, and an older response must not land after
+ *  a newer one and redisplay a parked session that has since resumed.
+ *
+ *  A failure becomes the SECTION's own message rather than a tab error, matching
+ *  accounts: an empty section would read as "no usage to report", which is the
+ *  fabricated-answer shape this report exists to refuse. */
+const quotaRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true },
+    });
+  },
+  onError: (err: unknown) => {
+    store.set({ quota: { ...store.get().quota, error: errorText(err) } });
+  },
+});
+
+function refreshQuota(): void {
+  quotaRefetcher.refresh();
+}
+
 /** Records the outcome of an account action on the row that produced it. */
 function setAccountStatus(agent: string, name: string, message: string, error: boolean): void {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
@@ -2410,6 +2490,22 @@ const projectsRefetcher = createFencedRefetcher({
 
 /** Commits a fenced registry read, reconciling the selected project against it. */
 function commitRegisteredProjects(projects: RegisteredProject[]): void {
+  // The authoritative list settles what a learned registration became: a settled
+  // id the registry no longer holds was deleted or rebound away, so a later write
+  // must re-register instead of failing on the stale id; an uncertain outcome the
+  // registry now names is determinate and takes the recorded id.
+  const byRoot = new Map(projects.map((p) => [p.root, p.id]));
+  for (const [root, learned] of projectColorRegistrations) {
+    if ("uncertain" in learned) {
+      const id = byRoot.get(root);
+      if (id !== undefined) projectColorRegistrations.set(root, { id });
+    } else if (byRoot.get(root) !== learned.id) {
+      // The registry must still map THIS root to the learned id: an id that
+      // survives only under another root means this one was rebound away, and
+      // the stale mapping would write the next color onto the rebound project.
+      projectColorRegistrations.delete(root);
+    }
+  }
   const selectedProject = reconcileProject(
     store.get().sessions,
     store.get().tasks,
@@ -2422,6 +2518,53 @@ function commitRegisteredProjects(projects: RegisteredProject[]): void {
 
 function refreshRegisteredProjects(): void {
   projectsRefetcher.refresh();
+}
+
+/** What the writer learned about a root's durable registration. A settled id
+ *  feeds later queued writes — a choice captured before the first write
+ *  registered the project must not call registerProject again, or a rebind in
+ *  between would register the old root as a second project. An uncertain one
+ *  gates a following delete until registerProject makes it determinate. */
+const projectColorRegistrations = new Map<string, { id: string } | { uncertain: true }>();
+
+/** Sets a project's color. A project known only from its sessions has no registry
+ *  record to hold a color, so it is registered first (idempotent on the daemon).
+ *  Each choice is fenced to the connection and credential it was made under, and
+ *  keeps the project id it was made for, so a rebind cannot turn it into a new
+ *  registration of the old root. Deleting the project cancels it (openDeleteProject). */
+const projectColorWriter = createLatestWriter<{ color: string; tok: string; connection: number; projectId: string | null }>(
+  async (root, { color, tok, connection, projectId: known }) => {
+    const current = (): boolean => isCurrentConnection(connection, tok);
+    if (!current()) return;
+    const learned = projectColorRegistrations.get(root);
+    const projectId = known ?? (learned && "id" in learned ? learned.id : null) ?? await (async () => {
+      try {
+        const project = await registerProject(root, tok);
+        projectColorRegistrations.set(root, { id: project.id });
+        return project.id;
+      } catch (e) {
+        if (isMutationOutcomeUncertain(e)) projectColorRegistrations.set(root, { uncertain: true });
+        throw e;
+      }
+    })();
+    if (!current()) return;
+    await setProjectColor(projectId, color, tok);
+    if (current()) refreshRegisteredProjects();
+  },
+  (e: unknown, _root, { tok, connection }) => {
+    if (isCurrentConnection(connection, tok)) surfaceMutationError(e);
+  },
+);
+
+function isCurrentConnection(connection: number, tok: string): boolean {
+  return connection === connectionGeneration && token === tok;
+}
+
+function doSetProjectColor(root: string, color: string): void {
+  const tok = token;
+  if (tok === null) return;
+  const projectId = store.get().registeredProjects.find((r) => r.root === root)?.id ?? null;
+  void projectColorWriter.set(root, { color, tok, connection: connectionGeneration, projectId });
 }
 
 /** Debounced registry refetch for a burst of projects.changed events, mirroring
@@ -2450,6 +2593,7 @@ function openAddTask(): void {
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -2498,6 +2642,7 @@ function openEditTask(task: TaskData): void {
     editTaskModal(projects, task, {
       loadPrograms,
       loadOnComplete: () => listOnComplete(token ?? ""),
+      loadHosts,
       onSubmit: (input: AddTaskInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -2507,6 +2652,9 @@ function openEditTask(task: TaskData): void {
         const m = modal;
         m.setBusy(true);
         const value = buildTask(input);
+        // `host` is patched only when CHANGED (undefined drops out of the JSON): an
+        // unrelated edit must not re-validate, and fail on, a host removed from the
+        // list since the task was written.
         void updateTask(
           task,
           {
@@ -2516,6 +2664,8 @@ function openEditTask(task: TaskData): void {
             watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
             target_session: input.targetSession,
             on_complete: value.on_complete ?? "",
+            max_concurrent_runs: value.max_concurrent_runs ?? 0,
+            host: (input.host ?? "") !== (task.host ?? "") ? input.host ?? "" : undefined,
             project_path: input.projectPath,
             program: input.program,
           },
@@ -2572,7 +2722,14 @@ function doTriggerTask(task: TaskData): void {
   }
   void triggerTask(task, tok)
     .then(refreshTasks)
-    .catch((e) => surfaceTabError(e));
+    .catch((e) => {
+      // A committed run (auto-created session, start unconfirmed) still moved
+      // last-run: refetch, and show the warning rather than a plain success.
+      if (isMutationCommittedError(e)) {
+        refreshTasks();
+      }
+      surfaceTabError(e);
+    });
 }
 
 /**
@@ -2832,6 +2989,7 @@ const actions = {
   deleteProject: openDeleteProject,
   addProject: openAddProject,
   rebindProject: openRebindProject,
+  setProjectColor: doSetProjectColor,
   setTheme,
 };
 
@@ -2943,6 +3101,7 @@ function stopStream(): void {
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
   accountsRefetcher.invalidate();
+  quotaRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
@@ -3035,7 +3194,7 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
   // until syncSplit remaps the layout, that ordinal names a neighbour. A changed
   // selection uses the same retained-layout rule (#1855, as moveSelection).
   const settled = selectedId
-    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId))
+    ? splitView.settledTab(selectedId, tabIdsOf(sessions, selectedId), tabSynthOf(sessions, selectedId))
     : 0;
   const activeTab = clampActiveTab(sessions, selectedId, settled);
   // Stamp the daemon's startup-skipped repo set onto the store when the snapshot

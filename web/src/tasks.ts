@@ -28,6 +28,7 @@ import { asForm, field, modalChrome, type ModalHandle, projectLabel } from "./mo
 import { icon, type IconName } from "./icon.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron, previewIsRedundant } from "./schedule.js";
+import type { HostOption } from "./backends.js";
 import type { OnCompleteOption, TaskData } from "./types.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 
@@ -42,6 +43,11 @@ export interface AddTaskInput {
   prompt: string;
   targetSession: string;
   onComplete?: string;
+  /** The watch-task concurrency cap, already parsed to the stored int: 0 for
+   *  unlimited, and 0 when the submitted shape cannot carry one (#4180). */
+  maxConcurrentRuns?: number;
+  /** A listed host name, or "" for the repo's backend (#5571 W6.3). */
+  host?: string;
   program: string;
 }
 
@@ -76,7 +82,10 @@ function genTaskId(): string {
   return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
 
-/** Builds a task.Task from the add-form input: a fresh id + created_at, exactly one
+/** (An unpicked host is "" — Go's omitempty zero — which the daemon stores as no
+ *  host at all.)
+ *
+ *  Builds a task.Task from the add-form input: a fresh id + created_at, exactly one
  *  trigger set per `trigger`, and enabled=true (a new task is armed). The daemon
  *  re-validates the trigger/prompt/program contract (task.AddTask). */
 export function buildTask(input: AddTaskInput): TaskData {
@@ -88,6 +97,11 @@ export function buildTask(input: AddTaskInput): TaskData {
     watch_cmd: input.trigger === "watch" ? input.watchCmd : "",
     target_session: input.targetSession,
     on_complete: input.targetSession.trim() ? "" : input.onComplete ?? "",
+    max_concurrent_runs:
+      // Same shape gate as on_complete above: a cap the task cannot carry is
+      // stored as 0 (unlimited), never a value ValidateTrigger refuses (#4180).
+      capUnavailableReason(input.trigger, input.targetSession) === null ? input.maxConcurrentRuns ?? 0 : 0,
+    host: (input.host ?? "").trim(),
     project_path: input.projectPath,
     program: input.program,
     enabled: true,
@@ -98,6 +112,47 @@ export function buildTask(input: AddTaskInput): TaskData {
 /** Targeted tasks reuse a session, so a spawned-session policy cannot apply. */
 export function onCompleteUnavailableReason(targetSession: string): string | null {
   return targetSession.trim() ? "Target session will be reused." : null;
+}
+
+/** THE one predicate for "can this task shape carry a concurrency cap" on the
+ *  web (#4180) — the browser twin of task.CapUnavailableReason, pinned to it by
+ *  the shared vectors in task/testdata/cap_vectors.json (the same
+ *  shared-source-of-truth contract as the schedule module). The cap bounds the
+ *  sessions a watch task spawns per event: cron fires already coalesce, and
+ *  deliveries into a named session already serialize, so those shapes show the
+ *  reason in place of the input rather than offering a value ValidateTrigger
+ *  would refuse. Reason order is part of the contract: a shape failing both
+ *  rules reports the trigger. */
+export function capUnavailableReason(trigger: "cron" | "watch", targetSession: string): string | null {
+  if (trigger !== "watch") {
+    return "Cron fires already coalesce.";
+  }
+  if (targetSession.trim() !== "") {
+    return "Deliveries into one session already serialize.";
+  }
+  return null;
+}
+
+/** The browser twin of task.ParseCapInput: empty means 0 (unlimited — the
+ *  stored default), and anything else must be a non-negative integer within the
+ *  ceiling both surfaces share (task.MaxCapValue = Number.MAX_SAFE_INTEGER —
+ *  above it the two sides could not represent the same digits identically).
+ *  Pinned by task/testdata/cap_vectors.json. Returns null for a refusal. */
+export function parseCapInput(raw: string): number | null {
+  const v = raw.trim();
+  if (v === "") {
+    return 0;
+  }
+  if (!/^[+-]?\d+$/.test(v)) {
+    return null;
+  }
+  const n = Number(v);
+  if (n < 0 || !Number.isSafeInteger(n)) {
+    return null;
+  }
+  // Go's strconv.Atoi("-0") is +0 while Number("-0") is -0 — same digits, two
+  // zeroes, and the vectors say the shared answer is the positive one.
+  return n === 0 ? 0 : n;
 }
 
 /** The task's trigger as a one-line summary, mirroring the TUI's row detail
@@ -874,6 +929,9 @@ function taskFormModal(opts: {
    *  project change: the program a repo defaults to is a per-repo fact. */
   loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
   loadOnComplete: () => Promise<OnCompleteOption[]>;
+  /** Fetches the listed hosts for a project (ListBackends.hosts). Re-run on every
+   *  project change: availability is a per-repo fact (#5571 W6.3). */
+  loadHosts: (repoPath: string) => Promise<HostOption[]>;
   onSubmit: (input: AddTaskInput) => void;
   onCancel: () => void;
 }): ModalHandle {
@@ -966,6 +1024,24 @@ function taskFormModal(opts: {
     onCompleteReason.textContent = reason ?? "";
   };
   targetInput.addEventListener("input", syncOnComplete);
+
+  // The watch-task concurrency cap (#4180): a plain text input like the target
+  // field, shown only while the shape can carry one (capUnavailableReason, the
+  // pinned twin of task.CapUnavailableReason). The reason row takes its place
+  // otherwise — the same inapplicable-row pattern as On done.
+  const capInput = h("input", { type: "text", inputMode: "numeric", class: "af-input", placeholder: "0 · unlimited", autocomplete: "off" });
+  capInput.setAttribute("aria-label", "Max concurrent runs");
+  const capField = field("Max concurrent runs", capInput);
+  const capReason = h("p", { class: "af-muted" });
+  const capReasonField = fieldGroup("Max concurrent runs", capReason);
+  const syncCap = (): void => {
+    const reason = capUnavailableReason(triggerSelect.value === "watch" ? "watch" : "cron", targetInput.value);
+    capField.hidden = reason !== null;
+    capReasonField.hidden = reason === null;
+    capReason.textContent = reason ?? "";
+  };
+  targetInput.addEventListener("input", syncCap);
+  triggerSelect.addEventListener("change", syncCap);
   let onCompleteOptions: OnCompleteOption[] = [];
   const renderOnCompleteHint = (): void => {
     onCompleteHint.textContent = onCompleteOptions.find(option => option.value === onCompleteSelect.value)?.hint ?? "";
@@ -988,6 +1064,64 @@ function taskFormModal(opts: {
   }).catch(() => {
     onCompleteHint.textContent = "Choices unavailable · current value kept.";
   });
+
+  // The host field (#5571 W6.3): the listed hosts the daemon reports for this
+  // project, never a list here. "Repo backend" (empty) is the default and sends no
+  // host; an unusable host is shown with the daemon's reason and cannot be chosen.
+  // A seeded host the catalog no longer lists is carried through as a choice so an
+  // unrelated edit never silently clears it.
+  const hostSelect = h("select", { class: "af-input" });
+  hostSelect.setAttribute("aria-label", "Host");
+  const hostHint = h("span", { class: "af-modal-hint", id: "af-task-host-hint" });
+  hostSelect.setAttribute("aria-describedby", hostHint.id);
+  const keepHost = opts.seed?.host ?? "";
+  let hostOptions: HostOption[] = [];
+  // The seed only decides the selection until the user touches the field: after
+  // that the current value wins even when it is "" (Repo backend), so clearing a
+  // task's host is not undone by the next render (#5967).
+  let hostTouched = false;
+  const renderHosts = (): void => {
+    const previous = hostSelection(hostTouched, hostSelect.value, keepHost);
+    hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
+    for (const o of hostOptions) {
+      const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} — unavailable`);
+      if (o.status !== "available") opt.disabled = true;
+      hostSelect.append(opt);
+    }
+    if (keepHost !== "" && !hostOptions.some((o) => o.name === keepHost)) {
+      hostSelect.append(h("option", { value: keepHost }, keepHost));
+    }
+    hostSelect.value = previous;
+    if (hostSelect.value !== previous) hostSelect.value = "";
+    const chosen = hostOptions.find((o) => o.name === hostSelect.value);
+    hostHint.textContent = chosen && chosen.status !== "available" ? (chosen.reason ?? "") : "";
+  };
+  const hostField = field("Host", hostSelect);
+  hostField.append(hostHint);
+  renderHosts();
+  hostSelect.addEventListener("change", () => {
+    hostTouched = true;
+    renderHosts();
+  });
+  let hostSeq = 0;
+  const loadHostsFor = (repoPath: string): void => {
+    const seq = ++hostSeq;
+    void opts
+      .loadHosts(repoPath)
+      .then((hosts) => {
+        if (seq !== hostSeq) return;
+        hostOptions = hosts;
+        renderHosts();
+      })
+      .catch(() => {
+        if (seq !== hostSeq) return;
+        // An unreachable catalog costs the user the choice, never the task.
+        hostOptions = [];
+        renderHosts();
+        hostHint.textContent = "Hosts unavailable · current value kept.";
+      });
+  };
+  projectSelect.addEventListener("change", () => loadHostsFor(projectSelect.value));
 
   // The program field (#1970). Its options come from the daemon, never from a list
   // here, so an agent added server-side shows up with no change to the web.
@@ -1051,13 +1185,19 @@ function taskFormModal(opts: {
     syncTriggerFields();
     promptArea.value = s.prompt ?? "";
     targetInput.value = s.target_session ?? "";
+    // 0/absent stores as unlimited and seeds an empty field — the same
+    // empty-means-default convention the target field uses — so only a positive
+    // cap is shown as a value.
+    capInput.value = s.max_concurrent_runs ? String(s.max_concurrent_runs) : "";
     programSelect.value = s.program ?? "";
   }
 
   // Kicked off after the seed so the catalog's re-render preserves the seeded
   // program as the current selection rather than clobbering it with the default.
   loadProgramsFor(projectSelect.value);
+  loadHostsFor(projectSelect.value);
   syncOnComplete();
+  syncCap();
 
   body.append(
     field("Name", nameInput),
@@ -1069,6 +1209,9 @@ function taskFormModal(opts: {
     field("Target session", targetInput),
     onCompleteField,
     onCompleteReasonField,
+    capField,
+    capReasonField,
+    hostField,
     field("Program", programSelect),
   );
 
@@ -1099,6 +1242,20 @@ function taskFormModal(opts: {
       handle.setError("Enter a watch command.");
       return;
     }
+    // The cap field is shown only while the shape can carry one, so an
+    // inapplicable submission stores 0 (unlimited) — agreeing with what the
+    // daemon's merge would do anyway (task.clearInapplicableCap) — and an
+    // applicable one is parsed by the same rule the TUI uses (parseCapInput,
+    // pinned by the shared vectors in task/testdata/cap_vectors.json).
+    let maxConcurrentRuns = 0;
+    if (capUnavailableReason(trigger, targetInput.value) === null) {
+      const parsed = parseCapInput(capInput.value);
+      if (parsed === null) {
+        handle.setError("Max concurrent runs must be a non-negative integer.");
+        return;
+      }
+      maxConcurrentRuns = parsed;
+    }
     handle.setError(null);
     opts.onSubmit({
       name,
@@ -1109,6 +1266,8 @@ function taskFormModal(opts: {
       prompt: promptArea.value,
       targetSession: targetInput.value.trim(),
       onComplete: onCompleteSelect.value,
+      maxConcurrentRuns,
+      host: hostSelect.value,
       program: programSelect.value,
     });
   });
@@ -1127,6 +1286,7 @@ export function addTaskModal(
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
     loadOnComplete: () => Promise<OnCompleteOption[]>;
+    loadHosts: (repoPath: string) => Promise<HostOption[]>;
   },
 ): ModalHandle {
   return taskFormModal({
@@ -1136,6 +1296,7 @@ export function addTaskModal(
     defaultProject,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });
@@ -1152,6 +1313,7 @@ export function editTaskModal(
     onCancel: () => void;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
     loadOnComplete: () => Promise<OnCompleteOption[]>;
+    loadHosts: (repoPath: string) => Promise<HostOption[]>;
   },
 ): ModalHandle {
   return taskFormModal({
@@ -1162,7 +1324,15 @@ export function editTaskModal(
     seed: task,
     loadPrograms: callbacks.loadPrograms,
     loadOnComplete: callbacks.loadOnComplete,
+    loadHosts: callbacks.loadHosts,
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel,
   });
+}
+
+/** Which host a re-rendered task form selects (#5967). The seed decides only until
+ *  the user touches the field; after that the current value wins even when it is
+ *  "" (Repo backend), so an explicit clear is never replaced by the seeded host. */
+export function hostSelection(touched: boolean, current: string, seed: string): string {
+  return touched ? current : seed;
 }

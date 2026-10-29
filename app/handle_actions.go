@@ -229,6 +229,16 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 				"The sandbox may still be running and holding unpushed work, and af cannot confirm the remote teardown.",
 			age.Round(time.Second), u.Error))
 	}
+	if selected.Capabilities().Workspace == session.WorkspaceRemote {
+		loss.remote = true
+		// An archived row that kept its workspace on its host (W8.5) still owns it,
+		// and kill removes it. Nothing is measured for a row with no agent-server, so
+		// the dialog says what is known rather than staying silent.
+		if w := selected.ArchivedWorkspace(); selected.IsArchived() && w != nil && !w.Pushed && w.Dir != "" {
+			loss.warnings = append(loss.warnings, fmt.Sprintf(
+				"Warning: This session was archived without pushing. Its workspace at %s still holds its work, and killing the session deletes it.", w.Dir))
+		}
+	}
 	if selected.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 		// GetWorktreeCleanupImpact is an in-memory snapshot, intentionally not
 		// gated on started (unlike GetGitWorktree), so a session that HAS a
@@ -243,6 +253,14 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		if hasWorktree && impact.RemoveWorktree && impact.Path != "" {
 			return m, m.openPendingKillConfirm(selectedTitle, reserved, cleanupImpact, loss, killAction)
 		}
+	}
+	// An off-box workspace is measured where it lives: the daemon asks the
+	// session's agent-server, the dialog stays pending meanwhile, and what comes
+	// back is stated the way a local worktree's loss is (#5571 W8.2). An
+	// unreachable row skips the measurement: its host cannot answer, and the
+	// notice above already says the loss cannot be known.
+	if selected.Capabilities().Workspace == session.WorkspaceRemote && !selected.IsArchived() && selected.UnreachableSnapshot() == nil {
+		return m, m.openPendingRemoteKillConfirm(selectedTitle, reserved, target, loss, killAction)
 	}
 	return m, m.openKillConfirm(selectedTitle, reserved, cleanupImpact, loss, killAction)
 }

@@ -39,16 +39,38 @@ func parseRelayPort(raw string) (int, error) {
 // accepted socket that immediately closes. The token gate wrapping the mux has
 // already authenticated the request.
 func (hs *headlessServer) relayHandler(w http.ResponseWriter, r *http.Request) {
-	port, err := parseRelayPort(r.URL.Query().Get(agentproto.RelayPortQueryParam))
-	if err != nil {
-		writeHTTPError(w, r, http.StatusBadRequest, err)
-		return
-	}
+	q := r.URL.Query()
 	d := net.Dialer{Timeout: relayDialTimeout}
-	target, err := d.DialContext(r.Context(), "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-	if err != nil {
-		writeHTTPError(w, r, http.StatusBadGateway, fmt.Errorf("nothing is listening on 127.0.0.1:%d in the workspace: %w", port, err))
-		return
+	var target net.Conn
+	if which := q.Get(agentproto.RelayTargetQueryParam); which != "" {
+		// A server-owned target (W5.4): the workspace's editor socket, whose path
+		// only this process knows. It is never caller-chosen and cannot be combined
+		// with a port.
+		if which != agentproto.RelayTargetEditor || q.Get(agentproto.RelayPortQueryParam) != "" {
+			writeHTTPError(w, r, http.StatusBadRequest, fmt.Errorf("relay target must be %q and excludes ?port=", agentproto.RelayTargetEditor))
+			return
+		}
+		ep, err := hs.ensureEditor()
+		if err != nil {
+			writeHTTPError(w, r, http.StatusBadGateway, fmt.Errorf("the workspace editor is not serving: %w", err))
+			return
+		}
+		target, err = d.DialContext(r.Context(), "unix", ep.SocketPath)
+		if err != nil {
+			writeHTTPError(w, r, http.StatusBadGateway, fmt.Errorf("the workspace editor is not accepting connections: %w", err))
+			return
+		}
+	} else {
+		port, err := parseRelayPort(q.Get(agentproto.RelayPortQueryParam))
+		if err != nil {
+			writeHTTPError(w, r, http.StatusBadRequest, err)
+			return
+		}
+		target, err = d.DialContext(r.Context(), "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			writeHTTPError(w, r, http.StatusBadGateway, fmt.Errorf("nothing is listening on 127.0.0.1:%d in the workspace: %w", port, err))
+			return
+		}
 	}
 	defer target.Close()
 

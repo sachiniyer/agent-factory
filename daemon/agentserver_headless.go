@@ -19,6 +19,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -46,10 +47,27 @@ import (
 // controlServer resolves an AgentServer out of the multi-session Manager,
 // headlessServer holds the one it owns directly.
 type headlessServer struct {
+	// adopted is set when this server was started over a preserved worktree
+	// (#5571 W8.6); its non-first-time launch respawns the agent there.
+	adopted bool
 	// as is the single workspace's agent-server — the local in-process
 	// implementation over tmux (same runtime as the daemon's local sessions),
 	// exposed here over the wire.
 	as session.AgentServer
+	// inst is the workspace's session.Instance itself — the tab roster the
+	// /v1/agent/tab-* routes bind to (through the tabs narrowing below) and the
+	// resolving arm bindTab falls back to when the AgentServer lacks the
+	// id-native plane. hs.as never does (it is inst.AgentServer()), so in
+	// production the fallback is dead code; the field exists so the route has
+	// the same bind surface the daemon's streamHandler does.
+	inst *session.Instance
+	// program is the host-resolved agent command, for conversation resume and
+	// capture decisions (#5571 W7.2).
+	program string
+	// tabs is the roster the /v1/agent/tab-* routes create, close, and read —
+	// in production the SAME Instance inst points at, narrowed to the five
+	// methods the routes need so a wire-shape test can substitute a small fake.
+	tabs tabKeeper
 	// title is the workspace's session title, echoed in the startup banner so a
 	// driver knows which id to name on the /v1/sessions/{id}/stream path.
 	title string
@@ -62,6 +80,34 @@ type headlessServer struct {
 	// archive collapses concurrent /v1/agent/archive requests onto one in-flight
 	// archive (#2997 finding 2). See singleFlightArchive.
 	archive singleFlightArchive
+	// editor is the workspace's code-server supervisor (W5.4), created on first use.
+	editor agentEditor
+}
+
+// tabKeeper is the tab-roster surface the /v1/agent/tab-* routes bind to
+// (#5571 W4.3). It is *session.Instance narrowed to exactly the methods the
+// routes call — the routes never touch tmux, the worktree, or persistence
+// themselves — so the wire contract can be exercised without a started session.
+// Every method is the Instance admission path (AddShellTabWithID keeps the
+// started/archived/account fences; CloseTabByID is the same close the daemon's
+// own route issues) — a remote caller gets no looser path than a local one.
+type tabKeeper interface {
+	// TabsData projects the roster (agent tab first) plus each tab's exit
+	// evidence — the /v1/agent/tabs payload.
+	TabsData() []session.TabData
+	// RecordProcessTabExits probes un-recorded process tabs before a roster
+	// read so a tab whose command already finished does not report a stale
+	// absence — the read side of stampProcessTabExit's restore path.
+	RecordProcessTabExits()
+	// AddShellTabWithID spawns a shell tab, assigning the daemon-supplied id
+	// verbatim (idempotency key for the replayed create).
+	AddShellTabWithID(id string) (*session.Tab, error)
+	// AddProcessTabWithID spawns a process tab under the supplied id; command
+	// and name are the request's own fields.
+	AddProcessTabWithID(id, command, requestedName string) (*session.Tab, error)
+	// CloseTabByID closes the tab a stable id names — ErrTabGone when it names
+	// nothing, which the shared envelope maps to 404.
+	CloseTabByID(tabID string) error
 }
 
 // singleFlightArchive makes a second /v1/agent/archive request JOIN the archive
@@ -182,6 +228,18 @@ type AgentServerOptions struct {
 	// SessionEnvPassthrough carries exact operator-approved variable names from
 	// the outer runtime. Values remain in this host's environment.
 	SessionEnvPassthrough []string
+	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
+	// Empty derives it from this host's own branch_prefix, as before.
+	Branch string
+	// AdoptWorktree is an existing linked worktree this server binds instead of
+	// creating one (#5571 W8.6). The provisioning daemon proved it present and on
+	// Branch before starting this process.
+	AdoptWorktree string
+	// PolicyFile is the daemon-resolved operator policy (config.AgentPolicy).
+	// When set, this process answers every config read from it and never reads
+	// or creates anything under its own host's af home (#5571 W2.5); a file it
+	// cannot read or parse fails the start rather than falling back to the host.
+	PolicyFile string
 	// Version is this binary's own build stamp, echoed in the startup banner so
 	// the provisioning daemon can persist which agent-server generation the
 	// session runs (#5571 W1.1 — reattach keys off it). Empty means the banner
@@ -232,6 +290,14 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("agent-server requires a repository path (--repo)")
 	}
 
+	if opts.PolicyFile != "" {
+		policy, perr := config.LoadAgentPolicyFile(opts.PolicyFile)
+		if perr != nil {
+			return fmt.Errorf("af agent-server: %w", perr)
+		}
+		config.InstallAgentPolicy(policy)
+	}
+
 	// LoadConfig honors cors_allowed_origins/default_program for a configured
 	// host; a sandbox with no config file falls back to defaults.
 	cfg, err := config.LoadConfig()
@@ -266,8 +332,20 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("af agent-server: %w", rerr)
 	}
 	if loginPATH != "" {
+		// The session directory holding the staged af keeps PATH precedence
+		// over whatever the login profile put first (#5877).
+		loginPATH = session.PinPATHDir(loginPATH, session.SessionBinDir(os.Args[0]))
 		if err := os.Setenv("PATH", loginPATH); err != nil {
 			log.WarningLog.Printf("agent-server: could not adopt login-shell PATH for the agent pane: %v", err)
+		}
+	}
+
+	// An account-scoped sandbox proves executable attribution BEFORE any pane can
+	// receive the scope: the resolved command must name an absolute executable, not
+	// a bare name a workspace-relative PATH entry could answer (#5571 W7.4).
+	if agent := os.Getenv(session.AccountScopeAgentEnv); agent != "" {
+		if err := session.RequireAttributedAccountProgram(resolvedProgram, agent); err != nil {
+			return fmt.Errorf("af agent-server: %w", err)
 		}
 	}
 
@@ -286,9 +364,16 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// say so on the instance so the injected guidance stops teaching them
 		// (#5571 W3.1).
 		CallbackUnavailable: os.Getenv("AF_DAEMON_URL") == "" || os.Getenv("AF_DAEMON_TOKEN") == "",
+		// The daemon holds this session as a remote workspace and admits its tabs
+		// accordingly; the injected guidance must match (#5571 W3.3).
+		HostedRemotely: true,
+		// What /v1/health tells the daemon this server speaks; the guidance
+		// follows it rather than a static floor (#5878).
+		AdvertisedFeatures: agentServerWireFeatures,
 		// This process's startup config is its frozen branch-naming snapshot, just
 		// like the host daemon's. NewGitWorktree must not reload a later save.
 		BranchPrefix: &branchPrefix,
+		BranchName:   opts.Branch,
 		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
 		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly
 		// so a workspace whose repo config declares backend=docker/ssh/hook does
@@ -299,10 +384,32 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("failed to build workspace instance: %w", err)
 	}
 
+	// The relaunch (W7.1) and agent swap respawn through the local runtime, and a
+	// respawn that rebuilds a deleted worktree must make its stale-pane teardown
+	// obligation durable first. The driving daemon installs those callbacks on ITS
+	// instances; this one needs its own, backed by a marker in the session dir (#5824).
+	sessionDir, sdErr := runtimetoken.SessionDir()
+	if sdErr != nil {
+		return fmt.Errorf("agent-server: %w", sdErr)
+	}
+	if err := instance.InstallDurableRebuildTeardown(sessionDir, session.RebuildTeardownKey(opts.RepoPath, opts.Title)); err != nil {
+		return fmt.Errorf("agent-server: %w", err)
+	}
+
+	if opts.AdoptWorktree != "" {
+		if err := instance.AdoptExistingWorktree(opts.AdoptWorktree); err != nil {
+			return fmt.Errorf("agent-server: %w", err)
+		}
+	}
+
 	hs := &headlessServer{
-		as:     instance.AgentServer(),
-		title:  opts.Title,
-		events: newEventsHub(),
+		adopted: opts.AdoptWorktree != "",
+		as:      instance.AgentServer(),
+		inst:    instance,
+		program: resolvedProgram,
+		tabs:    instance,
+		title:   opts.Title,
+		events:  newEventsHub(),
 	}
 
 	// The bearer token this server expects comes from a 0600 file beside this
@@ -365,7 +472,10 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// tmux session or worktree is orphaned. Durability of in-progress work is the
 	// driving daemon's job (archive = push branch, epic §5), not the agent-server's.
 	_ = closeTCP.close()
-	if err := hs.as.Kill(false); err != nil {
+	if err := hs.stopEditor(); err != nil {
+		log.WarningLog.Printf("agent-server: workspace editor teardown on shutdown: %v", err)
+	}
+	if err := hs.shutdownWorkspace(); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
 	return nil
@@ -397,6 +507,26 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
 	mux.HandleFunc("/v1/agent/archive", rpcHandler(hs.Archive))
 	mux.HandleFunc("/v1/agent/kill", rpcHandler(hs.Kill))
+	mux.HandleFunc("/v1/agent/workspace-facts", rpcHandler(hs.WorkspaceFacts))
+	mux.HandleFunc("/v1/agent/stop", rpcHandler(hs.StopPreserving))
+	// W7.1: stop the agent and start it again in this workspace, resuming the
+	// provider's conversation. Advertised as the "relaunch" feature.
+	mux.HandleFunc("/v1/agent/relaunch", rpcHandler(hs.Relaunch))
+	mux.HandleFunc(agentproto.EditorPath, rpcHandler(hs.Editor))
+	mux.HandleFunc(agentproto.EditorStopPath, rpcHandler(hs.EditorStop))
+	// W7.5: swap the agent for another in this workspace. Advertised as the
+	// "agent-swap" feature.
+	mux.HandleFunc("/v1/agent/swap-agent", rpcHandler(hs.SwapAgent))
+	// W7.6: rotate the account scope and relaunch. Advertised as the
+	// "account-swap" feature.
+	mux.HandleFunc("/v1/agent/swap-account", rpcHandler(hs.SwapAccount))
+	mux.HandleFunc("/v1/agent/swap-account-status", rpcHandler(hs.SwapAccountStatus))
+	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
+	// exit evidence, over the same envelope dispatch. These are the routes the
+	// "tab-api" feature token on /v1/health advertises.
+	mux.HandleFunc("/v1/agent/tab-create", rpcHandler(hs.TabCreate))
+	mux.HandleFunc("/v1/agent/tab-close", rpcHandler(hs.TabClose))
+	mux.HandleFunc("/v1/agent/tabs", rpcHandler(hs.Tabs))
 
 	// WS data plane — same paths, same broker, same wire as the daemon (§1.1: all
 	// over the same routes the daemon mux already serves).
@@ -413,9 +543,53 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	return mux
 }
 
-// healthHandler answers GET /v1/health with a trivial liveness envelope.
+// agentServerWireFeatures is the capability token list /v1/health advertises
+// (#5571 W4.3): `version` says which af build answered, `features` says which
+// surfaces it speaks, so a driving daemon can learn what a sandbox agent-server
+// offers BEFORE calling a route that might not exist on an older build — the
+// additive-contract answer to wire drift, where a missing token means degrade
+// rather than fail. Tokens name route clusters, not the implementation, so a
+// client tests "tab-api" rather than inferring it from the version string.
+var agentServerWireFeatures = []string{
+	// "tab-api": POST /v1/agent/tab-create, /v1/agent/tab-close, and
+	// /v1/agent/tabs — stable-id create/close plus the roster with exit
+	// evidence.
+	"tab-api",
+	// "tab-id-addressing": ?tab_id= on the WS stream and tab_id on preview —
+	// the id-addressed data plane (ws_pty.go's bindTab picks the binding).
+	"tab-id-addressing",
+	// "relaunch": POST /v1/agent/relaunch — stop the agent and start it again
+	// in this workspace with the provider's resume (#5571 W7.1).
+	session.RelaunchFeature,
+	// "editor": POST /v1/agent/editor and /v1/agent/relay?target=editor — the
+	// workspace's own code-server, relayed to the daemon (#5571 W5.4).
+	agentproto.EditorFeature,
+	// "agent-swap": POST /v1/agent/swap-agent — replace the agent with another
+	// in this workspace, resolving the new agent's program on this host (#5571 W7.5).
+	session.SwapAgentFeature,
+	// "account-swap": POST /v1/agent/swap-account — rotate the staged account
+	// scope in and relaunch the agent on it (#5571 W7.6).
+	session.AccountSwapFeature,
+}
+
+// agentHealthResponse is GET /v1/health's payload: liveness, the build version
+// the banner also carries, and the wire features this server speaks (#5571
+// W4.3).
+type agentHealthResponse struct {
+	OK       bool     `json:"ok"`
+	Version  string   `json:"version"`
+	Features []string `json:"features"`
+}
+
+// healthHandler answers GET /v1/health with liveness plus the version/features
+// advertisement — the property that makes the route a capability probe, not
+// just a ping.
 func (hs *headlessServer) healthHandler(w http.ResponseWriter, r *http.Request) {
-	writeHTTPSuccess(w, r, map[string]bool{"ok": true})
+	writeHTTPSuccess(w, r, agentHealthResponse{
+		OK:       true,
+		Version:  Version(),
+		Features: agentServerWireFeatures,
+	})
 }
 
 // --- control REST: 1:1 mirror of session.AgentServer -----------------------
@@ -424,11 +598,17 @@ func (hs *headlessServer) healthHandler(w http.ResponseWriter, r *http.Request) 
 // fresh create materializes the worktree and spawns; a restore reconnects.
 type agentLifecycleRequest struct {
 	FirstTimeSetup bool `json:"first_time_setup"`
+	// Conversation is the daemon's recorded conversation for this launch to
+	// resume (#5571 W7.2); honored only where this host's provider store holds it.
+	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
 }
 
 // agentOKResponse is the acknowledgement for the no-return interface methods.
 type agentOKResponse struct {
 	OK bool `json:"ok"`
+	// Conversation is the conversation a launch came up on (#5571 W7.2); the
+	// daemon records it as it does for a local session.
+	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
 }
 
 func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResponse) error {
@@ -440,10 +620,42 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 }
 
 func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
+	if hs.adopted && !req.FirstTimeSetup && hs.inst != nil {
+		return hs.launchAdopted(req, resp)
+	}
+	var codexSnap session.ConversationCaptureSnapshot
+	codex := tmux.DetectAgentFromCommand(hs.program) == tmux.ProgramCodex
+	if hs.inst != nil && req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
+		// A resume flag for a transcript this host does not hold makes the agent
+		// exit on launch, so a fresh workspace starts a new conversation instead.
+		if session.ConversationResumableHere(hs.program, hs.inst.GetWorktreePath(), *req.Conversation) {
+			hs.inst.SetResumeConversation(*req.Conversation)
+		} else {
+			log.InfoLog.Printf("agent-server: conversation %s is not in this host's %s store; starting a new conversation",
+				req.Conversation.ID, req.Conversation.Agent)
+		}
+	}
+	if codex && hs.inst != nil {
+		// Before the spawn, so the capture can tell the new rollout from old ones.
+		// Correlated against the directory the launch command actually runs the
+		// agent in (an `env -C DIR codex` moves it off the worktree), not the
+		// worktree; unscoped when that is not provable (#5861).
+		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
+			codexHomeFor(hs.program, hs.inst.GetWorktreePath()),
+			session.LaunchCaptureWorkingDir(hs.program, hs.inst.GetWorktreePath()))
+	}
 	if err := hs.as.Launch(req.FirstTimeSetup); err != nil {
 		return err
 	}
 	resp.OK = true
+	if hs.inst == nil {
+		return nil
+	}
+	if conv := hs.inst.AgentConversation(); conv.HasID() {
+		resp.Conversation = &conv
+	} else if codex {
+		hs.captureCodexConversation(codexSnap)
+	}
 	return nil
 }
 
@@ -479,6 +691,9 @@ type agentSnapshotResponse struct {
 	// client can distinguish a reported miss from a server that predates the
 	// field.
 	Captured bool `json:"captured"`
+	// Conversation is the conversation identity once the server has one
+	// (#5571 W7.2); omitted until then.
+	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
 }
 
 func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) error {
@@ -492,14 +707,23 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 	resp.Content = obs.Content
 	resp.ModelChange = obs.ModelChange
 	resp.Captured = obs.Captured
+	if hs.inst != nil {
+		if conv := hs.inst.AgentConversation(); conv.HasID() {
+			resp.Conversation = &conv
+		}
+	}
 	return nil
 }
 
-// agentPreviewRequest selects tab Tab's content; Full=true returns the entire
-// scrollback history, false the visible screen.
+// agentPreviewRequest selects a tab's content; Full=true returns the entire
+// scrollback history, false the visible screen. TabID addresses the tab by its
+// stable id and takes precedence over the ordinal Tab, exactly as the daemon's
+// own PreviewRequest resolves — a stale id is a 404 (session.ErrTabGone through
+// rpcHandler), never a silent fallback to whatever sits at Tab (#5571 W4.3).
 type agentPreviewRequest struct {
-	Tab  int  `json:"tab"`
-	Full bool `json:"full"`
+	TabID string `json:"tab_id,omitempty"`
+	Tab   int    `json:"tab"`
+	Full  bool   `json:"full"`
 	// Grid asks for the per-row grid capture with cursor and size (#5571 W4.2).
 	// A server that predates it ignores the field and never sets HasGrid, which
 	// is how the client knows to keep the joined Content.
@@ -527,7 +751,13 @@ type agentPreviewResponse struct {
 }
 
 func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewResponse) error {
-	snapshot, err := hs.as.Preview(req.Tab, req.Full)
+	var snapshot session.PreviewSnapshot
+	var err error
+	if req.TabID != "" {
+		snapshot, err = hs.as.PreviewByID(req.TabID, req.Full)
+	} else {
+		snapshot, err = hs.as.Preview(req.Tab, req.Full)
+	}
 	if err != nil {
 		return err
 	}
@@ -542,7 +772,13 @@ func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewRes
 	if !ok {
 		return nil
 	}
-	pane, gerr := gs.PreviewGrid(req.Tab)
+	var pane session.PaneSnapshot
+	var gerr error
+	if req.TabID != "" {
+		pane, gerr = gs.PreviewGridByID(req.TabID)
+	} else {
+		pane, gerr = gs.PreviewGrid(req.Tab)
+	}
 	if gerr != nil {
 		// The joined Content above is still a valid answer; the client falls
 		// back to it when HasGrid is absent.
@@ -619,6 +855,9 @@ func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error 
 }
 
 func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
+	if err := hs.stopEditor(); err != nil {
+		log.WarningLog.Printf("agent-server: workspace editor teardown: %v", err)
+	}
 	if err := hs.as.Kill(false); err != nil {
 		return err
 	}
@@ -645,9 +884,21 @@ func (hs *headlessServer) streamHandler(w http.ResponseWriter, r *http.Request) 
 		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	sub, err := hs.as.Subscribe(tab, since)
+	// The same binding selection the daemon's streamHandler makes (#5571 W4.3):
+	// a ?tab_id= binds the id-native plane — which the in-sandbox server's local
+	// AgentServer always has — and a missing ?tab_id= stays an ordinal for
+	// legacy drivers that predate the parameter. This supersedes the "ordinal
+	// only" rule this handler used to carry: the sandbox's tab set is no longer
+	// fixed now that /v1/agent/tab-create can grow it, so an id-addressed
+	// connection must NEVER re-resolve through a shifting ordinal.
+	binding, err := bindTab(hs.as, hs.inst, r.URL.Query().Get("tab_id"), tab)
 	if err != nil {
-		writeHTTPError(w, r, http.StatusInternalServerError, err)
+		writeHTTPError(w, r, httpStatusForTab(err), err)
+		return
+	}
+	sub, err := binding.subscribe(since)
+	if err != nil {
+		writeHTTPError(w, r, httpStatusForTab(err), err)
 		return
 	}
 	w.Header().Set(streamSeqHeader, strconv.FormatUint(uint64(sub.Seq()), 10))
@@ -659,11 +910,7 @@ func (hs *headlessServer) streamHandler(w http.ResponseWriter, r *http.Request) 
 		_ = sub.Close()
 		return
 	}
-	// The in-sandbox headless server is addressed by ordinal only: the orchestrator's
-	// remoteAgentServer has already resolved any stable ?tab_id= to an index before
-	// forwarding it here (#1738), and a sandbox's tab set is fixed for its lifetime,
-	// so there is nothing to re-resolve — pin the ordinal.
-	servePTYStream(ordinalTabBinding{as: hs.as, tab: tab}, sub, conn)
+	servePTYStream(binding, sub, conn)
 }
 
 // streamInfoHandler answers GET /v1/sessions/{id}/stream-info with where the
@@ -695,4 +942,14 @@ func (hs *headlessServer) eventsHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	serveEvents(hs.events, conn)
+}
+
+// WorkspaceFacts measures this server's workspace for the daemon's kill
+// confirmation (#5571 W8.2). Read-only: git status/rev-list/for-each-ref/reflog.
+func (hs *headlessServer) WorkspaceFacts(_ struct{}, resp *session.WorkspaceFacts) error {
+	if hs.inst == nil {
+		return fmt.Errorf("this agent-server has no workspace")
+	}
+	*resp = session.MeasureWorkspaceAt(hs.inst.GetWorktreePath(), hs.inst.Path)
+	return nil
 }
