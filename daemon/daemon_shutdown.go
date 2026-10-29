@@ -1,35 +1,28 @@
 package daemon
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
 // drainJoinBudget bounds how long drainDaemon waits for joined goroutines (the
 // poll pass, a deferred orphan sweep, the update driver's release lookup, a root
-// create, a mutation's targeted persist) after the first checkpoint is durable.
-// It sits well inside stopDaemonGrace (5s): the stopper SIGKILLs at the grace, so
-// a goroutine that can block longer than that must cost at most its own
-// in-flight work, never the final save (#5846).
-var drainJoinBudget = 2 * time.Second
-
-// checkpointBeforeJoin writes the durable checkpoint that precedes the join
-// (#5846). It refreshes rows already on disk from the live instances and never
-// adds, removes or re-orders membership (session.Storage.CheckpointLiveRows):
-// goroutines that are still joining, a root-agent replacement above all, may
-// commit while it runs, and a whole-list write from a stale snapshot would put the
-// replaced row back. It does not seal archive admission either. It is skipped when
-// the home directory is gone (see homeDeleted). A var so a test can observe the
-// ordering.
-var checkpointBeforeJoin = func(m *Manager) error {
-	if m.homeDeleted.Load() {
-		return nil
-	}
-	return m.checkpointLiveRows()
-}
+// create, a mutation's targeted persist). It sits well inside stopDaemonGrace
+// (5s): the stopper SIGKILLs at the grace, so a goroutine that can block longer
+// than that costs its own in-flight work and no longer the whole grace. A join
+// that times out writes nothing (see skippedOnJoinTimeout) (#5846).
+//
+// Sizing (#5846): the final save is a per-repo flock plus one JSON write, measured
+// at ~0.7ms for 10 sessions, ~6ms for 100 and ~28ms for 500 on a warm local disk
+// (SaveInstancesForShutdown, 5 repos). Budgeting a pessimistic 1s for it (a slow or
+// network disk, a contended flock) and keeping 1s of the 5s grace for the HTTP and
+// control-plane joins that run before this join and for process exit, the join gets
+// 3s. A join that finishes between this budget and roughly grace minus the save
+// used to be saved on master and now is not; that window is about 1s wide.
+var drainJoinBudget = 3 * time.Second
 
 // joinWithin runs join and reports whether it returned inside d. A join that does
 // not return is abandoned, not cancelled: its goroutine keeps running until the
@@ -49,10 +42,6 @@ func joinWithin(d time.Duration, join func()) bool {
 		return false
 	}
 }
-
-// markHomeDeleted records that the AF home is gone, so no checkpoint may be
-// written: saving would recreate a skeleton of the deleted home.
-func (m *Manager) markHomeDeleted() { m.homeDeleted.Store(true) }
 
 // drainDaemon quiesces the daemon's externally reachable control planes and
 // daemon-owned writers before the terminal checkpoint. It closes mutation
@@ -103,18 +92,6 @@ func drainDaemon(
 		}
 	}
 
-	// Durable checkpoint BEFORE anything is joined (#5846). Admission is closed and
-	// both control planes are joined, so nothing user-driven is in flight: this
-	// captures every mutation made up to now. The joins below can then be bounded
-	// without ever putting the checkpoint behind a goroutine that cannot be
-	// cancelled. Ordering argument: a join that completes is followed by the
-	// final save (daemon.go), which is a superset of this one; a join that does
-	// not complete is abandoned and this checkpoint stands, losing at most that
-	// goroutine's in-flight work, which is never durable until its own persist.
-	if err := checkpointBeforeJoin(m); err != nil {
-		log.ErrorLog.Printf("failed to write the pre-drain checkpoint: %v", err)
-	}
-
 	// Stop and join daemon-owned writers too. The lifecycle gate above also
 	// refuses any scheduler/watcher delivery that reaches the closed transports
 	// during their deferred teardown.
@@ -134,67 +111,36 @@ func drainDaemon(
 		m.stopAndWaitBackgroundMutationsForShutdown()
 	})
 	if !joined {
-		log.WarningLog.Printf("shutdown join exceeded %s; keeping the pre-drain checkpoint and skipping the final save so a wedged goroutine cannot hold exit past the SIGKILL grace (#5846)", drainJoinBudget)
+		log.WarningLog.Printf("shutdown join exceeded %s; skipping the final save so a wedged goroutine cannot hold exit past the SIGKILL grace, and writing nothing: %s (#5846)",
+			drainJoinBudget, m.skippedOnJoinTimeout())
 	}
 	return joined
 }
 
-// checkpointLiveRows is the pre-drain checkpoint's body. Membership is
-// re-validated under the repo file lock against the manager's current instance
-// map; m.mu is only TRY-locked there, because a writer that holds m.mu may be
-// waiting on that same file lock, and a skipped row is safe (the final save or the
-// row's own targeted persist covers it) where a lock-order deadlock inside the
-// stop grace is not.
-func (m *Manager) checkpointLiveRows() error {
-	// m.mu is only TRY-locked, here and below (see above).
-	tryMu := func(fn func()) bool {
-		for attempt := 0; attempt < 20; attempt++ {
-			if m.mu.TryLock() {
-				defer m.mu.Unlock()
-				fn()
-				return true
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-		return false
+// skippedOnJoinTimeout names what a timed-out join leaves undurable, for the log.
+//
+// There is deliberately no checkpoint on this path. Any durable write taken
+// while a joined goroutine can still commit (the poll pass, a settlement, a
+// stand-down discharge, a create holding the repo start lock, RefreshInstances
+// holding m.mu) races that writer: the only lock every disk write shares is the
+// repo file lock, and in-memory rows are not under it. Targeted persists already
+// made every real mutation durable; what a timeout loses is the wedged
+// goroutine's in-flight work, stale status the next poll recomputes, and persists
+// that had ALREADY failed and were waiting on a retry, which is exactly what a
+// SIGKILL leaves on master. m.mu is only try-locked: this must not block.
+func (m *Manager) skippedOnJoinTimeout() string {
+	if !m.mu.TryLock() {
+		return "the owed-retry counts could not be read without blocking"
 	}
-	isCurrent := func(inst *session.Instance) bool {
-		current := false
-		tryMu(func() {
-			for _, cur := range m.instances {
-				if cur == inst {
-					current = true
-					return
-				}
-			}
-		})
-		return current
-	}
+	defer m.mu.Unlock()
+	return fmt.Sprintf("%d owed settlement retr%s and %d owed stand-down discharge%s stay as the disk has them",
+		len(m.settleOwed), plural(len(m.settleOwed), "y", "ies"),
+		len(m.dischargeOwed), plural(len(m.dischargeOwed), "", "s"))
+}
 
-	// Owed stand-down discharges (#4730) must reach this checkpoint: the join
-	// timeout skips the final save and its FlushOwedSettlements, so this can be
-	// the last durable write, and persisting a marker memory already discharged
-	// would re-arm a teardown the worker stood down. They are applied to the rows
-	// being written rather than flushed through FlushOwedSettlements, because that
-	// path takes the repo start lock, which CreateSession holds across
-	// provisioning and the prompt send: nothing before the join may wait on a
-	// lock an in-flight repository operation can hold for an unbounded time. When
-	// the owed set cannot be read without blocking, nothing is written: a stale
-	// marker is worse than no checkpoint, and the final save covers a clean join.
-	type owedRow struct{ id, title string }
-	owed := make(map[owedRow]bool)
-	if !tryMu(func() {
-		for _, entry := range m.dischargeOwed {
-			owed[owedRow{entry.instance.ID, entry.instance.Title}] = true
-		}
-	}) {
-		log.WarningLog.Printf("pre-drain checkpoint skipped: the owed-discharge set could not be read without blocking (#5846)")
-		return nil
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
 	}
-	adjust := func(data *session.InstanceData) {
-		if owed[owedRow{data.ID, data.Title}] {
-			data.PendingOnComplete = nil
-		}
-	}
-	return m.storage.CheckpointLiveRows(m.InstancesSnapshot(), isCurrent, adjust)
+	return many
 }

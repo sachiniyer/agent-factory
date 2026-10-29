@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os/exec"
-	"sync"
 	"testing"
 	"time"
 
@@ -1066,78 +1065,4 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryFlushedBeforeShut
 	manager.mu.Lock()
 	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the discharge lands at shutdown")
 	manager.mu.Unlock()
-}
-
-// TestTaskSessionLifecycle_StandDownDischargeFlushedOnJoinTimeoutPath pins the
-// #6031 review P2: when a joined goroutine outruns drainJoinBudget the final
-// SaveInstancesForShutdown (and its FlushOwedSettlements) is skipped, so the
-// pre-drain checkpoint is the last durable write and must itself land the owed
-// discharge instead of persisting the restored marker.
-func TestTaskSessionLifecycle_StandDownDischargeFlushedOnJoinTimeoutPath(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	installInstantBackend(t)
-	testguard.IsolateTmux(t)
-	repoPath := setupControlRepo(t)
-	repo, err := config.RepoFromPath(repoPath)
-	require.NoError(t, err)
-	manager, err := NewManager(config.DefaultConfig())
-	require.NoError(t, err)
-	shortenDrainBudget(t, 150*time.Millisecond)
-
-	inst := registerTaskSpawnedSession(t, manager, repo.ID, repoPath, "nightly", "task-kill")
-	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
-	endRunOnIdleEdge(t, inst)
-	manager.fileOwedTaskLifecycle(repo.ID, inst)
-	require.NotNil(t, inst.OwedOnComplete(), "precondition: the durable marker is filed")
-
-	prev := testHookPersistInstanceData
-	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
-		if data.Title == "nightly" && data.TaskID != "" && data.PendingOnComplete == nil {
-			return errors.New("injected discharge persist failure (disk error)")
-		}
-		return nil
-	}
-	t.Cleanup(func() { testHookPersistInstanceData = prev })
-	manager.dischargeOwedTaskLifecycle(repo.ID, inst.ID, inst.Title)
-	manager.mu.Lock()
-	require.NotEmpty(t, manager.dischargeOwed, "the failed stand-down recorded a discharge retry")
-	manager.mu.Unlock()
-	testHookPersistInstanceData = func(string, session.InstanceData) error { return nil }
-
-	// A joined goroutine that outruns the budget.
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	var workers sync.WaitGroup
-	workers.Add(1)
-	go func() { defer workers.Done(); <-release }()
-
-	// An in-flight CreateSession holds the repo start lock across provisioning
-	// and the prompt send. The pre-join checkpoint must not wait on it (#6031 P1):
-	// nothing before the join may block on a lock a repo operation can hold
-	// without bound.
-	startLock := manager.startLockForRepo(repo.ID)
-	startLock.Lock()
-	t.Cleanup(startLock.Unlock)
-
-	httpClosed, controlClosed := false, false
-	var joined bool
-	drained := make(chan struct{})
-	go func() {
-		joined = drainDaemon(manager, nil, func() error { return nil }, &httpClosed, &controlClosed, make(chan struct{}), &workers)
-		close(drained)
-	}()
-	select {
-	case <-drained:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the pre-join checkpoint blocked on the repo start lock")
-	}
-	require.False(t, joined, "precondition: the join timed out, so no final save runs")
-
-	raw, err := config.LoadRepoInstances(repo.ID)
-	require.NoError(t, err)
-	var rows []session.InstanceData
-	require.NoError(t, json.Unmarshal(raw, &rows))
-	require.Len(t, rows, 1)
-	assert.Nil(t, rows[0].PendingOnComplete,
-		"the pre-drain checkpoint must not persist a lifecycle marker memory already discharged")
 }

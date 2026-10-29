@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -11,37 +13,10 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
-// #5846: drain guarantees a durable checkpoint inside the stopper's grace
-// whatever a joined goroutine does. The checkpoint is taken after admission is
-// closed and before anything is joined, and the join itself is bounded.
-
-type checkpointProbe struct {
-	mu    sync.Mutex
-	calls int
-	// stopClosedAtCall records, per call, whether stopCh was already closed: the
-	// first checkpoint must precede the join.
-	stopClosedAtCall []bool
-}
-
-func installCheckpointProbe(t *testing.T, stopCh chan struct{}) *checkpointProbe {
-	t.Helper()
-	p := &checkpointProbe{}
-	prev := checkpointBeforeJoin
-	checkpointBeforeJoin = func(*Manager) error {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		p.calls++
-		select {
-		case <-stopCh:
-			p.stopClosedAtCall = append(p.stopClosedAtCall, true)
-		default:
-			p.stopClosedAtCall = append(p.stopClosedAtCall, false)
-		}
-		return nil
-	}
-	t.Cleanup(func() { checkpointBeforeJoin = prev })
-	return p
-}
+// #5846: drain bounds the join inside the stopper's grace. A join that times
+// out writes nothing: a durable write taken while admitted writers can still
+// commit races them (see skippedOnJoinTimeout), so a wedged goroutine costs its
+// in-flight work and no longer the grace.
 
 func shortenDrainBudget(t *testing.T, d time.Duration) {
 	t.Helper()
@@ -50,13 +25,10 @@ func shortenDrainBudget(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { drainJoinBudget = prev })
 }
 
-func TestDrainCheckpointsBeforeJoinAndAbandonsAWedgedGoroutine(t *testing.T) {
+func TestDrainAbandonsAWedgedGoroutineAndWritesNothing(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, _ := newManagerCapturingWarnings(t, config.DefaultConfig())
 	shortenDrainBudget(t, 150*time.Millisecond)
-
-	stopCh := make(chan struct{})
-	probe := installCheckpointProbe(t, stopCh)
 
 	// A joined goroutine that never returns on its own: the poll pass, orphan
 	// sweep and update-driver lookup are all this shape from the drain's side.
@@ -69,11 +41,21 @@ func TestDrainCheckpointsBeforeJoinAndAbandonsAWedgedGoroutine(t *testing.T) {
 		<-release
 	}()
 
+	// The repo start lock a CreateSession holds across provisioning: drain must
+	// not wait on it, because nothing on its path takes it.
+	startLock := manager.startLockForRepo("some-repo")
+	startLock.Lock()
+	t.Cleanup(startLock.Unlock)
+
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	before := listFiles(t, home)
+
 	httpClosed, controlClosed := false, false
 	var joined bool
 	drained := make(chan struct{})
 	go func() {
-		joined = drainDaemon(manager, nil, func() error { return nil }, &httpClosed, &controlClosed, stopCh, &workers)
+		joined = drainDaemon(manager, nil, func() error { return nil }, &httpClosed, &controlClosed, make(chan struct{}), &workers)
 		close(drained)
 	}()
 	select {
@@ -83,10 +65,7 @@ func TestDrainCheckpointsBeforeJoinAndAbandonsAWedgedGoroutine(t *testing.T) {
 	}
 
 	require.False(t, joined, "an abandoned join must be reported so the final save is skipped")
-	probe.mu.Lock()
-	defer probe.mu.Unlock()
-	require.Equal(t, 1, probe.calls, "exactly one checkpoint, taken before the join")
-	require.Equal(t, []bool{false}, probe.stopClosedAtCall, "the checkpoint must precede closing stopCh and joining")
+	require.Equal(t, before, listFiles(t, home), "a timed-out drain must not write anything")
 }
 
 func TestDrainReportsACompletedJoin(t *testing.T) {
@@ -94,7 +73,6 @@ func TestDrainReportsACompletedJoin(t *testing.T) {
 	manager, _ := newManagerCapturingWarnings(t, config.DefaultConfig())
 
 	stopCh := make(chan struct{})
-	probe := installCheckpointProbe(t, stopCh)
 	var workers sync.WaitGroup
 	workers.Add(1)
 	go func() {
@@ -104,7 +82,31 @@ func TestDrainReportsACompletedJoin(t *testing.T) {
 
 	httpClosed, controlClosed := false, false
 	require.True(t, drainDaemon(manager, nil, func() error { return nil }, &httpClosed, &controlClosed, stopCh, &workers))
-	probe.mu.Lock()
-	defer probe.mu.Unlock()
-	require.Equal(t, 1, probe.calls)
+}
+
+func TestSkippedOnJoinTimeoutNamesTheOwedRetries(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	manager, _ := newManagerCapturingWarnings(t, config.DefaultConfig())
+	manager.mu.Lock()
+	manager.dischargeOwed["r|a"] = dischargeRetryEntry{}
+	manager.mu.Unlock()
+	require.Equal(t, "0 owed settlement retries and 1 owed stand-down discharge stay as the disk has them", manager.skippedOnJoinTimeout())
+
+	manager.mu.Lock() // held: the log line must not block
+	defer manager.mu.Unlock()
+	require.Contains(t, manager.skippedOnJoinTimeout(), "without blocking")
+}
+
+// listFiles returns path -> size+mtime for every file under dir.
+func listFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		info, err := e.Info()
+		require.NoError(t, err)
+		out[e.Name()] = fmt.Sprintf("%s/%d", info.ModTime(), info.Size())
+	}
+	return out
 }

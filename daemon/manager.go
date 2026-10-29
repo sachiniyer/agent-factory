@@ -21,9 +21,6 @@ type Manager struct {
 	// transports or joins anything, so a probe's ssh child is killed rather than
 	// waited on (#5839). Zero-value safe; see advisory.go.
 	advisory advisoryScope
-	// homeDeleted is set when the AF home vanished under the daemon: shutdown
-	// then writes no checkpoint at all (#5846).
-	homeDeleted atomic.Bool
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
 	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and
