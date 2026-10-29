@@ -346,3 +346,23 @@ func errOrNil(t skillTarget) error {
 	}
 	return nil
 }
+
+// #6004: codex -C moves the working root after Codex resolves its home, so a
+// relative CODEX_HOME still anchors at the pane's start directory and the skill
+// has a place; whitespace-only HOME is a directory name, not an absent HOME.
+func TestResolveSkillTarget_FollowsTheAgentsOwnRootRules(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	t.Setenv("CODEX_HOME", "")
+
+	inst := skillTestInstance(t, "codex", "")
+	work := inst.GetWorktreePath()
+
+	target := resolveSkillTarget(inst, "CODEX_HOME=rel codex -C nested")
+	require.NoError(t, errOrNil(target))
+	require.Equal(t, filepath.Join(work, "rel"), target.root)
+
+	target = resolveSkillTarget(inst, "env -u CODEX_HOME HOME='   ' codex")
+	require.NoError(t, errOrNil(target))
+	require.Equal(t, filepath.Join(work, "   ", ".codex"), target.root)
+}
