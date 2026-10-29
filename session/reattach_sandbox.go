@@ -67,8 +67,11 @@ func (i *Instance) ReattachSandbox() error {
 	callbackLost := i.restoreCallbackForReattach(p)
 
 	var localAddr string
+	callbackConfirmed := false
 	if p.startTunnelFn != nil {
 		localAddr, err = p.startTunnelFn(p.remoteAddr)
+		// The test seam has no -R to confirm: it stands in for a confirmed one.
+		callbackConfirmed = true
 	} else {
 		// The old connection died with the daemon; a socket its sshd left behind
 		// would fail the -R bind (ExitOnForwardFailure) for good.
@@ -76,10 +79,12 @@ func (i *Instance) ReattachSandbox() error {
 			p.clearStaleCallbackSocket()
 		}
 		var note string
-		localAddr, _, note, err = p.openTunnelForReattach()
+		var withCallback bool
+		localAddr, withCallback, note, err = p.openTunnelForReattach()
 		if err == nil && note != "" && callbackLost == "" {
 			callbackLost = note
 		}
+		callbackConfirmed = withCallback
 	}
 	if err != nil {
 		p.abandonUnadoptedTunnel()
@@ -104,12 +109,16 @@ func (i *Instance) ReattachSandbox() error {
 	// the replacement and point the row at a reaped runtime.
 	i.mu.Lock()
 	stillCurrent := i.remoteClient == nil && i.backend == b && !i.userKilled && i.liveness != LiveArchived
+	// Adopting the same runtime provisions nothing, so the recorded callback
+	// state travels with it (#5974): bindProvisionResult installs the result's
+	// reason verbatim, and an empty one would read as a healthy reprovision.
+	priorCallbackReason := i.callbackUnavailable
 	i.mu.Unlock()
 	if !stillCurrent {
 		p.abandonUnadoptedTunnel()
 		return ErrReattachIneligible
 	}
-	if err := i.bindProvisionResult(ProvisionResult{Backend: b, Endpoint: endpoint, Teardown: p.reap}); err != nil {
+	if err := i.bindProvisionResult(ProvisionResult{Backend: b, Endpoint: endpoint, Teardown: p.reap, CallbackUnavailable: priorCallbackReason}); err != nil {
 		p.abandonUnadoptedTunnel()
 		return fmt.Errorf("reattach %q: %w", i.Title, err)
 	}
@@ -124,14 +133,23 @@ func (i *Instance) ReattachSandbox() error {
 		i.Tabs = []*Tab{newRemoteAgentTab()}
 	}
 	i.appendPendingMetadataTabsLocked()
-	// The loader rewrote a live row to Lost because nothing was bound; the
-	// runtime answered, so it is live again. The next status poll refines Ready
-	// into the agent's real state.
-	i.liveness = LiveReady
-	// A callback that could not be brought back is said out loud on the row, not
-	// left as an agent whose af verbs fail silently; an earlier recorded reason
-	// (a degraded create) is the more precise one and is kept.
-	if callbackLost != "" && i.callbackUnavailable == "" {
+	// The loader rewrote a live row to Lost because nothing was bound. The
+	// runtime answered, which proves reachability and nothing about what the
+	// agent is doing: a daemon that restarted under a working agent must not
+	// publish it as idle (ClassifyActivity and `af sessions watch` read this).
+	// Running is the conservative claim; the agent-server's status sweep settles
+	// it to the observed state — its first post-reattach capture is a Baseline
+	// that preserves this value, and idle needs observed silence (#5973).
+	i.liveness = LiveRunning
+	// The callback state is preserved until positive evidence says otherwise
+	// (the W3.6 health rule, #5974): a reason recorded at create or on an
+	// earlier reattach stays unless THIS reattach restored the credential and
+	// confirmed the forward; a callback that could not be brought back is said
+	// out loud rather than left as an agent whose af verbs fail silently.
+	switch {
+	case callbackConfirmed && callbackLost == "" && p.callbackForwardPersisted():
+		i.callbackUnavailable = ""
+	case callbackLost != "" && i.callbackUnavailable == "":
 		i.callbackUnavailable = callbackLost
 	}
 	i.touchLocked()

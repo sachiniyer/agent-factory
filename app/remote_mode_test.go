@@ -298,6 +298,36 @@ func TestQuitAfterARepeatedSaveFailureDiscardsAndLeaves(t *testing.T) {
 	require.False(t, h.hooksPane.IsDirty())
 }
 
+// #5898: the discard confirmation answers the edits that failed to save. Input
+// that is not another quit attempt — editing resumes, a click — drops it, so a
+// later identical error warns again instead of discarding the new edits unseen.
+func TestQuitDiscardConfirmationDoesNotSurviveOtherInput(t *testing.T) {
+	h := dirtyHooksHome(t)
+	stubHooksSaveFailure(t)
+
+	_, _ = h.handleQuit()
+	require.False(t, h.quitting)
+	require.NotEmpty(t, h.quitSaveFailure, "the refused quit arms the confirmation")
+
+	// A repeated quit keeps it armed: the message that carries it calls handleQuit.
+	done := h.invalidateQuitConfirmationAfter()
+	_, _ = h.handleQuit()
+	done()
+	require.True(t, h.quitting, "the repeated quit still discards and leaves")
+
+	h = dirtyHooksHome(t)
+	_, _ = h.handleQuit()
+	require.NotEmpty(t, h.quitSaveFailure)
+
+	// Any other input in between disarms it.
+	h.invalidateQuitConfirmationAfter()()
+	require.Empty(t, h.quitSaveFailure)
+
+	_, _ = h.handleQuit()
+	require.False(t, h.quitting, "the same error after other input is a fresh refusal, not a discard")
+	require.True(t, h.hooksPane.IsDirty(), "the edit is still kept")
+}
+
 // #5900: the cache is keyed by (project, ID). The store tolerates legacy duplicate
 // IDs and a mutation acts on exactly one row, so an acknowledged edit or delete
 // must not rewrite or drop the rows it never touched.
@@ -364,4 +394,32 @@ func TestRemoteScheduleEditWithoutARecordMarksHealthUnknownNotTheOldCronsTimes(t
 	require.False(t, got.Overdue)
 	require.Zero(t, got.MissedOccurrences)
 	require.True(t, got.Unassessable, "the row says no verdict is available rather than staying silent")
+}
+
+// #5898 (Codex P1): the task-save recovery notice ("Press any key") appears on a
+// refused quit. Dismissing it leaves the unsaved edit in place, so it must keep
+// the discard confirmation armed — otherwise the next quit is refused all over
+// again and the user can never choose to leave. Every input in that state, key
+// and mouse alike, goes through beginUserInput:
+func TestQuitDiscardConfirmationSurvivesDismissingRecovery(t *testing.T) {
+	for _, name := range []string{"any key", "enter", "the q key", "mouse click"} {
+		t.Run(name, func(t *testing.T) {
+			h := dirtyHooksHome(t)
+			stubHooksSaveFailure(t)
+
+			_, _ = h.handleQuit()
+			require.False(t, h.quitting)
+			require.NotEmpty(t, h.quitSaveFailure)
+			h.recovery = &recoveryNotice{"Cannot save task", "Your changes are retained.", "Press any key to continue."}
+
+			dismissed, end := h.beginUserInput()
+			end()
+			require.True(t, dismissed, "the input is consumed dismissing the notice")
+			require.Nil(t, h.recovery)
+			require.NotEmpty(t, h.quitSaveFailure, "and leaves the confirmation armed")
+
+			_, _ = h.handleQuit()
+			require.True(t, h.quitting, "so the next quit is the user's choice to discard and leave")
+		})
+	}
 }

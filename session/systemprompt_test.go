@@ -1,7 +1,6 @@
 package session
 
 import (
-	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -564,9 +563,7 @@ func TestInjectSystemPrompt_OpencodeExportedConfigEnvDoesNotAffectOtherAgents(t 
 func captureOpencodeInfoLog(t *testing.T) *logtest.Buffer {
 	t.Helper()
 	var buf logtest.Buffer
-	orig := log.InfoLog
-	log.InfoLog = stdlog.New(&buf, "INFO: ", 0)
-	t.Cleanup(func() { log.InfoLog = orig })
+	log.CaptureOutput(t, log.InfoLog, "INFO: ", &buf)
 	return &buf
 }
 
@@ -768,8 +765,8 @@ func TestAfUsageReference_NamesTheRemoteTabBoundaryPerKind(t *testing.T) {
 		t.Fatal("af usage still forbids every tab remotely after external web tabs became admissible")
 	}
 	for _, want := range []string{
-		"Shell, process, and VS Code tabs require a local session",
-		"web tabs work on remote sessions too",
+		"Shell and process tabs require a local session",
+		"web and VS Code tabs work on remote sessions too",
 		"shows whatever listens on that port inside the session's own workspace",
 	} {
 		if !strings.Contains(afUsageReference, want) {

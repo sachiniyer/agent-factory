@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -127,7 +128,13 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// connection settings; resolved BEFORE any remote state exists.
 	hostName, listed, err := chooseListedHost(spec.Host, cfg)
 	if err != nil {
-		return ProvisionResult{}, err
+		// An adoption reaches the host through the transport the row recorded, so a
+		// host list that has since changed does not decide where it goes (and
+		// without a listed entry no account is synced).
+		if spec.Adopt == nil {
+			return ProvisionResult{}, err
+		}
+		hostName, listed = "", nil
 	}
 	// The licence to send an account's credentials (W7.3): a host-list entry and
 	// nothing else. A repository-chosen [ssh] target never earns it.
@@ -148,25 +155,29 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	var sshCfg config.SSHConfig
 	posture := cfg.SSHHostKeyVerification
-	if listed != nil {
-		sshCfg = sshConfigForHost(*listed)
-		posture = hostPosture(*listed, cfg.SSHHostKeyVerification)
-		spec.WorkspaceRoot = listed.WorkspaceRoot
-	} else {
-		// Shared with the ListBackends RPC (#1933) — see BackendConfigError.
-		if err := BackendConfigError(BackendSSH, cfg); err != nil {
-			return ProvisionResult{}, err
+	var dialAddr string
+	var dialPort, pinPort int
+	if spec.Adopt == nil {
+		if listed != nil {
+			sshCfg = sshConfigForHost(*listed)
+			posture = hostPosture(*listed, cfg.SSHHostKeyVerification)
+			spec.WorkspaceRoot = listed.WorkspaceRoot
+		} else {
+			// Shared with the ListBackends RPC (#1933) — see BackendConfigError.
+			if err := BackendConfigError(BackendSSH, cfg); err != nil {
+				return ProvisionResult{}, err
+			}
+			// Safe to dereference: BackendConfigError rejects a missing SSH section, so it
+			// is set here (locked by TestBackendConfigError_ReportsRepoConfigRequirements).
+			sshCfg = *cfg.SSH
 		}
-		// Safe to dereference: BackendConfigError rejects a missing SSH section, so it
-		// is set here (locked by TestBackendConfigError_ReportsRepoConfigRequirements).
-		sshCfg = *cfg.SSH
-	}
-	if spec.CloneURL == "" {
-		// Shared with BackendUnusableReason (#1933) — one wording, choose time and
-		// create time.
-		return ProvisionResult{}, missingOriginError(BackendSSH, spec.RepoRoot)
-	}
+		if spec.CloneURL == "" {
+			// Shared with BackendUnusableReason (#1933) — one wording, choose time and
+			// create time.
+			return ProvisionResult{}, missingOriginError(BackendSSH, spec.RepoRoot)
+		}
 
+	}
 	// The same precondition BackendUnusableReason checks at choose time, so a host
 	// without OpenSSH fails here with the message the picker already gave rather
 	// than deep inside a provision step.
@@ -179,58 +190,79 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		return ProvisionResult{}, fmt.Errorf("backend=ssh: cannot locate the af binary to stream onto the remote: %w", err)
 	}
 
-	// ONE ssh transport. This backend used to carry its own in-process x/crypto
-	// client, and having two paths is what produced #3044 — the same address
-	// resolving differently depending on which read it. The composed command is
-	// handed to the same sandboxProvisioner `backend=sandbox` uses (#3052).
-	// Create time is where an identity typo must be refused — see
-	// verifySSHIdentityFile for why the teardown path deliberately does not.
-	if err := verifySSHIdentityFile(sshCfg); err != nil {
-		return ProvisionResult{}, err
-	}
-	// ONE resolution, here, feeding EVERY later step. Each provision command, the
-	// `ssh -L` tunnel and the reap are separate ssh invocations that would each
-	// resolve `ssh.host` independently, so a name with several addresses could put
-	// the workspace on one machine and the agent-server, tunnel or reap on another —
-	// and the reap would then remove the wrong directory, report success, and leave
-	// the real workspace leaking with nothing pointing at it (#3086). Pinning it
-	// into the composed command means all of them ride the same address, because
-	// they all ride this one string.
-	//
-	// An empty result means af could not settle on an address and this session
-	// behaves exactly as it did before the pin — see resolvePinnedSSHDialAddress.
-	pinHost, pinPort, err := resolveSSHHostPort(sshCfg.Host, sshCfg.Port)
-	if err != nil {
-		return ProvisionResult{}, err
-	}
-	if pinPort == 0 {
-		pinPort = sshDefaultPort
-	}
-	dialAddr := pinForProvision(sshCfg, pinHost, pinPort, posture)
-	dialPort := 0
-	sshCmd, err := sshCommandPinnedTo(sshCfg, posture, dialAddr, dialPort)
-	if err != nil {
-		return ProvisionResult{}, err
-	}
-	// Composition is pure; the accept-new store is created HERE, immediately
-	// before the command that appends to it runs. See prepareSSHHostKeyStore.
-	if err := prepareSSHHostKeyStore(sshCfg, posture); err != nil {
-		return ProvisionResult{}, err
-	}
-	// AND ONE ADDRESS IS NOT ONE MACHINE. Behind an L4 load balancer the pin above
-	// is satisfied by every backend, so the steps can still split (#3122). Ask the
-	// machine which address it is and re-pin to that, BEFORE anything creates remote
-	// state — so the workspace, the tunnel and the reap all ride the same host.
-	//
-	// Only when af is already pinning: an empty dialAddr means the posture cannot
-	// refuse a wrong pin (#3086), and that reasoning applies to a machine address
-	// exactly as it does to a resolved one.
-	if dialAddr != "" {
-		if machineAddr, machinePort := learnPinnedMachine(sshCmd, dialAddr, pinPort); machineAddr != "" {
-			dialAddr, dialPort = machineAddr, machinePort
-			sshCmd, err = sshCommandPinnedTo(sshCfg, posture, dialAddr, dialPort)
-			if err != nil {
+	var sshCmd string
+	if spec.Adopt != nil {
+		// Reach the host the archive recorded, not whatever the host list or the
+		// repo's [ssh] section says now: a probe of the wrong machine answering
+		// "gone" would authorise replacing real work (#5571 W8.6).
+		t := spec.Adopt.Transport
+		if t == nil || strings.TrimSpace(t.SSHCmd) == "" {
+			return ProvisionResult{}, errors.New("backend=ssh: the archived row recorded no transport to reach its preserved workspace")
+		}
+		sshCmd = t.SSHCmd
+		if t.SSH != nil {
+			sshCfg, posture, hostName = t.SSH.Config, t.SSH.HostKeyVerification, t.SSH.HostName
+		}
+		if t.Prepare != nil {
+			if err := t.Prepare(); err != nil {
 				return ProvisionResult{}, err
+			}
+		}
+	} else {
+		// ONE ssh transport. This backend used to carry its own in-process x/crypto
+		// client, and having two paths is what produced #3044 — the same address
+		// resolving differently depending on which read it. The composed command is
+		// handed to the same sandboxProvisioner `backend=sandbox` uses (#3052).
+		// Create time is where an identity typo must be refused — see
+		// verifySSHIdentityFile for why the teardown path deliberately does not.
+		if err := verifySSHIdentityFile(sshCfg); err != nil {
+			return ProvisionResult{}, err
+		}
+		// ONE resolution, here, feeding EVERY later step. Each provision command, the
+		// `ssh -L` tunnel and the reap are separate ssh invocations that would each
+		// resolve `ssh.host` independently, so a name with several addresses could put
+		// the workspace on one machine and the agent-server, tunnel or reap on another —
+		// and the reap would then remove the wrong directory, report success, and leave
+		// the real workspace leaking with nothing pointing at it (#3086). Pinning it
+		// into the composed command means all of them ride the same address, because
+		// they all ride this one string.
+		//
+		// An empty result means af could not settle on an address and this session
+		// behaves exactly as it did before the pin — see resolvePinnedSSHDialAddress.
+		pinHost, resolvedPort, err := resolveSSHHostPort(sshCfg.Host, sshCfg.Port)
+		if err != nil {
+			return ProvisionResult{}, err
+		}
+		pinPort = resolvedPort
+		if pinPort == 0 {
+			pinPort = sshDefaultPort
+		}
+		dialAddr = pinForProvision(sshCfg, pinHost, pinPort, posture)
+		dialPort = 0
+		sshCmd, err = sshCommandPinnedTo(sshCfg, posture, dialAddr, dialPort)
+		if err != nil {
+			return ProvisionResult{}, err
+		}
+		// Composition is pure; the accept-new store is created HERE, immediately
+		// before the command that appends to it runs. See prepareSSHHostKeyStore.
+		if err := prepareSSHHostKeyStore(sshCfg, posture); err != nil {
+			return ProvisionResult{}, err
+		}
+		// AND ONE ADDRESS IS NOT ONE MACHINE. Behind an L4 load balancer the pin above
+		// is satisfied by every backend, so the steps can still split (#3122). Ask the
+		// machine which address it is and re-pin to that, BEFORE anything creates remote
+		// state — so the workspace, the tunnel and the reap all ride the same host.
+		//
+		// Only when af is already pinning: an empty dialAddr means the posture cannot
+		// refuse a wrong pin (#3086), and that reasoning applies to a machine address
+		// exactly as it does to a resolved one.
+		if dialAddr != "" {
+			if machineAddr, machinePort := learnPinnedMachine(sshCmd, dialAddr, pinPort); machineAddr != "" {
+				dialAddr, dialPort = machineAddr, machinePort
+				sshCmd, err = sshCommandPinnedTo(sshCfg, posture, dialAddr, dialPort)
+				if err != nil {
+					return ProvisionResult{}, err
+				}
 			}
 		}
 	}
@@ -253,7 +285,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// Best-effort reap whatever the failed provision left behind. Preserve any
 		// cleanup failure in the returned error: no Instance exists yet to own a
 		// retry handle, so silently dropping it would hide an orphan.
-		return ProvisionResult{}, p.reapProvisionFailure(err)
+		return p.failedProvision(err)
 	}
 	res.Backend = &sshBackend{
 		// The command the sandbox's agent-server was bound to launch (#5108) —
@@ -282,6 +314,17 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	// The pin fields are written together, because which of them is safe to write
 	// depends on whether a rolled-back daemon could read it correctly (#3122).
+	if t := spec.Adopt; t != nil && t.Transport != nil && t.Transport.SSH != nil {
+		// The recorded identity IS the identity: keep its config, posture and pin
+		// exactly, and take only what this launch changed.
+		c := *t.Transport.SSH
+		sb := res.Backend.(*sshBackend)
+		c.SessionDir, c.RemotePID = sb.cleanup.SessionDir, sb.cleanup.RemotePID
+		c.RemoteAddr, c.AgentServerVersion, c.TokenRef = sb.cleanup.RemoteAddr, sb.cleanup.AgentServerVersion, sb.cleanup.TokenRef
+		c.CallbackRef, c.CallbackReverse = sb.cleanup.CallbackRef, sb.cleanup.CallbackReverse
+		sb.cleanup = &c
+		return res, nil
+	}
 	sshRecordPinnedMachine(res.Backend.(*sshBackend).cleanup, dialAddr, dialPort, pinPort)
 	return res, nil
 }

@@ -255,3 +255,25 @@ func TestUnreachableRemedyPrintsAValidCommandForACustomPort(t *testing.T) {
 	assert.Contains(t, out.String(), "-p 2222")
 	assert.NotContains(t, out.String(), "ubuntu@box.example:2222")
 }
+
+// #6096: removing the default with --clear-default is exactly ONE write to the
+// host list (clear and removal together) and never a separate default_host
+// write, so a refusal can never follow a partial mutation.
+func TestHostsRemoveClearDefault_IsASingleEditNotAClearThenARemoval(t *testing.T) {
+	var edits []config.HostsEdit
+	var sets []string
+	pe, ps, pf := hostsEditApply, hostsConfigSet, hostsRemoveClearDefault
+	t.Cleanup(func() { hostsEditApply, hostsConfigSet, hostsRemoveClearDefault = pe, ps, pf })
+	hostsEditApply = func(e config.HostsEdit) (daemon.SetConfigValueResponse, error) {
+		edits = append(edits, e)
+		return daemon.SetConfigValueResponse{}, nil
+	}
+	hostsConfigSet = func(k, v string) (daemon.SetConfigValueResponse, error) {
+		sets = append(sets, k)
+		return daemon.SetConfigValueResponse{}, nil
+	}
+	hostsRemoveClearDefault = true
+	require.NoError(t, hostsRemoveCmd.RunE(hostsRemoveCmd, []string{"box1"}))
+	require.Equal(t, []config.HostsEdit{{Op: config.HostsEditRemove, Name: "box1", ClearDefault: true}}, edits)
+	require.Empty(t, sets, "no standalone default_host write may precede a capability-gated edit")
+}

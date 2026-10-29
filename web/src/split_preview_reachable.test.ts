@@ -23,10 +23,14 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 
 register("./browser_stub_loader.mjs", import.meta.url);
-const { previewOriginReachable, PREVIEW_PROBE_MESSAGE } = (await import("./split.js")) as {
-  previewOriginReachable: (origin: string, fresh?: boolean) => Promise<boolean>;
-  PREVIEW_PROBE_MESSAGE: string;
-};
+const { previewOriginReachable, editorOriginReachable, editorOriginUnreachableMessage, PREVIEW_PROBE_MESSAGE, EDITOR_PROBE_MESSAGE } =
+  (await import("./split.js")) as {
+    previewOriginReachable: (origin: string, fresh?: boolean) => Promise<boolean>;
+    editorOriginReachable: (origin: string, fresh?: boolean) => Promise<boolean>;
+    editorOriginUnreachableMessage: (origin: string) => string;
+    PREVIEW_PROBE_MESSAGE: string;
+    EDITOR_PROBE_MESSAGE: string;
+  };
 
 /** A fake iframe the probe creates. Only the surface `previewOriginReachable`
  *  touches is implemented; `contentWindow` is a unique object so the message
@@ -49,7 +53,7 @@ interface ProbeControls {
   lastFrame: () => FakeFrame;
   /** Deliver the daemon's success postMessage for `frame`. Resolves the probe
    *  with `true` and removes its listener. */
-  deliverSuccess: (frame: FakeFrame) => void;
+  deliverSuccess: (frame: FakeFrame, data?: string) => void;
   /** Fire the probe's timeout. Resolves the probe with `false` and evicts the
    *  cache entry (the "port is now browser-unreachable" path). */
   fireTimeout: () => void;
@@ -138,9 +142,9 @@ function stubDom(t: import("node:test").TestContext): ProbeControls {
       }
       return f;
     },
-    deliverSuccess: (frame: FakeFrame) => {
+    deliverSuccess: (frame: FakeFrame, data: string = PREVIEW_PROBE_MESSAGE) => {
       for (const fn of [...listeners]) {
-        fn({ source: frame.contentWindow, data: PREVIEW_PROBE_MESSAGE });
+        fn({ source: frame.contentWindow, data });
       }
     },
     fireTimeout: () => {
@@ -314,4 +318,43 @@ test("fresh drops ONLY the named port: a cached answer for another port survives
   // A's cache entry is still live: a non-fresh call on A does NOT re-probe.
   void previewOriginReachable(a, false);
   assert.equal(dom.iframeCount(), 2, "port A's cached success survived the fresh call on B");
+});
+
+// ---------------------------------------------------------------------------
+// The W5.2 editor-port origin (#6002): the same framed probe, against the editor
+// listener's own probe page, before the pane navigates to it.
+// ---------------------------------------------------------------------------
+
+test("editor origin: the probe frames the editor listener's probe page and accepts only its message", async (t) => {
+  const dom = stubDom(t);
+  const p = editorOriginReachable("https://box.tailnet.ts.net:9301", true);
+  assert.equal(dom.lastFrame().src, "https://box.tailnet.ts.net:9301/_af/editor-probe");
+  // The preview listener's message must not prove the EDITOR port is reachable.
+  dom.deliverSuccess(dom.lastFrame(), PREVIEW_PROBE_MESSAGE);
+  dom.deliverSuccess(dom.lastFrame(), EDITOR_PROBE_MESSAGE);
+  assert.equal(await p, true);
+});
+
+test("editor origin: an unreachable port fails closed (timeout => false) and is not cached", async (t) => {
+  const dom = stubDom(t);
+  const origin = "https://box.tailnet.ts.net:9302";
+  const first = editorOriginReachable(origin, false);
+  dom.fireTimeout();
+  assert.equal(await first, false);
+  const second = editorOriginReachable(origin, false);
+  assert.equal(dom.iframeCount(), 2, "a failure is evicted so Retry re-probes");
+  dom.deliverSuccess(dom.lastFrame(), EDITOR_PROBE_MESSAGE);
+  assert.equal(await second, true);
+});
+
+test("editor origin: a malformed origin is unreachable without probing", async (t) => {
+  const dom = stubDom(t);
+  assert.equal(await editorOriginReachable("not a url"), false);
+  assert.equal(dom.iframeCount(), 0);
+});
+
+test("editor origin: the unreachable message names the port and the tailscale serve step", () => {
+  const msg = editorOriginUnreachableMessage("https://box.tailnet.ts.net:9303");
+  assert.match(msg, /port 9303/);
+  assert.match(msg, /tailscale serve/);
 });

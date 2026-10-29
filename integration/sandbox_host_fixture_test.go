@@ -93,6 +93,23 @@ func (h *sandboxHost) exec(t *testing.T, script string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// execOK runs a shell snippet inside the container under `set -e` and fails the
+// test on any nonzero exit, returning stdout only. exec above discards the exit
+// status and interleaves stderr into its result, which is right for polling but
+// wrong for fixture setup and for fingerprints: a setup step that silently failed
+// leaves the assertion built on it testing nothing (#5947).
+func (h *sandboxHost) execOK(t *testing.T, script string) string {
+	t.Helper()
+	cmd := exec.Command("docker", "exec", h.container, "sh", "-c", "set -e; "+script)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("host command failed: %v\nscript: %s\nstdout: %s\nstderr: %s", err, script, out, stderr.String())
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // waitFor polls cond until it holds or the deadline passes.
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
 	t.Helper()

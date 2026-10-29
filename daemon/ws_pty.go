@@ -218,10 +218,25 @@ func (b ordinalTabBinding) resize(rows, cols uint16) error {
 // Package-level rather than a controlServer method: it uses no controlServer
 // state, and the headless agent-server binds the exact same decision
 // (agentserver_headless.go's streamHandler) — one selection rule, two servers.
-// instance is unused now that no runtime needs a daemon-side roster to resolve
-// an id (#5571 W4.4); the parameter is kept so callers stay unchanged.
-func bindTab(as session.AgentServer, _ *session.Instance, tabID string, tab int) (ptyTabBinding, error) {
+//
+// A legacy ?tab=<idx> to an OFF-BOX session is translated, not forwarded: the
+// ordinal names a slot in the DAEMON's roster, which a reorder permutes without
+// touching the sandbox's, so forwarding it would reach a different command
+// (#5952). The ordinal is resolved against the daemon roster once, here, and the
+// connection binds the resulting stable id — after which a reorder or close
+// cannot move it, and a closed tab is a definitive tab_gone. A local session
+// keeps the positional pin: its ordinal and its tmux roster are one namespace.
+func bindTab(as session.AgentServer, instance *session.Instance, tabID string, tab int) (ptyTabBinding, error) {
 	if tabID == "" {
+		if instance != nil && instance.Capabilities().Workspace == session.WorkspaceRemote {
+			if ta, ok := as.(session.TabAddressableServer); ok {
+				id, inRoster := instance.TabIDAt(tab)
+				if !inRoster || id == "" {
+					return nil, fmt.Errorf("session %q has no tab at position %d: %w", instance.Title, tab, session.ErrTabGone)
+				}
+				return idTabBinding{as: ta, tabID: id}, nil
+			}
+		}
 		return ordinalTabBinding{as: as, tab: tab}, nil
 	}
 	ta, ok := as.(session.TabAddressableServer)
