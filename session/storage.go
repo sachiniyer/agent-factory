@@ -683,6 +683,29 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 //     carve-out for an older binary's disposable Loading/Deleting projection
 //     (#551) is reaped; durable ghosts are preserved verbatim.
 func (s *Storage) SaveInstances(instances []*Instance) error {
+	return s.saveInstances(instances, config.WithFileLock)
+}
+
+// SaveInstancesWithin is SaveInstances with a DEADLINE on every instances-flock
+// wait, shared across all repos in the call: a lock holder that never lets go
+// surfaces as config.ErrLockTimeout once budget is spent instead of parking the
+// caller. Nothing is written for a repo whose lock was not acquired — the
+// checkpoint never proceeds unlocked. Repos checkpointed before the timeout
+// stay written. Callers on a path with its own budget (the daemon's missing-file
+// restore, bounded by the poll/shutdown grace) use this form (#6048 review).
+func (s *Storage) SaveInstancesWithin(instances []*Instance, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	return s.saveInstances(instances, func(path string, fn func() error) error {
+		// A spent budget (0) is a genuinely non-blocking attempt: a free lock is
+		// never refused for being late, a held one times out at once without
+		// sleeping, so a pass over many repos cannot overrun the shared deadline.
+		return config.WithFileLockTimeout(path, max(time.Until(deadline), 0), fn)
+	})
+}
+
+// saveInstances is the checkpoint body; withLock is how each repo's instances
+// flock is taken.
+func (s *Storage) saveInstances(instances []*Instance, withLock func(path string, fn func() error) error) error {
 	// Keep the live instances grouped by their stable storage repo. Each repo is
 	// projected once to decide whether it has anything to checkpoint, then again
 	// inside its file lock so an archive that starts after collection cannot be
@@ -718,7 +741,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		if pathErr != nil {
 			return pathErr
 		}
-		if err := config.WithFileLock(path, func() error {
+		if err := withLock(path, func() error {
 			checkpoint := snapshotInstancesForCheckpoint(repoInstances)
 			if !checkpoint.shouldWrite() {
 				return nil
@@ -760,7 +783,82 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 				reconcilePendingArchiveRows(group, checkpoint.inFlightArchive, onDisk)
 				group = mergeCommittedArchiveRows(group, onDisk, checkpoint.prePushArchive)
 			}
-			ghosts := preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles)
+			// A same-titled on-disk row whose stable ID differs from the
+			// in-memory instance is a replacement the daemon has not observed:
+			// refreshDaemonInstances keeps the old in-memory pointer by title
+			// even when the disk row's ID differs, so the checkpoint would write
+			// the stale instance and clobber the replacement's identity — the
+			// data-loss class persistInstanceData's title+ID guard exists to
+			// prevent. Drop the stale in-memory row and let the on-disk
+			// replacement survive the wholesale rewrite verbatim (retained below
+			// outside the ghost reaper). An empty ID on either side is a legacy record and still
+			// matches, mirroring stableIDMatchesForDaemon (#6048 review).
+			//
+			// Duplicate disk titles are resolved FIRST, newest UpdatedAt wins (ties
+			// keep the earliest), the same rule dedupeInstanceData applies: only
+			// that authoritative row is compared with the live instance, so an older
+			// stale duplicate cannot supersede a current row matching it.
+			authoritative := make(map[string]int)
+			for i, d := range onDisk {
+				if prev, ok := authoritative[d.Title]; !ok || d.UpdatedAt.After(onDisk[prev].UpdatedAt) {
+					authoritative[d.Title] = i
+				}
+			}
+			replaced := make(map[string]struct{})
+			replacedID := make(map[string]string)
+			for i := range group {
+				if idx, ok := authoritative[group[i].Title]; ok && !stableIDMatches(onDisk[idx].ID, group[i].ID) {
+					replaced[group[i].Title] = struct{}{}
+					replacedID[group[i].Title] = group[i].ID
+				}
+			}
+			var replacements []json.RawMessage
+			if len(replaced) > 0 {
+				// The conflicting on-disk row is retained UNCONDITIONALLY and
+				// verbatim: handing it to preserveUnmaterializedGhostRows would let
+				// that helper reap it as a disposable legacy transient when it is a
+				// Loading/Deleting row with no retention marker, and with the stale
+				// in-memory row already dropped the checkpoint would then lose both
+				// records and orphan the replacement session (#6048 review).
+				best := make(map[string]int)
+				restDisk := make([]InstanceData, 0, len(onDisk))
+				restRaw := make([]json.RawMessage, 0, len(onDisk))
+				for i, d := range onDisk {
+					if _, isReplaced := replaced[d.Title]; !isReplaced {
+						restDisk = append(restDisk, d)
+						if i < len(onDiskRaw) {
+							restRaw = append(restRaw, onDiskRaw[i])
+						}
+						continue
+					}
+					if i != authoritative[d.Title] {
+						continue // an older duplicate of the replacement: superseded
+					}
+					best[d.Title] = i
+				}
+				for _, i := range best {
+					raw := json.RawMessage(nil)
+					if i < len(onDiskRaw) {
+						raw = onDiskRaw[i]
+					} else {
+						raw, _ = json.Marshal(onDisk[i])
+					}
+					replacements = append(replacements, stripRemovedInstanceDataWireKeys(raw))
+				}
+				onDisk, onDiskRaw = restDisk, restRaw
+				kept := make([]InstanceData, 0, len(group))
+				for _, g := range group {
+					if _, drop := replaced[g.Title]; drop {
+						continue
+					}
+					kept = append(kept, g)
+				}
+				group = kept
+				for title := range replaced {
+					delete(inMemoryTitles, title)
+				}
+			}
+			ghosts := append(preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles), replacements...)
 			jsonData, err := marshalCheckpointInstances(group, ghosts)
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)

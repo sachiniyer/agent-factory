@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -903,24 +902,92 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	}
 	refreshRowOutcomes.prune(allInstances)
 
-	// Preserve in-memory instances whose repo directory vanished from disk
-	// entirely (#736). LoadAllRepoInstances only returns repos that still have
-	// an on-disk instances directory, so an externally-deleted repo dir is
-	// simply absent from allInstances and would otherwise be dropped from
-	// `next`. This is a recoverable disk inconsistency — SaveInstances recreates
-	// missing repo directories — so we re-hydrate the prior instances and log
-	// loudly rather than silently abandoning running sessions. This
-	// parallels the corrupted-JSON handling above, which also re-hydrates from
-	// `existing`. On startup (existing == nil) there is nothing to preserve.
+	// Preserve in-memory instances whose repo storage vanished from disk (#736):
+	// either the repo's instances directory was deleted entirely OR the repo's
+	// instances.json file was deleted while its directory remains. A deleted
+	// directory makes the repo simply absent from allInstances, while a deleted
+	// FILE is still reported by the loader as present-but-empty ("[]") with
+	// Missing[repoID]=true — so the empty branch above calls continue without
+	// touching `existing` either way, and `next` would otherwise drop the repo's
+	// live in-memory sessions. The mid-life write path opens up a second arm: when
+	// a preserved session next performs any targeted write, UpdateRepoInstances
+	// reads the still-missing file as "[]" and unconditionally saves that result
+	// back, so the file reappears on disk as a real empty "[]" even though
+	// persistence returned "not found". On the following poll Missing[repoID] is
+	// false and the repo is present in allInstances, so without provenance the
+	// guard would skip preservation and drop every formerly preserved live session
+	// again — preserving only until the next write. To keep the protection alive
+	// after the file is recreated WITHOUT also preserving a repo that was
+	// LEGITIMATELY emptied (another process killed the last session, or an
+	// administrator replaced the roster with "[]"), a present-but-empty file is
+	// preserved only when the daemon previously OBSERVED it as missing
+	// (preservedMissingFileRepos). A genuinely empty file the daemon never saw
+	// vanish is the authoritative state, so its stale in-memory sessions are
+	// dropped rather than held forever. A present repo that carries REAL rows is
+	// left to the normal load path (an external rewrite that replaces the rows is
+	// observed, not papered over) and clears any stale provenance so a later
+	// legitimate emptying is not over-preserved. Both the missing-directory and
+	// missing-file cases are recoverable disk inconsistencies — SaveInstances
+	// recreates missing repo directories and files — so we re-hydrate the prior
+	// instances and log loudly rather than silently abandoning running sessions.
+	// This parallels the corrupted-JSON handling above, which also re-hydrates
+	// from `existing`, and keeps the repo's in-flight task runs counted against
+	// max_concurrent_runs via the preserved instance itself (#1892). On startup
+	// (existing == nil) there is nothing to preserve.
 	if existing != nil {
 		warnedRepos := make(map[string]bool)
+		preservedMissingFileRepos.mu.Lock()
+		// Record which repos we OBSERVED as missing this poll, so a file that is
+		// later recreated as an empty "[]" by a preserved session's targeted
+		// write stays protected on the next tick via provenance rather than by
+		// treating every present empty file as data loss.
+		for key := range existing {
+			repoID, _ := splitDaemonInstanceKey(key)
+			if missing[repoID] {
+				preservedMissingFileRepos.oweLocked(repoID, key)
+			}
+		}
+		// Drop provenance for repos whose records are all back on disk, so a later
+		// legitimate emptying is not over-preserved. Real rows alone are not
+		// enough: the restore checkpoint omits in-flight rows (a Deleting or
+		// pre-push archive), which stay protected until their record lands.
+		for repoID := range preservedMissingFileRepos.repos {
+			if raw, ok := allInstances[repoID]; ok && !missing[repoID] && !(raw == nil || string(raw) == "[]" || string(raw) == "null") && preservedMissingFileRepos.landedLocked(repoID, existing, next) {
+				preservedMissingFileRepos.forgetLocked(repoID)
+			}
+		}
+		// Snapshot the owed identities under the lock so the preserve loop reads
+		// a stable view.
+		owedKeys := preservedMissingFileRepos.owedSnapshotLocked()
+		preservedMissingFileRepos.mu.Unlock()
 		for key, inst := range existing {
 			repoID, _ := splitDaemonInstanceKey(key)
-			if _, ok := allInstances[repoID]; ok {
-				continue
+			raw, ok := allInstances[repoID]
+			// Skip preservation only when the repo is present, NOT missing, AND
+			// either carries real rows on disk or was never observed missing
+			// while empty. Absent (deleted directory) and flagged missing
+			// (deleted file) are recoverable disk inconsistencies we re-hydrate
+			// from `existing`. A present-but-empty file is preserved only with
+			// provenance (it was observed missing then recreated empty by a
+			// preserved session's targeted write); a present-but-empty file the
+			// daemon never saw vanish is the authoritative state and its stale
+			// in-memory sessions are dropped.
+			if ok && !missing[repoID] {
+				if raw == nil || string(raw) == "[]" || string(raw) == "null" {
+					if !owedKeys[key] {
+						continue
+					}
+					// Present-but-empty AND previously observed missing: keep
+					// protecting the recreated-empty file.
+				} else if !owedKeys[key] || next[key] != nil {
+					// Real rows: normal load path. Under provenance, an
+					// existing session whose record never landed (omitted by
+					// the restore checkpoint) is still preserved.
+					continue
+				}
 			}
 			if !warnedRepos[repoID] && !unreadableRepos[repoID] {
-				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory: %s", repoID)
+				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory or missing/empty instances.json: %s", repoID)
 				warnedRepos[repoID] = true
 			}
 			next[key] = inst
@@ -928,34 +995,4 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	}
 
 	return next, ghostTaskRuns, skipped, reread, nil
-}
-
-func daemonInstanceKey(repoID, title string) string {
-	return repoID + "\x00" + title
-}
-
-// splitDaemonInstanceKey is the inverse of daemonInstanceKey: it splits a
-// "<repoID>\x00<title>" key back into (repoID, title). A key with no NUL
-// separator (unexpected) is returned as ("", key).
-func splitDaemonInstanceKey(key string) (string, string) {
-	for i := 0; i < len(key); i++ {
-		if key[i] == 0 {
-			return key[:i], key[i+1:]
-		}
-	}
-	return "", key
-}
-
-func daemonInstances(instanceMap map[string]*session.Instance) []*session.Instance {
-	keys := make([]string, 0, len(instanceMap))
-	for key := range instanceMap {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	instances := make([]*session.Instance, 0, len(keys))
-	for _, key := range keys {
-		instances = append(instances, instanceMap[key])
-	}
-	return instances
 }
