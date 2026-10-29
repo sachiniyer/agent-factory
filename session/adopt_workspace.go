@@ -172,6 +172,12 @@ func (p *sandboxProvisioner) abandonAdoption(cause error) error {
 	return fmt.Errorf("%w (the preserved workspace at %s was not touched)", cause, p.sessionDir)
 }
 
+// OwesPreservedWorkspace reports whether this row holds an unpushed preserved
+// workspace. The automatic Lost-restore loop leaves such a row alone: a failed
+// explicit restore of it is the operator's to retry, not something to re-probe on
+// a timer.
+func (i *Instance) OwesPreservedWorkspace() bool { return i.preservedWorkspaceOwed() != nil }
+
 // preservedWorkspaceOwed reports whether this row holds an unpushed preserved
 // workspace that a restore must reattach rather than replace.
 func (i *Instance) preservedWorkspaceOwed() *ArchivedWorkspaceData {
@@ -228,7 +234,7 @@ func (i *Instance) restorePreservedWorkspaceWith(w *ArchivedWorkspaceData, repro
 	// Proven gone: there is no work left to protect, so the ordinary path may
 	// replace it. It pins the recorded branch, so it restores that branch or fails.
 	if strings.TrimSpace(i.Branch) == "" {
-		return nil, fmt.Errorf("cannot restore session %q: its preserved workspace is gone and no branch was recorded to restore from: %w", i.Title, err)
+		return nil, fmt.Errorf("cannot restore session %q: its preserved workspace is gone and no branch was recorded to restore from; nothing was changed. The work existed only in that workspace; to start over under this name, remove the row (af sessions kill %q) and create a new session: %w", i.Title, i.Title, err)
 	}
 	log.WarningLog.Printf("restore of %q: the preserved workspace %s is gone from its host; re-provisioning onto branch %q", i.Title, w.Dir, i.Branch)
 	if err := reprovision(nil); err != nil {
@@ -259,7 +265,9 @@ func (i *Instance) rollbackAdoption(w *ArchivedWorkspaceData) {
 	i.agentSrv = nil
 	i.remoteClient = nil
 	i.archivedWorkspace = cloneArchivedWorkspace(w)
-	i.started = false
+	// started is left exactly as the restore fence set it: AbortRestoreToLost does
+	// not restore it, and both a manual and an automatic recovery refuse a row that
+	// is not started, which would strand the preserved workspace with no retry.
 	i.touchLocked()
 	i.mu.Unlock()
 }
@@ -289,6 +297,19 @@ func (i *Instance) AdoptExistingWorktree(worktreePath string) error {
 // the program, flags and resume rewrite are the ones every other relaunch uses,
 // and it creates nothing: no worktree, no hook.
 func (i *Instance) LaunchAdopted(conv *AgentConversationData) error {
+	b, ok := i.currentBackend().(*LocalBackend)
+	if !ok {
+		return fmt.Errorf("adopted launch: session %q has no local runtime", i.Title)
+	}
+	return i.launchAdoptedWith(conv, func() error { return b.Respawn(i) })
+}
+
+// launchAdoptedWith is LaunchAdopted with the respawn injected. The agent-server
+// built this instance fresh, so nothing has marked it started: a respawn does not
+// (it assumes a started instance), and an unstarted instance refuses every prompt
+// ("instance not started") even with its agent running. A launch that came up
+// marks it started, exactly as a first-time launch does.
+func (i *Instance) launchAdoptedWith(conv *AgentConversationData, respawn func() error) error {
 	if conv != nil && conv.HasID() {
 		if ConversationResumableHere(i.Program, i.GetWorktreePath(), *conv) {
 			i.SetResumeConversation(*conv)
@@ -296,45 +317,26 @@ func (i *Instance) LaunchAdopted(conv *AgentConversationData) error {
 			log.InfoLog.Printf("adopted launch: conversation %s is not in this host's %s store; resuming the latest instead", conv.ID, conv.Agent)
 		}
 	}
-	b, ok := i.currentBackend().(*LocalBackend)
-	if !ok {
-		return fmt.Errorf("adopted launch: session %q has no local runtime", i.Title)
-	}
-	return b.Respawn(i)
-}
-
-// adoptReadyTimeout bounds how long an adopting launch waits for the new
-// agent-server to answer through its tunnel; a var so a test can shorten it.
-var adoptReadyTimeout = 20 * time.Second
-
-// waitAdoptedServerReady polls the agent-server's health through the forward
-// until it answers with the session's token. It is the readiness gate between
-// "the tunnel is up" and the first agent RPC.
-func waitAdoptedServerReady(localAddr, token, title string) error {
-	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: "http://" + localAddr, Token: token}, title)
-	if err != nil {
+	if err := respawn(); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(adoptReadyTimeout)
-	for {
-		_, err := rc.health()
-		if err == nil {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("the reattached agent-server did not answer through its tunnel within %s: %w", adoptReadyTimeout, err)
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
+	i.mu.Lock()
+	i.markStartedLocked(true)
+	i.mu.Unlock()
+	return nil
 }
 
-// adoptedTransportOr is the ssh invocation a provision uses: the archived row's
-// recorded one when adopting, else the one the current configuration yields.
-func adoptedTransportOr(spec ProvisionSpec, current string) string {
-	if spec.Adopt != nil && spec.Adopt.Transport != nil {
-		return strings.TrimSpace(spec.Adopt.Transport.SSHCmd)
+// markStartedLocked is the one place a successful launch — first-time, restore or
+// adopted — marks the instance started, so no launch path can forget it. touch
+// bumps the update stamp when the flag changed. The caller holds i.mu.
+func (i *Instance) markStartedLocked(touch bool) {
+	if i.started {
+		return
 	}
-	return current
+	i.started = true
+	if touch {
+		i.touchLocked()
+	}
 }
 
 // beginAdoption is provision()'s first step when adopting: the session dir is the
@@ -370,4 +372,38 @@ func (p *sandboxProvisioner) awaitAdoptedServer(localAddr, token string) error {
 		return p.sandboxErr(err)
 	}
 	return nil
+}
+
+// adoptReadyTimeout bounds how long an adopting launch waits for the new
+// agent-server to answer through its tunnel; a var so a test can shorten it.
+var adoptReadyTimeout = 20 * time.Second
+
+// waitAdoptedServerReady polls the agent-server's health through the forward
+// until it answers with the session's token. It is the readiness gate between
+// "the tunnel is up" and the first agent RPC.
+func waitAdoptedServerReady(localAddr, token, title string) error {
+	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: "http://" + localAddr, Token: token}, title)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(adoptReadyTimeout)
+	for {
+		_, err := rc.health()
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the reattached agent-server did not answer through its tunnel within %s: %w", adoptReadyTimeout, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// adoptedTransportOr is the ssh invocation a provision uses: the archived row's
+// recorded one when adopting, else the one the current configuration yields.
+func adoptedTransportOr(spec ProvisionSpec, current string) string {
+	if spec.Adopt != nil && spec.Adopt.Transport != nil {
+		return strings.TrimSpace(spec.Adopt.Transport.SSHCmd)
+	}
+	return current
 }

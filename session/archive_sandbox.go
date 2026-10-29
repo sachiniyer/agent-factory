@@ -199,11 +199,18 @@ func recoverSandbox(i *Instance) error {
 // whose archive kept its workspace reattaches it (W8.6) and launches the agent
 // with its recorded conversation; any other row gets a fresh sandbox.
 func restoreSandboxRuntime(i *Instance, confirmLive bool) error {
-	adopted, err := i.provisionForRestore()
+	return restoreSandboxRuntimeWith(i, confirmLive, i.provisionForRestore, i.Start)
+}
+
+// restoreSandboxRuntimeWith is restoreSandboxRuntime with the provisioning and the
+// launch injected, so the retry behaviour of a failed adopted launch is testable
+// without a host.
+func restoreSandboxRuntimeWith(i *Instance, confirmLive bool, provision func() (*ArchivedWorkspaceData, error), start func(firstTimeSetup bool) error) error {
+	adopted, err := provision()
 	if err != nil {
 		return err
 	}
-	if err := i.Start(adopted == nil); err != nil {
+	if err := start(adopted == nil); err != nil {
 		if adopted != nil {
 			// The workspace is the archive's, not this attempt's: keep it. Reaping
 			// here is what a fresh sandbox's failed start gets, and would delete
@@ -916,7 +923,7 @@ func (i *Instance) settleRestoreCheckpoint(spec *ProvisionSpec, restoreBranch st
 	case verdict:
 		i.markBranchPushed()
 	case replacePreserved:
-		return fmt.Errorf("cannot restore session %q: its preserved workspace is gone from its host and its branch %q is not on origin, so there is nothing to restore it from; nothing was changed", i.Title, restoreBranch)
+		return fmt.Errorf("cannot restore session %q: its preserved workspace is gone from its host and its branch %q is not on origin, so there is nothing to restore it from; nothing was changed. The work existed only in that workspace; to start over under this name, remove the row (af sessions kill %q) and create a new session", i.Title, restoreBranch, i.Title)
 	default:
 		restoreBranch = ""
 	}

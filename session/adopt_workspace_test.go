@@ -454,6 +454,9 @@ func TestSettleRestoreCheckpoint(t *testing.T) {
 		err := newRow().settleRestoreCheckpoint(s, "af/b", true, false, true)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "nothing to restore it from")
+		assert.Contains(t, err.Error(), "nothing was changed. The work existed only in that workspace")
+		assert.Contains(t, err.Error(), `af sessions kill "t"`, "the refusal says how to start over")
+		assert.Contains(t, err.Error(), "create a new session")
 		assert.Equal(t, "af/b", s.RestoreBranch, "the spec is untouched on a refusal")
 	})
 	t.Run("an origin that cannot be asked refuses in every mode", func(t *testing.T) {
@@ -481,4 +484,83 @@ func TestRefusedReplacementKeepsThePreservedRecord(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.NotNil(t, inst.ArchivedWorkspace())
+}
+
+func TestOwesPreservedWorkspace(t *testing.T) {
+	assert.False(t, (&Instance{}).OwesPreservedWorkspace())
+	assert.False(t, (&Instance{archivedWorkspace: &ArchivedWorkspaceData{Pushed: true, Branch: "b"}}).OwesPreservedWorkspace())
+	assert.True(t, (&Instance{archivedWorkspace: &ArchivedWorkspaceData{Dir: "/d"}}).OwesPreservedWorkspace())
+}
+
+func TestNoBranchRefusalIsActionable(t *testing.T) {
+	backend, teardown, err := restoreRuntimeCleanup("t", "sandbox", &RuntimeCleanupData{Sandbox: &SandboxRuntimeCleanupData{
+		SSHCommand: "ssh recorded-host", SessionDir: "/d",
+	}})
+	require.NoError(t, err)
+	inst := &Instance{Title: "t", backend: backend, runtimeTeardown: teardown, archivedWorkspace: &ArchivedWorkspaceData{Dir: "/d"}}
+	_, err = inst.restorePreservedWorkspaceWith(inst.ArchivedWorkspace(), func(a *AdoptSpec) error { return ErrPreservedWorkspaceGone })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `af sessions kill "t"`)
+	assert.NotNil(t, inst.ArchivedWorkspace())
+}
+
+// The e2e regression of #5947: the in-sandbox instance is built fresh, a respawn
+// does not mark it started, and every prompt then failed "instance not started"
+// although the agent was running.
+func TestLaunchAdoptedMarksTheInstanceStarted(t *testing.T) {
+	inst := &Instance{Title: "t"}
+	require.False(t, inst.started, "premise: a fresh in-sandbox instance is not started")
+
+	require.Error(t, inst.launchAdoptedWith(nil, func() error { return errors.New("tmux failed") }))
+	assert.False(t, inst.started, "a failed launch must not claim the instance started")
+
+	require.NoError(t, inst.launchAdoptedWith(nil, func() error { return nil }))
+	assert.True(t, inst.started, "a launch that came up is a started instance, so prompts reach it")
+}
+
+// #5947 review: a failed adopted launch leaves the preserved record and the row's
+// restore eligibility exactly as before the attempt (the restore fence has set
+// started, and AbortRestoreToLost does not restore it), so a retry reaches the same
+// decision and can succeed.
+func TestFailedAdoptedLaunchThenRetrySucceeds(t *testing.T) {
+	backend, teardown, err := restoreRuntimeCleanup("t", "sandbox", &RuntimeCleanupData{Sandbox: &SandboxRuntimeCleanupData{
+		SSHCommand: "ssh recorded-host", SessionDir: "/d",
+	}})
+	require.NoError(t, err)
+	w := &ArchivedWorkspaceData{Host: "box", Dir: "/d"}
+	// BeginRestore leaves the row started and Lost; that is the state a retry needs.
+	inst := &Instance{Title: "t", Branch: "b", backend: backend, runtimeTeardown: teardown, started: true,
+		archivedWorkspace: cloneArchivedWorkspace(w)}
+
+	var provisioned, launches int
+	provision := func() (*ArchivedWorkspaceData, error) { provisioned++; return inst.ArchivedWorkspace(), nil }
+
+	err = restoreSandboxRuntimeWith(inst, false, provision, func(bool) error { launches++; return errors.New("agent did not start") })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "left as archived")
+	assert.True(t, inst.started, "a failed launch must not strip the eligibility a retry needs")
+	assert.Equal(t, w, inst.ArchivedWorkspace(), "the preserved record is exactly as before the attempt")
+	assert.Nil(t, inst.remoteClient)
+
+	var firstTime []bool
+	err = restoreSandboxRuntimeWith(inst, false, provision, func(first bool) error { firstTime = append(firstTime, first); return nil })
+	require.NoError(t, err)
+	assert.Equal(t, []bool{false}, firstTime, "the retry reattaches (not a first-time setup) and succeeds")
+	assert.Equal(t, 2, provisioned, "the retry reached the same adopt decision")
+	assert.Nil(t, inst.ArchivedWorkspace(), "a launched restore no longer owes the preserved workspace")
+	assert.True(t, inst.started)
+}
+
+// One shared path marks every successful launch started.
+func TestMarkStartedLockedIsTheOnePath(t *testing.T) {
+	inst := &Instance{}
+	inst.mu.Lock()
+	inst.markStartedLocked(false)
+	inst.mu.Unlock()
+	assert.True(t, inst.started)
+	before := inst.UpdatedAt
+	inst.mu.Lock()
+	inst.markStartedLocked(true) // already started: no change, no touch
+	inst.mu.Unlock()
+	assert.Equal(t, before, inst.UpdatedAt)
 }
