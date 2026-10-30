@@ -280,15 +280,18 @@ func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 	if !rs.hasFeatureCached(tabAPIFeature) {
 		return false
 	}
+	// Tabs a restart left unknown are retried before the roster is read, so a
+	// rebind this call achieves is what the sweep sees (#6235).
+	restoreChanged := i.retryUnknownTabRestores(rs)
 	roster, err := rs.rc.tabs()
 	if err != nil {
-		return false
+		return restoreChanged
 	}
 	byID := make(map[string]TabData, len(roster))
 	for _, td := range roster {
 		byID[td.ID] = td
 	}
-	changed = i.retryPendingRemoteClose(rs, byID)
+	changed = i.retryPendingRemoteClose(rs, byID) || restoreChanged
 	for _, id := range i.retireLostOffBoxTabs(rows, byID) {
 		// End the stream outside i.mu: a subscriber must see it end, not block on
 		// an id the new sandbox will never serve.

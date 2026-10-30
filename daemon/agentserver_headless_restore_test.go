@@ -73,3 +73,30 @@ func TestLaunchRebindsSurvivingTabsOnTheOrdinaryRestartPathToo(t *testing.T) {
 		t.Fatalf("a launch that is not a restart adoption must not rebind (err=%v calls=%d)", err, len(got))
 	}
 }
+
+// The retry route rebinds on a running server, outside any launch (#6235), and is
+// advertised under its own token so a driver never calls it on a server without it.
+func TestRestoreTabsRouteRebindsWithoutALaunch(t *testing.T) {
+	if !slices.Contains(agentServerWireFeatures, "tab-restore-retry") {
+		t.Fatalf("features %v must advertise tab-restore-retry", agentServerWireFeatures)
+	}
+	orig := restoreSurvivingTabs
+	t.Cleanup(func() { restoreSurvivingTabs = orig })
+	calls := 0
+	restoreSurvivingTabs = func(_ *session.Instance, rows []session.TabData) session.TabRestoreReport {
+		calls++
+		return session.TabRestoreReport{Restored: []string{rows[0].ID}}
+	}
+	stub := &launchStub{}
+	hs := &headlessServer{as: stub, inst: &session.Instance{}}
+	var resp agentOKResponse
+	if err := hs.RestoreTabs(agentLifecycleRequest{Tabs: []session.TabData{{ID: "t1", TmuxName: "a"}}}, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(resp.TabsRestored) != 1 || stub.launched != 0 {
+		t.Fatalf("retry must rebind once and never launch: calls=%d launched=%d resp=%+v", calls, stub.launched, resp)
+	}
+	if err := (&headlessServer{as: stub}).RestoreTabs(agentLifecycleRequest{}, &agentOKResponse{}); err == nil {
+		t.Fatal("a server with no workspace must refuse, not claim success")
+	}
+}
