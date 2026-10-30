@@ -142,20 +142,49 @@ func (i *Instance) noteAttentionLivenessLocked() {
 			i.attention.IdleSince = instanceNow().UTC()
 		}
 	case LiveRunning:
-		if !i.attention.SeenIdle {
-			return
-		}
-		since := i.attention.IdleSince
-		if since.IsZero() || instanceNow().Sub(since) >= attentionAnswerIdle {
+		if i.attentionAnsweredByWorkLocked() {
 			i.attention = nil
-			return
 		}
-		i.attention.SeenIdle = false
-		i.attention.IdleSince = time.Time{}
 	case LivenessUnset:
 	default:
 		i.attention = nil
 	}
+}
+
+// attentionAnsweredByWorkLocked applies the rule for work seen after the agent
+// asked: the request counts as answered only when the agent went idle first and
+// stayed idle for attentionAnswerIdle. A shorter still spell is the agent
+// pausing inside its own turn, so it only resets the idle record. It reports
+// whether the request is answered; the caller clears it. Caller holds i.mu for
+// writing and has checked i.attention is set.
+func (i *Instance) attentionAnsweredByWorkLocked() bool {
+	if !i.attention.SeenIdle {
+		return false
+	}
+	since := i.attention.IdleSince
+	if since.IsZero() || instanceNow().Sub(since) >= attentionAnswerIdle {
+		return true
+	}
+	i.attention.SeenIdle = false
+	i.attention.IdleSince = time.Time{}
+	return false
+}
+
+// AttentionAnsweredByWork reports the agent's own evidence of work (it shows its
+// in-turn indicator, not merely a repainted pane) against the open request, and
+// returns the SetAt of the request that work answers, for a keyed clear. It does
+// not clear: the caller persists and publishes the clear like any other.
+func (i *Instance) AttentionAnsweredByWork() (time.Time, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.attention == nil {
+		return time.Time{}, false
+	}
+	if i.attentionAnsweredByWorkLocked() {
+		return i.attention.SetAt, true
+	}
+	i.touchLocked()
+	return time.Time{}, false
 }
 
 // dropAttentionIfStoppedLocked removes a request on a session that is not

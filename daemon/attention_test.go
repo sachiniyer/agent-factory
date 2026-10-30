@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 func TestIsTypedInputIgnoresTerminalReplies(t *testing.T) {
@@ -133,4 +135,54 @@ func TestSubmitDetectorFollowsAPasteAcrossFrames(t *testing.T) {
 			t.Errorf("%s: %q -> %v, want %v", name, tc.in, got, tc.want)
 		}
 	}
+}
+
+func fixturePane(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile("../task/testdata/" + name)
+	require.NoError(t, err)
+	return string(raw)
+}
+
+// The end-to-end shape of the rule, on real Claude Code captures. A session that
+// asked for the user sits idle; the user types a draft, which repaints the
+// composer. The poll reads that as churn and moves the session to Running, but
+// the request must survive it: only Claude's own in-turn indicator answers it.
+func TestAttentionSurvivesTypingADraftIntoClaudesComposer(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, "asker", "af_attention_draft")
+	require.Equal(t, "claude", inst.ResolvedAgent(), "premise: the session runs Claude")
+
+	var pending []func()
+	prev := runAttentionClear
+	runAttentionClear = func(clear func()) { pending = append(pending, clear) }
+	t.Cleanup(func() { runAttentionClear = prev })
+
+	// Waiting at Ready when it asks: the next Running edge would be its answer.
+	inst.SetStatusForTest(session.Ready)
+	_, err = inst.SetAttention("pick A or B", time.Unix(100, 0))
+	require.NoError(t, err)
+	require.True(t, inst.Attention().SeenIdle, "premise: the old churn rule would clear on the next edge")
+
+	settle := func(frame string) {
+		_, epoch := inst.InFlightOpAndEpoch()
+		manager.settleChurnedLiveness(inst, true, frame, epoch)
+	}
+
+	settle(fixturePane(t, "claude_idle_draft.ansi"))
+	require.Equal(t, session.LiveRunning, inst.GetLiveness(), "the typed draft churns the pane, so the poll reads Running")
+	require.True(t, inst.HasAttention(), "typing a draft must not answer the request")
+	require.Empty(t, pending, "and nothing is queued to clear it")
+
+	// Control: Claude actually working on a turn is the answer.
+	inst.SetStatusForTest(session.Ready)
+	settle(fixturePane(t, "claude_working_tool.ansi"))
+	require.Len(t, pending, 1, "the agent's own indicator queues the keyed clear")
+	pending[0]()
+	require.False(t, inst.HasAttention())
 }
