@@ -53,7 +53,12 @@ func Dir() (string, error) {
 	return filepath.Join(home, DirName), nil
 }
 
-// ReadingPath returns $AF_HOME/plan/<account>.json.
+// ReadingsDirName is where account readings live, under $AF_HOME/plan: a
+// directory of their own, so no account name (agentaccount.ValidateName accepts
+// "meter") can name the shared meter state file next to it (Codex P2 on #6299).
+const ReadingsDirName = "readings"
+
+// ReadingPath returns $AF_HOME/plan/readings/<account>.json.
 func ReadingPath(account string) (string, error) {
 	if account != DefaultAccount {
 		if err := agentaccount.ValidateName(account); err != nil {
@@ -64,7 +69,7 @@ func ReadingPath(account string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, account+".json"), nil
+	return filepath.Join(dir, ReadingsDirName, account+".json"), nil
 }
 
 // WriteReading stores r as the account's newest reading.

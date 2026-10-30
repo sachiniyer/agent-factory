@@ -162,7 +162,8 @@ func TestDroppedNeverArchives(t *testing.T) {
 
 func TestBacklogArchiveGuard(t *testing.T) {
 	_, _, inst := startedItem(t)
-	guard := backlogArchiveGuard(inst.ID)
+	var fenced *session.Instance
+	guard := backlogArchiveGuard(inst.ID, func(cur *session.Instance) { fenced = cur })
 	if guard(inst) == nil {
 		t.Fatal("guard passed mid-run")
 	}
@@ -170,12 +171,25 @@ func TestBacklogArchiveGuard(t *testing.T) {
 	if err := guard(inst); err != nil {
 		t.Fatalf("idle session refused: %v", err)
 	}
-	if backlogArchiveGuard("other")(inst) == nil {
+	// The fence is shut while the archive runs (Codex P2 on #6294): input that
+	// arrives after the check is refused instead of starting work the archive
+	// interrupts. The caller reopens it when the archive is over.
+	if fenced != inst {
+		t.Fatal("the guard did not report the instance it fenced")
+	}
+	if err := inst.NoteAdoptionDelivery(); err == nil {
+		t.Fatal("a delivery was accepted after the guard passed")
+	}
+	inst.ReopenAdoptionFence()
+	if backlogArchiveGuard("other", func(*session.Instance) {})(inst) == nil {
 		t.Fatal("guard passed for another session")
 	}
 	inst.ArmBacklogRun(time.Now())
 	if guard(inst) == nil {
 		t.Fatal("guard passed with a new run")
+	}
+	if err := inst.NoteAdoptionDelivery(); err != nil {
+		t.Fatalf("a refusal must reopen the fence: %v", err)
 	}
 }
 

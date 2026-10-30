@@ -165,7 +165,15 @@ func (b *Backlog) AnswerFailed(id, answerID int, reason string, now time.Time) e
 	}
 	prev := m.PrevStatus
 	m.Delivery = DeliveryFailed
-	if it.Status == StatusRunning && prev.Valid() && prev != StatusRunning && CheckStatusChange(StatusChange{ID: id,
+	// A newer answer that is pending or was delivered is work the item is
+	// running for: the status this answer replaced must not come back over it.
+	newerWork := false
+	for _, x := range it.Thread {
+		if x.Kind == KindAnswer && x.ID > answerID && (x.Delivery == DeliveryPending || x.Delivery == DeliveryDelivered) {
+			newerWork = true
+		}
+	}
+	if !newerWork && it.Status == StatusRunning && prev.Valid() && prev != StatusRunning && CheckStatusChange(StatusChange{ID: id,
 		From: it.Status, To: prev, By: ActorAF, StartFailed: true, PrevStatus: prev}) == nil {
 		it.Status = prev
 	}

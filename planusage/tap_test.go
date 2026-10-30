@@ -205,3 +205,34 @@ func TestTapRecordsNothingWhenPlanUsageIsOff(t *testing.T) {
 }
 
 func agentaccountNameValid(name string) bool { return agentaccount.ValidateName(name) == nil }
+
+// An account named "meter" is legal; its readings must not share a path with the
+// meter state file (Codex P2 on #6299).
+func TestAReadingNeverSharesAPathWithTheMeterState(t *testing.T) {
+	home(t)
+	reading, err := ReadingPath("meter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meter, err := MeterPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading == meter {
+		t.Fatalf("an account named meter writes its reading to the meter state file: %s", reading)
+	}
+	if err := WriteReading("meter", Reading{FiveHour: &Limit{UsedPercentage: 5, ResetsAt: 1}, ReadAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	st := NewMeterState()
+	st.RememberRunDirs("s1", []string{"/a"})
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := LoadReading("meter"); err != nil || r == nil || r.FiveHour == nil {
+		t.Fatalf("saving the meter state clobbered the account's reading: %+v %v", r, err)
+	}
+	if loaded, err := LoadMeter(); err != nil || len(loaded.RunDirs["s1"]) != 1 {
+		t.Fatalf("writing a reading clobbered the meter state: %+v %v", loaded, err)
+	}
+}

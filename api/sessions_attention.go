@@ -55,7 +55,9 @@ after it went idle.
 					return jsonError(fmt.Errorf("a session <title> is required (or pass --self to target the current session)"))
 				}
 				var err error
-				repoID, err = resolveRepoID()
+				// resolveRepoIDForLookup, not resolveRepoID: against --daemon-url the
+				// client's cwd says nothing about the remote's repos (Codex P2 on #6295).
+				repoID, err = resolveRepoIDForLookup()
 				if err != nil {
 					return jsonError(err)
 				}

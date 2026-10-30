@@ -152,6 +152,17 @@ func (m *Manager) sendBacklogAnswer(repoID string, inst *session.Instance, promp
 	}
 	m.persistAndPublishInstance(repoID, inst)
 	if err := sendBacklogPrompt(m, SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID, Prompt: prompt, BacklogOrigin: true}); err != nil {
+		if errors.Is(err, errBacklogDeliveryUncertain) {
+			// It may have landed: keep the run marker (the agent may be working on
+			// the answer) and treat the answer as delivered so a restart does not
+			// send it again; the thread says it was not confirmed.
+			if ref, rerr := m.backlogService().Resolve(repoID, ""); rerr == nil {
+				if it := backlogItemOfSession(repoID, inst.ID); it != 0 {
+					m.noteBacklogUncertainDelivery(ref, it, err)
+				}
+			}
+			return nil
+		}
 		if !wasActive {
 			m.disarmBacklogRun(repoID, inst)
 		}
@@ -184,6 +195,15 @@ func (m *Manager) backlogAnswerDelivered(repoID string, a backlog.PendingAnswer,
 		return []int{a.ID}, b.AnswerDelivered(a.ID, a.AnswerID, svc.Now())
 	}); err != nil {
 		m.warn().Printf("record delivered answer on %s: %v", backlog.FormatID(a.ID), err)
+		return
+	}
+	// A pending answer holds back the run's end (RunEnded), so an agent that
+	// finished the answer before this write landed had its idle edge dropped and
+	// no later edge will come: settle it now if the session is idle with the
+	// marker clear. Fenced by the generation, like every completion.
+	if s, ok := m.itemSessions(repoID)[a.SessionID]; ok && !s.instance.BacklogRunActive() &&
+		s.view.Liveness == session.LiveReady {
+		m.settleRunEnd(repoID, a.SessionID, s.gen, stop)
 	}
 }
 
@@ -193,24 +213,6 @@ func (m *Manager) backlogAnswerFailed(repoID string, a backlog.PendingAnswer, re
 		return []int{a.ID}, b.AnswerFailed(a.ID, a.AnswerID, reason, svc.Now())
 	}); err != nil {
 		m.warn().Printf("record undelivered answer on %s: %v", backlog.FormatID(a.ID), err)
-	}
-}
-
-// applyRetrying runs a backlog transaction, retrying a busy backlog with backoff
-// until it lands or stop closes (a nil stop retries until it lands).
-func (m *Manager) applyRetrying(repoID string, stop <-chan struct{}, fn func(*backlog.Backlog) ([]int, error)) error {
-	delay := finishStartBackoff
-	for {
-		_, err := applyBacklog(m.backlogService(), backlog.ProjectRef{ID: repoID}, fn)
-		if !errors.Is(err, backlog.ErrBusy) {
-			return err
-		}
-		select {
-		case <-stop:
-			return err
-		case <-time.After(delay):
-		}
-		delay = min(delay*2, 5*time.Second)
 	}
 }
 
@@ -313,4 +315,16 @@ func answeredBefore(it *backlog.Item, answerID int, t time.Time) bool {
 		}
 	}
 	return false
+}
+
+// backlogItemOfSession is the id of the item whose latest run is the session, or 0.
+func backlogItemOfSession(repoID, sessionID string) int {
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		return 0
+	}
+	if it := b.ItemForSession(sessionID); it != nil {
+		return it.ID
+	}
+	return 0
 }
