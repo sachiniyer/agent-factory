@@ -486,8 +486,15 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 		}
 
 		// Re-read config.json under the lock: a racer may have renamed it to
-		// .bak, or it may have changed since our pre-lock read.
-		data, err := os.ReadFile(configPath)
+		// .bak, or it may have changed since our pre-lock read. Read it through
+		// the pinned directory, not by name: the lock covers config.toml, so
+		// os.ReadFile(configPath) resolves the home link afresh at open time, and
+		// a home that moved since the lock's confirm would feed this parse bytes
+		// from a directory this lock does not cover — the read half of the same
+		// sibling hazard migrate.go pins its body against, left path-based here
+		// when the conversion was first written and never converted (#3688,
+		// #3697).
+		data, err := locked.readSibling(configPath)
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
 		}
@@ -547,15 +554,40 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 		// Pick the first free config.json.bak / .bak.1 / .bak.2 … so the
 		// oldest backup — the one most likely to hold real settings — is
 		// preserved and each later conversion lands beside it.
-		bakPath, bakErr := availableBackupPath(configPath + ".bak")
+		//
+		// The slot is chosen, and the move is made, against the pinned
+		// directory, the way migrate.go chooses and writes its own backup: the
+		// conversion locks config.toml and renames its sibling config.json, so
+		// a path-based availableBackupPath / os.Rename pair resolves the home
+		// link at each call and can act on a directory this lock does not cover
+		// after a mid-conversion retarget — silently renaming another home's
+		// active config.json to a .bak slot it never earned. The pinned
+		// availableBackupPathWith asks the fd the lock holds open whether a
+		// backup name is free, and renameSibling renames within that fd, so a
+		// link that moves mid-conversion is followed nowhere rather than
+		// somewhere the lock never reached (#3688, #3697).
+		bakPath, bakErr := availableBackupPathWith(configPath+".bak", locked.siblingOccupied)
 		renameErr := bakErr
 		if renameErr == nil {
-			renameErr = func() error {
-				if convertRenameFailForTest != nil {
-					return convertRenameFailForTest()
-				}
-				return os.Rename(configPath, bakPath)
-			}()
+			// A retarget since the locked write has already been answered for the
+			// bytes — config.toml landed in the pinned directory whatever the
+			// link did — but the rename still mutates a sibling, and acting on it
+			// while the link names another home leaves the legacy config.json in
+			// place in the locked directory and reports a clean conversion of a
+			// home that is no longer this one. Confirm, the way migrate.go does
+			// before its backup, so a moved link is refused loudly. The move is
+			// best-effort — config.toml is canonical next load — so the refusal
+			// is logged, not fatal, the same as any other rename failure.
+			if cErr := locked.confirm(); cErr != nil {
+				renameErr = cErr
+			} else {
+				renameErr = func() error {
+					if convertRenameFailForTest != nil {
+						return convertRenameFailForTest()
+					}
+					return locked.renameSibling(configPath, bakPath)
+				}()
+			}
 		}
 		if renameErr != nil {
 			// config.toml is already written and will be canonical next load;

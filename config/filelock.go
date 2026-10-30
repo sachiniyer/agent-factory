@@ -208,6 +208,32 @@ func (t lockedTarget) read() ([]byte, error) {
 	return data, nil
 }
 
+// readSibling reads a file BESIDE the locked one — the legacy config.json the
+// one-time json→toml conversion reads — opened through the pinned directory
+// rather than by name. It is the read half of the hazard writeSibling and
+// removeSibling close for the write and delete: a path opened by name re-resolves
+// the home link at open time, so a home that moved between the lock's confirm and
+// the body's read feeds the conversion bytes from a directory this lock does not
+// cover — the same sibling race migrate.go pins its own body against, left
+// path-based here when the conversion was first written and never converted
+// (#3688, #3697).
+//
+// Errors are wrapped as *os.PathError naming path so callers keep testing them
+// with os.IsNotExist, the way read does for the locked file itself.
+func (t lockedTarget) readSibling(path string) ([]byte, error) {
+	fd, err := unix.Openat(t.dirFD, filepath.Base(path), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, &os.PathError{Op: "read", Path: path, Err: err}
+	}
+	return data, nil
+}
+
 // perm reports the locked file's current mode bits, asked of the pinned
 // directory. Callers use it to carry an existing file's mode onto a rewrite
 // rather than widening it to a fresh default.
@@ -249,6 +275,25 @@ func (t lockedTarget) writeSibling(path string, data []byte, perm os.FileMode) e
 func (t lockedTarget) removeSibling(path string) error {
 	if err := unix.Unlinkat(t.dirFD, filepath.Base(path), 0); err != nil {
 		return &os.PathError{Op: "remove", Path: path, Err: err}
+	}
+	return nil
+}
+
+// renameSibling renames a sibling of the locked file — the conversion's
+// config.json → config.json.bak move — inside the pinned directory. A
+// path-based os.Rename resolves both ends of the move through the home link at
+// call time, so a home repointed between the locked config.toml write and this
+// move can land it in a directory the lock does not cover — silently renaming
+// another home's active config.json to a .bak slot there while the conversion
+// reports success. renameat(dirFD, …, dirFD, …) asks the directory this lock
+// holds open, the way writeSibling's write and removeSibling's unlink do
+// (#3688, #3697). The caller confirms the link still names the pinned
+// directory before calling, so a retarget is refused loudly rather than made in
+// the wrong place; the move itself does not confirm, mirroring the writers,
+// because the fd it uses cannot be redirected regardless.
+func (t lockedTarget) renameSibling(srcPath, dstPath string) error {
+	if err := unix.Renameat(t.dirFD, filepath.Base(srcPath), t.dirFD, filepath.Base(dstPath)); err != nil {
+		return &os.LinkError{Op: "rename", Old: srcPath, New: dstPath, Err: err}
 	}
 	return nil
 }

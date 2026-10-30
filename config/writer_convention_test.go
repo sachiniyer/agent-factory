@@ -29,7 +29,6 @@ import (
 // above it, and renaming the function is exactly when someone should re-read
 // why the exemption exists.
 var writerConventionExemptions = map[string]writerExemption{
-	"config_load.go:convertJSONToTOML:os.Rename": {calls: 1, reason: "moves the LEGACY config.json aside after conversion; it renames the old file rather than writing config content"},
 	"config_load.go:writeConfigIfMissing:os.OpenFile": {calls: 1, reason: "first-run materialization, deliberately O_CREATE|O_EXCL so two racing af starts cannot both claim it — " +
 		"exclusive create is the race guard, and it cannot meet an existing link because it fails if anything is already there"},
 	"schema_migration.go:writeFileExclusive:os.OpenFile":  {calls: 1, reason: "schema-migration backup, same O_CREATE|O_EXCL contract: it must fail rather than overwrite an existing backup"},
@@ -65,6 +64,14 @@ var writerConventionExemptions = map[string]writerExemption{
 	// resolve the path afresh and, after a retarget, take out an unrelated
 	// backup in a directory this operation never locked (#3697 review).
 	"filelock.go:removeSibling:golang.org/x/sys/unix.Unlinkat": {calls: 1, reason: "undoes the pinned handle's own backup, inside the directory it was written in; a path-based remove could delete a different directory's file"},
+	// The conversion's config.json → config.json.bak move. It renames a sibling
+	// of the locked config.toml, so os.Rename (the path-based spelling the
+	// conversion was first written with) resolved both ends through the home
+	// link at call time and could land the move in a directory this lock never
+	// covered after a mid-conversion retarget; renameat(dirFD, …, dirFD, …)
+	// asks the directory the lock holds open, mirroring writeSibling and
+	// removeSibling (#3688, #3697).
+	"filelock.go:renameSibling:golang.org/x/sys/unix.Renameat": {calls: 1, reason: "moves the LEGACY config.json to its .bak slot inside the pinned directory after conversion; a path-based os.Rename could rename another home's active config.json after a mid-conversion retarget"},
 }
 
 // writerExemption records how many calls of that kind the function is allowed

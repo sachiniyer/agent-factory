@@ -249,3 +249,143 @@ func TestConversion_LostRaceAdoptsWinnersTOML(t *testing.T) {
 	assert.FileExists(t, filepath.Join(configDir, TomlConfigFileName))
 	assert.NoFileExists(t, filepath.Join(configDir, ConfigFileName))
 }
+
+// retargetableJSONHome stages the conversion's supported arrangement: an
+// AGENT_FACTORY_HOME that is itself a symlink "home → A", where A holds a
+// legacy config.json (and no config.toml, so the one-time conversion runs),
+// beside a peer directory B holding its OWN active config.json and a
+// pre-existing config.json.bak that must survive any retarget. The home is a
+// symlink holding regular files, so resolveWriteTarget(home/config.toml) returns
+// the path unchanged — the #3697 premise, not the #3688 one — which is exactly
+// the shape that left the conversion's path-based config.json legs uncovered.
+//
+// It mirrors retargetableHome (which stages the config.toml shape for the
+// migrate/pin tests) for the conversion's legacy sibling.
+func retargetableJSONHome(t *testing.T, aJSON, bJSON, bBak string) (tomlLink, home, first, second string) {
+	t.Helper()
+	root := t.TempDir()
+	first = filepath.Join(root, "A")
+	second = filepath.Join(root, "B")
+	require.NoError(t, os.Mkdir(first, 0o755))
+	require.NoError(t, os.Mkdir(second, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(first, ConfigFileName), []byte(aJSON), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(second, ConfigFileName), []byte(bJSON), 0644))
+	if bBak != "" {
+		require.NoError(t, os.WriteFile(filepath.Join(second, ConfigFileName+".bak"), []byte(bBak), 0644))
+	}
+	home = filepath.Join(root, "af-home")
+	require.NoError(t, os.Symlink(first, home))
+	tomlLink = filepath.Join(home, TomlConfigFileName)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	fastShell(t)
+
+	// Premise, asserted rather than assumed: config.toml in A is a regular
+	// file (it does not exist yet, so the home link is the only link), so the
+	// file-level #3688 pin has nothing to pin and the conversion's path-based
+	// legacy legs are the ones the pinned directory must cover.
+	resolved, err := resolveWriteTarget(tomlLink)
+	require.NoError(t, err)
+	require.Equal(t, tomlLink, resolved,
+		"premise: the home is the link, config.toml is not, so resolveWriteTarget returns the path unchanged")
+	return tomlLink, home, first, second
+}
+
+// TestConversionKeepsTheLegacyRenameInsideTheLockedDirectory is the conversion's
+// counterpart to TestMigrationBackupLandsInTheLockedDirectory, and the end-to-end
+// reproduction of the bug report: convertJSONToTOML locks config.toml and then
+// reads, backs up and renames its SIBLING config.json. Those three steps were
+// path-based, so a home link retargeted mid-conversion (stow, chezmoi, a dotfiles
+// branch switch) resolved each one through the moved link — adopting the
+// retargeted directory's config.json, choosing a backup slot there, and
+// renaming its active config.json to a .bak — while LoadConfig reported success
+// and left that home with neither config.json nor config.toml.
+//
+// The body now reads the legacy file, picks the backup slot, confirms, and
+// renames through the pinned directory: a mid-conversion retarget lands every
+// step in the locked directory (followed nowhere) or is refused loudly, never
+// silently renaming another home's active config.
+func TestConversionKeepsTheLegacyRenameInsideTheLockedDirectory(t *testing.T) {
+	const aJSON = `{"default_program": "codex"}`
+	const bJSON = `{"default_program": "aider"}`
+	const preciousBak = "schema_version = 1\n# do not lose me\n"
+
+	_, home, first, second := retargetableJSONHome(t, aJSON, bJSON, preciousBak)
+	bakInB := filepath.Join(second, ConfigFileName+".bak")
+
+	// Retarget the home link inside locked.write — after the config.toml
+	// write's confirm and before its bytes land, the window confirm cannot
+	// close — the same window TestFollowedLockPinsTheDirectoryItLocked drives
+	// for the plain write. After this, the link names B while the locked
+	// directory is still A.
+	followedWriteRaceHookForTest = func() { retargetHome(t, home, second) }
+	t.Cleanup(func() { followedWriteRaceHookForTest = nil })
+
+	warnBuf := captureLog(t, &aflog.WarningLog)
+	cfg, err := LoadConfig()
+	require.NoError(t, err,
+		"the conversion must succeed: config.toml landed in the locked directory under the lock")
+	assert.Equal(t, "codex", cfg.DefaultProgram,
+		"the returned config is the one converted from the LOCKED directory's config.json, "+
+			"read through the pinned fd — not the retargeted directory's")
+
+	// The locked directory A got its conversion; nothing of it reached B.
+	assert.Contains(t, readString(t, filepath.Join(first, TomlConfigFileName)), "codex",
+		"config.toml landed in the directory the lock covers")
+	// The rename was refused loudly: the confirm before the move caught the
+	// retarget, so the legacy config.json stays in the locked directory
+	// (config.toml is canonical next load) rather than being moved aside by a
+	// link that no longer names this home.
+	assert.FileExists(t, filepath.Join(first, ConfigFileName),
+		"the locked directory's config.json is left in place when the link moved before the rename")
+	assert.NoFileExists(t, filepath.Join(first, ConfigFileName+".bak"),
+		"no backup was created in the locked directory when the move was refused rather than misdirected")
+	assert.Contains(t, warnBuf.String(), "could not move the original",
+		"a refused rename is logged, not silent — the user is told the link move cost the move-aside")
+
+	// Nothing of the conversion reached B: its active config.json, its precious
+	// .bak, and the absence of a config.toml/config.json.bak.* all survive.
+	assert.Equal(t, bJSON, readString(t, filepath.Join(second, ConfigFileName)),
+		"B's active config.json must survive untouched — the move never followed the link there")
+	assert.Equal(t, preciousBak, readString(t, bakInB),
+		"B's pre-existing .bak must survive — the slot was chosen against the locked directory, not the retargeted one")
+	assert.NoFileExists(t, filepath.Join(second, TomlConfigFileName),
+		"no config.toml was written in the retargeted directory")
+	assert.Equal(t, []string{ConfigFileName, ConfigFileName + ".bak"}, entryNames(t, second),
+		"nothing of the conversion — no config.toml, no .bak.N, no .lock — was left in the retargeted directory")
+}
+
+// TestConversionWithNoRetargetStillMovesConfigJSONAside is the happy-path pin
+// after the pinned-rename change: when the home link does not move, the confirm
+// passes and the legacy config.json is still renamed to its .bak inside the
+// pinned directory, exactly as before. The previous regression tests cover the
+// values; this one covers the move-aside against the new pinned-rename plumbing.
+func TestConversionWithNoRetargetStillMovesConfigJSONAside(t *testing.T) {
+	const aJSON = `{"default_program": "codex"}`
+	const bJSON = `{"default_program": "aider"}`
+	// B is staged but unused: the home stays pointed at A throughout.
+	_, _, first, _ := retargetableJSONHome(t, aJSON, bJSON, "")
+
+	infoBuf := captureLog(t, &aflog.InfoLog)
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "codex", cfg.DefaultProgram)
+
+	// config.toml written, the legacy config.json moved aside to .bak.
+	assert.Contains(t, readString(t, filepath.Join(first, TomlConfigFileName)), "codex")
+	assert.NoFileExists(t, filepath.Join(first, ConfigFileName),
+		"the legacy config.json was renamed to .bak")
+	assert.Contains(t, readString(t, filepath.Join(first, ConfigFileName+".bak")), aJSON,
+		"the .bak beside the locked file holds the original config.json verbatim")
+	assert.Contains(t, infoBuf.String(), "migrated config to TOML",
+		"a clean conversion reports the move, not a refused-rename warning")
+
+	// A clean reload reads config.toml canonically with no duplicate-config
+	// warning, because config.json is gone.
+	reloadWarn := captureLog(t, &aflog.WarningLog)
+	_, err = LoadConfig()
+	require.NoError(t, err)
+	assert.NotContains(t, reloadWarn.String(), "both",
+		"the reload after a clean conversion has no duplicate-config warning (config.json is gone)")
+	assert.NotContains(t, reloadWarn.String(), "could not move the original",
+		"the reload after a clean conversion has no refused-rename warning")
+}
