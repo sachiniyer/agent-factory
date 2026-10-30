@@ -3288,6 +3288,13 @@ textarea[class] {
     order: 1;
     flex: 1;
   }
+  .af-session-first .af-term-attention {
+    order: 2;
+    flex-shrink: 0;
+  }
+  .af-session-first .af-term-attention-label {
+    display: none;
+  }
   .af-session-first .af-term-new-group {
     order: 3;
     flex-shrink: 0;

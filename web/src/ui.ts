@@ -2546,7 +2546,7 @@ export class AppShell {
       [chrome.title, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
-      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header],
+      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header], [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
     ]);
     this.renderTabBar(state);

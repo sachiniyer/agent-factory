@@ -165,7 +165,10 @@ func (d *deriver) running(it *Item) Derived {
 		return Derived{State: StateStopped, Reason: "no session"}
 	}
 	f := d.facts(run.SessionID)
-	if f.RunActive {
+	if f.RunActive || it.answerPending() {
+		// An answer on its way to the session is work in progress even while its
+		// run is not armed yet: delivery arms the run immediately before it sends,
+		// and a held delivery (a client attached) has no open completion gate.
 		return Derived{State: StateWorking, HoldsSlot: true}
 	}
 	reason := f.Reason

@@ -74,7 +74,11 @@ func (s *Service) resolve(repoID, repoPath string) (*project, error) {
 		}
 		return &project{host: s.host, id: repoID}, nil
 	}
-	path, err := config.ResolveUserPath(repoPath)
+	// The RPC-boundary resolver: ~ expanded, and a relative path refused rather
+	// than resolved against the daemon's own working directory (an unrelated
+	// checkout). Local CLI calls name the project by id; a remote caller sends an
+	// absolute path on the daemon host.
+	path, err := config.ResolveDaemonHostPath(repoPath)
 	if err != nil {
 		return nil, err
 	}

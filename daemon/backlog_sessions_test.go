@@ -410,3 +410,22 @@ func TestSelfReportBeforeTheStartRecordLinksTheRun(t *testing.T) {
 		t.Fatal("the late start record changed the linked run")
 	}
 }
+
+// The delivery counter is memory-only; after a restart the persisted prompt
+// attempt is what shows a prompt arrived after the run ended (Codex P2 on #6294).
+func TestBacklogArchiveCheckUsesDurablePostRunDeliveryEvidence(t *testing.T) {
+	_, _, inst := startedItem(t)
+	idleItemSession(t, inst)
+	after := inst.BacklogRunEndedAt().Add(time.Second)
+	if err := backlogArchiveCheck(inst.ID, inst, inst.AdoptionDeliveriesAtRunEnd()); err != nil {
+		t.Fatalf("an idle session with no later prompt was refused: %v", err)
+	}
+	inst.RecordPromptAttempt(session.PromptNotDelivered, after)
+	if err := backlogArchiveCheck(inst.ID, inst, inst.AdoptionDeliveriesAtRunEnd()); err != nil {
+		t.Fatalf("a proven non-delivery vetoed the archive: %v", err)
+	}
+	inst.RecordPromptAttempt(session.PromptDelivered, after.Add(time.Second))
+	if err := backlogArchiveCheck(inst.ID, inst, inst.AdoptionDeliveriesAtRunEnd()); err == nil {
+		t.Fatal("a prompt sent after the run ended did not veto the archive (counter is zero after a restart)")
+	}
+}

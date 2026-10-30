@@ -160,9 +160,13 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 	// there would retire the notice before it had said anything to anybody.
 	if streamShowsAgentPane(instance, r.URL.Query().Get("tab_id"), tab) {
 		cs.manager.acknowledgeRootRecreate(instance)
-		binding = attentionClearingBinding{ptyTabBinding: binding, instance: instance, clear: func(setAt time.Time) { cs.manager.queueAttentionClear(instance, setAt) }}
+		binding = attentionClearingBinding{ptyTabBinding: binding, instance: instance, submit: &submitDetector{},
+			clear: func(setAt time.Time) { cs.manager.queueAttentionClear(instance, setAt) }}
 		if instance.BacklogItem != 0 {
-			binding = backlogSubmitBinding{ptyTabBinding: binding, submitted: func() { cs.manager.noteBacklogSubmitted(instance) }}
+			binding = backlogSubmitBinding{ptyTabBinding: binding,
+				submit:       &submitDetector{},
+				openQuestion: func() string { return cs.manager.backlogSeenQuestion(instance) },
+				submitted:    func(q string) { cs.manager.noteBacklogSubmitted(instance, q) }}
 		}
 	}
 	servePTYStream(binding, sub, conn)

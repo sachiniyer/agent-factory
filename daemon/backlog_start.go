@@ -40,6 +40,10 @@ var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
 	switch {
 	case err == nil && status == session.PromptNotDelivered:
 		return errBacklogPromptNotDelivered
+	case err != nil && errors.Is(err, errTargetLimitReached):
+		// The session hit a usage limit between the caller's check and the send's
+		// fenced one: nothing was sent, and the caller should hold, not fail.
+		return fmt.Errorf("%w: %v", errBacklogTargetLimited, err)
 	case err != nil && isNotAttemptedErr(err):
 		return fmt.Errorf("%w: %v", errBacklogPromptNotDelivered, err)
 	case err != nil:
@@ -51,6 +55,7 @@ var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
 var (
 	errBacklogPromptNotDelivered = errors.New("the agent did not take the prompt")
 	errBacklogDeliveryUncertain  = errors.New("af could not confirm the prompt reached the agent")
+	errBacklogTargetLimited      = errors.New("the session is at a usage limit")
 )
 
 func (s *controlServer) StartBacklogItem(req StartBacklogItemRequest, resp *StartBacklogItemResponse) error {
@@ -92,7 +97,7 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 	// would fail where listing and adding items with that path succeeded.
 	root := ""
 	if strings.TrimSpace(req.RepoPath) != "" {
-		if root, err = config.ResolveUserPath(strings.TrimSpace(req.RepoPath)); err != nil {
+		if root, err = config.ResolveDaemonHostPath(req.RepoPath); err != nil {
 			return backlog.RunRef{}, err
 		}
 	}
@@ -108,7 +113,10 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 	var create CreateSessionRequest
 	m.backlog.reserve(ref.ID)
 	_, err = svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
-		p, err := b.BeginStart(req.ID, by, facts, svc.Now())
+		// Fresh facts INSIDE the transaction: a concurrent start may have linked an
+		// active session since the snapshot above, and a stale view would append a
+		// second run for the same item (Codex P2 on #6294).
+		p, err := b.BeginStart(req.ID, by, backlogHost{m: m}.Facts(ref.ID), svc.Now())
 		if err != nil {
 			return nil, err
 		}
@@ -240,14 +248,13 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 		return backlog.RunRef{}, fmt.Errorf("the session for %s is gone; retry \"af backlog start %d\" to start a new one", backlog.FormatID(id), id)
 	}
 	inst := s.instance
-	facts := backlogHost{m: m}.Facts(ref.ID)
 	var (
 		prev   backlog.Status
 		prompt string
 		armed  bool
 	)
 	out, err := svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
-		p, err := b.BeginStart(id, by, facts, svc.Now())
+		p, err := b.BeginStart(id, by, backlogHost{m: m}.Facts(ref.ID), svc.Now())
 		if err != nil {
 			return nil, err
 		}
@@ -279,7 +286,7 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 	var sendErr error
 	if armed {
 		m.persistAndPublishInstance(ref.ID, inst)
-		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt})
+		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt, BacklogOrigin: true})
 		switch {
 		case errors.Is(sendErr, errBacklogDeliveryUncertain):
 			// It may have landed: keep the run marker and the running item, say so
@@ -292,11 +299,37 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 		}
 	}
 	if sendErr != nil {
-		if _, err := svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
-			return []int{id}, b.ContinueFailed(id, prev, sendErr, svc.Now())
-		}); err != nil {
-			m.warn().Printf("restore %s after a failed continue: %v", backlog.FormatID(id), err)
-		}
+		// Roll the item back on a tracked, cancellable worker that retries a busy
+		// backlog (the RPC must not hang on the lock), and settle the previous run's
+		// end only AFTER the rollback commits: settling first would move an item
+		// that is still marked running to review although nothing was delivered.
+		// Arming bumped the generation, so an idle edge queued for the run that
+		// ended before this continue now fails its fence and nothing would see it
+		// again; the settle replays it against the session's current idle state.
+		rollbackErr := sendErr
+		// Fenced to the failed attempt: a retry that started work before this
+		// worker ran armed the session again (a newer generation, or an active
+		// run), and restoring the earlier status over it would undo that start.
+		failedGen := inst.BacklogRunGeneration()
+		m.launchBackgroundMutation(func(stop <-chan struct{}) {
+			rolledBack := false
+			if err := m.applyRetrying(ref.ID, stop, func(b *backlog.Backlog) ([]int, error) {
+				if inst.BacklogRunActive() || inst.BacklogRunGeneration() != failedGen {
+					return nil, errBacklogNoChange
+				}
+				rolledBack = true
+				return []int{id}, b.ContinueFailed(id, prev, rollbackErr, svc.Now())
+			}); err != nil && !errors.Is(err, errBacklogNoChange) {
+				m.warn().Printf("restore %s after a failed continue: %v", backlog.FormatID(id), err)
+				return
+			}
+			if !rolledBack {
+				return // a newer start superseded this attempt; it owns the item now
+			}
+			if inst.GetLiveness() == session.LiveReady && !inst.BacklogRunActive() {
+				m.settleRunEnd(ref.ID, inst.ID, inst.BacklogRunGeneration(), stop)
+			}
+		})
 		return backlog.RunRef{}, sendErr
 	}
 	runs := out.Item(id).Runs

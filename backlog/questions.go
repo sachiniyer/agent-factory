@@ -101,8 +101,20 @@ func (b *Backlog) Answer(id, questionID int, text string, deliver bool, now time
 	q.Closed = ClosedAnswered
 	answer := Message{Kind: KindAnswer, Author: AuthorUser, Text: text, Answers: q.ID}
 	if deliver && it.Status.Open() {
-		answer.Delivery, answer.PrevStatus = DeliveryPending, it.Status
+		// The status to give back if delivery fails is the one before the OLDEST
+		// pending answer: a second answer accepted while the first is pending would
+		// otherwise save "running" (what the first set) and never get the item back
+		// to where it was when both fail.
+		prev := it.Status
+		for _, x := range it.Thread {
+			if x.Kind == KindAnswer && x.Delivery == DeliveryPending && x.PrevStatus.Valid() {
+				prev = x.PrevStatus
+				break
+			}
+		}
+		answer.Delivery, answer.PrevStatus = DeliveryPending, prev
 		it.Status = StatusRunning
+		it.LiveAnswers++
 	}
 	out := Answered{Answer: *it.appendMessage(answer, now)}
 	if last := it.lastRun(); last != nil {
@@ -165,7 +177,13 @@ func (b *Backlog) AnswerFailed(id, answerID int, reason string, now time.Time) e
 	}
 	prev := m.PrevStatus
 	m.Delivery = DeliveryFailed
-	if it.Status == StatusRunning && prev.Valid() && prev != StatusRunning && CheckStatusChange(StatusChange{ID: id,
+	// The item is running for every live answer: pending ones and delivered ones
+	// whose run has not ended. The status this answer replaced comes back only
+	// when its failure leaves no other live answer, whichever order they fail in.
+	if it.LiveAnswers > 0 {
+		it.LiveAnswers--
+	}
+	if it.LiveAnswers == 0 && it.Status == StatusRunning && prev.Valid() && prev != StatusRunning && CheckStatusChange(StatusChange{ID: id,
 		From: it.Status, To: prev, By: ActorAF, StartFailed: true, PrevStatus: prev}) == nil {
 		it.Status = prev
 	}
@@ -202,19 +220,27 @@ func (b *Backlog) PendingAnswers() []PendingAnswer {
 	return out
 }
 
-// AnsweredInSession closes the oldest open question of the item whose latest
-// run is sessionID, the one its attention shows: the user answered in the
-// session's terminal. It returns the item id, or 0 when nothing was open.
-func (b *Backlog) AnsweredInSession(sessionID string, now time.Time) int {
+// AnsweredInSessionText closes the question the user SAW as answered in the
+// session's terminal: the
+// terminal binding captures what the session's attention showed (the oldest open
+// question's text) before forwarding the line, without touching the backlog
+// file. It closes the oldest open question only if that is the question with this
+// text; a different or newer one is left alone. It returns the item id, or 0.
+func (b *Backlog) AnsweredInSessionText(sessionID, text string, normalize func(string) string, now time.Time) int {
 	it := b.ItemForSession(sessionID)
-	if it == nil || it.lastRun().SessionID != sessionID {
+	if it == nil || it.lastRun().SessionID != sessionID || text == "" {
 		return 0
 	}
-	q := it.OpenQuestion()
-	if q == nil {
+	open := it.OpenQuestion()
+	if normalize == nil {
+		normalize = func(s string) string { return s }
+	}
+	// The attention mirror is display-capped, so compare in its normalization:
+	// the text the user saw is the capped form of the full question.
+	if open == nil || normalize(open.Text) != text {
 		return 0
 	}
-	q.Closed = ClosedAnsweredInSession
+	open.Closed = ClosedAnsweredInSession
 	it.UpdatedAt = now
 	return it.ID
 }
