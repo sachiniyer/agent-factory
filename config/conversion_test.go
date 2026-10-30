@@ -485,3 +485,102 @@ func TestConversion_RefusesTOMLSymlinkOutOfTheHome(t *testing.T) {
 		})
 	}
 }
+
+// TestConversionRenameRefusedAfterConfirmRechecksLink reproduces the window the
+// post-confirm recheck added for the codex finding on line 624: confirm()
+// passes before the rename, but a home link retarget between confirm and
+// renameSibling leaves prettyConfigPath pointing at another home's active
+// config.json. Without the recheck, the "delete it yourself" instruction
+// would tell the user to delete the wrong file. The recheck turns the
+// refusal into a retarget refusal and names the pinned source.
+func TestConversionRenameRefusedAfterConfirmRechecksLink(t *testing.T) {
+	const aJSON = `{"default_program": "codex"}`
+	const bJSON = `{"default_program": "aider"}`
+	const preciousBak = "schema_version = 1\n# do not lose me\n"
+
+	_, home, first, second := retargetableJSONHome(t, aJSON, bJSON, preciousBak)
+
+	// Retarget the home link and remove the source between the pre-rename
+	// confirm and renameSibling — the check-then-act window the recheck must
+	// close. The retarget alone does not make renameSibling fail (it goes
+	// through the pinned fd), so remove the source the rename reaches for
+	// too; that is the concurrent-removal case the finding names.
+	convertRenameRaceHookForTest = func() {
+		retargetHome(t, home, second)
+		require.NoError(t, os.Remove(filepath.Join(first, ConfigFileName)))
+	}
+	t.Cleanup(func() { convertRenameRaceHookForTest = nil })
+
+	warnBuf := captureLog(t, &aflog.WarningLog)
+	_, err := LoadConfig()
+	require.NoError(t, err,
+		"the conversion must succeed: config.toml landed in the locked directory under the lock")
+
+	// The recheck caught the retarget: the refusal names the pinned source the
+	// lock still covers (the original in the locked directory A) and does NOT
+	// invite the user to delete through the link that now reaches B's active
+	// config.json.
+	assert.Contains(t, warnBuf.String(), "could not move the original",
+		"a refused rename is logged, not silent — the user is told the link move cost the move-aside")
+	assert.Contains(t, warnBuf.String(), "the original remains at",
+		"the refusal names where the original actually sits (the pinned directory), not the moved link")
+	assert.Contains(t, warnBuf.String(), filepath.Join(first, ConfigFileName),
+		"the named location is the locked directory's config.json, not the link that now reaches B")
+	assert.NotContains(t, warnBuf.String(), "yourself to silence the duplicate-config warning",
+		"a retarget refusal must not invite the user to delete through a link that no longer names the original")
+
+	// The rename failed (the source was removed concurrently), so no
+	// backup was created in the locked directory.
+	assert.NoFileExists(t, filepath.Join(first, ConfigFileName+".bak"),
+		"no backup was created in the locked directory when the rename failed rather than misdirected")
+	// The locked directory A got its conversion; nothing reached B.
+	assert.Contains(t, readString(t, filepath.Join(first, TomlConfigFileName)), "codex",
+		"config.toml landed in the directory the lock covers")
+	assert.Equal(t, bJSON, readString(t, filepath.Join(second, ConfigFileName)),
+		"B's active config.json must survive untouched — the move never followed the link there")
+	assert.Equal(t, preciousBak, readString(t, filepath.Join(second, ConfigFileName+".bak")),
+		"B's pre-existing .bak must survive — the slot was chosen against the locked directory, not the retargeted one")
+	assert.NoFileExists(t, filepath.Join(second, TomlConfigFileName),
+		"no config.toml was written in the retargeted directory")
+}
+
+// TestConversionAcceptsConcurrentJSONUpdate pins the directory-level comparison
+// added for the codex finding on filelock.go:181 — confirmSiblingDir now
+// compares the parent directory siblingPath reaches with dirFD instead of the
+// file's own inode, so an editor that atomically replaces config.json (same
+// directory, different inode) is accepted rather than tripping a false
+// out-of-home-symlink refusal.
+func TestConversionAcceptsConcurrentJSONUpdate(t *testing.T) {
+	const aJSON = `{"default_program": "codex"}`
+	const replacement = `{"default_program": "aider"}`
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	require.NoError(t, os.Mkdir(home, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName), []byte(aJSON), 0o644))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	fastShell(t)
+
+	configDir, err := GetConfigDir()
+	require.NoError(t, err)
+	configPath := filepath.Join(configDir, ConfigFileName)
+	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+
+	// Replace config.json atomically (rename tmp → config.json) between the
+	// Stat(siblingPath) and the directory comparison in confirmSiblingDir —
+	// same directory, different inode. Without the directory-level check the
+	// conversion would abort with a false out-of-home-symlink error.
+	confirmSiblingDirStatHookForTest = func() {
+		tmp := configPath + ".tmp"
+		require.NoError(t, os.WriteFile(tmp, []byte(replacement), 0o644))
+		require.NoError(t, os.Rename(tmp, configPath))
+	}
+	t.Cleanup(func() { confirmSiblingDirStatHookForTest = nil })
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err,
+		"the conversion must accept an in-place atomic config.json rewrite in the pinned directory")
+	assert.Equal(t, "aider", cfg.DefaultProgram,
+		"the converted config reflects the replacement, not the pre-stat original")
+	assert.FileExists(t, tomlPath, "config.toml was written from the replacement")
+}

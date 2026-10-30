@@ -168,8 +168,13 @@ func (t lockedTarget) confirmSiblingDir(siblingPath string) error {
 		}
 		return fmt.Errorf("failed to inspect the legacy %s: %w", siblingPath, err)
 	}
+	if confirmSiblingDirStatHookForTest != nil {
+		confirmSiblingDirStatHookForTest()
+	}
 	// Fstatat with flags=0 follows a symlink the way readSibling's openat does,
-	// so the comparison is against the file readSibling actually reads.
+	// so the ENOENT check confirms whether the legacy name is in the pinned
+	// directory at all. An ENOENT is the TOML-symlink race: dirFD points at the
+	// symlink target's directory, not the home holding the legacy config.json.
 	var got unix.Stat_t
 	if err := unix.Fstatat(t.dirFD, filepath.Base(siblingPath), &got, 0); err != nil {
 		if errors.Is(err, unix.ENOENT) {
@@ -178,12 +183,33 @@ func (t lockedTarget) confirmSiblingDir(siblingPath string) error {
 		}
 		return fmt.Errorf("failed to confirm the legacy %s sits beside %s: %w", siblingPath, t.link, err)
 	}
-	if sameInode(&want, &got) {
+	// The file is present in the pinned directory. Compare the directory
+	// siblingPath reaches with dirFD rather than the file's own inode, so an
+	// editor that atomically replaces config.json (same directory, different
+	// inode) is accepted rather than tripping a false out-of-home-symlink
+	// refusal. The file-level stat above only confirms the name exists in the
+	// pinned directory; the inode can change between that and the directory
+	// check below when an editor rewrites config.json in place.
+	var wantDir, gotDir unix.Stat_t
+	if err := unix.Stat(filepath.Dir(siblingPath), &wantDir); err != nil {
+		return fmt.Errorf("failed to inspect the directory holding the legacy %s: %w", siblingPath, err)
+	}
+	if err := unix.Fstat(t.dirFD, &gotDir); err != nil {
+		return fmt.Errorf("failed to confirm the directory the lock covers for %s: %w", t.link, err)
+	}
+	if sameInode(&wantDir, &gotDir) {
 		return nil
 	}
 	return fmt.Errorf("cannot convert %s under the lock on %s: the config.json in the directory the lock covers (%s) is not the legacy %s — a freshly introduced config.toml symlink points at a directory other than the one holding the legacy config.json; re-run once config.toml is not a symlink out of its home",
 		siblingPath, t.link, t.dirResolved, siblingPath)
 }
+
+// confirmSiblingDirStatHookForTest, when non-nil, runs between the
+// unix.Stat(siblingPath) lookup and the Fstatat/directory comparison below —
+// the check-then-act window an editor's atomic config.json rewrite (same
+// directory, different inode) slips into. Tests use it to replace config.json
+// in that window and pin the directory-level comparison's acceptance.
+var confirmSiblingDirStatHookForTest func()
 
 // followedWriteRaceHookForTest, when non-nil, runs after confirm has passed and
 // before the bytes move — the check-then-act window confirm cannot close. Tests

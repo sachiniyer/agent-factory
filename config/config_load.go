@@ -430,6 +430,13 @@ func GlobalConfigPath() (string, error) {
 // assert the next load treats config.toml as canonical (both files present).
 var convertRenameFailForTest func() error
 
+// convertRenameRaceHookForTest, when non-nil, runs after the pre-rename
+// confirm passes and before the renameSibling call — the check-then-act
+// window a home link retarget slips into (the source is concurrently
+// removed, or the link repointed). Tests use it to drive a retarget INTO
+// that window and pin the re-confirm the recheck below catches.
+var convertRenameRaceHookForTest func()
+
 // convertRaceHookForTest, when non-nil, runs at the top of the conversion
 // file-lock body — the point at which a concurrent process that won the lock
 // first would already have written config.toml (and renamed config.json).
@@ -602,6 +609,9 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 					if convertRenameFailForTest != nil {
 						return convertRenameFailForTest()
 					}
+					if convertRenameRaceHookForTest != nil {
+						convertRenameRaceHookForTest()
+					}
 					return locked.renameSibling(configPath, bakPath)
 				}()
 			}
@@ -609,6 +619,20 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 		if renameErr != nil {
 			// config.toml is already written and will be canonical next load;
 			// leaving config.json in place only costs a "both files" warning.
+			// Re-check the link: confirm() passed before the rename, but the
+			// rename can still fail because the home link moved between confirm
+			// and renameSibling (the source was concurrently removed, or the
+			// link retargeted). In that case prettyConfigPath now names another
+			// home's active config.json, so a "delete it yourself" instruction
+			// aimed at it would delete the wrong file. Re-confirm to distinguish
+			// a retarget from an ordinary rename failure; on a retarget, name
+			// the pinned source the lock still covers and omit the deletion
+			// instruction, the same as a confirm failure up front.
+			if !retargetRefused {
+				if cErr := locked.confirm(); cErr != nil {
+					retargetRefused = true
+				}
+			}
 			if retargetRefused {
 				// The link moved after the write, so prettyConfigPath — the link
 				// — no longer reaches the original this conversion left in place;
