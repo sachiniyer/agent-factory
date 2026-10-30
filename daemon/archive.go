@@ -758,6 +758,11 @@ func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) 
 // other mutation writer for the row is action-gated while the op is up. The
 // snapshot is still taken inside the write, never passed in.
 func (m *Manager) persistUnderAdmission(repoID string, instance *session.Instance) error {
+	// Snapshot and write inside the row-write lock, so a poll that already passed
+	// its fence check cannot land an older snapshot after this one (#6210).
+	rowLock := m.rowWriteLockForRepo(repoID)
+	rowLock.Lock()
+	defer rowLock.Unlock()
 	return persistInstanceData(repoID, instance.ToInstanceData())
 }
 

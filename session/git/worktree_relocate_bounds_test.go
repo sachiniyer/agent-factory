@@ -221,7 +221,7 @@ func TestRelocate_SourceIdentityProbeIsBounded(t *testing.T) {
 	case err := <-done:
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		assert.True(t, gw.cleanupHasStalled())
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		t.Fatal("the pre-move source identity probe ignored the relocation bound")
 	}
 }

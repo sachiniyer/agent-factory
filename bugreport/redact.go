@@ -313,11 +313,13 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	r.noteWorktreeRoot(d.Worktree.WorktreePath)
 	for _, tab := range d.Tabs {
 		r.noteTmuxName(tab.TmuxName)
+		r.noteTmuxName(tab.SandboxTmux)
 	}
 	// PendingTabs is the durability staging area for metadata-only rows. It uses
 	// the same TabData shape as Tabs, so its names need the same log treatment.
 	for _, tab := range d.PendingTabs {
 		r.noteTmuxName(tab.TmuxName)
+		r.noteTmuxName(tab.SandboxTmux)
 	}
 	// A pending-teardown handle names a tmux session the same way a live tab
 	// does, and the retry logs it on every daemon start until the kill is
@@ -678,6 +680,11 @@ func redactTabData(tab *session.TabData) {
 	}
 	if tab.TmuxName != "" {
 		tab.TmuxName = redactedMarker
+	}
+	// SandboxTmux is the sandbox's tmux session name for an off-box tab: the same
+	// title-bearing name, on another host.
+	if tab.SandboxTmux != "" {
+		tab.SandboxTmux = redactedMarker
 	}
 	// A proposal slug is user-chosen, like a tab name, and names the work.
 	if tab.Proposal != "" {

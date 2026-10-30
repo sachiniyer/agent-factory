@@ -227,11 +227,15 @@ export class OptimisticSessions {
   }
 }
 
-/** Orders create selection against subsequent submissions and navigation. */
+/** Orders create selection against subsequent submissions and navigation, and is the
+ *  one clock every selection change advances (rail, keyboard, hash, back/forward). */
 export class CreateSelectionIntent {
   private generation = 0;
 
   navigate(): void { this.generation++; }
   submit(): number { return ++this.generation; }
+  /** The generation now: a by-id route lookup (#6204) takes it and applies its answer
+   *  only while isCurrent, so ANY navigation or selection since supersedes it. */
+  snapshot(): number { return this.generation; }
   isCurrent(intent: number): boolean { return intent === this.generation; }
 }

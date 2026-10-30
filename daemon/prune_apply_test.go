@@ -301,16 +301,48 @@ func TestPruneApply_ResumeNeverRemovesAReoccupyingWorktreesRegistration(t *testi
 }
 
 // Free space is counted once per filesystem, not once per path (Codex on #6186).
+// The evidence is the device identity and the number of distinct filesystems
+// summed — never two live statfs free-byte readings, which differ by a block
+// whenever anything writes to the disk between them (#6226).
 func TestSumFreeCountsASharedFilesystemOnce(t *testing.T) {
+	const free = 4096 * 1000
+	probe := func(devs map[string]uint64) func(string) (uint64, uint64, bool) {
+		return func(path string) (uint64, uint64, bool) {
+			dev, ok := devs[path]
+			return free, dev, ok
+		}
+	}
+
+	total, filesystems, ok := sumFreeWith([]string{"/a", "/b"}, probe(map[string]uint64{"/a": 7, "/b": 7}))
+	require.True(t, ok)
+	assert.Equal(t, 1, filesystems, "two archive roots on one mount are one filesystem")
+	assert.EqualValues(t, free, total, "and its free space is added once")
+
+	total, filesystems, ok = sumFreeWith([]string{"/a", "/b"}, probe(map[string]uint64{"/a": 7, "/b": 8}))
+	require.True(t, ok)
+	assert.Equal(t, 2, filesystems, "roots on different devices stay separate")
+	assert.EqualValues(t, 2*free, total)
+
+	_, _, ok = sumFreeWith([]string{"/a", "/missing"}, probe(map[string]uint64{"/a": 7}))
+	assert.False(t, ok, "an unmeasurable root makes the whole sum unknown")
+}
+
+// The real probe reports one device for two directories of one temp dir. Device
+// identity is stable between reads, unlike free space.
+func TestFreeBytesAtReportsOneDeviceForSiblingDirectories(t *testing.T) {
 	root := t.TempDir()
 	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
 	require.NoError(t, os.Mkdir(a, 0o755))
 	require.NoError(t, os.Mkdir(b, 0o755))
-	one, ok := sumFree([]string{a})
+	_, devA, okA := freeBytesAt(a)
+	_, devB, okB := freeBytesAt(b)
+	if !okA || !okB {
+		t.Skip("free space is not measurable on this platform")
+	}
+	assert.Equal(t, devA, devB)
+	_, filesystems, ok := sumFreeWith([]string{a, b}, freeBytesAt)
 	require.True(t, ok)
-	two, ok := sumFree([]string{a, b})
-	require.True(t, ok)
-	assert.Equal(t, one, two, "two archive roots on one mount are one filesystem")
+	assert.Equal(t, 1, filesystems)
 }
 
 // In-memory prune state moves forward only after the durable write that records it

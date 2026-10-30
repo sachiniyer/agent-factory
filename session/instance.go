@@ -190,10 +190,11 @@ type Instance struct {
 	// run completed" for the daemon's completion edge, which may have captured
 	// taskRunWasActive=true on a tick that raced the restore. Sticky for the
 	// process's lifetime: a session has exactly one run, and an interrupted
-	// end is a fact about it that never un-happens. In-memory only — after a
-	// restart the marker is already false, so no poll can ever capture the
-	// active half of the edge again and nothing needs the flag.
-	taskRunInterrupted bool
+	// end is a fact about it that never un-happens. In-memory only; a restart
+	// leaves no poll able to capture the active half of the edge.
+	taskRunInterrupted   bool
+	agentReplacedAt      time.Time // when the replacement was launched (#6231)
+	taskRunInterruptedAt time.Time // bounds the re-arm window (#6223); persisted
 	// taskRunInterruptedStamp is the one-shot twin of taskRunInterrupted for
 	// the daemon's status write: set when a restore's ConfirmLive performs the
 	// interrupt, consumed once by noteRuntimeReplaced so the owning task's

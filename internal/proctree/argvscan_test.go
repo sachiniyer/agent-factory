@@ -22,6 +22,9 @@ func stubScan(t *testing.T, snap func() (map[int]Process, error), argv func(int)
 	// passed here and failed there for that reason (#3695 review) — a test that
 	// passes for the host's reasons rather than the code's.
 	stubScanIdentity(t, nil)
+	previousPause := scanRefusalPause
+	t.Cleanup(func() { scanRefusalPause = previousPause })
+	scanRefusalPause = 0
 }
 
 // stubScanUID stands in for the kernel's ownership answer. A pid absent from
@@ -82,9 +85,26 @@ func fixedSnapshot(pids ...int) func() (map[int]Process, error) {
 // reported as a skip naming the pid rather than as a pass or a red.
 func TestProcessesMatchingArgvFindsALiveProcessByItsArgv(t *testing.T) {
 	self := os.Getpid()
-	matched, err := ProcessesMatchingArgv(func(argv []string) bool {
-		return len(argv) > 0 && strings.Contains(argv[0], ".test")
-	})
+	scan := func() ([]ProcessArgv, error) {
+		return ProcessesMatchingArgv(func(argv []string) bool {
+			return len(argv) > 0 && strings.Contains(argv[0], ".test")
+		})
+	}
+	matched, err := scan()
+	// A refusal naming a process that is gone by the time we look is an exit that
+	// landed after the scan settled it (#6217): nothing about THIS scan is wrong,
+	// and the table has changed under it, so scan the new table. A refusal that
+	// persists on a process that is still there falls through to the checks below.
+	for attempt := 0; attempt < 3 && err != nil; attempt++ {
+		var unreadable *ArgvUnreadableError
+		if !errors.As(err, &unreadable) {
+			break
+		}
+		if _, lookupErr := Lookup(unreadable.PID); !isGone(lookupErr) {
+			break
+		}
+		matched, err = scan()
+	}
 	if err != nil {
 		var unreadable *ArgvUnreadableError
 		if !errors.As(err, &unreadable) {
@@ -373,4 +393,111 @@ func TestAProcessThatExitedMidScanIsNotARefusal(t *testing.T) {
 			t.Fatalf("the refusal does not report that pid %d is ours: %v", dead, err)
 		}
 	})
+}
+
+// scriptedArgv returns the successive answers for one pid's argv reads; the
+// last repeats. Reads of other pids fail the test.
+func scriptedArgv(t *testing.T, pid int, answers ...error) (func(int) ([]string, error), *int) {
+	t.Helper()
+	reads := 0
+	return func(p int) ([]string, error) {
+		if p != pid {
+			t.Fatalf("unexpected read of pid %d", p)
+		}
+		i := reads
+		if i >= len(answers) {
+			i = len(answers) - 1
+		}
+		reads++
+		if answers[i] == nil {
+			return []string{"recovered"}, nil
+		}
+		return nil, answers[i]
+	}, &reads
+}
+
+// scriptedIdentity answers the liveness oracle in order; the last repeats.
+func scriptedIdentity(t *testing.T, answers ...identityAnswer) *int {
+	t.Helper()
+	checks := 0
+	previous := scanIdentity
+	t.Cleanup(func() { scanIdentity = previous })
+	scanIdentity = func(Process) (bool, error) {
+		i := checks
+		if i >= len(answers) {
+			i = len(answers) - 1
+		}
+		checks++
+		return answers[i].same, answers[i].err
+	}
+	return &checks
+}
+
+// TestRefusalIsReportedOnlyForAProcessPresentAndUnreadableThroughout feeds the
+// scan every ordering of the read and liveness answers (#6217). darwin cannot be
+// run here, so the orderings it can produce are injected: a departing process
+// refuses with the foreign-process errno while the liveness oracle still calls it
+// present, and only then turns zombie or disappears.
+func TestRefusalIsReportedOnlyForAProcessPresentAndUnreadableThroughout(t *testing.T) {
+	refused := errors.New("kern.procargs2: invalid argument")
+	present := identityAnswer{same: true}
+	departed := identityAnswer{same: false}
+	unknown := identityAnswer{err: errors.New("cannot revalidate")}
+
+	cases := []struct {
+		name     string
+		reads    []error
+		identity []identityAnswer
+		want     string // "refusal", "skip", "recovered"
+	}{
+		{"unreadable twice and present throughout is a refusal", []error{refused}, []identityAnswer{present}, "refusal"},
+		{"unrevalidatable identity never licenses a skip", []error{refused}, []identityAnswer{unknown}, "refusal"},
+		{"zombie seen before the re-read", []error{refused}, []identityAnswer{departed}, "skip"},
+		{"exit between the re-read and the final check", []error{refused}, []identityAnswer{present, present, departed}, "skip"},
+		{"exit between the two re-reads", []error{refused}, []identityAnswer{present, departed}, "skip"},
+		{"the re-read finds the process gone", []error{refused, syscall.ESRCH}, []identityAnswer{present}, "skip"},
+		{"the re-read finds it exited", []error{refused, ErrProcessExited}, []identityAnswer{present}, "skip"},
+		{"the re-read finds no argv", []error{refused, ErrNoArgv}, []identityAnswer{present}, "skip"},
+		{"the re-read succeeds: the first failure was transient", []error{refused, nil}, []identityAnswer{present}, "recovered"},
+		{"the second re-read succeeds", []error{refused, refused, nil}, []identityAnswer{present}, "recovered"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argv, _ := scriptedArgv(t, 44, tc.reads...)
+			stubScan(t, fixedSnapshot(44), argv)
+			stubScanUID(t, map[int]int{44: os.Getuid()})
+			scriptedIdentity(t, tc.identity...)
+			got, err := ProcessesMatchingArgv(func([]string) bool { return true })
+			switch tc.want {
+			case "refusal":
+				var unreadable *ArgvUnreadableError
+				if !errors.As(err, &unreadable) || unreadable.PID != 44 {
+					t.Fatalf("err = %v, want an ArgvUnreadableError for pid 44", err)
+				}
+			case "skip":
+				if err != nil || len(got) != 0 {
+					t.Fatalf("got %v, %v; want the exited process skipped", got, err)
+				}
+			case "recovered":
+				if err != nil || len(got) != 1 || got[0].Argv[0] != "recovered" {
+					t.Fatalf("got %v, %v; want the re-read's argv used", got, err)
+				}
+			}
+		})
+	}
+}
+
+// TestARefusalIsReadMoreThanOnce pins the property itself: a single refused
+// read, however the liveness check answers, is never enough (#6217).
+func TestARefusalIsReadMoreThanOnce(t *testing.T) {
+	argv, reads := scriptedArgv(t, 44, errors.New("refused"))
+	stubScan(t, fixedSnapshot(44), argv)
+	stubScanUID(t, map[int]int{44: os.Getuid()})
+	_, err := ProcessesMatchingArgv(func([]string) bool { return true })
+	if err == nil {
+		t.Fatal("a process that refuses every read must still fail the scan")
+	}
+	if *reads < 2 {
+		t.Fatalf("argv was read %d time(s) before the refusal was reported; want at least 2", *reads)
+	}
 }

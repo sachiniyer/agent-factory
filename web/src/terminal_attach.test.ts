@@ -20,7 +20,7 @@ function stage() {
   const terminal = Object.assign(Object.create(AttachTerminal.prototype), {
     container: host, term, fit, stopped: false, initialConnectStarted: false,
     pendingViewport: null, lastRows: 0, lastCols: 0, parked: false,
-    visibleFitFrame: null, visibleFitTimer: null, visibleFitAttempts: 0,
+    visibleFitFrame: null, visibleFitTimer: null, visibleFitAttempts: 0, resizeTimer: null,
     // The real sendResize runs so its dedupe and hidden-page write guard are
     // exercised; only the socket write is stubbed.
     send: () => (calls.push("resize"), true),
@@ -30,6 +30,8 @@ function stage() {
     scheduleVisibleFit(): void;
     stopped: boolean;
     connect(): void;
+    scheduleFit(): void;
+    resizeTimer: number | null;
     visibleFitFrame: number | null;
     visibleFitTimer: number | null;
     visibleFitAttempts: number;
@@ -455,5 +457,67 @@ test("a persisted config size is what a fresh attach constructs with", () => {
     assert.deepEqual(calls, ["refit"]);
   } finally {
     setTerminalFontSizes({ phone: 6.5, desktop: 13 });
+  }
+});
+
+// #6215: the observer reports a resize once; if xterm cannot measure at that instant
+// the debounced fit must not be the end of it.
+test("a resize whose fit cannot measure is retried, not dropped", () => {
+  const win = stubWindow();
+  try {
+    const { terminal, host, fit, term, calls } = stage();
+    const propose = fit.proposeDimensions;
+    fit.proposeDimensions = () => undefined; // renderer metrics mid-invalidation
+    host.clientHeight = 720; // the taller viewport
+    terminal.scheduleFit();
+    win.runTimer(); // the debounce fires; the measurement fails
+    assert.deepEqual(calls, [], "nothing fitted yet");
+    assert.notEqual(terminal.visibleFitFrame, null, "a retry is armed");
+    win.runFrame(); // still unmeasurable: the retry budget keeps it alive
+    assert.notEqual(terminal.visibleFitFrame, null, "the retry persists across a failed attempt");
+    fit.proposeDimensions = propose; // metrics settle
+    win.runFrame();
+    assert.deepEqual(calls, ["fit", "resize"], "the new grid is fitted and sent to the PTY");
+    assert.equal(term.rows, 40);
+  } finally {
+    win.restore();
+  }
+});
+
+test("a fit that throws between proposal and fit (detached mid-resize) is retried", () => {
+  const win = stubWindow();
+  try {
+    const { terminal, fit, calls } = stage();
+    const realFit = fit.fit;
+    let first = true;
+    fit.fit = () => { if (first) { first = false; throw new Error("detached"); } realFit(); };
+    terminal.scheduleFit();
+    win.runTimer();
+    assert.deepEqual(calls, []);
+    win.runFrame();
+    assert.deepEqual(calls, ["fit", "resize"]);
+  } finally {
+    win.restore();
+  }
+});
+
+test("a resize event during a pending retry is not swallowed: the retry reads the latest host", () => {
+  const win = stubWindow();
+  try {
+    const { terminal, host, fit, term, calls } = stage();
+    const propose = fit.proposeDimensions;
+    fit.proposeDimensions = () => undefined;
+    terminal.scheduleFit();
+    win.runTimer(); // failed, retry armed
+    host.clientHeight = 900; // a second resize lands before the retry runs
+    terminal.scheduleFit(); // its own debounce
+    fit.proposeDimensions = () => ({ rows: host.clientHeight / 15, cols: 120 });
+    fit.fit = () => { Object.assign(term, fit.proposeDimensions()); calls.push("fit"); };
+    win.runFrame(); // the armed retry fits the latest geometry
+    assert.equal(term.rows, 60);
+    assert.deepEqual(calls.slice(0, 2), ["fit", "resize"]);
+    fit.proposeDimensions = propose;
+  } finally {
+    win.restore();
   }
 });

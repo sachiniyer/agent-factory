@@ -69,3 +69,24 @@ func (m *Manager) opLockFor(key string) *sync.Mutex {
 	}
 	return lock
 }
+
+// rowWriteLockForRepo returns the repository's row-write lock, the innermost
+// leaf of the lock order: op lock -> start lock -> admission -> m.mu, and this
+// lock below all of them. It is held only around "re-check the op fence,
+// snapshot the row, persistInstanceData" and never while acquiring another
+// daemon lock (only the instances.json file lock is taken inside it).
+//
+// It exists because the admission writers (persistUnderAdmission,
+// persistSettlementUnderAdmission) cannot take the start lock, so they are not
+// serialized against a poll that already passed its OpNone gate under the start
+// lock: the poll's older whole-row snapshot could be persisted AFTER the
+// restore's targeted write and regress it (#6210). The poll holds this lock from
+// its final fence check through its write, so either it sees the restore's fence
+// and cedes, or the restore's write queues behind it and lands newer.
+func (m *Manager) rowWriteLockForRepo(repoID string) *sync.Mutex {
+	if v, ok := m.repoRowLocks.Load(repoID); ok {
+		return v.(*sync.Mutex)
+	}
+	v, _ := m.repoRowLocks.LoadOrStore(repoID, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}

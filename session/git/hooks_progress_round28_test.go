@@ -122,7 +122,7 @@ func TestHookProgressTerminalMarkerWriteIsBoundedBeforeHooksDone(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("runner did not reach terminal-marker write")
 	}
-	waitForClosed(t, done, 3*relocationIdentityTimeout, "terminal-marker write held HooksDone past its bound")
+	waitForClosed(t, done, 3*relocationIdentityTimeout.Load(), "terminal-marker write held HooksDone past its bound")
 	if p.finished() {
 		t.Fatal("inconclusive terminal-marker write reported a finished journal")
 	}
@@ -188,7 +188,7 @@ func TestHookProgressTimedOutLeaseCloseDoesNotHoldFlightMutex(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("first lease open error = %v, want deadline", err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		t.Fatal("first lease open did not time out")
 	}
 	releaseOpenOnce.Do(func() { close(releaseOpen) })
@@ -213,7 +213,7 @@ func TestHookProgressTimedOutLeaseCloseDoesNotHoldFlightMutex(t *testing.T) {
 			t.Fatal(result.err)
 		}
 		_ = result.file.Close()
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		t.Fatal("timed-out descriptor close held the lease-flight mutex")
 	}
 	releaseCloseOnce.Do(func() { close(releaseClose) })
@@ -274,7 +274,7 @@ func TestHookProgressLockFileOpenIsBounded(t *testing.T) {
 		if !errors.Is(err, config.ErrLockTimeout) {
 			t.Fatalf("progress lock error = %v, want lock timeout", err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		releaseOnce.Do(func() { close(release) })
 		<-result
 		t.Fatal("stalled lock-file open exceeded the progress-lock bound")

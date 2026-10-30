@@ -292,6 +292,36 @@ func TestTakeoverConfiguresBeforeItAttaches(t *testing.T) {
 	assert.NotContains(t, joined, "destroy-unattached")
 }
 
+// #6221: the mirrors replay whatever the source session set locally, so no option
+// the takeover depends on may be set before them. Every set-option and bind-key
+// must follow the last run-shell, and the routing set is pinned by name so a new
+// routing option has to be added here, after the mirrors.
+func TestTakeoverRoutingOptionsAreAppliedAfterEveryMirror(t *testing.T) {
+	cw, _ := config.ParseDetachKey("ctrl-w")
+	args := newTakeoverRoute("login", cw, "ctrl+w").attachArgs()
+	lastMirror, routing := -1, map[string]bool{}
+	var cmds [][]string
+	for _, c := range strings.Split(strings.Join(args, "\x00"), "\x00;\x00") {
+		cmds = append(cmds, strings.Split(c, "\x00"))
+	}
+	for i, c := range cmds {
+		if c[0] == "run-shell" {
+			lastMirror = i
+		}
+	}
+	require.GreaterOrEqual(t, lastMirror, 0)
+	for i, c := range cmds {
+		switch c[0] {
+		case "set-option":
+			routing[c[3]] = true
+			assert.Greater(t, i, lastMirror, "set-option %s runs before a mirror and could be overwritten", c[3])
+		case "bind-key":
+			assert.Greater(t, i, lastMirror, "bind-key runs before the root mirror")
+		}
+	}
+	assert.Equal(t, map[string]bool{"prefix": true, "prefix2": true, "key-table": true, "status-right": true}, routing)
+}
+
 // #6073: a takeover pane keeps every binding the session's normal pane has —
 // mouse wheel and selection included — and adds only af's detach route; the
 // configured key wins over a root binding on the same key.

@@ -570,22 +570,28 @@ func (p *freeSpaceProbe) delta() (before, after uint64, known bool) {
 }
 
 func sumFree(dirs []string) (uint64, bool) {
-	var total uint64
+	total, _, ok := sumFreeWith(dirs, freeBytesAt)
+	return total, ok
+}
+
+// sumFreeWith sums free space with one count per FILESYSTEM (device), not per
+// path: many archive roots share a mount, and summing each would multiply its
+// free space. It also reports how many distinct filesystems were summed, which
+// is the evidence tests assert on instead of comparing live free-byte readings.
+func sumFreeWith(dirs []string, probe func(string) (free, dev uint64, ok bool)) (total uint64, filesystems int, ok bool) {
 	seen := map[uint64]bool{}
 	for _, d := range dirs {
-		free, dev, ok := freeBytesAt(d)
-		if !ok {
-			return 0, false
+		free, dev, known := probe(d)
+		if !known {
+			return 0, 0, false
 		}
-		// One count per FILESYSTEM (device), not per path: many archive roots share
-		// a mount, and summing each would multiply its free space.
 		if seen[dev] {
 			continue
 		}
 		seen[dev] = true
 		total += free
 	}
-	return total, len(seen) > 0
+	return total, len(seen), len(seen) > 0
 }
 
 // pruneArchiveRoots are the directories the in-scope archived worktrees sit in.

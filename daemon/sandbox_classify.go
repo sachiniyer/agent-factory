@@ -103,7 +103,7 @@ var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 // word before the first ':'). The rest of a status is a free-form message that can
 // carry a path or caller text, so a sandbox is shown only the head.
 var sandboxRunStatusHeads = map[string]bool{
-	"started": true, "sent": true, "errored": true, "deferred": true, "parked": true,
+	"started": true, "sent": true, "sent-unverified": true, "sent-unconfirmed": true, "errored": true, "deferred": true, "parked": true,
 	"dropped": true, "stopped": true, "skipped": true, "ok": true,
 }
 

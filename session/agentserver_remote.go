@@ -166,6 +166,11 @@ func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
 
 func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
 	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup, RestartAdoption: s.restartAdoption}
+	if s.restartAdoption && s.inst != nil {
+		// Hand the restarted server the surviving tabs' roster — only if it says it
+		// can rebind them (W1.4, #6162); otherwise they are flagged unavailable.
+		req.Tabs = s.inst.restoreRosterForRestart(s.hasFeatureCached(tabRestoreFeature))
+	}
 	// Send the recorded conversation so a launch resumes exactly it (#5571 W7.2).
 	// The server resumes it only where its own store still holds it.
 	if s.inst != nil {
@@ -179,6 +184,9 @@ func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
 		s.idNative() // warm the feature advertisement (#5571 W4.5)
 		if s.inst != nil && resp.Conversation != nil {
 			s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
+		}
+		if s.inst != nil && len(req.Tabs) > 0 {
+			s.inst.applyRestoreOutcome(req.Tabs, resp.TabsRestored, resp.TabsGone)
 		}
 	}
 	return err
@@ -842,11 +850,19 @@ type agentLifecycleReq struct {
 	// SiblingTabs is how many non-agent tabs the daemon's row records, sent with a
 	// restart adoption's Provision so the host can refuse to rebuild under them.
 	SiblingTabs int `json:"sibling_tabs,omitempty"`
+	// Tabs is the roster of off-box shell/process tabs a restarted server should
+	// rebind to their surviving tmux sessions (feature tab-restore, #6162). Sent
+	// only to a server that advertises the feature; the commands in it are never run.
+	Tabs []TabData `json:"tabs,omitempty"`
 }
 
 // agentLaunchResp carries back the conversation the server launched or resumed.
 type agentLaunchResp struct {
 	Conversation *AgentConversationData `json:"conversation,omitempty"`
+	// TabsRestored and TabsGone answer a restart adoption's Tabs: the ids rebound
+	// to a live session, and the ids whose session tmux confirmed absent.
+	TabsRestored []string `json:"tabs_restored,omitempty"`
+	TabsGone     []string `json:"tabs_gone,omitempty"`
 }
 
 type agentSnapshotResp struct {

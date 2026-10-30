@@ -90,10 +90,12 @@ func (r takeoverRoute) attachArgs() []string {
 	return []string{
 		"has-session", "-t", "=" + r.session, ";",
 		"new-session", "-d", "-t", r.session, "-s", r.group, ";",
-		"set-option", "-t", r.group, "prefix", r.prefix(), ";",
-		"set-option", "-t", r.group, "prefix2", "None", ";",
 		"run-shell", r.mirrorSessionOptionsScript(), ";",
 		"run-shell", r.mirrorRootScript(), ";",
+		// Every routing option comes AFTER the mirrors (#6221): a source session
+		// with its own prefix, prefix2, key-table or status-right must not win.
+		"set-option", "-t", r.group, "prefix", r.prefix(), ";",
+		"set-option", "-t", r.group, "prefix2", "None", ";",
 		"set-option", "-t", r.group, "key-table", r.table, ";",
 		"bind-key", "-T", r.table, r.key, "detach-client", ";",
 		"set-option", "-t", r.group, "status-right", r.display + " leaves", ";",
@@ -121,9 +123,9 @@ func (r takeoverRoute) mirrorRootScript() string {
 // scrolling and selection, history-limit, the status line…) would otherwise be
 // gone in the takeover pane, and with the global mouse option off the pane loses
 // scrolling and selection. `show-options` prints only options set on that session,
-// in a form `source-file` accepts. It runs BEFORE the routing options below, so
-// the takeover's own prefix, key-table, and status hint win
-// over a copied value. A failed copy must not abort the takeover.
+// in a form `source-file` accepts. It runs BEFORE every routing option in attachArgs
+// (prefix, prefix2, key-table, status-right), so the takeover's own values win
+// over a copied one. A failed copy must not abort the takeover.
 func (r takeoverRoute) mirrorSessionOptionsScript() string {
 	return "tmux show-options -t " + shellQuote("="+r.session) + " | sed -E 's/^/set-option -t " + r.group + " /' | tmux source-file - || true"
 }

@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,8 +76,12 @@ func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 		repo:      repo,
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", h.container).Run() })
+	// A FIXED host port, not an ephemeral one: restart() must come back on the
+	// address the operator's sandbox_ssh already names, and Docker may hand an
+	// ephemeral port out again differently after a restart.
+	fixedPort := freeLoopbackPort(t)
 	runExternal(t, "", "docker", "run", "-d", "--name", h.container,
-		"-p", "127.0.0.1::22",
+		"-p", "127.0.0.1:"+fixedPort+":22",
 		"-v", bare+":/repo.git",
 		"-v", priv+".pub:/authorized_keys:ro",
 		"af-sandbox-e2e:test")
@@ -84,6 +89,26 @@ func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 	waitForSSH(t, h.port)
 	h.known = writeKnownHostsForContainer(t, h.port)
 	return h
+}
+
+// freeLoopbackPort asks the kernel for a free loopback TCP port and releases it.
+func freeLoopbackPort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick a free port: %v", err)
+	}
+	defer l.Close()
+	_, port, _ := net.SplitHostPort(l.Addr().String())
+	return port
+}
+
+// restart bounces the container (docker restart): every process in it dies, the
+// filesystem and the published ssh port survive, and it returns once sshd answers.
+func (h *sandboxHost) restart(t *testing.T) {
+	t.Helper()
+	runExternal(t, "", "docker", "restart", "-t", "2", h.container)
+	waitForSSH(t, h.port)
 }
 
 // exec runs a shell snippet inside the container.

@@ -211,8 +211,9 @@ func startRepoGoneOriginProbe(worktree *GitWorktree) (*repoGoneOriginProbeFlight
 	}
 	repoGoneOriginProbeFlights.byPath[worktree.repoPath] = flight
 	repoGoneOriginProbeFlights.Unlock()
+	probe := repoGoneOriginProbe // seam read at spawn: the flight may be abandoned
 	go func() {
-		flight.err = repoGoneOriginProbe(ctx, worktree)
+		flight.err = probe(ctx, worktree)
 		cancel()
 		repoGoneOriginProbeFlights.Lock()
 		if repoGoneOriginProbeFlights.byPath[worktree.repoPath] == flight {
@@ -226,7 +227,7 @@ func startRepoGoneOriginProbe(worktree *GitWorktree) (*repoGoneOriginProbeFlight
 }
 
 func waitForRepoGoneOriginProbe(repoPath string, flight *repoGoneOriginProbeFlight) error {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -239,7 +240,7 @@ func waitForRepoGoneOriginProbe(repoPath string, flight *repoGoneOriginProbeFlig
 			repoGoneOriginProbeFlights.Unlock()
 			return fmt.Errorf(
 				"timed out after %s while checking origin repository %s: %w",
-				relocationIdentityTimeout, repoPath, context.DeadlineExceeded,
+				relocationIdentityTimeout.Load(), repoPath, context.DeadlineExceeded,
 			)
 		}
 		repoGoneOriginProbeFlights.Unlock()
@@ -325,7 +326,7 @@ func boundedRelocationCleanupInspection(
 		inspection, err := inspect(path)
 		resultC <- result{inspection: inspection, err: err}
 	}()
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case observed := <-resultC:
@@ -333,7 +334,7 @@ func boundedRelocationCleanupInspection(
 	case <-timer.C:
 		return cleanupPathInspection{}, fmt.Errorf(
 			"timed out after %s while checking cleanup identity at %s: %w",
-			relocationIdentityTimeout, path, context.DeadlineExceeded,
+			relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
 		)
 	}
 }
@@ -366,8 +367,9 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 	}
 	cleanupGenerationInstallFlights.byPath[path] = flight
 	cleanupGenerationInstallFlights.Unlock()
+	install := cleanupGenerationInstall // seam read at spawn: the flight may be abandoned
 	go func() {
-		flight.generation, flight.err = cleanupGenerationInstall(path, expected)
+		flight.generation, flight.err = install(path, expected)
 		cleanupGenerationInstallFlights.Lock()
 		if cleanupGenerationInstallFlights.byPath[path] == flight {
 			delete(cleanupGenerationInstallFlights.byPath, path)
@@ -376,7 +378,7 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 		cleanupGenerationInstallFlights.Unlock()
 		flight.afterUnpublish()
 	}()
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -391,7 +393,7 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 		cleanupGenerationInstallFlights.Unlock()
 		return "", fmt.Errorf(
 			"timed out after %s while installing cleanup generation at %s: %w",
-			relocationIdentityTimeout, path, context.DeadlineExceeded,
+			relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
 		)
 	}
 }
@@ -657,7 +659,7 @@ func boundedPointerCheckValue(kind, worktreePath string, check func(string) (str
 }
 
 func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFlight) (string, error) {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -669,7 +671,7 @@ func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFli
 			pointerCheckFlights.Unlock()
 			return "", fmt.Errorf(
 				"timed out after %s while verifying worktree pointer under %s: %w",
-				relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
+				relocationIdentityTimeout.Load(), worktreePath, context.DeadlineExceeded,
 			)
 		}
 		pointerCheckFlights.Unlock()

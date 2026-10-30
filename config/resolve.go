@@ -198,8 +198,9 @@ func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*Resol
 		if !joined {
 			flight = &repoResolveFlight{done: make(chan struct{})}
 			repoResolveFlights[key] = flight
+			resolve := resolveRepoForBound // seam read at spawn: the flight may be abandoned by its waiter
 			go func() {
-				val, err := resolveRepoForBound(repo)
+				val, err := resolve(repo)
 				repoResolveFlightsMu.Lock()
 				delete(repoResolveFlights, key)
 				repoResolveFlightsMu.Unlock()

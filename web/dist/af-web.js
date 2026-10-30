@@ -11895,7 +11895,9 @@ var AttachTerminal = class {
       if (this.stopped) {
         return;
       }
-      this.fitVisibleHost();
+      if (!this.fitVisibleHost()) {
+        this.scheduleVisibleFit();
+      }
     }, RESIZE_DEBOUNCE_MS);
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
@@ -15564,18 +15566,8 @@ function archiveNeedsFirstPage(archive, project) {
 }
 
 // src/route_lookup.ts
-var RouteLookups = class {
-  latest = 0;
-  /** Takes a ticket, superseding every earlier one. */
-  begin() {
-    return ++this.latest;
-  }
-  current(ticket) {
-    return ticket === this.latest;
-  }
-};
-function settleLookup(lookups, ticket, id, rows, effects) {
-  if (!lookups.current(ticket)) return "stale";
+function settleLookup(intent, ticket, id, rows, effects) {
+  if (!intent.isCurrent(ticket)) return "stale";
   const row = rows.find((r) => r.id === id);
   if (!row) {
     effects.missing();
@@ -15588,7 +15580,6 @@ function settleLookup(lookups, ticket, id, rows, effects) {
 // src/archive_window.ts
 var REREAD_BATCH = 500;
 var DISCOVERY_PAGE = 200;
-var DISCOVERY_MAX_PAGES = 200;
 async function rereadHeld(ids, fetchById) {
   const out = [];
   for (let i = 0; i < ids.length; i += REREAD_BATCH) {
@@ -15597,24 +15588,35 @@ async function rereadHeld(ids, fetchById) {
   return out;
 }
 function aheadOfCursor(row, cursor) {
-  const a = Date.parse(row.created_at ?? "");
-  const b = Date.parse(cursor.created_at);
-  if (Number.isNaN(a) || Number.isNaN(b)) return true;
-  if (a !== b) return a > b;
+  const order = compareTimestamps(row.created_at ?? "", cursor.created_at);
+  if (order === null) return true;
+  if (order !== 0) return order > 0;
   return (row.id ?? "") > cursor.id;
 }
-async function discoverHead(cursor, fetchPage) {
-  const out = [];
+function compareTimestamps(a, b) {
+  const split = (s) => ({
+    sec: Date.parse(s.replace(/\.\d+/, "")),
+    frac: (/\.(\d+)/.exec(s)?.[1] ?? "").padEnd(9, "0")
+  });
+  const x = split(a);
+  const y = split(b);
+  if (Number.isNaN(x.sec) || Number.isNaN(y.sec)) return null;
+  if (x.sec !== y.sec) return x.sec > y.sec ? 1 : -1;
+  if (x.frac === y.frac) return 0;
+  return x.frac > y.frac ? 1 : -1;
+}
+async function discoverHead(cursor, fetchPage, maxPages) {
+  const rows = [];
   let before = null;
-  for (let page = 0; page < DISCOVERY_MAX_PAGES; page++) {
+  for (let page = 0; page < maxPages; page++) {
     const got = await fetchPage(before, DISCOVERY_PAGE);
-    out.push(...got.sessions);
-    if (got.next === null || got.sessions.length === 0) break;
+    rows.push(...got.sessions);
+    if (got.next === null || got.sessions.length === 0) return { rows, complete: true };
     const last = got.sessions[got.sessions.length - 1];
-    if (cursor !== null && !aheadOfCursor(last, cursor)) break;
+    if (cursor !== null && !aheadOfCursor(last, cursor)) return { rows, complete: true };
     before = got.next;
   }
-  return out;
+  return { rows, complete: false };
 }
 function discoveryNeeded(dirty, previous, next) {
   if (dirty || previous.total !== next.total) return true;
@@ -15624,18 +15626,22 @@ function discoveryNeeded(dirty, previous, next) {
 }
 async function reconcileWindow(i) {
   const byId = new Map(i.held.map((s) => [s.id ?? "", s]));
-  if (!discoveryNeeded(i.dirty, i.archive, i.summary)) return [...byId.values()];
+  if (!discoveryNeeded(i.dirty, i.archive, i.summary)) return { rows: [...byId.values()], complete: true };
   byId.clear();
   const keep = (row) => {
     if (i.isArchived(row) && !i.live.has(row.id)) byId.set(row.id ?? "", row);
   };
+  let complete = true;
   for (const row of await rereadHeld(i.held.flatMap((s) => s.id ? [s.id] : []), i.fetchById)) keep(row);
   for (const [key, cursor] of Object.entries(i.archive.cursors)) {
     if (cursor === void 0) continue;
     const project = key === "" ? null : key;
-    for (const row of await discoverHead(cursor, (before, limit) => i.fetchPage(project, before, limit))) keep(row);
+    const maxPages = Math.ceil(i.summary.total / DISCOVERY_PAGE) + 2;
+    const found = await discoverHead(cursor, (before, limit) => i.fetchPage(project, before, limit), maxPages);
+    for (const row of found.rows) keep(row);
+    if (!found.complete) complete = false;
   }
-  return [...byId.values()];
+  return { rows: [...byId.values()], complete };
 }
 
 // src/pending_restores.ts
@@ -16062,6 +16068,11 @@ var CreateSelectionIntent = class {
   }
   submit() {
     return ++this.generation;
+  }
+  /** The generation now: a by-id route lookup (#6204) takes it and applies its answer
+   *  only while isCurrent, so ANY navigation or selection since supersedes it. */
+  snapshot() {
+    return this.generation;
   }
   isCurrent(intent) {
     return intent === this.generation;
@@ -18206,6 +18217,8 @@ var AppShell = class {
   update(state, prioritizeTerminal = false) {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
+    const archiveChanged = archiveRepaintNeeded(this.lastArchive, state);
+    this.lastArchive = state.archive;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
@@ -18284,7 +18297,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -18569,6 +18582,7 @@ var AppShell = class {
    *  time, so the rail says how many older sessions are still on the daemon and
    *  offers the next page, reports a read in flight, or names a failed one and
    *  offers the retry. Null while the archived group is hidden or fully loaded. */
+  lastArchive;
   archiveFooter(state) {
     const a = state.archive;
     if (!a.lazy || !state.statusFilter.archived) return null;
@@ -19603,6 +19617,9 @@ function inertRowReason(s) {
   }
   return cause === "" ? "cannot be opened" : `cannot be opened \xB7 ${cause}`;
 }
+function archiveRepaintNeeded(last, state) {
+  return last !== state.archive;
+}
 function archiveFooterSignature(state) {
   const a = state.archive;
   return JSON.stringify([a.lazy, a.loading, a.error ?? "", archiveHasMore(a, state.selectedProject), state.statusFilter.archived]);
@@ -20060,12 +20077,10 @@ function tabSynthOf(list, id) {
   return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
 }
 var resolvingRoute = false;
-var routeLookups = new RouteLookups();
 var routeSelection = null;
 var createSelectionIntent = new CreateSelectionIntent();
 function resolveRoute() {
   createSelectionIntent.navigate();
-  const ticket = routeLookups.begin();
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -20081,7 +20096,7 @@ function resolveRoute() {
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
     } else if (lookup && route) {
-      void resolveArchivedRoute(route.session, ticket);
+      void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -20111,12 +20126,11 @@ async function resolveArchivedRoute(id, ticket) {
     showTransientNotice("No session with that id in this daemon");
     replaceRoute(null);
   };
-  settleLookup(routeLookups, ticket, id, rows, {
-    // A session killed while the read was in flight is not found: the adopt fence
-    // refuses the stale row (#6209).
+  settleLookup(createSelectionIntent, ticket, id, rows, {
     found: (row) => {
       if (optimisticSessions.adopt([row], fence).length === 0) {
-        missing();
+        if (store.get().sessions.some((s) => s.id === id)) resolveRoute();
+        else missing();
         return;
       }
       applySessions(optimisticSessions.project());
@@ -21714,7 +21728,7 @@ async function fetchSnapshotWithArchiveWindow(tok) {
   if (!snapshot.archived) return { ...snapshot, archiveEpoch: epoch };
   const live = new Set(snapshot.sessions.map((s) => s.id));
   const archive = store.get().archive;
-  const kept = await reconcileWindow({
+  const { rows: kept, complete } = await reconcileWindow({
     held: optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id)),
     live,
     archive,
@@ -21724,7 +21738,7 @@ async function fetchSnapshotWithArchiveWindow(tok) {
     fetchById: (ids) => fetchSessionsById(tok, ids),
     fetchPage: (project, before, limit) => fetchArchivedPage(tok, { project, before, limit })
   });
-  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: epoch };
+  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: complete ? epoch : archiveCleanEpoch };
 }
 async function loadArchivedPage() {
   const tok = token;

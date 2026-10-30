@@ -662,8 +662,9 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 		err          error
 	}
 	resultCh := make(chan captureResult, 1)
+	captureTimeout := conversationCaptureTimeout // read at spawn: the loop below may abandon the worker
 	go func() {
-		conversation, err := session.CaptureAgentConversation(token.Agent(), snap, conversationCaptureTimeout)
+		conversation, err := session.CaptureAgentConversation(token.Agent(), snap, captureTimeout)
 		resultCh <- captureResult{conversation, err}
 	}()
 	var res captureResult

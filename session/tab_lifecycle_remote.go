@@ -386,7 +386,7 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) (changed bool, ado
 			name := uniqueTabNameReserving(i.Tabs, i.tabDisplayClaims, in.name)
 			i.Tabs = append(i.Tabs, &Tab{
 				ID: in.id, Name: name, Kind: in.kind, Command: in.command,
-				Exit: tabExitFromData(td.Exit), gen: td.Gen,
+				Exit: tabExitFromData(td.Exit), gen: td.Gen, sandboxTmux: td.TmuxName,
 			})
 			i.touchLocked()
 			changed = true

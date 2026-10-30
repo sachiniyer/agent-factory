@@ -113,7 +113,7 @@ import type { DragPayload } from "./layout.js";
 import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
 import { archiveKey, archiveFromSnapshot, archiveNeedsFirstPage, emptyArchive } from "./archive.js";
-import { RouteLookups, settleLookup } from "./route_lookup.js";
+import { settleLookup } from "./route_lookup.js";
 import { reconcileWindow } from "./archive_window.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
@@ -619,12 +619,10 @@ function tabSynthOf(list: SessionData[], id: string | null): string[] {
 
 // Resolve only against an authenticated snapshot, never a partially loaded rail.
 let resolvingRoute = false;
-const routeLookups = new RouteLookups();
 let routeSelection: string | null = null;
 const createSelectionIntent = new CreateSelectionIntent();
 function resolveRoute(): void {
   createSelectionIntent.navigate();
-  const ticket = routeLookups.begin();
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -642,7 +640,7 @@ function resolveRoute(): void {
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
     } else if (lookup && route) {
-      void resolveArchivedRoute(route.session, ticket);
+      void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -680,12 +678,14 @@ async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
     showTransientNotice("No session with that id in this daemon");
     replaceRoute(null);
   };
-  settleLookup(routeLookups, ticket, id, rows, {
-    // A session killed while the read was in flight is not found: the adopt fence
-    // refuses the stale row (#6209).
+  settleLookup(createSelectionIntent, ticket, id, rows, {
     found: (row) => {
       if (optimisticSessions.adopt([row], fence).length === 0) {
-        missing();
+        // An event newer than the read refused it. If that event already put the
+        // session in the model, the route resolves against that row; only a row
+        // the model does not hold is genuinely missing (a kill, #6209).
+        if (store.get().sessions.some((s) => s.id === id)) resolveRoute();
+        else missing();
         return;
       }
       applySessions(optimisticSessions.project());
@@ -3319,13 +3319,15 @@ async function fetchSnapshotWithArchiveWindow(tok: string): Promise<SessionSnaps
   const archive = store.get().archive;
   // Reads nothing while the stream stayed live and the counts did not move: a
   // deletion elsewhere then arrived as an event (adopt fence + event path).
-  const kept = await reconcileWindow({
+  const { rows: kept, complete } = await reconcileWindow({
     held: optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id)),
     live, archive, summary: snapshot.archived, dirty: epoch > archiveCleanEpoch, isArchived,
     fetchById: (ids) => fetchSessionsById(tok, ids),
     fetchPage: (project, before, limit) => fetchArchivedPage(tok, { project, before, limit }),
   });
-  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: epoch };
+  // A discovery that ran out of pages did not reconcile the window: leave the
+  // dirty mark so the next resync tries again instead of calling it clean.
+  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: complete ? epoch : archiveCleanEpoch };
 }
 
 /** Reads the next page of the selected project's archive, newest first, into the
