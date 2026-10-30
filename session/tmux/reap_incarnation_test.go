@@ -122,8 +122,9 @@ func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
 	case "display-message":
 		if sess == nil {
 			// Measured on tmux 3.4: aimed at a session that does not exist,
-			// display-message succeeds with EMPTY output rather than failing.
-			return nil, nil
+			// display-message SUCCEEDS, evaluating the format in a session-less
+			// fallback context — "#{pid}" still answers, "#{session_id}" is empty.
+			return []byte("114183\n"), nil
 		}
 		format := args[len(args)-1]
 		if strings.HasPrefix(format, "af-reap-") {

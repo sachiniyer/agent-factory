@@ -68,6 +68,18 @@ show-environment)
     AF_SESSION) echo 'AF_SESSION=` + sanitized + `' ;;
     *) echo "unknown variable: $4" >&2; exit 1 ;;
   esac ;;
+if-shell)
+  # if-shell -F -t $N COND TRUE FALSE. The server evaluates COND as a format and
+  # runs one branch. This fake's one session has a fixed id, server pid and creation
+  # stamp, so the condition production sends is true exactly when it names all three
+  # of them: the full string must equal the one built from those values.
+  want='#{&&:#{==:#{session_id},$7},#{&&:#{==:#{pid},4242},#{==:#{session_created},1700000000}}}'
+  if [ "$4" = '$7' ] && [ "$5" = "$want" ]; then
+    echo 'af-reap-fired'
+    echo "kill-session -t $4" >> '` + logPath + `'
+  else
+    echo 'af-reap-skipped'
+  fi ;;
 *) exit 0 ;;
 esac
 `

@@ -132,7 +132,6 @@ func TestTmuxSessionIDSemanticsTheIncarnationBindingRelies(t *testing.T) {
 		t.Logf("%s on a vanished id: exit %d, stdout %q, stderr %q", command, got.exit, got.stdout, got.stderr)
 	}
 	pinned := map[string]behaviour{
-		"display-message":  {exit: 0, stdout: "", stderr: ""},
 		"show-environment": {exit: 1, stderr: "no such session: " + idA},
 		"kill-session":     {exit: 1, stderr: "can't find session: " + idA},
 	}
@@ -158,10 +157,26 @@ func TestTmuxSessionIDSemanticsTheIncarnationBindingRelies(t *testing.T) {
 			t.Errorf("%s of a vanished id (%+v) is not recognised as gone by sessionIDProvedAbsent", command, got)
 		}
 	}
-	// An id read that succeeds on a vanished id proves nothing: its answer must be
-	// required to carry the id, and here it carries nothing.
-	if got := observed["display-message"]; strings.Contains(got.stdout, idA) {
-		t.Errorf("display-message on a vanished id printed the id: %+v", got)
+	// Exit 0 is not proof. On a vanished id display-message SUCCEEDS (measured on CI
+	// tmux 3.4: exit 0, stdout the server pid, evaluated in a session-less fallback
+	// context), so a read of the identity is only trustworthy if its answer carries
+	// #{session_id} equal to $N. Here it carries none — and the production reader
+	// must therefore reject it as unknown, not read it as a match or as absence.
+	dm := observed["display-message"]
+	if dm.exit != 0 {
+		t.Errorf("display-message on a vanished id exited %d; expected a success with a context-less answer, got %+v", dm.exit, dm)
+	}
+	if strings.Contains(dm.stdout, idA) || len(strings.Fields(dm.stdout)) == 3 {
+		t.Errorf("display-message on a vanished id returned something shaped like an identity: %+v", dm)
+	}
+	probe := NewTmuxSessionFromSanitizedName(name, "sleep 600")
+	// A plausible-looking verified identity for the dead id: the pid and stamp of the
+	// live server. Only the session id can tell the answers apart.
+	livePID := must("display-message", "-p", "-t", exactTarget(name), "#{pid}")
+	liveCreated := must("display-message", "-p", "-t", exactTarget(name), "#{session_created}")
+	same, known, perr := probe.confirmIncarnation(&tmuxGeneration{sessionID: idA, serverPID: livePID, created: liveCreated})
+	if same || known || perr == nil {
+		t.Errorf("confirmIncarnation on a vanished id = (same=%v, known=%v, err=%v), want unknown", same, known, perr)
 	}
 	// The guard cannot be true for a vanished id because it compares #{session_id}:
 	// whatever -t resolves to (nothing, an error, or some other session), the
