@@ -80,8 +80,8 @@ func TestCreateFromBuiltinTemplates(t *testing.T) {
 	if !slices.Equal(docs, want) {
 		t.Fatalf("docs = %v, want %v", docs, want)
 	}
-	if !slices.Equal(BuiltinTemplates, []string{"goals", "technical", "api", "ui", "future"}) {
-		t.Fatalf("BuiltinTemplates = %v, want goals, technical, api, ui, future", BuiltinTemplates)
+	if !slices.Equal(BuiltinTemplates, []string{"goals", "technical", "api", "ui", "steps", "future"}) {
+		t.Fatalf("BuiltinTemplates = %v, want goals, technical, api, ui, steps, future", BuiltinTemplates)
 	}
 	future, _, err := s.Read("auth-rework", "future")
 	if err != nil || !strings.HasPrefix(future, "# auth rework: future") {

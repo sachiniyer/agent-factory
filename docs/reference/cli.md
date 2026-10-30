@@ -2094,7 +2094,7 @@ af proposal start <slug> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--docs` | `stringSlice` | Docs to create, comma-separated (default `[goals,technical,api,ui,future]`) |
+| `--docs` | `stringSlice` | Docs to create, comma-separated (default `[goals,technical,api,ui,steps,future]`) |
 | `--session` | `string` | Act for the session with this `title` instead of the calling session |
 
 **Global flags**

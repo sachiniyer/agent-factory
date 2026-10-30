@@ -290,6 +290,7 @@ button:disabled,
   font: inherit;
   font-size: var(--af-type-body);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 }
 .af-project-item:hover {
@@ -3998,7 +3999,7 @@ textarea[class] {
   pointer-events: auto;
 }
 
-/* node_modules/@xterm/xterm/css/xterm.css */
+/* ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/@xterm/xterm/css/xterm.css */
 .xterm {
   cursor: text;
   position: relative;
