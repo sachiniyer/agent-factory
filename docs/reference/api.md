@@ -61,6 +61,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/AttachProposal` | `session_id`, `slug` | Attach the session to a proposal (or, with no slug, report its current one), open its Docs tab, and return the rules. |
 | `POST` | `/v1/DetachProposal` | `session_id` | Remove the session's proposal attachment and cursor, and close its Docs tab. |
 | `POST` | `/v1/AddProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `name`, `author` | Add a doc to a proposal from a template, or blank, and commit it as the given author. |
+| `POST` | `/v1/RemoveProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `author` | Remove a doc from a proposal and commit the deletion as the given author; the doc stays in the proposal's history. |
 | `POST` | `/v1/ReadProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc` | Read a proposal doc and the commit it is at, after committing its uncommitted edits as external. |
 | `POST` | `/v1/SaveProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `base` | Save a proposal doc as a human edit against a base commit; merges with git merge-file, and answers 409 proposal_conflict with ours/theirs/base when the edits conflict. |
 | `POST` | `/v1/WriteProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `author` | Replace a proposal doc and commit it as the given author, with no merge. |

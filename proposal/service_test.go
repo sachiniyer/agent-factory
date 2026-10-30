@@ -294,7 +294,7 @@ func TestServiceGetDetail(t *testing.T) {
 	if !slices.Equal(d.Docs, want) {
 		t.Fatalf("docs = %v, want %v", d.Docs, want)
 	}
-	if !slices.Equal(d.Templates, []string{"technical", "ui", "future"}) {
+	if !slices.Equal(d.Templates, []string{"technical", "ui", "steps", "future"}) {
 		t.Fatalf("templates = %v", d.Templates)
 	}
 	if d.OpenQuestions != 2 || d.Head == "" || !slices.Equal(d.AttachedSessions, []string{"alpha"}) {

@@ -1766,7 +1766,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
+        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalRemoveDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, RemoveProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
       },
       "verdict": "real-gap",
       "issue": "TBD",
@@ -1973,6 +1973,7 @@
       "af proposal list": "proposal.docs",
       "af proposal path": "proposal.docs",
       "af proposal add-doc": "proposal.docs",
+      "af proposal remove-doc": "proposal.docs",
       "af proposal cat": "proposal.docs",
       "af proposal write": "proposal.docs",
       "af proposal push-mode": "proposal.push",
@@ -2039,6 +2040,7 @@
       "POST /v1/SetBudget": "backlog.runner",
       "GET /v1/health": "-",
       "POST /v1/AddProposalDoc": "proposal.docs",
+      "POST /v1/RemoveProposalDoc": "proposal.docs",
       "POST /v1/AttachProposal": "proposal.agent-workflow",
       "POST /v1/CheckpointProposal": "proposal.agent-workflow",
       "POST /v1/DetachProposal": "proposal.agent-workflow",
@@ -2347,6 +2349,8 @@
       "af proposal path --help": "meta.discovery",
       "af proposal add-doc --help": "meta.discovery",
       "af proposal add-doc --session": "proposal.docs",
+      "af proposal remove-doc --help": "meta.discovery",
+      "af proposal remove-doc --session": "proposal.docs",
       "af proposal cat --help": "meta.discovery",
       "af proposal write --help": "meta.discovery",
       "af proposal write --session": "proposal.docs",
