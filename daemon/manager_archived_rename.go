@@ -54,8 +54,8 @@ func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, pro
 	if err != nil || archived == nil {
 		return err
 	}
-	if err := pendingPruneTitleRefusal(archived); err != nil {
-		return err
+	if err := m.pruneRowFence(repoID, archived); err != nil {
+		return fmt.Errorf("the title %q is held by an archived session: %w", archived.Title, err)
 	}
 	return m.validateTitleClaimableLocked(repoID, repoPath, title, program, namespace, allowReserved, diskData, archived, inPlace, remedyPath...)
 }
@@ -86,8 +86,8 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// The rename relocates the archive. A pending prune intent owns that worktree
 	// until it resolves (the startup resume or the next apply), so refuse before
 	// anything moves (#5189).
-	if err := pendingPruneTitleRefusal(archived); err != nil {
-		return nil, err
+	if err := m.pruneRowFence(repoID, archived); err != nil {
+		return nil, fmt.Errorf("the title %q is held by an archived session: %w", archived.Title, err)
 	}
 	oldTitle := archived.Title
 	// The replacement name must clear the same bar the archived row itself had:
@@ -389,15 +389,4 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 		}
 	}
 	return "", fmt.Errorf("could not find an available archived name for %q", base)
-}
-
-// pendingPruneTitleRefusal refuses to relocate, rename or reuse the title of an
-// archived row whose prune has not resolved. Relocating it would move the tree the
-// intent is about to rename or delete, and the intent's paths would then name
-// nothing (or someone else's tree).
-func pendingPruneTitleRefusal(archived *session.Instance) error {
-	if archived.PruneIntent() == nil {
-		return nil
-	}
-	return fmt.Errorf("the title %q is held by an archived session whose prune is pending (an earlier `af sessions prune --apply` was interrupted); finish it with `af sessions prune --apply` — the daemon also resumes it at start-up — then retry", archived.Title)
 }

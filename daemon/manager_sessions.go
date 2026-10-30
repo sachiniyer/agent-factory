@@ -64,6 +64,13 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	// A pending prune owns the archive's cleanup (the renamed .prune-* tree and the
 	// intent). Finish it through the same resume path before the kill proceeds, or
 	// refuse: a kill must never orphan either (#5189).
+	if instance != nil {
+		// One shared fence: an abandoned (timed-out) prune write or filesystem step
+		// refuses the kill even when the intent was cleared in memory.
+		if err := m.pruneAbandonedGuard(repoID, instance, nil); err != nil {
+			return session.InstanceData{}, fmt.Errorf("session %q has a prune step that timed out and may still be running: %w", title, err)
+		}
+	}
 	if instance != nil && instance.PruneIntent() != nil {
 		if _, inc := m.resumePruneIntent(repoID, instance); inc != nil {
 			return session.InstanceData{}, fmt.Errorf("session %q has an unfinished prune (stopped at %s: %s); run `af sessions prune --apply` to finish it, then kill it", title, inc.Step, inc.Reason)

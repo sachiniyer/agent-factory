@@ -410,3 +410,93 @@ func TestLeafRemovalFailingMidwayCanBeResumedToCompletion(t *testing.T) {
 	require.NoError(t, RemoveArchivedRegistrationLeaf(repo, leafName, nonce))
 	assert.NoDirExists(t, leaf)
 }
+
+// P1 (Codex on #6186): an object store referenced through the origin's
+// objects/info/alternates can live inside the registration leaf under ANY name, and
+// pruning would destroy the kept branch's objects. The rule is a dependency: every
+// store the repository depends on, through the whole alternates chain, lies outside
+// both deleted roots.
+func TestObjectStoresInsideDeletedRootsAreRefusedWhateverTheyAreNamed(t *testing.T) {
+	// moveOriginObjects moves the origin's objects into dest and leaves the origin
+	// pointing at them through alternates (git keeps working).
+	moveOriginObjects := func(t *testing.T, repo, dest, entry string) {
+		t.Helper()
+		objects := filepath.Join(repo, ".git", "objects")
+		require.NoError(t, os.Rename(objects, dest))
+		require.NoError(t, os.MkdirAll(filepath.Join(objects, "info"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(objects, "info", "alternates"), []byte(entry+"\n"), 0o644))
+	}
+
+	t.Run("a clean worktree depends only on stores outside", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		deps, err := objectStoresInsideDeletedRoots(wt)
+		require.NoError(t, err)
+		assert.Empty(t, deps)
+	})
+
+	t.Run("origin objects moved into the leaf, absolute alternates entry", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		leaf, err := registrationLeaf(wt)
+		require.NoError(t, err)
+		store := filepath.Join(leaf, "pack-store") // not named objects, no HEAD beside it
+		moveOriginObjects(t, repo, store, store)
+		gitIn(t, wt, "status", "--porcelain") // premise: git still works through the alternate
+
+		deps, err := objectStoresInsideDeletedRoots(wt)
+		require.NoError(t, err)
+		require.NotEmpty(t, deps)
+		reasons, err := WorktreeUnrecoverableContent(wt)
+		require.NoError(t, err)
+		assert.Contains(t, strings.Join(reasons, " "), "object store")
+		assert.Contains(t, strings.Join(reasons, " "), "pack-store")
+	})
+
+	t.Run("a relative alternates entry is resolved against the listing store", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		leaf, err := registrationLeaf(wt)
+		require.NoError(t, err)
+		store := filepath.Join(leaf, "store")
+		rel, err := filepath.Rel(filepath.Join(repo, ".git", "objects"), store)
+		require.NoError(t, err)
+		moveOriginObjects(t, repo, store, rel)
+		deps, err := objectStoresInsideDeletedRoots(wt)
+		require.NoError(t, err)
+		assert.NotEmpty(t, deps)
+	})
+
+	t.Run("transitively: an outside store whose alternates list a store inside", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		leaf, err := registrationLeaf(wt)
+		require.NoError(t, err)
+		inner := filepath.Join(leaf, "deep")
+		outer := filepath.Join(t.TempDir(), "outer-objects")
+		moveOriginObjects(t, repo, inner, outer)
+		require.NoError(t, os.MkdirAll(filepath.Join(outer, "info"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(outer, "info", "alternates"), []byte(inner+"\n"), 0o644))
+		deps, err := objectStoresInsideDeletedRoots(wt)
+		require.NoError(t, err)
+		assert.NotEmpty(t, deps)
+	})
+
+	t.Run("an alternate outside both roots is allowed", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		outside := filepath.Join(t.TempDir(), "shared-objects")
+		moveOriginObjects(t, repo, outside, outside)
+		deps, err := objectStoresInsideDeletedRoots(wt)
+		require.NoError(t, err)
+		assert.Empty(t, deps)
+	})
+
+	t.Run("an unreadable alternates file refuses", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("permission bits are bypassed by root")
+		}
+		repo, wt := pruneWorktree(t)
+		moveOriginObjects(t, repo, filepath.Join(t.TempDir(), "o"), filepath.Join(t.TempDir(), "o"))
+		alt := filepath.Join(repo, ".git", "objects", "info", "alternates")
+		require.NoError(t, os.Chmod(alt, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(alt, 0o644) })
+		_, err := objectStoresInsideDeletedRoots(wt)
+		require.Error(t, err, "unknown refuses")
+	})
+}

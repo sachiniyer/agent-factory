@@ -516,7 +516,7 @@ func TestPruneApply_TitleReuseRefusesWhileAPruneIsPendingThenSucceedsAfterResume
 	renamed, rerr := manager.renameArchivedForReuseLocked(repoID, repoPath, "reuse-pending", "claude", runtimeNamespaceLocalTmux, &disk)
 	manager.mu.Unlock()
 	require.Error(t, rerr)
-	assert.Contains(t, rerr.Error(), "prune is pending")
+	assert.Contains(t, rerr.Error(), "pending or interrupted")
 	assert.Nil(t, renamed)
 	assert.DirExists(t, archived, "the archive was not relocated out from under the intent")
 	assert.Equal(t, "reuse-pending", inst.Title)
@@ -622,6 +622,63 @@ func TestPruneApply_RefusesWhileAnAbandonedRecordWriteMayStillBeRunning(t *testi
 	require.NotEmpty(t, resp.Skipped)
 	assert.Contains(t, resp.Skipped[0].Reason, "may still be running")
 	assert.DirExists(t, archived)
+	close(release)
+	<-finished
+}
+
+// P1 (Codex on #6186): an intent write that times out has an UNKNOWN outcome. The
+// intent stays in memory and the abandoned write is registered, so a restore
+// cannot succeed and then be overwritten by the delayed write carrying the intent.
+func TestPruneApply_DelayedIntentWriteThenRestoreIsRefusedAndConverges(t *testing.T) {
+	manager, repoID, _, inst, archived := seedPrunableArchive(t, "delayed-intent")
+	c := planOf(t, manager, repoID)
+
+	prevTimeout, prevImpl := prunePersistTimeout, prunePersistImpl
+	prunePersistTimeout = 50 * time.Millisecond
+	prunePersistImpl = func(repoID string, data session.InstanceData) error {
+		time.Sleep(500 * time.Millisecond) // the write lands LATE
+		return persistInstanceData(repoID, data)
+	}
+	t.Cleanup(func() { prunePersistTimeout, prunePersistImpl = prevTimeout, prevImpl })
+
+	resp, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	require.Len(t, resp.Incomplete, 1)
+	assert.Equal(t, "intent", resp.Incomplete[0].Step)
+	require.NotNil(t, inst.PruneIntent(), "the intent is not cleared on an unknown outcome")
+	assert.DirExists(t, archived, "nothing was renamed")
+
+	// Restore, kill and a new prune all refuse while the row is fenced.
+	_, _, rerr := manager.RestoreSession(RestoreSessionRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID})
+	require.Error(t, rerr)
+	assert.Contains(t, rerr.Error(), "pending or interrupted")
+	_, kerr := manager.KillSession(KillSessionRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID})
+	require.Error(t, kerr)
+	assert.DirExists(t, archived)
+
+	// The delayed write lands; the system then converges from the record on disk.
+	prunePersistImpl, prunePersistTimeout = prevImpl, prevTimeout
+	require.Eventually(t, func() bool { return sessiongit.MutationInFlight(prunePersistKey(repoID)) == nil }, 5*time.Second, 20*time.Millisecond)
+	resp, err = manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	assert.Empty(t, resp.Incomplete, "skipped=%+v", resp.Skipped)
+	assert.True(t, inst.IsPruned())
+	assert.NoDirExists(t, archived)
+}
+
+// The shared fence consults both halves: with the intent cleared in memory, a
+// pending abandoned write still refuses restore.
+func TestPruneApply_FenceCoversAnAbandonedWriteEvenWithoutAnIntent(t *testing.T) {
+	manager, repoID, _, inst, _ := seedPrunableArchive(t, "fence-both-halves")
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	require.ErrorIs(t, sessiongit.BoundedMutationWithin(50*time.Millisecond, "saving the session records",
+		[]string{prunePersistKey(repoID)}, func() error { <-release; close(finished); return nil }), context.DeadlineExceeded)
+	require.Nil(t, inst.PruneIntent())
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "may still be running")
 	close(release)
 	<-finished
 }

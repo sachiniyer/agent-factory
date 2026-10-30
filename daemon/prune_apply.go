@@ -278,6 +278,14 @@ func (m *Manager) pruneApplyOne(c PruneCandidate, cutoff time.Time) (*PrunedEntr
 		return skip(err.Error())
 	}
 	if err := m.persistPruneRow(c.RepoID, instance); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			// The write may still land: the outcome is UNKNOWN, not "failed". The
+			// intent therefore STAYS in memory (every lifecycle operation refuses on
+			// it, and the abandoned write is registered), and the row reports
+			// incomplete. Clearing it would let a restore succeed and then be
+			// overwritten by the delayed write carrying the intent.
+			return nil, nil, &PruneIncompleteEntry{ID: c.ID, Title: c.Title, RepoID: c.RepoID, Step: "intent", Reason: err.Error()}
+		}
 		instance.ClearPruneIntent()
 		return skip(fmt.Sprintf("could not record the prune intent, so nothing was touched: %v", err))
 	}
@@ -655,9 +663,13 @@ func prunePersistKey(repoID string) string { return "instances\x00" + repoID }
 // UNKNOWN outcome (the write may still land): it is registered under the records'
 // key, and nothing in prune acts on the repo's rows again until it finishes.
 func boundedPrunePersist(repoID string, data session.InstanceData) error {
+	write := prunePersistImpl // captured by value: an abandoned write reads no package variable
 	return sessiongit.BoundedMutationWithin(prunePersistTimeout, "saving the session records",
-		[]string{prunePersistKey(repoID)}, func() error { return persistInstanceData(repoID, data) })
+		[]string{prunePersistKey(repoID)}, func() error { return write(repoID, data) })
 }
+
+// prunePersistImpl is the record writer; a package var so a test can delay it.
+var prunePersistImpl = persistInstanceData
 
 // pruneAbandonedGuard refuses to act on a row while a bounded filesystem mutation
 // of an earlier step has timed out and may still be running: its outcome is
@@ -677,4 +689,20 @@ func (m *Manager) pruneAbandonedGuard(repoID string, instance *session.Instance,
 		}
 	}
 	return sessiongit.MutationInFlight(keys...)
+}
+
+// pruneRowFence is THE check every lifecycle operation on a row makes before it
+// acts (restore, kill, rename and title reuse, a new prune): the row is fenced
+// while it has a prune intent in memory OR a pending abandoned filesystem/record
+// mutation that touches it. No caller consults only half: an intent cleared after a
+// timed-out write still leaves the abandoned write registered, and an intent in
+// memory fences the row whatever the registry says (#5189).
+func (m *Manager) pruneRowFence(repoID string, instance *session.Instance) error {
+	if instance.PruneIntent() != nil {
+		return fmt.Errorf("a prune of its archived worktree is pending or interrupted — run `af sessions prune --apply` to finish it first")
+	}
+	if err := m.pruneAbandonedGuard(repoID, instance, nil); err != nil {
+		return fmt.Errorf("a prune step on it timed out and may still be running: %w", err)
+	}
+	return nil
 }

@@ -167,6 +167,18 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 		reasons = append(reasons, fmt.Sprintf("git object storage lives inside what pruning deletes (%s) — its commits may exist nowhere else; pruning does not touch such worktrees, so preserve or relocate that repository first",
 			sampleList(firstN(storage, pruneSamplePaths), len(storage))))
 	}
+	// The same principle stated as a DEPENDENCY: every object store the kept
+	// branch's repository depends on — its objects directory and the transitive
+	// objects/info/alternates chain — must lie outside both deleted roots, whatever
+	// it is named. (The shape scan above cannot see a store referenced by path.)
+	deps, err := objectStoresInsideDeletedRoots(worktreePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(deps) > 0 {
+		reasons = append(reasons, fmt.Sprintf("the kept branch's repository depends on an object store inside what pruning deletes (%s) — its objects would be destroyed; move that store out (or run `git repack -a -d` in the origin to make it self-contained) first",
+			sampleList(firstN(deps, pruneSamplePaths), len(deps))))
+	}
 	subs, err := gitlinkPaths(worktreePath)
 	if err != nil {
 		return nil, err
@@ -512,4 +524,83 @@ func removeLeafIdentityLast(leaf string, inject func(entry string) error) error 
 		return err
 	}
 	return os.Remove(leaf)
+}
+
+const maxAlternatesDepth = 16
+
+// objectStoresInsideDeletedRoots follows the repository's object-store dependency
+// chain and returns every store (or alternates entry) that lies inside the
+// worktree tree or the registration leaf, judged after EvalSymlinks. Relative
+// alternates entries are resolved against the objects directory of the store that
+// lists them. A store that cannot be read or resolved is an error, which refuses; a
+// listed store that does not exist is judged lexically (git ignores it, so it
+// protects nothing, but it must not name a deleted root).
+func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
+	leaf, err := registrationLeaf(worktreePath)
+	if err != nil {
+		return nil, err
+	}
+	var roots []string
+	for _, p := range []string{worktreePath, leaf} {
+		real, err := boundedEvalSymlinks(p)
+		if err != nil {
+			return nil, fmt.Errorf("could not resolve %s: %w", p, err)
+		}
+		roots = append(roots, real)
+	}
+	out, err := runBoundedWorktreeGit(worktreePath, false, "--no-optional-locks", "rev-parse", "--path-format=absolute", "--git-path", "objects")
+	if err != nil {
+		return nil, fmt.Errorf("could not locate the object store of %s: %w", worktreePath, err)
+	}
+	var inside []string
+	visited := map[string]bool{}
+	var walk func(store string, depth int) error
+	walk = func(store string, depth int) error {
+		if depth > maxAlternatesDepth {
+			return fmt.Errorf("the alternates chain of %s is deeper than %d stores", worktreePath, maxAlternatesDepth)
+		}
+		real, err := boundedEvalSymlinks(store)
+		switch {
+		case err == nil:
+		case os.IsNotExist(err):
+			real = filepath.Clean(store)
+		default:
+			return fmt.Errorf("could not resolve the object store %s: %w", store, err)
+		}
+		if visited[real] {
+			return nil
+		}
+		visited[real] = true
+		for _, r := range roots {
+			if within(real, r) {
+				inside = append(inside, real)
+				break
+			}
+		}
+		raw, err := boundedReadFile(filepath.Join(real, "info", "alternates"))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("could not read the alternates of %s: %w", real, err)
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			line = strings.Trim(line, `"`)
+			if !filepath.IsAbs(line) {
+				line = filepath.Join(real, line)
+			}
+			if err := walk(filepath.Clean(line), depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(strings.TrimSpace(string(out)), 0); err != nil {
+		return nil, err
+	}
+	return inside, nil
 }

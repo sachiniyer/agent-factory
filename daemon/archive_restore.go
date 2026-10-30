@@ -103,6 +103,9 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	if at := instance.PrunedAt(); !at.IsZero() {
 		return "", session.PrunedRestoreError(title, instance.KeptBranch(), at)
 	}
+	if err := m.pruneRowFence(repoID, instance); err != nil {
+		return "", fmt.Errorf("cannot restore session %q: %w", title, err)
+	}
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
@@ -185,8 +188,8 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	if at := instance.PrunedAt(); !at.IsZero() {
 		return "", session.PrunedRestoreError(title, instance.KeptBranch(), at)
 	}
-	if instance.PruneIntent() != nil {
-		return "", fmt.Errorf("cannot restore session %q: a prune of its archived worktree was interrupted; run `af sessions prune --apply` to finish it first", title)
+	if err := m.pruneRowFence(repoID, instance); err != nil {
+		return "", fmt.Errorf("cannot restore session %q: %w", title, err)
 	}
 	// Re-run the shared runtime-entry guard under the operation lock, before the
 	// worktree move. A durable kill tombstone is terminal intent: restoring
