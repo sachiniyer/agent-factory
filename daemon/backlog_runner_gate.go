@@ -159,12 +159,6 @@ func (m *Manager) itemAccount(repoID string) (string, error) {
 	}
 	project, global := config.DefaultAccountLayersFor(m.Config(), root, tmux.ProgramClaude)
 	name := strings.TrimSpace(agentaccount.Resolve("", project.Name, global.Name))
-	if name == planusage.DefaultAccount {
-		// "default" is the key of the ambient identity (plan/default.json and the
-		// ambient config dir); a registered account of that name would share its
-		// readings and costs, so the budget would be judged on the wrong spend.
-		return "", fmt.Errorf("af cannot meter a registered Claude account named %q (that name is the ambient identity's): rename the account", planusage.DefaultAccount)
-	}
 	return planAccount(name), nil
 }
 

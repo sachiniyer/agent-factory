@@ -500,17 +500,16 @@ func TestCapInterruptRetryStopsAfterTheRunIsRearmed(t *testing.T) {
 	}
 }
 
-// A registered account named "default" shares its key with the ambient identity,
-// so its budget cannot be judged on its own spend (Codex P2 on #6300): the runner
-// stays closed with a reason that says to rename it.
-func TestItemAccountRefusesARegisteredAccountNamedDefault(t *testing.T) {
+// A registered account named "default" is its own identity: the ambient identity
+// has a key no account name can equal (Codex P2 on #6300).
+func TestItemAccountKeepsARegisteredDefaultSeparateFromTheAmbientIdentity(t *testing.T) {
 	m, repoID := runnerTestManager(t)
 	m.Config().DefaultAccounts = map[string]string{"claude": "default"}
-	if _, err := m.itemAccount(repoID); err == nil || !strings.Contains(err.Error(), "rename the account") {
-		t.Fatalf("err = %v", err)
+	if acct, err := m.itemAccount(repoID); err != nil || acct != "default" || acct == planusage.DefaultAccount {
+		t.Fatalf("a registered account named default: %q %v", acct, err)
 	}
-	m.Config().DefaultAccounts = map[string]string{"claude": "work"}
-	if acct, err := m.itemAccount(repoID); err != nil || acct != "work" {
-		t.Fatalf("a normally named account: %q %v", acct, err)
+	m.Config().DefaultAccounts = nil
+	if acct, err := m.itemAccount(repoID); err != nil || acct != planusage.DefaultAccount {
+		t.Fatalf("the ambient identity: %q %v", acct, err)
 	}
 }
