@@ -1766,7 +1766,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
+        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalRemoveDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, RemoveProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
       },
       "verdict": "real-gap",
       "issue": "TBD",
@@ -1809,6 +1809,63 @@
       "verdict": "real-gap",
       "issue": "TBD",
       "notes": "Step 3a (docs/dev/proposals/proposal-mode/api.md, Push) added the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready; the CLI sets the mode and sends now. Step 3b adds the web push chip (mode switch, countdown, Hold, Send now) over these routes — the remaining gap is that web cell. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The tui cell is n/a: goals.md lists a TUI editor as a non-goal, and with no TUI proposal edits there is nothing for a TUI push affordance to send."
+    },
+    {
+      "id": "backlog.items",
+      "title": "Keep an ordered backlog of work items per project",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog.go backlogListCmd/backlogShowCmd/backlogAddCmd/backlogEditCmd/backlogMoveCmd, api/backlog_status.go backlogDeleteCmd/backlogNoteCmd → POST /v1/GetBacklog, AddBacklogItems, UpdateBacklogItem, MoveBacklogItem, DeleteBacklogItem, PostBacklogMessage (daemon/backlog.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 2 adds the daemon routes and the CLI. PR 3 adds the web Backlog view (list, reorder, item panel, waits-on picker, notes). The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
+      "id": "backlog.status",
+      "title": "Queue, review, finish, drop and reopen backlog items",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_status.go backlogStatusCmd (queue, draft, review, reopen, done, drop) → POST /v1/SetBacklogItemStatus (daemon/backlog.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 3 adds the item panel actions on the web. The agent's done --self (session_id, pr) arrives with item sessions in PR 4. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
+      "id": "backlog.runner",
+      "title": "Show and change a project's backlog runner and the global budget",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_status.go backlogRunnerCmd/backlogBudgetCmd → POST /v1/SetBacklogSettings, GetBudget, SetBudget, GetBacklog (daemon/backlog.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (share of the Claude plan, stop-at, cap per run, dollar limit); plan readings arrive in PR 6 and the runner loop in PR 7. PR 3 shows a read-only runner bar on the web and PR 7 makes it editable. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     }
   ],
   "ledger": {
@@ -1819,6 +1876,21 @@
       "'-' means the item is not a user capability (grouping node, internal route)."
     ],
     "cli_verbs": {
+      "af backlog list": "backlog.items",
+      "af backlog show": "backlog.items",
+      "af backlog add": "backlog.items",
+      "af backlog edit": "backlog.items",
+      "af backlog move": "backlog.items",
+      "af backlog delete": "backlog.items",
+      "af backlog note": "backlog.items",
+      "af backlog queue": "backlog.status",
+      "af backlog draft": "backlog.status",
+      "af backlog review": "backlog.status",
+      "af backlog reopen": "backlog.status",
+      "af backlog done": "backlog.status",
+      "af backlog drop": "backlog.status",
+      "af backlog runner": "backlog.runner",
+      "af backlog budget": "backlog.runner",
       "af": "meta.discovery",
       "af accounts add": "session.accounts",
       "af accounts list": "session.accounts",
@@ -1859,6 +1931,7 @@
       "af proposal list": "proposal.docs",
       "af proposal path": "proposal.docs",
       "af proposal add-doc": "proposal.docs",
+      "af proposal remove-doc": "proposal.docs",
       "af proposal cat": "proposal.docs",
       "af proposal write": "proposal.docs",
       "af proposal push-mode": "proposal.push",
@@ -1912,8 +1985,19 @@
       "af version": "meta.discovery"
     },
     "routes": {
+      "POST /v1/GetBacklog": "backlog.items",
+      "POST /v1/AddBacklogItems": "backlog.items",
+      "POST /v1/UpdateBacklogItem": "backlog.items",
+      "POST /v1/MoveBacklogItem": "backlog.items",
+      "POST /v1/DeleteBacklogItem": "backlog.items",
+      "POST /v1/PostBacklogMessage": "backlog.items",
+      "POST /v1/SetBacklogItemStatus": "backlog.status",
+      "POST /v1/SetBacklogSettings": "backlog.runner",
+      "POST /v1/GetBudget": "backlog.runner",
+      "POST /v1/SetBudget": "backlog.runner",
       "GET /v1/health": "-",
       "POST /v1/AddProposalDoc": "proposal.docs",
+      "POST /v1/RemoveProposalDoc": "proposal.docs",
       "POST /v1/AttachProposal": "proposal.agent-workflow",
       "POST /v1/CheckpointProposal": "proposal.agent-workflow",
       "POST /v1/DetachProposal": "proposal.agent-workflow",
@@ -2068,6 +2152,49 @@
       "config-assistant": "config-agent"
     },
     "cli_flags": {
+      "af backlog --help": "meta.discovery",
+      "af backlog --json": "cli.json-envelope",
+      "af backlog --repo": "project.switch",
+      "af backlog list --help": "meta.discovery",
+      "af backlog show --help": "meta.discovery",
+      "af backlog add --help": "meta.discovery",
+      "af backlog edit --help": "meta.discovery",
+      "af backlog move --help": "meta.discovery",
+      "af backlog delete --help": "meta.discovery",
+      "af backlog note --help": "meta.discovery",
+      "af backlog queue --help": "meta.discovery",
+      "af backlog draft --help": "meta.discovery",
+      "af backlog review --help": "meta.discovery",
+      "af backlog reopen --help": "meta.discovery",
+      "af backlog done --help": "meta.discovery",
+      "af backlog drop --help": "meta.discovery",
+      "af backlog runner --help": "meta.discovery",
+      "af backlog budget --help": "meta.discovery",
+      "af backlog add --after": "backlog.items",
+      "af backlog add --before": "backlog.items",
+      "af backlog add --body": "backlog.items",
+      "af backlog add --file": "backlog.items",
+      "af backlog add --parent": "backlog.items",
+      "af backlog add --program": "backlog.items",
+      "af backlog add --waits-on": "backlog.items",
+      "af backlog edit --body": "backlog.items",
+      "af backlog edit --program": "backlog.items",
+      "af backlog edit --sequential": "backlog.items",
+      "af backlog edit --title": "backlog.items",
+      "af backlog edit --waits-on": "backlog.items",
+      "af backlog list --all": "backlog.items",
+      "af backlog list --state": "backlog.items",
+      "af backlog move --after": "backlog.items",
+      "af backlog move --before": "backlog.items",
+      "af backlog move --bottom": "backlog.items",
+      "af backlog move --into": "backlog.items",
+      "af backlog move --top": "backlog.items",
+      "af backlog runner --max-running": "backlog.runner",
+      "af backlog runner --on-done": "backlog.runner",
+      "af backlog budget --max-per-run": "backlog.runner",
+      "af backlog budget --share": "backlog.runner",
+      "af backlog budget --stop-at": "backlog.runner",
+      "af backlog budget --usd-limit": "backlog.runner",
       "af --daemon": "meta.internal",
       "af --daemon-url": "daemon.remote-access",
       "af --help": "meta.discovery",
@@ -2169,6 +2296,8 @@
       "af proposal path --help": "meta.discovery",
       "af proposal add-doc --help": "meta.discovery",
       "af proposal add-doc --session": "proposal.docs",
+      "af proposal remove-doc --help": "meta.discovery",
+      "af proposal remove-doc --session": "proposal.docs",
       "af proposal cat --help": "meta.discovery",
       "af proposal write --help": "meta.discovery",
       "af proposal write --session": "proposal.docs",
@@ -2421,6 +2550,26 @@
           }
         }
       },
+    "SetBacklogItemStatusRequest": {
+      "cli": {
+        "pr": {
+          "ok": "Set only by the agent's af backlog done --self --pr, which arrives with item sessions in backlog PR 4."
+        },
+        "session_id": {
+          "ok": "Set only by the agent's af backlog done --self, which arrives with item sessions in backlog PR 4."
+        }
+      }
+    },
+    "PostBacklogMessageRequest": {
+      "cli": {
+        "question_id": {
+          "ok": "Answers arrive in backlog PR 5 (af backlog answer); this af posts notes only."
+        },
+        "session_id": {
+          "ok": "Set only by af backlog note --self and ask --self, which arrive with item sessions in backlog PR 4 and 5."
+        }
+      }
+    },
       "SnapshotRequest": {
         "cli": {
           "before": {
@@ -3108,6 +3257,10 @@
     "synonyms": {
       "af sessions create name": "title"
     },
-    "declared": {}
+    "declared": {
+      "af backlog title": {
+        "ok": "add takes the one title it needs as a positional, like af sessions create <title>; edit changes only the fields you pass, so every field, the title included, is a flag."
+      }
+    }
   }
 }

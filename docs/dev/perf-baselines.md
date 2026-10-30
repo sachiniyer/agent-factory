@@ -96,7 +96,7 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1123422.000 | 1123422.000–1123422.000 | 0.000 | 1179593.100 |
+| raw_bytes | 1127967.000 | 1127967.000–1127967.000 | 0.000 | 1184365.350 |
 | gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
@@ -123,9 +123,13 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
 
+### Bundle refresh provenance (#6290)
+
+Master's committed bundle (1,120,104 raw / 254,141 gzip over `web/dist/**.{js,css}`, gzip level 9) sat 319 bytes under the 1,120,423.5 raw budget, so any web change tripped it. #6290 (terminal links without confirm() and project switcher rows as links) takes the bundle to 1,123,037 raw, +2,933 raw over master; comments do not ship (esbuild strips them), so the growth is feature code. Only the raw entry is moved (gzip is unchanged at 253,171 and its budget still holds); it is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`, which is not a routine local run; the figure is byte-exact and matches what the Performance job reported.
+
 ### Bundle refresh provenance (#5581)
 
-Master's committed bundle (1,120,104 raw over `web/dist/**.{js,css}`) sat 319 bytes under the 1,120,423.5 raw budget, so #5581 (glyph-only rail states and the agent-set attention dot) could not land without moving it. After merging master the bundle is 1,123,422 raw / 255,069 gzip, +3,318 raw over master. Comments do not ship, so the growth is the feature's code: the attention-seen store (`attention_seen.ts`), the glyph-only status model (`status.ts`) and the rail wiring. Only the raw entry is moved; gzip (255,069) is still inside its 265,829.55 budget. The raw entry is the deterministic sum, three identical samples, margin baseline x 0.05, confirmed by the `make perf-container` mean (1123422.000); every timing and layout-shift baseline is unchanged.
+Master's committed bundle (1,120,104 raw over `web/dist/**.{js,css}`) sat 319 bytes under the 1,120,423.5 raw budget, so #5581 (glyph-only rail states and the agent-set attention dot) could not land without moving it. After merging master (#6290 included) the bundle is 1,127,967 raw / 255,177 gzip (js, css and sw.js), +4,930 raw over master's 1,123,037. Comments do not ship, so the growth is the feature's code: the attention-seen store (`attention_seen.ts`), the glyph-only status model (`status.ts`) and the rail wiring. Only the raw entry is moved; gzip (255,069) is still inside its 265,829.55 budget. The raw entry is the deterministic sum, three identical samples, margin baseline x 0.05, confirmed by the `make perf-container` mean (1123422.000); every timing and layout-shift baseline is unchanged.
 
 ### Bundle refresh provenance (#6212)
 

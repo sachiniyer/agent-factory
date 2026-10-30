@@ -14,7 +14,7 @@ import "./styles.css";
 import "./tokens.css";
 import "./recovery.css";
 import { appendMutationOutcome, type MutationOutcomeNotice } from "./recovery.js";
-import { parseRoute, replaceRoute, restoreLoginRoute, stashLoginRoute, clearLoginRoute, sessionURL } from "./route.js";
+import { parseRoute, parseProjectRoute, replaceRoute, restoreLoginRoute, stashLoginRoute, clearLoginRoute, sessionURL } from "./route.js";
 import { copyText } from "./clipboard.js";
 import {
   addTask,
@@ -633,6 +633,7 @@ function resolveRoute(): void {
     return;
   }
   const route = parseRoute(location.hash);
+  const projectRoute = route ? null : parseProjectRoute(location.hash);
   resolvingRoute = true;
   let lookup = false;
   try {
@@ -646,6 +647,18 @@ function resolveRoute(): void {
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
+    } else if (projectRoute) {
+      // A project link (the switcher's rows, opened in a new tab): land on that
+      // project's sessions view with nothing selected, like a menu click would.
+      const { sessions, tasks, registeredProjects } = store.get();
+      const known = pickerProjects(sessions, tasks, projectRoots(registeredProjects))
+        .includes(projectRoute.project);
+      if (known) {
+        switchProject(projectRoute.project);
+        store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      } else {
+        showTransientNotice("No project at that path in this daemon");
+      }
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");

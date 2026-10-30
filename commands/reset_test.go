@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -146,6 +147,7 @@ func seedAFState(t *testing.T, home, repo, liveWT, reusedWT string) []byte {
 	// State files and daemon-runtime dirs that must be wiped.
 	writeFile(t, filepath.Join(home, config.StateFileName), `{"schema_version":1,"help_screens_seen":7}`)
 	writeFile(t, filepath.Join(home, config.TUIStateFileName), `{}`)
+	writeFile(t, filepath.Join(home, backlog.BudgetFileName), `{"schema_version":1,"limit":5}`)
 	mkdir(t, filepath.Join(home, "events"))
 	mkdir(t, filepath.Join(home, "logs"))
 	mkdir(t, filepath.Join(home, "locks"))
@@ -260,6 +262,7 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	assertGone(t, filepath.Join(home, "locks"))
 	assertGone(t, filepath.Join(home, config.StateFileName))
 	assertGone(t, filepath.Join(home, config.TUIStateFileName))
+	assertGone(t, filepath.Join(home, backlog.BudgetFileName))
 	assertGone(t, filepath.Join(home, "tasks.json"))
 	assertGone(t, filepath.Join(home, config.ProjectRegistryDirName))
 	assertGone(t, checkoutMarker)

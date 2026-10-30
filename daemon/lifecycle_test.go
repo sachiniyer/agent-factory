@@ -350,6 +350,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"AttachProposal":      blockedDuringProbation,
 	"DetachProposal":      blockedDuringProbation,
 	"AddProposalDoc":      blockedDuringProbation,
+	"RemoveProposalDoc":   blockedDuringProbation,
 	"ReadProposalDoc":     blockedDuringProbation,
 	"SaveProposalDoc":     blockedDuringProbation,
 	"WriteProposalDoc":    blockedDuringProbation,
@@ -358,6 +359,18 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"SetProposalPushMode": blockedDuringProbation,
 	"HoldProposalPush":    blockedDuringProbation,
 	"SendProposalChanges": blockedDuringProbation,
+	// Backlog reads answer during probation; every write waits like the other
+	// mutations.
+	"GetBacklog":           allowedDuringProbation,
+	"GetBudget":            allowedDuringProbation,
+	"AddBacklogItems":      blockedDuringProbation,
+	"UpdateBacklogItem":    blockedDuringProbation,
+	"MoveBacklogItem":      blockedDuringProbation,
+	"SetBacklogItemStatus": blockedDuringProbation,
+	"DeleteBacklogItem":    blockedDuringProbation,
+	"PostBacklogMessage":   blockedDuringProbation,
+	"SetBacklogSettings":   blockedDuringProbation,
+	"SetBudget":            blockedDuringProbation,
 }
 
 func TestControlServerProbationAdmissionLedger(t *testing.T) {
