@@ -178,11 +178,23 @@ func TestTapKillsTheUsersWholeProcessGroupOnTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stat, err := os.ReadFile(filepath.Join("/proc", strings.TrimSpace(string(raw)), "stat"))
-	if err == nil {
-		if fields := strings.Fields(string(stat)); len(fields) > 2 && fields[2] != "Z" {
+	statPath := filepath.Join("/proc", strings.TrimSpace(string(raw)), "stat")
+	// SIGKILL delivery is asynchronous, so the grandchild can still read as
+	// running for a moment: poll until it is gone or a zombie.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stat, err := os.ReadFile(statPath)
+		if err != nil {
+			return
+		}
+		fields := strings.Fields(string(stat))
+		if len(fields) > 2 && fields[2] == "Z" {
+			return
+		}
+		if time.Now().After(deadline) {
 			t.Fatalf("the user's grandchild outlived the timeout: %s", stat)
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

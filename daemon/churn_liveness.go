@@ -16,5 +16,17 @@ func (m *Manager) settleChurnedLiveness(instance *session.Instance, captured boo
 		m.resolveIdleLiveness(instance, content, epoch)
 		return
 	}
-	_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
+	agent := instance.ResolvedAgent()
+	running := session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch)
+	if !task.PublishesWorkingContent(agent) {
+		_ = instance.Transition(running)
+		return
+	}
+	// The agent publishes its own in-turn indicator, so churn is not the evidence
+	// of work (a typed draft repaints the composer too): the liveness moves, but
+	// an attention request is answered only by the indicator itself.
+	_ = instance.Transition(running.ChurnOnly())
+	if captured && task.IsWorkingContent(content, agent) {
+		m.answerAttentionByWork(instance)
+	}
 }

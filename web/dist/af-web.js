@@ -8066,7 +8066,10 @@ function attentionChip(onDismiss) {
   const patch = (on, reason) => {
     el2.hidden = !on;
     const title = reason ? `Needs attention: ${reason}` : "Needs attention";
-    if (el2.title !== title) el2.title = title;
+    if (el2.title !== title) {
+      el2.title = title;
+      el2.setAttribute("aria-label", title);
+    }
   };
   return { el: el2, dismiss, patch };
 }
@@ -19193,6 +19196,7 @@ var AppShell = class {
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
       [chrome.newTabs, this.header],
+      [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
     ]);

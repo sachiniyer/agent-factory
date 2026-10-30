@@ -55,8 +55,9 @@ after it went idle.
 					return jsonError(fmt.Errorf("a session <title> is required (or pass --self to target the current session)"))
 				}
 				var err error
-				// resolveRepoIDForLookup, not resolveRepoID: against --daemon-url the
-				// client's cwd says nothing about the remote's repos (Codex P2 on #6295).
+				// The request goes to the TARGETED daemon (routedSetAttention), so the
+				// scope is the one every other routed session verb uses: against a
+				// remote daemon the client's cwd names a repo that exists here, not there.
 				repoID, err = resolveRepoIDForLookup()
 				if err != nil {
 					return jsonError(err)
