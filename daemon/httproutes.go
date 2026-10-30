@@ -510,6 +510,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/RemoveProposalDoc",
+		Description: "Remove a doc from a proposal and commit the deletion as the given author; the doc stays in the proposal's history.",
+		requestType: reflect.TypeOf(RemoveProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RemoveProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/ReadProposalDoc",
 		Description: "Read a proposal doc and the commit it is at, after committing its uncommitted edits as external.",
 		requestType: reflect.TypeOf(ReadProposalDocRequest{}),

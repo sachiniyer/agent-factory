@@ -346,6 +346,34 @@ func TestDetach(t *testing.T) {
 	}
 }
 
+func TestRemoveDoc(t *testing.T) {
+	s, _ := newTestStore(t)
+	startAttached(t, s, "p", sessA, "goals", "api")
+	if err := os.WriteFile(filepath.Join(s.SlugPath("p"), "goals.md"), []byte("unsaved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, commit, err := s.RemoveDoc("p", "api", Committer{Author: AuthorHuman})
+	if err != nil || file != "api.md" || commit == "" {
+		t.Fatalf("RemoveDoc = %q, %q, %v", file, commit, err)
+	}
+	if docs, _ := s.Docs("p"); !slices.Equal(docs, []string{"goals.md"}) {
+		t.Fatalf("docs after remove = %v", docs)
+	}
+	if _, _, err := s.RemoveDoc("p", "api", Committer{Author: AuthorHuman}); err == nil {
+		t.Fatal("removing a missing doc must fail")
+	}
+	if text, err := s.git(nil, "show", commit+"^:p/api.md"); err != nil || text == "" {
+		t.Fatalf("the removed doc must stay in history: %q, %v", text, err)
+	}
+	if text, err := s.git(nil, "show", commit+":p/goals.md"); err != nil || text != "unsaved\n" {
+		t.Fatalf("uncommitted edits to other docs must be snapshotted first: %q, %v", text, err)
+	}
+	c := mustChanges(t, s, sessA)
+	if len(c.Edits) != 2 {
+		t.Fatalf("want the snapshot and the removal as 2 edits, got %+v", c.Edits)
+	}
+}
+
 func TestWriteAndAddDoc(t *testing.T) {
 	s, _ := newTestStore(t)
 	startAttached(t, s, "p", sessA, "goals")
