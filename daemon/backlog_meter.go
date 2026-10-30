@@ -323,7 +323,14 @@ func (m *Manager) meterPassLocked(now time.Time) {
 					}
 					usage.Unmeterable[r.run.SessionID] = backlog.UnmeterableProgram(r.item.ID, program)
 				}
-				continue
+				// The session ran Claude before a manual cross-agent handoff: its
+				// remembered Claude transcripts still hold usage that belongs to
+				// the run, so they are finished below rather than dropped (Codex
+				// P2 on #6299). With none remembered there is nothing to meter.
+				if len(state.RunDirs[r.run.SessionID]) == 0 {
+					continue
+				}
+				configDir, dirs = "", nil
 			}
 		}
 		// A session killed between passes has no instance, but its transcripts
