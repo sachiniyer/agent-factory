@@ -1,12 +1,13 @@
 package proctree
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 
 	"github.com/stretchr/testify/require"
 )
@@ -21,12 +22,7 @@ import (
 // what IsTmuxServer concluded from a live process's own table entry (#4678).
 func tmuxNamedProcess(t *testing.T, dir string, attr *syscall.SysProcAttr) int {
 	t.Helper()
-	sleepPath, err := exec.LookPath("sleep")
-	require.NoError(t, err)
-	body, err := os.ReadFile(sleepPath)
-	require.NoError(t, err)
-	fake := filepath.Join(t.TempDir(), "tmux")
-	require.NoError(t, os.WriteFile(fake, body, 0o755))
+	fake := sleeper.Named(t, filepath.Join(t.TempDir(), "tmux"))
 
 	cmd := exec.Command(fake, "300")
 	cmd.Dir = dir
@@ -80,7 +76,7 @@ func TestIsTmuxServer_RefusesATmuxClient(t *testing.T) {
 func TestIsTmuxProcess_CoversClientsAndRetitledArgv(t *testing.T) {
 	require.True(t, IsTmuxProcess(tmuxNamedProcess(t, t.TempDir(), nil)))
 
-	retitled := exec.Command("sleep", "300")
+	retitled := exec.Command(sleeper.Path(t), "300")
 	retitled.Args[0] = "tmux: server (/tmp/tmux-1000/default)"
 	require.NoError(t, retitled.Start())
 	t.Cleanup(func() {

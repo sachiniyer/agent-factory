@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseRoute, serializeRoute, stashRoute, restoreRoute } from "./route.js";
+import { parseRoute, serializeRoute, parseProjectRoute, serializeProjectRoute, stashRoute, restoreRoute } from "./route.js";
 
 test("session routes round-trip stable IDs, including encoded characters", () => {
   for (const session of ["abc-123", "a/b", "a b", "é?#%"])
@@ -8,6 +8,24 @@ test("session routes round-trip stable IDs, including encoded characters", () =>
   assert.equal(serializeRoute(null), "");
   for (const hash of ["", "#", "#/session/", "#/session/a/b", "#/task/a", "#/session/%", "#/session/%00", "#/session/%20"])
     assert.equal(parseRoute(hash), null, hash);
+});
+
+test("project routes round-trip repo roots, including slashes and spaces", () => {
+  for (const project of ["/home/u/repo", "/a b/c", "/é?#%"])
+    assert.deepEqual(parseProjectRoute(serializeProjectRoute({ project })), { project });
+  for (const hash of ["", "#/project/", "#/project/a/b", "#/session/a", "#/project/%", "#/project/%00", "#/project/%20"])
+    assert.equal(parseProjectRoute(hash), null, hash);
+  // A project link is not a session link.
+  assert.equal(parseRoute(serializeProjectRoute({ project: "/r" })), null);
+});
+
+test("login stash keeps a project link across sign-in", () => {
+  const saved = storage();
+  const hash = serializeProjectRoute({ project: "/home/u/repo" });
+  stashRoute(hash, saved);
+  assert.equal(restoreRoute("", saved), hash);
+  stashRoute("#/junk", saved);
+  assert.equal(restoreRoute("", saved), "");
 });
 
 function storage() {
