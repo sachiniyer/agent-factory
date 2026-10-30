@@ -653,6 +653,28 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				if account != "" {
 					return fmt.Errorf("restore account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
 				}
+				// A refused restore (restoreDeferred — tmux.ErrSpawnDirMissing or
+				// tmux.ErrSessionSocketUnverified) holds the contract "the session is
+				// kept as it was", never respawned, for non-account siblings too. The
+				// account branch above already returns on any error; this is the
+				// non-account path that used to log-and-continue. Continuing would let
+				// the dead-shell check below re-probe with pre-spawn semantics
+				// (ProbeSession: socket-ENOENT is plain absence), classify a
+				// possibly-live shell — its socket unlinked under a still-running
+				// server — as dead, and respawn it under the persisted name via Start,
+				// issuing new-session and recreating the socket path beside the live
+				// server. That orphans the live shell and, worse, makes the live
+				// agent's later liveness probe answer determinate-absent so the daemon
+				// respawns a second agent beside the orphaned one — precisely what
+				// ErrSessionSocketUnverified exists to prevent (#4135/#5765, the
+				// f6f19be5 refusal mechanism launch's agent-tab path already honors via
+				// preserveAgentHandle = ... || restoreDeferred(err)). Propagating the
+				// refusal out of setupTabs needs no new machinery: finishLaunchTabFailure
+				// spares the agent pane and FromInstanceData loads the row Lost so the
+				// lost-restore loop defers instead of respawning.
+				if restoreDeferred(err) {
+					return fmt.Errorf("restore tab %q for %q: %w", tab.Name, i.Title, err)
+				}
 				log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
 			} else if refreshUnknownScope && restoreResult != tmux.RestoreRespawned {
 				if _, cleanupErr := tab.tmux.CloseAndWaitForPaneExit(); cleanupErr != nil {
