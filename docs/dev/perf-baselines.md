@@ -96,7 +96,7 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1067070.000 | 1067070.000–1067070.000 | 0.000 | 1120423.500 |
+| raw_bytes | 1122105.000 | 1122105.000–1122105.000 | 0.000 | 1178210.250 |
 | gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
@@ -122,6 +122,10 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Bundle refresh provenance (#6289)
+
+Master's committed bundle (1,120,104 raw / 254,141 gzip over `web/dist/**.{js,css}`, gzip level 9) sat 319 bytes under the 1,120,423.5 raw budget, so any web change tripped it. #6289 (the task switch pending state) takes the bundle to 1,122,105 raw, +2,001 raw over master; comments do not ship (esbuild strips them), so the growth is feature code. Only the raw entry is moved (gzip is unchanged at 253,171 and its budget still holds); it is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`, which is not a routine local run; the figure is byte-exact and matches what the Performance job reported.
 
 ### Bundle refresh provenance (#6212)
 
