@@ -8,6 +8,8 @@ import { encode, ptyOutFrame } from "../src/frame.js";
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 
 test("project switcher: rows are links; a plain click switches in place, a modified click opens a new tab", async ({ page, context }, info) => {
+  // The route is consumed once resolved, so remember the fragment each tab opened with.
+  await context.addInitScript(() => { (window as unknown as { openedWith: string }).openedWith = location.hash; });
   await page.goto("/");
   await expect(page.locator(".af-app")).toBeVisible();
   const switcher = page.locator(".af-project-switch");
@@ -23,8 +25,8 @@ test("project switcher: rows are links; a plain click switches in place, a modif
   // Ctrl-click: the browser opens the link's route in a new tab; this tab stays put.
   const before = (await page.locator(".af-project-switch-name").textContent())!.trim();
   const [popup] = await Promise.all([context.waitForEvent("page"), other.click({ modifiers: ["Control"] })]);
-  expect(popup.url()).toContain(href!);
   await popup.waitForLoadState();
+  expect(await popup.evaluate(() => (window as unknown as { openedWith: string }).openedWith)).toBe(href);
   await expect(popup.locator(".af-project-switch-name")).toHaveText(name);
   // The route is consumed once resolved: the address bar no longer carries it.
   await expect.poll(() => new URL(popup.url()).hash).toBe("");
