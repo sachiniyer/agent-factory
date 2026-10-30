@@ -359,3 +359,41 @@ func TestPruneApply_NeverDeletesAWorktreeWithASubmodule(t *testing.T) {
 	assert.DirExists(t, archived)
 	assert.False(t, inst.IsPruned())
 }
+
+// Resume acts only on a positive answer (Codex on #6186): an unreadable archive
+// parent makes both existence probes UNKNOWN, which must not read as "gone" and
+// write the tombstone.
+func TestPruneApply_ResumeWithUnknownExistenceStaysIncomplete(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits are bypassed by root")
+	}
+	manager, repoID, _, inst, archived := seedPrunableArchive(t, "unknown-existence")
+	c := planOf(t, manager, repoID)
+	pruneStepHook = func(step string) error {
+		if step == "remove" {
+			return errPruneCrash
+		}
+		return nil
+	}
+	t.Cleanup(func() { pruneStepHook = nil })
+	_, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	pruneStepHook = nil
+	require.NotNil(t, inst.PruneIntent())
+
+	parent := filepath.Dir(archived)
+	require.NoError(t, os.Chmod(parent, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	entry, inc := manager.resumePruneIntent(repoID, inst)
+	require.NoError(t, os.Chmod(parent, 0o755))
+	assert.Nil(t, entry)
+	require.NotNil(t, inc, "unknown is incomplete, not done")
+	assert.False(t, inst.IsPruned())
+	assert.NotNil(t, inst.PruneIntent(), "the intent stays")
+	assert.Len(t, tombstones(t, archived), 1, "and the renamed tree was not touched")
+
+	entry, inc = manager.resumePruneIntent(repoID, inst)
+	assert.Nil(t, inc)
+	require.NotNil(t, entry)
+	assert.True(t, inst.IsPruned())
+}

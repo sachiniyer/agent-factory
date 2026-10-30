@@ -411,15 +411,16 @@ func (m *Manager) resumePruneIntent(repoID string, instance *session.Instance) (
 		return nil, nil
 	}
 
-	tombExists := false
-	if intent.TombstonePath != "" {
-		if _, err := os.Lstat(intent.TombstonePath); err == nil {
-			tombExists = true
-		}
+	// Resume acts only on a positive answer: ENOENT is "absent", any other error
+	// (an unreadable parent, a stalled mount) is "unknown", and unknown leaves the
+	// intent in place and the row incomplete — the verdict's fail-closed rule.
+	tombExists, err := pruneExists(intent.TombstonePath)
+	if err != nil {
+		return inc("intent", fmt.Errorf("cannot tell whether the renamed worktree is still there: %w", err))
 	}
-	origExists := false
-	if _, err := os.Lstat(intent.WorktreePath); err == nil {
-		origExists = true
+	origExists, err := pruneExists(intent.WorktreePath)
+	if err != nil {
+		return inc("intent", fmt.Errorf("cannot tell whether the original worktree path is occupied: %w", err))
 	}
 	// The rename never happened and the original is intact: abandon. The row is an
 	// ordinary archive again and the next verdict judges it from scratch.
@@ -571,4 +572,21 @@ func containsString(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// pruneExists answers whether path exists. An empty path is absent. ENOENT is a
+// definite "no"; any other failure is returned, never read as absence.
+func pruneExists(path string) (bool, error) {
+	if path == "" {
+		return false, nil
+	}
+	_, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
 }

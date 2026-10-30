@@ -133,6 +133,18 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 		reasons = append(reasons, fmt.Sprintf("%d index entr(ies) flagged assume-unchanged or skip-worktree (%s) — git status cannot see their content, so it may not be on the kept branch; clear the flag (git update-index --no-assume-unchanged / --no-skip-worktree) and commit or discard the change",
 			flagged, sampleList(flaggedSample, flagged)))
 	}
+	// The principle, not a list of shapes: prune deletes the worktree tree and its
+	// registration leaf, so neither may hold ANY git object storage — however it got
+	// there (absorbed, non-absorbed, retained after the gitlink was removed, a nested
+	// repository). Four P1s were one class: objects hiding under a deleted root.
+	storage, err := gitObjectStorageUnder(worktreePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(storage) > 0 {
+		reasons = append(reasons, fmt.Sprintf("git object storage lives inside what pruning deletes (%s) — its commits may exist nowhere else; pruning does not touch such worktrees, so preserve or relocate that repository first",
+			sampleList(firstN(storage, pruneSamplePaths), len(storage))))
+	}
 	subs, err := gitlinkPaths(worktreePath)
 	if err != nil {
 		return nil, err
@@ -268,4 +280,106 @@ func sampleList(sample []string, total int) string {
 		out += fmt.Sprintf(", … +%d more", total-len(sample))
 	}
 	return out
+}
+
+// gitObjectStorageUnder reports git object storage inside either root prune
+// deletes — the worktree tree and its registration leaf — at any depth:
+//
+//   - a git directory (a directory holding HEAD and an objects/ directory),
+//   - a nested .git directory,
+//   - a gitfile (.git file) whose target resolves inside either root.
+//
+// The worktree's own root .git pointer is exempt: it is the link to the main
+// repository's object store (commondir), which prune does not touch. The walk
+// follows no symlinks, containment is judged after EvalSymlinks, and any read error
+// refuses (it is returned, and the caller fails closed).
+func gitObjectStorageUnder(worktreePath string) ([]string, error) {
+	leaf, err := registrationLeaf(worktreePath)
+	if err != nil {
+		return nil, err
+	}
+	var roots []string
+	for _, p := range []string{worktreePath, leaf} {
+		real, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			return nil, fmt.Errorf("could not resolve %s: %w", p, err)
+		}
+		roots = append(roots, real)
+	}
+	var found []string
+	for _, root := range roots {
+		rootPointer := filepath.Join(roots[0], ".git")
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			name := d.Name()
+			switch {
+			case d.IsDir() && name == ".git":
+				found = append(found, path)
+				return filepath.SkipDir
+			case d.IsDir() && name == "objects":
+				if _, err := os.Lstat(filepath.Join(filepath.Dir(path), "HEAD")); err == nil {
+					found = append(found, filepath.Dir(path))
+					return filepath.SkipDir
+				} else if !os.IsNotExist(err) {
+					return err
+				}
+			case !d.IsDir() && name == ".git" && path != rootPointer:
+				target, err := gitfileTarget(path)
+				if err != nil {
+					return err
+				}
+				for _, r := range roots {
+					if within(target, r) {
+						found = append(found, path+" → "+target)
+						break
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("could not scan %s for git object storage: %w", root, err)
+		}
+	}
+	return found, nil
+}
+
+// gitfileTarget resolves the directory a gitfile points at ("gitdir: <path>"),
+// relative to the gitfile's own directory, with symlinks resolved when the target
+// exists.
+func gitfileTarget(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	buf := make([]byte, 4096)
+	n, err := f.Read(buf)
+	if err != nil && n == 0 {
+		return "", err
+	}
+	line := strings.TrimSpace(string(buf[:n]))
+	rest, ok := strings.CutPrefix(line, "gitdir:")
+	if !ok {
+		return "", fmt.Errorf("%s is a .git file but not a gitdir pointer", path)
+	}
+	target := strings.TrimSpace(rest)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	target = filepath.Clean(target)
+	if real, err := filepath.EvalSymlinks(target); err == nil {
+		return real, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	return target, nil
+}
+
+// within reports whether path is dir or lies beneath it.
+func within(path, dir string) bool {
+	path, dir = filepath.Clean(path), filepath.Clean(dir)
+	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
 }

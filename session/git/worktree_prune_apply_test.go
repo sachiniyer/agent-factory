@@ -264,3 +264,67 @@ func TestRegistrationLeafFlightSharesTheResolvedPath(t *testing.T) {
 		assert.Equal(t, want, got)
 	}
 }
+
+// The predicate is about what prune DELETES, not how the storage got there: neither
+// the worktree tree nor its registration leaf may hold git object storage (Codex
+// round 5 on #6186).
+func TestGitObjectStorageUnderTheDeletedRoots(t *testing.T) {
+	t.Run("a clean linked worktree passes", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		found, err := gitObjectStorageUnder(wt)
+		require.NoError(t, err)
+		assert.Empty(t, found, "its objects live in the main repository, not under either root")
+	})
+
+	t.Run("a submodule database retained under the leaf after the gitlink was removed", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		gitIn(t, wt, "submodule", "add", newPruneGuardRepo(t), "mod")
+		gitIn(t, wt, "commit", "-qm", "add submodule")
+		gitIn(t, wt, "rm", "-f", "mod")
+		gitIn(t, wt, "commit", "-qm", "remove submodule")
+		leaf, err := registrationLeaf(wt)
+		require.NoError(t, err)
+		require.DirExists(t, filepath.Join(leaf, "modules", "mod", "objects"), "premise: git keeps the database after removal")
+		subs, err := gitlinkPaths(wt)
+		require.NoError(t, err)
+		require.Empty(t, subs, "premise: no gitlink remains for the gitlink rule to see")
+
+		found, err := gitObjectStorageUnder(wt)
+		require.NoError(t, err)
+		require.NotEmpty(t, found)
+		assert.Contains(t, strings.Join(found, " "), filepath.Join("modules", "mod"))
+		reasons, err := WorktreeUnrecoverableContent(wt)
+		require.NoError(t, err)
+		assert.Contains(t, strings.Join(reasons, " "), "git object storage")
+	})
+
+	t.Run("a nested independent repository inside the tree", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		nested := filepath.Join(wt, "vendor", "lib")
+		require.NoError(t, os.MkdirAll(nested, 0o755))
+		gitIn(t, nested, "init", "-q")
+		found, err := gitObjectStorageUnder(wt)
+		require.NoError(t, err)
+		require.NotEmpty(t, found)
+		assert.Contains(t, strings.Join(found, " "), filepath.Join("vendor", "lib", ".git"))
+	})
+
+	t.Run("a gitfile elsewhere in the tree pointing inside a deleted root", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		leaf, err := registrationLeaf(wt)
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Join(wt, "x"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "x", ".git"), []byte("gitdir: "+leaf+"\n"), 0o644))
+		found, err := gitObjectStorageUnder(wt)
+		require.NoError(t, err)
+		assert.NotEmpty(t, found)
+	})
+
+	t.Run("a directory merely named objects is not storage", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		require.NoError(t, os.MkdirAll(filepath.Join(wt, "src", "objects"), 0o755))
+		found, err := gitObjectStorageUnder(wt)
+		require.NoError(t, err)
+		assert.Empty(t, found)
+	})
+}
