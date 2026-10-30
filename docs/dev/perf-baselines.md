@@ -97,7 +97,7 @@ under the `perf-baselines` artifact.
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
 | raw_bytes | 1067070.000 | 1067070.000–1067070.000 | 0.000 | 1120423.500 |
-| gzip_bytes | 240430.000 | 240430.000–240430.000 | 0.000 | 252451.500 |
+| gzip_bytes | 252762.000 | 252762.000–252762.000 | 0.000 | 265400.100 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -122,6 +122,10 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Bundle refresh provenance (#6234)
+
+Master sat 310 bytes from the 252,451.5 gzip budget when #6234 (delete confirmations name the user branch they leave in the repo, #6233) landed its web change: `keptBranchNote`, the `fetchKeptBranch` read and the confirm-time await in `index.ts`. The Performance job (run 41053680739) measured 252,762 gzip against that budget, +310. Comments do not ship (esbuild strips them), so the growth is the feature's code, about 0.4 KB gzipped and not reducible below the 310-byte gap without removing the feature. The gzip entry is moved to the job-reported 252,762 (three identical samples, margin baseline x 0.05, budget 265,400.1); raw and every timing baseline are unchanged. The figure is the job's own measurement, not a `make perf-container` recording; a local build of the committed tree sums to 252,329 because the container rebuilds `web/dist` itself.
 
 ### Bundle refresh provenance (#5681)
 
