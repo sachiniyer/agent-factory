@@ -103,7 +103,7 @@ backend-ssh-roundtrip:
 # a containerized sshd host. CI runs it (.github/workflows/sandbox-e2e.yml); it is
 # NOT a routine local gate — it builds an image and starts a container.
 backend-sandbox-e2e:
-	go test ./integration -run TestSandboxDaemonE2E -v -count=1 -timeout 20m
+	go test ./integration -run "TestSandbox(Daemon|Disruptions)E2E" -v -count=1 -timeout 30m
 
 # Registry-free build check (#2521): proves the round-trip image builds above
 # resolve NOTHING against a registry, by standing up a second docker daemon with
