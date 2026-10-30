@@ -275,8 +275,8 @@ func TestBacklogAnsweredInSessionOnSubmit(t *testing.T) {
 	m, repoID, inst := askedItem(t)
 	// The question the user's line answers is the one open when it is submitted;
 	// the agent posts the next one while the line is in flight.
-	answered := m.backlogOpenQuestion(inst)
-	if answered == 0 {
+	answered := m.backlogSeenQuestion(inst)
+	if answered == "" {
 		t.Fatal("no open question to capture")
 	}
 	if _, err := m.backlogService().PostMessage(backlog.PostMessageRequest{RepoID: repoID, ID: 1,
@@ -452,5 +452,22 @@ func TestAnswerDeliveredReplaysACompletionItSuppressed(t *testing.T) {
 	m.backgroundMutationWG.Wait()
 	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusReview {
 		t.Fatalf("status = %s, want review: the suppressed completion was never replayed", it.Status)
+	}
+}
+
+// Recovery can offer the same pending answer on every retry; only one delivery
+// worker runs per answer (Codex P2 on #6295).
+func TestOnePendingAnswerGetsOneDeliveryWorker(t *testing.T) {
+	m, repoID, _ := askedItem(t)
+	a := backlog.PendingAnswer{ID: 1, AnswerID: 9, SessionID: "s", Prompt: "p"}
+	if !m.backlog.claimAnswer(repoID, a) {
+		t.Fatal("the first claim must succeed")
+	}
+	if m.backlog.claimAnswer(repoID, a) {
+		t.Fatal("a second worker was allowed for the same answer")
+	}
+	m.backlog.releaseAnswer(repoID, a)
+	if !m.backlog.claimAnswer(repoID, a) {
+		t.Fatal("a released answer can be claimed again")
 	}
 }

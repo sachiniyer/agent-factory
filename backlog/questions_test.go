@@ -218,47 +218,6 @@ func TestServiceDoneClosesQuestion(t *testing.T) {
 	}
 }
 
-func TestAnsweredInSession(t *testing.T) {
-	now := time.Now()
-	b := New()
-	it, _ := b.Add(NewItem{Title: "A"}, now)
-	it.Status = StatusRunning
-	it.Runs = []RunRef{{SessionID: "old", State: RunStarted}, {SessionID: "s1", State: RunStarted}}
-	if got := b.AnsweredInSession("s1", 1, now); got != 0 {
-		t.Fatalf("closed %d with nothing open", got)
-	}
-	if _, err := b.Ask(1, "old", "q", now); err == nil {
-		t.Fatal("an old run asked")
-	}
-	for _, q := range []string{"q", "r"} {
-		if _, err := b.Ask(1, "s1", q, now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := b.AnsweredInSession("old", 1, now); got != 0 {
-		t.Fatal("an old run closed the question")
-	}
-	// A question the agent posted after the user submitted is not the one the
-	// submission answered (Codex P2 on #6295): only the id captured before the
-	// line was forwarded closes, and only while it is still the oldest open.
-	if got := b.AnsweredInSession("s1", 2, now); got != 0 {
-		t.Fatalf("closed %d: a question the user never saw", got)
-	}
-	if got := b.AnsweredInSession("s1", 0, now); got != 0 {
-		t.Fatal("no captured question must close nothing")
-	}
-	if got := b.AnsweredInSession("s1", 1, now); got != 1 {
-		t.Fatal(got)
-	}
-	if id := b.OpenQuestionID("s1"); id != 2 {
-		t.Fatalf("OpenQuestionID = %d, want the remaining question", id)
-	}
-	th := b.Item(1).Thread
-	if th[0].Closed != ClosedAnsweredInSession || th[1].Closed != "" || b.OpenQuestionText(1) != "r" {
-		t.Fatalf("only the oldest closes: %+v", th)
-	}
-}
-
 func TestItemPromptSaysAsk(t *testing.T) {
 	b := New()
 	it, _ := b.Add(NewItem{Title: "A"}, time.Now())
@@ -333,5 +292,76 @@ func TestAnswerFailedKeepsRunningForANewerAnswer(t *testing.T) {
 	}
 	if b.Item(1).Status != StatusReview {
 		t.Fatalf("status = %s, want the replaced status back", b.Item(1).Status)
+	}
+}
+
+// Two answers accepted on an item in review, both failing in order, give the item
+// back to review (Codex P2 on #6295): the second answer keeps the status before
+// the oldest pending answer, not the "running" the first one set.
+func TestQueuedAnswersAllFailingRestoreTheOriginalStatus(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusReview
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+	for _, q := range []string{"one?", "two?"} {
+		if _, err := b.Ask(1, "s1", q, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := b.Answer(1, 0, "a", true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := b.Answer(1, 0, "b", true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Answer.PrevStatus != StatusReview {
+		t.Fatalf("the second answer saved %q, want the status before the oldest pending answer", second.Answer.PrevStatus)
+	}
+	if err := b.AnswerFailed(1, first.Answer.ID, "pane gone", now); err != nil {
+		t.Fatal(err)
+	}
+	if b.Item(1).Status != StatusRunning {
+		t.Fatalf("status = %s: the second answer is still pending", b.Item(1).Status)
+	}
+	if err := b.AnswerFailed(1, second.Answer.ID, "pane gone", now); err != nil {
+		t.Fatal(err)
+	}
+	if b.Item(1).Status != StatusReview {
+		t.Fatalf("status = %s, want review once every answer failed", b.Item(1).Status)
+	}
+}
+
+// The terminal binding closes the question the user SAW (its text, read from the
+// session's attention before the line was forwarded), not whichever is oldest when
+// the worker runs (Codex P2 on #6295).
+func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusRunning
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+	if _, err := b.Ask(1, "s1", "first?", now); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.AnsweredInSessionText("s1", "second?", now); got != 0 {
+		t.Fatalf("closed %d for a question the user did not see", got)
+	}
+	if got := b.AnsweredInSessionText("s1", "", now); got != 0 {
+		t.Fatal("no seen question must close nothing")
+	}
+	if _, err := b.Ask(1, "s1", "second?", now); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.AnsweredInSessionText("s1", "second?", now); got != 0 {
+		t.Fatal("only the oldest open question can have been answered by a line")
+	}
+	if got := b.AnsweredInSessionText("s1", "first?", now); got != 1 {
+		t.Fatalf("got %d", got)
+	}
+	if b.OpenQuestionText(1) != "second?" {
+		t.Fatalf("the newer question must stay open, got %q", b.OpenQuestionText(1))
 	}
 }
