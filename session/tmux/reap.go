@@ -92,11 +92,34 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 // Taking the error lets it report blindness instead of either an empty result
 // or a concrete finding, the way the package already treats an unreadable
 // process table or session list.
+//
+// This ambient form resolves the tmux server from the caller's own environment,
+// which is correct for a caller driving its OWN daemon's sessions (the teardown
+// paths, which inherit the daemon's socket). Doctor — a separate process
+// observing a daemon's sessions — uses CaptureSessionProcessTreesOnSocket to
+// pin the read to the socket the daemon recorded, so a list-panes against
+// doctor's ambient (wrong) server does not return ErrSessionVanishedBeforeCapture
+// for a session that is live on the recorded one and arm a kill off the
+// fall-through.
 func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
+	return captureSessionProcessTrees(cmdExec, sanitizedName, "")
+}
+
+// CaptureSessionProcessTreesOnSocket is CaptureSessionProcessTrees pinned to a
+// specific tmux server socket via `tmux -S <socket> list-panes`. See
+// CaptureSessionProcessTrees for the contract; the socket pin is the point:
+// `af doctor` lists the daemon's sessions against the recorded socket, so the
+// pane capture that follows must read the SAME server or a live session reads
+// as vanished. An empty socket is the ambient form.
+func CaptureSessionProcessTreesOnSocket(cmdExec cmd.Executor, sanitizedName, socket string) ([]proctree.Process, error) {
+	return captureSessionProcessTrees(cmdExec, sanitizedName, socket)
+}
+
+func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket string) ([]proctree.Process, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
-		"list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", paneRowFormat)
+		socketTmuxArgs(socket, "list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", paneRowFormat)...)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
@@ -119,8 +142,10 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		// target` on a server that is still up but holds no sessions at all —
 		// all exit 1. tmuxProvedSessionAbsent classifies the third by asking for
 		// the session listing, because that answer names nothing to match on
-		// (#3469).
-		if tmuxProvedSessionAbsent(cmdExec, err, sanitizedName) {
+		// (#3469). The corroboration listing is pinned to the same socket so a
+		// caller that pinned its own list-panes corroborates against that server
+		// rather than re-resolving one from its ambient environment.
+		if tmuxProvedSessionAbsent(cmdExec, err, sanitizedName, socket) {
 			return nil, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
 		}
 		return nil, fmt.Errorf("cannot list panes before teardown: %w", err)

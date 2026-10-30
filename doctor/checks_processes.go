@@ -126,7 +126,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// the read that would prove membership never returned. A read that
 			// cannot answer is reported once as blindness below (via
 			// observations.blindSessions) rather than classified either way.
-			tree, paneErr := tmux.CaptureSessionProcessTrees(ctx.opts.Exec, name)
+			tree, paneErr := captureSessionProcessTrees(ctx, name)
 			// Build the captured-PID set from whatever the partial tree
 			// returned (may be non-empty even when paneErr != nil, e.g. one
 			// pane vanished between list-panes and the process snapshot while
@@ -280,10 +280,35 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// case-insensitive volume — comparing unequal to the same home,
 			// which would report a genuine same-home orphan as "belongs to
 			// another agent-factory home" and leave it unfixed.
+			//
+			// A kill ALSO requires a corroborated session listing: the dead
+			// session this arm infers must be dead on the server the daemon
+			// ACTUALLY hosts sessions on, not on the one doctor's own
+			// $TMUX/$TMUX_TMPDIR happens to resolve. Without the pin a live
+			// session on a different tmux server is absent from the ambient
+			// listing and reads as a dead one here, arming killFix for a
+			// process whose session is still alive. The listing is pinned to
+			// the daemon's recorded socket in listTmuxSessions; an UNCONFIRMED
+			// record (present but unreadable, or naming no socket) means the
+			// listing could not be pinned and stays ambient, so this arm
+			// refuses the kill and reports instead — the same "a successful
+			// listing of the wrong server is not evidence of death" rule the
+			// failed-listing guard above enforces for one that did not answer.
 			home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
 			hasHome := homeStatus == proctree.EnvFound
 			switch {
 			case hasHome && filepath.IsAbs(home) && sameHome(home, ctx.opts.ConfigDir):
+				if !ctx.sessionDeathCorroborated() {
+					report.addAdvisoryFinding(Finding{
+						Check: "orphaned-process",
+						Detail: fmt.Sprintf("%s marks session %s (home %s) but the daemon's tmux "+
+							"server record could not be read, so doctor cannot pin the listing "+
+							"to the socket that hosts its sessions — a live session on a "+
+							"different tmux server would look the same here, so it is reported, "+
+							"not killed", describeProc(p), name, home),
+					})
+					continue
+				}
 				report.addActionableFinding(Finding{
 					Check: "orphaned-process",
 					Detail: fmt.Sprintf("%s was spawned by dead session %s (home %s)",

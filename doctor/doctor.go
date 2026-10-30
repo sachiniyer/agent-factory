@@ -43,6 +43,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -363,6 +364,14 @@ type scanContext struct {
 	autostartInstalled bool
 	autostartScopeErr  error
 	autostartScoped    bool
+	// The daemon's recorded tmux server socket, memoized once per run so the
+	// session listing, pane-tree capture, and home-marker reads all pin to
+	// the server that actually hosts this home's sessions — not the one
+	// doctor's own $TMUX/$TMUX_TMPDIR resolves. See recordedSocket.
+	recordedServerState         tmux.ServerState
+	recordedServerStateOK       bool
+	recordedServerStateErr      error
+	recordedServerStateResolved bool
 }
 
 // applyDefaults resolves every zero-valued option to its production default.

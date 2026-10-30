@@ -141,7 +141,7 @@ func TestTmuxProvedSessionAbsentCorroboratesWithTheSessionListing(t *testing.T) 
 					return tc.listing, tc.listErr
 				},
 			}
-			require.Equal(t, tc.expected, tmuxProvedSessionAbsent(cmdExec, tc.failure, name))
+			require.Equal(t, tc.expected, tmuxProvedSessionAbsent(cmdExec, tc.failure, name, ""))
 		})
 	}
 }
