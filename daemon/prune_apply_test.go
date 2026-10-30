@@ -489,3 +489,48 @@ func TestPruneApply_TombstoneWriteAndMemoryCommitAreOneCriticalSection(t *testin
 	assert.False(t, row.PrunedAt.IsZero(), "disk holds the tombstone")
 	assert.Nil(t, row.PruneIntent, "and not the intent beside a missing worktree")
 }
+
+// Title reuse is fenced while a prune intent is pending (Codex on #6186): after a
+// crash between intent and rename, reusing the archived title must not relocate
+// the archive out from under the intent; once resume resolves it, reuse works.
+func TestPruneApply_TitleReuseRefusesWhileAPruneIsPendingThenSucceedsAfterResume(t *testing.T) {
+	manager, repoID, repoPath, inst, archived := seedPrunableArchive(t, "reuse-pending")
+	c := planOf(t, manager, repoID)
+	pruneStepHook = func(step string) error {
+		if step == "rename" { // intent persisted, nothing moved yet
+			return errPruneCrash
+		}
+		return nil
+	}
+	t.Cleanup(func() { pruneStepHook = nil })
+	_, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	pruneStepHook = nil
+	require.NotNil(t, inst.PruneIntent())
+
+	disk, derr := loadRepoInstanceData(repoID)
+	require.NoError(t, derr)
+	manager.mu.Lock()
+	renamed, rerr := manager.renameArchivedForReuseLocked(repoID, repoPath, "reuse-pending", "claude", runtimeNamespaceLocalTmux, &disk)
+	manager.mu.Unlock()
+	require.Error(t, rerr)
+	assert.Contains(t, rerr.Error(), "prune is pending")
+	assert.Nil(t, renamed)
+	assert.DirExists(t, archived, "the archive was not relocated out from under the intent")
+	assert.Equal(t, "reuse-pending", inst.Title)
+
+	// Resume resolves the intent (the rename never happened: it is abandoned) ...
+	entry, inc := manager.resumePruneIntent(repoID, inst)
+	require.Nil(t, inc)
+	require.Nil(t, entry)
+	require.Nil(t, inst.PruneIntent())
+
+	// ... and the title can then be reused.
+	disk, derr = loadRepoInstanceData(repoID)
+	require.NoError(t, derr)
+	manager.mu.Lock()
+	renamed, rerr = manager.renameArchivedForReuseLocked(repoID, repoPath, "reuse-pending", "claude", runtimeNamespaceLocalTmux, &disk)
+	manager.mu.Unlock()
+	require.NoError(t, rerr)
+	require.NotNil(t, renamed)
+}
