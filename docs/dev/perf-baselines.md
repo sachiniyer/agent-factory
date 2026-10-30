@@ -44,8 +44,7 @@ monitor scanout. The observer and driver add overhead; comparisons keep it fixed
 
 | Metric | Start → observable completion |
 | --- | --- |
-| raw/gzip bytes | Sum of every shipped JS and CSS file under `web/dist` except `web/dist/lazy/`; each file gzip level 9 independently, excluding maps and images; recomputed three times |
-| lazy raw/gzip bytes | The same sum for `web/dist/lazy/`: bundles the shell loads on demand (the Docs tab's editor), so they do not count against the shell's budget |
+| raw/gzip bytes | Sum of every shipped JS and CSS file under `web/dist`; each file gzip level 9 independently, excluding maps and images; recomputed three times |
 | first terminal | Navigation time origin → first nonblank PTY glyph painted; select `add-json-export` as soon as the 1,000-row rail is available |
 | keystroke echo | Browser keydown → that previously absent ASCII character appears in the terminal DOM and crosses a paint opportunity; actual PTY echo, no mocked socket |
 | rail render | First Snapshot JSON decoded → all 1,000 rail rows present and a paint opportunity; includes row construction, layout and scheduling, excludes HTTP transfer |
@@ -97,7 +96,7 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1134872.000 | 1134872.000–1134872.000 | 0.000 | 1191615.600 |
+| raw_bytes | 1123037.000 | 1123037.000–1123037.000 | 0.000 | 1179188.850 |
 | gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
 | lazy_raw_bytes | 353009.000 | 353009.000–353009.000 | 0.000 | 370659.450 |
 | lazy_gzip_bytes | 114809.000 | 114809.000–114809.000 | 0.000 | 120549.450 |
@@ -134,7 +133,11 @@ only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
 `lazy_*` entries measure it on its own, with the same 5% margin. Both lazy values
 were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
 `report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
-so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,134,872 raw and 256,552 gzip bytes over `web/dist` without `lazy/`. Master's committed shell was 1,117,448 raw against an unmoved raw baseline of 1,067,070, so the raw entry is re-recorded (1,067,070 → 1,134,872); the gzip entry stays inside its budget. Lazy bundle: 353,009 raw / 114,809 gzip.
+so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,140,136 raw and 257,851 gzip bytes over `web/dist` without `lazy/`. Both are inside the existing shell budgets (raw 1,179,188; gzip 265,829), so those baselines are not moved. Lazy bundle: 353,009 raw / 114,809 gzip.
+
+### Bundle refresh provenance (#6290)
+
+Master's committed bundle (1,120,104 raw / 254,141 gzip over `web/dist/**.{js,css}`, gzip level 9) sat 319 bytes under the 1,120,423.5 raw budget, so any web change tripped it. #6290 (terminal links without confirm() and project switcher rows as links) takes the bundle to 1,123,037 raw, +2,933 raw over master; comments do not ship (esbuild strips them), so the growth is feature code. Only the raw entry is moved (gzip is unchanged at 253,171 and its budget still holds); it is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`, which is not a routine local run; the figure is byte-exact and matches what the Performance job reported.
 
 ### Bundle refresh provenance (#6212)
 

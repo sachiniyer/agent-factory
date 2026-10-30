@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// node_modules/@xterm/addon-fit/lib/addon-fit.js
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/@xterm/addon-fit/lib/addon-fit.js
 var require_addon_fit = __commonJS({
-  "node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module) {
+  "../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module) {
     !(function(e, t) {
       "object" == typeof exports && "object" == typeof module ? module.exports = t() : "function" == typeof define && define.amd ? define([], t) : "object" == typeof exports ? exports.FitAddon = t() : e.FitAddon = t();
     })(self, (() => (() => {
@@ -60,9 +60,9 @@ var require_addon_fit = __commonJS({
   }
 });
 
-// node_modules/@xterm/xterm/lib/xterm.js
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/@xterm/xterm/lib/xterm.js
 var require_xterm = __commonJS({
-  "node_modules/@xterm/xterm/lib/xterm.js"(exports, module) {
+  "../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/@xterm/xterm/lib/xterm.js"(exports, module) {
     !(function(e, t) {
       if ("object" == typeof exports && "object" == typeof module) module.exports = t();
       else if ("function" == typeof define && define.amd) define([], t);
@@ -6306,11 +6306,26 @@ function parseRoute(hash) {
 function serializeRoute(route) {
   return route?.session ? `#/session/${encodeURIComponent(route.session)}` : "";
 }
+function parseProjectRoute(hash) {
+  const match = /^#\/project\/([^/]+)$/.exec(hash);
+  if (!match) return null;
+  try {
+    const project = decodeURIComponent(match[1]);
+    return project.trim() && !/[\x00-\x1f\x7f]/.test(project) ? { project } : null;
+  } catch {
+    return null;
+  }
+}
+function serializeProjectRoute(route) {
+  return route.project ? `#/project/${encodeURIComponent(route.project)}` : "";
+}
+function isRoute(hash) {
+  return parseRoute(hash) !== null || parseProjectRoute(hash) !== null;
+}
 var ROUTE_KEY = "af-session-route";
 function stashRoute(hash, storage) {
   try {
-    const route = parseRoute(hash);
-    if (route) storage.setItem(ROUTE_KEY, serializeRoute(route));
+    if (isRoute(hash)) storage.setItem(ROUTE_KEY, hash);
     else storage.removeItem(ROUTE_KEY);
   } catch {
   }
@@ -6319,7 +6334,7 @@ function restoreRoute(hash, storage) {
   try {
     const saved = storage.getItem(ROUTE_KEY);
     storage.removeItem(ROUTE_KEY);
-    return hash || serializeRoute(parseRoute(saved ?? ""));
+    return hash || (saved && isRoute(saved) ? saved : "");
   } catch {
     return hash;
   }
@@ -7514,7 +7529,7 @@ function decideKey(key, ctx, mods = {}) {
   return next ? { kind: "select", id: next } : { kind: "none" };
 }
 
-// node_modules/lucide/dist/esm/icons/archive-restore.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/archive-restore.mjs
 var ArchiveRestore = [
   ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
   ["path", { d: "M4 8v11a2 2 0 0 0 2 2h2" }],
@@ -7523,20 +7538,20 @@ var ArchiveRestore = [
   ["path", { d: "M12 12v9" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/archive.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/archive.mjs
 var Archive = [
   ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
   ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
   ["path", { d: "M10 12h4" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/arrow-right.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/arrow-right.mjs
 var ArrowRight = [
   ["path", { d: "M5 12h14" }],
   ["path", { d: "m12 5 7 7-7 7" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/bot.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/bot.mjs
 var Bot = [
   ["path", { d: "M12 8V4H8" }],
   ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2" }],
@@ -7546,13 +7561,13 @@ var Bot = [
   ["path", { d: "M9 13v2" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/check.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/check.mjs
 var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
 
-// node_modules/lucide/dist/esm/icons/chevron-down.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/chevron-down.mjs
 var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
 
-// node_modules/lucide/dist/esm/icons/circle-dashed.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/circle-dashed.mjs
 var CircleDashed = [
   ["path", { d: "M10.1 2.182a10 10 0 0 1 3.8 0" }],
   ["path", { d: "M13.9 21.818a10 10 0 0 1-3.8 0" }],
@@ -7564,17 +7579,17 @@ var CircleDashed = [
   ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
 var CircleQuestionMark = [
   ["circle", { cx: "12", cy: "12", r: "10" }],
   ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
   ["path", { d: "M12 17h.01" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/circle.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/circle.mjs
 var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
 
-// node_modules/lucide/dist/esm/icons/diamond.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/diamond.mjs
 var Diamond = [
   [
     "path",
@@ -7584,21 +7599,21 @@ var Diamond = [
   ]
 ];
 
-// node_modules/lucide/dist/esm/icons/ellipsis.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/ellipsis.mjs
 var Ellipsis = [
   ["circle", { cx: "12", cy: "12", r: "1" }],
   ["circle", { cx: "19", cy: "12", r: "1" }],
   ["circle", { cx: "5", cy: "12", r: "1" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/external-link.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/external-link.mjs
 var ExternalLink = [
   ["path", { d: "M15 3h6v6" }],
   ["path", { d: "M10 14 21 3" }],
   ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/file-text.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/file-text.mjs
 var FileText = [
   [
     "path",
@@ -7612,7 +7627,7 @@ var FileText = [
   ["path", { d: "M16 17H8" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/folder-git-2.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/folder-git-2.mjs
 var FolderGit2 = [
   ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
   [
@@ -7625,7 +7640,7 @@ var FolderGit2 = [
   ["circle", { cx: "20", cy: "19", r: "2" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/folder.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/folder.mjs
 var Folder = [
   [
     "path",
@@ -7635,7 +7650,7 @@ var Folder = [
   ]
 ];
 
-// node_modules/lucide/dist/esm/icons/funnel.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/funnel.mjs
 var Funnel = [
   [
     "path",
@@ -7645,30 +7660,30 @@ var Funnel = [
   ]
 ];
 
-// node_modules/lucide/dist/esm/icons/git-branch.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/git-branch.mjs
 var GitBranch = [
   ["path", { d: "M15 6a9 9 0 0 0-9 9V3" }],
   ["circle", { cx: "18", cy: "6", r: "3" }],
   ["circle", { cx: "6", cy: "18", r: "3" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/link.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/link.mjs
 var Link = [
   ["path", { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }],
   ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/loader-circle.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/loader-circle.mjs
 var LoaderCircle = [["path", { d: "M21 12a9 9 0 1 1-6.219-8.56" }]];
 
-// node_modules/lucide/dist/esm/icons/menu.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/menu.mjs
 var Menu = [
   ["path", { d: "M4 5h16" }],
   ["path", { d: "M4 12h16" }],
   ["path", { d: "M4 19h16" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/octagon-x.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/octagon-x.mjs
 var OctagonX = [
   ["path", { d: "m15 9-6 6" }],
   [
@@ -7680,14 +7695,14 @@ var OctagonX = [
   ["path", { d: "m9 9 6 6" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/panels-top-left.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/panels-top-left.mjs
 var PanelsTopLeft = [
   ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
   ["path", { d: "M3 9h18" }],
   ["path", { d: "M9 21V9" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/pencil.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/pencil.mjs
 var Pencil = [
   [
     "path",
@@ -7698,7 +7713,7 @@ var Pencil = [
   ["path", { d: "m15 5 4 4" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/play.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/play.mjs
 var Play = [
   [
     "path",
@@ -7706,13 +7721,13 @@ var Play = [
   ]
 ];
 
-// node_modules/lucide/dist/esm/icons/plus.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/plus.mjs
 var Plus = [
   ["path", { d: "M5 12h14" }],
   ["path", { d: "M12 5v14" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/refresh-cw.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/refresh-cw.mjs
 var RefreshCw = [
   ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
   ["path", { d: "M21 3v5h-5" }],
@@ -7720,22 +7735,22 @@ var RefreshCw = [
   ["path", { d: "M8 16H3v5" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/square-check-big.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/square-check-big.mjs
 var SquareCheckBig = [
   ["path", { d: "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" }],
   ["path", { d: "m9 11 3 3L22 4" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/square.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/square.mjs
 var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
 
-// node_modules/lucide/dist/esm/icons/terminal.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/terminal.mjs
 var Terminal = [
   ["path", { d: "M12 19h8" }],
   ["path", { d: "m4 17 6-6-6-6" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/trash-2.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/trash-2.mjs
 var Trash2 = [
   ["path", { d: "M10 11v6" }],
   ["path", { d: "M14 11v6" }],
@@ -7744,14 +7759,14 @@ var Trash2 = [
   ["path", { d: "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/triangle-alert.mjs
 var TriangleAlert = [
   ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
   ["path", { d: "M12 9v4" }],
   ["path", { d: "M12 17h.01" }]
 ];
 
-// node_modules/lucide/dist/esm/icons/x.mjs
+// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/x.mjs
 var X = [
   ["path", { d: "M18 6 6 18" }],
   ["path", { d: "m6 6 12 12" }]
@@ -10717,6 +10732,33 @@ var TouchScroll = (now) => {
   };
 };
 
+// src/url.ts
+function safeHttpUrl(raw) {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return (u.protocol === "http:" || u.protocol === "https:") && u.host ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+// src/terminal_links.ts
+function terminalLinkHandler(open, setTooltip) {
+  return {
+    activate(_event, text) {
+      const href = safeHttpUrl(text);
+      if (href) open(href, "_blank", "noopener,noreferrer");
+    },
+    hover(_event, text) {
+      setTooltip(safeHttpUrl(text) ?? "");
+    },
+    leave() {
+      setTooltip("");
+    }
+  };
+}
+
 // src/terminal.ts
 function holdClockMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -10754,7 +10796,13 @@ var AttachTerminal = class {
       // choice elsewhere), giving onMouseDownCapture ONE bit to invert on every
       // platform. It also keeps Option out of xterm's block-select gesture, which
       // would otherwise fire on the inverted bit.
-      macOptionClickForcesSelection: true
+      macOptionClickForcesSelection: true,
+      // Opens OSC 8 links without xterm's default confirm() warning, and shows the
+      // real URL as a tooltip on hover (terminal_links.ts).
+      linkHandler: terminalLinkHandler(
+        (url, target, features) => window.open(url, target, features),
+        (tip) => tip ? container.setAttribute("title", tip) : container.removeAttribute("title")
+      )
     });
     this.fit = new import_addon_fit.FitAddon();
     this.term.loadAddon(this.fit);
@@ -11238,6 +11286,7 @@ var AttachTerminal = class {
     this.unsubscribeFontSizes?.();
     this.unsubscribeFontSizes = null;
     this.closeSocket();
+    this.container.removeAttribute("title");
     this.term.dispose();
   }
   applicationOwnsMouse() {
@@ -18955,6 +19004,8 @@ var AppShell = class {
     const focusFallback = this.projectSwitchBtn.getClientRects().length ? this.projectSwitchBtn : this.appControls.trigger;
     replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
+  /** The project whose Space press is armed, awaiting its release (see projectItem). */
+  projectSpaceArmed = null;
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
    *  switches the active project and closes the menu. `record` is the registry
@@ -18984,15 +19035,37 @@ var AppShell = class {
       { class: "af-project-item-meta" },
       ...record && !record.path_exists ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` \xB7 ${projectMeta(p)}`] : [projectMeta(p)]
     );
-    const item = h("button", { type: "button", class: cls }, check, label, meta);
+    const item = h("a", { class: cls, href: serializeProjectRoute({ project: p.root }) }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
-    item.addEventListener("click", (e) => {
+    const activate = (e) => {
+      e.preventDefault();
       e.stopPropagation();
       this.closeProjectMenu();
       this.appControls.dismiss();
       this.actions.switchProject(p.root);
+    };
+    item.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) {
+        e.stopPropagation();
+        return;
+      }
+      activate(e);
+    });
+    item.addEventListener("keydown", (e) => {
+      if (e.key !== " " || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      if (!e.repeat) this.projectSpaceArmed = p.root;
+    });
+    item.addEventListener("keyup", (e) => {
+      if (e.key !== " " || this.projectSpaceArmed !== p.root) return;
+      this.projectSpaceArmed = null;
+      activate(e);
+    });
+    item.addEventListener("blur", (e) => {
+      const to = e.relatedTarget;
+      if (to instanceof Node && !this.projectMenu.contains(to)) this.projectSpaceArmed = null;
     });
     return item;
   }
@@ -20274,6 +20347,7 @@ function resolveRoute() {
     return;
   }
   const route = parseRoute(location.hash);
+  const projectRoute = route ? null : parseProjectRoute(location.hash);
   resolvingRoute = true;
   let lookup = false;
   try {
@@ -20285,6 +20359,15 @@ function resolveRoute() {
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
+    } else if (projectRoute) {
+      const { sessions, tasks, registeredProjects } = store.get();
+      const known = pickerProjects(sessions, tasks, projectRoots(registeredProjects)).includes(projectRoute.project);
+      if (known) {
+        switchProject(projectRoute.project);
+        store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      } else {
+        showTransientNotice("No project at that path in this daemon");
+      }
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");

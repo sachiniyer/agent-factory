@@ -233,6 +233,11 @@ test("every job in pr.yml is listed in Build's needs", () => {
     // — it runs AFTER the required checks resolve so a dropped workflow_run
     // event cannot strand their state, and a red dispatch must not block a PR.
     if (id === "gate-reconcile") continue;
+    // Deliberately advisory (#6281): the Ubuntu 26.04 leg is report-only
+    // (continue-on-error), so it must not gate Build, and a slow or missing
+    // 26.04 runner must not hold every merge. Remove this exemption, and add the
+    // job to Build's needs, when the leg is made blocking.
+    if (id === "test-ubuntu-26") continue;
     assert.ok(needs.includes(id), `pr.yml job "${id}" is not in Build's needs, so it gates nothing`);
   }
 });
