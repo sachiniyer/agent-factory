@@ -574,6 +574,10 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	if isSandbox {
 		// The projection above withheld the worktree path these two keys read.
 		req.ProjectPath = ""
+		// A sandbox reads only its own project and has no business paging an
+		// archive: the paging inputs are ignored and no cursor is returned (below),
+		// exactly as archived_by_project is withheld.
+		req.NewestFirst, req.Before, req.IDs = false, nil, nil
 	}
 	if err := req.Validate(); err != nil {
 		return err
@@ -590,7 +594,9 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 		return err
 	}
 	resp.Instances = instances
-	resp.NextBefore = next
+	if !isSandbox {
+		resp.NextBefore = next
+	}
 	resp.DeliveryAlarms = alarms
 	resp.SkippedRepos = skipped
 	if s.manager.lifecycle != nil {
