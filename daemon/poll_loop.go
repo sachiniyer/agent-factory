@@ -42,6 +42,10 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// and the TUI renders it from Snapshot instead of computing its own.
 			manager.RefreshStatuses()
 
+			// Once per daemon, after the first refresh: settle backlog runs a
+			// restart left starting. It runs on its own tracked goroutine.
+			manager.RecoverBacklogStarts()
+
 			// Always-ensure the root agent for repos opted in via root_agents
 			// (#1106). Runs after RefreshStatuses so a root whose tmux died is
 			// marked Dead and its heal STARTED in the same tick; the loop body

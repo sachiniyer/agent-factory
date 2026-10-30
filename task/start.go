@@ -263,7 +263,7 @@ func WaitForReadyAndSubmitPrompt(
 		// they skip the watch as well.
 		if turnSignaturedAgent(instance.ResolvedAgent()) &&
 			(status == session.PromptSentUnverified ||
-				(status == session.PromptDelivered && instance.TaskRunActive())) &&
+				(status == session.PromptDelivered && instance.RunGateActive())) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
 			instance.RecordTaskRunTurn(time.Now())
 			if status == session.PromptSentUnverified {

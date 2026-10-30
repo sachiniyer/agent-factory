@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"path/filepath"
 	"sync"
 
@@ -20,6 +21,116 @@ type routeServices struct {
 type backlogState struct {
 	once sync.Once
 	svc  *backlog.Service
+	// mu guards the in-memory bookkeeping below. None of it is durable: a
+	// restart has no starts in flight, and recovery settles their records.
+	mu sync.Mutex
+	// slots counts the item-session creates in flight per project.
+	slots map[string]int
+	// continuing holds the items whose "continue" is being sent.
+	continuing map[string]bool
+	// deferredArchive holds the sessions whose on_done archive waits for an
+	// attached client to leave.
+	deferredArchive map[string]bool
+	// recovered, recovering and recoveryDone track restart recovery.
+	recovered    map[string]bool
+	recovering   bool
+	recoveryDone bool
+}
+
+func (s *backlogState) reserve(repoID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.slots == nil {
+		s.slots = map[string]int{}
+	}
+	s.slots[repoID]++
+}
+
+func (s *backlogState) release(repoID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.slots[repoID] <= 1 {
+		delete(s.slots, repoID)
+		return
+	}
+	s.slots[repoID]--
+}
+
+func (s *backlogState) reserved(repoID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.slots[repoID]
+}
+
+func continueKey(repoID string, id int) string { return fmt.Sprintf("%s\x00%d", repoID, id) }
+
+// beginContinue claims the item's "continue"; false when one is in flight.
+func (s *backlogState) beginContinue(repoID string, id int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.continuing[continueKey(repoID, id)] {
+		return false
+	}
+	if s.continuing == nil {
+		s.continuing = map[string]bool{}
+	}
+	s.continuing[continueKey(repoID, id)] = true
+	return true
+}
+
+func (s *backlogState) endContinue(repoID string, id int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.continuing, continueKey(repoID, id))
+}
+
+func (s *backlogState) deferArchive(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deferredArchive == nil {
+		s.deferredArchive = map[string]bool{}
+	}
+	s.deferredArchive[sessionID] = true
+}
+
+func (s *backlogState) takeDeferredArchive(sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	owed := s.deferredArchive[sessionID]
+	delete(s.deferredArchive, sessionID)
+	return owed
+}
+
+func (s *backlogState) beginRecovery() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recoveryDone || s.recovering {
+		return false
+	}
+	s.recovering = true
+	return true
+}
+
+func (s *backlogState) endRecovery(pending bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recovering = false
+	s.recoveryDone = !pending
+}
+
+func (s *backlogState) isRecovered(repoID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recovered[repoID]
+}
+
+func (s *backlogState) markRecovered(repoID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recovered == nil {
+		s.recovered = map[string]bool{}
+	}
+	s.recovered[repoID] = true
 }
 
 func (m *Manager) backlogService() *backlog.Service {
@@ -34,11 +145,15 @@ type backlogHost struct {
 	m *Manager
 }
 
-// Facts reports nothing live: no item session exists until the backlog can
-// start sessions.
-func (h backlogHost) Facts(string) backlog.Facts {
-	return func(string) backlog.SessionFacts { return backlog.SessionFacts{} }
+func (h backlogHost) Facts(repoID string) backlog.Facts {
+	sessions := h.m.itemSessions(repoID)
+	return func(id string) backlog.SessionFacts {
+		s, ok := sessions[id]
+		return backlogSessionFacts(s, ok)
+	}
 }
+
+func (h backlogHost) SlotsUsed(repoID string) int { return h.m.backlogSlotsUsed(repoID) }
 
 func (h backlogHost) ProjectName(repoID string) string {
 	if root, err := registeredProjectRootForRepoID(repoID); err == nil && root != "" {
@@ -115,6 +230,11 @@ func (s *controlServer) SetBacklogItemStatus(req SetBacklogItemStatusRequest, re
 		return err
 	}
 	*resp = *out
+	if out.Item.Status == backlog.StatusDone {
+		if ref, err := s.manager.backlogService().Resolve(req.RepoID, req.RepoPath); err == nil {
+			s.manager.onBacklogItemDone(ref.ID, out.Item)
+		}
+	}
 	return nil
 }
 

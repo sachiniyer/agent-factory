@@ -45,6 +45,8 @@ func ParseState(s string) (State, error) {
 
 // SessionFacts is what the caller knows about one session.
 type SessionFacts struct {
+	// Limited marks a session parked at a usage limit; Reason says until when.
+	Limited     bool
 	Live        bool
 	RunActive   bool
 	Lost        bool

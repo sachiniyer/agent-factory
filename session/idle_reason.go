@@ -183,7 +183,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	// affirmatively failed delivery never binds it at all: the pane provably
 	// took nothing, so the boundary stays the last send that could have
 	// delivered.
-	if i.taskRunActive && status != PromptNotDelivered &&
+	if i.runGateActiveLocked() && status != PromptNotDelivered &&
 		(i.taskRunPromptAttemptAt.IsZero() ||
 			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
 		i.taskRunPromptAttemptAt = attemptedAt
@@ -282,7 +282,7 @@ func (i *Instance) RecordTaskRunTurn(observedAt time.Time) bool {
 //
 // Caller holds i.mu.
 func (i *Instance) recordTaskRunTurnLocked(observedAt time.Time) bool {
-	if !i.taskRunActive || i.taskRunPromptAttemptAt.IsZero() ||
+	if !i.runGateActiveLocked() || i.taskRunPromptAttemptAt.IsZero() ||
 		!observedAt.After(i.taskRunTurnObservedAt) ||
 		i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) {
 		return false
@@ -669,7 +669,7 @@ func (i *Instance) ReconcileTaskRunState(active, missionHeld, turnGateHeld bool)
 // still being in flight, mirroring ToInstanceData's write-side gate: a finished
 // run's stale timestamp is not evidence for its successor's delivery window.
 func taskRunTurnObservedAtFromData(data InstanceData) time.Time {
-	if !data.TaskRunActive {
+	if !runGateActiveInData(data) {
 		return time.Time{}
 	}
 	return data.TaskRunTurnObservedAt
@@ -686,7 +686,7 @@ func taskRunTurnObservedAtFromData(data InstanceData) time.Time {
 // restart must not resurrect one — the same Ready tick that would end the
 // un-restarted run must end this one too, not wedge it until fallback.
 func taskRunPromptAttemptAtFromData(data InstanceData) time.Time {
-	if !data.TaskRunActive {
+	if !runGateActiveInData(data) {
 		return time.Time{}
 	}
 	if data.TaskRunPromptAttemptAt.IsZero() {

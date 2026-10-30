@@ -272,6 +272,11 @@ func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
 	if instance == nil || !accountSwapResumeEligible(instance) || !instance.SupportsAutomaticAccountSwap() {
 		return nil, nil
 	}
+	// Item sessions park at a limit instead: their spend is metered against
+	// the backlog budget for the account they started on.
+	if instance.BacklogItem != 0 {
+		return nil, nil
+	}
 	if committed := committedAccountSwap(instance); committed != nil {
 		return committed, nil
 	}
