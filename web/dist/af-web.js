@@ -15563,6 +15563,28 @@ function archiveNeedsFirstPage(archive, project) {
   return (project ? archive.byProject[project] ?? 0 : archive.total) > 0;
 }
 
+// src/route_lookup.ts
+var RouteLookups = class {
+  latest = 0;
+  /** Takes a ticket, superseding every earlier one. */
+  begin() {
+    return ++this.latest;
+  }
+  current(ticket) {
+    return ticket === this.latest;
+  }
+};
+function settleLookup(lookups, ticket, id, rows, effects) {
+  if (!lookups.current(ticket)) return "stale";
+  const row = rows.find((r) => r.id === id);
+  if (!row) {
+    effects.missing();
+    return "missing";
+  }
+  effects.found(row);
+  return "found";
+}
+
 // src/pending_restores.ts
 var RESTORE_ADMISSION_MARGIN_MS = 1e3;
 var RESTORE_RECONCILE_RETRY_MIN_MS = 2e3;
@@ -19974,10 +19996,12 @@ function tabSynthOf(list, id) {
   return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
 }
 var resolvingRoute = false;
+var routeLookups = new RouteLookups();
 var routeSelection = null;
 var createSelectionIntent = new CreateSelectionIntent();
 function resolveRoute() {
   createSelectionIntent.navigate();
+  const ticket = routeLookups.begin();
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -19993,7 +20017,7 @@ function resolveRoute() {
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
     } else if (lookup && route) {
-      void resolveArchivedRoute(route.session);
+      void resolveArchivedRoute(route.session, ticket);
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -20004,7 +20028,7 @@ function resolveRoute() {
     if (!lookup) replaceRoute(id ? { session: id } : null);
   }
 }
-async function resolveArchivedRoute(id) {
+async function resolveArchivedRoute(id, ticket) {
   const tok = token;
   const generation = connectionGeneration;
   let rows = [];
@@ -20017,15 +20041,20 @@ async function resolveArchivedRoute(id) {
     }
   }
   if (token !== tok || connectionGeneration !== generation) return;
-  const row = rows.find((r) => r.id === id);
-  if (!row) {
-    showTransientNotice("No session with that id in this daemon");
-    replaceRoute(null);
-    return;
-  }
-  optimisticSessions.adopt([row]);
-  applySessions(optimisticSessions.project());
-  resolveRoute();
+  settleLookup(routeLookups, ticket, id, rows, {
+    found: (row) => {
+      optimisticSessions.adopt([row]);
+      applySessions(optimisticSessions.project());
+      resolveRoute();
+    },
+    // The one terminal state of an unknown id: the empty pane (the previous
+    // selection must not linger), one toast, and the URL reset to /.
+    missing: () => {
+      store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      showTransientNotice("No session with that id in this daemon");
+      replaceRoute(null);
+    }
+  });
 }
 function moveSelection(id) {
   createSelectionIntent.navigate();
