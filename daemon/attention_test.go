@@ -98,6 +98,45 @@ func TestIsSubmittedInputNeedsAnEnterOutsideAPaste(t *testing.T) {
 	}
 }
 
+// A bracketed paste can span input frames (the CLI attach reads stdin 32 bytes at
+// a time), and its markers can be split across them: a newline inside the paste
+// is not a submission (Codex P2 on #6300).
+func TestSubmitDetectorFollowsAPasteAcrossFrames(t *testing.T) {
+	frames := func(fs ...string) (got []bool) {
+		d := &submitDetector{}
+		for _, f := range fs {
+			got = append(got, d.Submitted([]byte(f)))
+		}
+		return got
+	}
+	eq := func(got, want []bool) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
+	}
+	for name, tc := range map[string]struct {
+		in   []string
+		want []bool
+	}{
+		"paste start, then a continuation with a newline": {[]string{"\x1b[200~line one", "\nline two"}, []bool{false, false}},
+		"the paste ends in a later frame, then Enter":     {[]string{"\x1b[200~a", "b\n", "c\x1b[201~", "\r"}, []bool{false, false, false, true}},
+		"the end marker is split across frames":           {[]string{"\x1b[200~a\n", "\x1b[20", "1~", "\n"}, []bool{false, false, false, true}},
+		"the start marker is split across frames":         {[]string{"\x1b[20", "0~x\ny", "\x1b[201~"}, []bool{false, false, false}},
+		"typed text then Enter is a submission":           {[]string{"hello", "\r"}, []bool{false, true}},
+		"a terminal reply is not a submission":            {[]string{"\x1b[I", "\r"}, []bool{false, true}},
+	} {
+		if got := frames(tc.in...); !eq(got, tc.want) {
+			t.Errorf("%s: %q -> %v, want %v", name, tc.in, got, tc.want)
+		}
+	}
+}
+
 func fixturePane(t *testing.T, name string) string {
 	t.Helper()
 	raw, err := os.ReadFile("../task/testdata/" + name)
