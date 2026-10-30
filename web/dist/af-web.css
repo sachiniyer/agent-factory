@@ -3595,7 +3595,7 @@ textarea[class] {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .af-docs-status .af-icon {
+  .af-docs-status:is([data-state=saving], [data-state=pending], [data-state=loading]) .af-icon {
     animation: none;
   }
 }

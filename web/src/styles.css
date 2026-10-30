@@ -4134,9 +4134,10 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   to { transform: rotate(360deg); }
 }
 
-/* Reduced motion keeps the glyph and drops the spin. */
+/* Reduced motion keeps the glyph and drops the spin. The selector repeats the
+ * animated rule's, or its higher specificity would win over this one. */
 @media (prefers-reduced-motion: reduce) {
-  .af-docs-status .af-icon { animation: none; }
+  .af-docs-status:is([data-state="saving"], [data-state="pending"], [data-state="loading"]) .af-icon { animation: none; }
 }
 
 .af-docs-status[data-state="conflict"],
