@@ -61,9 +61,7 @@ func TestDaemonDoesNotResurrectAHomeDeletedUnderIt(t *testing.T) {
 		return err == nil
 	})
 
-	if err := os.RemoveAll(h.home); err != nil {
-		t.Fatalf("remove the daemon's home: %v", err)
-	}
+	deleteHomeUnderDaemon(t, h.home)
 
 	// homeMissingChecksToExit is 2, so the daemon exits between one and two
 	// intervals after the deletion; the budget is generous over that because a
@@ -213,26 +211,7 @@ func assertCreateLeavesADeletedHomeDeleted(t *testing.T, worktreeRoot string) {
 	defer conn.Close()
 
 	deletedAt := time.Now()
-	// A concurrent write by the daemon or stand-in during deletion is expected
-	// traffic, not a product bug: on macOS it can make RemoveAll report
-	// "directory not empty" (#3957). Retry only the deletion harness step.
-	const deleteAttempts = 20
-	for attempt := 1; attempt <= deleteAttempts; attempt++ {
-		if err := os.RemoveAll(h.home); err != nil {
-			if attempt == deleteAttempts {
-				entries, readErr := os.ReadDir(h.home)
-				var remaining []string
-				for _, entry := range entries {
-					remaining = append(remaining, entry.Name())
-				}
-				t.Fatalf("remove the daemon's home %s after %d attempts: %v; remaining entries: %v (listing error: %v)",
-					h.home, deleteAttempts, err, remaining, readErr)
-			}
-			time.Sleep(25 * time.Millisecond)
-			continue
-		}
-		break
-	}
+	deleteHomeUnderDaemon(t, h.home)
 
 	createErr := postOverConn(conn, "/v1/CreateSession", map[string]string{
 		"title":     "after-deletion",
@@ -338,4 +317,39 @@ func postOverConn(conn net.Conn, path string, payload any, timeout time.Duration
 		return fmt.Errorf("POST %s status=%d error=%s", path, resp.StatusCode, msg)
 	}
 	return nil
+}
+
+// deleteHomeUnderDaemon makes the daemon's home path vanish in one step, then
+// disposes of the contents.
+//
+// os.RemoveAll on the live path races the daemon's own writes into
+// instances/<id>/: it empties a directory, the daemon adds an entry, and the
+// final rmdir fails with "directory not empty" (#6191, #3957). That is harness
+// noise, not a product bug, and it fails the test before it reaches anything it
+// pins. Renaming the home to a sibling is atomic, so from the daemon's side the
+// home path is gone exactly as after `rm -rf`: a daemon that writes by path
+// re-creates a fresh directory there, which the callers' observation loops still
+// catch as a resurrection. Only the leftover copy, which no daemon path names,
+// is then removed; writes through descriptors the daemon already holds can still
+// race that removal, so it keeps a bounded retry.
+func deleteHomeUnderDaemon(t *testing.T, home string) {
+	t.Helper()
+	gone := fmt.Sprintf("%s.deleted-%d", home, time.Now().UnixNano())
+	if err := os.Rename(home, gone); err != nil {
+		t.Fatalf("move the daemon's home %s aside: %v", home, err)
+	}
+	const attempts = 20
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = os.RemoveAll(gone); err == nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	entries, _ := os.ReadDir(gone)
+	var remaining []string
+	for _, e := range entries {
+		remaining = append(remaining, e.Name())
+	}
+	t.Fatalf("remove the moved-aside home %s after %d attempts: %v; remaining entries: %v", gone, attempts, err, remaining)
 }
