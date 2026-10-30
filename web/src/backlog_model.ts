@@ -63,8 +63,11 @@ export interface Derived {
 }
 
 export interface RunnerView {
-  state: "off" | "idle" | "stopped" | string;
+  state: "off" | "idle" | "running" | "waiting" | "stopped" | string;
   reason?: string;
+  /** The closed gate when the runner is stopped or waiting: share, stop_at,
+   *  usage_limit, no_reading, unmeterable, usd_limit, no_account, metering. */
+  gate?: string;
   used: number;
   max: number;
 }
@@ -228,13 +231,13 @@ export interface SessionItem {
   title: string;
 }
 
-/** Maps each item session id to its item, from the items' run refs. A session
- *  named by two items keeps the later run. */
 /** The proposals the backlog's items came from, in first-seen order. */
 export function sources(b: Backlog): string[] {
   return [...new Set(b.items.map((it) => it.source?.proposal ?? "").filter(Boolean))];
 }
 
+/** Maps each item session id to its item, from the items' run refs. A session
+ *  named by two items keeps the later run. */
 export function sessionItems(views: ReadonlyMap<string, BacklogView>): Map<string, SessionItem> {
   const out = new Map<string, SessionItem>();
   for (const [root, v] of views) {
@@ -416,11 +419,13 @@ export function neededBy(b: Backlog, id: number): Item[] {
   return b.items.filter((it) => (it.waits_on ?? []).includes(id));
 }
 
-export type ItemAction = "queue" | "draft" | "done" | "drop" | "reopen" | "delete";
+export type ItemAction = "queue" | "draft" | "start" | "review" | "done" | "drop" | "reopen" | "delete";
 
 export const ACTION_LABELS: Record<ItemAction, string> = {
   queue: "Queue",
   draft: "Back to draft",
+  start: "Start now",
+  review: "Send to review",
   done: "Mark done",
   drop: "Drop",
   reopen: "Reopen",
@@ -428,7 +433,8 @@ export const ACTION_LABELS: Record<ItemAction, string> = {
 };
 
 /** The actions the panel offers for an item, in the order it shows them. A
- *  parent only queues its draft children and drops its open ones. */
+ *  parent only queues its draft children and drops its open ones. Send to
+ *  review answers af's own question, such as the cap per run. */
 export function itemActions(b: Backlog, it: Item, derived: Derived): ItemAction[] {
   if (isParent(b, it.id)) {
     const out: ItemAction[] = [];
@@ -440,6 +446,8 @@ export function itemActions(b: Backlog, it: Item, derived: Derived): ItemAction[
   const s = it.status;
   if (s === "draft" || s === "review") out.push("queue");
   if (s === "queued" || s === "review") out.push("draft");
+  if (s !== "done" && s !== "dropped" && derived.state !== "working" && derived.state !== "starting") out.push("start");
+  if (s === "running" && openQuestion(it)?.author === "af") out.push("review");
   if (s !== "done" && s !== "dropped") out.push("done", "drop");
   else out.push("reopen");
   if (s === "draft" && (it.runs ?? []).length === 0 && (it.thread ?? []).length === 0) out.push("delete");
@@ -455,6 +463,11 @@ export function safeHttpUrl(raw: string | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+/** The item a Run next pass starts first: the top Queued leaf in tree order. */
+export function topQueued(view: BacklogView): Item | undefined {
+  return view.backlog.items.find((it) => derivedOf(view, it.id).state === "queued" && !isParent(view.backlog, it.id));
 }
 
 export function needsYouLabel(n: number): string {

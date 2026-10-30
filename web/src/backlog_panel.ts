@@ -1,7 +1,8 @@
 // The Backlog view's item panel (backlog proposal, ui.md "Item panel"). The
 // title field, the body section and the note box live across renders so a
 // backlog.changed event never eats what the user is typing, or their focus;
-// the parts above and below the body rebuild.
+// the parts above and below the body rebuild. The open question's answer box
+// lives across renders for the same reason.
 
 import { h } from "./dom.js";
 import { icon } from "./icon.js";
@@ -13,6 +14,7 @@ import {
   childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, neededBy, openQuestion, safeHttpUrl,
 } from "./backlog_model.js";
 import { ROW_KIND_LABELS, isArchived, rowKind } from "./status.js";
+import { type Usage, pct, runUse, usd } from "./backlog_usage.js";
 import { formatTime } from "./time.js";
 import type { SessionData } from "./types.js";
 
@@ -22,6 +24,9 @@ export interface PanelActions {
   remove(id: number): void;
   move(id: number, to: MoveTarget): void;
   note(id: number, text: string): void;
+  start(id: number): void;
+  /** Sends the answer; resolves true once the daemon took it. */
+  answer(id: number, questionId: number, text: string): Promise<boolean>;
   addChild(parent: number, title: string): void;
   select(id: number): void;
   close(): void;
@@ -30,9 +35,10 @@ export interface PanelActions {
   restoreSession(id: string): void;
 }
 
-const ACTION_STATUS: Record<Exclude<ItemAction, "delete">, Status> = {
+const ACTION_STATUS: Record<Exclude<ItemAction, "delete" | "start">, Status> = {
   queue: "queued",
   draft: "draft",
+  review: "review",
   done: "done",
   drop: "dropped",
   reopen: "draft",
@@ -76,6 +82,11 @@ export class ItemPanel {
   private readonly body: BodyEditor;
   private readonly note: HTMLTextAreaElement;
   private readonly head: HTMLElement;
+  private readonly question: HTMLElement;
+  private readonly questionText = h("span", {});
+  private readonly answer: HTMLTextAreaElement;
+  private readonly sendAnswer: HTMLButtonElement;
+  private questionId = 0;
   private readonly above: HTMLElement;
   private readonly below: HTMLElement;
   private readonly threadList: HTMLElement;
@@ -85,6 +96,7 @@ export class ItemPanel {
   private moveOpen = false;
   private view: BacklogView | null = null;
   private sessions: SessionData[] = [];
+  private usage: Usage | null = null;
 
   constructor(readonly root: string, readonly id: number, private readonly actions: PanelActions) {
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
@@ -109,7 +121,20 @@ export class ItemPanel {
       this.note.value = "";
       actions.note(id, text);
     });
-    this.head = h("div", { class: "af-backlog-panel-state" });
+    this.head = h("div", { class: "af-backlog-panel-state", tabIndex: -1 });
+    this.answer = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: `Answer ${formatID(id)}…` });
+    this.answer.setAttribute("aria-label", "Answer");
+    this.sendAnswer = button("Send answer", () => this.submitAnswer(), "af-primary");
+    this.answer.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) {
+        e.preventDefault();
+        this.submitAnswer();
+      }
+    });
+    this.question = h("div", { class: "af-backlog-question", role: "group", hidden: true },
+      h("div", { class: "af-backlog-question-text" }, icon("circle-question"), this.questionText),
+      h("div", { class: "af-backlog-note-row" }, this.answer, this.sendAnswer));
+    this.question.setAttribute("aria-label", "Open question");
     this.above = h("div", { class: "af-backlog-panel-rest" });
     this.below = h("div", { class: "af-backlog-panel-rest" });
     this.threadList = h("ol", { class: "af-backlog-thread" });
@@ -119,7 +144,7 @@ export class ItemPanel {
     this.closeButton = close;
     const top = h("div", { class: "af-backlog-panel-top" },
       h("span", { class: "af-backlog-id" }, formatID(id)), this.title, close);
-    this.el = h("aside", { class: "af-backlog-panel" }, top, this.head, this.above, section("Body", this.body.el), this.below,
+    this.el = h("aside", { class: "af-backlog-panel" }, top, this.head, this.question, this.above, section("Body", this.body.el), this.below,
       section("Thread", this.threadList, h("div", { class: "af-backlog-note-row" }, this.note, addNote)));
     this.el.setAttribute("aria-label", `Item ${formatID(id)}`);
     this.el.addEventListener("keydown", (e) => {
@@ -137,9 +162,21 @@ export class ItemPanel {
     return this.view ? itemByID(this.view.backlog, this.id) : undefined;
   }
 
-  render(view: BacklogView, sessions: SessionData[]): void {
+  private submitAnswer(): void {
+    const text = this.answer.value.trim();
+    const qid = this.questionId;
+    if (!text || !qid || this.sendAnswer.disabled) return;
+    this.sendAnswer.disabled = true;
+    void this.actions.answer(this.id, qid, text).then((ok) => {
+      this.sendAnswer.disabled = false;
+      if (ok && this.questionId === qid && this.answer.value.trim() === text) this.answer.value = "";
+    });
+  }
+
+  render(view: BacklogView, sessions: SessionData[], usage: Usage | null = null): void {
     this.view = view;
     this.sessions = sessions;
+    this.usage = usage;
     const it = this.item();
     if (!it) return;
     if (document.activeElement !== this.title) this.title.value = it.title;
@@ -147,10 +184,11 @@ export class ItemPanel {
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
     const q = openQuestion(it);
-    const above: HTMLElement[] = [];
-    if (q) above.push(h("div", { class: "af-backlog-question", role: "status" }, icon("circle-question"), h("span", {}, q.text)));
-    above.push(this.actionsRow(view, it));
-    this.above.replaceChildren(...above);
+    this.question.hidden = !q;
+    if ((q?.id ?? 0) !== this.questionId) this.answer.value = "";
+    this.questionId = q?.id ?? 0;
+    this.questionText.textContent = q ? (q.author === "af" ? `af asks: ${q.text}` : q.text) : "";
+    this.above.replaceChildren(this.actionsRow(view, it));
     const below: HTMLElement[] = [this.waitsSection(view, it)];
     const children = this.childrenSection(view, it);
     if (children) below.push(children);
@@ -166,7 +204,9 @@ export class ItemPanel {
   }
 
   /** Keeps the focus, and a field's value, across a rebuild: the same control
-   *  is found again by its tag, label and text. */
+   *  is found again by its tag, label and text. An item action that went away,
+   *  such as Start now once the item starts, hands focus to the first action
+   *  left, else to the state chip. */
   private keepField(): () => void {
     const active = document.activeElement as HTMLInputElement | null;
     const box = [this.above, this.below].find((b) => active && b.contains(active));
@@ -176,11 +216,17 @@ export class ItemPanel {
     const text = active.textContent;
     const field = tag === "INPUT" || tag === "SELECT";
     const value = field ? active.value : "";
+    const action = active.dataset.action;
     return () => {
-      const next = [...box.querySelectorAll<HTMLInputElement>(tag.toLowerCase())]
-        .find((el) => el.getAttribute("aria-label") === label && (field || el.textContent === text));
-      if (!next) return;
-      if (field) next.value = value;
+      const next = action
+        ? this.above.querySelector<HTMLElement>(`[data-action="${action}"]`)
+        : [...box.querySelectorAll<HTMLInputElement>(tag.toLowerCase())]
+          .find((el) => el.getAttribute("aria-label") === label && (field || el.textContent === text));
+      if (!next) {
+        if (action) (this.above.querySelector<HTMLElement>("[data-action]") ?? this.head).focus({ preventScroll: true });
+        return;
+      }
+      if (field) (next as HTMLInputElement).value = value;
       next.focus({ preventScroll: true });
     };
   }
@@ -188,10 +234,13 @@ export class ItemPanel {
   private actionsRow(view: BacklogView, it: Item): HTMLElement {
     const row = h("div", { class: "af-backlog-actions" });
     for (const a of itemActions(view.backlog, it, derivedOf(view, it.id))) {
-      row.append(button(ACTION_LABELS[a], () => {
+      const b = button(ACTION_LABELS[a], () => {
         if (a === "delete") this.actions.remove(it.id);
+        else if (a === "start") this.actions.start(it.id);
         else this.actions.status(it.id, ACTION_STATUS[a]);
-      }, a === "queue" ? "af-primary" : "af-ghost"));
+      }, a === "queue" || a === "start" ? "af-primary" : "af-ghost");
+      b.dataset.action = a;
+      row.append(b);
     }
     row.append(this.moveMenu(view, it));
     return row;
@@ -234,7 +283,7 @@ export class ItemPanel {
     }
     const add = button("Add", () => {
       this.pickerOpen = !this.pickerOpen;
-      this.render(view, this.sessions);
+      this.render(view, this.sessions, this.usage);
       this.el.querySelector<HTMLInputElement>(".af-backlog-picker input")?.focus();
     });
     add.classList.add("af-backlog-wait-add");
@@ -280,7 +329,7 @@ export class ItemPanel {
       if (e.key === "Escape") {
         e.preventDefault();
         this.pickerOpen = false;
-        this.render(view, this.sessions);
+        this.render(view, this.sessions, this.usage);
         this.below.querySelector<HTMLElement>(".af-backlog-wait-add")?.focus();
       }
     });
@@ -322,7 +371,15 @@ export class ItemPanel {
       const s = run.session_id ? this.sessions.find((x) => x.id === run.session_id) : undefined;
       const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : "Gone";
       const by = run.started_by === "runner" ? "runner" : "you";
-      const meta = [`Started by ${by}`, formatTime(run.started_at), live].join(" · ");
+      const meta = h("div", { class: "af-backlog-reason" }, [`Started by ${by}`, formatTime(run.started_at), live].join(" · "));
+      const cost = run.session_id ? this.usage?.runs[run.session_id] : undefined;
+      if (cost !== undefined && this.usage) {
+        const use = runUse(run.session_id, this.usage, Date.now(), s?.account);
+        const words = use === null ? [`${usd(cost)} at API prices`] : [`${pct(use)} of the 5-hour window`, `${usd(cost)} at API prices`];
+        const span = h("span", { class: "af-backlog-run-use" }, words.join(" · "));
+        span.title = use === null ? "No reading for the 5-hour window" : `${usd(this.usage.run_window[run.session_id] ?? 0)} in this 5-hour window`;
+        meta.append(" · ", span);
+      }
       const btns = h("div", { class: "af-backlog-run-actions" });
       if (s?.id) {
         const sid = s.id;
@@ -333,7 +390,7 @@ export class ItemPanel {
       }
       list.append(h("li", { class: "af-backlog-run" },
         h("div", { class: "af-backlog-run-main" }, h("div", { class: "af-backlog-run-title" }, run.title || run.session_id),
-          h("div", { class: "af-backlog-reason" }, meta)), btns));
+          meta), btns));
     }
     parts.push(list);
     return section("Runs", ...parts);

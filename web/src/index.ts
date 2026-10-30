@@ -97,6 +97,7 @@ import {
   newSessionModal,
   rebindProjectModal,
   removeTaskModal,
+  askConfirm,
 } from "./modals.js";
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
@@ -1311,6 +1312,15 @@ function openConfirm(
     }),
   );
   if (immediateRestore) onConfirm();
+}
+
+/** The backlog's one-time confirm before a start by hand while a budget gate
+ *  is closed. */
+function confirmBacklog(title: string, body: string, confirmLabel: string): Promise<boolean> {
+  return askConfirm({ title, body, confirmLabel }, (m) => openModal(m, true), (m) => {
+    if (modal === m) closeModal();
+    else m.close();
+  });
 }
 
 /** Opens the delete-project confirm for a project row (#1735). On confirm it
@@ -3171,6 +3181,7 @@ const actions = {
       if (s && isActionableSession(s)) openConfirm("restore", s);
     },
     addProject: () => openAddProject(),
+    confirm: confirmBacklog,
   },
   notice: surfaceNotice,
   paneDropHintAt: (x: number, y: number) => splitView.showTabDropHintAt(x, y),
@@ -3348,8 +3359,8 @@ function onEvent(ev: WireEvent): void {
   // no-ops these, so run both: the reducer for session.* and the task refetch for
   // task.*.
   const backlogAction = backlogEventAction(ev.type);
-  if (backlogAction === "budget") {
-    backlogLoader.requestBudget();
+  if (backlogAction === "spend") {
+    backlogLoader.applySpend(ev.data);
     return;
   }
   if (backlogAction === "refresh") {

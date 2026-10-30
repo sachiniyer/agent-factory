@@ -109,7 +109,7 @@ test("a failed refetch keeps the last view and records the error", async () => {
   assert.equal(state.budget?.usd_spent, 1);
 });
 
-test("a spend event refetches only the budget", async () => {
+test("a spend event applies in place and wins over a budget read before it", async () => {
   const l = loader();
   void l.refresh();
   await settle();
@@ -117,16 +117,50 @@ test("a spend event refetches only the budget", async () => {
   answer("GetBudget", budgetOf(1));
   await settle();
   const views = state.views;
-  l.requestBudget();
-  l.requestBudget();
-  mock.timers.tick(150);
+  void l.refresh();
   await settle();
-  assert.deepEqual(pending.map((p) => p.method), ["GetBudget"]);
-  answer("GetBudget", budgetOf(2.5));
-  await settle();
-  assert.equal(state.budget?.usd_spent, 2.5);
+  l.applySpend({
+    five_hour: { plan: 40, backlog: 12, resets_at: "2000-01-01T05:00:00Z", all_cost: 20 },
+    seven_day: { plan: 30, backlog: 18, resets_at: null },
+    reading_at: "2000-01-01T00:00:00Z",
+    runs: { s1: 1.25 },
+  });
+  assert.deepEqual(pending.map((p) => p.method).sort(), ["GetBacklog", "GetBudget"]);
+  assert.equal(state.usage?.five_hour.backlog, 12);
+  assert.equal(state.usage?.runs.s1, 1.25);
   assert.equal(state.views, views);
-  assert.equal(state.generation, 1);
+  answer("GetBacklog", backlogOf("b"));
+  answer("GetBudget", { ...(budgetOf(2) as object), windows: { five_hour: { plan: 1, backlog: 1, resets_at: null } }, runs: {},
+    unmeterable: { s7: "the runner can't meter aider" } });
+  await settle();
+  assert.equal(state.budget?.usd_spent, 2);
+  assert.equal(state.usage?.five_hour.backlog, 12);
+  assert.equal(state.usage?.runs.s1, 1.25);
+  assert.deepEqual(state.usage?.unmeterable, { s7: "the runner can't meter aider" }, "an older spend payload names no unmeterable runs");
+});
+
+test("unmeterable runs follow the newest source that names them", async () => {
+  const l = loader();
+  void l.refresh();
+  await settle();
+  answer("GetBacklog", backlogOf("a"));
+  answer("GetBudget", { ...(budgetOf(1) as object), unmeterable: { s7: "old" } });
+  await settle();
+  void l.refresh();
+  await settle();
+  l.applySpend({ five_hour: {}, seven_day: {}, reading_at: null, runs: {}, run_window: { s1: 0.5 }, unmeterable: {} });
+  assert.deepEqual(state.usage?.unmeterable, {});
+  assert.deepEqual(state.usage?.run_window, { s1: 0.5 });
+  answer("GetBacklog", backlogOf("a"));
+  answer("GetBudget", { ...(budgetOf(1) as object), unmeterable: { s7: "old" } });
+  await settle();
+  assert.deepEqual(state.usage?.unmeterable, {}, "a reply read before the spend event does not bring back a cleared run");
+  void l.refresh();
+  await settle();
+  answer("GetBacklog", backlogOf("a"));
+  answer("GetBudget", { ...(budgetOf(1) as object), unmeterable: { s8: "new" } });
+  await settle();
+  assert.deepEqual(state.usage?.unmeterable, { s8: "new" });
 });
 
 import { backlogEventAction } from "./backlog_data.js";
@@ -136,6 +170,6 @@ test("every backlog.changed frame is a full re-read, whatever its ids say", () =
   // empty list means "refresh the project". The decision is on the type alone.
   assert.equal(backlogEventAction("backlog.changed"), "refresh");
   assert.equal(backlogEventAction("backlog.runner"), "refresh");
-  assert.equal(backlogEventAction("backlog.spend"), "budget");
+  assert.equal(backlogEventAction("backlog.spend"), "spend");
   assert.equal(backlogEventAction("session.updated"), null);
 });

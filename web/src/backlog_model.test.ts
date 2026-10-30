@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   type Backlog, type BacklogView, type Item, type ListOptions, type State,
   applyMove, dropMove, itemActions, keyboardMove, listRows, needsYouCount, needsYouLabel, neededBy, parseBacklogView, safeHttpUrl,
-  sessionItems, sources,
+  sessionItems, sources, topQueued,
 } from "./backlog_model.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
 
@@ -182,17 +182,32 @@ test("itemActions offers only the changes the daemon allows", () => {
     Object.assign(b.items.find((it) => it.id === id) as Item, over);
     return itemActions(b, b.items.find((it) => it.id === id) as Item, { state });
   };
-  assert.deepEqual(at(5, { status: "draft" }), ["queue", "done", "drop", "delete"]);
-  assert.deepEqual(at(5, { status: "queued" }, "queued"), ["draft", "done", "drop"]);
-  assert.deepEqual(at(5, { status: "review" }, "in_review"), ["queue", "draft", "done", "drop"]);
+  assert.deepEqual(at(5, { status: "draft" }), ["queue", "start", "done", "drop", "delete"]);
+  assert.deepEqual(at(5, { status: "queued" }, "queued"), ["draft", "start", "done", "drop"]);
+  assert.deepEqual(at(5, { status: "queued" }, "waiting"), ["draft", "start", "done", "drop"]);
+  assert.deepEqual(at(5, { status: "review" }, "in_review"), ["queue", "draft", "start", "done", "drop"]);
   assert.deepEqual(at(5, { status: "running" }, "working"), ["done", "drop"]);
-  assert.deepEqual(at(5, { status: "done" }, "done"), ["reopen"]);
+  assert.deepEqual(at(5, { status: "running" }, "starting"), ["done", "drop"]);
+  assert.deepEqual(at(5, { status: "running" }, "stopped"), ["start", "done", "drop"]);
+  const capQ = { id: 1, kind: "question", author: "af", text: "This run used 11%…", at: "" };
+  assert.deepEqual(at(5, { status: "running", thread: [capQ] }, "needs_you"), ["start", "review", "done", "drop"]);
+  const agentQ = { ...capQ, author: "agent:s1" };
+  assert.deepEqual(at(5, { status: "running", thread: [agentQ] }, "needs_you"), ["start", "done", "drop"]);
+  assert.deepEqual(at(5, { status: "done", thread: [] }, "done"), ["reopen"]);
   assert.deepEqual(at(6, { status: "draft", thread: [{ id: 1, kind: "note", author: "user", text: "n", at: "" }] }),
-    ["queue", "done", "drop"]);
+    ["queue", "start", "done", "drop"]);
   assert.deepEqual(at(1, {}), ["queue", "drop"]);
   for (const id of [2, 4]) Object.assign(b.items.find((it) => it.id === id) as Item, { status: "queued" });
   assert.deepEqual(at(1, {}, "queued"), ["drop"]);
   assert.deepEqual(at(1, {}, "done"), []);
+});
+
+test("topQueued is the first queued leaf in tree order", () => {
+  const b = tree();
+  const v = view(b);
+  assert.equal(topQueued(v), undefined);
+  v.states = { 1: { state: "queued" }, 3: { state: "waiting" }, 4: { state: "queued" }, 5: { state: "queued" } };
+  assert.equal(topQueued(v)?.id, 4);
 });
 
 test("listRows source filter keeps a proposal's items", () => {

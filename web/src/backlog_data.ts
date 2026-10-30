@@ -6,31 +6,33 @@
 // also names its project by repo id, which the web cannot map to every root it
 // knows, so every project is re-read; there are few. The stream's reconnect resync
 // and every focus of the view re-read too, and a refresh reads the budget, which
-// publishes no event of its own. backlog.spend (not yet emitted) re-reads only it.
+// publishes no event of its own. backlog.spend carries the plan use itself, so it applies without a refetch.
 
 import { errorText } from "./api.js";
 import { getBacklog, getBudget } from "./backlog_api.js";
 import type { BacklogView, Budget } from "./backlog_model.js";
+import { type Usage, applySpend, spendHasUnmeterable } from "./backlog_usage.js";
 
 export interface BacklogData {
   views: ReadonlyMap<string, BacklogView>;
   errors: ReadonlyMap<string, string>;
   budget: Budget | null;
+  usage: Usage | null;
   /** The loader refresh these views came from; a later refresh started later. */
   generation: number;
 }
 
-export const EMPTY_BACKLOG_DATA: BacklogData = { views: new Map(), errors: new Map(), budget: null, generation: 0 };
+export const EMPTY_BACKLOG_DATA: BacklogData = { views: new Map(), errors: new Map(), budget: null, usage: null, generation: 0 };
 
 const DEBOUNCE_MS = 150;
 
 /** What a wire event asks of the loader. The frame's ids are a hint and are never
  *  read: a parent's derived state moves without being named, and an empty list is a
  *  project-level change, so every backlog.changed and backlog.runner frame is a full
- *  re-read. backlog.spend moves only the budget. */
-export function backlogEventAction(type: string): "refresh" | "budget" | null {
+ *  re-read. backlog.spend carries the plan use and is applied in place. */
+export function backlogEventAction(type: string): "refresh" | "spend" | null {
   if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
-  if (type === "backlog.spend") return "budget";
+  if (type === "backlog.spend") return "spend";
   return null;
 }
 
@@ -44,8 +46,11 @@ export interface BacklogLoaderOptions {
 export class BacklogLoader {
   private generation = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private budgetTimer: ReturnType<typeof setTimeout> | null = null;
   private budgetGeneration = 0;
+  private spendGeneration = 0;
+  // Whether a backlog.spend since the last GetBudget reply named the
+  // unmeterable runs; an older daemon's payload does not.
+  private spendUnmeterable = false;
 
   constructor(private readonly opts: BacklogLoaderOptions) {}
 
@@ -60,6 +65,7 @@ export class BacklogLoader {
     if (token === null) return;
     const gen = ++this.generation;
     const budgetGen = ++this.budgetGeneration;
+    const spendGen = this.spendGeneration;
     const roots = [...new Set(this.opts.roots().filter(Boolean))];
     const [results, budget] = await Promise.all([
       Promise.all(roots.map((root) => getBacklog(root, token)
@@ -80,17 +86,26 @@ export class BacklogLoader {
         if (old) views.set(r.root, old);
       }
     }
-    this.opts.commit({ views, errors, budget: budgetGen === this.budgetGeneration ? budget ?? cur.budget : cur.budget, generation: gen });
+    const fresh = budgetGen === this.budgetGeneration ? budget : null;
+    let usage = cur.usage;
+    if (fresh && spendGen === this.spendGeneration) {
+      usage = fresh.usage;
+      this.spendUnmeterable = false;
+    } else if (fresh && cur.usage && !this.spendUnmeterable) {
+      usage = { ...cur.usage, unmeterable: fresh.usage.unmeterable };
+    }
+    this.opts.commit({ views, errors, budget: fresh?.budget ?? cur.budget, usage, generation: gen });
   }
 
-  /** Refetches only the budget, for backlog.spend. */
-  async refreshBudget(): Promise<void> {
-    const token = this.opts.token();
-    if (token === null) return;
-    const gen = ++this.budgetGeneration;
-    const budget = await getBudget(token).catch(() => null);
-    if (gen !== this.budgetGeneration || this.opts.token() !== token || !budget) return;
-    this.opts.commit({ ...this.opts.current(), budget });
+  /** Applies a backlog.spend payload. A GetBudget still in flight was read
+   *  before it, so that reply's plan use is dropped. */
+  applySpend(ev: unknown): void {
+    const cur = this.opts.current();
+    const usage = applySpend(cur.usage, ev);
+    if (usage === cur.usage) return;
+    this.spendGeneration++;
+    if (spendHasUnmeterable(ev)) this.spendUnmeterable = true;
+    this.opts.commit({ ...cur, usage });
   }
 
   /** Coalesces a burst of events into one refetch. */
@@ -102,20 +117,11 @@ export class BacklogLoader {
     }, DEBOUNCE_MS);
   }
 
-  requestBudget(): void {
-    if (this.budgetTimer !== null) return;
-    this.budgetTimer = setTimeout(() => {
-      this.budgetTimer = null;
-      void this.refreshBudget();
-    }, DEBOUNCE_MS);
-  }
-
   reset(): void {
     this.generation++;
     this.budgetGeneration++;
+    this.spendGeneration++;
     if (this.timer !== null) clearTimeout(this.timer);
-    if (this.budgetTimer !== null) clearTimeout(this.budgetTimer);
     this.timer = null;
-    this.budgetTimer = null;
   }
 }
