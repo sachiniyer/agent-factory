@@ -317,18 +317,14 @@ func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, bo
 // it: on the chip row at its insert or content-end column, or on the absorbed
 // Enter's blank row at the insert column. A hidden cursor (Claude's ordinary
 // composer draws one) cannot prove that, so it withholds.
-func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText string) bool {
-	ok, _ := stillChipComposerWhy(boundary, pane, cursor, chipText)
-	return ok
-}
-
-// stillChipComposerWhy is stillChipComposer that also names the condition that
-// failed, so the withheld-remedy warning says WHICH of hidden cursor, foreign
-// composer content, moved anchor, changed region or misplaced cursor made the
-// shape unprovable (#6224): a bare "not a still, single-chip composer" cannot
-// tell a Claude pane (hidden cursor, by design) from a Codex pane whose footer
-// bled into the region.
-func stillChipComposerWhy(boundary, pane string, cursor paneCursorState, chipText string) (bool, string) {
+//
+// The second return names the condition that failed, so the withheld-remedy
+// warning says WHICH of hidden cursor, foreign composer content, moved
+// anchor, changed region or misplaced cursor made the shape unprovable
+// (#6224): a bare "not a still, single-chip composer" cannot tell a Claude
+// pane (hidden cursor, by design) from a Codex pane whose footer bled into
+// the region.
+func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText string) (bool, string) {
 	if !cursor.Visible {
 		return false, "the cursor is hidden, so where the draft left it cannot be proven (Claude's ordinary composer hides it)"
 	}
@@ -478,7 +474,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 	why := "the bound evidence is a literal tail, not a collapsed-paste chip"
 	stillChip := false
 	if bound.chip {
-		stillChip, why = stillChipComposerWhy(stripped, pane, cursor, bound.chipText)
+		stillChip, why = stillChipComposer(stripped, pane, cursor, bound.chipText)
 	}
 	if !stillChip {
 		log.WarningLog.Printf("submit: session %q still shows this prompt's bound evidence staged in the composer after Enter, "+
