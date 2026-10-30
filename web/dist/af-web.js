@@ -16542,6 +16542,31 @@ function taskVerbs(t, actions2) {
     { label: "Remove", glyph: "trash", run: () => actions2.remove(t) }
   ];
 }
+function paintSwitch(el2, on, busy) {
+  el2.classList.toggle("af-task-switch-on", on);
+  el2.setAttribute("aria-checked", on ? "true" : "false");
+  el2.title = on ? "Enabled \xB7 click to disable" : "Disabled \xB7 click to enable";
+  if (busy) {
+    el2.setAttribute("aria-busy", "true");
+    el2.setAttribute("aria-disabled", "true");
+  } else {
+    el2.removeAttribute("aria-busy");
+    el2.removeAttribute("aria-disabled");
+  }
+}
+function flipSwitch(pending, t, toggle, paint) {
+  if (pending.has(t.id)) return;
+  const next = !t.enabled;
+  pending.set(t.id, next);
+  paint(next, true);
+  void toggle().then(
+    (applied) => applied ? next : t.enabled,
+    () => t.enabled
+  ).then((on) => {
+    pending.delete(t.id);
+    paint(on, false);
+  });
+}
 var TasksPane = class {
   constructor(actions2) {
     this.actions = actions2;
@@ -16556,6 +16581,9 @@ var TasksPane = class {
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
   // next-run recalculation) keeps the reader's place (#2933).
   lastToken = null;
+  // Task id -> the value an in-flight toggle is moving to. Rebuilds re-apply it so
+  // a refetch mid-request cannot hand back an enabled switch for the same task.
+  pending = /* @__PURE__ */ new Map();
   /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
    *  tasks whose project_path matches, so the tasks view operates within the same
    *  project the rail is scoped to. A null project (none exist) shows no tasks. */
@@ -16585,6 +16613,12 @@ var TasksPane = class {
       const control = [...row?.querySelectorAll("button") ?? []].find((button) => sameControlKey(controlKey(button), focused));
       control?.focus({ preventScroll: true });
     }
+  }
+  flip(t) {
+    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => {
+      const el2 = this.el.querySelector(`[data-task-id="${CSS.escape(t.id)}"] .af-task-switch`);
+      if (el2) paintSwitch(el2, on, busy);
+    });
   }
   render(tasks) {
     if (this.lastError) {
@@ -16665,7 +16699,11 @@ var TasksPane = class {
     toggle.setAttribute("aria-checked", t.enabled ? "true" : "false");
     toggle.setAttribute("aria-label", `Enabled: ${t.name}`);
     toggle.title = t.enabled ? "Enabled \xB7 click to disable" : "Disabled \xB7 click to enable";
-    toggle.addEventListener("click", () => this.actions.toggle(t));
+    const inFlight = this.pending.get(t.id);
+    if (inFlight !== void 0) {
+      paintSwitch(toggle, inFlight, true);
+    }
+    toggle.addEventListener("click", () => this.flip(t));
     const verbs = taskVerbs(t, this.actions);
     const iconBtns = verbs.map(({ label, glyph, run, blocked }) => {
       const btn = h("button", { type: "button", class: "af-task-icon-btn", title: blocked ?? label }, icon(glyph));
@@ -21413,17 +21451,23 @@ function openEditTask(task) {
     })
   );
 }
-function toggleTask(task) {
+async function toggleTask(task) {
   const tok = token;
   if (tok === null) {
-    return;
+    return false;
   }
-  void updateTask(task, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
-    if (isMutationCommittedError(e)) {
+  try {
+    await updateTask(task, { enabled: !task.enabled }, tok);
+  } catch (e) {
+    const committed = isMutationCommittedError(e);
+    if (committed) {
       refreshTasks();
     }
     surfaceTabError(e);
-  });
+    return committed;
+  }
+  refreshTasks();
+  return true;
 }
 function doTriggerTask(task) {
   const tok = token;
