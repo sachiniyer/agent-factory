@@ -47,6 +47,11 @@ type remoteClientlessChannel struct {
 	conn   *websocket.Conn
 	ctx    context.Context
 	cancel context.CancelFunc
+	// pr is the reader end of the live capture's pipe. StopCapture closes it so
+	// a readLoop parked in pw.Write for a reader that is gone is released: a
+	// context cancel and a socket close cannot reach a goroutine blocked on an
+	// io.Pipe write.
+	pr *io.PipeReader
 	// remoteSeq is this channel's cursor in the REMOTE broker's ring (#5571
 	// W1.2): the OpHello start seq of the current subscription plus the bytes
 	// it has delivered since. A re-dial sends it as ?since=, so bytes the
@@ -135,9 +140,9 @@ func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		cancel()
 		return nil, err
 	}
-	c.conn, c.ctx, c.cancel = conn, ctx, cancel
-	c.dialSeq, c.helloPending, c.replayContiguous = c.remoteSeq, true, false
 	pr, pw := io.Pipe()
+	c.conn, c.ctx, c.cancel, c.pr = conn, ctx, cancel, pr
+	c.dialSeq, c.helloPending, c.replayContiguous = c.remoteSeq, true, false
 	go c.readLoop(ctx, conn, pw)
 	return pr, nil
 }
@@ -251,7 +256,11 @@ func (c *remoteClientlessChannel) StopCapture() error {
 	}
 	c.cancel()
 	err := c.conn.Close(websocket.StatusNormalClosure, "")
-	c.conn, c.ctx, c.cancel = nil, nil, nil
+	// Release a readLoop blocked writing PTY output to a reader that will not
+	// read again (the capture is over, or its owner dropped the reader). The
+	// loop then returns and closes its end; it can never outlive the capture.
+	_ = c.pr.Close()
+	c.conn, c.ctx, c.cancel, c.pr = nil, nil, nil, nil
 	return err
 }
 
