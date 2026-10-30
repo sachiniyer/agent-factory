@@ -55,6 +55,10 @@ func TestLimitBannerNeedsToOpenItsRow(t *testing.T) {
 			"+ " + codexBannerLine1 + "\n\n› "},
 		{"devin: prose", tmux.ProgramDevin,
 			"I read that devin prints Quota exhausted when the plan runs out.\n\n> "},
+		{"devin: branch under tool output", tmux.ProgramDevin,
+			"  └ Quota exhausted: usage quota has been exhausted\n\n> "},
+		{"devin: bullet", tmux.ProgramDevin, "- Quota exhausted handling was added\n\n> "},
+		{"devin: quoted", tmux.ProgramDevin, "> \"Quota exhausted\" is the banner\n\n> "},
 	}
 	for _, tc := range falsePositives {
 		t.Run("not a limit/"+tc.name, func(t *testing.T) {
@@ -139,5 +143,31 @@ func TestLimitParkErrorIgnoresAQuotedBanner(t *testing.T) {
 	}
 	if err := limitParkError(det, "  ⎿  "+claudeBanner+"\n❯ ", tmux.ProgramClaude); err == nil {
 		t.Fatal("a real banner did not park a starting session")
+	}
+}
+
+// TestDevinBannerPrefixesTheEvidenceAdmits pins the INFERRED renderings of
+// devin's alert (#6246): bare, the warning glyph, glyph + VS15, and the ASCII
+// "[!]" fallback, each also ANSI-styled. None was observed live. The quoted and
+// branch shapes (#4721) are pinned as non-matches in TestLimitBannerNeedsToOpenItsRow.
+func TestDevinBannerPrefixesTheEvidenceAdmits(t *testing.T) {
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	det := NewLimitDetector(nil)
+	for name, lead := range map[string]string{
+		"bare":       "",
+		"glyph":      "\u26a0 ",
+		"glyph+vs15": "\u26a0\ufe0e ",
+		"ascii":      "[!] ",
+		"indented":   "  \u26a0\ufe0e ",
+	} {
+		for _, styled := range []bool{false, true} {
+			pane := lead + "Quota exhausted: usage quota has been exhausted\n\n> "
+			if styled {
+				pane = "\x1b[31m" + lead + "\x1b[0m\x1b[1mQuota exhausted\x1b[0m: usage quota has been exhausted\n\n> "
+			}
+			if hit, _, _ := det.Check(pane, tmux.ProgramDevin, now); !hit {
+				t.Errorf("%s (styled=%v) was missed:\n%q", name, styled, pane)
+			}
+		}
 	}
 }
