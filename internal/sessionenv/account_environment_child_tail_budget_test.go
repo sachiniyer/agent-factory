@@ -94,7 +94,7 @@ func TestValidateAccountEnvironmentCommand_InertOperandsDoNotConsumeVerdictBudge
 // length: the adversarial shapes stop after limit+1 judgements, and a benign
 // argv of ordinary words costs a constant, however long it is. The counters
 // are the oracle, so this holds on any machine at any load.
-func TestShadowedChildTailMutates_WorkIsBoundedByTheBudget(t *testing.T) {
+func TestShadowedLiteralChildTailMutates_WorkIsBoundedByTheBudget(t *testing.T) {
 	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
 	const n = 20000
 	for _, tc := range []struct {
