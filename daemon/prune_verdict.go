@@ -41,6 +41,13 @@ func (m *Manager) pruneVerdict(repoID string, instance *session.Instance, cutoff
 		// handle.
 		return skip("incomplete archive — retained source trees are present and need manual review")
 	}
+	// Prune acts only on a direct child of this repo's archive root; a record that
+	// names any other location is refused here, so the dry run shows it too.
+	if wt := data.Worktree.WorktreePath; wt != "" {
+		if err := pruneUnderArchiveRoot(repoID, wt); err != nil {
+			return skip(fmt.Sprintf("the recorded archive location is outside what prune manages: %v", err))
+		}
+	}
 	// The plan must read like the apply it previews (#5136 review): the same
 	// deletion-boundary refusals run here, so a foreign-path occupant or a dirty
 	// worktree shows as skipped in the dry run instead of appearing prunable and

@@ -683,3 +683,67 @@ func TestPruneApply_FenceCoversAnAbandonedWriteEvenWithoutAnIntent(t *testing.T)
 	close(release)
 	<-finished
 }
+
+// Prune acts only on direct children of the repo's archive root (<AF home>/archived/
+// <repoID>), in apply AND in resume (the last gap in the design note). A corrupted or
+// hand-edited intent that aims outside it refuses and leaves the intent for a human.
+func TestPruneUnderArchiveRoot(t *testing.T) {
+	_, repoID, _, _, archived := seedPrunableArchive(t, "under-root")
+	root, err := pruneArchiveRoot(repoID)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Dir(archived), root, "premise: the archive lives directly under the root")
+
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "escape")))
+
+	require.NoError(t, pruneUnderArchiveRoot(repoID, archived), "a direct child")
+	require.NoError(t, pruneUnderArchiveRoot(repoID, filepath.Join(root, ".prune-abc-123")), "a tombstone sibling, even before it exists")
+	for name, p := range map[string]string{
+		"grandchild":              filepath.Join(archived, "inner"),
+		"the root itself":         root,
+		"a sibling repo's root":   filepath.Join(filepath.Dir(root), "other-repo", "wt"),
+		"anywhere else":           filepath.Join(outside, ".prune-x"),
+		"through a symlinked dir": filepath.Join(root, "escape", ".prune-x"),
+		"relative":                ".prune-x",
+		"empty":                   "",
+	} {
+		assert.Error(t, pruneUnderArchiveRoot(repoID, p), name)
+	}
+}
+
+func TestPruneApply_ResumeRefusesAnIntentOutsideTheArchiveRoot(t *testing.T) {
+	manager, repoID, _, inst, archived := seedPrunableArchive(t, "outside-root")
+	outside := t.TempDir()
+	victim := filepath.Join(outside, ".prune-victim")
+	require.NoError(t, os.MkdirAll(victim, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("not ours"), 0o644))
+
+	for name, intent := range map[string]session.PruneIntentData{
+		"worktree and tombstone outside": {WorktreePath: filepath.Join(outside, "wt"), TombstonePath: victim},
+		"only the worktree outside":      {WorktreePath: filepath.Join(outside, "wt"), TombstonePath: filepath.Join(filepath.Dir(archived), ".prune-ok")},
+		"only the tombstone outside":     {WorktreePath: archived, TombstonePath: victim},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, inst.SetPruneIntent(intent))
+			entry, inc := manager.resumePruneIntent(repoID, inst)
+			assert.Nil(t, entry)
+			require.NotNil(t, inc, "the row reports an error")
+			assert.NotNil(t, inst.PruneIntent(), "the intent stays for a human")
+			assert.False(t, inst.IsPruned())
+			assert.FileExists(t, filepath.Join(victim, "keep.txt"), "nothing outside the archive root was deleted")
+			assert.DirExists(t, archived)
+			inst.ClearPruneIntent()
+		})
+	}
+
+	// A parent that is a symlink out of the root is outside too.
+	root, err := pruneArchiveRoot(repoID)
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "escape")))
+	require.NoError(t, inst.SetPruneIntent(session.PruneIntentData{
+		WorktreePath: filepath.Join(root, "escape", "wt"), TombstonePath: filepath.Join(root, "escape", ".prune-victim"),
+	}))
+	_, inc := manager.resumePruneIntent(repoID, inst)
+	require.NotNil(t, inc)
+	assert.FileExists(t, filepath.Join(victim, "keep.txt"))
+}

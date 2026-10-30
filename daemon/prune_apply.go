@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/sachiniyer/agent-factory/config"
 	"os"
 	"path/filepath"
 	"sort"
@@ -270,6 +271,9 @@ func (m *Manager) pruneApplyOne(c PruneCandidate, cutoff time.Time) (*PrunedEntr
 		intent.TombstonePath = filepath.Join(filepath.Dir(wt), ".prune-"+shortPruneID(data.ID)+"-"+randomSuffix())
 	}
 
+	if err := pruneIntentUnderArchiveRoot(c.RepoID, &intent); err != nil {
+		return skip(fmt.Sprintf("refusing to prune: %v", err))
+	}
 	// 1. intent
 	if err := pruneStep("intent"); err != nil {
 		return nil, nil, &PruneIncompleteEntry{ID: c.ID, Title: c.Title, RepoID: c.RepoID, Step: "intent", Reason: err.Error()}
@@ -331,6 +335,9 @@ func (m *Manager) pruneFinish(repoID string, instance *session.Instance, intent 
 	repoPath := data.Worktree.RepoPath
 	if repoPath == "" {
 		repoPath = data.Path
+	}
+	if err := pruneIntentUnderArchiveRoot(repoID, intent); err != nil {
+		return "intent", err
 	}
 	if intent.TombstonePath != "" {
 		if err := validatePruneTombstonePath(intent); err != nil {
@@ -718,6 +725,70 @@ func (m *Manager) killPruneFence(repoID, title string, instance *session.Instanc
 	}
 	if err := m.pruneRowFence(repoID, instance); err != nil {
 		return fmt.Errorf("cannot kill session %q: %w; run `af sessions prune --apply` to finish it, then kill it", title, err)
+	}
+	return nil
+}
+
+// pruneArchiveRoot is where af relocates a repo's archived worktrees:
+// <AF home>/archived/<repoID>, the root archivedWorktreePath (and so
+// pruneArchiveRoots) derives from. Prune only ever acts on direct children of it.
+func pruneArchiveRoot(repoID string) (string, error) {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the AF home: %w", err)
+	}
+	return filepath.Join(home, "archived", repoID), nil
+}
+
+// pruneUnderArchiveRoot proves path is a DIRECT CHILD of the repo's archive root:
+// its parent, resolved through symlinks (bounded), must be the resolved root. A
+// path anywhere else — a hand-edited or corrupted record, a symlinked parent —
+// refuses. An absent parent (the tree was deleted out of band along with its
+// directory) is judged lexically, since there is nothing to resolve.
+func pruneUnderArchiveRoot(repoID, path string) error {
+	if path == "" || !filepath.IsAbs(path) {
+		return fmt.Errorf("%q is not an absolute path", path)
+	}
+	path = filepath.Clean(path)
+	root, err := pruneArchiveRoot(repoID)
+	if err != nil {
+		return err
+	}
+	if base := filepath.Base(path); base == "." || base == ".." || base == string(filepath.Separator) {
+		return fmt.Errorf("%q does not name a directory under the archive root", path)
+	}
+	resolve := func(p string) (string, error) {
+		real, err := sessiongit.BoundedFSOp("resolving "+p, func() (string, error) { return filepath.EvalSymlinks(p) })
+		if err != nil && os.IsNotExist(err) {
+			return filepath.Clean(p), nil
+		}
+		return real, err
+	}
+	realRoot, err := resolve(root)
+	if err != nil {
+		return fmt.Errorf("cannot resolve the archive root %s: %w", root, err)
+	}
+	realParent, err := resolve(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("cannot resolve the parent of %s: %w", path, err)
+	}
+	if realParent != realRoot {
+		return fmt.Errorf("%s is not a direct child of this repository's archive root %s; refusing to act on it", path, realRoot)
+	}
+	return nil
+}
+
+// pruneIntentUnderArchiveRoot applies pruneUnderArchiveRoot to both paths an
+// intent can delete or move, in apply AND in resume, before anything is renamed or
+// removed. A failure leaves the intent for a human.
+func pruneIntentUnderArchiveRoot(repoID string, intent *session.PruneIntentData) error {
+	if err := pruneUnderArchiveRoot(repoID, intent.WorktreePath); err != nil {
+		return fmt.Errorf("worktree path: %w", err)
+	}
+	if intent.TombstonePath != "" {
+		if err := pruneUnderArchiveRoot(repoID, intent.TombstonePath); err != nil {
+			return fmt.Errorf("tombstone path: %w", err)
+		}
 	}
 	return nil
 }
