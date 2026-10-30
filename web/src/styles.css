@@ -4205,10 +4205,15 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 .af-backlog-actions {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  /* Buttons on one row share its height, so a primary and a ghost button line up
+     when the row wraps at phone width. */
+  align-items: stretch;
   gap: var(--af-space-2);
   padding: var(--af-space-2) 0;
 }
+/* Move… opens a panel under its summary, so it takes its own row rather than
+   stretching the action buttons beside it. */
+.af-backlog-actions > .af-backlog-move { flex: 1 1 100%; }
 
 .af-backlog-move > summary { list-style: none; cursor: pointer; }
 .af-backlog-move > summary::-webkit-details-marker { display: none; }

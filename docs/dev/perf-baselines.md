@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1189611.000 | 1189611.000–1189611.000 | 0.000 | 1249091.550 |
-| gzip_bytes | 270353.000 | 270353.000–270353.000 | 0.000 | 283870.650 |
+| raw_bytes | 1189669.000 | 1189669.000–1189669.000 | 0.000 | 1249152.450 |
+| gzip_bytes | 270362.000 | 270362.000–270362.000 | 0.000 | 283880.100 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -129,7 +129,7 @@ Master's committed bundle (1,120,104 raw over `web/dist/**.{js,css}`) sat 319 by
 
 ### Bundle refresh provenance (Backlog web view)
 
-Master's committed bundle is 1,120,104 raw / 254,141 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,189,611 raw / 270,353 gzip, +69,507 raw / +16,212 gzip. The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the unmerged daemon stack branch (#6295), which sits on the attention-dot rail work. Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
+Master's committed bundle is 1,120,104 raw / 254,141 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,189,669 raw / 270,362 gzip, +69,565 raw / +16,221 gzip. The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the unmerged daemon stack branch (#6295), which sits on the attention-dot rail work. Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6212)
 
