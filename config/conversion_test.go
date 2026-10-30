@@ -341,6 +341,17 @@ func TestConversionKeepsTheLegacyRenameInsideTheLockedDirectory(t *testing.T) {
 		"no backup was created in the locked directory when the move was refused rather than misdirected")
 	assert.Contains(t, warnBuf.String(), "could not move the original",
 		"a refused rename is logged, not silent — the user is told the link move cost the move-aside")
+	// The refusal names the pinned source the lock still covers (the original is
+	// in the locked directory A, not where the moved link now reaches) and does
+	// NOT point a "delete it yourself" instruction at the link — that now reaches
+	// B's active config.json, and following it could delete another home's only
+	// config.
+	assert.Contains(t, warnBuf.String(), "the original remains at",
+		"the refusal names where the original actually sits (the pinned directory), not the moved link")
+	assert.Contains(t, warnBuf.String(), filepath.Join(first, ConfigFileName),
+		"the named location is the locked directory's config.json, not the link that now reaches B")
+	assert.NotContains(t, warnBuf.String(), "yourself to silence the duplicate-config warning",
+		"a retarget refusal must not invite the user to delete through a link that no longer names the original")
 
 	// Nothing of the conversion reached B: its active config.json, its precious
 	// .bak, and the absence of a config.toml/config.json.bak.* all survive.
@@ -388,4 +399,89 @@ func TestConversionWithNoRetargetStillMovesConfigJSONAside(t *testing.T) {
 		"the reload after a clean conversion has no duplicate-config warning (config.json is gone)")
 	assert.NotContains(t, reloadWarn.String(), "could not move the original",
 		"the reload after a clean conversion has no refused-rename warning")
+}
+
+// TestConversion_RefusesTOMLSymlinkOutOfTheHome pins the guard against the
+// one-shot race a freshly introduced config.toml symlink opens (review on this
+// PR). The conversion locks config.toml and reads/renames its sibling config.json
+// through the pinned directory; that is correct only while config.json is a
+// sibling of the locked file. A config.toml installed as a symlink to ANOTHER
+// directory between LoadConfig observing it missing and the lock pinning it
+// points the pinned fd at the symlink target's directory rather than the home
+// holding the legacy config.json — so readSibling would open an unrelated file
+// there (or, absent one, return ENOENT and silently leave the real legacy
+// configuration unconverted). The guard refuses that up front instead of
+// mis-reading or mis-renaming.
+//
+// It calls convertJSONToTOML directly to stage the post-pin state LoadConfig's
+// own toml-existence check would otherwise short-circuit (a config.toml that
+// already exists is read, not converted): here config.toml is a symlink to an
+// empty file in another directory, the shape the lock pins in the race.
+func TestConversion_RefusesTOMLSymlinkOutOfTheHome(t *testing.T) {
+	const aJSON = `{"default_program":"codex"}`
+
+	for _, tc := range []struct {
+		name         string
+		stageSibling string // content for an unrelated config.json placed in the symlink target dir; "" to leave it absent
+		errContains  string
+	}{
+		{
+			name:         "no config.json in the symlink target directory",
+			stageSibling: "",
+			errContains:  "is not in the directory the lock covers",
+		},
+		{
+			name:         "an unrelated config.json in the symlink target directory",
+			stageSibling: `{"default_program":"impostor"}`,
+			errContains:  "is not the legacy",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			require.NoError(t, os.Mkdir(home, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName), []byte(aJSON), 0o644))
+			t.Setenv("AGENT_FACTORY_HOME", home)
+			fastShell(t)
+
+			// config.toml in the home is a symlink to an empty file in another
+			// directory — the shape a peer process installing config.toml as a
+			// symlink during the conversion window pins the lock onto.
+			elsedir := filepath.Join(root, "elsewhere")
+			require.NoError(t, os.Mkdir(elsedir, 0o755))
+			tomlTarget := filepath.Join(elsedir, TomlConfigFileName)
+			require.NoError(t, os.WriteFile(tomlTarget, []byte(""), 0o644))
+			tomlLink := filepath.Join(home, TomlConfigFileName)
+			require.NoError(t, os.Symlink(tomlTarget, tomlLink))
+			if tc.stageSibling != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(elsedir, ConfigFileName), []byte(tc.stageSibling), 0o644))
+			}
+
+			configPath := filepath.Join(home, ConfigFileName)
+			cfg, err := convertJSONToTOML(configPath, tomlLink, configPath, tomlLink)
+			require.Error(t, err, "a config.toml symlinked out of the home must not let the conversion read or rename an unrelated file")
+			assert.Nil(t, cfg)
+			assert.Contains(t, err.Error(), tc.errContains,
+				"the refusal names the directory the lock covers vs. the one holding the legacy config.json")
+
+			// Nothing was converted: the home's legacy config.json is untouched,
+			// no config.toml/.bak/.lock was left in the home, and the symlink
+			// target directory is unchanged apart from its pre-existing empty toml.
+			assert.Equal(t, aJSON, readString(t, configPath),
+				"the real legacy config.json is left in place, not renamed by a misdirected move")
+			assert.NoFileExists(t, filepath.Join(home, ConfigFileName+".bak"),
+				"no backup was created in the home")
+			info, lerr := os.Lstat(tomlLink)
+			require.NoError(t, lerr)
+			assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink,
+				"the config.toml symlink the peer installed is left for the operator to repair")
+			if tc.stageSibling == "" {
+				assert.NoFileExists(t, filepath.Join(elsedir, ConfigFileName),
+					"nothing was created in the directory the lock mistakenly covered")
+			} else {
+				assert.Equal(t, tc.stageSibling, readString(t, filepath.Join(elsedir, ConfigFileName)),
+					"the unrelated config.json in the symlink target directory is untouched")
+			}
+		})
+	}
 }

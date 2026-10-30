@@ -137,6 +137,54 @@ func (t lockedTarget) confirmDir() error {
 		t.link, t.dir, moved, t.dirResolved)
 }
 
+// confirmSiblingDir verifies the pinned directory holds the legacy config.json
+// readSibling is about to open — the premise the conversion's
+// readSibling/renameSibling pair depends on. The lock covers config.toml, and
+// the conversion reads and renames the legacy config.json BESIDE it through that
+// same pinned fd; that is correct only while the config.json readSibling reaches
+// is the user's legacy one.
+//
+// A config.toml installed as a symlink to another directory between LoadConfig
+// observing it missing and this lock pinning it leaves dirFD pointing at the
+// symlink target's directory rather than the home holding the legacy
+// config.json. readSibling would then open an unrelated file there (or, absent
+// one, return ENOENT and silently leave the real legacy configuration
+// unconverted) — the sibling race the pinned directory exists to close, reopened
+// at the file instead of the home. Refuse that one-shot race up front by
+// comparing the file the pinned name reaches with the file the legacy path
+// resolves to. A config.json that is ITSELF a symlink into the home from
+// elsewhere is a valid sibling — readSibling follows it to the same file the
+// path resolves to — so this confirms it rather than refusing. A config.json
+// that has already vanished is readSibling's to answer with defaults, not a
+// symlink race; a home link that moves mid-operation is confirm's, before the
+// write and the rename.
+func (t lockedTarget) confirmSiblingDir(siblingPath string) error {
+	var want unix.Stat_t
+	if err := unix.Stat(siblingPath, &want); err != nil {
+		if os.IsNotExist(err) {
+			// The vanished-sibling case is readSibling's to answer (defaults),
+			// not a freshly introduced symlink race.
+			return nil
+		}
+		return fmt.Errorf("failed to inspect the legacy %s: %w", siblingPath, err)
+	}
+	// Fstatat with flags=0 follows a symlink the way readSibling's openat does,
+	// so the comparison is against the file readSibling actually reads.
+	var got unix.Stat_t
+	if err := unix.Fstatat(t.dirFD, filepath.Base(siblingPath), &got, 0); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return fmt.Errorf("cannot convert %s under the lock on %s: the legacy config.json is not in the directory the lock covers (%s) — a freshly introduced config.toml symlink points elsewhere than the home holding it; re-run once config.toml is not a symlink out of its home",
+				siblingPath, t.link, t.dirResolved)
+		}
+		return fmt.Errorf("failed to confirm the legacy %s sits beside %s: %w", siblingPath, t.link, err)
+	}
+	if sameInode(&want, &got) {
+		return nil
+	}
+	return fmt.Errorf("cannot convert %s under the lock on %s: the config.json in the directory the lock covers (%s) is not the legacy %s — a freshly introduced config.toml symlink points at a directory other than the one holding the legacy config.json; re-run once config.toml is not a symlink out of its home",
+		siblingPath, t.link, t.dirResolved, siblingPath)
+}
+
 // followedWriteRaceHookForTest, when non-nil, runs after confirm has passed and
 // before the bytes move — the check-then-act window confirm cannot close. Tests
 // use it to drive a retarget INTO that window, where only the pinned directory
