@@ -16,6 +16,12 @@ async function projectRoot(request: APIRequestContext): Promise<string> {
   return a.worktree.repo_path as string;
 }
 
+async function rpc(request: APIRequestContext, name: string, data: Record<string, unknown>) {
+  const resp = await (await request.post(`/v1/${name}`, { data })).json();
+  expect(resp.error, `${name}: ${JSON.stringify(resp.error)}`).toBeNull();
+  return resp.data;
+}
+
 async function add(request: APIRequestContext, root: string, title: string, parent?: number): Promise<number> {
   const resp = await (await request.post("/v1/AddBacklogItems", {
     data: { repo_path: root, items: [{ key: "k", title, parent }] },
@@ -104,4 +110,29 @@ test("a backlog.changed frame is a re-read: a child queued elsewhere moves the p
   const late = `late-${stamp}`;
   await add(request, root, late);
   await expect(row(page, late)).toBeVisible();
+});
+
+test("at 390 px a Queued item's action row fits and its buttons line up", async ({ page, request }, info) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const root = await projectRoot(request);
+  const title = `phone-${Date.now().toString(36)}`;
+  const id = await add(request, root, title);
+  await rpc(request, "SetBacklogItemStatus", { repo_path: root, id, status: "queued" });
+  await openBacklog(page);
+  await row(page, title).click();
+  const panel = page.locator("aside.af-backlog-panel");
+  await expect(panel).toBeVisible();
+  const rects = await panel.locator(".af-backlog-actions > button").evaluateAll((els) =>
+    els.map((e) => { const r = e.getBoundingClientRect(); return { top: r.top, height: r.height, bottom: r.bottom, right: r.right }; }));
+  expect(rects.length).toBeGreaterThanOrEqual(3);
+  for (const a of rects) {
+    expect(a.right, "no button overflows the viewport").toBeLessThanOrEqual(390);
+    for (const b of rects) {
+      if (Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1) {
+        expect(Math.abs(a.top - b.top), "same-row buttons share a top").toBeLessThan(1);
+        expect(Math.abs(a.height - b.height), "same-row buttons share a height").toBeLessThan(1);
+      }
+    }
+  }
+  await page.screenshot({ path: info.outputPath("phone-actions.png") });
 });

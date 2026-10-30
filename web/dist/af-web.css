@@ -3832,9 +3832,12 @@ textarea[class] {
 .af-backlog-actions {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: stretch;
   gap: var(--af-space-2);
   padding: var(--af-space-2) 0;
+}
+.af-backlog-actions > .af-backlog-move {
+  flex: 1 1 100%;
 }
 .af-backlog-move > summary {
   list-style: none;
