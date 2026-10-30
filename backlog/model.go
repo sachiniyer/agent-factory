@@ -71,21 +71,26 @@ type Backlog struct {
 }
 
 type Item struct {
-	ID         int       `json:"id"`
-	Title      string    `json:"title"`
-	Body       string    `json:"body,omitempty"`
-	Status     Status    `json:"status"`
-	Parent     int       `json:"parent,omitempty"`
-	Sequential bool      `json:"sequential,omitempty"`
-	WaitsOn    []int     `json:"waits_on,omitempty"`
-	Program    string    `json:"program,omitempty"`
-	Source     *Source   `json:"source,omitempty"`
-	PR         string    `json:"pr,omitempty"`
-	External   string    `json:"external,omitempty"`
-	Runs       []RunRef  `json:"runs,omitempty"`
-	Thread     []Message `json:"thread,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         int    `json:"id"`
+	Title      string `json:"title"`
+	Body       string `json:"body,omitempty"`
+	Status     Status `json:"status"`
+	Parent     int    `json:"parent,omitempty"`
+	Sequential bool   `json:"sequential,omitempty"`
+	// LiveAnswers counts the answers accepted for delivery whose work is still
+	// the reason the item is running: +1 on accept, -1 when one fails, 0 when the
+	// item leaves running. A failed delivery gives the replaced status back only
+	// when it was the last (Codex P2 on #6295).
+	LiveAnswers int       `json:"live_answers,omitempty"`
+	WaitsOn     []int     `json:"waits_on,omitempty"`
+	Program     string    `json:"program,omitempty"`
+	Source      *Source   `json:"source,omitempty"`
+	PR          string    `json:"pr,omitempty"`
+	External    string    `json:"external,omitempty"`
+	Runs        []RunRef  `json:"runs,omitempty"`
+	Thread      []Message `json:"thread,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Source struct {

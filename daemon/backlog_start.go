@@ -305,12 +305,24 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 		// ended before this continue now fails its fence and nothing would see it
 		// again; the settle replays it against the session's current idle state.
 		rollbackErr := sendErr
+		// Fenced to the failed attempt: a retry that started work before this
+		// worker ran armed the session again (a newer generation, or an active
+		// run), and restoring the earlier status over it would undo that start.
+		failedGen := inst.BacklogRunGeneration()
 		m.launchBackgroundMutation(func(stop <-chan struct{}) {
+			rolledBack := false
 			if err := m.applyRetrying(ref.ID, stop, func(b *backlog.Backlog) ([]int, error) {
+				if inst.BacklogRunActive() || inst.BacklogRunGeneration() != failedGen {
+					return nil, errBacklogNoChange
+				}
+				rolledBack = true
 				return []int{id}, b.ContinueFailed(id, prev, rollbackErr, svc.Now())
-			}); err != nil {
+			}); err != nil && !errors.Is(err, errBacklogNoChange) {
 				m.warn().Printf("restore %s after a failed continue: %v", backlog.FormatID(id), err)
 				return
+			}
+			if !rolledBack {
+				return // a newer start superseded this attempt; it owns the item now
 			}
 			if inst.GetLiveness() == session.LiveReady && !inst.BacklogRunActive() {
 				m.settleRunEnd(ref.ID, inst.ID, inst.BacklogRunGeneration(), stop)
