@@ -24,6 +24,8 @@ export type SyncStatus =
   | "merged"
   | "conflict"
   | "markers"
+  | "recovered"
+  | "recovered"
   | "error";
 
 export interface Conflict {
@@ -66,12 +68,18 @@ export interface Model {
   /** The tab is gone: no timers, no reloads, only the final save. */
   closed: boolean;
   timer: "save" | "retry" | null;
-  note: { kind: "merged" | "error"; detail: string } | null;
+  note: { kind: "merged" | "error" | "recovered"; detail: string } | null;
+  /** Texts of saves that failed without a reply: any of them may have landed. A
+   *  conflict whose "theirs" is one of them is our own commit, not the agent's. */
+  maybeLanded: string[];
+  /** What per-viewer storage currently holds for this doc (a JSON key), or null. */
+  stashed: string | null;
   loadFailed: string | null;
 }
 
 export type Event =
-  | { t: "load_ok"; doc: DocText }
+  /** `draft` is what per-viewer storage held for this doc, read before the load. */
+  | { t: "load_ok"; doc: DocText; draft: Draft | null }
   | { t: "load_fail"; error: string }
   | { t: "edit"; text: string }
   | { t: "timer" }
@@ -85,7 +93,6 @@ export type Event =
   | { t: "flush" }
   | { t: "leave" }
   | { t: "close" }
-  | { t: "restore_draft"; draft: Draft }
   | { t: "keep_mine"; head: DocText }
   | { t: "take_theirs"; head: DocText }
   | { t: "show_both"; head: DocText };
@@ -102,15 +109,18 @@ export type Effect =
   | { t: "stash"; draft: Draft }
   | { t: "unstash" };
 
-/** An unresolved conflict's draft, as stored for this viewer. */
+/** Unsaved work, as stored for this viewer: an unresolved conflict's draft, or
+ *  edits no save has landed yet. */
 export interface Draft {
   buffer: string;
   /** The text the user's edits were made against. */
   base: string;
-  /** The agent's side when the conflict arose. */
+  /** The agent's side when the conflict arose; "" for unsent edits. */
   theirs: string;
-  /** The commit `theirs` is at. */
+  /** The commit `theirs` is at; "" for unsent edits. */
   head: string;
+  /** Absent means a conflict draft (the only kind stored before this field). */
+  kind?: "conflict" | "unsent";
 }
 
 export function initialModel(): Model {
@@ -129,6 +139,8 @@ export function initialModel(): Model {
     closed: false,
     timer: null,
     note: null,
+    stashed: null,
+    maybeLanded: [],
     loadFailed: null,
   };
 }
@@ -145,6 +157,7 @@ export function statusOf(m: Model): { status: SyncStatus; detail: string } {
   if (m.phase === "saving") return { status: "saving", detail: "" };
   if (m.note?.kind === "error") return { status: "error", detail: m.note.detail };
   if (hasConflictMarkers(m.buffer)) return { status: "markers", detail: "" };
+  if (isDirty(m) && m.note?.kind === "recovered") return { status: "recovered", detail: "" };
   if (isDirty(m)) return { status: "pending", detail: "" };
   if (m.note?.kind === "merged") return { status: "merged", detail: "" };
   return { status: "saved", detail: "" };
@@ -172,9 +185,49 @@ function arm(m: Model, fx: Effect[], kind: "save" | "retry", ms: number): void {
   fx.push({ t: "arm", kind, ms });
 }
 
-function stash(m: Model, fx: Effect[]): void {
-  const c = m.conflict;
-  if (c) fx.push({ t: "stash", draft: { buffer: m.buffer, base: c.base, theirs: c.theirs, head: c.head } });
+/** The tab opened with a draft in per-viewer storage: an unresolved conflict from
+ *  an earlier tab, or edits whose save never landed. Applied inside load_ok, before
+ *  settle can start a reload that would otherwise let the storage mirror drop it. */
+function restoreDraft(m: Model, fx: Effect[], draft: Draft): void {
+  m.stashed = draftKey(draft);
+  if (draft.buffer === m.saved) return;
+  const unsent = draft.kind === "unsent";
+  const rebased = unsent ? mergeWithMarkers(draft.base, draft.buffer, m.saved) : draft.buffer;
+  const clean = unsent && !hasConflictMarkers(rebased);
+  m.buffer = clean ? rebased : draft.buffer;
+  fx.push({ t: "set_buffer", text: m.buffer });
+  if (clean) {
+    // Edits that no save landed, rebased onto what the daemon holds now: they go
+    // out again, and the status says they were recovered.
+    m.note = { kind: "recovered", detail: "" };
+    return;
+  }
+  enterConflict(m, fx, { ours: draft.buffer, theirs: m.saved, base: draft.base, head: m.base });
+}
+
+function draftKey(d: Draft): string {
+  return JSON.stringify(d);
+}
+
+/** What per-viewer storage must hold: the conflict draft while a conflict is open,
+ *  else any edits not yet saved, else nothing. It is written before a save is
+ *  sent and cleared once a save has landed, so closing the page, or a save that
+ *  fails, never loses typing. */
+function wantedDraft(m: Model): Draft | null {
+  if (m.phase === "conflict" && m.conflict) {
+    return { buffer: m.buffer, base: m.conflict.base, theirs: m.conflict.theirs, head: m.conflict.head, kind: "conflict" };
+  }
+  if (isDirty(m)) return { buffer: m.buffer, base: m.saved, theirs: "", head: "", kind: "unsent" };
+  return null;
+}
+
+function syncStash(m: Model, fx: Effect[]): void {
+  if (!m.loaded) return;
+  const want = wantedDraft(m);
+  const key = want ? draftKey(want) : null;
+  if (key === m.stashed) return;
+  m.stashed = key;
+  fx.push(want ? { t: "stash", draft: want } : { t: "unstash" });
 }
 
 function enterConflict(m: Model, fx: Effect[], conflict: Conflict): void {
@@ -182,7 +235,6 @@ function enterConflict(m: Model, fx: Effect[], conflict: Conflict): void {
   m.conflict = conflict;
   m.leaving = false;
   disarm(m, fx);
-  stash(m, fx);
 }
 
 function startSave(m: Model, fx: Effect[], final: boolean): void {
@@ -214,6 +266,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.saved = e.doc.text;
       m.base = e.doc.commit;
       fx.push({ t: "set_buffer", text: e.doc.text });
+      if (e.draft) restoreDraft(m, fx, e.draft);
       return;
 
     case "load_fail":
@@ -224,8 +277,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       // Before the first load the editor is read-only, so there is nothing to keep.
       if (!m.loaded || m.closed || e.text === m.buffer) return;
       m.buffer = e.text;
-      m.note = null;
-      if (m.phase === "conflict" && m.conflict) stash(m, fx);
+      if (m.note?.kind !== "recovered") m.note = null;
       if (m.phase === "idle") {
         // Debounce: autosave runs a pause after the LAST keystroke.
         if (isDirty(m) && !hasConflictMarkers(m.buffer)) arm(m, fx, "save", AUTOSAVE_DELAY_MS);
@@ -237,8 +289,10 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       const kind = m.timer;
       m.timer = null;
       m.backoff = false;
-      if (kind === "save" && m.phase === "idle" && m.loaded && !m.closed && isDirty(m) && !hasConflictMarkers(m.buffer)) {
-        startSave(m, fx, false);
+      if (kind === "save" && m.phase === "idle" && m.loaded && isDirty(m)) {
+        // A closed tab keeps retrying a failed final save while the page lives.
+        if (m.closed) startSave(m, fx, true);
+        else if (!hasConflictMarkers(m.buffer)) startSave(m, fx, false);
       }
       return;
     }
@@ -256,6 +310,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.flight = null;
       m.phase = "idle";
       m.note = null;
+      m.maybeLanded = [];
       const mergedAgentEdits = r.merged && r.text !== sent;
       if (!mergedAgentEdits) {
         // The commit holds exactly what was sent, so it is the new base; typing
@@ -292,6 +347,15 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       if (m.phase !== "saving" || !m.flight) return;
       m.flight = null;
       const r = e.result;
+      if (m.maybeLanded.includes(r.theirs)) {
+        // The head is a save of ours whose reply was lost, not an agent edit:
+        // adopt it as the base and send what we have on top.
+        m.phase = "idle";
+        m.base = r.head;
+        m.saved = r.theirs;
+        m.maybeLanded = [];
+        return;
+      }
       // Even when the tab is leaving, the draft goes to per-viewer storage, not
       // into the proposal doc.
       enterConflict(m, fx, { ours: r.ours, theirs: r.theirs, base: r.base, head: r.head });
@@ -300,10 +364,13 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
 
     case "save_fail":
       if (m.phase !== "saving") return;
+      m.maybeLanded = [...m.maybeLanded, m.flight!.text];
       m.flight = null;
       m.phase = "idle";
       m.note = { kind: "error", detail: e.error };
-      if (!m.closed) arm(m, fx, "save", SAVE_RETRY_MS);
+      // Retry while the page is alive, closed tab or not: the edits stay in
+      // per-viewer storage (see syncStash) until a save lands.
+      arm(m, fx, "save", SAVE_RETRY_MS);
       return;
 
     case "remote":
@@ -352,7 +419,6 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       if (!m.loaded) return;
       if (m.phase === "conflict") {
         // Nothing goes to the daemon. The draft is already in per-viewer storage.
-        stash(m, fx);
         return;
       }
       if (m.phase === "idle") {
@@ -365,26 +431,8 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       return;
     }
 
-    case "restore_draft": {
-      // The tab opened with a stored draft from an earlier, unresolved conflict.
-      if (m.phase !== "idle" || !m.loaded || e.draft.buffer === m.saved) {
-        if (e.draft.buffer === m.saved) fx.push({ t: "unstash" });
-        return;
-      }
-      m.buffer = e.draft.buffer;
-      fx.push({ t: "set_buffer", text: e.draft.buffer });
-      enterConflict(m, fx, {
-        ours: e.draft.buffer,
-        theirs: m.saved,
-        base: e.draft.base,
-        head: m.base,
-      });
-      return;
-    }
-
     case "keep_mine":
       if (m.phase !== "conflict") return;
-      fx.push({ t: "unstash" });
       m.conflict = null;
       m.phase = "idle";
       m.base = e.head.commit;
@@ -395,7 +443,6 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
 
     case "take_theirs":
       if (m.phase !== "conflict") return;
-      fx.push({ t: "unstash" });
       m.conflict = null;
       m.phase = "idle";
       m.note = null;
@@ -405,7 +452,6 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
     case "show_both": {
       if (m.phase !== "conflict" || !m.conflict) return;
       const merged = mergeWithMarkers(m.conflict.base, m.buffer, e.head.text);
-      fx.push({ t: "unstash" });
       m.conflict = null;
       m.phase = "idle";
       m.note = null;
@@ -421,6 +467,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
 /** The drain rule. After every transition: a queued final save goes out; an idle,
  *  clean, stale document reloads; an idle, dirty one without markers arms autosave. */
 function settle(m: Model, fx: Effect[]): void {
+  syncStash(m, fx);
   if (m.phase !== "idle" || !m.loaded) return;
   if (m.leaving) {
     m.leaving = false;
