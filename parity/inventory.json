@@ -1135,7 +1135,7 @@
         "pointer": "api/sessions_prune.go sessionsPruneCmd -> daemon/control_client.go PruneSessions -> controlServer.PruneSessions (daemon/prune.go)"
       },
       "verdict": "deliberate",
-      "notes": "CLI-only by design (#5136): prune is a fleet SWEEP gated on an explicit --older-than duration and a repo scope, not a per-session action on the selected rail row — the shape every TUI/web session verb takes. The interactive surfaces deliberately keep per-session kill/archive/restore and leave the retention decision to an operator script; a mistaken bulk delete cannot hide behind a button. Slice 1 ships the dry run only: a strictly read-only listing of reclaimable archives — the deletion+tombstone apply lands in the follow-up filed from #5142's review. The daemon route POST /v1/PruneSessions is public so the same read-only RPC is reachable for remote daemons and external tooling."
+      "notes": "CLI-only by design (#5136): prune is a fleet SWEEP gated on an explicit --older-than duration and a repo scope, not a per-session action on the selected rail row — the shape every TUI/web session verb takes. The interactive surfaces deliberately keep per-session kill/archive/restore and leave the retention decision to an operator script; a mistaken bulk delete cannot hide behind a button. The dry run is a strictly read-only listing of reclaimable archives; --apply (#5189) deletes exactly what that same verdict lists, bound to the plan the operator confirmed, keeps each branch, and leaves a pruned tombstone row that every surface lists as archived and that restore refuses by naming the branch. The apply is CLI-only for the same reason as the sweep: a destructive bulk action stays behind an explicit flag and a confirmed plan, not a button. The daemon route POST /v1/PruneSessions is public so the same RPC (apply, only) is reachable for remote daemons and external tooling."
     },
     {
       "id": "session.restore",
@@ -2201,6 +2201,8 @@
       "af sessions preview --tab-id": "session.preview-tab",
       "af sessions preview --tab-name": "session.preview-tab",
       "af sessions prune --all": "session.prune",
+      "af sessions prune --apply": "session.prune",
+      "af sessions prune --yes": "session.prune",
       "af sessions prune --help": "meta.discovery",
       "af sessions prune --older-than": "session.prune",
       "af sessions restore --force-reap": "session.restore",

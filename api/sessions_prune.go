@@ -168,13 +168,17 @@ func applyPrunePlan(cmd *cobra.Command, req daemon.PruneSessionsRequest, plan da
 			return daemon.PruneSessionsResponse{}, fmt.Errorf("not confirmed; nothing was deleted")
 		}
 	}
-	req.Apply = true
-	req.Only = nil
+	// The apply is bound to exactly the plan the user saw: the sessions it listed
+	// plus any interrupted prune it will finish.
+	var only []string
 	for _, c := range plan.Candidates {
-		req.Only = append(req.Only, c.ID)
+		only = append(only, c.ID)
 	}
 	for _, sk := range interrupted {
-		req.Only = append(req.Only, sk.ID)
+		only = append(only, sk.ID)
 	}
-	return pruneSessionsViaDaemon(req)
+	return pruneSessionsViaDaemon(daemon.PruneSessionsRequest{
+		RepoID: req.RepoID, All: req.All, OlderThan: req.OlderThan,
+		Apply: true, Only: only,
+	})
 }

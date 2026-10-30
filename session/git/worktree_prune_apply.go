@@ -309,18 +309,29 @@ func gitObjectStorageUnder(worktreePath string) ([]string, error) {
 		err   error
 	}
 	done := make(chan result, 1)
-	deadline := time.Now().Add(objectStorageScanTimeout)
+	// The bounds and the test seam are read ONCE, here, and handed to the walk by
+	// value. The walk goroutine can outlive this call (a directory read parked on a
+	// stalled mount cannot be interrupted, so the bound abandons it), and it must
+	// never read a package variable a later caller or test may change. The leak is
+	// acceptable only because it is bounded by that stalled syscall: the goroutine
+	// ends when the read returns, and holds nothing but its own copy of the limits.
+	limits := objectStorageScanLimits{
+		timeout:    objectStorageScanTimeout,
+		maxEntries: objectStorageScanMaxEntries,
+		hook:       objectStorageScanHook,
+	}
+	limits.deadline = time.Now().Add(limits.timeout)
 	go func() {
-		found, err := scanGitObjectStorage(worktreePath, deadline)
+		found, err := scanGitObjectStorage(worktreePath, limits)
 		done <- result{found, err}
 	}()
 	select {
 	case r := <-done:
 		return r.found, r.err
-	case <-time.After(objectStorageScanTimeout):
+	case <-time.After(limits.timeout):
 		// A directory read parked on a stalled mount cannot be interrupted; the
 		// answer is UNKNOWN, and unknown refuses.
-		return nil, fmt.Errorf("scanning %s for git object storage did not finish within %s — the filesystem may be stalled", worktreePath, objectStorageScanTimeout)
+		return nil, fmt.Errorf("scanning %s for git object storage did not finish within %s — the filesystem may be stalled", worktreePath, limits.timeout)
 	}
 }
 
@@ -332,7 +343,16 @@ var (
 	objectStorageScanHook       func()
 )
 
-func scanGitObjectStorage(worktreePath string, deadline time.Time) ([]string, error) {
+// objectStorageScanLimits is everything the walk goroutine reads besides its
+// arguments, captured by value when the scan starts.
+type objectStorageScanLimits struct {
+	timeout    time.Duration
+	deadline   time.Time
+	maxEntries int
+	hook       func()
+}
+
+func scanGitObjectStorage(worktreePath string, limits objectStorageScanLimits) ([]string, error) {
 	leaf, err := registrationLeaf(worktreePath)
 	if err != nil {
 		return nil, err
@@ -353,14 +373,14 @@ func scanGitObjectStorage(worktreePath string, deadline time.Time) ([]string, er
 			if walkErr != nil {
 				return walkErr
 			}
-			if objectStorageScanHook != nil {
-				objectStorageScanHook()
+			if limits.hook != nil {
+				limits.hook()
 			}
 			entries++
-			if entries > objectStorageScanMaxEntries {
-				return fmt.Errorf("more than %d entries", objectStorageScanMaxEntries)
+			if entries > limits.maxEntries {
+				return fmt.Errorf("more than %d entries", limits.maxEntries)
 			}
-			if time.Now().After(deadline) {
+			if time.Now().After(limits.deadline) {
 				return fmt.Errorf("deadline passed")
 			}
 			name := d.Name()
