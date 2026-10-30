@@ -97,7 +97,7 @@ under the `perf-baselines` artifact.
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
 | raw_bytes | 1067070.000 | 1067070.000–1067070.000 | 0.000 | 1120423.500 |
-| gzip_bytes | 240430.000 | 240430.000–240430.000 | 0.000 | 252451.500 |
+| gzip_bytes | 253295.000 | 253295.000–253295.000 | 0.000 | 265959.750 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -122,6 +122,10 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Bundle refresh provenance (#6212)
+
+Master's committed bundle (1,113,561 raw / 252,436 gzip) already sat 15 bytes under the 252,451.5 gzip budget, so #6212 (one fenced model for the loaded archive window, #6206-#6209) could not land without moving it: the bundle grew to 1,116,548 raw / 253,295 gzip, +2,987 raw / +859 gzip (gzip level 9 over `web/dist/**.{js,css}`; the failing job reported the same 253,295). Comments do not ship (esbuild strips them from the unminified bundle; none of the new modules' prose is in `af-web.js`), so the growth is the feature's code: the archive-window reconcile (`archive_window.ts`), the fenced `adopt`, and the dirty-epoch wiring in `index.ts`. Only the gzip entry was over budget; raw (1,116,548 against 1,120,423.5) is left alone. The gzip entry is the deterministic sum, three identical samples, margin baseline × 0.05; every timing and layout-shift baseline is unchanged. This was computed from the committed tree rather than recorded with `make perf-container`, which is not a routine local run; the figure is byte-exact and equals what the job measured.
 
 ### Bundle refresh provenance (#5681)
 
