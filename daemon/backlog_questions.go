@@ -144,12 +144,17 @@ func (m *Manager) sendBacklogAnswer(repoID string, inst *session.Instance, promp
 	if m.isPollPaused(repoID, inst.Title, inst.ID) || inst.GetLiveness() == session.LiveLimitReached {
 		return errBacklogAnswerHeld
 	}
+	// A second answer can arrive while the first is still being worked on: the
+	// run that was already active is not ours to close if this send fails.
+	wasActive := inst.BacklogRunActive()
 	if !inst.ArmBacklogRun(time.Now()) {
 		return errors.New("the session is not an item session")
 	}
 	m.persistAndPublishInstance(repoID, inst)
 	if err := sendBacklogPrompt(m, SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID, Prompt: prompt, BacklogOrigin: true}); err != nil {
-		m.disarmBacklogRun(repoID, inst)
+		if !wasActive {
+			m.disarmBacklogRun(repoID, inst)
+		}
 		return err
 	}
 	return nil
