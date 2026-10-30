@@ -378,3 +378,18 @@ func backlogItemOfSession(repoID, sessionID string) int {
 	}
 	return 0
 }
+
+// rebuildAskedQuestions refills the remembered question of each item session from
+// the backlog after a restart, so a terminal answer still reaches an open question
+// whose attention chip was dismissed. It sets no attention: a dismissed chip stays
+// dismissed (Codex P2 on #6299).
+func (m *Manager) rebuildAskedQuestions(b *backlog.Backlog) {
+	for _, it := range b.Items {
+		q := b.OpenQuestionText(it.ID)
+		r := b.LatestRun(it.ID)
+		if q == "" || r == nil || r.SessionID == "" {
+			continue
+		}
+		m.backlog.asked.Store(r.SessionID, q)
+	}
+}
