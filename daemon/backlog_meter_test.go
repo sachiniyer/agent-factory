@@ -115,3 +115,22 @@ func TestPlanUsageOffReadsNothing(t *testing.T) {
 	_, statErr := os.Stat(filepath.Join(home, "plan"))
 	require.True(t, os.IsNotExist(statErr), "nothing is stored under $AF_HOME/plan while plan usage is off")
 }
+
+// When the daemon's CLAUDE_CONFIG_DIR is a registered account's directory, its
+// transcripts are scanned under that account, not the ambient identity (Codex P2
+// on #6299): the tap files the plan reading under the same account.
+func TestScanSourcesFilesAnAmbientDirUnderItsRegisteredAccount(t *testing.T) {
+	home := "/af"
+	work := "/af/accounts/claude/work"
+	got := scanSources(home, map[string]string{"work": work}, work, nil)
+	if len(got["work"]) != 1 || got["work"][0] != work {
+		t.Fatalf("work sources %v: the account's own directory, once", got["work"])
+	}
+	if len(got[planusage.DefaultAccount]) != 0 {
+		t.Fatalf("the ambient identity also scans %v: its costs would count there first and the account would be left with none", got[planusage.DefaultAccount])
+	}
+	got = scanSources(home, map[string]string{"work": work}, "/home/me/.claude", map[string][]string{"work": {"/custom"}})
+	if len(got[planusage.DefaultAccount]) != 1 || len(got["work"]) != 2 {
+		t.Fatalf("a plain ambient dir stays ambient, a run's effective dir joins its account: %v", got)
+	}
+}

@@ -381,20 +381,15 @@ func (m *Manager) meterPassLocked(now time.Time) {
 // dir and fills usage with each account's windows; the top-level windows are
 // the account with the newest reading.
 func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlogDirs []string, runConfigs map[string][]string, overrides map[string]planusage.Price, now time.Time, usage *planusage.Usage) {
-	sources := map[string][]string{planusage.DefaultAccount: {ambientClaudeConfigDir()}}
+	registered := map[string]string{}
 	if names, err := agentaccount.List(home, tmux.ProgramClaude); err == nil {
 		for _, name := range names {
 			if acct, err := agentaccount.Selected(home, tmux.ProgramClaude, name); err == nil && acct.Dir != "" {
-				sources[name] = []string{acct.Dir}
+				registered[name] = acct.Dir
 			}
 		}
 	}
-	// A session's effective config dir (CLAUDE_CONFIG_DIR or HOME overridden in
-	// its launch command) is scanned under the account its readings are filed
-	// under, so its transcripts count toward the window its run is judged in.
-	for account, dirs := range runConfigs {
-		sources[account] = append(sources[account], dirs...)
-	}
+	sources := scanSources(home, registered, ambientClaudeConfigDir(), runConfigs)
 	state.ScanAll(sources, backlogDirs, overrides, now)
 	for name := range sources {
 		r, err := planusage.LoadReading(name)
@@ -408,6 +403,38 @@ func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlo
 			usage.Account, usage.Windows, usage.ReadingAt = name, au.Windows, au.ReadingAt
 		}
 	}
+}
+
+// scanSources decides which config dirs are scanned under which account key:
+// every registered account's own dir; the daemon's ambient dir under the account
+// whose directory it is (the tap files readings by the same rule, so a
+// CLAUDE_CONFIG_DIR pointing at a registered account is that account's, not the
+// ambient identity's); and each item session's effective config dir under the
+// account its readings are filed under.
+func scanSources(home string, registered map[string]string, ambient string, runConfigs map[string][]string) map[string][]string {
+	sources := map[string][]string{planusage.DefaultAccount: nil}
+	for name, dir := range registered {
+		sources[name] = []string{dir}
+	}
+	if ambient != "" {
+		account := planusage.AccountForConfigDir(home, ambient)
+		if !containsDir(sources[account], ambient) {
+			sources[account] = append(sources[account], ambient)
+		}
+	}
+	for account, dirs := range runConfigs {
+		sources[account] = append(sources[account], dirs...)
+	}
+	return sources
+}
+
+func containsDir(dirs []string, dir string) bool {
+	for _, d := range dirs {
+		if filepath.Clean(d) == filepath.Clean(dir) {
+			return true
+		}
+	}
+	return false
 }
 
 func ambientClaudeConfigDir() string {
