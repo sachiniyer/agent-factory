@@ -392,6 +392,7 @@ func (m *Manager) recoverBacklog(repoID string, stop <-chan struct{}) bool {
 	for id, s := range sessions {
 		list = append(list, backlog.ItemSession{ID: id, Title: s.instance.Title, Item: s.instance.BacklogItem, CreatedAt: s.instance.CreatedAt})
 	}
+	m.rebuildAskedQuestions(b)
 	answering := m.redeliverBacklogAnswers(repoID, b)
 	starting := false
 	for _, it := range b.Items {
