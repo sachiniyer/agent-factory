@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
@@ -762,7 +763,7 @@ func TestTaskFireLeftoverRecordCarriesTmuxName(t *testing.T) {
 	}
 	row, err := taskFireLeftoverRecord(
 		&task.Task{ID: "ab0r7060", ProjectPath: repoPath, Prompt: "p"},
-		fire, repo, nil)
+		fire, repo, nil, time.Now())
 	if err != nil {
 		t.Fatalf("taskFireLeftoverRecord: %v", err)
 	}
@@ -898,6 +899,7 @@ func TestTaskFireLeftoverRecord_StopsProvenRuntime(t *testing.T) {
 	}
 	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sanitized,
 		"-e", tmux.EnvMarkerSession+"="+sanitized,
+		"-e", tmux.EnvMarkerGeneration+"=gen-proven-leftover",
 		"-e", tmux.EnvMarkerHome+"="+home, "sh").CombinedOutput(); err != nil {
 		t.Fatalf("seed leftover tmux session: %v: %s", err, out)
 	}
@@ -908,9 +910,13 @@ func TestTaskFireLeftoverRecord_StopsProvenRuntime(t *testing.T) {
 	fire := &taskFireMarker{
 		TaskID: "ab0r7097", IntendedAt: time.Now().Add(-time.Minute), Title: title,
 	}
+	// reconcileStart is captured AFTER the leftover session is seeded, so the
+	// genuine leftover's creation time predates the bound and reads as ours —
+	// the same ordering a boot replay sees (leftover from the old daemon,
+	// reconcile bound = this daemon's boot).
 	row, err := taskFireLeftoverRecord(
 		&task.Task{ID: "ab0r7097", ProjectPath: repoPath, Prompt: "p"},
-		fire, repo, nil)
+		fire, repo, nil, time.Now())
 	if err != nil {
 		t.Fatalf("taskFireLeftoverRecord: %v", err)
 	}
@@ -1021,7 +1027,7 @@ func TestTaskFireLeftoverRecord_ForeignRowOwningCollidingTmuxName(t *testing.T) 
 	}
 	row, err := taskFireLeftoverRecord(
 		&task.Task{ID: "ab0r7110", ProjectPath: repoPath, Prompt: "p"},
-		fire, repo, []session.InstanceData{foreignRow})
+		fire, repo, []session.InstanceData{foreignRow}, time.Now())
 	if err != nil {
 		t.Fatalf("taskFireLeftoverRecord: %v", err)
 	}
@@ -1074,6 +1080,7 @@ func TestTaskFireLeftoverRecord_ForeignRowOwningTmuxNameDoesNotReap(t *testing.T
 	// per-attempt evidence checks pass for it.
 	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sanitized,
 		"-e", tmux.EnvMarkerSession+"="+sanitized,
+		"-e", tmux.EnvMarkerGeneration+"=gen-foreign-live",
 		"-e", tmux.EnvMarkerHome+"="+home, "sh").CombinedOutput(); err != nil {
 		t.Fatalf("seed foreign tmux session: %v: %s", err, out)
 	}
@@ -1096,7 +1103,7 @@ func TestTaskFireLeftoverRecord_ForeignRowOwningTmuxNameDoesNotReap(t *testing.T
 	}
 	row, err := taskFireLeftoverRecord(
 		&task.Task{ID: "ab0r7111", ProjectPath: repoPath, Prompt: "p"},
-		fire, repo, []session.InstanceData{foreignRow})
+		fire, repo, []session.InstanceData{foreignRow}, time.Now())
 	if err != nil {
 		t.Fatalf("taskFireLeftoverRecord: %v", err)
 	}
@@ -1107,5 +1114,323 @@ func TestTaskFireLeftoverRecord_ForeignRowOwningTmuxNameDoesNotReap(t *testing.T
 	// have reaped it through the sanitized name.
 	if out, err := exec.Command("tmux", "has-session", "-t", "="+sanitized).CombinedOutput(); err != nil {
 		t.Fatalf("a foreign persisted row owns this tmux name; its live session must not be reaped, but it is gone: %v: %s", err, out)
+	}
+}
+
+// TestTaskFireLeftoverRecord_ConcurrentCreateNotReaped is the rowless
+// concurrent-create regression. The reconcile's "proven ours" evidence is name
+// based (AF_SESSION == sanitized name, AF_HOME == this install, session_created
+// >= IntendedAt), and the kill is issued by sanitized name with no identity
+// binding — so a concurrently created live session (another task's in-flight
+// delivery, or a user/API create) whose title sanitizes to the same tmux name
+// passes every check while its persisted row is still in flight (the create
+// path persists only AFTER sending the prompt). Before the fix the reconcile
+// reaped that session silently (nil, nil, no tombstone or quarantine record).
+//
+// This simulates the window exactly: a fire marker whose intent predates the
+// daemon's boot, a live tmux session created AFTER the boot (as a concurrent
+// create racing the replay would be), seeded with the exact ancestry markers a
+// real af create stamps (AF_SESSION, AF_HOME, AF_SESSION_GEN), and no persisted
+// row (rows = nil — the create has spawned the session but not yet persisted).
+// The reconcile must NOT kill it.
+func TestTaskFireLeftoverRecord_ConcurrentCreateNotReaped(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := setupTaskRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	title := "concurrent-leftover"
+	sanitized := tmux.SanitizedNameForRepo(title, repo.IdentityPath())
+
+	// The reconcile bound is the daemon's own boot; capture it BEFORE the
+	// concurrent create spawns its session, as a boot replay would.
+	reconcileStart := time.Now()
+	time.Sleep(1100 * time.Millisecond) // cross a wall-second so session_created strictly postdates the boot's second
+
+	// A live tmux session under the colliding name, carrying the af ancestry
+	// markers exactly as a normally-created af local session does — so the
+	// per-attempt evidence checks would pass for it on creation time alone.
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sanitized,
+		"-e", tmux.EnvMarkerSession+"="+sanitized,
+		"-e", tmux.EnvMarkerGeneration+"=gen-concurrent",
+		"-e", tmux.EnvMarkerHome+"="+home, "sh").CombinedOutput(); err != nil {
+		t.Fatalf("seed concurrent tmux session: %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-session", "-t", "="+sanitized).Run()
+	})
+
+	// IntendedAt predates the boot, so the lower bound (session_created >=
+	// IntendedAt) passes — exactly the bug: creation time alone cannot
+	// distinguish a genuine leftover from a concurrent create.
+	fire := &taskFireMarker{
+		TaskID:     "ab0r7120",
+		IntendedAt: reconcileStart.Add(-time.Minute),
+		Title:      title,
+	}
+	// rows = nil: the concurrent create has not yet persisted its row, so the
+	// persisted-row foreign guard cannot see it.
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7120", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+		fire, repo, nil, reconcileStart)
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row != nil && row.UserKilled {
+		t.Fatalf("a concurrent create's live session must not be reaped, got a teardown tombstone: %+v", row)
+	}
+	// The concurrent create's live session must STILL be alive — the reconcile
+	// must not have killed it through the sanitized name.
+	if out, err := exec.Command("tmux", "has-session", "-t", "="+sanitized).CombinedOutput(); err != nil {
+		t.Fatalf("a concurrent create's live session was killed by the reconcile (rowless window): %v: %s", err, out)
+	}
+}
+
+// TestTaskFireLeftoverRecord_TmuxOnlyProvenReap pins the genuine-leftover
+// happy path the concurrent-create guard must NOT regress: a tmux-only leftover
+// created by the old daemon (predates the boot, carries AF_SESSION_GEN), with no
+// worktree, is proven and reaped, and the kill leaves no residue.
+func TestTaskFireLeftoverRecord_TmuxOnlyProvenReap(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := setupTaskRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	title := "tmux-only-leftover"
+	sanitized := tmux.SanitizedNameForRepo(title, repo.IdentityPath())
+	intendedAt := time.Now().Add(-time.Minute) // intent a minute before the boot
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sanitized,
+		"-e", tmux.EnvMarkerSession+"="+sanitized,
+		"-e", tmux.EnvMarkerGeneration+"=gen-tmux-only",
+		"-e", tmux.EnvMarkerHome+"="+home, "sh").CombinedOutput(); err != nil {
+		t.Fatalf("seed leftover tmux session: %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-session", "-t", "="+sanitized).Run()
+	})
+
+	// A genuine tmux-only leftover: the intent predates the boot, the session
+	// carries the markers a real af create stamps, and the reconcile bound is
+	// captured AFTER the leftover was created (as a boot replay sees a session
+	// the old daemon left behind). Both bounds pass → proven → reaped.
+	fire := &taskFireMarker{
+		TaskID:     "ab0r7121",
+		IntendedAt: intendedAt,
+		Title:      title,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7121", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+		fire, repo, nil, time.Now())
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	// A proven clean tmux-only leftover has no worktree to reap through a
+	// tombstone, so the record is nil — its runtime was already stopped.
+	if row != nil {
+		t.Fatalf("a proven tmux-only leftover must reap to nil (nothing left to record), got %+v", row)
+	}
+	if out, err := exec.Command("tmux", "has-session", "-t", "="+sanitized).CombinedOutput(); err == nil {
+		t.Fatalf("the proven leftover's runtime must be stopped inside reconcile, still alive: %s", out)
+	}
+}
+
+// TestTaskFireLeftoverRecord_SessionWithoutGenerationNotReaped pins the
+// probe-to-kill identity binding: the evidence now requires an AF_SESSION_GEN
+// marker (every af-created session stamps it together with AF_SESSION) so the
+// kill can be bound to the exact probed session. A session that carries
+// AF_SESSION/AF_HOME but NO generation is not one af launched and cannot be
+// re-identified, so it must not be reaped even when its creation time predates
+// the boot — failing closed rather than destroying an unverifiable session.
+func TestTaskFireLeftoverRecord_SessionWithoutGenerationNotReaped(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoPath := setupTaskRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	title := "no-gen-leftover"
+	sanitized := tmux.SanitizedNameForRepo(title, repo.IdentityPath())
+
+	// AF_SESSION and AF_HOME but deliberately NO AF_SESSION_GEN: not an
+	// af-created session (af stamps both together), so its identity cannot be
+	// bound through the probe-to-kill window.
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sanitized,
+		"-e", tmux.EnvMarkerSession+"="+sanitized,
+		"-e", tmux.EnvMarkerHome+"="+home, "sh").CombinedOutput(); err != nil {
+		t.Fatalf("seed tmux session: %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-session", "-t", "="+sanitized).Run()
+	})
+
+	fire := &taskFireMarker{
+		TaskID: "ab0r7122", IntendedAt: time.Now().Add(-time.Minute), Title: title,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7122", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+		fire, repo, nil, time.Now())
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row != nil && row.UserKilled {
+		t.Fatalf("a session af cannot re-identify (no generation) must not be reaped, got a tombstone: %+v", row)
+	}
+	if out, err := exec.Command("tmux", "has-session", "-t", "="+sanitized).CombinedOutput(); err != nil {
+		t.Fatalf("the unverifiable session must not be killed: %v: %s", err, out)
+	}
+}
+
+// installFakeTmuxForEvidence installs a fake `tmux` on PATH that answers the
+// four probes taskFireTmuxEvidence issues — show-environment for AF_HOME,
+// AF_SESSION, AF_SESSION_GEN, and display-message for session_created — so the
+// evidence logic (the reconcileStart upper bound and the generation
+// requirement) can be exercised hermetically on hosts that have no real tmux
+// server. gen == "" makes the fake report AF_SESSION_GEN absent (the targeted
+// query exits 1 with tmux's exact "unknown variable" stderr, then the
+// unfiltered fallback succeeds, matching how a real tmux answers). created is
+// the unix seconds display-message echoes. The fake lives for the test only
+// (PATH is restored on cleanup), so it cannot disturb a shared host's tmux.
+func installFakeTmuxForEvidence(t *testing.T, gen string, created int64) {
+	t.Helper()
+	home := os.Getenv("AGENT_FACTORY_HOME")
+	if home == "" {
+		t.Fatal("precondition: AGENT_FACTORY_HOME must be set before installing the fake tmux")
+	}
+	// The gen branch is selected at script-generation time: when gen == "" the
+	// fake emits tmux's exact "unknown variable: AF_SESSION_GEN" on stderr and
+	// exits 1, then succeeds on the unfiltered fallback — matching how a real
+	// tmux answers an absent marker (#3309). When gen != "" it echoes the
+	// marker line. No runtime `if` so the two responses cannot be conflated by
+	// shell quoting.
+	genBranch := "echo \"AF_SESSION_GEN=" + gen + "\""
+	if gen == "" {
+		genBranch = "echo \"unknown variable: AF_SESSION_GEN\" >&2; exit 1"
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"n=${3#=}\n" +
+		"n=${n%:}\n" +
+		"case \"$1\" in\n" +
+		"show-environment)\n" +
+		"  if [ -z \"$4\" ]; then exit 0; fi\n" +
+		"  case \"$4\" in\n" +
+		"    AF_HOME) echo \"AF_HOME=" + home + "\" ;;\n" +
+		"    AF_SESSION) echo \"AF_SESSION=$n\" ;;\n" +
+		"    AF_SESSION_GEN) " + genBranch + " ;;\n" +
+		"    *) echo \"unknown variable: $4\" >&2; exit 1 ;;\n" +
+		"  esac\n" +
+		"  ;;\n" +
+		"display-message) echo \"" + fmt.Sprintf("%d", created) + "\" ;;\n" +
+		"*) exit 0 ;;\n" +
+		"esac\n"
+	t.Logf("fake tmux script:\n%s", script)
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestTaskFireTmuxEvidence_ReconcileStartBound pins the upper bound that closes
+// the rowless concurrent-create window, hermetically (no real tmux needed). A
+// session whose server-side creation time postdates the reconcile bound — as a
+// concurrent create racing the boot replay does — must never read as "proven",
+// no matter that its ancestry markers all match. The lower bound alone
+// (session_created >= IntendedAt) cannot distinguish a genuine leftover from a
+// concurrent create; the upper bound (session_created not-after the daemon's
+// own boot) does, because a true leftover was created by the PREVIOUS daemon.
+func TestTaskFireTmuxEvidence_ReconcileStartBound(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	reconcileStart := time.Now()
+	sanitized := "af_fake_evidence"
+
+	// Session created a minute AFTER the boot: a concurrent create racing the
+	// replay. Its markers all match (AF_SESSION/AF_HOME/AF_SESSION_GEN present and
+	// correct) and it postdates the intent, so the lower bound alone passes —
+	// only the upper bound excludes it.
+	createdAfter := reconcileStart.Add(time.Minute).Unix()
+	installFakeTmuxForEvidence(t, "gen-after", createdAfter)
+	fire := &taskFireMarker{TaskID: "ab0r7130", IntendedAt: reconcileStart.Add(-time.Hour)}
+	proven, gen := taskFireTmuxEvidence(cmd.MakeExecutor(), sanitized, fire, reconcileStart)
+	if proven || gen != "" {
+		t.Fatalf("a session created after the reconcile bound must not be proven, got proven=%v gen=%q", proven, gen)
+	}
+
+	// Session created a minute AFTER the intent but a minute BEFORE the boot:
+	// a genuine leftover. Both bounds pass and the generation is returned so the
+	// caller can bind the kill to it.
+	createdBefore := reconcileStart.Add(-time.Minute).Unix()
+	installFakeTmuxForEvidence(t, "gen-before", createdBefore)
+	proven, gen = taskFireTmuxEvidence(cmd.MakeExecutor(), sanitized, fire, reconcileStart)
+	if !proven {
+		t.Fatalf("a genuine leftover predating the boot must be proven, got proven=%v", proven)
+	}
+	if gen != "gen-before" {
+		t.Fatalf("a proven session must return its generation for kill binding, got %q", gen)
+	}
+}
+
+// TestTaskFireTmuxEvidence_RequiresGeneration pins the probe-to-kill identity
+// requirement: every af-created session stamps AF_SESSION and AF_SESSION_GEN
+// together, so a session carrying AF_SESSION/AF_HOME but NO generation is not
+// one af launched and cannot be re-identified through the probe-to-kill window.
+// Evidence must fail closed rather than authorize a kill it cannot bind to the
+// probed session. Hermetic (no real tmux).
+func TestTaskFireTmuxEvidence_RequiresGeneration(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	now := time.Now()
+	sanitized := "af_fake_nogen"
+	// A session predating the boot (genuine-leftover timing) but with no
+	// AF_SESSION_GEN marker: af cannot re-identify it, so it is not proven.
+	installFakeTmuxForEvidence(t, "", now.Add(-time.Minute).Unix())
+	fire := &taskFireMarker{TaskID: "ab0r7131", IntendedAt: now.Add(-time.Hour)}
+	proven, gen := taskFireTmuxEvidence(cmd.MakeExecutor(), sanitized, fire, now)
+	if proven || gen != "" {
+		t.Fatalf("a session without AF_SESSION_GEN must not be proven, got proven=%v gen=%q", proven, gen)
+	}
+}
+
+// TestTaskFireTmuxEvidence_HomeMismatchNotProven pins the other half of the
+// provenance: AF_HOME must point at THIS install. Hermetic (no real tmux): the
+// fake echoes an AF_HOME that does not equal the test's AGENT_FACTORY_HOME,
+// so ownership fails and the session is left alone regardless of timing.
+func TestTaskFireTmuxEvidence_HomeMismatchNotProven(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	now := time.Now()
+	sanitized := "af_fake_otherhome"
+	// Install a fake whose AF_HOME answer is a different directory than the
+	// test's home.
+	dir := t.TempDir()
+	otherHome := filepath.Join(dir, "other-af-home")
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"show-environment) echo \"AF_HOME=" + otherHome + "\" ;;\n" +
+		"display-message) echo \"" + fmt.Sprintf("%d", now.Add(-time.Minute).Unix()) + "\" ;;\n" +
+		"*) exit 0 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fire := &taskFireMarker{TaskID: "ab0r7132", IntendedAt: now.Add(-time.Hour)}
+	proven, gen := taskFireTmuxEvidence(cmd.MakeExecutor(), sanitized, fire, now)
+	if proven || gen != "" {
+		t.Fatalf("a session whose AF_HOME is not this install must not be proven, got proven=%v gen=%q", proven, gen)
 	}
 }

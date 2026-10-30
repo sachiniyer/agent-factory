@@ -78,6 +78,20 @@ type taskFireMarker struct {
 // same reason createSessionForTask is: tests pin it without a daemon.
 var daemonDrainingFn = func() bool { return false }
 
+// daemonBootTime is the earliest instant of this daemon process. The boot
+// replay's leftover reconcile uses it as the upper bound for "proven ours": a
+// true leftover of an interrupted attempt was created by the PREVIOUS daemon,
+// so its tmux session's server-side creation time must predate this boot. A
+// session created AFTER this instant — a concurrent create by another replayed
+// fire or a user/API create racing the boot, whose title sanitizes to the same
+// tmux name — is NOT that leftover, and reaping it by sanitized name would
+// destroy a live foreign session while the create path's row is still in flight
+// (persisted only after the prompt is sent). Set once at the top of runDaemon;
+// the CLI's RunTask path owns no daemon and leaves this zero, which the
+// reconcile reads as "no daemon-start bound" and falls back to its own entry
+// time. Same package-var shape as daemonDrainingFn for the same reason.
+var daemonBootTime time.Time
+
 func taskFireDir() (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
@@ -277,6 +291,23 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 //     is quarantined as a startup-state-unknown record for inspection rather
 //     than destroyed on a guess.
 func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) {
+	// A genuine leftover of the interrupted attempt was created by the OLD
+	// daemon before this one started, so its tmux session must predate the
+	// reconcile's bound. The boot replay runs each marker on its own goroutine
+	// and shares no lock keyed on the sanitized tmux name with a concurrent
+	// create (another replayed fire or a user/API create) whose title collapses
+	// onto the same name; the persisted-row foreign scan cannot see that create
+	// until its row lands (after the prompt), so the bound is what keeps the
+	// reconcile from "proving" and reaping a session the interrupted attempt
+	// never made. The daemon's own boot instant is the strongest bound — it
+	// excludes any session created during THIS daemon's lifetime — and is set
+	// before any replay goroutine starts. The CLI's RunTask path owns no
+	// daemon and leaves daemonBootTime zero; fall back to this reconcile's own
+	// entry time, which still excludes any session created during the probe.
+	reconcileStart := daemonBootTime
+	if reconcileStart.IsZero() {
+		reconcileStart = time.Now()
+	}
 	repo, err := repoFromPathForCreate(t.ProjectPath)
 	if err != nil {
 		return false, fmt.Errorf("%w: resolving the task's repository: %v", errTaskFireReconcile, err)
@@ -353,7 +384,7 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		return false, nil
 	}
 
-	row, err := taskFireLeftoverRecord(t, fire, repo, rows)
+	row, err := taskFireLeftoverRecord(t, fire, repo, rows, reconcileStart)
 	if err != nil {
 		return false, err
 	}
@@ -377,7 +408,7 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 // every discovered artifact is proven to this attempt and clean, a
 // startup-state-unknown record otherwise — or nil when nothing is left behind
 // and nothing is unknown.
-func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.RepoContext, rows []session.InstanceData) (*session.InstanceData, error) {
+func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.RepoContext, rows []session.InstanceData, reconcileStart time.Time) (*session.InstanceData, error) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return nil, fmt.Errorf("%w: loading config: %v", errTaskFireReconcile, err)
@@ -441,8 +472,11 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	// be reaped. Anything else — foreign markers, a registration older than the
 	// intent, an unreadable answer — leaves it unproven and quarantined.
 	proven := found && !unknown
+	probeGen := ""
 	if tmuxPresent {
-		proven = proven && taskFireTmuxEvidence(cmdExec, sanitized, fire)
+		var tmuxProven bool
+		tmuxProven, probeGen = taskFireTmuxEvidence(cmdExec, sanitized, fire, reconcileStart)
+		proven = proven && tmuxProven
 	}
 	if wtPath != "" {
 		proven = proven && taskFireWorktreeEvidence(wtPath, identityRoot, branch, fire)
@@ -464,9 +498,23 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	// while it runs would authorize a `worktree remove -f` teardown that
 	// deletes work generated after the snapshot (#5503 review). A kill that
 	// fails leaves the writer question unanswered — quarantine, never reap.
+	//
+	// The probes above and this kill are separate tmux commands, and a
+	// concurrent create (another replayed fire, or a user/API create) can
+	// replace the same-named session in the probe-to-kill window. The evidence
+	// already refused any session created after the reconcile bound (so a
+	// session minted during this boot is never "proven"); this re-check binds
+	// the kill to the EXACT session the probes identified by re-reading its
+	// AF_SESSION_GEN and refusing if the name now answers for a different
+	// generation — the same read-before-act guard the account-login adopt path
+	// uses (#3309). Absent or unreadable generation is treated as unknown and
+	// fails closed rather than destroy a session af cannot re-identify.
 	runtimeStopped := false
 	if proven && tmuxPresent {
-		if _, kerr := tmux.NewTmuxSessionFromSanitizedName(sanitized, program).Close(); kerr == nil {
+		genNow, genNowPresent, genNowErr := tmux.SessionGenerationMarker(cmdExec, sanitized)
+		if genNowErr != nil || !genNowPresent || genNow != probeGen {
+			log.WarningLog.Printf("task %s: declined to reap leftover tmux session %q — its identity changed between probe and kill, leaving it for inspection", t.ID, sanitized)
+		} else if _, kerr := tmux.NewTmuxSessionFromSanitizedName(sanitized, program).Close(); kerr == nil {
 			runtimeStopped = true
 			log.WarningLog.Printf("task %s: reaped proven leftover tmux session %q from an interrupted cron fire", t.ID, sanitized)
 		}
@@ -582,30 +630,54 @@ func taskFireRowOwnsTmuxName(d *session.InstanceData, name string) bool {
 }
 
 // taskFireTmuxEvidence reports whether a live tmux session proves it belongs to
-// this attempt: the af ancestry markers point at THIS sanitized name and THIS
-// agent-factory home, and the server's own creation time is not older than the
-// recorded intent. Creation time is second-granularity, so the comparison is at
-// whole seconds — a leftover spawned in the intent's wall second reads as ours,
-// which is the right direction: the same-named predecessor it could confuse
-// with would itself have been reaped or suffixed around.
-func taskFireTmuxEvidence(cmdExec cmd.Executor, sanitized string, fire *taskFireMarker) bool {
+// this attempt, and returns the session's AF_SESSION_GEN so the caller can bind
+// the subsequent kill to the exact session the probes identified. The af
+// ancestry markers must point at THIS sanitized name, THIS agent-factory home,
+// and carry a generation (every af-created session stamps AF_SESSION and
+// AF_SESSION_GEN together via `new-session -e`; a session with AF_SESSION but
+// no generation is not one af launched and cannot be re-identified). The
+// server's own creation time is the per-attempt timestamp: it must not be older
+// than the recorded intent, and — the upper bound that closes the rowless
+// concurrent-create window — it must not postdate the reconcile's start. A true
+// leftover was created by the OLD daemon before this one started, so it
+// predates the boot; a session created after the bound (a concurrent create by
+// another replayed fire or a user/API create racing the boot, whose title
+// sanitizes to the same tmux name) cannot be the interrupted attempt's residue,
+// and reaping it by sanitized name would destroy a live foreign session whose
+// persisted row has not landed yet. Creation time is second-granularity, so the
+// comparisons are at whole seconds — a leftover spawned in the intent's wall
+// second reads as ours, while a session in the boot's wall second reads as not
+// newer than the boot; the generation re-check at kill time backstops both
+// same-second edges.
+func taskFireTmuxEvidence(cmdExec cmd.Executor, sanitized string, fire *taskFireMarker, reconcileStart time.Time) (proven bool, generation string) {
 	home, homePresent, err := tmux.SessionHomeMarker(cmdExec, sanitized)
 	if err != nil || !homePresent {
-		return false
+		return false, ""
 	}
 	ourHome, err := config.GetConfigDir()
 	if err != nil || home != ourHome {
-		return false
+		return false, ""
 	}
 	name, namePresent, err := tmux.SessionEnvVar(cmdExec, sanitized, tmux.EnvMarkerSession)
 	if err != nil || !namePresent || name != sanitized {
-		return false
+		return false, ""
+	}
+	gen, genPresent, genErr := tmux.SessionGenerationMarker(cmdExec, sanitized)
+	if genErr != nil || !genPresent {
+		return false, ""
 	}
 	created, err := tmux.SessionCreatedUnix(cmdExec, sanitized)
 	if err != nil {
-		return false
+		return false, ""
 	}
-	return created.Unix() >= fire.IntendedAt.Unix()
+	// Lower bound errs toward "ours" (a leftover spawned in the intent's wall
+	// second reads as ours); the upper bound errs toward foreign — the safe
+	// direction for a destructive reap, since the persisted-row guard cannot
+	// see a rowless concurrent create.
+	if created.Unix() < fire.IntendedAt.Unix() || created.After(reconcileStart) {
+		return false, ""
+	}
+	return true, gen
 }
 
 // taskFireWorktreeEvidence reports whether a worktree proves it was registered
