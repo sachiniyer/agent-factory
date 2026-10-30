@@ -728,7 +728,7 @@ func TestValidateAccountEnvironmentCommand_IoniceTasksetOptionValueBranchesAdmit
 
 // The child-tail branches scanned by this fix (ionice `--` and `default`, and
 // tasksetCommandAfterMask) see the real util-linux binary's own argv, so they
-// use shadowedChildTailMutates, which drops the childless PID bound the
+// use shadowedLiteralChildTailMutates, which drops the childless PID bound the
 // selector/terminal branches keep: a command may legitimately take any number
 // of operands, so the tail's length is not an environment mutation. The
 // childless scan had rejected `ionice echo a1 … a65` solely for having 65
@@ -765,16 +765,17 @@ func TestValidateAccountEnvironmentCommand_LongChildTailStaysAdmitted(t *testing
 	}
 }
 
-// The every-suffix walk in shadowedChildTailMutates stays linear in the tail's
+// The literal-suffix walk in shadowedLiteralChildTailMutates stays linear in the tail's
 // length after the childless cap was dropped from the child tail (Codex on
 // #4708): judging every suffix through wrapperOperandTailMutates re-scans the
 // remainder through unrecognizedWrapperHidesAccountAssignment and is quadratic,
 // so a long benign child argv (`ionice echo a1 … aN` with N in the thousands)
 // stalls an apply/swap. The scan judges the full tail once (catching a buried
 // env word, shell, or `--opt=DENIED` from any prefix) and only the suffix
-// starting at a word whose own name begins a verdict (a wrapper, a direct
-// account-mutating builtin, strace, or a non-literal — see
-// accountChildTailSuffixStartsVerdict). A long benign argv has none of those
+// starting at a LITERAL word whose own name begins a verdict (a wrapper, a
+// direct account-mutating builtin, strace, or a shell — see
+// accountChildTailSuffixStartsVerdict; a non-literal word is an argument, not an
+// exec boundary, and is skipped). A long benign argv has none of those
 // words, so it does not re-walk every suffix, and 8000 operand args do not
 // stall commandMutatesAccountEnvironment. The unrelated commandFeedsProvenShell
 // path is bypassed here so the timing reflects the walk this fix changed.
@@ -863,7 +864,7 @@ func TestValidateAccountEnvironmentCommand_TasksetChildLaunchingLongAbbreviation
 // Recognizing the --all/--cpu abbreviations must not open an under-refusal:
 // once the option word is consumed, the mask/list operand falls to
 // tasksetCommandAfterMask, whose wrapperOperandTailMutates and
-// shadowedChildTailMutates walks judge every child slice — exactly the path
+// shadowedLiteralChildTailMutates walks judge every child slice — exactly the path
 // the spelled-out forms already take. So a mutating child tail behind an
 // abbreviation is now refused via the child-tail walk rather than the old
 // fail-closed option arm; the refusal outcome is unchanged. Measured on the
@@ -958,7 +959,7 @@ func TestValidateAccountEnvironmentCommand_TasksetChildLaunchingShortClustersAdm
 // Recognizing the -ac/-ca clusters must not open an under-refusal: once the
 // option word is consumed, the mask/list operand falls to
 // tasksetCommandAfterMask, whose wrapperOperandTailMutates and
-// shadowedChildTailMutates walks judge every child slice — exactly the path
+// shadowedLiteralChildTailMutates walks judge every child slice — exactly the path
 // the separated-flag forms already take. So a mutating child tail behind a
 // cluster is now refused via the child-tail walk rather than the old
 // fail-closed option arm; the refusal outcome is unchanged. Measured on the

@@ -123,7 +123,7 @@ func TestShadowedChildTailMutates_WorkIsBoundedByTheBudget(t *testing.T) {
 			require.Equal(t, tc.unsafe, unsafe)
 			require.Equal(t, tc.judgements, *memo.childJudgements,
 				"suffix judgements started by child-tail walks")
-			require.LessOrEqual(t, len(memo.childTails), len(call.Args),
+			require.LessOrEqual(t, len(memo.literalChildTails), len(call.Args),
 				"each tail position is scanned at most once")
 		})
 	}
