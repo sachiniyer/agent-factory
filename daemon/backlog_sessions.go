@@ -110,18 +110,32 @@ func (m *Manager) noteBacklogRunEnd(repoID string, instance *session.Instance, w
 		instance.StartupStateUnknown() || instance.GetLiveness() != session.LiveReady {
 		return
 	}
-	sessionID := instance.ID
+	sessionID, gen := instance.ID, instance.BacklogRunGeneration()
 	m.launchBackgroundMutation(func(<-chan struct{}) {
-		m.backlogRunEnded(repoID, sessionID)
+		m.backlogRunEndedGen(repoID, sessionID, gen)
 	})
 }
 
 // backlogRunEnded moves a silent run's item to review, and archives the
 // session when the user already marked the item done and on_done is archive.
 func (m *Manager) backlogRunEnded(repoID, sessionID string) {
+	m.backlogRunEndedGen(repoID, sessionID, -1)
+}
+
+// backlogRunEndedGen is backlogRunEnded for the run of generation gen (-1: any).
+// The check runs inside the backlog transaction, and continueBacklogItem arms
+// the next run inside its own, so a completion queued for the previous run
+// cannot finish a continue that was accepted after it (Codex P2 on #6294).
+func (m *Manager) backlogRunEndedGen(repoID, sessionID string, gen int) {
 	svc := m.backlogService()
 	var end backlog.RunEnd
 	_, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+		if gen >= 0 {
+			if s, ok := m.itemSessions(repoID)[sessionID]; ok &&
+				(s.instance.BacklogRunActive() || s.instance.BacklogRunGeneration() != gen) {
+				return nil, errBacklogNoChange
+			}
+		}
 		end = b.RunEnded(sessionID, svc.Now())
 		if !end.Changed {
 			return nil, errBacklogNoChange
@@ -283,7 +297,6 @@ func (m *Manager) recoverBacklog(repoID string) bool {
 	for id, s := range sessions {
 		list = append(list, backlog.ItemSession{ID: id, Title: s.instance.Title, Item: s.instance.BacklogItem, CreatedAt: s.instance.CreatedAt})
 	}
-	ended := idleRunEnds(b, sessions)
 	starting := false
 	for _, it := range b.Items {
 		for _, r := range it.Runs {
@@ -299,7 +312,17 @@ func (m *Manager) recoverBacklog(repoID string) bool {
 			return false
 		}
 	}
-	for _, sessionID := range ended {
+	// Computed from the backlog AS RECOVERED: a start whose session link was just
+	// repaired above can already have gone idle, and only the repaired run
+	// (state started) qualifies as ended. Reading it before the repair would
+	// leave that item running with no marker edge left to move it to review.
+	if starting {
+		if b, err = backlog.Load(repoID); err != nil {
+			m.warn().Printf("backlog recovery for project %s: %v", repoID, err)
+			return false
+		}
+	}
+	for _, sessionID := range idleRunEnds(b, sessions) {
 		m.backlogRunEnded(repoID, sessionID)
 	}
 	return true

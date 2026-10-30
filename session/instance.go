@@ -244,6 +244,9 @@ type Instance struct {
 	backlogRunActive bool
 	// backlogRunEndedAt is when the latest backlog run ended (persisted).
 	backlogRunEndedAt time.Time
+	// backlogRunGen counts the runs armed on this session (in memory only): a
+	// completion queued for run N must not finish run N+1 (ArmBacklogRun).
+	backlogRunGen int
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

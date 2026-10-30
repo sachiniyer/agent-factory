@@ -43,6 +43,15 @@ func (i *Instance) BacklogRunActive() bool {
 	return i.backlogRunActive
 }
 
+// BacklogRunGeneration is how many backlog runs have been armed on this session
+// since the daemon loaded it. A completion records the generation of the run it
+// ended and applies only while that is still the latest.
+func (i *Instance) BacklogRunGeneration() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.backlogRunGen
+}
+
 // ArmBacklogRun opens a backlog run at the moment the backlog delivers a prompt.
 // It sets the run's prompt boundary and holds the turn gate, so the session's
 // next idle observation ends the run only after the agent has taken the turn.
@@ -54,6 +63,7 @@ func (i *Instance) ArmBacklogRun(at time.Time) bool {
 		return false
 	}
 	i.backlogRunActive = true
+	i.backlogRunGen++
 	i.backlogRunEndedAt = time.Time{}
 	i.taskRunPromptAttemptAt = at
 	i.taskRunTurnObservedAt = time.Time{}

@@ -197,6 +197,34 @@ func TestRecoverySkipsCurrentDaemonStarts(t *testing.T) {
 	}
 }
 
+// A run a restart left starting, whose session persisted idle with its marker
+// already cleared, goes to review in the same recovery pass that repairs the
+// session link (Codex P2 on #6294).
+func TestRecoveryEndsAnIdleRunAfterRepairingItsSessionLink(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	inst.DisarmBacklogRun()
+	prevStart := daemonProcessStart
+	t.Cleanup(func() { daemonProcessStart = prevStart })
+	daemonProcessStart = inst.CreatedAt.Add(time.Hour)
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		r := &b.Item(1).Runs[0]
+		r.State, r.SessionID, r.Title, r.StartedAt = backlog.RunStarting, "", "", inst.CreatedAt.Add(-time.Second)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !m.recoverBacklog(repoID) {
+		t.Fatal("recovery did not settle the project")
+	}
+	it := loadItem(t, repoID, 1)
+	if it.Runs[0].State != backlog.RunStarted || it.Runs[0].SessionID != inst.ID {
+		t.Fatalf("the run was not linked: %+v", it.Runs[0])
+	}
+	if it.Status != backlog.StatusReview {
+		t.Fatalf("status = %s, want review: an idle run was left running", it.Status)
+	}
+}
+
 func TestRecoverySkipsSkippedRepos(t *testing.T) {
 	m, repoID, inst := startedItem(t)
 	prevStart := daemonProcessStart
@@ -230,5 +258,35 @@ func TestDeferredArchive(t *testing.T) {
 	s.deferArchive("a")
 	if !s.takeDeferredArchive("a") || s.takeDeferredArchive("a") {
 		t.Fatal("deferred archive is taken once")
+	}
+}
+
+// A completion queued for run N must not finish a continue accepted after it
+// (Codex P2 on #6294): the continue re-arms the same session, so the stale
+// callback sees a newer generation and does nothing.
+func TestStaleCompletionDoesNotFinishALaterContinue(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	gen := inst.BacklogRunGeneration()
+	inst.DisarmBacklogRun() // run N ended on its idle edge; its completion is still queued
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(*Manager, SendPromptRequest) error { return nil }
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatal(err)
+	}
+	if inst.BacklogRunGeneration() == gen {
+		t.Fatal("the continue did not arm a new run")
+	}
+	m.backlogRunEndedGen(repoID, inst.ID, gen) // the stale callback fires now
+
+	it := loadItem(t, repoID, 1)
+	if it.Status != backlog.StatusRunning {
+		t.Fatalf("status = %s: the stale completion finished the new run", it.Status)
+	}
+	for _, msg := range it.Thread {
+		if msg.Text == backlog.RunEndNote {
+			t.Fatalf("a stopped-agent note was added for a run that is working: %+v", it.Thread)
+		}
 	}
 }
