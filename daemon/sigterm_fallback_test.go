@@ -208,7 +208,7 @@ func stubDaemonScan(t *testing.T, pids []int, err error) {
 // the zombie, defeating any "did it die?" check based on signal probes.
 func spawnFakeDaemonWithDaemonFlag(t *testing.T) *exec.Cmd {
 	t.Helper()
-	cmd := spawnFakeDaemonProc(t, "af", "sleep 60; :", "--daemon", "af-test")
+	cmd := spawnFakeDaemonHomeProc(t, "af", "sleep 60; :", "--daemon", "af-test")
 	// Wait until the crafted post-exec argv is visible. Event-driven with a
 	// generous bound so a loaded CI runner cannot miss the window — the old
 	// fixed ~500ms wait could expire just before the exec landed, failing the
