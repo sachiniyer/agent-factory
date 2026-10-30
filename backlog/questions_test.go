@@ -306,3 +306,32 @@ func TestAnswerDelivered(t *testing.T) {
 		t.Fatal(err, b.PendingAnswers())
 	}
 }
+
+// One answer's failure cannot roll the item back over work another answer started
+// (Codex P2 on #6295): two answers accepted on an item in review, the second
+// delivered, then the first fails.
+func TestAnswerFailedKeepsRunningForANewerAnswer(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusRunning
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+	it.Thread = []Message{
+		{ID: 1, Kind: KindAnswer, Answers: 0, Delivery: DeliveryPending, PrevStatus: StatusReview},
+		{ID: 2, Kind: KindAnswer, Answers: 0, Delivery: DeliveryDelivered, PrevStatus: StatusRunning},
+	}
+	if err := b.AnswerFailed(1, 1, "pane gone", now); err != nil {
+		t.Fatal(err)
+	}
+	if b.Item(1).Status != StatusRunning {
+		t.Fatalf("status = %s: the first answer's rollback overwrote the work the second started", b.Item(1).Status)
+	}
+	// With no newer answer, the rollback still happens.
+	b.Item(1).Thread = []Message{{ID: 1, Kind: KindAnswer, Delivery: DeliveryPending, PrevStatus: StatusReview}}
+	if err := b.AnswerFailed(1, 1, "pane gone", now); err != nil {
+		t.Fatal(err)
+	}
+	if b.Item(1).Status != StatusReview {
+		t.Fatalf("status = %s, want the replaced status back", b.Item(1).Status)
+	}
+}
