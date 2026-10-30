@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"syscall"
+	"time"
 )
 
 // ErrNoArgv reports that a process has no argument vector to classify — a
@@ -170,28 +171,18 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 			if known && uid != os.Getuid() {
 				continue
 			}
-			// Ownership did not settle it, so ask the second oracle whether the
-			// process is even still there. On darwin this is the difference
-			// between the two facts EINVAL covers, and nothing else can tell
-			// them apart: a departed process answers kern.procargs2 exactly as a
-			// foreign one does, and its ownership is unreadable for the same
-			// reason it is unreadable for anything that no longer exists.
-			//
-			// SameIdentity rather than a bare existence check, because a PID is
-			// not an identity: the snapshotted process can exit and its number be
-			// reused before this line runs, and "some process answers to 45" is
-			// not "the one we were refused is still there". It compares the start
-			// stamp, so a recycled PID reports the original instance as departed —
-			// the (pid, StartID) pairing this package uses everywhere it is about
-			// to act on a process.
-			//
-			// "Gone" is established POSITIVELY: only a definitive false skips.
-			// An identity that could not be revalidated is UNKNOWN and still
-			// fails, as does a process that is still itself.
-			if same, identityErr := scanIdentity(process); identityErr == nil && !same {
+			// Ownership did not settle it. A refusal is only reportable for a
+			// process that is provably still present, and a single read plus a
+			// single liveness check cannot prove that (#6217): see settleRefusal.
+			settled, outcome, refusal := settleRefusal(process, err)
+			switch outcome {
+			case refusalRecovered:
+				argv = settled
+			case refusalGone:
 				continue
+			default:
+				return nil, &ArgvUnreadableError{PID: pid, Err: refusal, OwnedByUs: known}
 			}
-			return nil, &ArgvUnreadableError{PID: pid, Err: err, OwnedByUs: known}
 		}
 		if match(argv) {
 			matched = append(matched, ProcessArgv{Process: process, Argv: argv})
@@ -199,4 +190,64 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 	}
 	sort.Slice(matched, func(i, j int) bool { return matched[i].Process.PID < matched[j].Process.PID })
 	return matched, nil
+}
+
+// refusalReads is how many times a refused argv is read before it is believed,
+// and scanRefusalPause the gap between reads. A process on its way out answers
+// kern.procargs2 with EINVAL — the foreign-process errno — from the moment its
+// address space is torn down until the kernel marks it a zombie and then reaps
+// it, and during that window the liveness oracle still calls it present. One
+// read followed by one liveness check therefore reports a process that merely
+// exited mid-scan as a refusal (#6217, after #3693). A process that is really
+// restricted refuses every read for as long as it lives, so refusing repeatedly
+// with the process present before, between and after the reads is the evidence
+// that cannot be produced by an exit: a departing process stops being present
+// within the window, and a read that begins to work is simply used.
+const refusalReads = 3
+
+var scanRefusalPause = 10 * time.Millisecond
+
+type refusalOutcome int
+
+const (
+	// refusalStands: refused on every read, present throughout.
+	refusalStands refusalOutcome = iota
+	// refusalGone: the process exited (or its pid was recycled) while the
+	// refusal was being settled. Skipped, like any exit mid-scan.
+	refusalGone
+	// refusalRecovered: a re-read succeeded; the argv is the second answer.
+	refusalRecovered
+)
+
+// settleRefusal decides what a refused argv read means. first is the refusal
+// the scan already has. Every read is bracketed by a presence check
+// (scanIdentity, which treats a zombie, a reaped process and a recycled pid as
+// departed), so a refusal stands only when the same process instance was
+// present before the first re-read, between all reads and after the last one.
+// An identity that cannot be revalidated counts as present: unknown never
+// licenses a skip.
+func settleRefusal(process Process, first error) ([]string, refusalOutcome, error) {
+	gone := func() bool {
+		same, err := scanIdentity(process)
+		return err == nil && !same
+	}
+	last := first
+	for read := 1; read < refusalReads; read++ {
+		if gone() {
+			return nil, refusalGone, nil
+		}
+		time.Sleep(scanRefusalPause)
+		argv, err := scanArgv(process.PID)
+		switch {
+		case err == nil:
+			return argv, refusalRecovered, nil
+		case errors.Is(err, ErrNoArgv), isGone(err):
+			return nil, refusalGone, nil
+		}
+		last = err
+	}
+	if gone() {
+		return nil, refusalGone, nil
+	}
+	return nil, refusalStands, last
 }
