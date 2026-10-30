@@ -270,6 +270,12 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	state, err := planusage.LoadMeter()
 	if err != nil {
 		m.warn().Printf("plan meter: %v", err)
+		// Publish the failure, not the previous good result: the runner would
+		// otherwise gate on unchanged costs while new spend goes unseen.
+		st.usageMu.Lock()
+		st.usage = planusage.Usage{Unavailable: err.Error(), Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+		st.finished = now
+		st.usageMu.Unlock()
 		return
 	}
 	usage := planusage.Usage{Runs: map[string]float64{}, RunWindow: map[string]float64{}, Unmeterable: map[string]string{}, Accounts: map[string]planusage.AccountUsage{}}

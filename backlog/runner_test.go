@@ -485,3 +485,41 @@ func TestRunnerStaysClosedWhileTheBudgetCannotBeMetered(t *testing.T) {
 		t.Fatalf("%+v", p)
 	}
 }
+
+// The runner closes while the meter is unavailable (Codex P2 on #6300): the last
+// good result is not stale-but-usable, and a dollar-limit-only budget must not
+// keep starting against spend it can no longer see.
+func TestRunnerGateClosesWhileTheMeterIsUnavailable(t *testing.T) {
+	in := gateIn(planusage.Usage{Unavailable: "plan/meter.json: invalid character"})
+	in.Budget.USDLimit = 10
+	g := CheckGates(in)
+	if g.Name != GateMeterUnavailable || !strings.Contains(g.Reason, "invalid character") {
+		t.Fatalf("gate %+v", g)
+	}
+}
+
+func TestRunnerEligibleOnlyForAQueuedUnblockedLeaf(t *testing.T) {
+	b, states := runnerBacklog(t)
+	var id int
+	for _, it := range b.Items {
+		if states[it.ID].State == StateQueued && !b.IsParent(it.ID) {
+			id = it.ID
+			break
+		}
+	}
+	if id == 0 || !b.RunnerEligible(id, states) {
+		t.Fatalf("fixture has no eligible item: %d", id)
+	}
+	drafted := map[int]Derived{}
+	for k, v := range states {
+		drafted[k] = v
+	}
+	drafted[id] = Derived{State: StateDraft}
+	if b.RunnerEligible(id, drafted) {
+		t.Fatal("an item the user moved back to draft is still eligible")
+	}
+	drafted[id] = Derived{State: StateWaiting}
+	if b.RunnerEligible(id, drafted) {
+		t.Fatal("an item with an unmet dependency is eligible")
+	}
+}

@@ -24,6 +24,10 @@ const (
 	// GatePlanUsageOff closes the runner while [backlog] plan_usage is off: with
 	// no plan readings and no metering there is nothing to hold a budget against.
 	GatePlanUsageOff = "plan_usage_off"
+	// GateMeterUnavailable closes the runner while the meter cannot be read or
+	// written: the last good result is stale, and gating on it would let starts
+	// continue against spend that can no longer be seen.
+	GateMeterUnavailable = "meter_unavailable"
 )
 
 // StaleReadingAfter is the reading age past which the runner starts at most
@@ -83,6 +87,9 @@ func CheckGates(in GateInput) Gate {
 	if u.Disabled {
 		return Gate{GatePlanUsageOff, "Plan usage is off, so the runner cannot stay within a budget · " +
 			"turn it on with \"af config set backlog.plan_usage true\", or start items by hand with \"af backlog start\""}
+	}
+	if u.Unavailable != "" {
+		return Gate{GateMeterUnavailable, "Plan metering is unavailable, so the runner waits · " + u.Unavailable}
 	}
 	if b.Share <= 0 {
 		return Gate{GateShare, "Backlog share is 0% · raise it with \"af backlog budget --share 50\""}
@@ -221,6 +228,15 @@ func (b *Backlog) Runnable(states map[int]Derived, n int, skip func(int) bool) [
 		out = append(out, it.ID)
 	}
 	return out
+}
+
+// RunnerEligible reports whether the runner may start item id now: it is a
+// queued leaf (not held after a failed start) in the given derived states. The
+// admission check for an automatic start, which must not override a draft or a
+// new dependency the user set since the pass chose the item.
+func (b *Backlog) RunnerEligible(id int, states map[int]Derived) bool {
+	it := b.Item(id)
+	return it != nil && states[id].State == StateQueued && !b.IsParent(id) && !it.heldAfterFailure()
 }
 
 // RunnerInput is one runner pass's view of a project.

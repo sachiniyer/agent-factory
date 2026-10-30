@@ -27,6 +27,10 @@ var errSlotsFull = errors.New("slots full")
 // errRunnerOff refuses an automatic start after the runner switch went off.
 var errRunnerOff = errors.New("the runner is off")
 
+// errNotRunnable refuses an automatic start of an item that is no longer a
+// queued, unblocked leaf.
+var errNotRunnable = errors.New("the item is no longer runnable")
+
 // runnerState paces runner passes, holds what the runner remembers between
 // passes, and remembers the state each project's runner last published.
 type runnerState struct {
@@ -213,6 +217,9 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 		if errors.Is(err, errSlotsFull) || errors.Is(err, errRunnerOff) {
 			break
 		}
+		if errors.Is(err, errNotRunnable) {
+			continue // the user changed it since the pass chose it; not a failed start
+		}
 		if err != nil {
 			rs.startFailed(repoID, id, now)
 			m.warn().Printf("backlog runner: start %s in project %s: %v", backlog.FormatID(id), repoID, err)
@@ -248,6 +255,12 @@ func (m *Manager) startBacklogItemCapped(req backlog.StartRequest, by string) (b
 	// purpose, an automatic one must honour it at the admission boundary.
 	if by == backlog.StartedByRunner && !b.Settings.Runner {
 		return backlog.RunRef{}, errRunnerOff
+	}
+	// Likewise the item itself: the user may have drafted it or added a
+	// dependency while this start waited for the lock; explicit starts ignore
+	// both on purpose, an automatic one must not override them.
+	if by == backlog.StartedByRunner && !b.RunnerEligible(req.ID, b.DeriveAll(backlogHost{m: m}.Facts(ref.ID))) {
+		return backlog.RunRef{}, errNotRunnable
 	}
 	if m.backlogSlotsUsed(ref.ID) >= b.Settings.MaxRunning {
 		return backlog.RunRef{}, errSlotsFull

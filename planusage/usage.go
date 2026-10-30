@@ -65,6 +65,10 @@ type Usage struct {
 	// default): af injects no status line tap, reads no transcripts, and has no
 	// plan windows, so nothing can be gated on the plan budget.
 	Disabled bool `json:"disabled,omitempty"`
+	// Unavailable is set (with the reason) when the meter could not be read or
+	// written on its last pass: the windows are empty, not stale, so nothing is
+	// gated on a result that no longer reflects the spend.
+	Unavailable string `json:"unavailable,omitempty"`
 	// Metering is set until the first metering pass has finished; the windows
 	// are empty until then.
 	Metering bool `json:"metering,omitempty"`

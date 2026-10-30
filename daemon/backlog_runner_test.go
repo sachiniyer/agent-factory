@@ -513,3 +513,20 @@ func TestItemAccountKeepsARegisteredDefaultSeparateFromTheAmbientIdentity(t *tes
 		t.Fatalf("the ambient identity: %q %v", acct, err)
 	}
 }
+
+// An item the user drafted after the pass chose it is not started by the runner
+// (Codex P2 on #6300); the explicit start of the same item still works.
+func TestAutomaticStartRevalidatesTheItemAtAdmission(t *testing.T) {
+	m, repoID := runnerTestManager(t)
+	queueItem(t, m, repoID, 1)
+	setRunner(t, m, repoID, true, 1)
+	if _, err := m.backlogService().SetItemStatus(backlog.SetItemStatusRequest{RepoID: repoID, ID: 1, Status: backlog.StatusDraft}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByRunner); !errors.Is(err, errNotRunnable) {
+		t.Fatalf("an automatic start of a drafted item: %v", err)
+	}
+	if it := loadItem(t, repoID, 1); len(it.Runs) != 0 {
+		t.Fatalf("the drafted item was started: %+v", it)
+	}
+}
