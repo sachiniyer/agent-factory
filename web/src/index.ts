@@ -113,6 +113,7 @@ import type { DragPayload } from "./layout.js";
 import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
 import { archiveKey, archiveFromSnapshot, archiveNeedsFirstPage, emptyArchive } from "./archive.js";
+import { RouteLookups, settleLookup } from "./route_lookup.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
@@ -617,10 +618,12 @@ function tabSynthOf(list: SessionData[], id: string | null): string[] {
 
 // Resolve only against an authenticated snapshot, never a partially loaded rail.
 let resolvingRoute = false;
+const routeLookups = new RouteLookups();
 let routeSelection: string | null = null;
 const createSelectionIntent = new CreateSelectionIntent();
 function resolveRoute(): void {
   createSelectionIntent.navigate();
+  const ticket = routeLookups.begin();
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -638,7 +641,7 @@ function resolveRoute(): void {
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
     } else if (lookup && route) {
-      void resolveArchivedRoute(route.session);
+      void resolveArchivedRoute(route.session, ticket);
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -655,7 +658,7 @@ function resolveRoute(): void {
  *  by id, adopts it when it is an archived row, and re-runs the route against the
  *  list that now has it. An id the daemon does not know is the same "no such
  *  session" the route reported before the archive became lazy. */
-async function resolveArchivedRoute(id: string): Promise<void> {
+async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
   const tok = token;
   const generation = connectionGeneration;
   let rows: SessionData[] = [];
@@ -668,15 +671,20 @@ async function resolveArchivedRoute(id: string): Promise<void> {
     }
   }
   if (token !== tok || connectionGeneration !== generation) return;
-  const row = rows.find((r) => r.id === id);
-  if (!row) {
-    showTransientNotice("No session with that id in this daemon");
-    replaceRoute(null);
-    return;
-  }
-  optimisticSessions.adopt([row]);
-  applySessions(optimisticSessions.project());
-  resolveRoute();
+  settleLookup(routeLookups, ticket, id, rows, {
+    found: (row) => {
+      optimisticSessions.adopt([row]);
+      applySessions(optimisticSessions.project());
+      resolveRoute();
+    },
+    // The one terminal state of an unknown id: the empty pane (the previous
+    // selection must not linger), one toast, and the URL reset to /.
+    missing: () => {
+      store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      showTransientNotice("No session with that id in this daemon");
+      replaceRoute(null);
+    },
+  });
 }
 
 /** Moves the rail selection to a session by its stable id and puts the keyboard in
