@@ -2488,7 +2488,6 @@
       "web_rpcs: keyed by RPC method -> json field."
     ],
     "requests": {
-<<<<<<< ours
       "SetConfigValueRequest": {
         "tui": {
           "hosts_edit": {
@@ -2539,18 +2538,6 @@
           }
         }
       },
-    "SetBacklogItemStatusRequest": {
-      "cli": {
-        "pr": {
-          "ok": "Set only by the agent's af backlog done --self --pr, which arrives with item sessions in backlog PR 4."
-        },
-        "session_id": {
-          "ok": "Set only by the agent's af backlog done --self, which arrives with item sessions in backlog PR 4."
-        }
-      }
-    },
-=======
->>>>>>> theirs
     "PostBacklogMessageRequest": {
       "cli": {
         "question_id": {
