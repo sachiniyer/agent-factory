@@ -56,6 +56,7 @@ import {
 } from "./layout.js";
 import { fetchEditorPortOrigin, fetchPreviewOrigin, pauseStatusPoll, probeWebTab } from "./api.js";
 import type { HoldAction } from "./delivery_hold.js";
+import { isProposalView, placeNewDocsTabs, showTab } from "./docs_autosplit.js";
 import { mountDocsTab } from "./docs_tab.js";
 import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
@@ -84,6 +85,12 @@ import { TabKind } from "./types.js";
 /** How close (as a fraction of the pane) to an edge the pointer must be for the drop
  *  to split rather than replace — the outer 30% band on each side is an edge zone. */
 const EDGE_BAND = 0.3;
+
+function phoneWidth(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(max-width: 768px)").matches
+    : false;
+}
 
 export interface SplitCallbacks {
   /** The FOCUSED pane's connection state, for the pane-header status line. */
@@ -424,9 +431,17 @@ export class SplitView {
   // tab, so the id is captured at the same moment as the ordinal.
   private lastFocusedTabId = "";
 
+  // Docs tabs already auto-split once this page load, keyed by session and tab
+  // identity, so a split the user closes is not put back.
+  private readonly docsPlaced = new Set<string>();
+  // The divider ratio of each session's proposal view, so the view comes back as
+  // the user left it.
+  private readonly proposalRatios = new Map<string, number>();
+
   constructor(
     private readonly host: HTMLElement,
     private readonly cb: SplitCallbacks,
+    private readonly narrow: () => boolean = phoneWidth,
   ) {}
 
   /**
@@ -492,7 +507,7 @@ export class SplitView {
       // whose tab merely MOVED then finds its identity already matching and is left
       // streaming untouched; only a genuinely replaced tab rebuilds.
       const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds, nextSynth);
-      this.tree = validate(settled, tabCount);
+      this.tree = this.placeDocs(sessionId, validate(settled, tabCount), tabIds, tabKinds);
       // Always re-retain: `ids` must track the roster even when the remap left the
       // tree identical, or the record would claim ordinals were bound against a list
       // that has since moved on — the decay the record exists to prevent.
@@ -536,7 +551,12 @@ export class SplitView {
     // another window's close — now delivered live by #1815) moved the tabs out from
     // under them. validate() alone only clamps a too-high ordinal, so a pane would
     // come back bound to whatever tab slid into its slot.
-    this.tree = validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount);
+    this.tree = this.placeDocs(
+      sessionId,
+      validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount),
+      tabIds,
+      tabKinds,
+    );
     this.retain(sessionId, this.tree, tabIds);
     // Focus the first pane of the newly shown session by default.
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
@@ -586,6 +606,11 @@ export class SplitView {
     return remapByIdentity(rec.tree, rec.ids, tabIds, nextSynth);
   }
 
+  private placeDocs(sessionId: string, tree: LayoutNode, tabIds: string[], tabKinds: number[]): LayoutNode {
+    const key = (identity: string) => `${sessionId}\u0000${identity}`;
+    return placeNewDocsTabs(tree, tabIds, tabKinds, this.docsPlaced, key, this.narrow());
+  }
+
   /** Retains `tree` for `sessionId` together with the identities it is bound against. */
   private retain(sessionId: string, tree: LayoutNode, ids: string[]): void {
     this.trees.set(sessionId, { tree, ids });
@@ -594,11 +619,9 @@ export class SplitView {
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
    *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
   setFocusedTab(tab: number): void {
-    if (!this.tree || !this.focusedId) {
-      return;
+    if (this.showTab(tab)) {
+      this.commit();
     }
-    this.tree = replaceTab(this.tree, this.focusedId, tab);
-    this.commit();
   }
 
   /** setFocusedTab for the post-await apply of an awaited tab mutation
@@ -612,11 +635,22 @@ export class SplitView {
    *  overlapping awaited gestures by issue order, so a stale apply still refuses
    *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
   setFocusedTabAwaited(tab: number): void {
-    if (!this.tree || !this.focusedId) {
-      return;
+    if (this.showTab(tab)) {
+      this.land();
     }
-    this.tree = replaceTab(this.tree, this.focusedId, tab);
-    this.land();
+  }
+
+  /** Applies docs_autosplit's showTab rule to the tree and focus; false without a
+   *  focused pane. */
+  private showTab(tab: number): boolean {
+    if (!this.tree || !this.focusedId) {
+      return false;
+    }
+    const ratio = (this.sessionId && this.proposalRatios.get(this.sessionId)) || 0.5;
+    const next = showTab(this.tree, this.focusedId, tab, this.tabKinds, this.narrow(), ratio);
+    this.tree = next.tree;
+    this.focusedId = next.focus;
+    return true;
   }
 
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
@@ -1712,6 +1746,9 @@ export class SplitView {
         // Persist the final ratio into the retained tree by id.
         if (this.tree) {
           this.tree = setRatio(this.tree, node.id, node.ratio);
+          if (this.sessionId && this.tree.kind === "split" && isProposalView(this.tree, this.tabKinds)) {
+            this.proposalRatios.set(this.sessionId, this.tree.ratio);
+          }
           if (this.sessionId) {
             this.retain(this.sessionId, this.tree, this.tabIds);
           }

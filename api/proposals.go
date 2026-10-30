@@ -42,7 +42,7 @@ var proposalStartCmd = &cobra.Command{
 		"agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and " +
 		"dashes. A doc with no template starts blank; user templates in " +
 		"<AF_HOME>/templates/proposal/<name>.md override the built-in ones. The session gets a " +
-		"Docs tab for the proposal, and \"tab\" names it.",
+		"Proposal tab, and \"tab\" names it.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runProposal(func() (any, error) {
@@ -67,7 +67,7 @@ var proposalAttachCmd = &cobra.Command{
 	Short: "Attach this session to a proposal and print the rules",
 	Long: "Attach the session to an existing proposal and print the rules. A session holds one " +
 		"proposal at a time, so this detaches it from any other. With no slug, print the current " +
-		"proposal and the rules again. The session gets a Docs tab for the proposal when it has " +
+		"proposal and the rules again. The session gets a Proposal tab when it has " +
 		"none, and \"tab\" names it.",
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -91,7 +91,7 @@ var proposalAttachCmd = &cobra.Command{
 var proposalDetachCmd = &cobra.Command{
 	Use:   "detach",
 	Short: "Remove this session's proposal attachment and cursor",
-	Long:  "Remove the session's proposal attachment and cursor, and close its Docs tab for the proposal.",
+	Long:  "Remove the session's proposal attachment and cursor, and close its Proposal tab.",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runProposal(func() (any, error) {

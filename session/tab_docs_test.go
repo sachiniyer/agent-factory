@@ -21,7 +21,7 @@ func TestAddDocsTab_MetadataOnlyWithProposal(t *testing.T) {
 	assert.Equal(t, TabKindDocs, tab.Kind)
 	assert.Equal(t, "auth-rework", tab.Proposal)
 	assert.Nil(t, tab.tmux, "a docs tab has no tmux session")
-	assert.Equal(t, "Docs", TabLabel(tab))
+	assert.Equal(t, "Proposal", TabLabel(tab))
 
 	second, err := inst.AddDocsTab("search-v2", "")
 	require.NoError(t, err)
