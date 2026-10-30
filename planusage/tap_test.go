@@ -2,6 +2,7 @@ package planusage
 
 import (
 	"bytes"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,16 +119,28 @@ func TestTapSurvivesAFailingUserCommand(t *testing.T) {
 func TestAccountForConfigDir(t *testing.T) {
 	h := "/af"
 	for dir, want := range map[string]string{
-		"":                            DefaultAccount,
-		"/home/me/.claude":            DefaultAccount,
-		"/af/accounts/claude/work":    "work",
-		"/af/accounts/claude/work/":   "work",
-		"/af/accounts/codex/work":     DefaultAccount,
-		"/af/accounts/claude/default": DefaultAccount,
+		"":                          DefaultAccount,
+		"/home/me/.claude":          DefaultAccount,
+		"/af/accounts/claude/work":  "work",
+		"/af/accounts/claude/work/": "work",
+		"/af/accounts/codex/work":   DefaultAccount,
+		// A registered account named "default" is its own identity, not the
+		// ambient one (Codex P2 on #6299/#6300): the ambient key can never be a
+		// valid account name.
+		"/af/accounts/claude/default": "default",
 	} {
 		if got := AccountForConfigDir(h, dir); got != want {
 			t.Errorf("%q: %q", dir, got)
 		}
+	}
+}
+
+func TestTheAmbientKeyCannotBeARegisteredAccountName(t *testing.T) {
+	if agentaccountNameValid(DefaultAccount) {
+		t.Fatalf("%q is a valid account name, so an account could share the ambient identity's readings and meter", DefaultAccount)
+	}
+	if !agentaccountNameValid("default") {
+		t.Fatal("an account named default must stay legal")
 	}
 }
 
@@ -190,3 +203,5 @@ func TestTapRecordsNothingWhenPlanUsageIsOff(t *testing.T) {
 		t.Fatalf("a reading was stored while plan usage is off: %+v", r)
 	}
 }
+
+func agentaccountNameValid(name string) bool { return agentaccount.ValidateName(name) == nil }
