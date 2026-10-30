@@ -17,6 +17,10 @@ var createBacklogSession = func(m *Manager, ctx context.Context, req CreateSessi
 	return m.CreateSession(ctx, req)
 }
 
+// validateBacklogCreate is the pre-create host check. A package var so tests
+// that stand in for the create need not have an agent installed.
+var validateBacklogCreate = validateCreateFirst
+
 // sendBacklogPrompt sends "continue" to an item's live session.
 var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
 	_, err := m.SendPromptWithStatus(req)
@@ -90,6 +94,14 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 			Prompt:      b.ItemPrompt(it, proposalDir(ref.ID, it)),
 			Backend:     string(session.BackendLocal),
 			BacklogItem: it.ID,
+		}
+		// The host-owned checks `af sessions create` runs (the agent is
+		// installed, tmux exists): fail the start here, with the actionable
+		// message and no run recorded, instead of a session that dies while
+		// waiting for an agent that cannot launch (found in the slice 4
+		// play-test).
+		if err := validateBacklogCreate(create); err != nil {
+			return nil, err
 		}
 		return []int{req.ID}, nil
 	})

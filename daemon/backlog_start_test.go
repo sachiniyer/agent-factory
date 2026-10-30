@@ -17,6 +17,11 @@ func backlogTestManager(t *testing.T) (*Manager, string, string) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
+	// These tests stand in for the session create; no agent is installed on the
+	// runner, so the host preflight is exercised on its own below.
+	prevValidate := validateBacklogCreate
+	validateBacklogCreate = func(CreateSessionRequest) error { return nil }
+	t.Cleanup(func() { validateBacklogCreate = prevValidate })
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	if err != nil {
@@ -109,6 +114,39 @@ func TestStartBacklogItemFailedCreate(t *testing.T) {
 	}
 	if !strings.Contains(it.Thread[0].Text, "no worktree") {
 		t.Fatalf("thread %+v", it.Thread)
+	}
+	if got := m.backlogSlotsUsed(repoID); got != 0 {
+		t.Fatalf("slot leaked: %d", got)
+	}
+}
+
+// A start whose agent cannot launch fails at once with the preflight's message
+// and records no run, instead of creating a session that dies while waiting for
+// the agent (found in the slice 4 play-test).
+func TestStartBacklogItemFailsFastWhenTheHostCheckRefuses(t *testing.T) {
+	m, repoID, repoPath := backlogTestManager(t)
+	validateBacklogCreate = func(CreateSessionRequest) error {
+		return errors.New("Claude Code is not installed or not on PATH")
+	}
+	created := false
+	prev := createBacklogSession
+	createBacklogSession = func(*Manager, context.Context, CreateSessionRequest) (session.InstanceData, error) {
+		created = true
+		return session.InstanceData{}, nil
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	_, err := m.StartBacklogItem(backlog.StartRequest{RepoPath: repoPath, ID: 1}, backlog.StartedByUser)
+	if err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Fatalf("err = %v, want the preflight message", err)
+	}
+	m.backgroundMutationWG.Wait()
+	if created {
+		t.Fatal("a session was created for a start the host check refused")
+	}
+	it := loadItem(t, repoID, 1)
+	if len(it.Runs) != 0 || it.Status != backlog.StatusDraft {
+		t.Fatalf("a refused start left state behind: %+v", it)
 	}
 	if got := m.backlogSlotsUsed(repoID); got != 0 {
 		t.Fatalf("slot leaked: %d", got)
