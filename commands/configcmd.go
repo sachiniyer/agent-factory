@@ -121,6 +121,7 @@ var globalConfigReadOrder = []string{
 	"program_overrides",
 	"default_accounts",
 	"session_env_passthrough",
+	"sandbox_agent_config",
 	"auto_update",
 	"network.listen_addr",
 	"network.require_token",
@@ -138,6 +139,7 @@ var globalConfigReadOrder = []string{
 	"on_archive_command",
 	"move_cmd",
 	"worktree_root",
+	"projects_root",
 	"detach_keys",
 	"update_channel",
 	"upgrade_clear_unverifiable_artifacts",
@@ -501,6 +503,7 @@ Settable keys:
   program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
   session_env_passthrough    compact JSON array of exact environment variable names
+  sandbox_agent_config       compact JSON array of agent:file entries (claude:settings.json, claude:CLAUDE.md, claude:.claude.json, codex:config.toml, codex:AGENTS.md) placed in a sandbox session's account scope
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
   root_agent.enabled         true | false
@@ -540,6 +543,7 @@ Settable keys:
   branch_prefix              string
   on_archive_command         shell command run before a local worktree moves into the archive, or "" to disable
   worktree_root              subdirectory | sibling
+  projects_root              absolute path on the daemon host where af projects add <git-url> clones (default <af home>/projects)
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH

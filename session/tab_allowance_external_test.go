@@ -10,6 +10,19 @@ import (
 // off-box menu contract. Web is admissible because an external HTTPS tab is
 // metadata only: it owns no PTY and starts no process. Every process-backed or
 // worktree-reading kind must remain refused on a machine that cannot serve it.
+func TestTabKindAllowances_OffBoxOffersVSCodeThroughTheHostEditor(t *testing.T) {
+	for _, allowance := range tabKindAllowances(remoteCaps()) {
+		if allowance.Kind == "vscode" {
+			require.True(t, allowance.Allowed, "W5.4: the host runs the editor")
+		}
+	}
+	for _, allowance := range tabKindAllowances(noEditorRemoteCaps()) {
+		if allowance.Kind == "vscode" {
+			require.False(t, allowance.Allowed, "no host editor, no vscode tab")
+		}
+	}
+}
+
 func TestTabKindAllowances_OffBoxOffersOnlyMetadataWeb(t *testing.T) {
 	remote := remoteCaps()
 	projected := make(map[string]TabKindAllowance)
@@ -26,7 +39,6 @@ func TestTabKindAllowances_OffBoxOffersOnlyMetadataWeb(t *testing.T) {
 		name string
 		kind TabKind
 	}{
-		{name: "vscode", kind: TabKindVSCode},
 		{name: "shell", kind: TabKindShell},
 		{name: "process", kind: TabKindProcess},
 		{name: "agent", kind: TabKindAgent},

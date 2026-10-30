@@ -33,7 +33,11 @@ import {
   type RegisteredProject,
   errorText,
   explainConfig,
+  fetchArchivedPage,
   fetchSessionSnapshot,
+  fetchSessionsById,
+  type ArchivedSummary,
+  type SessionSnapshot,
   killSession,
   getConfig,
   isMutationCommittedError,
@@ -94,7 +98,7 @@ import {
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
-import { restoreShortcutFocus } from "./shortcut-focus.js";
+import { shortcutRepeatGuard, tabCreateKey } from "./tab_create.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
 import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, reconcileProject, scopeToProject } from "./project.js";
 import {
@@ -108,6 +112,9 @@ import {
 import type { DragPayload } from "./layout.js";
 import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
+import { archiveKey, archiveFromSnapshot, archiveNeedsFirstPage, emptyArchive } from "./archive.js";
+import { settleLookup } from "./route_lookup.js";
+import { reconcileWindow } from "./archive_window.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
@@ -129,15 +136,15 @@ import type { TerminalStatus } from "./terminal.js";
 import {
   AppShell,
   isActionableSession,
+  isOpenableSession,
   orderedSessions,
   clearLoginDraft,
   renderLogin,
   sessionTabs,
-  canManageTabs,
   restoreRequiresConfirmation,
   isOffBoxWorkspace,
   canMutateTabRoster,
-  canCreateTabKind,
+  offeredNewTabKinds,
   canCloseTabs,
   tabIdentity,
   tabRealId,
@@ -179,6 +186,7 @@ const store = new Store<AppState>({
   connecting: true,
   loginError: null,
   sessions: [],
+  archive: emptyArchive(),
   // No skipped repos until a Snapshot carries the incompleteness channel (#4742);
   // the rail renders no notice in this default state.
   skippedRepos: [],
@@ -331,6 +339,7 @@ function mount(): void {
   // included, so it can interrupt the agent (#2517) — and only the ctrl+] detach
   // chord is swallowed here (stopPropagation) so it never leaks into the PTY.
   document.addEventListener("keydown", onKeydown, true);
+  document.addEventListener("keyup", (e) => tabShortcutRepeat.release(e.code), true);
 
   // Follow the OS theme while the choice is System (redesign PR1).
   watchSystemTheme();
@@ -402,6 +411,7 @@ function rerender(): void {
   routeSelection = state.selectedId;
   shell.update(state, parseRoute(location.hash) !== null);
   syncSplit(state);
+  maybeLoadArchive(state);
 }
 
 /** Validates the token (Snapshot probe), and on success persists it, seeds the rail
@@ -418,9 +428,11 @@ async function connect(candidate: string): Promise<void> {
   let operationClockMs: number | undefined;
   let daemonBootId: string | undefined;
   let skippedRepos: SkippedRepo[] | undefined;
+  let archived: ArchivedSummary | undefined;
   try {
     const snapshot = await fetchSessionSnapshot(candidate);
     sessions = snapshot.sessions;
+    archived = snapshot.archived;
     operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
     operationClockMs = snapshot.operationClockMs;
     daemonBootId = snapshot.daemonBootId;
@@ -501,6 +513,7 @@ async function connect(candidate: string): Promise<void> {
     connecting: false,
     loginError: null,
     sessions,
+    archive: archiveFromSnapshot(emptyArchive(), archived),
     skippedRepos: skippedRepos ?? [],
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
@@ -516,7 +529,7 @@ async function connect(candidate: string): Promise<void> {
   });
   applySessions(sessions, {
     kind: "snapshot", generation: restoreSnapshot,
-    operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
+    operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos, archived,
   }, sessions);
   resolvingRoute = false;
   resolveRoute();
@@ -616,12 +629,18 @@ function resolveRoute(): void {
   }
   const route = parseRoute(location.hash);
   resolvingRoute = true;
+  let lookup = false;
   try {
     const session = route && store.get().sessions.find((s) => s.id === route.session);
+    // The live-only startup snapshot leaves the archive out (#6178): an id it does
+    // not hold may be an archived session, which one read by id settles.
+    lookup = !session && route !== null && store.get().archive.lazy && store.get().archive.total > 0;
     if (session?.id) {
       if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
+    } else if (lookup && route) {
+      void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -629,8 +648,51 @@ function resolveRoute(): void {
   } finally {
     resolvingRoute = false;
     const id = store.get().selectedId;
-    replaceRoute(id ? { session: id } : null);
+    // A pending archived lookup owns the hash until it answers.
+    if (!lookup) replaceRoute(id ? { session: id } : null);
   }
+}
+
+/** Resolves a deep link to a session the live-only snapshot did not hold: reads it
+ *  by id, adopts it when it is an archived row, and re-runs the route against the
+ *  list that now has it. An id the daemon does not know is the same "no such
+ *  session" the route reported before the archive became lazy. */
+async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
+  const tok = token;
+  const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
+  let rows: SessionData[] = [];
+  try {
+    if (tok !== null) rows = await fetchSessionsById(tok, [id]);
+  } catch (e) {
+    if (tok !== null && token === tok && shouldForgetToken(e)) {
+      disconnect(describeError(e), true);
+      return;
+    }
+  }
+  if (token !== tok || connectionGeneration !== generation) return;
+  // The one terminal state of an unknown id: the empty pane (the previous
+  // selection must not linger), one toast, and the URL reset to /.
+  const missing = (): void => {
+    store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+    showTransientNotice("No session with that id in this daemon");
+    replaceRoute(null);
+  };
+  settleLookup(createSelectionIntent, ticket, id, rows, {
+    found: (row) => {
+      if (optimisticSessions.adopt([row], fence).length === 0) {
+        // An event newer than the read refused it. If that event already put the
+        // session in the model, the route resolves against that row; only a row
+        // the model does not hold is genuinely missing (a kill, #6209).
+        if (store.get().sessions.some((s) => s.id === id)) resolveRoute();
+        else missing();
+        return;
+      }
+      applySessions(optimisticSessions.project());
+      resolveRoute();
+    },
+    missing,
+  });
 }
 
 /** Moves the rail selection to a session by its stable id and puts the keyboard in
@@ -684,7 +746,7 @@ function openFromRail(id: string): void {
  *  switchTab already sets focus:"rail" for exactly this reason. */
 function focusTerminal(): void {
   const selected = selectedSessionData();
-  if (!selected || !isActionableSession(selected)) {
+  if (!selected || !isOpenableSession(selected)) {
     // A kill-only startup-unknown row has a stable management target but no
     // confirmed runtime binding. Keep every caller behind the same daemon-owned
     // lifecycle fence as row clicks; focusing whatever SplitView happens to
@@ -1687,7 +1749,7 @@ function guardedTabRebind(
       }
       const {
         sessions, authoritative, generation,
-        operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
+        operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos, archived,
       } = snapshot;
       const targetIdx = resolve(sessions);
       // Read the generation BEFORE committing the roster. The guard asks whether the
@@ -1703,7 +1765,7 @@ function guardedTabRebind(
       // user made during the await (pickSelection keeps their newer choice) — the one
       // input that deliberately does read the committed state.
       applySessions(sessions, {
-        kind: "snapshot", generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
+        kind: "snapshot", generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos, archived,
       }, authoritative);
       // Whether the session this gesture was aimed at survived the round trip. A
       // session killed by another client mid-flight ALSO moves the selection
@@ -1746,6 +1808,11 @@ function guardedTabRebind(
     .catch((e) => surfaceTabError(e));
 }
 
+/** Session+kind creates in flight. The daemon names each CreateTab uniquely, so a
+ *  double-click would otherwise start two shells or VS Code servers. */
+const pendingTabCreates = new Set<string>();
+const tabShortcutRepeat = shortcutRepeatGuard();
+
 /** Creates the tab kind chosen in the New tab menu on the selected session, then
  *  resyncs to pull the grown tab list, selects the new tab, and attaches it —
  *  mirroring the TUI's `t`, which opens the fresh tab as a pane. The resync is
@@ -1760,22 +1827,30 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
   // so a loopback client can still create tabs.
   // Per KIND, not one bool: the daemon answers separately for each, so a session
   // that may open a web tab but not a shell must be offered exactly that (#3060).
-  if (!sel || tok === null || !canCreateTabKind(sel, kind)) {
+  if (!sel || tok === null || !offeredNewTabKinds(sel).includes(kind)) {
+    return;
+  }
+  const selId = sel.id ?? "";
+  const pendingKey = tabCreateKey(connectionGeneration, selId, kind);
+  if (pendingTabCreates.has(pendingKey)) {
     return;
   }
   clearTabError();
-  const selId = sel.id ?? "";
   const create = kind === "vscode" ? createVSCodeTab : createTab;
   // createTab returns the daemon's resolved, collision-suffixed name; hold it so the
   // rebind lands on the tab THIS create made.
   let createdName = "";
   guardedTabRebind(
     selId,
-    () =>
-      create(selId, sel.title, tok).then((name) => {
-        createdName = name;
-        return fetchProjectedSnapshot(tok);
-      }),
+    () => {
+      pendingTabCreates.add(pendingKey);
+      return create(selId, sel.title, tok)
+        .then((name) => {
+          createdName = name;
+          return fetchProjectedSnapshot(tok);
+        })
+        .finally(() => pendingTabCreates.delete(pendingKey));
+    },
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
     // round trip would make it THEIR tab. Resolving the name to its current ordinal in
@@ -1961,6 +2036,7 @@ function renameSessionTab(id: string, name: string, editedSessionId: string): vo
         operationClockMs: snapshot.operationClockMs,
         daemonBootId: snapshot.daemonBootId,
         skippedRepos: snapshot.skippedRepos,
+        archived: snapshot.archived,
       }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
@@ -2009,6 +2085,7 @@ function reorderSessionTab(from: number, to: number): void {
         operationClockMs: snapshot.operationClockMs,
         daemonBootId: snapshot.daemonBootId,
         skippedRepos: snapshot.skippedRepos,
+        archived: snapshot.archived,
       }, snapshot.authoritative);
     })
     .catch((e) => surfaceTabError(e));
@@ -2981,6 +3058,7 @@ const actions = {
   switchProject,
   setStatusFilter,
   resetStatusFilter,
+  loadMoreArchived,
   addTask: openAddTask,
   editTask: openEditTask,
   toggleTask,
@@ -3013,7 +3091,7 @@ function syncSplit(state: AppState): void {
   // so bind SplitView only when the daemon also projected a lifecycle capability.
   // This is the stream-side choke point complement to focusTerminal's keyboard
   // fence: neither merely selecting nor attaching can reuse an uncertain binding.
-  const runtimeSelected = selected && isActionableSession(selected) ? selected : null;
+  const runtimeSelected = selected && isOpenableSession(selected) ? selected : null;
   const runtimeSessionId = runtimeSelected ? selId : null;
   // The ordered tab identities, so the split view can (a) know the live tab count and
   // (b) reject a drop whose drag-time snapshot no longer matches (a mid-drag reorder).
@@ -3065,9 +3143,13 @@ function startStream(tok: string): void {
   stream = new EventStream(tok, {
     onEvent,
     onResync: () => {
+      markArchiveDirty();
       requestResync();
     },
-    onStatus: (s: EventStreamStatus) => store.set({ live: s }),
+    onStatus: (s: EventStreamStatus) => {
+      if (s !== "open") markArchiveDirty();
+      store.set({ live: s });
+    },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
     // Not /v1/auth-info, which says whether a token is required, not whether
@@ -3203,13 +3285,93 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
   // Event deltas (no snapshot evidence) leave skippedRepos untouched — the skip
   // set changes only on a snapshot refresh, so a session.* event never clears it.
   store.set({ sessions, selectedProject, selectedId, activeTab,
-    ...(evidence?.kind === "snapshot" ? { skippedRepos: evidence.skippedRepos ?? [] } : {}),
+    ...(evidence?.kind === "snapshot" ? {
+      skippedRepos: evidence.skippedRepos ?? [],
+      archive: archiveFromSnapshot(store.get().archive, evidence.archived),
+    } : {}),
   });
   // Evidence distinguishes causal completion from delayed updates/cache repaints.
   if (evidence) pendingRestores.observe(authoritative.map(s => ({
     id: s.id, restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
     restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive",
   })), evidence);
+}
+
+/** The snapshot with the archive window folded back in (#6178). The startup and
+ *  resync reads are live-only, so the archived rows the user has already paged in
+ *  are not in them; rebuilding the list from the response alone would drop those
+ *  rows on every resync and the archive would empty itself. They are re-read by id
+ *  rather than kept as they were: a session deleted while this client missed the
+ *  event must not linger, and one restored since is already in the live rows. */
+// Set whenever the stream was not live (or asked for a resync): rows may have been
+// archived or deleted unseen. A reconcile clears it only when its snapshot is applied
+// (clearArchiveDirty), so a response discarded by a fence retries the discovery.
+let archiveDirtyEpoch = 1;
+let archiveCleanEpoch = 0;
+function markArchiveDirty(): void { archiveDirtyEpoch++; }
+function clearArchiveDirty(epoch: number): void { if (epoch > archiveCleanEpoch) archiveCleanEpoch = epoch; }
+
+async function fetchSnapshotWithArchiveWindow(tok: string): Promise<SessionSnapshot & { archiveEpoch: number }> {
+  const epoch = archiveDirtyEpoch;
+  const snapshot = await fetchSessionSnapshot(tok);
+  if (!snapshot.archived) return { ...snapshot, archiveEpoch: epoch };
+  const live = new Set(snapshot.sessions.map((s) => s.id));
+  const archive = store.get().archive;
+  // Reads nothing while the stream stayed live and the counts did not move: a
+  // deletion elsewhere then arrived as an event (adopt fence + event path).
+  const { rows: kept, complete } = await reconcileWindow({
+    held: optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id)),
+    live, archive, summary: snapshot.archived, dirty: epoch > archiveCleanEpoch, isArchived,
+    fetchById: (ids) => fetchSessionsById(tok, ids),
+    fetchPage: (project, before, limit) => fetchArchivedPage(tok, { project, before, limit }),
+  });
+  // A discovery that ran out of pages did not reconcile the window: leave the
+  // dirty mark so the next resync tries again instead of calling it clean.
+  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: complete ? epoch : archiveCleanEpoch };
+}
+
+/** Reads the next page of the selected project's archive, newest first, into the
+ *  rail (#6178). Runs when the archived group is shown and its first page is
+ *  missing (maybeLoadArchive), and from the rail's "Show older" / "Retry" control. */
+async function loadArchivedPage(): Promise<void> {
+  const tok = token;
+  if (tok === null) return;
+  const project = store.get().selectedProject;
+  const key = archiveKey(project);
+  const start = store.get().archive;
+  if (!start.lazy || start.loading || start.cursors[key] === null) return;
+  const generation = connectionGeneration;
+  const before = start.cursors[key] ?? null;
+  store.set({ archive: { ...start, loading: true, error: undefined } });
+  try {
+    // A row an event removed or restored while the read was in flight is refused by
+    // the adopt fence, so no re-read is needed (#6209).
+    const fence = optimisticSessions.snapshotFence();
+    const page = await fetchArchivedPage(tok, { project, before });
+    if (token !== tok || connectionGeneration !== generation) return;
+    optimisticSessions.adopt(page.sessions, fence);
+    applySessions(optimisticSessions.project());
+    const archive = store.get().archive;
+    store.set({ archive: { ...archive, loading: false, cursors: { ...archive.cursors, [key]: page.next } } });
+  } catch (e) {
+    if (token !== tok || connectionGeneration !== generation) return;
+    if (shouldForgetToken(e)) {
+      disconnect(describeError(e), true);
+      return;
+    }
+    store.set({ archive: { ...store.get().archive, loading: false, error: errorText(e) } });
+  }
+}
+
+/** The rail's archive control: the next page, or the retry of a failed read. */
+function loadMoreArchived(): void {
+  void loadArchivedPage();
+}
+
+/** Loads the first archived page once the archived group is on screen. */
+function maybeLoadArchive(state: AppState): void {
+  if (state.phase !== "app" || !state.statusFilter.archived) return;
+  if (archiveNeedsFirstPage(state.archive, state.selectedProject)) queueMicrotask(() => void loadArchivedPage());
 }
 
 /** Tab mutations also fetch full snapshots. Fold those through the same ledger
@@ -3222,6 +3384,7 @@ interface AcceptedSessionSnapshot {
   operationClockMs?: number;
   daemonBootId?: string;
   skippedRepos?: SkippedRepo[];
+  archived?: ArchivedSummary;
 }
 async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnapshot | null> {
   if (token !== tok) return null;
@@ -3232,20 +3395,25 @@ async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnaps
     let operationClockMs: number | undefined;
     let daemonBootId: string | undefined;
     let skippedRepos: SkippedRepo[] | undefined;
+    let archived: ArchivedSummary | undefined;
+    let archiveEpoch = 0;
     const sessions = await optimisticSessions.refresh(async () => {
       // refresh may retry after an intervening event. Carry the issuance stamp
       // and raw rows from the accepted attempt together to the commit site.
       generation = pendingRestores.beginSnapshot();
-      const snapshot = await fetchSessionSnapshot(tok);
+      const snapshot = await fetchSnapshotWithArchiveWindow(tok);
       authoritative = snapshot.sessions;
       operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
       operationClockMs = snapshot.operationClockMs;
       daemonBootId = snapshot.daemonBootId;
       skippedRepos = snapshot.skippedRepos;
+      archived = snapshot.archived;
+      archiveEpoch = snapshot.archiveEpoch;
       return authoritative;
-    });
+    }, () => archived !== undefined);
+    if (sessions !== null) clearArchiveDirty(archiveEpoch);
     return sessions === null ? null : {
-      sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos,
+      sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos, archived,
     };
   } catch (error) {
     // The gesture cannot safely rebind without its post-mutation roster. Keep
@@ -3277,7 +3445,7 @@ function requestResync(): void {
     const eventGeneration = sessionEventGeneration;
     const mutationFence = optimisticSessions.snapshotFence();
     const restoreSnapshot = pendingRestores.beginSnapshot();
-    void fetchSessionSnapshot(tok)
+    void fetchSnapshotWithArchiveWindow(tok)
       .then((snapshot) => {
         const sessions = snapshot.sessions;
         // A stop/reconnect or a newer resync owns the result now.
@@ -3292,7 +3460,7 @@ function requestResync(): void {
           requestResync();
           return;
         }
-        if (!optimisticSessions.snapshot(sessions, mutationFence)) {
+        if (!optimisticSessions.snapshot(sessions, mutationFence, snapshot.archived !== undefined)) {
           requestResync();
           return;
         }
@@ -3302,7 +3470,9 @@ function requestResync(): void {
           operationClockMs: snapshot.operationClockMs,
           daemonBootId: snapshot.daemonBootId,
           skippedRepos: snapshot.skippedRepos,
+          archived: snapshot.archived,
         }, sessions);
+        clearArchiveDirty(snapshot.archiveEpoch);
         // A successful HTTP response is not necessarily authoritative: either fence
         // above can discard it and schedule a replacement. Stamp the stable app root
         // only after the winning response reaches the store, giving black-box clients
@@ -3362,6 +3532,11 @@ function isNativeControl(el: HTMLElement | null): boolean {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  if (tabShortcutRepeat.swallow(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   const state = store.get();
   if (state.phase !== "app") {
     return;
@@ -3385,7 +3560,7 @@ function onKeydown(e: KeyboardEvent): void {
   // stale, so we never honor terminal mode without a live, visible pane. The pure state
   // machine (nav.ts) decides the rest; index.ts only performs the effect.
   const selected = selectedSessionData();
-  const actionableSelected = selected && isActionableSession(selected) ? selected : null;
+  const actionableSelected = selected && isOpenableSession(selected) ? selected : null;
   const focus: KeyboardFocus =
     state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
   // The selected session's tab shape drives the nav-mode tab keys (1-9 / t / w).
@@ -3409,18 +3584,20 @@ function onKeydown(e: KeyboardEvent): void {
         // daemon's lifecycle capability, exactly like pointer-open. A kill-only
         // startup-unknown row remains visible/removable but cannot become a pane
         // target through j/k.
-        .filter(isActionableSession)
+        .filter(isOpenableSession)
         .map((s) => s.id),
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      newTabKinds: actionableSelected
+        ? offeredNewTabKinds(actionableSelected)
+        : [],
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
       tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false,
     },
-    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") },
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey, meta: e.metaKey },
   );
   if (action.kind === "none") {
     // Not ours — including Escape while a terminal is focused, which now FORWARDS to
@@ -3453,18 +3630,12 @@ function onKeydown(e: KeyboardEvent): void {
       if (shell) shell.switchTab(action.index);
       else switchTab(action.index);
       break;
-    case "newTab": {
-      const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      shell?.openNewTabPicker(() => {
-        focusRail();
-        // Control+] commonly leaves document.body as the nominal focus target.
-        // Focusing body is a no-op, which can leave the picker item focused after
-        // its hidden ancestors close; the next shortcut is then swallowed as a
-        // native-button key. Give rail navigation a stable DOM focus target.
-        restoreShortcutFocus(navigationTarget, root?.querySelector<HTMLElement>(".af-rail") ?? null);
-      });
+    case "newTab":
+      if (!e.repeat) {
+        tabShortcutRepeat.arm(e.code);
+        createSessionTab(action.tabKind);
+      }
       break;
-    }
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);
       else closeSessionTab(store.get().activeTab);

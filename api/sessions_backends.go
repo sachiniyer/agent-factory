@@ -50,8 +50,9 @@ from the same precondition checks.
 
 An available backend may also carry "callback_unavailable_reason": a create on
 it succeeds but the session gets no af callback, because the daemon cannot mint
-a credential under its current listener/auth posture. It is advisory, not a
-precondition — the session still works, it just cannot call back into af.
+a credential while its dedicated sandbox callback endpoint is not running. It is
+advisory, not a precondition — the session still works, it just cannot call back
+into af.
 
 Example:
   af sessions backends

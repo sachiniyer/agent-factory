@@ -35,57 +35,106 @@ type tabCreateIntent struct {
 	id      string
 	kind    TabKind
 	command string
-	name    string
-	at      time.Time
-	// adopted records that the sweep already put the sandbox's tab on the roster.
-	// The intent stays until the retry consumes it (or it expires), but there is
-	// nothing left for the sweep to do with it.
+	// requested is the caller's requested name (the retry-lookup key); name is
+	// the display name the attempt claimed (used if the sweep adopts the tab).
+	requested string
+	name      string
+	at        time.Time
+	// adopted records that the sweep already put the sandbox's tab on the roster
+	// (the row was already present, or the sweep just appended it). The intent
+	// stays until the retry consumes it (or it expires), but there is nothing
+	// left for the sweep to do with it. It is latched ONLY for an adoption that
+	// actually happened: a spawn refused because the session is inert or a
+	// spawn-block fence is up leaves it false so a later sweep retries, or the
+	// tab the sandbox started would stay untracked after the block clears.
 	adopted bool
 }
 
-func tabIntentKey(kind TabKind, command, requestedName string) string {
-	return TabKindName(kind) + "\x00" + command + "\x00" + requestedName
+// intentKey identifies an intent: the id AND the request shape it was minted
+// for. Every operation on behalf of a request touches only the intent under its
+// own key, whatever its outcome, so a different request that reuses the id can
+// neither read, overwrite nor consume another request's record (#6030).
+func intentKey(id string, kind TabKind, command, requestedName string) string {
+	return id + "\x00" + TabKindName(kind) + "\x00" + command + "\x00" + requestedName
+}
+
+// intentHeldByOtherShapeLocked reports whether id is the recorded identity of an
+// uncertain create for a DIFFERENT request that is still unresolved. An adopted
+// intent is on the roster, where the id collision check judges any conflict. Caller holds i.mu.
+func (i *Instance) intentHeldByOtherShapeLocked(id string, kind TabKind, command, requestedName string) bool {
+	for _, in := range i.tabCreateIntents {
+		if in.id == id && !in.adopted && (in.kind != kind || in.command != command || in.requested != requestedName) &&
+			time.Since(in.at) <= tabIntentTTL {
+			return true
+		}
+	}
+	return false
 }
 
 // intentIDLocked returns the id an uncertain earlier attempt at this exact
-// request minted, or "". Caller holds i.mu.
+// request minted, or "". Intents are kept per minted id, so two same-shape
+// creates whose answers were both lost each keep their own (#6021); a retry
+// takes the oldest one no other attempt is currently re-running, which is how a
+// second retry reaches the second execution rather than joining the first; when
+// every one is being re-run it joins the oldest of those.
+// Caller holds i.mu.
 func (i *Instance) intentIDLocked(kind TabKind, command, requestedName string) string {
-	key := tabIntentKey(kind, command, requestedName)
-	in := i.tabCreateIntents[key]
-	if in == nil {
-		return ""
+	var free, running *tabCreateIntent
+	older := func(a, b *tabCreateIntent) bool {
+		return b == nil || a.at.Before(b.at) || (a.at.Equal(b.at) && a.id < b.id)
 	}
-	if time.Since(in.at) > tabIntentTTL {
-		delete(i.tabCreateIntents, key)
-		return ""
+	for key, in := range i.tabCreateIntents {
+		if time.Since(in.at) > tabIntentTTL {
+			// The replay window is over, but an unadopted intent still names an
+			// execution that may exist: it stays for the sweep to adopt or prove
+			// gone (#6023). It is no longer offered to a retry.
+			if in.adopted {
+				delete(i.tabCreateIntents, key)
+			}
+			continue
+		}
+		if in.kind != kind || in.command != command || in.requested != requestedName {
+			continue
+		}
+		if _, inFlight := i.tabCreateInFlight[in.id]; inFlight {
+			if older(in, running) {
+				running = in
+			}
+		} else if older(in, free) {
+			free = in
+		}
 	}
-	return in.id
+	// A shape with an intent never mints a new id: with none free, the retry
+	// joins an attempt already in flight (and so its one execution) rather than
+	// starting the command again (#6030).
+	switch {
+	case free != nil:
+		return free.id
+	case running != nil:
+		return running.id
+	}
+	return ""
 }
 
-// consumeIntentLocked retires the intent for this request once a create has
-// resolved to id — by a fresh create, or by joining a tab already on the roster
-// (the sweep's adoption). Only the intent that minted id is retired. Caller
-// holds i.mu.
+// consumeIntentLocked retires the intent a create has resolved: the one that
+// minted id for THIS request shape — by a fresh create, a definitive refusal, or
+// joining a tab already on the roster (the sweep's adoption). A different request
+// that merely reused the id (and was refused for it) answers nothing about the
+// original attempt, whose execution may still be running unseen, so its intent
+// stays (#6030). Caller holds i.mu.
 func (i *Instance) consumeIntentLocked(id string, kind TabKind, command, requestedName string) {
-	key := tabIntentKey(kind, command, requestedName)
-	if in := i.tabCreateIntents[key]; in != nil && in.id == id {
-		delete(i.tabCreateIntents, key)
-	}
+	delete(i.tabCreateIntents, intentKey(id, kind, command, requestedName))
 }
 
-// recordIntentLocked keeps id as the identity of this request after an uncertain
+// recordIntentLocked keeps id as the identity of this attempt after an uncertain
 // create. Caller holds i.mu.
 func (i *Instance) recordIntentLocked(id string, kind TabKind, command, requestedName, displayName string) {
 	if i.tabCreateIntents == nil {
 		i.tabCreateIntents = map[string]*tabCreateIntent{}
 	}
-	i.tabCreateIntents[tabIntentKey(kind, command, requestedName)] = &tabCreateIntent{
-		id: id, kind: kind, command: command, name: displayName, at: time.Now(),
+	i.tabCreateIntents[intentKey(id, kind, command, requestedName)] = &tabCreateIntent{
+		id: id, kind: kind, command: command, requested: requestedName, name: displayName, at: time.Now(),
 	}
-}
-
-func (i *Instance) clearIntentLocked(kind TabKind, command, requestedName string) {
-	delete(i.tabCreateIntents, tabIntentKey(kind, command, requestedName))
 }
 
 // createOutcomeUncertain reports whether a failed create leaves the sandbox's
@@ -122,6 +171,19 @@ func (i *Instance) stageRemoteCloseLocked(tab *Tab) *RemoteTabCleanupData {
 	i.pendingRemoteClose = append(i.pendingRemoteClose, h)
 	i.touchLocked()
 	return &h
+}
+
+// dropAdoptedIntentsLocked ends the retry-join window of a tab that is now
+// closed: an adopted intent left behind would point a later request at a closed
+// (or re-created) id. It is applied only once the close is COMMITTED — a close
+// whose commit fails rolls back to exactly the pre-close state, intents
+// included. Caller holds i.mu.
+func (i *Instance) dropAdoptedIntentsLocked(tabID string) {
+	for key, in := range i.tabCreateIntents {
+		if in.id == tabID && in.adopted {
+			delete(i.tabCreateIntents, key)
+		}
+	}
 }
 
 // retireRemoteCloseLocked drops a confirmed pending close. Caller holds i.mu.
@@ -180,7 +242,7 @@ func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 	rs := i.remoteTabServerCachedLocked()
 	work := len(i.pendingRemoteClose) > 0
 	for _, in := range i.tabCreateIntents {
-		if !in.adopted && time.Since(in.at) <= tabIntentTTL {
+		if !in.adopted {
 			work = true
 			break
 		}
@@ -193,6 +255,10 @@ func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 			}
 		}
 	}
+	// Taken ahead of the roster read, and a reason to read it: a row the sandbox
+	// does not hold must be noticed even when nothing else is pending (#5954).
+	rows := i.offBoxPTYRowsLocked()
+	work = work || len(rows) > 0
 	remote := i.capabilitiesLocked().Workspace == WorkspaceRemote
 	hasClient := i.remoteClient != nil
 	i.mu.RUnlock()
@@ -214,15 +280,25 @@ func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 	if !rs.hasFeatureCached(tabAPIFeature) {
 		return false
 	}
+	// Tabs a restart left unknown are retried before the roster is read, so a
+	// rebind this call achieves is what the sweep sees (#6235).
+	restoreChanged := i.retryUnknownTabRestores(rs)
 	roster, err := rs.rc.tabs()
 	if err != nil {
-		return false
+		return restoreChanged
 	}
 	byID := make(map[string]TabData, len(roster))
 	for _, td := range roster {
 		byID[td.ID] = td
 	}
-	changed = i.retryPendingRemoteClose(rs, byID)
+	changed = i.retryPendingRemoteClose(rs, byID) || restoreChanged
+	for _, id := range i.retireLostOffBoxTabs(rows, byID) {
+		// End the stream outside i.mu: a subscriber must see it end, not block on
+		// an id the new sandbox will never serve.
+		rs.closeTabStream(id)
+		changed = true
+		i.markLoadRuntimeReplaced()
+	}
 	rosterChanged, adopted := i.applyOffBoxRoster(byID)
 	for _, id := range adopted {
 		// An adopted replacement may reuse a closed id: lift its terminal mark, as
@@ -276,29 +352,53 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) (changed bool, ado
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	for key, in := range i.tabCreateIntents {
-		if time.Since(in.at) > tabIntentTTL {
+		expired := time.Since(in.at) > tabIntentTTL
+		td, ok := byID[in.id]
+		if expired && !in.adopted && (!ok || td.Command != in.command) {
+			// A roster read that succeeded and lacks the id (or holds another
+			// command under it), past the replay window, proves the execution is
+			// gone or never was: the only point an unresolved intent may be
+			// discarded (#6023).
 			delete(i.tabCreateIntents, key)
 			continue
 		}
-		td, ok := byID[in.id]
-		if !ok || in.adopted {
+		if expired && in.adopted {
+			delete(i.tabCreateIntents, key)
 			continue
 		}
-		if _, have := i.tabIndexByIDLocked(in.id); !have && i.started && i.tabSpawnBlockedLocked() == nil {
+		// Only the intent whose request the sandbox's tab actually is: a different
+		// shape recorded on the same id describes no execution there.
+		if !ok || in.adopted || td.Command != in.command {
+			continue
+		}
+		// Latch adopted ONLY once the row is actually on the daemon roster. A
+		// spawn refused because the session is inert (!started) or a spawn-block
+		// fence is up (tabSpawnBlockedLocked) must NOT latch, or every later sweep
+		// skips the intent (the !in.adopted check in ReconcileOffBoxTabs stops
+		// motivating work too) and the tab the sandbox started is never adopted
+		// even after the block clears — a running command left invisible and
+		// unclosable, and a post-TTL retry that runs it a second time (#5996).
+		//
+		// The intent is NOT retired in either arm: a caller whose create failed
+		// with an unknown outcome retries, and that retry must still resolve to
+		// this id and join the one execution; adoption only makes the join find
+		// it. The retry consumes the intent; the TTL bounds the rest.
+		if _, have := i.tabIndexByIDLocked(in.id); have {
+			in.adopted = true // already on the roster: nothing left for the sweep to do
+		} else if i.started && i.tabSpawnBlockedLocked() == nil {
 			name := uniqueTabNameReserving(i.Tabs, i.tabDisplayClaims, in.name)
 			i.Tabs = append(i.Tabs, &Tab{
 				ID: in.id, Name: name, Kind: in.kind, Command: in.command,
-				Exit: tabExitFromData(td.Exit), gen: td.Gen,
+				Exit: tabExitFromData(td.Exit), gen: td.Gen, sandboxTmux: td.TmuxName,
 			})
 			i.touchLocked()
 			changed = true
 			adopted = append(adopted, in.id)
+			in.adopted = true
 		}
-		// The intent is NOT retired here. A caller whose create failed with an
-		// unknown outcome will retry, and that retry must still resolve to this
-		// id and join the one execution (#5996); adopting the row only makes the
-		// join find it. The retry consumes the intent; the TTL bounds the rest.
-		in.adopted = true
+		// otherwise (row not on the roster and the spawn was refused): leave
+		// adopted false so a later sweep retries the intent once the session is
+		// started and the spawn-block fence has lifted.
 	}
 	for idx, tab := range i.Tabs {
 		if tab.Kind != TabKindProcess || tab.tmux != nil || tab.Exit != nil || tab.gen == "" {

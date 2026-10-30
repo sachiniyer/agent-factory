@@ -27,6 +27,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   check:
@@ -86,6 +87,15 @@ jobs:
     - name: Install zsh
       if: steps.check.outputs.should_release == 'true'
       run: scripts/ci-apt-install.sh zsh
+
+    # Test (macOS) is the only darwin test run and lives on master's pr.yml, which
+    # the preflight below cannot see. Block on a known-red verdict (#5818).
+    - name: Test (macOS) verdict on master
+      if: steps.check.outputs.should_release == 'true'
+      uses: actions/github-script@v8
+      with:
+        script: |
+          await require('./.github/scripts/macos-verdict.js').gateRelease({ github, core, context });
 
     - name: Release preflight
       if: steps.check.outputs.should_release == 'true'

@@ -28,6 +28,10 @@ func (i *Instance) TabAlive(idx int) bool {
 	if rosterTab == nil || !i.StreamsViaAgentServer() {
 		return false
 	}
+	if rosterTab.restoreState != TabRestored {
+		// Unknown or confirmed gone: no server holds the terminal right now.
+		return false
+	}
 	switch rosterTab.Kind {
 	case TabKindAgent, TabKindShell, TabKindProcess:
 		return rosterTab.Exit == nil

@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/projectclone"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -61,6 +64,13 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 	return projects, registryDegraded
 }
 
+// projectSnapshotFetchTimeout bounds the cross-repo snapshot read the project
+// picker and the Projects section make synchronously on the event loop. It is
+// deliberately short — the loop is parked for up to this long — where
+// rebindConflictRefreshTimeout bounds the same fetch off-loop and can afford
+// ten seconds. A var so tests can shrink it.
+var projectSnapshotFetchTimeout = 3 * time.Second
+
 // buildProjectListWithSnapshotStatus is buildProjectList, also reporting whether
 // the picker's cross-repo session snapshot fetch FAILED. The failure is a
 // first-class degraded state, distinct from the registry read's: the union
@@ -72,9 +82,20 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 // destructive consumers of the counts (refreshSidebarProjects) drop it via
 // buildProjectList.
 func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bool) {
-	data, err := allReposSnapshotFetcher(context.Background())
+	// This runs on the bubbletea event loop (Ctrl+P, launch, project switch,
+	// add/delete/rebind completion), and the local daemon transport bounds only
+	// the dial, so a daemon that accepts the connection and never answers would
+	// park Update — key input, repaint and the Ctrl+C hard exit with it — until
+	// the process is killed (#6045). The deadline rides the transport read, and
+	// its expiry lands in the same snapshotDegraded path as any failed fetch.
+	ctx, cancel := context.WithTimeout(context.Background(), projectSnapshotFetchTimeout)
+	defer cancel()
+	data, err := allReposSnapshotFetcher(ctx)
 	snapshotDegraded := false
 	if err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("no answer from the daemon within %s: %w", projectSnapshotFetchTimeout, err)
+		}
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
 		snapshotDegraded = true
 		data = nil
@@ -576,6 +597,20 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // loop. A path that is not a git repository keeps the overlay open with an inline
 // error rather than dismissing the user's typing.
 func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
+	if projectclone.LooksLikeURL(path) {
+		// A git URL (W9.10) is cloned by the DAEMON, on its host, so there is
+		// nothing to probe or switch to here: the project appears in the list
+		// when the registration lands.
+		url := strings.TrimSpace(path)
+		if err := projectclone.Validate(url); err != nil {
+			m.projectPickerOverlay.SetAddError(err.Error())
+			return m, nil
+		}
+		m.closeProjectPicker()
+		return m, func() tea.Msg {
+			return projectAddedMsg{root: url, byURL: true, err: registerProjectURLThroughDaemon(url)}
+		}
+	}
 	if isRemoteTarget() {
 		return m.handleRemoteAddProject(path)
 	}
@@ -624,6 +659,10 @@ func (m *home) addProjectCmd(root string) tea.Cmd {
 // happened; the registration just won't persist for the next launch — and is surfaced
 // as a warning rather than an error box, matching the pre-#2456 best-effort write.
 func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil && msg.byURL && !mutationMayHaveLanded(msg.err) {
+		// Nothing else on screen says the clone failed, and the user waited on it.
+		return m, m.handleError(fmt.Errorf("could not add project %s: %w", msg.root, msg.err))
+	}
 	if msg.err != nil {
 		// A registration that may have landed is re-read rather than assumed
 		// either way (#4824): the Projects section shows it if the daemon

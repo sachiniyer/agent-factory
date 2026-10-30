@@ -446,6 +446,30 @@ func ApplyAccountEnvironment(env []string, command string, account Account) ([]s
 	return scoped, nil
 }
 
+// ScopeAgentServerAccount scopes an account-bound agent-server's already-filtered
+// environment to its account (#5863). The account root is not chosen here: the
+// launch delivered it, so it must be present and non-empty, and it is kept as the
+// ONE identity; every other credential name ApplyAccount removes for this agent is
+// removed (and pinned empty) by the same code, from the same per-agent list. A
+// missing root or an active cloud mode is a refusal, never a launch on whatever
+// identity the host environment holds.
+func ScopeAgentServerAccount(env []string, agent, program string) ([]string, error) {
+	configVar, ok := SupportsAccounts(agent)
+	if !ok {
+		return nil, fmt.Errorf("agent %q does not support multiple accounts", agent)
+	}
+	dir := ""
+	for _, kv := range env {
+		if name, value, found := strings.Cut(kv, "="); found && name == configVar {
+			dir = value
+		}
+	}
+	if strings.TrimSpace(dir) == "" {
+		return nil, fmt.Errorf("account-bound agent-server has no %s", configVar)
+	}
+	return applyAccount(env, program, Account{Name: "session", Agent: agent, Dir: dir}, false)
+}
+
 func applyAccount(env []string, command string, account Account, validateCommand bool) ([]string, error) {
 	configVar, ok := SupportsAccounts(account.Agent)
 	if !ok {

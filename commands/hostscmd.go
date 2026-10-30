@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,6 +49,7 @@ var (
 	errHostsNotReady          = errors.New("the host is saved but not ready to run a session")
 	errHostsCheckHasProblems  = errors.New("one or more hosts are not ready to run a session")
 	errHostsUnreachableOrBusy = errors.New("one or more hosts could not be probed")
+	errHostsCheckIncomplete   = errors.New("one or more hosts answered but not with a recognisable git, tmux and gh report")
 )
 
 var hostsCmd = &cobra.Command{
@@ -118,24 +120,118 @@ func loadGlobalHosts() (map[string]config.HostConfig, string, error) {
 	return hosts, load.Config.DefaultHost, nil
 }
 
-// parseHostDestination splits `[user@]host[:port]` into the entry's fields. A
-// bare IPv6 literal (more than one colon) is a host, not host:port.
+// parseHostDestination splits `[user@]host[:port]`, or an `ssh://[user@]host[:port]`
+// URL, into the entry's fields. The stored host is always the bare hostname or
+// address: brackets around an IPv6 literal are URL syntax, not part of the host
+// (ssh takes `-p 2222 user@2001:db8::1`, which is how af composes its argv), and
+// the port is split out. A bare IPv6 literal without brackets (more than one
+// colon) is a host, not host:port.
 func parseHostDestination(dest string) (config.HostConfig, error) {
+	dest = strings.TrimSpace(dest)
+	if strings.HasPrefix(dest, "ssh://") {
+		return parseSSHURLDestination(dest)
+	}
 	var h config.HostConfig
-	dest = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(dest), "ssh://"), "/")
 	if user, rest, ok := strings.Cut(dest, "@"); ok {
 		h.User, dest = user, rest
 	}
+	dest = strings.TrimSuffix(dest, "/")
+	if strings.HasPrefix(dest, "[") {
+		return finishBracketedHost(h, dest)
+	}
 	if strings.Count(dest, ":") == 1 {
 		host, port, _ := strings.Cut(dest, ":")
-		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
-			return h, fmt.Errorf("the port in %q must be a number from 1 to 65535", dest)
+		n, err := hostPort(port, dest)
+		if err != nil {
+			return h, err
 		}
 		h.Port, dest = n, host
 	}
 	h.Host = dest
 	return h, nil
+}
+
+// finishBracketedHost reads `[address]` or `[address]:port` (no scheme).
+func finishBracketedHost(h config.HostConfig, dest string) (config.HostConfig, error) {
+	end := strings.IndexByte(dest, ']')
+	if end < 0 {
+		return h, fmt.Errorf("%q has an opening [ with no closing ]", dest)
+	}
+	h.Host = dest[1:end]
+	switch rest := dest[end+1:]; {
+	case rest == "":
+	case strings.HasPrefix(rest, ":"):
+		n, err := hostPort(rest[1:], dest)
+		if err != nil {
+			return h, err
+		}
+		h.Port = n
+	default:
+		return h, fmt.Errorf("%q: only a :port may follow the closing ]", dest)
+	}
+	return h, nil
+}
+
+// parseSSHURLDestination parses an ssh:// URL with net/url, which owns the
+// bracketed-IPv6 and port rules.
+func parseSSHURLDestination(dest string) (config.HostConfig, error) {
+	var h config.HostConfig
+	if err := refuseUnbracketedIPv6URL(dest); err != nil {
+		return h, err
+	}
+	u, err := url.Parse(dest)
+	if err != nil {
+		return h, fmt.Errorf("%q is not a valid ssh:// URL: %w", dest, err)
+	}
+	if u.Path != "" && u.Path != "/" || u.RawQuery != "" || u.Fragment != "" {
+		return h, fmt.Errorf("%q: an ssh:// destination is [user@]host[:port], with no path, query or fragment", dest)
+	}
+	if u.User != nil {
+		if _, hasPassword := u.User.Password(); hasPassword {
+			return h, fmt.Errorf("%q: put no password in a host destination; ssh authenticates with keys", dest)
+		}
+		h.User = u.User.Username()
+	}
+	h.Host = u.Hostname()
+	if port := u.Port(); port != "" {
+		n, err := hostPort(port, dest)
+		if err != nil {
+			return h, err
+		}
+		h.Port = n
+	}
+	return h, nil
+}
+
+// refuseUnbracketedIPv6URL refuses an ssh:// destination whose host part has a
+// colon outside brackets and more than one colon overall. RFC 3986 puts an IPv6
+// literal in brackets, so `ssh://user@2001:db8::1` is not a URL authority:
+// net/url would read the last group as a port and af would save, and probe, a
+// different machine (#6067). Refusing is the only reading that cannot guess
+// wrong. A single colon (`host:port`) is still a port, and the scheme-less
+// `user@2001:db8::1` keeps its documented whole-address reading.
+func refuseUnbracketedIPv6URL(dest string) error {
+	authority := strings.TrimPrefix(dest, "ssh://")
+	if i := strings.IndexAny(authority, "/?#"); i >= 0 {
+		authority = authority[:i]
+	}
+	userinfo := ""
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		userinfo, authority = authority[:i+1], authority[i+1:]
+	}
+	if strings.HasPrefix(authority, "[") || strings.Count(authority, ":") < 2 {
+		return nil
+	}
+	return fmt.Errorf("%q has an IPv6 address outside brackets, which a URL cannot express; "+
+		"put it in brackets and add the port after them, for example ssh://%s[%s]:22", dest, userinfo, authority)
+}
+
+func hostPort(port, dest string) (int, error) {
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return 0, fmt.Errorf("the port in %q must be a number from 1 to 65535", dest)
+	}
+	return n, nil
 }
 
 // applyHostsEdit sends one per-entry edit of the host list to the writer, which
@@ -183,7 +279,8 @@ func hostsEnvelopeError(cmd *cobra.Command, data any, err error, code string) er
 // ordinary failure).
 const (
 	// hostsCodeNotReady: the host is saved, the probe answered, and it cannot run a
-	// session yet (or could not be reached). data carries the probe result.
+	// session yet (or could not be reached, or answered unrecognisably). data
+	// carries the probe result.
 	hostsCodeNotReady = "host_not_ready"
 	// apiproto.ErrorCodeMutationCommitted: the host is saved but a later step (the
 	// default pick, or the probe itself) could not run.
@@ -273,9 +370,13 @@ func describeHost(h config.HostConfig) string {
 	return s
 }
 
-// hostReady reports a probed host that answered, with no blocking problem.
+// hostReady reports a probed host that answered recognisably (git, tmux and gh
+// each gave a recognised answer) with no blocking problem. A reachable host
+// whose probe output was garbled/truncated has Complete false and is unknown,
+// not ready — the same contract doctor honors (#5841). Absent from an older
+// daemon's reply, Complete decodes false, so it too reads as not ready.
 func hostReady(r daemon.HostCheckResult) bool {
-	return r.Probed && r.Reachable && len(r.Problems) == 0
+	return r.Probed && r.Reachable && r.Complete && len(r.Problems) == 0
 }
 
 // renderHostCheck prints one host's probe result and, for anything short of
@@ -297,6 +398,15 @@ func renderHostCheck(w io.Writer, r daemon.HostCheckResult, entry config.HostCon
 			fmt.Fprintf(w, "    fix: %s\n", p)
 		}
 		fmt.Fprintf(w, "    then run `af hosts check %s`\n", r.Name)
+	case !r.Complete:
+		// The host answered something af could not read (truncated/garbled
+		// output, banner or profile noise on a probe line, a broken tmux -V).
+		// That is unknown, never ready — the same arm doctor renders (#5841).
+		fmt.Fprintf(w, "  %s: unknown: the host answered but not with a recognisable git, tmux and gh report", r.Name)
+		if r.Readiness != "" {
+			fmt.Fprintf(w, "; cached state: %s", r.Readiness)
+		}
+		fmt.Fprintf(w, "\n    fix: check that a non-interactive `%s` prints no banner or extra output for a plain command, then run `af hosts check %s`\n", sshRemedyCommand(entry), r.Name)
 	default:
 		fmt.Fprintf(w, "  %s: ready (git, tmux and gh answered)\n", r.Name)
 	}
@@ -374,7 +484,7 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 			fmt.Fprintln(cmd.OutOrStdout(), "no hosts saved; add one with `af hosts add <name> <ssh-destination>`")
 		}
 		hosts, _, _ := hostsLoad()
-		blocked, unreachable := false, false
+		blocked, unreachable, incomplete := false, false, false
 		for _, r := range resp.Hosts {
 			if !hostsJSONFlag {
 				renderHostCheck(cmd.OutOrStdout(), r, hosts[r.Name])
@@ -384,6 +494,10 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 				blocked = true
 			case !r.Probed || !r.Reachable:
 				unreachable = true
+			case !r.Complete:
+				// A reachable, problem-free host whose probe af could not read is
+				// unknown, not a silent exit 0 (#5841).
+				incomplete = true
 			}
 		}
 		var outcome error
@@ -392,6 +506,8 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 			outcome = errHostsCheckHasProblems
 		case unreachable:
 			outcome = errHostsUnreachableOrBusy
+		case incomplete:
+			outcome = errHostsCheckIncomplete
 		}
 		if hostsJSONFlag {
 			// One envelope on stdout: the probe results are the data, and a host

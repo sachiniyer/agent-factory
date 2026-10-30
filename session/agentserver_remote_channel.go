@@ -35,11 +35,23 @@ type remoteClientlessChannel struct {
 	// tabID, when set, addresses the tab by stable id (#5571 W4.4) and tab is
 	// unused: stream dial and repaint both bind the id inside the sandbox.
 	tabID string
+	// route, when set, decides at each dial and repaint what goes on the wire for
+	// the tab this channel was bound to by stable id: the id itself where the
+	// sandbox speaks id addressing, else the SANDBOX's own ordinal for it (never
+	// one from the daemon's roster, which a local reorder changes without the
+	// sandbox). label names the tab in logs.
+	route func() (tab int, tabID string, err error)
+	label string
 
 	mu     sync.Mutex
 	conn   *websocket.Conn
 	ctx    context.Context
 	cancel context.CancelFunc
+	// pr is the reader end of the live capture's pipe. StopCapture closes it so
+	// a readLoop parked in pw.Write for a reader that is gone is released: a
+	// context cancel and a socket close cannot reach a goroutine blocked on an
+	// io.Pipe write.
+	pr *io.PipeReader
 	// remoteSeq is this channel's cursor in the REMOTE broker's ring (#5571
 	// W1.2): the OpHello start seq of the current subscription plus the bytes
 	// it has delivered since. A re-dial sends it as ?since=, so bytes the
@@ -56,6 +68,10 @@ type remoteClientlessChannel struct {
 	dialSeq          uint64
 	helloPending     bool
 	replayContiguous bool
+	// paneReplaced marks the next capture as following a replacement of the
+	// remote pane (an in-place relaunch, #5871): it never claims to replay
+	// history, so the recovery repaint is always owed. Cleared by StopCapture.
+	paneReplaced bool
 	// writeMu serializes SendRaw/Resize writes: coder/websocket allows one
 	// concurrent reader + one writer, but two goroutines writing (an input and a
 	// resize) would race the frame boundary.
@@ -76,7 +92,19 @@ func (c *remoteClientlessChannel) tabLabel() string {
 	if c.tabID != "" {
 		return c.tabID
 	}
+	if c.label != "" {
+		return c.label
+	}
 	return strconv.Itoa(c.tab)
+}
+
+// target is what to put on the wire for this channel right now: a stable id, or
+// (ordinal plane) the sandbox's own ordinal for the tab it is bound to.
+func (c *remoteClientlessChannel) target() (tab int, tabID string, err error) {
+	if c.route != nil {
+		return c.route()
+	}
+	return c.tab, c.tabID, nil
 }
 
 func newRemoteClientlessChannel(rc *remoteAgentClient, tab int) *remoteClientlessChannel {
@@ -102,14 +130,19 @@ func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		return nil, fmt.Errorf("remote clientless capture already started")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	conn, err := c.rc.dialStream(ctx, c.tab, c.tabID, c.remoteSeq)
+	tab, tabID, err := c.target()
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	c.conn, c.ctx, c.cancel = conn, ctx, cancel
-	c.dialSeq, c.helloPending, c.replayContiguous = c.remoteSeq, true, false
+	conn, err := c.rc.dialStream(ctx, tab, tabID, c.remoteSeq)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	pr, pw := io.Pipe()
+	c.conn, c.ctx, c.cancel, c.pr = conn, ctx, cancel, pr
+	c.dialSeq, c.helloPending, c.replayContiguous = c.remoteSeq, true, false
 	go c.readLoop(ctx, conn, pw)
 	return pr, nil
 }
@@ -197,7 +230,19 @@ func (c *remoteClientlessChannel) advanceRemoteSeqLocked(conn *websocket.Conn, d
 func (c *remoteClientlessChannel) ReplaysHistory() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.conn != nil && c.replayContiguous
+	return c.conn != nil && c.replayContiguous && !c.paneReplaced
+}
+
+// PaneReplaced records that the remote pane this channel streams was replaced
+// by a new process (an in-place relaunch). The cursor into the old pane's ring
+// means nothing to the replacement, so the next dial is a live tail, and that
+// capture never reports contiguous history: the broker owes every attached
+// client a repaint of the replacement's screen.
+func (c *remoteClientlessChannel) PaneReplaced() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.remoteSeq = 0
+	c.paneReplaced = true
 }
 
 // StopCapture cancels the read loop and closes the WS, so the broker's read side
@@ -205,12 +250,17 @@ func (c *remoteClientlessChannel) ReplaysHistory() bool {
 func (c *remoteClientlessChannel) StopCapture() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.paneReplaced = false
 	if c.conn == nil {
 		return nil
 	}
 	c.cancel()
 	err := c.conn.Close(websocket.StatusNormalClosure, "")
-	c.conn, c.ctx, c.cancel = nil, nil, nil
+	// Release a readLoop blocked writing PTY output to a reader that will not
+	// read again (the capture is over, or its owner dropped the reader). The
+	// loop then returns and closes its end; it can never outlive the capture.
+	_ = c.pr.Close()
+	c.conn, c.ctx, c.cancel, c.pr = nil, nil, nil, nil
 	return err
 }
 
@@ -254,10 +304,14 @@ func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
 	// repaint lands exactly at any client width (#1688, #5571 W4.2). Against an
 	// agent-server that predates it, the grid call returns the joined screen only
 	// and the repaint stays the screen-only best effort it was.
-	if c.tabID != "" {
-		return c.rc.previewGridByID(c.tabID)
+	tab, tabID, err := c.target()
+	if err != nil {
+		return PaneSnapshot{}, err
 	}
-	return c.rc.previewGrid(c.tab)
+	if tabID != "" {
+		return c.rc.previewGridByID(tabID)
+	}
+	return c.rc.previewGrid(tab)
 }
 
 // activeConn returns the live capture socket and its context, or an error if

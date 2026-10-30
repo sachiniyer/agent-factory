@@ -35,6 +35,33 @@ func (failingPtyFactory) Start(*exec.Cmd) (*os.File, error) {
 	return nil, fmt.Errorf("simulated pty start failure")
 }
 
+// shrinkAfterListPanes is a cmd.Executor that leaves every tmux call at the
+// package's normal bound and tightens tmuxCommandTimeout only once the
+// pty-start-failure cleanup's list-panes (SessionProcessTrees, the last call
+// before the cleanup kill-session) has answered. The old test shrank the bound for
+// the whole of Start, so on a slow macOS runner the up-front has-session probe or
+// the post-failure existence probe could overrun 200ms and Start failed on THAT
+// timeout before reaching the path under test (#5334). Now only the kill-session
+// is on the short deadline. The write happens on Start's goroutine, which is also
+// the one that reads the bound next, so there is no concurrent access.
+type shrinkAfterListPanes struct {
+	cmd.Executor
+	to     time.Duration
+	shrunk bool
+}
+
+func (e *shrinkAfterListPanes) Output(c *exec.Cmd) ([]byte, error) {
+	out, err := e.Executor.Output(c)
+	for _, a := range c.Args {
+		if a == "list-panes" {
+			tmuxCommandTimeout = e.to
+			e.shrunk = true
+			break
+		}
+	}
+	return out, err
+}
+
 // wedgeKillSessionAfterCreateOnPath installs a fake `tmux` on PATH that:
 //   - answers the FIRST has-session "no such session" (exit 1), so Start's up-front
 //     existence gate passes and the create proceeds to ptyFactory.Start;
@@ -92,11 +119,14 @@ func wedgeKillSessionAfterCreateOnPath(t *testing.T) {
 // on a bare, unbounded exec.Command and Start never returned.
 func TestStartPtyFailureCleanupKillSessionIsBounded(t *testing.T) {
 	wedgeKillSessionAfterCreateOnPath(t)
-	shortTmuxTimeout(t, 200*time.Millisecond)
+	// Registers the restore; the executor below lowers the bound just before the
+	// cleanup kill-session, not for the whole of Start.
+	shortTmuxTimeout(t, tmuxCommandTimeout)
+	exe := &shrinkAfterListPanes{Executor: cmd.MakeExecutor(), to: 200 * time.Millisecond}
 	// Pin the `-e` support probe so sessionEnvFlags never runs an unbounded
 	// `tmux -V` against the wedging fake (envmarker.go) — not what this exercises.
 	forceNewSessionEnvMarkers(t, false)
-	ts := NewTmuxSessionWithDeps("wedge-2028-cleanup", "sh", failingPtyFactory{}, cmd.MakeExecutor())
+	ts := NewTmuxSessionWithDeps("wedge-2028-cleanup", "sh", failingPtyFactory{}, exe)
 
 	done := make(chan error, 1)
 	go func() { done <- ts.Start(t.TempDir()) }()
@@ -110,6 +140,9 @@ func TestStartPtyFailureCleanupKillSessionIsBounded(t *testing.T) {
 		// own (timeout) cause to it — it does not replace or swallow the real error.
 		if !strings.Contains(err.Error(), "error starting tmux session") {
 			t.Fatalf("want the pty-start failure surfaced, got %v", err)
+		}
+		if !exe.shrunk {
+			t.Fatalf("the cleanup never reached its list-panes step, so the kill-session bound was not exercised; got %v", err)
 		}
 		if !errors.Is(err, ErrSessionNotStarted) {
 			t.Fatalf("a PtyFactory.Start failure happens before the new-session process begins; got %v", err)

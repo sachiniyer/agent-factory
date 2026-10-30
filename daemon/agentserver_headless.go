@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,6 +51,9 @@ type headlessServer struct {
 	// adopted is set when this server was started over a preserved worktree
 	// (#5571 W8.6); its non-first-time launch respawns the agent there.
 	adopted bool
+	// repoPath is the repository this workspace runs against; with the title it
+	// names the workspace across an agent-server restart (see editorNamespace).
+	repoPath string
 	// as is the single workspace's agent-server — the local in-process
 	// implementation over tmux (same runtime as the daemon's local sessions),
 	// exposed here over the wire.
@@ -80,6 +84,8 @@ type headlessServer struct {
 	// archive collapses concurrent /v1/agent/archive requests onto one in-flight
 	// archive (#2997 finding 2). See singleFlightArchive.
 	archive singleFlightArchive
+	// editor is the workspace's code-server supervisor (W5.4), created on first use.
+	editor agentEditor
 }
 
 // tabKeeper is the tab-roster surface the /v1/agent/tab-* routes bind to
@@ -408,6 +414,14 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		tabs:    instance,
 		title:   opts.Title,
 		events:  newEventsHub(),
+		// The workspace's crash-stable editor identity (#6092): repo + title.
+		repoPath: opts.RepoPath,
+	}
+
+	// A previous agent-server for this workspace may have been killed hard and left
+	// its editor running (#6092); end it now rather than when someone next opens one.
+	if err := hs.acquireEditorNamespace(); err != nil && !errors.Is(err, errEditorWorkspaceBusy) {
+		log.WarningLog.Printf("agent-server: sweeping a previous server's editor: %v", err)
 	}
 
 	// The bearer token this server expects comes from a 0600 file beside this
@@ -470,6 +484,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// tmux session or worktree is orphaned. Durability of in-progress work is the
 	// driving daemon's job (archive = push branch, epic §5), not the agent-server's.
 	_ = closeTCP.close()
+	if err := hs.stopEditor(); err != nil {
+		log.WarningLog.Printf("agent-server: workspace editor teardown on shutdown: %v", err)
+	}
 	if err := hs.shutdownWorkspace(); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
@@ -492,6 +509,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// dispatch (rpcHandler: POST-only, {data,error} envelope, 400/413/500 mapping).
 	mux.HandleFunc("/v1/agent/provision", rpcHandler(hs.Provision))
 	mux.HandleFunc("/v1/agent/launch", rpcHandler(hs.Launch))
+	mux.HandleFunc("/v1/agent/restore-tabs", rpcHandler(hs.RestoreTabs))
 	mux.HandleFunc("/v1/agent/expose", rpcHandler(hs.Expose))
 	mux.HandleFunc("/v1/agent/snapshot", rpcHandler(hs.Snapshot))
 	mux.HandleFunc("/v1/agent/preview", rpcHandler(hs.Preview))
@@ -507,6 +525,8 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// W7.1: stop the agent and start it again in this workspace, resuming the
 	// provider's conversation. Advertised as the "relaunch" feature.
 	mux.HandleFunc("/v1/agent/relaunch", rpcHandler(hs.Relaunch))
+	mux.HandleFunc(agentproto.EditorPath, rpcHandler(hs.Editor))
+	mux.HandleFunc(agentproto.EditorStopPath, rpcHandler(hs.EditorStop))
 	// W7.5: swap the agent for another in this workspace. Advertised as the
 	// "agent-swap" feature.
 	mux.HandleFunc("/v1/agent/swap-agent", rpcHandler(hs.SwapAgent))
@@ -520,6 +540,8 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/tab-create", rpcHandler(hs.TabCreate))
 	mux.HandleFunc("/v1/agent/tab-close", rpcHandler(hs.TabClose))
 	mux.HandleFunc("/v1/agent/tabs", rpcHandler(hs.Tabs))
+	// #5997: the daemon names the agent tab. Advertised as "agent-tab-id".
+	mux.HandleFunc("/v1/agent/agent-tab-id", rpcHandler(hs.AgentTabID))
 
 	// WS data plane — same paths, same broker, same wire as the daemon (§1.1: all
 	// over the same routes the daemon mux already serves).
@@ -551,15 +573,28 @@ var agentServerWireFeatures = []string{
 	// "tab-id-addressing": ?tab_id= on the WS stream and tab_id on preview —
 	// the id-addressed data plane (ws_pty.go's bindTab picks the binding).
 	"tab-id-addressing",
+	// "agent-tab-id": POST /v1/agent/agent-tab-id — the daemon tells the sandbox
+	// which stable id its agent tab carries, so the agent tab is addressed by id
+	// like every other tab (#5997).
+	session.AgentTabIDFeature,
 	// "relaunch": POST /v1/agent/relaunch — stop the agent and start it again
 	// in this workspace with the provider's resume (#5571 W7.1).
 	session.RelaunchFeature,
+	// "editor": POST /v1/agent/editor and /v1/agent/relay?target=editor — the
+	// workspace's own code-server, relayed to the daemon (#5571 W5.4).
+	agentproto.EditorFeature,
 	// "agent-swap": POST /v1/agent/swap-agent — replace the agent with another
 	// in this workspace, resolving the new agent's program on this host (#5571 W7.5).
 	session.SwapAgentFeature,
 	// "account-swap": POST /v1/agent/swap-account — rotate the staged account
 	// scope in and relaunch the agent on it (#5571 W7.6).
 	session.AccountSwapFeature,
+	// "tab-restore": a restart adoption's Launch carries the roster; survivors
+	// are rebound, never re-run (W1.4, #6162).
+	session.TabRestoreFeature,
+	// "tab-restore-retry": POST /v1/agent/restore-tabs, the same rebind on a
+	// running server (#6235).
+	session.TabRestoreRetryFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version
@@ -588,6 +623,13 @@ func (hs *headlessServer) healthHandler(w http.ResponseWriter, r *http.Request) 
 // fresh create materializes the worktree and spawns; a restore reconnects.
 type agentLifecycleRequest struct {
 	FirstTimeSetup bool `json:"first_time_setup"`
+	// RestartAdoption marks the launch that adopts a restarted agent-server's
+	// surviving workspace (W1.4); only it is refused a guessed respawn.
+	RestartAdoption bool `json:"restart_adoption,omitempty"`
+	// SiblingTabs: non-agent tabs the daemon's row records (restart adoption).
+	SiblingTabs int `json:"sibling_tabs,omitempty"`
+	// Tabs: the surviving-tab roster (feature tab-restore).
+	Tabs []session.TabData `json:"tabs,omitempty"`
 	// Conversation is the daemon's recorded conversation for this launch to
 	// resume (#5571 W7.2); honored only where this host's provider store holds it.
 	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
@@ -599,9 +641,15 @@ type agentOKResponse struct {
 	// Conversation is the conversation a launch came up on (#5571 W7.2); the
 	// daemon records it as it does for a local session.
 	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
+	// TabsRestored / TabsGone answer a restart adoption's Tabs.
+	TabsRestored []string `json:"tabs_restored,omitempty"`
+	TabsGone     []string `json:"tabs_gone,omitempty"`
 }
 
 func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResponse) error {
+	if hs.inst != nil && req.SiblingTabs > 0 {
+		hs.inst.SetPersistedSiblingTabs(req.SiblingTabs)
+	}
 	if err := hs.as.Provision(req.FirstTimeSetup); err != nil {
 		return err
 	}
@@ -609,7 +657,14 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 	return nil
 }
 
-func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
+func (hs *headlessServer) launchWorkspace(req agentLifecycleRequest, resp *agentOKResponse) error {
+	// A restore-launch that carries the recorded conversation must not respawn a
+	// vanished agent onto a guessed one (#4797): see RefuseGuessedRespawn.
+	if req.RestartAdoption && !req.FirstTimeSetup && req.Conversation != nil && hs.inst != nil {
+		if err := hs.inst.RefuseGuessedRespawn(*req.Conversation); err != nil {
+			return err
+		}
+	}
 	if hs.adopted && !req.FirstTimeSetup && hs.inst != nil {
 		return hs.launchAdopted(req, resp)
 	}
@@ -845,6 +900,9 @@ func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error 
 }
 
 func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
+	if err := hs.stopEditor(); err != nil {
+		log.WarningLog.Printf("agent-server: workspace editor teardown: %v", err)
+	}
 	if err := hs.as.Kill(false); err != nil {
 		return err
 	}

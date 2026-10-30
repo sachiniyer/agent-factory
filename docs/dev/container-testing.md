@@ -309,12 +309,13 @@ tui-driver` drops you into a live driven session. See
 
 GitHub's `TUI driver selftest` workflow runs the same
 `scripts/testbox.sh selftest` container entry point after TUI-scoped pushes to
-`master` and on manual dispatch. The auto-merger (`.github/auto-merge.md`)
+`master`, on manual dispatch, and on a pull request: `pr.yml` calls it as a
+reusable workflow when the diff touches the TUI surface (see
+[What CI runs where](#what-ci-runs-where)), so on those PRs it is a gate on the
+head. The auto-merger (`.github/auto-merge.md`)
 also re-dispatches it after every later merge because the merger's
 `GITHUB_TOKEN` suppresses push workflows; dispatch intentionally ignores the
-path filter. This #4000 step-1 run is a
-post-merge signal, not a pull-request gate; a failure uploads the driver's
-console transcript from the runner.
+path filter. A failure uploads the driver's console transcript from the runner.
 
 ## `make lifecycle-container` — clean install + upgrade
 
@@ -340,9 +341,9 @@ CI runner leg. See [lifecycle-testing.md](lifecycle-testing.md).
 ## Known limitations
 
 - **No systemd inside** — autostart-unit flows (`af daemon install`) still
-  need CI or careful host testing. It fails outright in the container
-  ("systemctl: executable file not found"), which is why the lifecycle gate
-  SKIPs its supervision assertion here and runs it on the CI runner instead.
+  need CI or careful host testing. It fails outright in the container (no
+  `systemctl`/`loginctl`), which is why the lifecycle gate SKIPs its
+  supervision assertion here and runs it on the CI runner instead.
 - **Network-dependent flows** (`gh`, pushing branches) need an explicitly
   injected token; the sandbox has none by default, which keeps external
   access opt-in and visible.

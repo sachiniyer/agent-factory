@@ -32,6 +32,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   validate:
@@ -69,6 +70,14 @@ jobs:
     # release must not be blocked by a repository it never installs from.
     - name: Install zsh
       run: scripts/ci-apt-install.sh zsh
+
+    # Test (macOS) is the only darwin test run and lives on master's pr.yml, which
+    # the preflight below cannot see. Block on a known-red verdict (#5818).
+    - name: Test (macOS) verdict on master
+      uses: actions/github-script@v8
+      with:
+        script: |
+          await require('./.github/scripts/macos-verdict.js').gateRelease({ github, core, context });
 
     - name: Release preflight
       run: |

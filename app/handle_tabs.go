@@ -196,9 +196,15 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 		return m, m.handleNotice(fmt.Errorf("tab created in %q; it will appear after the next snapshot", selected.Title))
 	}
 	var attachErr error
-	if kind == session.TabKindVSCode {
+	switch {
+	case kind == session.TabKindVSCode:
 		_, attachErr = selected.AttachVSCodeTab(response.Name, response.ID)
-	} else {
+	case selected.Capabilities().Workspace == session.WorkspaceRemote:
+		// The daemon committed the sandbox's shell; this row has no tmux session or
+		// worktree for AttachShellTab to bind, and refusing here would report a
+		// committed create as a failure and invite a retry (#6020).
+		_, attachErr = selected.AttachOffBoxTab(kind, response.Name, response.ID)
+	default:
 		_, attachErr = selected.AttachShellTab(response.Name, response.TmuxName, response.ID)
 	}
 	if attachErr != nil {

@@ -27,9 +27,9 @@ const (
 // independent from a later cleanup that calls t.Fatal (#4160).
 func useRelocationIdentityTimeoutForTest(t *testing.T, compressed time.Duration) {
 	t.Helper()
-	previous := relocationIdentityTimeout
-	relocationIdentityTimeout = scaledRelocationIdentityTestTimeout(compressed, previous)
-	t.Cleanup(func() { relocationIdentityTimeout = previous })
+	previous := relocationIdentityTimeout.Load()
+	relocationIdentityTimeout.Store(scaledRelocationIdentityTestTimeout(compressed, previous))
+	t.Cleanup(func() { relocationIdentityTimeout.Store(previous) })
 }
 
 func scaledRelocationIdentityTestTimeout(compressed, production time.Duration) time.Duration {
@@ -84,6 +84,16 @@ func TestRelocationIdentityTimeoutUsesSharedTestPolicy(t *testing.T) {
 				continue
 			}
 			ast.Inspect(function.Body, func(node ast.Node) bool {
+				// relocationIdentityTimeout is an atomic: a bypass is a direct
+				// reassignment of the variable or a .Store call on it.
+				if call, ok := node.(*ast.CallExpr); ok {
+					if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Store" {
+						if identifier, ok := selector.X.(*ast.Ident); ok && identifier.Name == "relocationIdentityTimeout" {
+							files[name] = true
+						}
+					}
+					return true
+				}
 				assignment, ok := node.(*ast.AssignStmt)
 				if !ok {
 					return true

@@ -271,11 +271,16 @@ and the offending screen.
 The `TUI driver selftest` workflow
 (`.github/workflows/tui-driver-selftest.yml`) runs the same
 `scripts/testbox.sh selftest` entry point on pushes to `master` that touch the
-TUI, its tmux session layer, or the container/driver harness. Auto Gate merges
-with `GITHUB_TOKEN`, which suppresses those push events, so its master-side
-workflow list re-dispatches the selftest after every later merge. Manual and
-gate-raised dispatches always run regardless of changed paths. The roughly
-ten-minute run on each merge is intentional while the signal is measured; the
+TUI, its tmux session layer, or the container/driver harness. The auto-merger
+(`.github/auto-merge.md`) merges a whole batch of PRs before re-dispatching the
+master-side workflow list once for the new head — not after each individual
+merge — and `tui-driver-selftest.yml` is on that list. With the default
+`GITHUB_TOKEN` a merge fires no push event, so the merger dispatches the
+selftest itself; with `AUTO_MERGE_TOKEN` (a PAT that can touch workflows) the
+merge push already fires the workflow, so the merger skips the dispatch.
+Manual and merger-raised dispatches always run regardless of changed paths. The
+roughly ten-minute run on each merge is intentional while the signal is
+measured; the
 runner is free for this public repository. The daemon, TUI, stand-in sessions,
 and private tmux server remain inside the ephemeral testbox container.
 

@@ -38,20 +38,20 @@ func (s *remoteAgentServer) idNative() bool {
 	return native
 }
 
-// nativeFor reports whether tabID should ride the id-native plane. The sandbox
-// knows a tab by the id the daemon supplied at create (W4.5), but the AGENT tab
-// is seeded independently on each side — the daemon's newRemoteAgentTab and the
-// sandbox's newAgentTab mint different random ids — so an agent-tab id sent
-// natively would be ErrTabGone on the far side. The agent tab is pinned to
-// ordinal 0 on both rosters and can neither close nor reorder, so the ordinal
-// bridge is exact for it until the two ids are reconciled.
+// nativeFor reports whether tabID should ride the id-native plane. Every tab is
+// known to the sandbox by the id the daemon supplied; the agent tab is too once
+// the sandbox has been told its id (#5997, agentTabNative). Only an agent-server
+// that predates the "agent-tab-id" feature still has an agent tab it does not
+// know by id, and for that one tab alone the ordinal bridge remains: the agent
+// tab is pinned to slot 0 on both rosters and can neither close nor reorder, so
+// the bridge is exact for it.
 func (s *remoteAgentServer) nativeFor(tabID string) bool {
 	if !s.idNative() {
 		return false
 	}
 	if s.inst != nil {
 		if idx, ok := s.inst.TabIndexByID(tabID); ok && idx == 0 {
-			return false
+			return s.agentTabNative(tabID)
 		}
 	}
 	return true
@@ -103,7 +103,11 @@ func (s *remoteAgentServer) ensureBrokerByID(tabID string) (*ptyBroker, error) {
 	if s.idBrokers == nil {
 		s.idBrokers = make(map[string]*ptyBroker)
 	}
-	br := newPTYBroker(newRemoteIDClientlessChannel(s.rc, tabID))
+	var ch clientlessChannel = newRemoteIDClientlessChannel(s.rc, tabID)
+	if s.idChannel != nil {
+		ch = s.idChannel(tabID)
+	}
+	br := newPTYBroker(ch)
 	s.idBrokers[tabID] = br
 	return br, nil
 }
@@ -119,13 +123,34 @@ func (s *remoteAgentServer) dropBrokerByID(tabID string, br *ptyBroker) {
 	br.close()
 }
 
+// planeFor picks the plane a tab-id operation rides. A tab keeps the plane its
+// LIVE subscriptions are on, however the probe has answered since: a probe that
+// failed (an unknown) is not evidence the tab is not native, and a later
+// confirmed answer must not cut a running stream over to a broker that never
+// opened its capture, which would fail every input and resize with "remote pty
+// stream is not open" (#6076). Only a tab with no live subscription moves to the
+// plane the confirmed answer names; a new subscription on a moved tab starts
+// there, and the old one ends in the ordinary way.
+func (s *remoteAgentServer) planeFor(tabID string) (native bool) {
+	s.mu.Lock()
+	idb, ob := s.idBrokers[tabID], s.ordBound[tabID]
+	s.mu.Unlock()
+	if idb != nil && idb.liveSubscribers() > 0 {
+		return true
+	}
+	if ob != nil && ob.liveSubscribers() > 0 {
+		return false
+	}
+	return s.nativeFor(tabID)
+}
+
 func (s *remoteAgentServer) SubscribeTab(tabID string, since Seq) (PTYSubscription, error) {
-	if !s.nativeFor(tabID) {
-		idx, err := s.ordinalOf(tabID)
+	if !s.planeFor(tabID) {
+		br, err := s.ensureBoundBroker(tabID)
 		if err != nil {
 			return nil, err
 		}
-		return s.Subscribe(idx, since)
+		return br.subscribe(since)
 	}
 	br, err := s.ensureBrokerByID(tabID)
 	if err != nil {
@@ -148,31 +173,29 @@ func (s *remoteAgentServer) InputTab(tabID string, b []byte) error {
 		br  *ptyBroker
 		err error
 	)
-	if s.nativeFor(tabID) {
+	native := s.planeFor(tabID)
+	if native {
 		br, err = s.ensureBrokerByID(tabID)
 	} else {
-		var idx int
-		if idx, err = s.ordinalOf(tabID); err == nil {
-			br, err = s.ensureBroker(idx)
-		}
+		br, err = s.ensureBoundBroker(tabID)
 	}
 	if err != nil {
 		return err
 	}
 	err = br.input(b)
-	if errors.Is(err, ErrTabGone) && s.nativeFor(tabID) {
+	if errors.Is(err, ErrTabGone) && native {
 		s.dropBrokerByID(tabID, br)
 	}
 	return err
 }
 
 func (s *remoteAgentServer) ResizeTab(tabID string, rows, cols uint16) error {
-	if !s.nativeFor(tabID) {
-		idx, err := s.ordinalOf(tabID)
+	if !s.planeFor(tabID) {
+		br, err := s.ensureBoundBroker(tabID)
 		if err != nil {
 			return err
 		}
-		return s.Resize(idx, rows, cols)
+		return br.resize(rows, cols)
 	}
 	br, err := s.ensureBrokerByID(tabID)
 	if err != nil {
@@ -196,11 +219,15 @@ func (s *remoteAgentServer) closeTabStream(tabID string) {
 		s.goneTabs = map[string]bool{}
 	}
 	s.goneTabs[tabID] = true
-	br := s.idBrokers[tabID]
+	br, ob := s.idBrokers[tabID], s.ordBound[tabID]
 	delete(s.idBrokers, tabID)
+	delete(s.ordBound, tabID)
 	s.mu.Unlock()
 	if br != nil {
 		br.close()
+	}
+	if ob != nil {
+		ob.close()
 	}
 }
 

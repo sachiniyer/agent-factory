@@ -140,6 +140,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// nothing else. A repository-chosen [ssh] target never earns it.
 	if listed != nil {
 		spec.AccountSyncHost = hostName
+		spec.AgentConfigFiles = append([]string(nil), cfg.SandboxAgentConfig...)
 	}
 	// BEFORE any remote state exists, and before the host is even contacted: the
 	// resolved agent command must be one af PROVES honours the account scope — the
@@ -284,7 +285,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// Best-effort reap whatever the failed provision left behind. Preserve any
 		// cleanup failure in the returned error: no Instance exists yet to own a
 		// retry handle, so silently dropping it would hide an orphan.
-		return ProvisionResult{}, p.provisionFailure(err)
+		return p.failedProvision(err)
 	}
 	res.Backend = &sshBackend{
 		// The command the sandbox's agent-server was bound to launch (#5108) —
@@ -307,6 +308,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			RemoteAddr:         p.remoteAddr,
 			AgentServerVersion: p.agentServerVersion,
 			TokenRef:           p.tokenRef,
+			LaunchScript:       p.launchScript,
 			CallbackRef:        p.callbackRef,
 			CallbackReverse:    p.callbackReverse(),
 		},
@@ -321,6 +323,9 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		c.SessionDir, c.RemotePID = sb.cleanup.SessionDir, sb.cleanup.RemotePID
 		c.RemoteAddr, c.AgentServerVersion, c.TokenRef = sb.cleanup.RemoteAddr, sb.cleanup.AgentServerVersion, sb.cleanup.TokenRef
 		c.CallbackRef, c.CallbackReverse = sb.cleanup.CallbackRef, sb.cleanup.CallbackReverse
+		// The script that started THIS server, not the archived one's: a crash
+		// recovery after the restore must relaunch what is actually running.
+		c.LaunchScript = sb.cleanup.LaunchScript
 		sb.cleanup = &c
 		return res, nil
 	}

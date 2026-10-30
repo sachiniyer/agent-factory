@@ -201,7 +201,7 @@ func TestHookProgressLeaseOpenIsBoundedUnderProgressLock(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("bounded lease error = %v, want deadline exceeded", err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		releaseOnce.Do(func() { close(release) })
 		<-result
 		t.Fatal("stalled lease open retained the progress lock past its bound")

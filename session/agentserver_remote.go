@@ -61,6 +61,9 @@ type remoteAgentServer struct {
 	// holds inst's roster lock across the bounded REST capture (#2200). nil only
 	// for the transport-only NewRemoteAgentServer constructor used by integrations.
 	inst *Instance
+	// restartAdoption is set on the short-lived server a W1.4 restart uses to
+	// adopt the surviving workspace; it rides the Launch request.
+	restartAdoption bool
 	// teardown reaps the off-box workspace AFTER its in-sandbox agent is killed over
 	// REST. nil for an out-of-process `af agent-server` the caller owns. Run
 	// best-effort in Kill so a session kill also removes its sandbox; idempotent
@@ -77,7 +80,16 @@ type remoteAgentServer struct {
 	// the sandbox's tab-id-addressing advertisement.
 	idBrokers map[string]*ptyBroker
 	// goneTabs are ids whose tab closed: terminal for subscriptions (#5963).
-	goneTabs     map[string]bool
+	goneTabs map[string]bool
+	// agentTabSynced is the agent-tab id the sandbox is known to hold (#5997).
+	agentTabSynced string
+	// ordBound holds the brokers of tabs opened through the ordinal plane,
+	// keyed by the stable id they resolved to (agentserver_remote_ordinal.go).
+	ordBound map[string]*ptyBroker
+	// boundChannel and idChannel, when set, replace the remote WS channel a
+	// broker is built over (test seams; production leaves them nil).
+	boundChannel func(tabID string) clientlessChannel
+	idChannel    func(tabID string) clientlessChannel
 	idPlaneKnown bool
 	idPlane      bool
 	features     []string
@@ -139,7 +151,13 @@ func (s *remoteAgentServer) noteAdoption() error {
 }
 
 func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
-	err := s.rc.call("/v1/agent/provision", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup}
+	if s.restartAdoption && s.inst != nil {
+		// The restarted server's fresh instance holds only its agent tab; tell it
+		// how many other tabs the daemon's durable row records (W1.4, #6162).
+		req.SiblingTabs = s.inst.nonAgentTabCount()
+	}
+	err := s.rc.call("/v1/agent/provision", req, nil)
 	if err == nil {
 		s.idNative() // warm the feature advertisement (#5571 W4.5)
 	}
@@ -147,7 +165,13 @@ func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
 }
 
 func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
-	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup}
+	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup, RestartAdoption: s.restartAdoption}
+	if s.restartAdoption && s.inst != nil {
+		// Hand the restarted server the surviving tabs' roster — only if it says it
+		// can rebind them (W1.4, #6162). Otherwise they stay unknown and are
+		// retried later (#6235, #6236).
+		req.Tabs = s.inst.restoreRosterForRestart(s.featureVerdict(tabRestoreFeature))
+	}
 	// Send the recorded conversation so a launch resumes exactly it (#5571 W7.2).
 	// The server resumes it only where its own store still holds it.
 	if s.inst != nil {
@@ -161,6 +185,9 @@ func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
 		s.idNative() // warm the feature advertisement (#5571 W4.5)
 		if s.inst != nil && resp.Conversation != nil {
 			s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
+		}
+		if s.inst != nil && len(req.Tabs) > 0 {
+			s.inst.applyRestoreOutcome(req.Tabs, resp.TabsRestored, resp.TabsGone)
 		}
 	}
 	return err
@@ -277,58 +304,6 @@ func (s *remoteAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryS
 	return resp.Status, nil
 }
 
-// --- data plane: one remote WS per tab, fanned by the shared ptyBroker ---
-
-// ensureBroker lazily builds the ptyBroker for tab `tab`, bound to a remote WS
-// clientlessChannel. Refuses once Kill has latched closed (the #1632 guard): a
-// Subscribe racing teardown must not dial a fresh WS to a sandbox being torn down.
-func (s *remoteAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, fmt.Errorf("remote session %q is being terminated", s.rc.title)
-	}
-	if br := s.brokers[tab]; br != nil {
-		return br, nil
-	}
-	if s.brokers == nil {
-		s.brokers = make(map[int]*ptyBroker)
-	}
-	br := newPTYBroker(newRemoteClientlessChannel(s.rc, tab))
-	s.brokers[tab] = br
-	return br, nil
-}
-
-func (s *remoteAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error) {
-	br, err := s.ensureBroker(tab)
-	if err != nil {
-		return nil, err
-	}
-	return br.subscribe(since)
-}
-
-func (s *remoteAgentServer) Input(tab int, b []byte) error {
-	// The off-box runtime's PTY input path, same reason as the local one (#3865).
-	// It has no InputTab: a remote roster is fixed, so ws_pty.go's id-native
-	// binding never selects this runtime.
-	if err := s.noteAdoption(); err != nil {
-		return err
-	}
-	br, err := s.ensureBroker(tab)
-	if err != nil {
-		return err
-	}
-	return br.input(b)
-}
-
-func (s *remoteAgentServer) Resize(tab int, rows, cols uint16) error {
-	br, err := s.ensureBroker(tab)
-	if err != nil {
-		return err
-	}
-	return br.resize(rows, cols)
-}
-
 // trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
 // StopPreservingWorkspace stops the remote agent and closes this side's data
 // plane without running the runtime teardown, so the workspace stays on its host
@@ -336,15 +311,9 @@ func (s *remoteAgentServer) Resize(tab int, rows, cols uint16) error {
 func (s *remoteAgentServer) StopPreservingWorkspace() error {
 	s.mu.Lock()
 	s.closed = true
-	brokers := s.brokers
-	s.brokers = nil
-	idBrokers := s.idBrokers
-	s.idBrokers = nil
+	all := s.takeBrokersLocked()
 	s.mu.Unlock()
-	for _, br := range brokers {
-		br.close()
-	}
-	for _, br := range idBrokers {
+	for _, br := range all {
 		br.close()
 	}
 	s.closeRelays()
@@ -366,15 +335,9 @@ func (s *remoteAgentServer) Kill(_ bool) error {
 	// racing Subscribe can't resurrect one, then kill the remote workspace over REST.
 	s.mu.Lock()
 	s.closed = true
-	brokers := s.brokers
-	s.brokers = nil
-	idBrokers := s.idBrokers
-	s.idBrokers = nil
+	all := s.takeBrokersLocked()
 	s.mu.Unlock()
-	for _, br := range brokers {
-		br.close()
-	}
-	for _, br := range idBrokers {
+	for _, br := range all {
 		br.close()
 	}
 	s.closeRelays()
@@ -880,11 +843,27 @@ type agentLifecycleReq struct {
 	// Conversation is the daemon's recorded conversation for a launch to resume
 	// (#5571 W7.2). Absent for a first launch and for a pre-field server.
 	Conversation *AgentConversationData `json:"conversation,omitempty"`
+	// RestartAdoption marks the launch that adopts a RESTARTED agent-server's
+	// surviving workspace (W1.4). Only that launch is refused a lazy respawn onto
+	// a guessed conversation; every other restore (an archive restore, a Lost
+	// recovery) keeps resuming the way it always has.
+	RestartAdoption bool `json:"restart_adoption,omitempty"`
+	// SiblingTabs is how many non-agent tabs the daemon's row records, sent with a
+	// restart adoption's Provision so the host can refuse to rebuild under them.
+	SiblingTabs int `json:"sibling_tabs,omitempty"`
+	// Tabs is the roster of off-box shell/process tabs a restarted server should
+	// rebind to their surviving tmux sessions (feature tab-restore, #6162). Sent
+	// only to a server that advertises the feature; the commands in it are never run.
+	Tabs []TabData `json:"tabs,omitempty"`
 }
 
 // agentLaunchResp carries back the conversation the server launched or resumed.
 type agentLaunchResp struct {
 	Conversation *AgentConversationData `json:"conversation,omitempty"`
+	// TabsRestored and TabsGone answer a restart adoption's Tabs: the ids rebound
+	// to a live session, and the ids whose session tmux confirmed absent.
+	TabsRestored []string `json:"tabs_restored,omitempty"`
+	TabsGone     []string `json:"tabs_gone,omitempty"`
 }
 
 type agentSnapshotResp struct {

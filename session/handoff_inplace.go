@@ -246,6 +246,8 @@ func (b *remoteAgentBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	// the outgoing agent and apply its readiness heuristics to the new one. With
 	// no answer the claim is retired rather than left naming an agent that is gone.
 	i.replaceRuntimeProgram(program)
+	// The stored launch script names the agent that was just replaced.
+	i.retireLaunchScript()
 	// A new agent process, same workspace (#4222).
 	i.markAgentRuntimeReplaced(true)
 	return nil

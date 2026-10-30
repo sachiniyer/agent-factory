@@ -3,12 +3,12 @@ package session
 import (
 	"errors"
 	"fmt"
-	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,7 +52,18 @@ func TestMain(m *testing.M) {
 	// developer's real server.
 	restoreTmux := testguard.SandboxTmux()
 	log.Initialize(false)
+	goroutinesBefore := testguard.GoroutineBaseline()
 	code := m.Run()
+	// A product goroutine that outlives the whole package reads package-level state
+	// (a logger, a hook, a resolver) that a later test reassigns, and -race then
+	// blames the LATER test (#6088, and the log-pointer race that followed). Name
+	// the leaker here instead. The ptyBroker capture loops are a known family —
+	// many tests build a broker and never close it — so they are filtered; any
+	// other leaked family fails the package.
+	if leaked := leakedOutsideKnownFamilies(testguard.LeakedGoroutines(goroutinesBefore, 10*time.Second)); len(leaked) > 0 {
+		fmt.Fprintln(os.Stderr, "session tests leaked goroutines:", testguard.FormatLeaks(leaked))
+		code = 1
+	}
 	// The ssh ProxyCommand tests build af once for the whole package
 	// (afRelayBinary), so its temp directory is a package-lifetime resource and
 	// this is the only place that can remove it (#3842).
@@ -121,6 +132,7 @@ func TestBackendCapabilities(t *testing.T) {
 		TerminalTab:      true,
 		InteractiveInput: true,
 		LoopbackRelay:    true,
+		RemoteEditor:     true,
 		Handoff:          false,
 	}
 
@@ -509,9 +521,7 @@ func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 func captureWarningLog(t *testing.T) *logtest.Buffer {
 	t.Helper()
 	var buf logtest.Buffer
-	orig := log.WarningLog
-	log.WarningLog = stdlog.New(&buf, "WARNING: ", 0)
-	t.Cleanup(func() { log.WarningLog = orig })
+	log.CaptureOutput(t, log.WarningLog, "WARNING: ", &buf)
 	return &buf
 }
 
@@ -558,4 +568,26 @@ func writeScript(t *testing.T, dir, name, content string) string {
 	err := os.WriteFile(path, []byte("#!/bin/sh\n"+content), 0755)
 	require.NoError(t, err)
 	return path
+}
+
+// knownLeakedGoroutineFamilies are goroutines tests are known to leave behind.
+// Do not add to this list to silence a new leak: make the test wait for the
+// goroutine (a done channel in t.Cleanup) or inject the state it reads.
+var knownLeakedGoroutineFamilies = []string{
+	"session.(*ptyBroker).readLoop",
+	"session.(*ptyBroker).watchPaneDeath",
+}
+
+func leakedOutsideKnownFamilies(leaked []string) []string {
+	var out []string
+next:
+	for _, stack := range leaked {
+		for _, known := range knownLeakedGoroutineFamilies {
+			if strings.Contains(stack, known) {
+				continue next
+			}
+		}
+		out = append(out, stack)
+	}
+	return out
 }

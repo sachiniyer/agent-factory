@@ -39,7 +39,7 @@ func captureHookProgressPrepareIO() hookProgressPrepareIO {
 		closeFile: func(file *os.File) {
 			closeHookProgressFileWith(file, closeLeaseFile)
 		},
-		timeout: relocationIdentityTimeout,
+		timeout: relocationIdentityTimeout.Load(),
 	}
 }
 
@@ -113,13 +113,13 @@ func boundedDiscardHookProgress(prepared *preparedHookProgress, journal string, 
 		discard(prepared, journal, renamed)
 		close(done)
 	}()
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-done:
 		return nil
 	case <-timer.C:
-		return fmt.Errorf("hook journal rollback exceeded %s: %w", relocationIdentityTimeout, context.DeadlineExceeded)
+		return fmt.Errorf("hook journal rollback exceeded %s: %w", relocationIdentityTimeout.Load(), context.DeadlineExceeded)
 	}
 }
 
@@ -160,7 +160,7 @@ func boundedPrepareHookProgress(run hookRun, commands []string, prefix, generati
 }
 
 func waitForHookProgressPreparation(directory, path string, flight *hookProgressPrepareFlight) (*preparedHookProgress, error) {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -170,7 +170,7 @@ func waitForHookProgressPreparation(directory, path string, flight *hookProgress
 		if hookProgressPrepareFlights.byDirectory[directory] == flight {
 			flight.timedOut = true
 			hookProgressPrepareFlights.Unlock()
-			return nil, fmt.Errorf("timed out after %s while preparing hook journal %s: %w", relocationIdentityTimeout, path, context.DeadlineExceeded)
+			return nil, fmt.Errorf("timed out after %s while preparing hook journal %s: %w", relocationIdentityTimeout.Load(), path, context.DeadlineExceeded)
 		}
 		hookProgressPrepareFlights.Unlock()
 		<-flight.done

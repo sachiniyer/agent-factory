@@ -231,6 +231,12 @@ type Config struct {
 	// daemon's environment. Values are looked up only when a session starts and
 	// are never written to config, argv, or logs.
 	SessionEnvPassthrough []string `json:"session_env_passthrough,omitempty" toml:"session_env_passthrough,omitempty"`
+	// SandboxAgentConfig is the operator's chosen agent personalization to place in
+	// a sandbox session's account scope on a LISTED host (#5571 W7.7): entries of
+	// the form "<agent>:<file>" from a closed set (settings.json, CLAUDE.md,
+	// .claude.json, config.toml, AGENTS.md). Global-only, like sandbox.ssh: a
+	// repository must never choose what af copies off the daemon box or where.
+	SandboxAgentConfig []string `json:"sandbox_agent_config,omitempty" toml:"sandbox_agent_config,omitempty"`
 	// DockerMountAgentCredentials, when true, lets a docker-backend session
 	// bind-mount the daemon user's on-disk credential file for THAT session's
 	// agent (only) read-only into the container, so a containerised agent can
@@ -326,6 +332,12 @@ type Config struct {
 	OnArchiveCommand string `json:"on_archive_command,omitempty" toml:"on_archive_command,omitempty"`
 	// WorktreeRoot controls where new worktrees are created.
 	WorktreeRoot string `json:"worktree_root" toml:"worktree_root"`
+	// ProjectsRoot is the directory on the DAEMON's host under which
+	// `af projects add <git-url>` clones repositories (W9.10). Empty means
+	// <AF home>/projects. Global-only: the daemon creates directories and runs
+	// git there for a possibly-remote caller, so a cloned repository must never
+	// choose where.
+	ProjectsRoot string `json:"projects_root,omitempty" toml:"projects_root,omitempty"`
 	// DetachKeys is the key combination used to detach from an attached session (e.g. "ctrl-w", "ctrl-q").
 	DetachKeys string `json:"detach_keys" toml:"detach_keys"`
 	// UpdateChannel selects which release channel auto-update and

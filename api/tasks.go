@@ -243,11 +243,21 @@ var tasksAddCmd = &cobra.Command{
 		// Route the write through the daemon: it owns scheduling and reloads its
 		// own scheduler/watchers in-process, so no separate reload poke is needed
 		// (#1029 PR 3). The on-disk tasks.json format is unchanged.
-		if err := routedAddTask(s, task.ActorCLI); err != nil {
+		storedID, err := routedAddTask(s, task.ActorCLI)
+		if err != nil {
 			if !apiclient.IsMutationCommitted(err) {
 				return jsonError(fmt.Errorf("failed to add task: %w", err))
 			}
 			warnCommittedTaskMutation(err)
+		}
+		// The id the daemon STORED, not the one this command generated: a daemon
+		// that mints the id (a sandbox credential's add) discards the request's,
+		// and printing the unstored one leaves the caller unable to get or remove
+		// the task (#5890). A committed add whose reload failed names the stored
+		// id on the error itself; only a failure that stored nothing leaves the
+		// generated one, and then there is no task to address.
+		if storedID != "" {
+			id = storedID
 		}
 
 		// Echo the resolved binding, not just the id (#1891). The id alone left

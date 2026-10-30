@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 )
 
 // Off-box shell and process tabs (#5571 W4.5). A sandbox whose agent-server
@@ -21,6 +20,22 @@ func (s *remoteAgentServer) hasFeatureCached(name string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.idPlaneKnown && slices.Contains(s.features, name)
+}
+
+// featureVerdict resolves the advertisement, asking the server once if it has
+// not yet answered. A health fetch that fails leaves the verdict unknown — never
+// absent — so a transient failure is not read as an old server (#6236).
+func (s *remoteAgentServer) featureVerdict(name string) featureVerdict {
+	s.idNative()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case !s.idPlaneKnown:
+		return featureUnknown
+	case slices.Contains(s.features, name):
+		return featurePresent
+	}
+	return featureAbsent
 }
 
 // remoteTabServerCached returns the cached remote agent-server without building
@@ -57,6 +72,10 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 			// could not see keeps its id (#5958): the sandbox's id idempotency
 			// then answers the one execution instead of running the command again.
 			id = i.intentIDLocked(kind, command, requestedName)
+		}
+		if i.intentHeldByOtherShapeLocked(id, kind, command, requestedName) {
+			i.mu.Unlock()
+			return nil, fmt.Errorf("tab id %q is held by an earlier create of a different command whose outcome is unknown; retry that request or use another id", id)
 		}
 		if refused, existing, found := i.tabIDCollisionLocked(id, kind, command); found {
 			// The retry resolved to a tab already on the roster (adopted by the
@@ -126,7 +145,7 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 		if uncertain {
 			i.recordIntentLocked(id, kind, command, requestedName, displayName)
 		} else {
-			i.clearIntentLocked(kind, command, requestedName)
+			i.consumeIntentLocked(id, kind, command, requestedName)
 		}
 		i.mu.Unlock()
 		if uncertain {
@@ -134,18 +153,26 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 		}
 		return nil, fmt.Errorf("failed to create %s tab in the sandbox: %w", TabKindName(kind), err)
 	}
+	// The daemon is the name authority: the sandbox names a tab against its own
+	// roster, which does not hold the daemon's web or other tmux-less tabs, so
+	// adopting its name could duplicate one. The name reserved for this create is
+	// kept, re-derived only if something took it since (#5962).
 	name := displayName
-	if strings.TrimSpace(td.Name) != "" {
-		name = td.Name
-	}
-	tab := &Tab{ID: id, Name: name, Kind: kind, Command: command, Exit: tabExitFromData(td.Exit), gen: td.Gen}
+	tab := &Tab{ID: id, Name: name, Kind: kind, Command: command, Exit: tabExitFromData(td.Exit), gen: td.Gen, sandboxTmux: td.TmuxName}
 
 	i.mu.Lock()
 	stale := !i.started || i.tabSpawnBlockedLocked() != nil
 	colErr, existing, collide := i.tabIDCollisionLocked(id, kind, command)
 	adopt := !stale && !collide
-	i.clearIntentLocked(kind, command, requestedName)
+	i.consumeIntentLocked(id, kind, command, requestedName)
 	if adopt {
+		others := make(map[string]bool, len(i.tabDisplayClaims))
+		for n := range i.tabDisplayClaims {
+			if n != displayName {
+				others[n] = true
+			}
+		}
+		tab.Name = uniqueTabNameReserving(i.Tabs, others, displayName)
 		i.Tabs = append(i.Tabs, tab)
 		i.touchLocked()
 	}
@@ -197,4 +224,27 @@ func (i *Instance) closeOffBoxTab(tab *Tab) error {
 		return fmt.Errorf("failed to close tab %q: %w", tab.Name, err)
 	}
 	return nil
+}
+
+// ReconcileTabManagementSnapshot adopts the daemon's projected tab-management
+// verdict onto a client row, reporting whether it changed. nil (an older daemon)
+// leaves the row's own derivation in force (#5953).
+func (i *Instance) ReconcileTabManagementSnapshot(v *bool) bool {
+	if v == nil {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.projectedTabManagement == *v {
+		return false
+	}
+	// Report a change only when the capability the TUI renders from differs: a
+	// local row already manages tabs, so recording the projection is invisible.
+	before := i.capabilitiesLocked().TabManagement
+	i.projectedTabManagement = *v
+	if i.capabilitiesLocked().TabManagement == before {
+		return false
+	}
+	i.touchLocked()
+	return true
 }

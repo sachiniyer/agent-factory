@@ -40,6 +40,7 @@ import type {
   SessionData,
   SkippedRepo,
   SnapshotResponse,
+  SnapshotCursor,
   TaskData,
   TaskMutationRef,
   TasksResponse,
@@ -308,6 +309,10 @@ export async function af<T>(method: string, body: unknown, token: string, signal
  */
 export interface SessionSnapshot {
   sessions: SessionData[];
+  /** The archived sessions the response leaves out (#6178). Absent when the daemon
+   *  predates the lazy-archive request shape: `sessions` is then the whole list,
+   *  archived rows included, exactly as before. */
+  archived?: ArchivedSummary;
   operationLockTimeoutMs?: number;
   operationClockMs?: number;
   daemonBootId?: string;
@@ -317,15 +322,60 @@ export interface SessionSnapshot {
   skippedRepos?: SkippedRepo[];
 }
 
+/** How many archived sessions the daemon holds, in total and per project root. */
+export interface ArchivedSummary {
+  total: number;
+  byProject: Record<string, number>;
+}
+
+/** Page size for the archived view. */
+export const ARCHIVED_PAGE_SIZE = 50;
+
 export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
-  const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
+  // The first screen needs the live rows; the archive is most of a long-lived
+  // daemon's rows and loads on demand (fetchArchivedPage). A daemon that predates
+  // `lazy_archive` ignores it and answers with every row and no archived_total.
+  const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "", lazy_archive: true }, token);
   return {
     sessions: resp.instances ?? [],
+    archived: resp.archived_total === undefined ? undefined
+      : { total: resp.archived_total, byProject: resp.archived_by_project ?? {} },
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
     operationClockMs: resp.operation_clock_ms,
     daemonBootId: resp.boot_id,
     skippedRepos: resp.skipped_repos,
   };
+}
+
+/** One page of a project's archived sessions, newest first. `next` is the cursor of
+ *  the following page, or null when this was the last. */
+export interface ArchivedPage {
+  sessions: SessionData[];
+  next: SnapshotCursor | null;
+}
+
+export async function fetchArchivedPage(
+  token: string,
+  opts: { project: string | null; before: SnapshotCursor | null; limit?: number },
+): Promise<ArchivedPage> {
+  const resp = await af<SnapshotResponse>("Snapshot", {
+    repo_id: "",
+    statuses: ["archived"],
+    newest_first: true,
+    limit: opts.limit ?? ARCHIVED_PAGE_SIZE,
+    ...(opts.project ? { project_path: opts.project } : {}),
+    ...(opts.before ? { before: opts.before } : {}),
+  }, token);
+  return { sessions: resp.instances ?? [], next: resp.next_before ?? null };
+}
+
+/** The rows with these stable ids, whatever their state: how a deep link to an
+ *  archived session, and the refresh of the already-loaded archive window, read
+ *  rows the live-only startup snapshot left out. */
+export async function fetchSessionsById(token: string, ids: string[]): Promise<SessionData[]> {
+  if (ids.length === 0) return [];
+  const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "", ids }, token);
+  return resp.instances ?? [];
 }
 
 export async function fetchSnapshot(token: string): Promise<SessionData[]> {
@@ -1256,9 +1306,14 @@ function requireTaskID(id: string, action: string): void {
 }
 
 /** Adds a task (mirrors `af tasks add`). The daemon re-validates (trigger, program)
- *  and owns the write; the created task also arrives via a task.created event. */
+ *  and owns the write; the created task also arrives via a task.created event.
+ *  validate_path asks the daemon to check the picked project is still a git repo
+ *  on ITS host (#5859): the select's options are derived from live state, so a
+ *  path gone stale since it was read — a checkout deleted out from under a
+ *  project row — would otherwise save silently and only fail when the task
+ *  fires. The refusal renders in the modal. */
 export async function addTask(task: TaskData, token: string): Promise<void> {
-  await af("AddTask", { task }, token);
+  await af("AddTask", { task, validate_path: true }, token);
 }
 
 /** Builds the project compare-and-swap from the record the caller displayed —
@@ -1281,10 +1336,13 @@ function projectExpectation(task: TaskMutationRef): ProjectExpectation {
  *  (last_run_*, created_at) untouched. Refuses a task with no stable id, before
  *  issuing the request. Takes the DISPLAYED record: the request pins its project
  *  binding, so a task rebound by another client while this pane was stale is
- *  refused rather than patched (#3230). */
+ *  refused rather than patched (#3230). validate_path rides every patch; the
+ *  daemon applies it only when the patch carries project_path — which the edit
+ *  form always sends — so an edit re-checks the submitted repo the same way
+ *  the TUI form's validateForm re-checks it on every save (#5859). */
 export async function updateTask(task: TaskMutationRef, update: TaskUpdate, token: string): Promise<void> {
   requireTaskID(task.id, "update a task");
-  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token);
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task), validate_path: true }, token);
 }
 
 /** Fires a task NOW (mirrors `af tasks trigger`). The daemon runs it through the same

@@ -394,12 +394,19 @@ func verifyStaged(ctx context.Context, worktree string, env []string) error {
 // tracked ones kept, as in the snapshot). CheckTree compares the output.
 func (s *Snapshot) VerifyCommand() string {
 	// Built the way the snapshot was: start from the destination's own index (so
-	// tracked files stay in the set even when they match an ignore rule), then fold
-	// the working tree in with add -A. An empty index would drop every tracked-but-
-	// ignored file and fail a faithful destination.
-	return `d=$(mktemp -d) && idx=$(git rev-parse --path-format=absolute --git-path index) && ` +
+	// tracked files stay in the set even when they match an ignore rule), clear the
+	// assume-unchanged and skip-worktree flags it carries for files present on disk
+	// (they make add -A skip a file the move script changed, so a stale destination
+	// would verify), then fold the working tree in with add -A. A flagged file that
+	// is absent keeps its flag, as in clearHidingFlags: clearing it would stage a
+	// deletion nobody made. Paths travel NUL-terminated end to end (ls-files -z,
+	// xargs -0, update-index -z), so quoting never reaches the shell and the
+	// existence test and the clear see exactly the same list.
+	return `d=$(mktemp -d) && idx=$(git rev-parse --path-format=absolute --git-path index) && top=$(git rev-parse --show-toplevel) && ` +
 		`{ [ ! -f "$idx" ] || cp "$idx" "$d/index"; } && ` +
-		`GIT_INDEX_FILE="$d/index" git add -A && GIT_INDEX_FILE="$d/index" git write-tree; rc=$?; rm -rf "$d"; exit $rc`
+		`{ cd "$top" && git ls-files -v -z | xargs -0 sh -c 'for l in "$@"; do case "$l" in [a-zS]\ *) p=${l#??}; if [ -e "$p" ] || [ -L "$p" ]; then printf "%s\0" "$p"; fi;; esac; done' sh > "$d/hidden"; } && ` +
+		`export GIT_INDEX_FILE="$d/index" && git update-index --no-assume-unchanged -z --stdin < "$d/hidden" && git update-index --no-skip-worktree -z --stdin < "$d/hidden" && ` +
+		`git add -A && git write-tree; rc=$?; rm -rf "$d"; exit $rc`
 }
 
 // CheckTree reports whether got, the output of VerifyCommand at the destination,

@@ -58,7 +58,7 @@ Working style:
   stays restorable. Use `af sessions kill` only when you explicitly mean to
   permanently destroy the session and prune its owned branch. Don't let sessions
   accumulate.
-- Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
+- Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`. `TMUX_TMPDIR` alone is not isolation: inside an af pane `$TMUX` is set and tmux addresses that server, so `TMUX_TMPDIR=… tmux kill-server` kills the production server (2026-10-29, #6180). Isolation is `env -u TMUX tmux -S <your own socket>`; print `#{pid}` and `#{socket_path}` before any `kill-server`.
 - Before opening a PR run the **cheap local checks** — `gofmt -l .`,
   `go build ./...`, `go vet ./...`, `golangci-lint run --timeout=3m --fast`,
   `scripts/lint-file-length.sh` — and, when the diff touches a generated-docs
@@ -223,6 +223,8 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
 - `schedule/` — UI-agnostic schedule model behind the task pickers (preset shapes ↔ cron expressions)
 - `quota/` — usage-limit evidence and account selection for limited sessions
+- `proposal/` — proposal store: per-project folders of markdown docs a user and agent sessions edit together, backed by a private git repo under the AF home
+- `move/` — moving a live local worktree session to a sandbox: worktree snapshot, the `move_cmd` contract, all-or-nothing orchestration
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, session monitor, control-socket RPCs, autostart unit
 - `preflight/` — pre-launch checks (tmux presence, agent command executables)
 - `doctor/` — `af doctor` diagnostics and verified `--fix` remediations
@@ -233,6 +235,7 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `log/` — logging
 - `internal/` — implementation-only helper packages (af home, autoupdate, ssh relay, program privacy, redaction, test guards, …)
 - `design/` — design tokens and the style-guide template (generator inputs for web/ui/doc CSS)
+- `plugins/` — generated per-agent plugin packagings of the `agent-factory` skill (gen-docs output — do not hand-edit)
 - `scripts/` — dev/CI scripts (gen-docs.sh, lint-file-length.sh, container harnesses, tmux scenario drivers)
 - `docs/` — documentation (remote hooks, etc.)
 - `examples/` — example configurations

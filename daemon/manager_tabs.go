@@ -23,9 +23,13 @@ import (
 // and restoreLocalTabs reconnects it by exact name on reload) so it survives a
 // daemon/af restart — Sachin's hard #930 requirement. Off-box
 // instances have no daemon-side worktree from which to spawn a process, shell
-// or vscode tab, so RefuseTabKind refuses those kinds there; the kinds it
-// admits there are web tabs on an external target (#3062) and docs tabs,
-// which spawn nothing. Also
+// or vscode tab, so admission there follows the instance's capabilities
+// (Instance.Capabilities / Capabilities.RefuseTabKind), not a fixed roster:
+// docs tabs are always admitted; web tabs on an external target are admitted,
+// and on a loopback target only where the runtime has LoopbackRelay (current
+// off-box runtimes do); shell and process tabs are admitted only when
+// TabManagement is on, which an agent-server lifts by advertising "tab-api"
+// (#5571 W4.5) — otherwise they are refused. Also
 // rejected for an empty command; there has been no tab-count cap since #3023.
 func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// An empty kind is the default (shell-or-process, per req.Shell), not a kind;
@@ -325,17 +329,28 @@ func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (st
 		// Stop before removing the last durable UI retry handle. An unknown result
 		// leaves the tab intact so the user can retry instead of orphaning an editor.
 		vscodeKey = daemonInstanceKey(repoID, title)
+		m.stopRemoteEditor(instance)
 		if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 			return "", fmt.Errorf("cannot close the last VS Code tab because editor teardown could not be confirmed: %w", err)
 		}
 	}
 
+	// Nothing below may call a locking Instance method from inside the commit
+	// callback (it runs under instance.mu), so the remote stop is resolved here.
+	stopRemote := func() {}
+	if lastVSCode {
+		stopRemote = m.remoteEditorStopper(instance)
+	}
 	committed, err := instance.CloseTabByIDWithCommit(targetID, func(staged session.InstanceData) error {
 		// A proxy that resolved the tab before the first stop can still reach
 		// editor admission without the session op-lock. Sweep again while the
 		// roster is staged but before committing it. An unknown result makes the
 		// transaction restore the exact tab, preserving its durable retry handle.
 		if lastVSCode {
+			// A remote start in flight when the first stop ran can have finished
+			// since (#6089); stop it again before the tab is gone for good.
+			// Resolved before this callback: it runs under instance.mu.
+			stopRemote()
 			if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 				return fmt.Errorf("final editor teardown stayed unknown: %w", err)
 			}

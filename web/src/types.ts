@@ -130,8 +130,19 @@ export const Status = {
  * only present for a LimitReached row with a known reset time (omitzero on a
  * time.Time, mirroring the TabExitData.at precedent).
  */
+/** Where a session runs (#5571 W6.4); additive, derived by the daemon per snapshot. */
+export interface Placement {
+  kind: "local" | "remote";
+  host?: string;
+  backend?: string;
+  /** Workspace directory: the worktree locally, the host directory for ssh/sandbox. */
+  location?: string;
+}
+
 export interface SessionData {
   id?: string;
+  /** Absent on a daemon that predates W6.4; surfaces then show nothing extra. */
+  placement?: Placement;
   title: string;
   branch: string;
   path?: string;
@@ -321,6 +332,20 @@ export interface SnapshotResponse {
 	 *  (omitempty on the Go side) when no repo was skipped, which is every healthy
 	 *  startup, so the rail renders nothing extra in the steady state. */
 	skipped_repos?: SkippedRepo[];
+	/** Archived rows in the request's repo scope, present only when the request set
+	 *  `lazy_archive` AND the daemon understands it (#6178). Its absence on such a
+	 *  request means the daemon predates the shape and `instances` is the whole list. */
+	archived_total?: number;
+	/** Those archived rows per worktree repo path (the key projects are grouped by). */
+	archived_by_project?: Record<string, number>;
+	/** Resume position after a `limit`-bounded newest-first listing; absent on the last page. */
+	next_before?: SnapshotCursor;
+}
+
+/** A position in a newest-first listing (daemon SnapshotCursor). */
+export interface SnapshotCursor {
+	created_at: string;
+	id: string;
 }
 
 /** One repo the daemon could not load sessions for at startup

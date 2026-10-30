@@ -6598,6 +6598,9 @@ function rowStatus(s) {
 function isWorking(s) {
   return rowStatus(s).kind === null;
 }
+function hasInFlightOp(s) {
+  return (s.in_flight_op ?? InFlightOp.None) !== InFlightOp.None;
+}
 function isCreating(s) {
   return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
 }
@@ -6802,6 +6805,24 @@ function formatLimitReset(reset, now) {
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
 }
+function placementShort(s) {
+  const p = s.placement;
+  if (!p || p.kind !== "remote") return "";
+  return p.host || p.backend || "";
+}
+function placementDetail(s) {
+  const p = s.placement;
+  if (!p) return "";
+  const parts = [];
+  if (p.kind === "remote") {
+    parts.push(placementShort(s));
+    if (p.host && p.backend) parts.push(p.backend);
+  } else {
+    parts.push("local");
+  }
+  if (p.location) parts.push(p.location);
+  return parts.filter(Boolean).join(" \xB7 ");
+}
 
 // src/backends.ts
 var HOST_VALUE_PREFIX = "host:";
@@ -6994,15 +7015,33 @@ async function af(method, body, token2, signal) {
   }
   return env?.data;
 }
+var ARCHIVED_PAGE_SIZE = 50;
 async function fetchSessionSnapshot(token2) {
-  const resp = await af("Snapshot", { repo_id: "" }, token2);
+  const resp = await af("Snapshot", { repo_id: "", lazy_archive: true }, token2);
   return {
     sessions: resp.instances ?? [],
+    archived: resp.archived_total === void 0 ? void 0 : { total: resp.archived_total, byProject: resp.archived_by_project ?? {} },
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
     operationClockMs: resp.operation_clock_ms,
     daemonBootId: resp.boot_id,
     skippedRepos: resp.skipped_repos
   };
+}
+async function fetchArchivedPage(token2, opts) {
+  const resp = await af("Snapshot", {
+    repo_id: "",
+    statuses: ["archived"],
+    newest_first: true,
+    limit: opts.limit ?? ARCHIVED_PAGE_SIZE,
+    ...opts.project ? { project_path: opts.project } : {},
+    ...opts.before ? { before: opts.before } : {}
+  }, token2);
+  return { sessions: resp.instances ?? [], next: resp.next_before ?? null };
+}
+async function fetchSessionsById(token2, ids) {
+  if (ids.length === 0) return [];
+  const resp = await af("Snapshot", { repo_id: "", ids }, token2);
+  return resp.instances ?? [];
 }
 async function probeAuthRequired() {
   let resp;
@@ -7310,14 +7349,14 @@ function requireTaskID(id, action) {
   }
 }
 async function addTask(task, token2) {
-  await af("AddTask", { task }, token2);
+  await af("AddTask", { task, validate_path: true }, token2);
 }
 function projectExpectation(task) {
   return { enforce: true, project_path: task.project_path ?? "" };
 }
 async function updateTask(task, update, token2) {
   requireTaskID(task.id, "update a task");
-  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token2);
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task), validate_path: true }, token2);
 }
 async function triggerTask(task, token2) {
   requireTaskID(task.id, "trigger a task");
@@ -7445,8 +7484,10 @@ function decideKey(key, ctx, mods = {}) {
       }
       return { kind: "none" };
     }
-    if (key === "t") {
-      return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
+    if (key === "t" || key === "T") {
+      if (mods.ctrl || mods.meta || mods.alt) return { kind: "none" };
+      const tabKind = mods.shift ?? key === "T" ? "vscode" : "shell";
+      return ctx.newTabKinds.includes(tabKind) ? { kind: "newTab", tabKind } : { kind: "none" };
     }
     if (key === "w") {
       return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
@@ -7863,8 +7904,21 @@ function sessionFirstComposition(moves) {
     }
   } };
 }
+function applyTerminalTitle(el2, title) {
+  el2.textContent = title;
+  el2.title = title;
+  el2.setAttribute("aria-label", title);
+}
+function applyTerminalPlacement(el2, detail, remote) {
+  const shown = remote && detail !== "";
+  el2.hidden = !shown;
+  el2.textContent = shown ? detail : "";
+  el2.title = shown ? `Where this session runs: ${detail}` : "";
+}
 function terminalChrome(opts) {
-  const menu = actionsDisclosure();
+  const menu = actionsDisclosure("More session actions");
+  menu.trigger.replaceChildren(icon("ellipsis"));
+  menu.trigger.title = "More session actions";
   const action = (label, className, run) => {
     const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
     button.addEventListener("click", () => {
@@ -7873,13 +7927,36 @@ function terminalChrome(opts) {
     });
     return button;
   };
-  const title = h("span", { class: "af-term-title", title: opts.title }, opts.title);
-  title.setAttribute("aria-label", opts.title);
+  const newTabButton = (kind, label, glyph, name) => {
+    const button = h(
+      "button",
+      { type: "button", class: `af-ghost af-term-action af-term-new af-term-new-${kind}`, title: name },
+      icon(glyph),
+      h("span", { class: "af-term-new-label" }, label)
+    );
+    button.setAttribute("aria-label", name);
+    button.hidden = true;
+    button.addEventListener("mousedown", (event) => {
+      if (event.detail > 1) event.preventDefault();
+    });
+    button.addEventListener("click", (event) => {
+      if (event.detail > 1) return;
+      menu.close();
+      button.blur();
+      opts.newTab(kind);
+    });
+    return button;
+  };
+  const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
+  const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
+  const newTabs = h("div", { class: "af-term-new-group" }, newTerminal, newVSCode);
+  const title = h("span", { class: "af-term-title" });
+  applyTerminalTitle(title, opts.title);
+  const placement = h("span", { class: "af-term-placement" });
+  applyTerminalPlacement(placement, opts.placement?.detail ?? "", opts.placement?.remote ?? false);
   const titleBox = h("div", { class: "af-term-head-main" }, title, h("span", { class: "af-term-title-separator", ariaHidden: "true" }, " \xB7 "));
   const tabs = h("div", { class: "af-tabbar", role: "tablist" });
   tabs.setAttribute("aria-label", "Session tabs");
-  const keyboard = h("span", { class: "af-term-keyboard" }, "Keyboard");
-  keyboard.hidden = true;
   const actions2 = h("div", { class: "af-term-actions" });
   actions2.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
@@ -7889,37 +7966,32 @@ function terminalChrome(opts) {
   deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
-  const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
-  copy.title = "Copy link";
-  copy.setAttribute("aria-label", "Copy link");
-  const desktopCopy = action("", "af-copy-link af-copy-link-desktop", opts.copyLink);
-  desktopCopy.append(icon("link"));
-  desktopCopy.title = "Copy link";
-  desktopCopy.setAttribute("aria-label", "Copy link");
+  const copy = action("Copy link", "af-copy-link", opts.copyLink);
+  copy.title = "Copy link to this session";
   const fontDecrease = action("A\u2212", "af-term-zoom", () => opts.fontSizeStep?.(-1));
   fontDecrease.title = "Decrease terminal text size";
   fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
   const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
   fontIncrease.title = "Increase terminal text size";
   fontIncrease.setAttribute("aria-label", "Increase terminal text size");
-  const newTabSlot = h("div", { class: "af-term-new-slot" });
+  const tabUnavailable = h("span", { class: "af-tab-new-unavailable" });
+  tabUnavailable.hidden = true;
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, fontDecrease, fontIncrease, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, fontDecrease, fontIncrease, retry, menu.el);
+  return { head, title, placement, tabs, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
   const label = h("span", { class: "af-pane-label" });
-  const keyboard = h("span", { class: "af-pane-keyboard" }, "Keyboard");
   const close = h("button", { type: "button", class: "af-pane-close", title: "Hide pane" }, icon("x"));
   close.setAttribute("aria-label", "Hide pane");
   close.addEventListener("click", (event) => {
     event.stopPropagation();
     onClose();
   });
-  return { head: h("div", { class: "af-pane-head" }, glyph, label, keyboard, close), glyph, label };
+  return { head: h("div", { class: "af-pane-head" }, glyph, label, close), glyph, label };
 }
 function terminalSurface(container, palette) {
   const style = getComputedStyle(container);
@@ -8452,6 +8524,7 @@ var ConfigPane = class {
     const explainFocusedKey = active instanceof HTMLElement && active.classList.contains("af-config-explain-trigger") ? active.getAttribute("data-key") : null;
     const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
     const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
+    const saveFocusedKey = active instanceof HTMLButtonElement && active.closest(".af-config-list") !== null && active.classList.contains("af-config-save") ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -8476,6 +8549,10 @@ var ConfigPane = class {
           focusedConfigTextCaret.end ?? focusedConfigTextCaret.start
         );
       }
+    } else if (saveFocusedKey !== null) {
+      this.el.querySelector(
+        `.af-config-list [aria-label="${CSS.escape(saveFocusedKey)}"]`
+      )?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -11818,7 +11895,9 @@ var AttachTerminal = class {
       if (this.stopped) {
         return;
       }
-      this.fitVisibleHost();
+      if (!this.fitVisibleHost()) {
+        this.scheduleVisibleFit();
+      }
     }, RESIZE_DEBOUNCE_MS);
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
@@ -13374,22 +13453,26 @@ var InstallAffordance = class {
   }
 };
 
-// src/shortcut-focus.ts
-function restoreShortcutFocus(navigationTarget, rail) {
-  if (navigationTarget?.isConnected && navigationTarget !== document.body) {
-    navigationTarget.focus({ preventScroll: true });
-  }
-  if (document.activeElement === navigationTarget && navigationTarget !== document.body) {
-    return;
-  }
-  if (rail) {
-    rail.tabIndex = -1;
-    rail.focus({ preventScroll: true });
-    if (document.activeElement === rail) {
-      return;
+// src/tab_create.ts
+function tabCreateKey(generation, sessionId, kind) {
+  return `${generation}\0${sessionId}\0${kind}`;
+}
+function shortcutRepeatGuard() {
+  let held = null;
+  return {
+    arm(code) {
+      held = code;
+    },
+    release(code) {
+      if (held === code) held = null;
+    },
+    swallow(e) {
+      if (held !== e.code) return false;
+      if (e.repeat) return true;
+      held = null;
+      return false;
     }
-  }
-  document.activeElement?.blur();
+  };
 }
 
 // src/filter.ts
@@ -13920,6 +14003,7 @@ function adoptedSynthIdentities(prevIds, ids, nextSynth) {
   const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
   const isNewReal = (id) => id !== "" && !isSynth(id) && !prevIds.includes(id);
   const adopted = /* @__PURE__ */ new Set();
+  const fallback = /* @__PURE__ */ new Set();
   const vanished = new Set(prevIds.filter((id) => id !== "" && isSynth(id) && !ids.includes(id)));
   const unpaired = /* @__PURE__ */ new Set();
   ids.forEach((id, i) => {
@@ -13946,11 +14030,11 @@ function adoptedSynthIdentities(prevIds, ids, nextSynth) {
   for (const id of prevIds) {
     if (shared.has(id)) {
       key = id;
-    } else if (vanished.has(id) && gapOfNew.has(key)) {
-      adopted.add(id);
+    } else if (vanished.has(id) && !adopted.has(id) && gapOfNew.has(key)) {
+      fallback.add(id);
     }
   }
-  return adopted;
+  return { exact: adopted, fallback };
 }
 function remapByIdentity(root2, prevIds, ids, nextSynth) {
   if (prevIds.length === 0) {
@@ -13984,7 +14068,8 @@ function remapByIdentity(root2, prevIds, ids, nextSynth) {
   const max = ids.length - 1;
   const maxLeaf = leaves(cur).find((l) => l.tab === max) ?? null;
   if (maxLeaf) {
-    const adopted = adoptedSynthIdentities(prevIds, ids, nextSynth);
+    const { exact, fallback } = adoptedSynthIdentities(prevIds, ids, nextSynth);
+    const adopted = /* @__PURE__ */ new Set([...exact, ...fallback]);
     const deadIdentity = (tab) => {
       const prev = prevIds[tab];
       if (prev === void 0 || prev === "") {
@@ -13992,8 +14077,10 @@ function remapByIdentity(root2, prevIds, ids, nextSynth) {
       }
       return !isSynth(prev) || !adopted.has(prev);
     };
+    const exactHolderAtMax = moved.has(maxLeaf.id) || exact.has(prevIds[maxLeaf.tab] ?? "");
+    const tentative = (tab) => fallback.has(prevIds[tab] ?? "");
     for (const leaf of leaves(cur)) {
-      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+      if (!moved.has(leaf.id) && leaf.tab >= ids.length && (deadIdentity(leaf.tab) || exactHolderAtMax && tentative(leaf.tab))) {
         cur = closeLeaf(cur, leaf.id) ?? cur;
       }
     }
@@ -15446,6 +15533,117 @@ var SplitView = class {
   }
 };
 
+// src/archive.ts
+function emptyArchive() {
+  return { lazy: false, total: 0, byProject: {}, cursors: {}, loading: false };
+}
+function archiveFromSnapshot(previous, summary) {
+  if (!summary) return emptyArchive();
+  return { ...previous, lazy: true, total: summary.total, byProject: summary.byProject };
+}
+function archiveKey(project) {
+  return project ?? "";
+}
+function archivedCount(archive, project, scoped) {
+  const loaded = scoped.reduce((n, s) => n + (isArchived(s) ? 1 : 0), 0);
+  if (!archive.lazy) return loaded;
+  const known = project ? archive.byProject[project] ?? 0 : archive.total;
+  return Math.max(known, loaded);
+}
+function railKindCounts(archive, project, scoped) {
+  const counts = kindCounts(scoped);
+  counts.archived = archivedCount(archive, project, scoped);
+  return counts;
+}
+function archiveHasMore(archive, project) {
+  return archive.lazy && archive.cursors[archiveKey(project)] != null;
+}
+function archiveNeedsFirstPage(archive, project) {
+  if (!archive.lazy || archive.loading || archive.error) return false;
+  const key = archiveKey(project);
+  if (archive.cursors[key] !== void 0) return false;
+  return (project ? archive.byProject[project] ?? 0 : archive.total) > 0;
+}
+
+// src/route_lookup.ts
+function settleLookup(intent, ticket, id, rows, effects) {
+  if (!intent.isCurrent(ticket)) return "stale";
+  const row = rows.find((r) => r.id === id);
+  if (!row) {
+    effects.missing();
+    return "missing";
+  }
+  effects.found(row);
+  return "found";
+}
+
+// src/archive_window.ts
+var REREAD_BATCH = 500;
+var DISCOVERY_PAGE = 200;
+async function rereadHeld(ids, fetchById) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += REREAD_BATCH) {
+    out.push(...await fetchById(ids.slice(i, i + REREAD_BATCH)));
+  }
+  return out;
+}
+function aheadOfCursor(row, cursor) {
+  const order = compareTimestamps(row.created_at ?? "", cursor.created_at);
+  if (order === null) return true;
+  if (order !== 0) return order > 0;
+  return (row.id ?? "") > cursor.id;
+}
+function compareTimestamps(a, b) {
+  const split = (s) => ({
+    sec: Date.parse(s.replace(/\.\d+/, "")),
+    frac: (/\.(\d+)/.exec(s)?.[1] ?? "").padEnd(9, "0")
+  });
+  const x = split(a);
+  const y = split(b);
+  if (Number.isNaN(x.sec) || Number.isNaN(y.sec)) return null;
+  if (x.sec !== y.sec) return x.sec > y.sec ? 1 : -1;
+  if (x.frac === y.frac) return 0;
+  return x.frac > y.frac ? 1 : -1;
+}
+async function discoverHead(cursor, fetchPage, maxPages) {
+  const rows = [];
+  let before = null;
+  for (let page = 0; page < maxPages; page++) {
+    const got = await fetchPage(before, DISCOVERY_PAGE);
+    rows.push(...got.sessions);
+    if (got.next === null || got.sessions.length === 0) return { rows, complete: true };
+    const last = got.sessions[got.sessions.length - 1];
+    if (cursor !== null && !aheadOfCursor(last, cursor)) return { rows, complete: true };
+    before = got.next;
+  }
+  return { rows, complete: false };
+}
+function discoveryNeeded(dirty, previous, next) {
+  if (dirty || previous.total !== next.total) return true;
+  const keys = /* @__PURE__ */ new Set([...Object.keys(previous.byProject), ...Object.keys(next.byProject)]);
+  for (const k of keys) if ((previous.byProject[k] ?? 0) !== (next.byProject[k] ?? 0)) return true;
+  return false;
+}
+async function reconcileWindow(i) {
+  const byId = new Map(i.held.map((s) => [s.id ?? "", s]));
+  if (!discoveryNeeded(i.dirty, i.archive, i.summary)) return { rows: [...byId.values()], complete: true };
+  byId.clear();
+  const keep = (row) => {
+    if (i.isArchived(row) && !i.live.has(row.id)) byId.set(row.id ?? "", row);
+  };
+  let complete = true;
+  for (const row of await rereadHeld(i.held.flatMap((s) => s.id ? [s.id] : []), i.fetchById)) keep(row);
+  for (const [key, cursor] of Object.entries(i.archive.cursors)) {
+    if (cursor === void 0) continue;
+    const project = key === "" ? null : key;
+    const maxPages = Math.ceil(i.summary.total / DISCOVERY_PAGE) + 2;
+    const found = await discoverHead(cursor, (before, limit) => i.fetchPage(project, before, limit), maxPages);
+    for (const row of found.rows) keep(row);
+    if (!found.complete) complete = false;
+  }
+  return { rows: [...byId.values()], complete };
+}
+
 // src/pending_restores.ts
 var RESTORE_ADMISSION_MARGIN_MS = 1e3;
 var RESTORE_RECONCILE_RETRY_MIN_MS = 2e3;
@@ -15699,14 +15897,35 @@ var OptimisticSessions = class {
   snapshotFence() {
     return this.revision;
   }
-  snapshot(sessions, fence) {
+  /** The one door for archive rows read outside a snapshot (an archived page, a
+   *  deep-linked session, #6206-#6209). `fence` is `snapshotFence()` captured BEFORE
+   *  the read. A row is adopted only if no session event for it is newer than the
+   *  fence: a deletion or kill that arrived while the read was in flight beats the
+   *  stale row, in either arrival order. Adopting anything advances the revision, so
+   *  a snapshot fetched before the adopt fails its own fence and is re-requested
+   *  rather than overwriting the rows. A row already known is replaced in place.
+   *  Returns the rows actually adopted. */
+  adopt(rows, fence) {
+    const taken = rows.filter((row) => {
+      const seen = this.sessionEvents.get(sessionKey(row));
+      return !seen || seen.revision <= fence;
+    });
+    if (taken.length === 0) return taken;
+    for (const row of taken) this.authoritative = upsertSession(this.authoritative, row);
+    this.revision++;
+    return taken;
+  }
+  /** `leftLiveSet`: the snapshot was live-only, so a row ABSENT from it may have
+   *  been archived rather than killed (#6178); an archive request is then settled by
+   *  its absence, as a full snapshot settled it by the row's archived liveness. */
+  snapshot(sessions, fence, leftLiveSet = false) {
     if (fence !== this.revision) return false;
     this.authoritative = sessions;
     this.revision++;
     for (const [key, op] of this.pending) {
       if (op.kind !== "create" && op.row.id) {
         const target = sessions.find((row) => row.id === op.row.id);
-        if (op.kind === "kill" && !target || op.kind === "archive" && target?.liveness === Liveness.Archived) op.confirmed = true;
+        if (op.kind === "kill" && !target || op.kind === "archive" && (target?.liveness === Liveness.Archived || leftLiveSet && !target)) op.confirmed = true;
       }
       if (op.acknowledged) this.pending.delete(key);
     }
@@ -15715,7 +15934,7 @@ var OptimisticSessions = class {
   /** A tab mutation requires a snapshot accepted after its RPC. Never return
    * the old projection when events cross that request; retry a bounded number
    * of times and cancel silently when this connection no longer owns the work. */
-  async refresh(fetch2) {
+  async refresh(fetch2, leftLiveSet = () => false) {
     const epoch = this.epoch;
     for (let attempt = 0; attempt < 3; attempt++) {
       const fence = this.snapshotFence();
@@ -15727,7 +15946,7 @@ var OptimisticSessions = class {
         throw error;
       }
       if (epoch !== this.epoch) return null;
-      if (this.snapshot(sessions, fence)) return this.project();
+      if (this.snapshot(sessions, fence, leftLiveSet())) return this.project();
     }
     throw new Error("Could not refresh sessions after the operation because they kept changing. Check the session before trying again.");
   }
@@ -15849,6 +16068,11 @@ var CreateSelectionIntent = class {
   }
   submit() {
     return ++this.generation;
+  }
+  /** The generation now: a by-id route lookup (#6204) takes it and applies its answer
+   *  only while isCurrent, so ANY navigation or selection since supersedes it. */
+  snapshot() {
+    return this.generation;
   }
   isCurrent(intent) {
     return intent === this.generation;
@@ -16861,8 +17085,9 @@ function taskFormModal(opts) {
   hostSelect.setAttribute("aria-describedby", hostHint.id);
   const keepHost = opts.seed?.host ?? "";
   let hostOptions = [];
+  let hostTouched = false;
   const renderHosts = () => {
-    const previous = hostSelect.value || keepHost;
+    const previous = hostSelection(hostTouched, hostSelect.value, keepHost);
     hostSelect.replaceChildren(h("option", { value: "" }, "Repo backend"));
     for (const o of hostOptions) {
       const opt = h("option", { value: o.name }, o.status === "available" ? o.name : `${o.name} \u2014 unavailable`);
@@ -16880,7 +17105,10 @@ function taskFormModal(opts) {
   const hostField = field("Host", hostSelect);
   hostField.append(hostHint);
   renderHosts();
-  hostSelect.addEventListener("change", renderHosts);
+  hostSelect.addEventListener("change", () => {
+    hostTouched = true;
+    renderHosts();
+  });
   let hostSeq = 0;
   const loadHostsFor = (repoPath) => {
     const seq = ++hostSeq;
@@ -17036,6 +17264,9 @@ function editTaskModal(projects, task, callbacks) {
     onSubmit: callbacks.onSubmit,
     onCancel: callbacks.onCancel
   });
+}
+function hostSelection(touched, current, seed) {
+  return touched ? current : seed;
 }
 
 // src/project-menu-focus.ts
@@ -17336,6 +17567,12 @@ function skippedRepoRepairHint(reason) {
 function isActionableSession(s) {
   return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
 }
+function isOpenableSession(s) {
+  if (isActionableSession(s)) {
+    return true;
+  }
+  return s.is_root === true && typeof s.id === "string" && s.id !== "" && !hasInFlightOp(s) && s.user_killed !== true && s.startup_state_unknown !== true && s.pending_account_swap === void 0 && !s.unreachable;
+}
 function retryActionForSession(s) {
   if (isPendingManualHandoffDeliveryUnconfirmed(s) || isPendingAgentHandoffDeliveryUnconfirmed(s)) {
     return {
@@ -17407,6 +17644,10 @@ function canMutateTabRoster(s) {
 }
 function canCloseTabs(s) {
   return canMutateTabRoster(s);
+}
+function offeredNewTabKinds(s) {
+  if (tabCreationUnavailableReason(s) !== null) return [];
+  return NEW_TAB_MENU_KINDS.filter((kind) => canCreateTabKind(s, kind));
 }
 function tabCreationUnavailableReason(s) {
   const projected = s.tab_kinds;
@@ -17659,9 +17900,10 @@ var AppShell = class {
     this.navToggle.addEventListener("click", () => this.toggleNav());
     this.appControls = appbarControls([
       ...this.installEl ? [this.installEl] : []
-    ], this.phone, this.captureNewTabCancelReturn, () => {
-      const slot = this.terminalChrome?.newTabSlot;
-      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
+    ], this.phone, () => {
+    }, () => {
+      const panel = this.terminalChrome?.menu.panel;
+      if (panel && this.appControls.panel.contains(panel)) this.terminalChrome?.menu.dismiss();
     }, () => this.projectSwitchBtn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
     const header = h(
@@ -17774,7 +18016,6 @@ var AppShell = class {
   // and focused kind are both too coarse: switching between same-kind panes must
   // still invalidate carried actions, while viewport-only recomposition must not.
   sessionComposition = null;
-  newTabPickerPosition = null;
   phoneSyncQueued = false;
   schedulePhoneSync = () => {
     if (this.phoneSyncQueued) return;
@@ -17786,22 +18027,7 @@ var AppShell = class {
   };
   syncPhone() {
     const active = this.phone.matches && this.terminalSelected === true;
-    const compositionChanged = this.el.classList.contains("af-session-first") !== active;
-    const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
-    const responsiveState = this.responsiveNewTabState;
-    this.responsiveNewTabState = null;
-    const pickerOpen = responsiveState?.trigger === pickerTrigger ? responsiveState.open : pickerTrigger?.getAttribute("aria-expanded") === "true";
-    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ?? (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : void 0) : void 0;
-    const reopenPicker = () => {
-      this.openNewTabPicker();
-      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
-        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
-      }
-    };
-    if (!compositionChanged) {
-      if (responsiveState?.trigger === pickerTrigger && responsiveState.open && pickerTrigger?.getAttribute("aria-expanded") !== "true") reopenPicker();
-      return;
-    }
+    if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement;
     const sessionActionsOpen = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
     this.appControls.close();
@@ -17810,10 +18036,7 @@ var AppShell = class {
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
     if (sessionActionsOpen) this.terminalChrome?.menu.open();
-    if (pickerOpen) {
-      reopenPicker();
-    }
-    if (!pickerOpen && focus && focus !== document.activeElement) {
+    if (focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
     }
@@ -17897,19 +18120,6 @@ var AppShell = class {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   tabBar = null;
-  // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
-  // Escape restores every enclosing disclosure a keyboard open changed before
-  // returning to navigation. Pointer opens have no entry and return to the button.
-  newTabCancelReturn = /* @__PURE__ */ new WeakMap();
-  responsiveNewTabState = null;
-  captureNewTabCancelReturn = () => {
-    const trigger = this.terminalChrome?.newTabSlot.querySelector(".af-tab-new") ?? null;
-    this.responsiveNewTabState = trigger ? {
-      trigger,
-      cancel: this.newTabCancelReturn.get(trigger),
-      open: trigger.getAttribute("aria-expanded") === "true"
-    } : null;
-  };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -18007,6 +18217,8 @@ var AppShell = class {
   update(state, prioritizeTerminal = false) {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
+    const archiveChanged = archiveRepaintNeeded(this.lastArchive, state);
+    this.lastArchive = state.archive;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
@@ -18085,7 +18297,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -18174,7 +18386,7 @@ var AppShell = class {
     const visible = visibleRailSessions(state);
     const count = String(visible.length);
     if (this.railCount.textContent !== count) this.railCount.textContent = count;
-    const filterSignature = JSON.stringify([kindCounts(scoped), state.statusFilter]);
+    const filterSignature = JSON.stringify([railKindCounts(state.archive, state.selectedProject, scoped), state.statusFilter]);
     if (filterSignature !== this.lastFilterSignature) {
       this.lastFilterSignature = filterSignature;
       this.renderFilterMenu(state, scoped);
@@ -18218,13 +18430,15 @@ var AppShell = class {
       state.selectedProject,
       scoped.length,
       scoped.some((s) => !isArchived(s)),
-      scoped.filter(isArchived).length,
+      archivedCount(state.archive, state.selectedProject, scoped),
       visible.length,
-      state.statusFilter
+      state.statusFilter,
+      archiveFooterSignature(state)
     ]);
     if (noticeSignature !== this.lastRailNoticeSignature) {
       this.lastRailNoticeSignature = noticeSignature;
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
+      this.cachedArchiveFooter = state.selectedProject ? this.archiveFooter(state) : null;
     }
     const skipped = state.skippedRepos ?? [];
     const skippedRoots = state.registeredProjects.filter((p) => p.repo_id && skipped.some((s) => s.repo_id === p.repo_id)).map((p) => [p.repo_id, p.root]);
@@ -18235,7 +18449,8 @@ var AppShell = class {
     }
     const head = [];
     if (this.cachedRailNotice) head.push(this.cachedRailNotice);
-    orderChildren(this.railList, [...head, ...rows]);
+    const foot = this.cachedArchiveFooter ? [this.cachedArchiveFooter] : [];
+    orderChildren(this.railList, [...head, ...rows, ...foot]);
     const railNav = this.railList.parentElement;
     if (this.cachedSkippedNotice !== this.mountedSkippedNotice) {
       this.mountedSkippedNotice?.remove();
@@ -18257,6 +18472,7 @@ var AppShell = class {
   lastFilterSignature = "";
   lastRailNoticeSignature = "";
   cachedRailNotice = null;
+  cachedArchiveFooter = null;
   lastSkippedNoticeSignature = "";
   cachedSkippedNotice = null;
   // The element currently mounted as a sibling of the rail listbox; null when the
@@ -18362,8 +18578,34 @@ var AppShell = class {
    *    with the way back, rather than a rail that looks broken.
    *  - otherwise nothing: rows are showing.
    */
+  /** The control under the archived rows (#6178): the archive is read a page at a
+   *  time, so the rail says how many older sessions are still on the daemon and
+   *  offers the next page, reports a read in flight, or names a failed one and
+   *  offers the retry. Null while the archived group is hidden or fully loaded. */
+  lastArchive;
+  archiveFooter(state) {
+    const a = state.archive;
+    if (!a.lazy || !state.statusFilter.archived) return null;
+    if (a.error) {
+      const retry = h("button", { type: "button", class: "af-rail-empty-new af-rail-archive-retry" }, "Retry");
+      retry.addEventListener("click", () => this.actions.loadMoreArchived());
+      return h("li", { class: "af-rail-archive-status" }, `Could not load archived sessions: ${a.error} `, retry);
+    }
+    if (a.loading) return h("li", { class: "af-rail-archive-status" }, "Loading archived sessions\u2026");
+    if (!archiveHasMore(a, state.selectedProject)) return null;
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const remaining = Math.max(0, archivedCount(a, state.selectedProject, scoped) - scoped.filter(isArchived).length);
+    const more = h(
+      "button",
+      { type: "button", class: "af-rail-empty-new af-rail-archive-more" },
+      remaining > 0 ? `Show older archived \xB7 ${remaining} more` : "Show older archived"
+    );
+    more.addEventListener("click", () => this.actions.loadMoreArchived());
+    return h("li", { class: "af-rail-archive-status" }, more);
+  }
   railNotice(state, scoped, visible) {
-    if (scoped.length === 0) return null;
+    const archived = archivedCount(state.archive, state.selectedProject, scoped);
+    if (scoped.length === 0 && archived === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
@@ -18375,7 +18617,6 @@ var AppShell = class {
       );
       newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
       const empty = h("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} \u2014 `, newBtn);
-      const archived = scoped.filter(isArchived).length;
       if (archived > 0 && !state.statusFilter.archived) {
         const show = h("button", { type: "button", class: "af-rail-empty-new af-rail-show-archived" }, "Show archived");
         show.addEventListener("click", () => this.actions.setStatusFilter("archived", true));
@@ -18450,7 +18691,7 @@ var AppShell = class {
    *  the menu governs. Rebuilt in place — the menu's open state is preserved across
    *  rebuilds so a live event never snaps it shut mid-narrowing. */
   renderFilterMenu(state, scoped) {
-    const counts = kindCounts(scoped);
+    const counts = railKindCounts(state.archive, state.selectedProject, scoped);
     const narrowed = !isDefaultFilter(state.statusFilter);
     this.filterDot.classList.toggle("af-rail-filter-dot-on", narrowed);
     this.filterBtn.classList.toggle("af-rail-filter-narrowed", narrowed);
@@ -18650,168 +18891,6 @@ var AppShell = class {
     }
     return drop.landed;
   }
-  /** Keyboard twin of the New tab button, including its per-kind availability. */
-  openNewTabPicker(shortcutReturn) {
-    const slot = this.terminalChrome?.newTabSlot;
-    const trigger = slot?.querySelector(".af-tab-new");
-    if (!trigger || !slot) return;
-    if (shortcutReturn) {
-      const preserveAppControls = this.appControls.panel.contains(slot) && this.appControls.trigger.getAttribute("aria-expanded") === "true";
-      const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
-      this.newTabCancelReturn.set(trigger, () => {
-        if (!preserveSessionActions) this.terminalChrome?.menu.close();
-        if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
-        shortcutReturn();
-      });
-    }
-    if (this.appControls.panel.contains(slot)) {
-      if (!this.newTabCancelReturn.has(trigger)) {
-        const wasHidden = this.appControls.panel.hidden;
-        this.newTabCancelReturn.set(trigger, () => {
-          if (!this.appControls.panel.contains(slot)) {
-            this.terminalChrome?.menu.open();
-            trigger.focus();
-            return;
-          }
-          if (wasHidden) this.appControls.close(true);
-          else this.appControls.trigger.focus();
-        });
-      }
-      this.appControls.open();
-    }
-    this.terminalChrome?.menu.open();
-    if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
-    else trigger.click();
-    slot?.querySelector('[role="menuitem"]')?.focus();
-  }
-  /** The visible New tab button and its kind menu.
-   *
-   *  The old split control created a terminal from a plus and hid VS Code behind a
-   *  separate, unlabeled caret. Even the project's maintainer could not find that
-   *  path (#2077), so the labelled button now makes the choice explicit where the
-   *  editor will appear. The `t` shortcut opens this same picker.
-   *
-   *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
-   *  are bound to THIS instance and torn down with it — see the isConnected check
-   *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
-  newTabControl(selected) {
-    const wrap = h("div", { class: "af-tab-new-wrap" });
-    const trigger = h(
-      "button",
-      { type: "button", class: "af-tab-new", title: "New terminal or VS Code tab" },
-      icon("plus", "af-tab-new-plus"),
-      h("span", {}, "New tab"),
-      icon("chevron-down", "af-tab-new-caret")
-    );
-    trigger.setAttribute("aria-haspopup", "menu");
-    trigger.setAttribute("aria-expanded", "false");
-    trigger.setAttribute("aria-label", "New tab \xB7 Terminal or VS Code");
-    const menu = h("div", { class: "af-tab-menu" });
-    menu.setAttribute("role", "menu");
-    menu.setAttribute("aria-label", "Tab type");
-    menu.hidden = true;
-    let scrollParent = null;
-    const positionMenu = () => {
-      const anchor = trigger.getBoundingClientRect();
-      const menuBox = menu.getBoundingClientRect();
-      const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
-      const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
-      const gap = parseFloat(getComputedStyle(trigger).getPropertyValue("--af-space-2"));
-      const below = anchor.bottom + gap;
-      const above = anchor.top - menuBox.height - gap;
-      const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
-      menu.style.left = `${left}px`;
-      menu.style.top = `${top}px`;
-    };
-    const close = () => {
-      menu.hidden = true;
-      this.newTabCancelReturn.delete(trigger);
-      trigger.setAttribute("aria-expanded", "false");
-      document.removeEventListener("mousedown", onDocMouseDown);
-      window.removeEventListener("keydown", onKeyDown, true);
-      scrollParent?.removeEventListener("scroll", positionMenu);
-      scrollParent = null;
-      window.removeEventListener("resize", positionMenu);
-      wrap.removeEventListener("focusout", onFocusOut);
-      if (this.newTabPickerPosition === positionMenu) this.newTabPickerPosition = null;
-    };
-    const onFocusOut = (e) => {
-      const next = e.relatedTarget;
-      if (!next || !wrap.contains(next)) close();
-    };
-    const onDocMouseDown = (e) => {
-      if (!wrap.isConnected || !wrap.contains(e.target)) {
-        close();
-      }
-    };
-    const onKeyDown = (e) => {
-      if (!wrap.isConnected) {
-        close();
-        return;
-      }
-      if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) return;
-      const items = Array.from(menu.querySelectorAll('[role="menuitem"]:not(:disabled)'));
-      const current = items.indexOf(document.activeElement);
-      if ((e.key === "Enter" || e.key === " ") && current < 0) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.key === "Escape") {
-        const returnAfterCancel = this.newTabCancelReturn.get(trigger);
-        close();
-        if (returnAfterCancel) returnAfterCancel();
-        else trigger.focus();
-        return;
-      }
-      if (!items.length) return;
-      if (e.key === "Enter" || e.key === " ") {
-        items[current]?.click();
-        return;
-      }
-      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : e.key === "ArrowDown" ? (current + 1) % items.length : current <= 0 ? items.length - 1 : current - 1;
-      items[next].focus();
-    };
-    const open = () => {
-      this.newTabPickerPosition = positionMenu;
-      menu.hidden = false;
-      positionMenu();
-      trigger.setAttribute("aria-expanded", "true");
-      scrollParent = wrap.closest(".af-tabbar");
-      scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
-      window.addEventListener("resize", positionMenu);
-      document.addEventListener("mousedown", onDocMouseDown);
-      wrap.addEventListener("focusout", onFocusOut);
-      window.addEventListener("keydown", onKeyDown, true);
-    };
-    const item = (label, kind) => {
-      const b = h("button", { type: "button", class: "af-tab-menu-item" }, label);
-      b.setAttribute("role", "menuitem");
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        close();
-        this.terminalChrome?.menu.close();
-        this.appControls.close();
-        this.actions.newTab(kind);
-      });
-      return b;
-    };
-    const offered = [];
-    for (const [label, kind] of NEW_TAB_MENU_ITEMS) {
-      if (!selected || canCreateTabKind(selected, kind)) {
-        offered.push(item(label, kind));
-      }
-    }
-    menu.append(...offered);
-    trigger.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (menu.hidden) {
-        open();
-      } else {
-        close();
-      }
-    });
-    wrap.append(trigger, menu);
-    return wrap;
-  }
   toggleFilterMenu() {
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
@@ -18893,8 +18972,13 @@ var AppShell = class {
     }
     const chrome = terminalChrome({
       title: selected.title,
+      placement: { detail: placementDetail(selected), remote: selected.placement?.kind === "remote" },
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
+      newTab: (kind) => {
+        if (this.appControls.trigger.getAttribute("aria-expanded") === "true") this.appControls.dismiss();
+        this.actions.newTab(kind);
+      },
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.(),
@@ -18936,12 +19020,14 @@ var AppShell = class {
       this.main.replaceChildren(head, archiveWarning, this.termHost);
     }
     this.sessionFirst = sessionFirstComposition([
+      // Restore runs in reverse and inserts each node before its old next sibling,
+      // so a node must be listed before the sibling that follows it.
       [chrome.title, this.header],
-      [chrome.keyboard, this.header],
       [this.viewNav, this.appControls.panel],
       [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
+      [chrome.newTabs, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
     ]);
@@ -18997,13 +19083,16 @@ var AppShell = class {
         selected.id ?? ""
       )
     );
-    const unavailable = tabCreationUnavailableReason(selected);
-    if (unavailable === null) {
-      this.terminalChrome?.newTabSlot.replaceChildren(this.newTabControl(selected));
-    } else {
-      const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
-      reason.setAttribute("aria-label", `New tab unavailable \xB7 ${unavailable}`);
-      this.terminalChrome?.newTabSlot.replaceChildren(reason);
+    const chrome = this.terminalChrome;
+    if (chrome) {
+      const unavailable = tabCreationUnavailableReason(selected);
+      const offered = offeredNewTabKinds(selected);
+      chrome.newTerminal.hidden = !offered.includes("shell");
+      chrome.newVSCode.hidden = !offered.includes("vscode");
+      chrome.tabUnavailable.hidden = unavailable === null;
+      chrome.tabUnavailable.textContent = unavailable ?? "";
+      chrome.tabUnavailable.title = unavailable ?? "";
+      if (unavailable !== null) chrome.tabUnavailable.setAttribute("aria-label", `New tab unavailable \xB7 ${unavailable}`);
     }
     const scrollLeft = bar.scrollLeft;
     bar.replaceChildren(...children);
@@ -19334,11 +19423,9 @@ var AppShell = class {
     if (!selected || !this.headTitle) {
       return;
     }
-    this.headTitle.textContent = selected.title;
-    this.headTitle.title = selected.title;
-    this.headTitle.setAttribute("aria-label", selected.title);
+    applyTerminalTitle(this.headTitle, selected.title);
+    if (this.terminalChrome) applyTerminalPlacement(this.terminalChrome.placement, placementDetail(selected), selected.placement?.kind === "remote");
     if (this.terminalChrome) {
-      this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
     const warningText = sessionWarningText(selected);
@@ -19530,13 +19617,20 @@ function inertRowReason(s) {
   }
   return cause === "" ? "cannot be opened" : `cannot be opened \xB7 ${cause}`;
 }
+function archiveRepaintNeeded(last, state) {
+  return last !== state.archive;
+}
+function archiveFooterSignature(state) {
+  const a = state.archive;
+  return JSON.stringify([a.lazy, a.loading, a.error ?? "", archiveHasMore(a, state.selectedProject), state.statusFilter.archived]);
+}
 function sessionRow(s, selected, openSession, buildActions, previous) {
   const status = rowStatus(s);
   const operator = operatorKind(s);
   const creating = isCreating(s);
-  const actionable = isActionableSession(s);
+  const actionable = isOpenableSession(s);
   const killable = isKillableSession(s);
-  const managed = actionable || killable;
+  const managed = isActionableSession(s) || killable;
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
@@ -19559,6 +19653,12 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
       " \xB7 ",
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch)
     );
+  }
+  const place = placementShort(s);
+  if (place) {
+    const placed = h("span", { class: "af-row-place" }, place);
+    placed.title = placementDetail(s);
+    branchParts.push(" \xB7 ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);
@@ -19704,6 +19804,7 @@ var store = new Store({
   connecting: true,
   loginError: null,
   sessions: [],
+  archive: emptyArchive(),
   // No skipped repos until a Snapshot carries the incompleteness channel (#4742);
   // the rail renders no notice in this default state.
   skippedRepos: [],
@@ -19778,6 +19879,7 @@ function mount() {
   store.subscribe(rerender);
   rerender();
   document.addEventListener("keydown", onKeydown, true);
+  document.addEventListener("keyup", (e) => tabShortcutRepeat.release(e.code), true);
   watchSystemTheme();
   void bootstrap();
 }
@@ -19829,6 +19931,7 @@ function rerender() {
   routeSelection = state.selectedId;
   shell.update(state, parseRoute(location.hash) !== null);
   syncSplit(state);
+  maybeLoadArchive(state);
 }
 async function connect(candidate) {
   const attempt = connectionGate.begin();
@@ -19840,9 +19943,11 @@ async function connect(candidate) {
   let operationClockMs;
   let daemonBootId;
   let skippedRepos;
+  let archived;
   try {
     const snapshot = await fetchSessionSnapshot(candidate);
     sessions = snapshot.sessions;
+    archived = snapshot.archived;
     operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
     operationClockMs = snapshot.operationClockMs;
     daemonBootId = snapshot.daemonBootId;
@@ -19890,6 +19995,7 @@ async function connect(candidate) {
     connecting: false,
     loginError: null,
     sessions,
+    archive: archiveFromSnapshot(emptyArchive(), archived),
     skippedRepos: skippedRepos ?? [],
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
@@ -19909,7 +20015,8 @@ async function connect(candidate) {
     operationLockTimeoutMs,
     operationClockMs,
     daemonBootId,
-    skippedRepos
+    skippedRepos,
+    archived
   }, sessions);
   resolvingRoute = false;
   resolveRoute();
@@ -19980,12 +20087,16 @@ function resolveRoute() {
   }
   const route = parseRoute(location.hash);
   resolvingRoute = true;
+  let lookup = false;
   try {
     const session = route && store.get().sessions.find((s) => s.id === route.session);
+    lookup = !session && route !== null && store.get().archive.lazy && store.get().archive.total > 0;
     if (session?.id) {
       if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
+    } else if (lookup && route) {
+      void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -19993,8 +20104,40 @@ function resolveRoute() {
   } finally {
     resolvingRoute = false;
     const id = store.get().selectedId;
-    replaceRoute(id ? { session: id } : null);
+    if (!lookup) replaceRoute(id ? { session: id } : null);
   }
+}
+async function resolveArchivedRoute(id, ticket) {
+  const tok = token;
+  const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
+  let rows = [];
+  try {
+    if (tok !== null) rows = await fetchSessionsById(tok, [id]);
+  } catch (e) {
+    if (tok !== null && token === tok && shouldForgetToken(e)) {
+      disconnect(describeError(e), true);
+      return;
+    }
+  }
+  if (token !== tok || connectionGeneration !== generation) return;
+  const missing = () => {
+    store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+    showTransientNotice("No session with that id in this daemon");
+    replaceRoute(null);
+  };
+  settleLookup(createSelectionIntent, ticket, id, rows, {
+    found: (row) => {
+      if (optimisticSessions.adopt([row], fence).length === 0) {
+        if (store.get().sessions.some((s) => s.id === id)) resolveRoute();
+        else missing();
+        return;
+      }
+      applySessions(optimisticSessions.project());
+      resolveRoute();
+    },
+    missing
+  });
 }
 function moveSelection(id) {
   createSelectionIntent.navigate();
@@ -20016,7 +20159,7 @@ function openFromRail(id) {
 }
 function focusTerminal() {
   const selected = selectedSessionData();
-  if (!selected || !isActionableSession(selected)) {
+  if (!selected || !isOpenableSession(selected)) {
     focusRail();
     return;
   }
@@ -20661,7 +20804,8 @@ function guardedTabRebind(selId, run, resolve, verb) {
       operationLockTimeoutMs,
       operationClockMs,
       daemonBootId,
-      skippedRepos
+      skippedRepos,
+      archived
     } = snapshot;
     const targetIdx = resolve(sessions);
     const currentGen = splitView.layoutGeneration();
@@ -20671,7 +20815,8 @@ function guardedTabRebind(selId, run, resolve, verb) {
       operationLockTimeoutMs,
       operationClockMs,
       daemonBootId,
-      skippedRepos
+      skippedRepos,
+      archived
     }, authoritative);
     const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
     const outcome = rebindTargetAfterAwait({
@@ -20695,22 +20840,31 @@ function guardedTabRebind(selId, run, resolve, verb) {
     surfaceNotice(tabRebindRefusalNotice(outcome.reason, verb));
   }).catch((e) => surfaceTabError(e));
 }
+var pendingTabCreates = /* @__PURE__ */ new Set();
+var tabShortcutRepeat = shortcutRepeatGuard();
 function createSessionTab(kind = "shell") {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || !canCreateTabKind(sel, kind)) {
+  if (!sel || tok === null || !offeredNewTabKinds(sel).includes(kind)) {
+    return;
+  }
+  const selId = sel.id ?? "";
+  const pendingKey = tabCreateKey(connectionGeneration, selId, kind);
+  if (pendingTabCreates.has(pendingKey)) {
     return;
   }
   clearTabError();
-  const selId = sel.id ?? "";
   const create = kind === "vscode" ? createVSCodeTab : createTab;
   let createdName = "";
   guardedTabRebind(
     selId,
-    () => create(selId, sel.title, tok).then((name) => {
-      createdName = name;
-      return fetchProjectedSnapshot(tok);
-    }),
+    () => {
+      pendingTabCreates.add(pendingKey);
+      return create(selId, sel.title, tok).then((name) => {
+        createdName = name;
+        return fetchProjectedSnapshot(tok);
+      }).finally(() => pendingTabCreates.delete(pendingKey));
+    },
     // Focus the created tab BY its resolved name, never `length - 1`: the last slot is
     // an ordinal, and a concurrent create from another client landing inside this
     // round trip would make it THEIR tab. Resolving the name to its current ordinal in
@@ -20799,7 +20953,8 @@ function renameSessionTab(id, name, editedSessionId) {
       operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
       operationClockMs: snapshot.operationClockMs,
       daemonBootId: snapshot.daemonBootId,
-      skippedRepos: snapshot.skippedRepos
+      skippedRepos: snapshot.skippedRepos,
+      archived: snapshot.archived
     }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
@@ -20824,7 +20979,8 @@ function reorderSessionTab(from, to) {
       operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
       operationClockMs: snapshot.operationClockMs,
       daemonBootId: snapshot.daemonBootId,
-      skippedRepos: snapshot.skippedRepos
+      skippedRepos: snapshot.skippedRepos,
+      archived: snapshot.archived
     }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
@@ -21415,6 +21571,7 @@ var actions = {
   switchProject,
   setStatusFilter,
   resetStatusFilter,
+  loadMoreArchived,
   addTask: openAddTask,
   editTask: openEditTask,
   toggleTask,
@@ -21431,7 +21588,7 @@ function syncSplit(state) {
   const tok = token;
   const initialTab = clampActiveTab(state.sessions, selId, state.activeTab);
   const selected = selId ? state.sessions.find((s) => s.id === selId) : null;
-  const runtimeSelected = selected && isActionableSession(selected) ? selected : null;
+  const runtimeSelected = selected && isOpenableSession(selected) ? selected : null;
   const runtimeSessionId = runtimeSelected ? selId : null;
   const tabIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabIdentity) : ["0:"];
   const tabRealIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabRealId) : [""];
@@ -21461,9 +21618,13 @@ function startStream(tok) {
   stream = new EventStream(tok, {
     onEvent,
     onResync: () => {
+      markArchiveDirty();
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s }),
+    onStatus: (s) => {
+      if (s !== "open") markArchiveDirty();
+      store.set({ live: s });
+    },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
     // Not /v1/auth-info, which says whether a token is required, not whether
@@ -21542,13 +21703,76 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
     selectedProject,
     selectedId,
     activeTab,
-    ...evidence?.kind === "snapshot" ? { skippedRepos: evidence.skippedRepos ?? [] } : {}
+    ...evidence?.kind === "snapshot" ? {
+      skippedRepos: evidence.skippedRepos ?? [],
+      archive: archiveFromSnapshot(store.get().archive, evidence.archived)
+    } : {}
   });
   if (evidence) pendingRestores.observe(authoritative.map((s) => ({
     id: s.id,
     restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
     restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive"
   })), evidence);
+}
+var archiveDirtyEpoch = 1;
+var archiveCleanEpoch = 0;
+function markArchiveDirty() {
+  archiveDirtyEpoch++;
+}
+function clearArchiveDirty(epoch) {
+  if (epoch > archiveCleanEpoch) archiveCleanEpoch = epoch;
+}
+async function fetchSnapshotWithArchiveWindow(tok) {
+  const epoch = archiveDirtyEpoch;
+  const snapshot = await fetchSessionSnapshot(tok);
+  if (!snapshot.archived) return { ...snapshot, archiveEpoch: epoch };
+  const live = new Set(snapshot.sessions.map((s) => s.id));
+  const archive = store.get().archive;
+  const { rows: kept, complete } = await reconcileWindow({
+    held: optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id)),
+    live,
+    archive,
+    summary: snapshot.archived,
+    dirty: epoch > archiveCleanEpoch,
+    isArchived,
+    fetchById: (ids) => fetchSessionsById(tok, ids),
+    fetchPage: (project, before, limit) => fetchArchivedPage(tok, { project, before, limit })
+  });
+  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: complete ? epoch : archiveCleanEpoch };
+}
+async function loadArchivedPage() {
+  const tok = token;
+  if (tok === null) return;
+  const project = store.get().selectedProject;
+  const key = archiveKey(project);
+  const start = store.get().archive;
+  if (!start.lazy || start.loading || start.cursors[key] === null) return;
+  const generation = connectionGeneration;
+  const before = start.cursors[key] ?? null;
+  store.set({ archive: { ...start, loading: true, error: void 0 } });
+  try {
+    const fence = optimisticSessions.snapshotFence();
+    const page = await fetchArchivedPage(tok, { project, before });
+    if (token !== tok || connectionGeneration !== generation) return;
+    optimisticSessions.adopt(page.sessions, fence);
+    applySessions(optimisticSessions.project());
+    const archive = store.get().archive;
+    store.set({ archive: { ...archive, loading: false, cursors: { ...archive.cursors, [key]: page.next } } });
+  } catch (e) {
+    if (token !== tok || connectionGeneration !== generation) return;
+    if (shouldForgetToken(e)) {
+      disconnect(describeError(e), true);
+      return;
+    }
+    store.set({ archive: { ...store.get().archive, loading: false, error: errorText(e) } });
+  }
+}
+function loadMoreArchived() {
+  void loadArchivedPage();
+}
+function maybeLoadArchive(state) {
+  if (state.phase !== "app" || !state.statusFilter.archived) return;
+  if (archiveNeedsFirstPage(state.archive, state.selectedProject)) queueMicrotask(() => void loadArchivedPage());
 }
 async function fetchProjectedSnapshot(tok) {
   if (token !== tok) return null;
@@ -21559,16 +21783,21 @@ async function fetchProjectedSnapshot(tok) {
     let operationClockMs;
     let daemonBootId;
     let skippedRepos;
+    let archived;
+    let archiveEpoch = 0;
     const sessions = await optimisticSessions.refresh(async () => {
       generation = pendingRestores.beginSnapshot();
-      const snapshot = await fetchSessionSnapshot(tok);
+      const snapshot = await fetchSnapshotWithArchiveWindow(tok);
       authoritative = snapshot.sessions;
       operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
       operationClockMs = snapshot.operationClockMs;
       daemonBootId = snapshot.daemonBootId;
       skippedRepos = snapshot.skippedRepos;
+      archived = snapshot.archived;
+      archiveEpoch = snapshot.archiveEpoch;
       return authoritative;
-    });
+    }, () => archived !== void 0);
+    if (sessions !== null) clearArchiveDirty(archiveEpoch);
     return sessions === null ? null : {
       sessions,
       authoritative,
@@ -21576,7 +21805,8 @@ async function fetchProjectedSnapshot(tok) {
       operationLockTimeoutMs,
       operationClockMs,
       daemonBootId,
-      skippedRepos
+      skippedRepos,
+      archived
     };
   } catch (error) {
     requestResync();
@@ -21598,7 +21828,7 @@ function requestResync() {
     const eventGeneration = sessionEventGeneration;
     const mutationFence = optimisticSessions.snapshotFence();
     const restoreSnapshot = pendingRestores.beginSnapshot();
-    void fetchSessionSnapshot(tok).then((snapshot) => {
+    void fetchSnapshotWithArchiveWindow(tok).then((snapshot) => {
       const sessions = snapshot.sessions;
       if (requestGeneration !== resyncRequestGeneration || token !== tok) {
         return;
@@ -21607,7 +21837,7 @@ function requestResync() {
         requestResync();
         return;
       }
-      if (!optimisticSessions.snapshot(sessions, mutationFence)) {
+      if (!optimisticSessions.snapshot(sessions, mutationFence, snapshot.archived !== void 0)) {
         requestResync();
         return;
       }
@@ -21617,8 +21847,10 @@ function requestResync() {
         operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
         operationClockMs: snapshot.operationClockMs,
         daemonBootId: snapshot.daemonBootId,
-        skippedRepos: snapshot.skippedRepos
+        skippedRepos: snapshot.skippedRepos,
+        archived: snapshot.archived
       }, sessions);
+      clearArchiveDirty(snapshot.archiveEpoch);
       root?.setAttribute("data-af-resync-settled", "");
       resolveResyncCompletions();
     }).catch((error) => {
@@ -21656,6 +21888,11 @@ function isNativeControl(el2) {
   return el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
 }
 function onKeydown(e) {
+  if (tabShortcutRepeat.swallow(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   const state = store.get();
   if (state.phase !== "app") {
     return;
@@ -21667,7 +21904,7 @@ function onKeydown(e) {
     return;
   }
   const selected = selectedSessionData();
-  const actionableSelected = selected && isActionableSession(selected) ? selected : null;
+  const actionableSelected = selected && isOpenableSession(selected) ? selected : null;
   const focus = state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
   const action = decideKey(
     e.key,
@@ -21684,17 +21921,17 @@ function onKeydown(e) {
       orderedIds: filterSessions(
         orderedSessions(scopeToProject(state.sessions, state.selectedProject)),
         state.statusFilter
-      ).filter(isActionableSession).map((s) => s.id),
+      ).filter(isOpenableSession).map((s) => s.id),
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      newTabKinds: actionableSelected ? offeredNewTabKinds(actionableSelected) : [],
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
       tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false
     },
-    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") }
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey, meta: e.metaKey }
   );
   if (action.kind === "none") {
     return;
@@ -21718,14 +21955,12 @@ function onKeydown(e) {
       if (shell) shell.switchTab(action.index);
       else switchTab(action.index);
       break;
-    case "newTab": {
-      const navigationTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      shell?.openNewTabPicker(() => {
-        focusRail();
-        restoreShortcutFocus(navigationTarget, root?.querySelector(".af-rail") ?? null);
-      });
+    case "newTab":
+      if (!e.repeat) {
+        tabShortcutRepeat.arm(e.code);
+        createSessionTab(action.tabKind);
+      }
       break;
-    }
     case "closeTab":
       if (shell) shell.closeTab(store.get().activeTab);
       else closeSessionTab(store.get().activeTab);

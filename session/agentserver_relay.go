@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -30,8 +31,16 @@ func (c *remoteAgentClient) dialRelay(ctx context.Context, port int) (net.Conn, 
 	if port < 1 || port > 65535 {
 		return nil, fmt.Errorf("remote agent-server: relay port %d out of range", port)
 	}
+	return c.dialRelayQuery(ctx, agentproto.RelayPortQueryParam, strconv.Itoa(port),
+		fmt.Sprintf("nothing is listening on 127.0.0.1:%d in the workspace", port))
+}
+
+// dialRelayQuery opens the relay for one query selector (a port, or a
+// server-owned target) and adapts it to a net.Conn. notServing is the message a
+// 502 maps to.
+func (c *remoteAgentClient) dialRelayQuery(ctx context.Context, key, value, notServing string) (net.Conn, error) {
 	q := url.Values{}
-	q.Set(agentproto.RelayPortQueryParam, strconv.Itoa(port))
+	q.Set(key, value)
 	q.Set(agentproto.AccessTokenQueryParam, c.token)
 	u := c.wsBase + agentproto.RelayPath + "?" + q.Encode()
 
@@ -49,7 +58,7 @@ func (c *remoteAgentClient) dialRelay(ctx context.Context, port int) (net.Conn, 
 	conn, resp, err := websocket.Dial(dialCtx, u, opts)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusBadGateway {
-			return nil, fmt.Errorf("nothing is listening on 127.0.0.1:%d in the workspace", port)
+			return nil, errors.New(notServing)
 		}
 		return nil, fmt.Errorf("remote agent-server: dial port relay: %w",
 			agentproto.RedactAccessTokenError(err, c.token))
@@ -63,13 +72,17 @@ func (c *remoteAgentClient) dialRelay(ctx context.Context, port int) (net.Conn, 
 // DialLoopback implements LoopbackRelayer. Relays are tracked so Kill closes
 // them with the session, as the PTY brokers are.
 func (s *remoteAgentServer) DialLoopback(ctx context.Context, port int) (net.Conn, error) {
+	return s.trackedRelay(func() (net.Conn, error) { return s.rc.dialRelay(ctx, port) })
+}
+
+func (s *remoteAgentServer) trackedRelay(dial func() (net.Conn, error)) (net.Conn, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("session is shut down")
 	}
 	s.mu.Unlock()
-	conn, err := s.rc.dialRelay(ctx, port)
+	conn, err := dial()
 	if err != nil {
 		return nil, err
 	}

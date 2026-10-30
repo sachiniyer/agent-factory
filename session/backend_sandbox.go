@@ -1,14 +1,12 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -111,7 +109,7 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		return ProvisionResult{}, p.provisionFailure(err)
+		return p.failedProvision(err)
 	}
 	return res, nil
 }
@@ -170,7 +168,16 @@ type sandboxProvisioner struct {
 	//	remoteAddr         the agent-server's loopback address on the sandbox
 	//	                   (the banner's addr) — the -L forward's destination.
 	//	agentServerVersion the version the remote binary reported in its banner.
-	tokenRef           string
+	tokenRef string
+	// launchScript is the exact command that started the agent-server, persisted
+	// so a crashed one can be relaunched from the row alone (W1.4). It names the
+	// session dir's env files and flags, never a secret.
+	launchScript string
+	adoptPending bool // a restarted server has not adopted its workspace yet (W1.4)
+	// persistIdentity is the daemon-installed durable write of the row a W1.4
+	// restart fires before it spawns, before it adopts and when adoption ends.
+	// In memory only; the daemon reinstalls it per reattach attempt.
+	persistIdentity    func(*Instance) error
 	remoteAddr         string
 	agentServerVersion string
 
@@ -332,6 +339,9 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.syncAccountIn(sshProvisionStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
+	if err := w.syncAgentConfigIn(sshProvisionStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
 	p.account = w
 	// Reached only past the pre-launch steps (clone, binary copy, callback env),
 	// so a startAgentServer failure here is not the pre-launch empty-PID case: a
@@ -342,7 +352,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.remotePID = w.RemotePID
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	p.remotePID = w.RemotePID
+	p.remotePID, p.launchScript = w.RemotePID, w.launchScript
 	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)
 	if err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
@@ -403,8 +413,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 				RemoteAddr:         p.remoteAddr,
 				AgentServerVersion: p.agentServerVersion,
 				TokenRef:           p.tokenRef,
+				LaunchScript:       p.launchScript,
 				CallbackRef:        p.callbackRef,
 				CallbackReverse:    p.callbackReverse(),
+				AccountSyncHost:    p.accountSyncHost(),
 			},
 		},
 		Endpoint: endpoint,
@@ -540,113 +552,6 @@ func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string,
 	// partial result the kill leaves behind.
 	cmd.WaitDelay = sandboxTunnelWaitDelay
 	return cmd
-}
-
-// startTunnel runs `<sandbox_ssh> -N -L <local>:<remote>` as a long-lived child.
-//
-// The local port is chosen by binding :0 and closing it, rather than asking ssh
-// for one: `ssh -L` has no "pick a port and tell me" form, so af must name the
-// port it will dial. The listener is closed before ssh binds it, which is a
-// small race — the readiness probe below is what actually establishes that the
-// forward came up, so a lost race fails the provision rather than handing back a
-// dead endpoint.
-//
-// The child is bound to this process's lifetime by the machinery in
-// sandbox_tunnel.go (#5564): spawned under the watch lifeline when this binary
-// can serve as one, registered for the daemon-exit stop, and env-stamped for
-// the next daemon's ownership-proven sweep.
-func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
-	if p.startTunnelFn != nil {
-		return p.startTunnelFn(remoteAddr)
-	}
-	localAddr, err := p.openTunnel(remoteAddr)
-	if err != nil {
-		return "", err
-	}
-	// The supervisor starts only after the FIRST generation proves ready: an
-	// ssh that cannot establish at all is a provision failure (reaped as one),
-	// not an outage to retry — the re-dial loop exists for transports that die
-	// AFTER they once worked.
-	go p.superviseTunnel()
-	return localAddr, nil
-}
-
-// openTunnel spawns the first -L generation and waits for its forward to answer,
-// WITHOUT starting the supervisor. Reattach (#5571 W1.5) probes the agent-server
-// through this generation before deciding whether to adopt it: supervision —
-// and with it the latched stop a failed attempt would need — begins only once
-// the probe has accepted the runtime.
-func (p *sandboxProvisioner) openTunnel(remoteAddr string) (string, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", fmt.Errorf("backend=%s: opening a local port for the tunnel failed: %w", p.label(), err)
-	}
-	localAddr := ln.Addr().String()
-	_ = ln.Close()
-
-	forward := fmt.Sprintf("%s:%s", localAddr, remoteAddr)
-	// Registered before the spawn so a daemon exit racing this provision —
-	// StopAllSandboxTunnels — has the entry it needs the moment the child is
-	// born; the entry is dropped by stopTunnel, which reap reaches on every
-	// failure path below.
-	registerSandboxTunnel(p)
-	// The transport contract the supervisor re-establishes on every re-dial is
-	// pinned here, once: every generation binds the same localAddr so the
-	// published endpoint is never stale, and W3.4's -R slot rides p.reverseFwds.
-	p.reapMu.Lock()
-	p.forward, p.localAddr = forward, localAddr
-	p.reapMu.Unlock()
-	// Spawn+publish happen atomically under reapMu (provisionTunnelChild), so
-	// a StopAllSandboxTunnels stop can never interleave between a born child
-	// and its publication — and a child born after that stop already ran is
-	// killed by its own spawner rather than left registered to nothing.
-	if _, err := p.provisionTunnelChild(); err != nil {
-		return "", fmt.Errorf("backend=%s: starting the ssh tunnel failed: %w", p.label(), err)
-	}
-
-	if err := waitForSandboxTunnelFn(p.label(), localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
-		return "", err
-	}
-	return localAddr, nil
-}
-
-// sandboxTransportConfigKey names the setting that holds the ssh invocation for
-// this backend, so a transport failure points the operator at something they can
-// run by hand. The two backends reach the same transport from different config
-// surfaces, and telling an `ssh.host` user to check `sandbox_ssh` is worse than
-// saying nothing.
-func sandboxTransportConfigKey(label string) string {
-	if label == string(BackendSSH) {
-		return "ssh.host"
-	}
-	if label == string(BackendHook) {
-		return "remote_hooks.provision_cmd"
-	}
-	return "sandbox.ssh"
-}
-
-// waitForSandboxTunnelFn is the readiness probe both startTunnel and the
-// transport supervisor run after a spawn — a var so a supervisor test can give
-// its fake tunnel a working forward without standing up a real listener.
-var waitForSandboxTunnelFn = waitForSandboxTunnelWithin
-
-// waitForSandboxTunnel probes the local end until it answers. Without this the
-// provision would return an endpoint whose first request races the forward.
-func waitForSandboxTunnelWithin(label, localAddr string, timeout, poll time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		conn, err := net.DialTimeout("tcp", localAddr, poll)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("backend=%s: the ssh tunnel to %s never started listening within %s — "+
-				"check that the transport af runs for %s works by hand and that the remote permits port forwarding",
-				label, localAddr, timeout, sandboxTransportConfigKey(label))
-		}
-		time.Sleep(poll)
-	}
 }
 
 func (p *sandboxProvisioner) reapProvisionFailure(provisionErr error) error {
@@ -850,10 +755,17 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// A subshell so `exit "$rc"` reports rm's status as this group's status
 	// without terminating anything that might follow it.
 	removeAndConfirm := "( " + rm + "; rc=$?; " + respond + `; exit "$rc" )`
+	afPath := p.sessionDir + "/" + sshAfBinaryName
+	// A restart records the PID it launched on the HOST before af learns it, so a
+	// daemon that exited in between leaves a row naming the dead server while the
+	// restarted one runs. Reaping removes the session directory under whatever
+	// still runs there, so the host's record is consulted too and a live match is
+	// stopped (or the reap refused) first.
+	hostKill := "( " + remoteRecordedPIDKillScript(p.agentServerPIDPath(), p.remotePID, afPath, p.tokenRef) + " )"
 	if p.remotePID == "" {
-		return removeAndConfirm, expect
+		return hostKill + " && " + removeAndConfirm, expect
 	}
-	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef)
+	kill := remotePIDIdentityKillScript(p.remotePID, afPath, p.tokenRef)
 	// A SUBSHELL, not a { } group. The identity-kill script ends in `exit 0` when
 	// the process is already gone — the common case after a clean shutdown — and a
 	// group command runs in the CURRENT shell, so that exit terminated the whole
@@ -861,7 +773,7 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// looked like "exited 0, never confirmed": the directory survived and the
 	// record was retained forever. A subshell contains the exit and yields it as
 	// the group's status, which is what `&&` needs.
-	return "( " + kill + " ) && " + removeAndConfirm, expect
+	return hostKill + " && ( " + kill + " ) && " + removeAndConfirm, expect
 }
 
 // sandboxReapNonce makes each reap's challenge unique, so a marker captured from
@@ -912,89 +824,3 @@ type sandboxBackend struct {
 }
 
 func (b *sandboxBackend) Type() string { return "sandbox" }
-
-// ErrOutputOverLimit reports that a remote command produced more output than the
-// caller allowed. The command was killed the moment the limit was crossed; nothing
-// past the limit was ever held.
-var ErrOutputOverLimit = errors.New("remote command output exceeded its limit")
-
-// limitedShell is the optional capability of a sandboxShell that can bound a
-// command's stdout while it streams (#5865). The host is untrusted by W7.3's own
-// design, so a response that is read in full before it is checked bounds nothing.
-type limitedShell interface {
-	// RunLimited runs script and returns its stdout, holding at most limit bytes.
-	// Past the limit the command is killed and ErrOutputOverLimit is returned.
-	RunLimited(timeout time.Duration, script string, limit int64) ([]byte, error)
-}
-
-// limitWriter accepts at most limit bytes, then cancels the command and refuses
-// the rest. It never buffers beyond the limit.
-type limitWriter struct {
-	limit    int64
-	buf      bytes.Buffer
-	exceeded bool
-	cancel   context.CancelFunc
-}
-
-func (w *limitWriter) Write(p []byte) (int, error) {
-	if w.exceeded {
-		return 0, ErrOutputOverLimit
-	}
-	room := w.limit - int64(w.buf.Len())
-	if int64(len(p)) > room {
-		w.buf.Write(p[:room])
-		w.exceeded = true
-		w.cancel()
-		return int(room), ErrOutputOverLimit
-	}
-	return w.buf.Write(p)
-}
-
-// RunLimited satisfies limitedShell over the operator's ssh invocation, with the
-// same command composition, process group and deadline as Run.
-func (p *sandboxProvisioner) RunLimited(timeout time.Duration, script string, limit int64) ([]byte, error) {
-	if p.runCommandFn != nil {
-		// A test seam that returns whole buffers cannot stream; it is bounded after
-		// the fact, which is all a seam can honestly do.
-		out, err := p.runCommandFn(timeout, script, nil, false)
-		if err == nil && int64(len(out)) > limit {
-			return nil, ErrOutputOverLimit
-		}
-		return out, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := p.buildRunCommand(ctx, script, nil)
-	out := &limitWriter{limit: limit, cancel: cancel}
-	var stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = out, &boundedBuffer{buf: &stderr, max: 4096}
-	err := cmd.Run()
-	if out.exceeded {
-		return nil, ErrOutputOverLimit
-	}
-	if errors.Is(err, exec.ErrWaitDelay) {
-		err = nil
-	}
-	if err != nil && ctx.Err() != nil {
-		return out.buf.Bytes(), fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
-	}
-	return out.buf.Bytes(), err
-}
-
-// boundedBuffer keeps the first max bytes written and discards the rest, so a
-// chatty stderr cannot grow the daemon either.
-type boundedBuffer struct {
-	buf *bytes.Buffer
-	max int
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if room := b.max - b.buf.Len(); room > 0 {
-		if len(p) > room {
-			b.buf.Write(p[:room])
-		} else {
-			b.buf.Write(p)
-		}
-	}
-	return len(p), nil
-}

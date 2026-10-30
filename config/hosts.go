@@ -226,3 +226,12 @@ func ValidateHostsInTOML(data []byte) error {
 	}
 	return ValidateHosts(raw.Hosts, raw.DefaultHost)
 }
+
+// validateOptionalHostName accepts the empty default_host (no default) and
+// otherwise checks the name's shape.
+func validateOptionalHostName(v string) error {
+	if v == "" {
+		return nil
+	}
+	return ValidateHostName(v)
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/configagent"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The `C` hotkey's app-side wiring (phase 3).
@@ -203,8 +204,10 @@ type configAgentDoneMsg struct {
 // Instance: `tmux attach-session` needs only a session NAME, while the WS route
 // needs an Instance to resolve a byte source — and an Instance is a row.
 func (m *home) enterConfigAgent(sessionName, socketPath string) tea.Cmd {
+	m.tookTerminal.Store(true)
 	cmd := execConfigAgentAttach(sessionName, socketPath)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		bareAttachCleanup(cmd)
 		return configAgentDoneMsg{sessionName: sessionName, err: err}
 	})
 }
@@ -246,13 +249,15 @@ var execConfigAgentAttach = func(sessionName, socketPath string) *exec.Cmd {
 // The per-caller vars stay separate so a test can stub one takeover without
 // disabling the other.
 func bareTmuxAttachCommand(sessionName, socketPath string) *exec.Cmd {
-	args := make([]string, 0, 5)
+	args := make([]string, 0, 16)
 	if socketPath != "" {
 		args = append(args, "-S", socketPath)
 	}
-	args = append(args, "attach-session", "-t", sessionName)
+	route := newTakeoverRoute(sessionName, tmux.DetachKeyByte, tmux.DetachKeyDisplay)
+	args = append(args, route.attachArgs()...)
 	cmd := exec.Command("tmux", args...)
 	cmd.Env = configAgentAttachEnv()
+	registerTakeoverRoute(cmd, socketPath, route)
 	return cmd
 }
 

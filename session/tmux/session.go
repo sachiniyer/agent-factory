@@ -324,6 +324,12 @@ type TmuxSession struct {
 	// exit-destroys-session semantics their own restore contracts rely on.
 	// Guarded by programMu; read by Start's new-session arguments.
 	remainOnExit bool
+	// exactResumeOnly makes Restore's re-spawn refuse an account-wide "latest"
+	// resume (codex resume --last, amp threads continue --last): a shared account
+	// home holds every session's conversations, so "latest" can name a sibling's.
+	// The caller applies the session's own recorded id to the program first, and a
+	// session with none starts fresh. Guarded by programMu.
+	exactResumeOnly bool
 	// accountLoginEnv holds the NAME=VALUE entries that make an account LOGIN
 	// pane browser-free (#3854), or nil for every other pane. It is a resolved
 	// list rather than a bool because the operator's own pass-through wins: a name

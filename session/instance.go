@@ -190,10 +190,11 @@ type Instance struct {
 	// run completed" for the daemon's completion edge, which may have captured
 	// taskRunWasActive=true on a tick that raced the restore. Sticky for the
 	// process's lifetime: a session has exactly one run, and an interrupted
-	// end is a fact about it that never un-happens. In-memory only — after a
-	// restart the marker is already false, so no poll can ever capture the
-	// active half of the edge again and nothing needs the flag.
-	taskRunInterrupted bool
+	// end is a fact about it that never un-happens. In-memory only; a restart
+	// leaves no poll able to capture the active half of the edge.
+	taskRunInterrupted   bool
+	agentReplacedAt      time.Time // when the replacement was launched (#6231)
+	taskRunInterruptedAt time.Time // bounds the re-arm window (#6223); persisted
 	// taskRunInterruptedStamp is the one-shot twin of taskRunInterrupted for
 	// the daemon's status write: set when a restore's ConfirmLive performs the
 	// interrupt, consumed once by noteRuntimeReplaced so the owning task's
@@ -266,10 +267,10 @@ type Instance struct {
 	// relocationSettleNotify is the daemon-installed persist callback the
 	// respawn fires after SettleWorktreeRelocationClaim resolves a single-
 	// candidate recovery record but BEFORE the spawn proceeds — the settle is
-	// in-memory only, and a daemon exit between it and the later boundary
-	// write would reload the stale record and strand the session inert
-	// (#5295 review). In-memory only; each daemon generation re-installs it
-	// at its recover/respawn entry points.
+	// in-memory only, and a daemon exit before the later boundary write would
+	// reload the stale record and strand the session inert (#5295 review).
+	// In-memory only; each daemon generation re-installs it at its
+	// recover/respawn entry points.
 	relocationSettleNotify func(*Instance) error
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
 	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit
@@ -301,9 +302,9 @@ type Instance struct {
 	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
 	callbackUnavailable string
 	// hostedRemotely marks an instance running INSIDE a sandbox, where the daemon
-	// holds the session as a remote workspace. It decides which capability
-	// projection the injected guidance is rendered from (guidance.go, #5571 W3.3).
-	hostedRemotely bool
+	// holds the session as a remote workspace (guidance.go, #5571 W3.3).
+	hostedRemotely       bool
+	persistedSiblingTabs int // non-agent tabs the daemon's row records but this fresh hosted instance lacks (W1.4)
 	// advertisedFeatures is what the hosting agent-server advertises on
 	// /v1/health; guidance lifts the static remote floor by it (#5878).
 	advertisedFeatures []string
@@ -406,6 +407,14 @@ type Instance struct {
 	// archivedWorkspace records where this archived off-box session's work lives
 	// (#5571 W8.5); nil for a live row or one archived before the field.
 	archivedWorkspace *ArchivedWorkspaceData
+	// placement is the daemon-projected place this row runs (#5571 W6.4). Set on
+	// a client row built from a snapshot, which has no runtime to derive it from.
+	placement *PlacementData
+	// projectedTabManagement is the daemon's verdict that this off-box session
+	// serves shell and process tabs (#5953). A client row built from a snapshot has
+	// no live agent-server to read the advertisement from, so it adopts the
+	// projection instead.
+	projectedTabManagement bool
 	// accountAgent is the agent namespace Account was selected in. It must be
 	// durable rather than re-derived at refresh time: a program_overrides edit
 	// after the pin can resolve the recorded Program to a different agent's
@@ -462,12 +471,11 @@ type Instance struct {
 	// exists for exactly one caller: the daemon's root-agent heal, which reaps
 	// the vanished root's record — and with it agent_conversation — and creates a
 	// replacement in place, where every other Lost session is re-spawned on its
-	// own surviving record. Write-once by NewInstance and read only while
-	// planning the first launch, so it needs no lock (the inPlace precedent).
-	//
-	// It is a REQUEST, not a fact: the recorded conversation is only honored when
-	// the resolved command can actually express it, and the conversation the
-	// session ends up with is whatever the launch plan committed to Tabs[0].
+	// own surviving record. Set by NewInstance or SetResumeConversation; not
+	// consumed by a launch (root-recreate classification reads it afterwards);
+	// retired when the account changes (retireConversationsLocked, #6189). A
+	// REQUEST, not a fact: honored only when the resolved command can express it,
+	// and the session's conversation is whatever the launch committed to Tabs[0].
 	carriedConversation AgentConversationData
 
 	// reportedConversation is the last conversation a remote agent-server reported
@@ -530,10 +538,10 @@ type Instance struct {
 	// worktree move and teardown were declared done, local or remote (#5136).
 	// It is the timestamp `af sessions prune --older-than` measures age from:
 	// UpdatedAt cannot serve because it also advances on unrelated mutations
-	// after the archive. Persisted; records archived before the field existed
-	// carry no value and the prune cutoff falls back to UpdatedAt, which for an
-	// untouched archived row still approximates its archive time. Guarded by mu.
+	// after the archive. Persisted; rows from before the field carry no value and
+	// the cutoff falls back to UpdatedAt, which approximates it. Guarded by mu.
 	archivedAt time.Time
+	prune      pruneState // archive nonce, tombstone and intent (#5189); guarded by mu
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend
@@ -651,6 +659,8 @@ type Instance struct {
 	// Guarded by i.mu; in memory — a restart before the retry loses the mapping,
 	// and the sandbox's own roster then still holds the tab it started.
 	tabCreateIntents map[string]*tabCreateIntent
+	// tabTeardown serializes teardown attempts per tab id (lockTeardown).
+	tabTeardown map[string]*teardownGate
 
 	// tabSpawnClaims reserves the FULL tmux session names of sibling spawns
 	// still in flight — derived under i.mu, released once the append resolves

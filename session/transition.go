@@ -813,6 +813,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	// own commit above.
 	if from.liveness == LiveArchived && to.liveness != LiveArchived {
 		i.archivedAt = time.Time{}
+		i.prune.nonce = ""
 	}
 	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
 		close(i.archiveSettled)
@@ -832,6 +833,11 @@ func (i *Instance) endTaskRunInterruptedLocked() {
 	i.taskRunIdleEdgeHeld = false
 	i.taskRunTurnGateHeld = false
 	i.taskRunInterrupted = true
+	i.taskRunInterruptedAt = time.Now()
+	if at := i.agentReplacedAt; !at.IsZero() && at.Before(i.taskRunInterruptedAt) &&
+		i.taskRunInterruptedAt.Sub(at) <= taskRunResumeWindow {
+		i.taskRunInterruptedAt = at // the launch, not the settle (#6231)
+	}
 }
 
 // endTaskRunFailedLocked ends an in-flight task run as failed: the run's own

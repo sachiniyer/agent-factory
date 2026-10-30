@@ -66,41 +66,106 @@ func (i *Instance) ReattachSandbox() error {
 	// sandbox's env file rewritten — the credential is re-derived, not reissued.
 	callbackLost := i.restoreCallbackForReattach(p)
 
-	var localAddr string
+	// dial opens the transport to the recorded address and asks the agent-server
+	// whether it is alive. aliveErr separates "the server did not answer over a
+	// working transport" (restartable) from a transport that never opened.
 	callbackConfirmed := false
-	if p.startTunnelFn != nil {
-		localAddr, err = p.startTunnelFn(p.remoteAddr)
-		// The test seam has no -R to confirm: it stands in for a confirmed one.
-		callbackConfirmed = true
-	} else {
-		// The old connection died with the daemon; a socket its sshd left behind
-		// would fail the -R bind (ExitOnForwardFailure) for good.
-		if p.callbackForwardPersisted() {
-			p.clearStaleCallbackSocket()
+	dial := func() (endpoint *AgentServerEndpoint, rc *remoteAgentClient, aliveErr, err error) {
+		var localAddr string
+		if p.startTunnelFn != nil {
+			localAddr, err = p.startTunnelFn(p.remoteAddr)
+			// The test seam has no -R to confirm: it stands in for a confirmed one.
+			callbackConfirmed = true
+		} else {
+			// The old connection died with the daemon; a socket its sshd left behind
+			// would fail the -R bind (ExitOnForwardFailure) for good.
+			if p.callbackForwardPersisted() {
+				p.clearStaleCallbackSocket()
+			}
+			var note string
+			var withCallback bool
+			localAddr, withCallback, note, err = p.openTunnelForReattach()
+			if err == nil && note != "" && callbackLost == "" {
+				callbackLost = note
+			}
+			callbackConfirmed = withCallback
 		}
-		var note string
-		var withCallback bool
-		localAddr, withCallback, note, err = p.openTunnelForReattach()
-		if err == nil && note != "" && callbackLost == "" {
-			callbackLost = note
+		if err != nil {
+			p.abandonUnadoptedTunnel()
+			return nil, nil, nil, err
 		}
-		callbackConfirmed = withCallback
+		endpoint = &AgentServerEndpoint{URL: "http://" + localAddr, Token: token}
+		rc, err = newRemoteAgentClient(*endpoint, i.Title)
+		if err != nil {
+			p.abandonUnadoptedTunnel()
+			return nil, nil, nil, err
+		}
+		// The derived token is what proves identity: only the agent-server launched
+		// with this session's file-supplied token accepts it.
+		if _, aerr := (&remoteAgentServer{rc: rc}).Alive(); aerr != nil {
+			p.abandonUnadoptedTunnel()
+			return nil, nil, aerr, nil
+		}
+		return endpoint, rc, nil, nil
 	}
+	endpoint, rc, aliveErr, err := dial()
 	if err != nil {
-		p.abandonUnadoptedTunnel()
 		return fmt.Errorf("reattach %q: %w", i.Title, err)
 	}
-	endpoint := &AgentServerEndpoint{URL: "http://" + localAddr, Token: token}
-	rc, err := newRemoteAgentClient(*endpoint, i.Title)
-	if err != nil {
-		p.abandonUnadoptedTunnel()
-		return fmt.Errorf("reattach %q: %w", i.Title, err)
+	// persistIdentity writes the provisioner's live identity (PID, address,
+	// adoption debt) onto the row's cleanup handle. Every exit past a spawn goes
+	// through it: a process af started must be durably recorded or a daemon
+	// restart would launch another beside it.
+	persistIdentity := func() error { return i.persistRuntimeIdentity(b, p) }
+	adopt := p.adoptPending // a restarted server a previous attempt left unadopted
+	if aliveErr != nil {
+		// The host answered over a working transport but the agent-server did not:
+		// relaunch it if — and only if — the host proves it dead (W1.4).
+		rerr := p.restartAgentServer(token, persistIdentity)
+		if p.adoptPending {
+			_ = persistIdentity() // a process was spawned, whether or not the restart completed
+		}
+		if rerr != nil {
+			return fmt.Errorf("reattach %q: the agent-server did not answer: %w (not restarted: %v)", i.Title, aliveErr, rerr)
+		}
+		log.InfoLog.Printf("sandbox runtime: session %q: restarted its crashed agent-server (pid %s, %s)", i.Title, p.remotePID, p.remoteAddr)
+		// Nothing has asked this server to touch the workspace yet, so one this
+		// attempt cannot even reach is stopped rather than left to answer a
+		// later probe.
+		if endpoint, rc, aliveErr, err = dial(); err != nil || aliveErr != nil {
+			p.stopUnadoptedServer()
+			_ = persistIdentity()
+			return fmt.Errorf("reattach %q: the restarted agent-server did not answer: %w", i.Title, errors.Join(err, aliveErr))
+		}
+		adopt = true
 	}
-	// The derived token is what proves identity: only the agent-server launched
-	// with this session's file-supplied token accepts it.
-	if _, err := (&remoteAgentServer{rc: rc}).Alive(); err != nil {
-		p.abandonUnadoptedTunnel()
-		return fmt.Errorf("reattach %q: the agent-server did not answer: %w", i.Title, err)
+	// Staged shell/process rows (a daemon restart leaves only these) join the
+	// roster the restarted server is handed; idempotent, so a retry is a no-op.
+	i.materializeRestorableTabs()
+	if adopt {
+		// The surviving workspace is adopted through the ordinary restore path
+		// (firstTimeSetup=false): Provision re-derives and proves the worktree
+		// handle before Launch reattaches a live tmux session or re-spawns one
+		// that is gone, so a pane that outlived the crash keeps its agent.
+		//
+		// From here the server may hold the workspace, so a failure NEVER stops
+		// it: an ordinary agent-server destroys its worktree on SIGTERM. It stays
+		// running and recorded (adoptPending), and the next reattach finishes the
+		// adoption.
+		// inst is set so Launch sends the EXACT recorded conversation id: a bare
+		// server would omit it and the host could resume onto another one (#4797).
+		srv := &remoteAgentServer{rc: rc, inst: i, restartAdoption: true}
+		if aerr := errors.Join(srv.Provision(false), srv.Launch(false)); aerr != nil {
+			p.abandonUnadoptedTunnel()
+			return fmt.Errorf("reattach %q: adopting the restarted agent-server failed (it is left running with its workspace; the next reattach retries): %w", i.Title, aerr)
+		}
+		// The agent may have been respawned rather than reattached: settle that
+		// before the endpoint is bound, so no observation precedes it.
+		i.noteAdoptedRestart()
+		p.adoptPending = false
+		if perr := persistIdentity(); perr != nil {
+			log.WarningLog.Printf("sandbox runtime: session %q adopted its restarted agent-server but could not record that: %v", i.Title, perr)
+		}
 	}
 
 	// Re-verify under i.mu that the row is still the one this attempt probed: a

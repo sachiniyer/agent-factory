@@ -444,10 +444,15 @@ export function synthIdentities(kinds: readonly number[], names: readonly string
  *      be told; every candidate in that gap is kept alive rather than guessing a
  *      positional pairing that can bind the id to the CLOSED tab and drop the live
  *      pane's. A gap with no new real id adopts nothing: those tabs really closed. */
-function adoptedSynthIdentities(prevIds: string[], ids: string[], nextSynth?: readonly string[]): Set<string> {
+function adoptedSynthIdentities(
+  prevIds: string[],
+  ids: string[],
+  nextSynth?: readonly string[],
+): { exact: Set<string>; fallback: Set<string> } {
   const shared = new Set(prevIds.filter((id) => id !== "" && ids.includes(id)));
   const isNewReal = (id: string): boolean => id !== "" && !isSynth(id) && !prevIds.includes(id);
   const adopted = new Set<string>();
+  const fallback = new Set<string>();
   // 1. exact pairing by the new tab's kind:name.
   const vanished = new Set(prevIds.filter((id) => id !== "" && isSynth(id) && !ids.includes(id)));
   const unpaired = new Set<number>();
@@ -476,11 +481,11 @@ function adoptedSynthIdentities(prevIds: string[], ids: string[], nextSynth?: re
   for (const id of prevIds) {
     if (shared.has(id)) {
       key = id;
-    } else if (vanished.has(id) && gapOfNew.has(key)) {
-      adopted.add(id);
+    } else if (vanished.has(id) && !adopted.has(id) && gapOfNew.has(key)) {
+      fallback.add(id);
     }
   }
-  return adopted;
+  return { exact: adopted, fallback };
 }
 
 /** Re-points every leaf at wherever ITS OWN tab now sits, given the tab identity
@@ -597,7 +602,8 @@ export function remapByIdentity(
     // "some backfill happened somewhere": a session-wide flag let one id-less tab's
     // backfill mark every other missing synthesized tab alive, so a closed legacy tab
     // survived and the clamp evicted the real survivor's pane (#5982).
-    const adopted = adoptedSynthIdentities(prevIds, ids, nextSynth);
+    const { exact, fallback } = adoptedSynthIdentities(prevIds, ids, nextSynth);
+    const adopted = new Set([...exact, ...fallback]);
     // A !moved leaf is DEAD (its tab was genuinely closed) when its prev identity is a
     // real id that's gone from `ids`, or a synthesized `kind:name` that no real id
     // adopted (a closed pre-#1738 legacy tab). An adopted survivor (synthesized id
@@ -609,9 +615,20 @@ export function remapByIdentity(
       }
       return !isSynth(prev) || !adopted.has(prev);
     };
+    // A pane whose tab was matched EXACTLY (its real id kept, or its backfill paired
+    // by kind:name) outranks a pane kept alive only by the ambiguous gap fallback:
+    // when such a tentative pane is out of range and the slot it would clamp onto is
+    // held by an exact survivor, validate() would keep whichever is visually first —
+    // possibly the closed tab's pane (#6025). The exact one wins; close the other.
+    const exactHolderAtMax = moved.has(maxLeaf.id) || exact.has(prevIds[maxLeaf.tab] ?? "");
+    const tentative = (tab: number): boolean => fallback.has(prevIds[tab] ?? "");
     // (1) Close a dead leaf clamped out of range onto a survivor's slot at `max`.
     for (const leaf of leaves(cur)) {
-      if (!moved.has(leaf.id) && leaf.tab >= ids.length && deadIdentity(leaf.tab)) {
+      if (
+        !moved.has(leaf.id) &&
+        leaf.tab >= ids.length &&
+        (deadIdentity(leaf.tab) || (exactHolderAtMax && tentative(leaf.tab)))
+      ) {
         cur = closeLeaf(cur, leaf.id) ?? cur;
       }
     }

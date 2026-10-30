@@ -307,7 +307,7 @@ func TestHookProgressJournalResolutionIsBounded(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("bounded journal resolution error = %v, want deadline exceeded", err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		t.Fatal("journal path resolution exceeded the shared identity deadline")
 	}
 }

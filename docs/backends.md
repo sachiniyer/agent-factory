@@ -9,8 +9,12 @@ A session's **backend** decides *where* its workspace and agent run. Every
 backend exposes the same session surface — attach, preview, prompt delivery, the
 live PTY stream — so the TUI, CLI, and daemon drive a containerised session much
 like a local one. Tab admission follows what each kind needs: shell/process tabs
-need a local PTY and process, and VS Code needs a daemon-side worktree/editor, so
-those remain local-only. A metadata-only web tab spawns neither and can be added
+need a local PTY and process; an off-box session serves them too, in the
+workspace, when its agent-server advertises a tab API; a VS Code tab on an
+off-box session opens the editor running on the
+session's host, rooted at the workspace and relayed through the agent-server
+(code-server or openvscode-server must be installed there; af detects it and
+never installs it). A metadata-only web tab spawns neither and can be added
 to an off-box session (docker, ssh, sandbox, hook) when its target is an external
 HTTPS URL, or a loopback address (including `--port`): the daemon's web-tab proxy
 reaches the workspace's own `127.0.0.1:<port>` through the agent-server's port
@@ -574,18 +578,33 @@ back (see [Archive & restore](#archive-restore)).
 > cannot look up still works. The pin is an improvement on connecting by name, so
 > when it cannot be applied af falls back rather than failing the session.
 >
-> **Which resolver picks the address, and when it matters.** af resolves with Go's
-> built-in resolver, which reads `/etc/hosts` and DNS. `ssh` resolves with
-> `getaddrinfo`, which follows `nsswitch.conf` and so can also use LDAP, `sssd` or
-> mDNS. Once af pins, `ssh` does no resolving at all — the connection is made for
-> it — so every step of a session goes to the same place regardless.
+> **Which resolver picks the address, and when it matters.** af resolves the name
+> the same way `ssh` does — through the system resolver (`getaddrinfo`, which
+> follows `nsswitch.conf` and so uses LDAP, `sssd` or mDNS too), not with Go's own.
+> In a `CGO_ENABLED=0` (static) build Go's resolver skips NSS, so where `getent`
+> is available af reaches `getaddrinfo` through `getent ahosts`, dials the
+> answers in order and pins the first that answers. `getent` is not on macOS, and
+> the official Darwin builds are static, so there af cannot reach the system
+> resolver and connects by name (resolving in `ssh` each step) as it did before.
+> A cgo build dials through `getaddrinfo` directly — unless Go's pure resolver is
+> forced on instead (the `netgo` build tag, or `GODEBUG=netdns=go`). af still
+> believes it has the system resolver there (it keys that off the `cgo` build tag
+> alone), so it does not fall back to `getent`: a name only NSS can answer fails
+> the probe, and af connects by name as it did before. Either way, once af pins, `ssh` does no
+> resolving at all — the connection is made for it — so every step of a session
+> goes to the same place regardless.
 >
-> The one place this can bite is a `known_hosts` entry recorded **earlier**, by a
-> plain `ssh` or an older session, against whichever machine `getaddrinfo` picked.
-> If your resolvers select different machines *and* those machines have different
-> host keys, the pinned one presents a key that entry does not match and the session
-> fails to start, naming the host. Nothing runs on the wrong machine — verification
-> refuses it before authenticating. Point `ssh.host` at one machine if you hit this.
+> af and `ssh` use the same resolver, so the `known_hosts` entry an earlier `ssh`
+> recorded against that name ordinarily matches the machine af pins — but the
+> same resolver does not guarantee the same *address*, and that is still where this
+> can bite. A name that hands back **different machines on different calls** — a
+> rotating round-robin — can pin one the entry does not cover; and even with the
+> same answers, af's probe pins whichever address actually answers the dial (it
+> tries them in order, racing IPv6 and IPv4), so a multi-address name whose
+> addresses hold different host keys can pin one the earlier `ssh` did not land
+> on. The session then fails to start naming the host, nothing runs on the wrong
+> machine, verification refuses it before authenticating, and the earlier advice
+> to point `ssh.host` at one machine covers it.
 >
 > **`accept-new` pins only once it knows the host.** On the very first connection to
 > a host there is no entry to check against, so `accept-new` would simply record
@@ -674,7 +693,7 @@ concurrent writers wait their turn instead of failing or retrying.
 
 A host in the global `hosts` list is probed for `git`, `tmux` (3.2 or newer) and
 `gh` without creating a session on it. `af doctor` shows one row per listed host
-(ready, blocked with the missing tool, or unreachable), and the daemon repeats
+(ready, blocked with the missing tool, unreachable, or unknown), and the daemon repeats
 the probe about every ten minutes, so the host pickers show a recent verdict
 instead of "not probed yet". An unreachable host or an unreadable reply records
 nothing: it can neither mark a host ready nor clear an earlier blocked verdict.
@@ -769,6 +788,38 @@ the host. The file carries `global_agent_skills`, `worktree_root`, `branch_prefi
 edits and hooks saved in the TUI included. It never carries `sandbox.ssh`, `hosts`,
 `move_cmd` or accounts.
 
+
+### Inspect a sandbox session's work
+
+The agent's work lives in the sandbox's workspace, not on the daemon host, so
+`git status` in your own checkout shows nothing. You do not need ssh to the host
+to look at it, or to hand the agent something: every client (TUI, web, phone,
+`af` against a remote daemon) opens the same tabs a local session has, and they
+run in the workspace.
+
+1. **Status and diff.** Open a shell tab — `af sessions tab-create <title> --kind
+   shell`, the TUI's new-tab key, or the web's **Terminal** button — and run `git status`
+   and `git diff`. It is the agent's own workspace, so the branch and uncommitted
+   changes are the agent's. The shell is listed once the sandbox's agent-server
+   serves the tab API; against one that does not, the picker says so instead of
+   creating a tab.
+2. **Browse and edit files.** Open a VS Code tab — `af sessions tab-create <title>
+   --kind vscode`. The editor runs on the host, rooted at the workspace, and the
+   daemon relays it, so a remote client reaches it through the same authenticated
+   origin as any other tab. The host needs `code-server` or `openvscode-server`;
+   af detects one and does not install it, and a missing one shows the install
+   hint in the tab. See [VS Code tabs](web.md#vs-code-tabs).
+3. **Hand the agent a file.** Put the file in the workspace — drag it into the VS
+   Code explorer, or paste its contents into a shell tab (`cat > notes.md`) — then
+   tell the agent where it is with `af sessions send-prompt <title> "read
+   notes.md"`. The agent sees what is on disk in the workspace; there is no
+   separate upload channel.
+
+An **archived** sandbox that was archived without pushing keeps its workspace on
+the host (see [Archive & restore](#archive-restore)): there is no live agent to
+ask, so read the files from the host, or restore the session to get the tabs
+back.
+
 ---
 
 ## Hook backend (bring-your-own-provisioner)
@@ -785,8 +836,7 @@ repo on your infra, starts an **`af agent-server`** there, and echoes that
 server's authed endpoint (`{url, token}`); the daemon then
 drives the session over that `ws://` stream — so a hook session matches a local,
 docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
-Like the other off-box backends it admits web tabs (external HTTPS, or loopback via the port relay); shell,
-process, and VS Code tabs need a daemon-side worktree.
+Like the other off-box backends it admits web tabs (external HTTPS, or loopback via the port relay). Shell and process tabs are admitted when the `af agent-server` your `launch_cmd` starts advertises `tab-api` (a current build does): they then run on the session's host, with the daemon keeping a roster row for each; an older agent-server without `tab-api` keeps the refusal, since those kinds would need a daemon-side worktree. A VS Code tab opens the editor on the session's host.
 
 ```json
 {
@@ -908,6 +958,15 @@ config, so the host's own login is neither read nor replaced.
   workspaces and synced credentials, exactly as local worktrees share one user
   today. A Unix user per session is a later hardening, not part of this contract.
 
+**Operator-selected agent config.** The global-only `sandbox_agent_config` key
+(`agent:file` entries from a closed set: `claude:settings.json`, `claude:CLAUDE.md`,
+`claude:.claude.json`, `codex:config.toml`, `codex:AGENTS.md`) lists agent
+personalization af places in that same scope — read from the operator's own agent
+home on the daemon machine, written beside the synced credentials, one way, and
+removed with them. It applies only on a listed host and only to an account-scoped
+session; a repository can never set it. A copied codex `config.toml` is rewritten to
+the file credential store so it cannot override the session's account.
+
 Not yet built: fanning a refresh out to every live session on the same account
 (providers that rotate refresh tokens log the others out), write-back on a timer or
 after a daemon restart.
@@ -932,14 +991,24 @@ capabilities — `Archive` and `Recover` are both supported. All four are declar
 off-box in one place (`backendProvisionsOffBox`), and all four share a single
 capability declaration, so none of them can differ from the others here without
 that being a deliberate change. Parity is not total: they declare
-`TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`), which is why an off-box session carries only
-its agent tab plus any external HTTPS web tabs (the one metadata-only kind
-admitted off-box). A **Lost** sandbox session (one whose
+`TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`). The static declaration is the floor: an
+off-box session whose agent-server advertises `tab-api` lifts `TabManagement` and
+serves shell and process tabs off-box too. Without that advertisement an off-box
+session carries only its agent tab plus HTTPS web tabs (the one metadata-only kind
+admitted off-box; a loopback target is admitted because off-box runtimes relay
+loopback through the agent-server) and docs tabs. A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) is reachable, so recovery **relaunches
 the agent in place**: the sandbox's agent-server stops the agent (if it is still
 running) and starts it again in its existing workspace with the provider's resume,
-rebuilding the worktree on the recorded branch if it was deleted. The branch, the
-tree and any uncommitted work are otherwise untouched, and nothing is pushed,
+rebuilding the worktree if it was deleted: on the recorded branch when that
+branch still exists (its tip is kept), or — when the branch is gone too — by
+recreating it from the recorded base commit (falling back to the origin default
+branch, then `HEAD`), which is only attempted when the agent's exact recorded
+conversation can be resumed; otherwise the rebuild is refused and the session
+stays Lost. A rebuilt worktree runs the repository's `post_worktree_commands`
+again, so installs or builds with side effects repeat on that recovery. When the
+worktree still exists, the branch, the tree and any uncommitted work are untouched
+and no hooks re-run. Either way nothing is pushed,
 reaped, re-cloned or re-provisioned. The same relaunch serves `retry-limit` on a
 dead agent. A sandbox built before the relaunch route existed (it advertises the
 `relaunch` feature on `/v1/health`) falls back to replacing the sandbox: recovery
@@ -957,11 +1026,14 @@ What the sandbox host needs, and what af does to it:
   one ssh argument that the remote login shell parses). The static `af` binary
   af copies over also has to run there: see the glibc rule under
   [Docker](#docker-backend) for the dynamic build.
-- **Git identity is rewritten.** Provisioning runs `git config --global`
-  on the host to set `user.name` "Agent Factory" and `user.email`
-  `af@agent-factory.local`, and adds `safe.directory "*"`. That is the host
-  user's global git config, so point `sandbox.ssh` at a user whose global git
-  identity you do not mind changing.
+- **Git identity is repo-local.** After the clone, provisioning writes the
+  committer identity into the workspace's own `.git/config` (`git config
+  --local`): the operator's `user.name`/`user.email` as git resolves them on
+  the daemon host. Each field falls back separately to its placeholder
+  ("Agent Factory" for `user.name`, `af@agent-factory.local` for
+  `user.email`) only when that field is unset, so configuring just one keeps
+  the configured value and substitutes the placeholder for the other. The
+  host user's global git config is left untouched.
 - **Credentials.** The clone uses value-free GitHub credentials: no token value is
   written into the clone's config. The per-session agent-server token goes
   through stdin into a `0600` file in the session directory, never through argv
@@ -973,15 +1045,43 @@ What the sandbox host needs, and what af does to it:
   daemon already gives sandboxes a working callback.
   When that is not the case the create is **not** refused: the session is created
   without a callback credential and the reason is reported (`callback_unavailable_reason`
-  in the backend picker). Only the `/v1/Snapshot` route is admitted for this
-  credential, answering with the caller's own session.
+  in the backend picker). The credential admits a bounded `af` surface —
+  `Snapshot` returns the caller's project (the sandbox-safe projection
+  withholds the tmux name and the repository paths), and every other admitted
+  route is bounded by its handler to the caller's own project.
 - **Daemon restart.** The agent-server is started with `nohup`, so it
-  outlives a daemon restart on the host, and on start the daemon reattaches
-  to it: it re-dials the tunnel and rebinds the same agent-server, with no
-  re-provision. A row that cannot be reattached (no persisted runtime identity,
-  or the agent-server is gone) stays Lost, and recovery pushes its work to
-  `origin`, then re-provisions a fresh sandbox from the branch. An unreachable
-  host alone is not death and never triggers that replacement.
+  outlives a daemon restart on the host, and on start the daemon tries to
+  reattach to it in the background (`ReattachSandbox`): it re-dials the tunnel
+  and rebinds the same agent-server, with no re-provision. What happens next
+  depends on the row:
+  - **Reattach succeeds.** The row is live again with the same agent-server.
+    Nothing is pushed, replaced or restarted.
+  - **Reattach is not attempted or fails** (no persisted runtime identity, the
+    host does not answer, or the agent-server does not answer). The row stays
+    Lost and holds *no* agent-server client: it carries the "not provisioned"
+    sentinel (`ErrRemoteSandboxNotProvisioned`), which restore reads as
+    *absent* (`probeAbsent` in `daemon/restore.go` and `daemon/lostrestore.go`),
+    not as a sandbox that answered dead. Absent means replacement is
+    unconditional: the old runtime is torn down and a fresh sandbox is
+    provisioned from the session's branch on `origin`. **Nothing is pushed
+    first, so work the sandbox never pushed is not preserved on this path**;
+    only what already reached `origin` comes back. Provisioning needs the
+    host, so a host that is still unreachable fails that attempt and the row
+    stays Lost, but that is the provision failing, not a guard.
+  - **A live client sees the agent die** (no restart involved, or the row was
+    reattached first). If the agent-server answers that the agent is gone, the
+    sandbox is still there, so recovery (and a manual restore) pushes its work
+    to `origin` before replacing it (`probeAnsweredDead`), and refuses to
+    replace anything if that push does not land. If it does not answer at all,
+    the probe is unknown and replacement is refused: unreachable is not dead.
+  - **`--force-reap`** replaces a sandbox that answered dead, or one that could
+    not be probed, without pushing it; it still requires the session's branch
+    to be known so the replacement never lands on the default branch.
+
+Work that matters should therefore reach `origin` before a daemon restart can
+leave a row un-reattached. For an `ssh`/`sandbox` session, the default archive
+leaves the workspace on the host and restore reattaches it (W8.5/W8.6), so an
+archived session does not depend on a push at all.
 
 ### What survives, and what doesn't
 

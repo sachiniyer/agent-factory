@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/hostlayout"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -518,6 +519,8 @@ func NewInstanceID() string {
 }
 
 func NewInstance(opts InstanceOptions) (*Instance, error) {
+	// An instance's project path is host layout from the moment it exists.
+	hostlayout.Default.Note(opts.Path)
 	t := opts.CreatedAt
 	if t.IsZero() {
 		t = time.Now()

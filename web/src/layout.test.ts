@@ -800,3 +800,28 @@ test("a renamed-then-backfilled tab falls back to the gap rule; a gap with no ne
   const out = remapByIdentity(tree, ["id-agent", "1:old"], ["id-agent", "id-new"], ["0:agent", "1:renamed"]);
   assert.equal(leaves(out).length, 2, "the renamed-backfilled pane is kept");
 });
+
+// #6025: an ambiguous gap-fallback candidate must never displace a pane whose
+// backfill was matched exactly.
+for (const closedFirst of [true, false]) {
+  test(`fallback candidate does not evict an exactly-matched live pane (#6025, closed ${closedFirst ? "first" : "last"})`, () => {
+    resetIds();
+    const l = (id: string, tab: number) => ({ kind: "leaf", id, tab }) as LayoutNode;
+    const rest: LayoutNode = {
+      kind: "split", id: "S2", dir: "row", ratio: 0.5,
+      a: l("Lagent", 0),
+      b: { kind: "split", id: "S3", dir: "row", ratio: 0.5, a: l("Lold", 1), b: l("Lshell", 2) },
+    };
+    const tree: LayoutNode = closedFirst
+      ? { kind: "split", id: "S1", dir: "row", ratio: 0.5, a: l("Lclosed", 3), b: rest }
+      : { kind: "split", id: "S1", dir: "row", ratio: 0.5, a: rest, b: l("Lclosed", 3) };
+    const prev = ["id-agent", "1:old", "1:shell", "1:closed"];
+    const next = ["id-agent", "id-renamed", "id-shell"];
+    const out = validate(remapByIdentity(tree, prev, next, ["0:agent", "1:renamed", "1:shell"]), next.length);
+    const ls = leaves(out);
+    assert.ok(ls.some((x) => x.id === "Lshell" && x.tab === 2), "the exactly-matched shell pane keeps its slot");
+    assert.ok(!ls.some((x) => x.id === "Lclosed"), "the closed tab's pane goes");
+    assert.ok(ls.some((x) => x.id === "Lold"), "the renamed-backfilled pane is kept by the fallback");
+    assert.ok(ls.some((x) => x.id === "Lagent"));
+  });
+}

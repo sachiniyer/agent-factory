@@ -647,8 +647,15 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
 		return nil, spawnErr
 	}
-	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindVSCode); err != nil {
+	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil || i.capabilitiesLocked().RemoteEditor, TabKindVSCode); err != nil {
 		return nil, err
+	}
+	// Index 0 is the pinned agent tab (unclosable, the PTY stream's target). A
+	// restore that fails before remote Launch leaves started=true with an EMPTY
+	// roster; an editor admitted there would sit in the agent slot, be unclosable,
+	// and suppress agent seeding on the retry (#6091). Same guard as web and docs.
+	if len(i.Tabs) == 0 || i.Tabs[0] == nil || i.Tabs[0].Kind != TabKindAgent {
+		return nil, fmt.Errorf("cannot add a VS Code tab before the session's agent tab is ready")
 	}
 	tab := newVSCodeTab()
 	tab.Name = uniqueTabName(i.Tabs, base)

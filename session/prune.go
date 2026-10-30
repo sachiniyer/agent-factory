@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -51,6 +52,12 @@ func ArchiveTimeFor(data InstanceData) time.Time {
 // so a row that could never be reclaimed does not also report a confusing age
 // verdict.
 func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
+	if !data.PrunedAt.IsZero() {
+		return fmt.Sprintf("already pruned at %s — branch %s was kept", data.PrunedAt.Format(time.RFC3339), data.Branch)
+	}
+	if data.PruneIntent != nil {
+		return "a prune of this archive was interrupted — run `af sessions prune --apply` to finish it"
+	}
 	if data.UserKilled {
 		return "kill tombstone — teardown is still owed"
 	}
@@ -156,9 +163,22 @@ func DirSizeBytes(root string) (int64, error) {
 		total int64
 		err   error
 	}
+	// One walk per root at a time: a walk parked on a stalled mount stays alive
+	// after its deadline, and every retry would otherwise start another behind it
+	// (#5189). A caller arriving while one is still parked refuses instead.
+	dirSizeFlightsMu.Lock()
+	if dirSizeFlights[root] {
+		dirSizeFlightsMu.Unlock()
+		return 0, fmt.Errorf("a previous measurement of %s is still running — the filesystem is likely stalled", root)
+	}
+	dirSizeFlights[root] = true
+	dirSizeFlightsMu.Unlock()
 	done := make(chan result, 1)
 	go func() {
 		total, err := dirSizeWalk(root)
+		dirSizeFlightsMu.Lock()
+		delete(dirSizeFlights, root)
+		dirSizeFlightsMu.Unlock()
 		done <- result{total, err}
 	}()
 	select {
@@ -168,6 +188,11 @@ func DirSizeBytes(root string) (int64, error) {
 		return 0, fmt.Errorf("measuring %s timed out after %s — the filesystem is likely stalled", root, dirSizeMeasureTimeout)
 	}
 }
+
+var (
+	dirSizeFlightsMu sync.Mutex
+	dirSizeFlights   = map[string]bool{}
+)
 
 func dirSizeWalk(root string) (int64, error) {
 	var total int64
@@ -202,6 +227,14 @@ func dirSizeWalk(root string) (int64, error) {
 		}
 		info, err := d.Info()
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // deleted mid-walk: already reclaimed
+			}
+			// A transient FUSE/NFS error here would otherwise vanish and
+			// understate the reclaim with no warning (#5189).
+			if firstErr == nil {
+				firstErr = err
+			}
 			return nil
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)

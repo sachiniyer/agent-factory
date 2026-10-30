@@ -269,9 +269,9 @@ func TestDerivationTracksPreviewTabUse(t *testing.T) {
 //
 // #1935 landed for the web, and the CLI now sends the same project_path field.
 // The fixture therefore proves both positive paths — inline web values and
-// field-by-field CLI assignments — while retaining a negative control: the web
-// still does not send max_concurrent_runs. A walk that credits the wrapper as
-// every nested field would fail that live task.max-concurrent-runs assertion.
+// field-by-field CLI assignments — and pins the web's max_concurrent_runs reach
+// by value too (#4180 landed), so a walk that drops the inline literal cannot
+// silently under-credit a field the web really does send.
 func TestDerivationSeesNestedTaskUpdateFields(t *testing.T) {
 	paths := jsonFieldPaths(auditedRequests["UpdateTaskRequest"])
 	var nested []string

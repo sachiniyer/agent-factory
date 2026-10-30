@@ -334,6 +334,9 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	program, proof := respawnLaunchProgram(
 		i, resolvedProgram, declarationBase, resolution.trustBase, resume, prepared)
 	setLaunchProgram(ts, program, proof)
+	// A re-spawn resumes this session's own recorded conversation or starts fresh
+	// (#4797): never the latest one on a shared account home.
+	ts.SetExactResumeOnly(true)
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: %w", err))
 	}
@@ -362,7 +365,20 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
 	if restoreResult == tmux.RestoreRespawned {
-		i.setRuntimeLaunch(declarationBase, ts)
+		// RuntimeProgram holds the clean base command that was actually launched,
+		// not the pane-fallback base an account swap's proof may have been
+		// declared against (that base carries af's own injected flags, and
+		// recording it would poison RuntimeProgram with af's words). An account
+		// swap carries the clean base its preflight froze (runtimeBase) and the
+		// configuration is NOT resolved again here: a program_overrides edit
+		// between preflight and respawn would otherwise record a command that
+		// never ran, and the next same-agent swap would trust it (#6049 review).
+		// Any other respawn launches the base it just resolved.
+		runtimeBase := resolution.command
+		if prepared != nil {
+			runtimeBase = prepared.runtimeBase
+		}
+		i.setRuntimeLaunch(runtimeBase, ts)
 		// A respawn produced a replacement process: the run-end classifier at
 		// ConfirmLive reads this verdict to interrupt a still-in-flight task
 		// run rather than let the fresh agent's first idle edge complete it

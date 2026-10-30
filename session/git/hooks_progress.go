@@ -137,7 +137,7 @@ func withHookProgressLock(dir string, fn func(string, os.FileInfo) error) error 
 	if !identity.IsDir() {
 		return fmt.Errorf("hook journal path is not a directory: %s", pinned)
 	}
-	return withBoundedHookProgressFileLock(filepath.Join(pinned, ".progress"), relocationIdentityTimeout, func() error {
+	return withBoundedHookProgressFileLock(filepath.Join(pinned, ".progress"), relocationIdentityTimeout.Load(), func() error {
 		hookProgressLockAcquired()
 		return fn(pinned, identity)
 	})

@@ -75,7 +75,8 @@ type InstanceData struct {
 	CanKill bool `json:"can_kill,omitempty"`
 	// CanHandoff is the projection-only agent-swap capability shared by the TUI and
 	// web (#2013): true when this session's agent can be handed off in place — a
-	// local-worktree backend (Capabilities().Handoff) in a runtime state that admits
+	// local-worktree backend, or an ssh/sandbox one whose agent-server advertises
+	// agent-swap (Capabilities().Handoff), in a runtime state that admits
 	// the swap (ValidateRuntimeAction(RuntimeActionHandoff)). It is derived live by
 	// ToInstanceData from the SAME two predicates the TUI's handoff gate reads
 	// (app/handle_handoff.go), so a browser — which cannot run those Go predicates —
@@ -165,9 +166,9 @@ type InstanceData struct {
 	// replacement runtime, so adopting the row as the fire's product would
 	// misreport the interrupted run as started and discharge a prompt that was
 	// never replayed. omitempty + additive: an older record decodes to false —
-	// indistinguishable from a normally-ended run, which is the pre-fix
-	// reading and matches it.
-	TaskRunInterrupted bool `json:"task_run_interrupted,omitempty"`
+	// indistinguishable from a normally-ended run (the pre-fix reading).
+	TaskRunInterrupted   bool      `json:"task_run_interrupted,omitempty"`
+	TaskRunInterruptedAt time.Time `json:"task_run_interrupted_at,omitzero"` // #6223 re-arm window
 	// TaskRunFailurePending records that the run ended failed (initial prompt
 	// proven undelivered, #5278) and the task's errored status has not yet been
 	// acknowledged as written (#5646). omitempty + additive: an older record
@@ -263,7 +264,13 @@ type InstanceData struct {
 	// never to a time before the real archive — so the fallback can only make a
 	// legacy row look younger and therefore under-delete, never over-delete.
 	ArchivedAt time.Time `json:"archived_at,omitzero"`
-	Prompt     string    `json:"prompt,omitempty"`
+	// ArchiveNonce is the occupant nonce stamped into the archived worktree's registration leaf (#5189).
+	ArchiveNonce string `json:"archive_nonce,omitempty"`
+	// PrunedAt marks a prune tombstone: the worktree was deleted, the branch kept (#5189).
+	PrunedAt time.Time `json:"pruned_at,omitzero"`
+	// PruneIntent is the durable record written before prune's first irreversible step (#5189).
+	PruneIntent *PruneIntentData `json:"prune_intent,omitempty"`
+	Prompt      string           `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
 	// Unlike Prompt, it is cleared only after the exact mission lands (or is
@@ -429,6 +436,17 @@ type InstanceData struct {
 	// nil therefore means only "not projected", and ForStorage sets it back to nil
 	// so a derived verdict still never reaches instances.json.
 	TabRosterMutable *bool `json:"tab_roster_mutable,omitempty"`
+	// Placement is where the session runs (#5571 W6.4): derived on every snapshot
+	// so each surface can show host, local-versus-off-box and workspace location.
+	// ForStorage sets it back to nil, so a derived fact never reaches
+	// instances.json.
+	Placement *PlacementData `json:"placement,omitempty"`
+	// TabManagement is Capabilities.TabManagement projected (#5953): whether this
+	// session may gain shell and process tabs. For an off-box row the daemon lifts
+	// it from the agent-server's advertisement, which a client's snapshot row
+	// cannot read, so without the projection the TUI refuses new remote tabs.
+	// A pointer so that false survives the wire; ForStorage clears it.
+	TabManagement *bool `json:"tab_management,omitempty"`
 	// RuntimeCleanupStateUnknown is the independent retention marker for a sandbox
 	// teardown whose completion could not be determined. The next restore must
 	// retry RuntimeCleanup before it can safely provision a replacement. It is not
@@ -592,118 +610,6 @@ func archiveWarningOperation(liveness Liveness) string {
 	}
 }
 
-// TabData is the serializable form of a session.Tab. The full list is persisted
-// (and restored by exact TmuxName) so every tab — agent and shell alike —
-// reconnects to its tmux session across an af/daemon restart (#930). The field
-// is omitempty + additive, mirroring the BranchCreatedByUs back-compat
-// precedent: instances.json written before #930 PR 2 simply has no Tabs, and
-// FromInstanceData synthesizes [agent, shell] from the legacy TmuxName/Program.
-// TabKindAllowance is the projected verdict for one creatable tab kind.
-type TabKindAllowance struct {
-	// Kind is the `--kind` spelling, the same vocabulary the CLI validates against
-	// (session.TabKindNameList), so a client switches on the name the user types.
-	Kind string `json:"kind"`
-	// Allowed is RefuseTabKind returning nil for this kind on this session.
-	Allowed bool `json:"allowed"`
-	// Reason is the daemon's refusal text, empty when allowed. Rendered verbatim by
-	// clients; it names the requirement that is actually unmet (#3053).
-	Reason string `json:"reason,omitempty"`
-}
-
-type TabData struct {
-	// ID is the tab's stable identity (#1738), minted at creation and never
-	// reused. It is the collision-proof key the PTY stream (?tab_id=) and the web
-	// DnD/pane bindings address the tab by, so a reorder/close can't misroute.
-	// omitempty + additive, mirroring the InstanceData.ID / BranchCreatedByUs
-	// rollforward precedent: a record written before #1738 has no id, and
-	// restoreLocalTabs backfills a fresh one on load.
-	ID string `json:"id,omitempty"`
-	// Gen identifies this INCARNATION of the tab: minted when the process is
-	// spawned, so a close-and-recreate under the same id (allowed) is a different
-	// tab to anything that fences on it (#5571, #5955, #5960). Sent by the
-	// agent-server on create and in its roster; the daemon records it and applies
-	// exit evidence only to the incarnation that produced it. omitempty: rows from
-	// before the field carry none and are never fenced in.
-	Gen  string `json:"gen,omitempty"`
-	Name string `json:"name"`
-	// The wire names it as `kind_name`, the word `tab_kinds[].kind` uses too.
-	Kind     TabKind `json:"kind"`
-	Command  string  `json:"command,omitempty"`
-	TmuxName string  `json:"tmux_name,omitempty"`
-	// URL is the target of a TabKindWeb tab (the iframe/proxy address); empty for
-	// every other kind. Surfaced in the snapshot so the web UI can iframe it and
-	// so `af sessions get` shows the target.
-	URL string `json:"url,omitempty"`
-	// Proposal is the slug a docs tab edits; empty for every other kind.
-	Proposal string `json:"proposal,omitempty"`
-	// PushMode is a docs tab's push mode, "auto" or "manual"; empty means auto.
-	PushMode string `json:"push_mode,omitempty"`
-	// WebProxied is derived at JSON encoding with IsLoopbackWebTarget, the
-	// daemon proxy's predicate. A pointer preserves explicit false for web tabs;
-	// non-web tabs omit it. Stored/input values never override the derivation.
-	WebProxied *bool `json:"web_proxied,omitempty"`
-	// Conversation is the provider-specific conversation id for this tab, when
-	// the underlying agent exposes a durable resume id. Omitted for legacy rows
-	// and providers where af can only resume "latest".
-	Conversation *AgentConversationData `json:"conversation,omitempty"`
-	// Handoffs is the tab's append-only agent-swap ledger (#2013), oldest first.
-	// omitempty + additive on the same rollforward precedent as ID and
-	// Conversation: a record written before #2013 has none, which is
-	// indistinguishable from a session that was never handed off — and those two
-	// deserve the same treatment, so nothing has to be backfilled.
-	Handoffs []AgentHandoff `json:"handoffs,omitempty"`
-	// Exit records how a process tab's command ended (#4479): the pane was seen
-	// dead, not merely missing, or af stopped it and says why. nil for tabs af
-	// never saw finish — the load path maps that to "still in flight", never to
-	// "re-run me".
-	Exit *TabExitData `json:"exit,omitempty"`
-	// AccountScope is the account af launched this tab's pane under (#4506
-	// review). A sibling whose recorded scope is not the session's account is
-	// stopped once at load, because its pane may run on another identity. Empty
-	// for a pane launched on the ambient identity, and for rows written before
-	// this field existed.
-	AccountScope string `json:"account_scope,omitempty"`
-}
-
-// TabExitData is the wire form of Tab.Exit: only the fields a reader needs to
-// render or reason about a finished command.
-type TabExitData struct {
-	Status      int  `json:"status,omitempty"`
-	StatusKnown bool `json:"status_known,omitempty"`
-	// At is omitted, not zero-valued, when tmux reported no death time:
-	// omitempty never omits a struct, and "0001-01-01T00:00:00Z" would present
-	// an invented completion time to every reader (#4506 review).
-	At time.Time `json:"at,omitzero"`
-	// StoppedBy is set when af stopped the command rather than it exiting:
-	// "account-scope" or "account-swap" (#4506 review).
-	StoppedBy string `json:"stopped_by,omitempty"`
-}
-
-// TabCleanupData is one durable cleanup handle for a closed tab whose tmux
-// teardown was never confirmed. It deliberately carries only what a retry needs
-// — no Kind, Command, or URL — so it cannot be mistaken for, or restored as, a
-// TabData: a tombstone that could round-trip into a tab would resurrect exactly
-// the closed tab #2669 exists to keep buried.
-type TabCleanupData struct {
-	// TabID is the closed tab's stable id (#1738). Ids are never reused, so it
-	// names the exact close this handle belongs to and keeps the retry's logs and
-	// deduplication honest across restarts.
-	TabID string `json:"tab_id,omitempty"`
-	// TmuxName is the cleanup handle proper: the EXACT tmux session name the retry
-	// must kill, and the token a later spawn must not re-derive. An entry with no
-	// name would be untargetable, so CloseTab never records one.
-	TmuxName string `json:"tmux_name"`
-}
-
-// RemoteTabCleanupData names an off-box tab whose close the sandbox has not
-// confirmed. The stable id is the whole handle — the sandbox addresses its tabs
-// by it — and Gen pins the incarnation, so a retry can never close a later tab
-// that reused the id.
-type RemoteTabCleanupData struct {
-	TabID string `json:"tab_id"`
-	Gen   string `json:"gen,omitempty"`
-}
-
 // Storage handles saving and loading instances using the state interface.
 // When repoID is set (TUI mode), operations are scoped to that repo.
 // When repoID is empty (daemon mode), operations span all repos.
@@ -783,6 +689,29 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 //     carve-out for an older binary's disposable Loading/Deleting projection
 //     (#551) is reaped; durable ghosts are preserved verbatim.
 func (s *Storage) SaveInstances(instances []*Instance) error {
+	return s.saveInstances(instances, config.WithFileLock)
+}
+
+// SaveInstancesWithin is SaveInstances with a DEADLINE on every instances-flock
+// wait, shared across all repos in the call: a lock holder that never lets go
+// surfaces as config.ErrLockTimeout once budget is spent instead of parking the
+// caller. Nothing is written for a repo whose lock was not acquired — the
+// checkpoint never proceeds unlocked. Repos checkpointed before the timeout
+// stay written. Callers on a path with its own budget (the daemon's missing-file
+// restore, bounded by the poll/shutdown grace) use this form (#6048 review).
+func (s *Storage) SaveInstancesWithin(instances []*Instance, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	return s.saveInstances(instances, func(path string, fn func() error) error {
+		// A spent budget (0) is a genuinely non-blocking attempt: a free lock is
+		// never refused for being late, a held one times out at once without
+		// sleeping, so a pass over many repos cannot overrun the shared deadline.
+		return config.WithFileLockTimeout(path, max(time.Until(deadline), 0), fn)
+	})
+}
+
+// saveInstances is the checkpoint body; withLock is how each repo's instances
+// flock is taken.
+func (s *Storage) saveInstances(instances []*Instance, withLock func(path string, fn func() error) error) error {
 	// Keep the live instances grouped by their stable storage repo. Each repo is
 	// projected once to decide whether it has anything to checkpoint, then again
 	// inside its file lock so an archive that starts after collection cannot be
@@ -818,7 +747,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		if pathErr != nil {
 			return pathErr
 		}
-		if err := config.WithFileLock(path, func() error {
+		if err := withLock(path, func() error {
 			checkpoint := snapshotInstancesForCheckpoint(repoInstances)
 			if !checkpoint.shouldWrite() {
 				return nil
@@ -860,7 +789,82 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 				reconcilePendingArchiveRows(group, checkpoint.inFlightArchive, onDisk)
 				group = mergeCommittedArchiveRows(group, onDisk, checkpoint.prePushArchive)
 			}
-			ghosts := preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles)
+			// A same-titled on-disk row whose stable ID differs from the
+			// in-memory instance is a replacement the daemon has not observed:
+			// refreshDaemonInstances keeps the old in-memory pointer by title
+			// even when the disk row's ID differs, so the checkpoint would write
+			// the stale instance and clobber the replacement's identity — the
+			// data-loss class persistInstanceData's title+ID guard exists to
+			// prevent. Drop the stale in-memory row and let the on-disk
+			// replacement survive the wholesale rewrite verbatim (retained below
+			// outside the ghost reaper). An empty ID on either side is a legacy record and still
+			// matches, mirroring stableIDMatchesForDaemon (#6048 review).
+			//
+			// Duplicate disk titles are resolved FIRST, newest UpdatedAt wins (ties
+			// keep the earliest), the same rule dedupeInstanceData applies: only
+			// that authoritative row is compared with the live instance, so an older
+			// stale duplicate cannot supersede a current row matching it.
+			authoritative := make(map[string]int)
+			for i, d := range onDisk {
+				if prev, ok := authoritative[d.Title]; !ok || d.UpdatedAt.After(onDisk[prev].UpdatedAt) {
+					authoritative[d.Title] = i
+				}
+			}
+			replaced := make(map[string]struct{})
+			replacedID := make(map[string]string)
+			for i := range group {
+				if idx, ok := authoritative[group[i].Title]; ok && !stableIDMatches(onDisk[idx].ID, group[i].ID) {
+					replaced[group[i].Title] = struct{}{}
+					replacedID[group[i].Title] = group[i].ID
+				}
+			}
+			var replacements []json.RawMessage
+			if len(replaced) > 0 {
+				// The conflicting on-disk row is retained UNCONDITIONALLY and
+				// verbatim: handing it to preserveUnmaterializedGhostRows would let
+				// that helper reap it as a disposable legacy transient when it is a
+				// Loading/Deleting row with no retention marker, and with the stale
+				// in-memory row already dropped the checkpoint would then lose both
+				// records and orphan the replacement session (#6048 review).
+				best := make(map[string]int)
+				restDisk := make([]InstanceData, 0, len(onDisk))
+				restRaw := make([]json.RawMessage, 0, len(onDisk))
+				for i, d := range onDisk {
+					if _, isReplaced := replaced[d.Title]; !isReplaced {
+						restDisk = append(restDisk, d)
+						if i < len(onDiskRaw) {
+							restRaw = append(restRaw, onDiskRaw[i])
+						}
+						continue
+					}
+					if i != authoritative[d.Title] {
+						continue // an older duplicate of the replacement: superseded
+					}
+					best[d.Title] = i
+				}
+				for _, i := range best {
+					raw := json.RawMessage(nil)
+					if i < len(onDiskRaw) {
+						raw = onDiskRaw[i]
+					} else {
+						raw, _ = json.Marshal(onDisk[i])
+					}
+					replacements = append(replacements, stripRemovedInstanceDataWireKeys(raw))
+				}
+				onDisk, onDiskRaw = restDisk, restRaw
+				kept := make([]InstanceData, 0, len(group))
+				for _, g := range group {
+					if _, drop := replaced[g.Title]; drop {
+						continue
+					}
+					kept = append(kept, g)
+				}
+				group = kept
+				for title := range replaced {
+					delete(inMemoryTitles, title)
+				}
+			}
+			ghosts := append(preserveUnmaterializedGhostRows(onDisk, onDiskRaw, inMemoryTitles), replacements...)
 			jsonData, err := marshalCheckpointInstances(group, ghosts)
 			if err != nil {
 				return fmt.Errorf("failed to marshal instances for repo %s: %w", rid, err)
