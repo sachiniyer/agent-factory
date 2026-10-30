@@ -33,6 +33,8 @@ type (
 	SetBudgetResponse            = backlog.BudgetResponse
 	StartBacklogItemRequest      = backlog.StartRequest
 	StartBacklogItemResponse     = backlog.StartResponse
+	RunBacklogRequest            = backlog.RunRequest
+	RunBacklogResponse           = backlog.RunResponse
 )
 
 func errUnknownBacklogMethod(method string) error {

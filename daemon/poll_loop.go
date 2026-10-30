@@ -46,6 +46,11 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// restart left starting. It runs on its own tracked goroutine.
 			manager.RecoverBacklogStarts()
 
+			// Start queued backlog items and stop runs over the cap per run, at
+			// most every 5 s. The pass runs on its own goroutine; starts go
+			// through the async start path.
+			manager.RunBacklogs()
+
 			// Always-ensure the root agent for repos opted in via root_agents
 			// (#1106). Runs after RefreshStatuses so a root whose tmux died is
 			// marked Dead and its heal STARTED in the same tick; the loop body

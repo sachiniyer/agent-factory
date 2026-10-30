@@ -30,6 +30,7 @@ func (backlogTestHost) AnswerTarget(_, _ string) backlog.AnswerTarget {
 	return backlog.TargetLive
 }
 func (backlogTestHost) DeliverAnswer(string, backlog.PendingAnswer) {}
+func (backlogTestHost) Gate(string) backlog.Gate                    { return backlog.Gate{} }
 func (backlogTestHost) Usage() planusage.Usage {
 	at := backlogTestNow.Add(-90 * time.Second)
 	return planusage.Usage{Account: planusage.DefaultAccount, ReadingAt: &at,
@@ -70,6 +71,9 @@ func stubBacklogDaemon(t *testing.T) *[]string {
 	}
 	routes["StartBacklogItem"] = backlogRoute(func(r daemon.StartBacklogItemRequest) (any, error) {
 		return daemon.StartBacklogItemResponse{Run: backlog.RunRef{State: backlog.RunStarting, StartedBy: backlog.StartedByUser}}, nil
+	})
+	routes["RunBacklog"] = backlogRoute(func(r daemon.RunBacklogRequest) (any, error) {
+		return daemon.RunBacklogResponse{Started: []int{r.Count}}, nil
 	})
 	prevSelf := backlogSelfSession
 	backlogSelfSession = func() (*session.InstanceData, error) { return nil, errors.New("not in an af session") }
@@ -348,7 +352,7 @@ func TestBacklogRunnerAndBudget(t *testing.T) {
 	if out, err = runBacklogCmd(t, "runner", "on", "--max-running", "2", "--on-done", "archive"); err != nil {
 		t.Fatal(err)
 	}
-	if v = decodeOut[backlogRunnerView](t, out); !v.Runner || v.Max != 2 || v.OnDone != "archive" || v.State != backlog.RunnerWaiting {
+	if v = decodeOut[backlogRunnerView](t, out); !v.Runner || v.Max != 2 || v.OnDone != "archive" || v.State != backlog.RunnerIdle {
 		t.Fatalf("%+v", v)
 	}
 	if _, err := runBacklogCmd(t, "runner", "maybe"); err == nil {

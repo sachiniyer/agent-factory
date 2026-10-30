@@ -640,6 +640,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/RunBacklog",
+		Description: "Run one runner pass now, ignoring the runner switch and budget: start up to count queued items (default 1) in the free slots; returns the ids started.",
+		requestType: reflect.TypeOf(RunBacklogRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RunBacklog) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/SetBacklogSettings",
 		Description: "Change a project's runner switch, max running, or what happens to an item's session when the item is done.",
 		requestType: reflect.TypeOf(SetBacklogSettingsRequest{}),

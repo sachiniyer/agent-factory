@@ -37,6 +37,7 @@ type backlogState struct {
 	recovering   bool
 	recoveryDone bool
 	meter        meterState
+	runner       runnerState
 }
 
 func (s *backlogState) reserve(repoID string) {

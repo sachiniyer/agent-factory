@@ -61,6 +61,7 @@ var verbTargetClass = map[string]string{
 	"af backlog note":   classRouted,
 	"af backlog queue":  classRouted,
 	"af backlog reopen": classRouted,
+	"af backlog run":    classRouted,
 	"af backlog review": classRouted,
 	"af backlog runner": classRouted,
 	"af backlog show":   classRouted,

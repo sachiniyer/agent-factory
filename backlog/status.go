@@ -186,5 +186,7 @@ func (b *Backlog) applyStatus(it *Item, to Status, now time.Time) {
 		it.closeOpenQuestions(ClosedDone)
 	case StatusDropped:
 		it.closeOpenQuestions(ClosedDropped)
+	case StatusReview:
+		it.closeAFQuestions(ClosedSentToReview)
 	}
 }
