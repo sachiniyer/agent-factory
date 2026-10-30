@@ -907,6 +907,11 @@ func TestTaskFireLeftoverRecord_StopsProvenRuntime(t *testing.T) {
 		_ = exec.Command("tmux", "kill-session", "-t", "="+sanitized).Run()
 	})
 
+	// Cross a wall-second so the leftover's second-granular creation time
+	// strictly predates the reconcile bound: the upper bound now rejects the
+	// boot's own wall second (a concurrent create racing the boot lands there),
+	// so a genuine leftover must be seeded in an earlier second to read as ours.
+	time.Sleep(1100 * time.Millisecond)
 	fire := &taskFireMarker{
 		TaskID: "ab0r7097", IntendedAt: time.Now().Add(-time.Minute), Title: title,
 	}
@@ -1218,6 +1223,12 @@ func TestTaskFireLeftoverRecord_TmuxOnlyProvenReap(t *testing.T) {
 	t.Cleanup(func() {
 		_ = exec.Command("tmux", "kill-session", "-t", "="+sanitized).Run()
 	})
+
+	// Cross a wall-second so the leftover's second-granular creation time
+	// strictly predates the reconcile bound: the upper bound now rejects the
+	// boot's own wall second (a concurrent create racing the boot lands there),
+	// so a genuine leftover must be seeded in an earlier second to read as ours.
+	time.Sleep(1100 * time.Millisecond)
 
 	// A genuine tmux-only leftover: the intent predates the boot, the session
 	// carries the markers a real af create stamps, and the reconcile bound is

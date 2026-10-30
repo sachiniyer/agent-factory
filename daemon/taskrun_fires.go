@@ -645,10 +645,17 @@ func taskFireRowOwnsTmuxName(d *session.InstanceData, name string) bool {
 // sanitizes to the same tmux name) cannot be the interrupted attempt's residue,
 // and reaping it by sanitized name would destroy a live foreign session whose
 // persisted row has not landed yet. Creation time is second-granularity, so the
-// comparisons are at whole seconds — a leftover spawned in the intent's wall
-// second reads as ours, while a session in the boot's wall second reads as not
-// newer than the boot; the generation re-check at kill time backstops both
-// same-second edges.
+// comparisons are at whole seconds. The lower bound errs toward "ours" (a
+// leftover spawned in the intent's wall second reads as ours); the upper bound
+// errs toward foreign — the safe direction for a destructive reap, since the
+// persisted-row guard cannot see a rowless concurrent create — by rejecting the
+// boot's OWN wall second, so a session created in or after the second the
+// daemon started is never proven. A concurrent create racing the boot lands
+// here and is left for inspection; a genuine leftover created in the boot's
+// wall second is quarantined rather than reaped, which is the safe trade. The
+// bound is compared at whole seconds because SessionCreatedUnix carries none
+// below the second (comparing it against a nanosecond-precise time.Now() would
+// let a same-second concurrent create read as older than the boot).
 func taskFireTmuxEvidence(cmdExec cmd.Executor, sanitized string, fire *taskFireMarker, reconcileStart time.Time) (proven bool, generation string) {
 	home, homePresent, err := tmux.SessionHomeMarker(cmdExec, sanitized)
 	if err != nil || !homePresent {
@@ -673,8 +680,8 @@ func taskFireTmuxEvidence(cmdExec cmd.Executor, sanitized string, fire *taskFire
 	// Lower bound errs toward "ours" (a leftover spawned in the intent's wall
 	// second reads as ours); the upper bound errs toward foreign — the safe
 	// direction for a destructive reap, since the persisted-row guard cannot
-	// see a rowless concurrent create.
-	if created.Unix() < fire.IntendedAt.Unix() || created.After(reconcileStart) {
+	// see a rowless concurrent create — by rejecting the boot's own wall second.
+	if created.Unix() < fire.IntendedAt.Unix() || created.Unix() >= reconcileStart.Unix() {
 		return false, ""
 	}
 	return true, gen
