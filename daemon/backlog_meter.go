@@ -161,6 +161,37 @@ func (m *Manager) meterUsageWithin(age time.Duration) planusage.Usage {
 	return st.current()
 }
 
+// rememberItemRunDirs records where a new item session's transcripts will be,
+// right after its start is committed and before it can be archived (which moves
+// the worktree they are derived from). It skips when a pass is running: that
+// pass, or the next, records them from the live session.
+func (m *Manager) rememberItemRunDirs(repoID, sessionID string) {
+	if !m.planUsageOn() {
+		return
+	}
+	s, ok := m.itemSessions(repoID)[sessionID]
+	if !ok {
+		return
+	}
+	_, dirs, err := s.instance.ClaudeRunTranscriptDirs()
+	if err != nil {
+		return
+	}
+	st := &m.backlog.meter
+	if !st.mu.TryLock() {
+		return
+	}
+	defer st.mu.Unlock()
+	state, err := planusage.LoadMeter()
+	if err != nil {
+		return
+	}
+	state.RememberRunDirs(sessionID, dirs)
+	if err := state.Save(); err != nil {
+		m.warn().Printf("plan meter: %v", err)
+	}
+}
+
 // itemRun is one started run of an item, with its session when it still exists.
 type itemRun struct {
 	repoID string
@@ -226,6 +257,12 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	updates := map[string]map[string]map[string]backlog.Meter{}
 	var backlogDirs []string
 	metered := map[string]bool{}
+	// runSnaps lets a run's dedupe keys and window buckets be put back if its
+	// cost cannot be committed to the backlog this pass; runConfigs are the
+	// effective config dirs the item sessions write to, scanned for the plan
+	// window even when they are not a registered account's.
+	runSnaps := map[string]planusage.RunSnapshot{}
+	runConfigs := map[string][]string{}
 	for _, r := range m.startedItemRuns(home) {
 		usage.Runs[r.run.SessionID] = r.run.Cost()
 		running := r.item.Status == backlog.StatusRunning
@@ -243,14 +280,20 @@ func (m *Manager) meterPassLocked(now time.Time) {
 			}
 			continue
 		}
+		// The directories seen for this session before, too: archiving moves the
+		// worktree the directory is derived from, but not the transcripts.
+		dirs = state.RememberRunDirs(r.run.SessionID, dirs)
 		backlogDirs = append(backlogDirs, dirs...)
 		metered[r.run.SessionID] = true
+		runSnaps[r.run.SessionID] = state.SnapshotRun(r.run.SessionID)
 		seen := state.RunSeenFor(r.run.SessionID)
 		planusage.PruneSeen(seen, now)
 		rm := backlog.MeterRun(r.item.ID, r.run, planusage.TranscriptFiles(dirs), seen, overrides, now)
 		usage.Runs[r.run.SessionID] = rm.Cost()
 		state.AddRunEntries(r.run.SessionID, rm.Entries)
-		runAccount[r.run.SessionID] = planusage.AccountForConfigDir(home, configDir)
+		account := planusage.AccountForConfigDir(home, configDir)
+		runAccount[r.run.SessionID] = account
+		runConfigs[account] = append(runConfigs[account], configDir)
 		if running && rm.Unmeterable != "" {
 			usage.Unmeterable[r.run.SessionID] = rm.Unmeterable
 		}
@@ -267,11 +310,17 @@ func (m *Manager) meterPassLocked(now time.Time) {
 			return nil
 		}); err != nil {
 			m.warn().Printf("plan meter: storing run costs of project %s: %v", repoID, err)
+			// The costs were not stored, so the keys that say "already counted"
+			// must not be either: put those runs back and the next pass counts
+			// them again.
+			for sessionID := range meters {
+				state.RestoreRun(sessionID, runSnaps[sessionID])
+			}
 		}
 	}
 	state.KeepRunSeen(metered)
 	state.PruneRunBuckets(now)
-	m.meterAccounts(home, state, backlogDirs, overrides, now, &usage)
+	m.meterAccounts(home, state, backlogDirs, runConfigs, overrides, now, &usage)
 	for sessionID, account := range runAccount {
 		usage.RunWindow[sessionID] = state.RunWindowCost(sessionID, usage.Accounts[account].Windows.FiveHour)
 	}
@@ -291,19 +340,23 @@ func (m *Manager) meterPassLocked(now time.Time) {
 // meterAccounts meters every transcript under each Claude account's config
 // dir and fills usage with each account's windows; the top-level windows are
 // the account with the newest reading.
-func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlogDirs []string, overrides map[string]planusage.Price, now time.Time, usage *planusage.Usage) {
-	sources := map[string]string{planusage.DefaultAccount: ambientClaudeConfigDir()}
+func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlogDirs []string, runConfigs map[string][]string, overrides map[string]planusage.Price, now time.Time, usage *planusage.Usage) {
+	sources := map[string][]string{planusage.DefaultAccount: {ambientClaudeConfigDir()}}
 	if names, err := agentaccount.List(home, tmux.ProgramClaude); err == nil {
 		for _, name := range names {
 			if acct, err := agentaccount.Selected(home, tmux.ProgramClaude, name); err == nil && acct.Dir != "" && name != planusage.DefaultAccount {
-				sources[name] = acct.Dir
+				sources[name] = []string{acct.Dir}
 			}
 		}
 	}
-	for name, dir := range sources {
-		if dir != "" {
-			state.Scan(name, dir, backlogDirs, overrides, now)
-		}
+	// A session's effective config dir (CLAUDE_CONFIG_DIR or HOME overridden in
+	// its launch command) is scanned under the account its readings are filed
+	// under, so its transcripts count toward the window its run is judged in.
+	for account, dirs := range runConfigs {
+		sources[account] = append(sources[account], dirs...)
+	}
+	state.ScanAll(sources, backlogDirs, overrides, now)
+	for name := range sources {
 		r, err := planusage.LoadReading(name)
 		if err != nil {
 			m.warn().Printf("plan meter: reading of account %s: %v", name, err)

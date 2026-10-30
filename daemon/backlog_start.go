@@ -130,6 +130,16 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 			}
 		}()
 		data, err := createBacklogSession(m, ctx, create)
+		if err == nil && data.LastPromptDeliveryStatus == session.PromptNotDelivered {
+			// The create succeeded but the runtime observed the prompt absent
+			// (CreateSession returns with the verdict). The work never reached the
+			// agent: disarm the run (its first idle edge would otherwise end it as
+			// a completion) and record a failed start.
+			if s, ok := m.itemSessions(ref.ID)[data.ID]; ok {
+				m.disarmBacklogRun(ref.ID, s.instance)
+			}
+			err = errBacklogPromptNotDelivered
+		}
 		m.finishBacklogStart(ref, req.ID, plan.Run.StartedAt, data, err, stop)
 	})
 	if !launched {
@@ -165,6 +175,14 @@ func (m *Manager) finishBacklogStart(ref backlog.ProjectRef, id int, startedAt t
 			return []int{id}, b.FinishStart(id, startedAt, data.ID, data.Title, createErr, svc.Now())
 		})
 		if err == nil {
+			// An idle edge observed before this link was committed found no item
+			// to land on and was held: settle it now (same generation fence).
+			if gen, held := m.backlog.takeEnd(data.ID); held && createErr == nil {
+				m.settleRunEnd(ref.ID, data.ID, gen, stop)
+			}
+			if createErr == nil {
+				m.rememberItemRunDirs(ref.ID, data.ID)
+			}
 			return
 		}
 		if !errors.Is(err, backlog.ErrBusy) {
@@ -229,12 +247,17 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 		return []int{id}, nil
 	})
 	if err != nil {
+		if armed {
+			// The write failed after the closure armed the live session; the
+			// backlog change was discarded, the instance change was not.
+			m.disarmBacklogRun(ref.ID, inst)
+		}
 		return backlog.RunRef{}, svc.Named(ref, err)
 	}
 	var sendErr error
 	if armed {
 		m.persistAndPublishInstance(ref.ID, inst)
-		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt})
+		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt, BacklogOrigin: true})
 		if sendErr != nil {
 			m.disarmBacklogRun(ref.ID, inst)
 			sendErr = fmt.Errorf("send continue to session %q: %w", inst.Title, sendErr)

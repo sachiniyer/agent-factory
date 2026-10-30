@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -25,6 +26,11 @@ type FileMark struct {
 	// ModTime is the file's modification time, in Unix nanoseconds, when it
 	// was last read; an unchanged file is not opened again.
 	ModTime int64 `json:"mtime,omitempty"`
+	// Skipped lists (comma-joined, sorted) the models whose messages in this
+	// file were read past because they had no price. When one of them gets a
+	// price the file is read again from the start; Seen keeps what was already
+	// counted from counting twice.
+	Skipped string `json:"skipped,omitempty"`
 }
 
 // Entry is the cost of one assistant message.
@@ -46,6 +52,11 @@ type ReadOptions struct {
 	// a new transcript on resume, fork and account swap; a key counts once.
 	// ReadTranscript adds what it counts. Nil counts per read only.
 	Seen map[string]int64
+	// Foreign reports whether a message key was counted for ANOTHER account.
+	// Claude Code copies a conversation into the destination account's config
+	// dir on an account handoff; those copied messages consumed the source
+	// account's plan, so they must not count again here.
+	Foreign func(key string) bool
 }
 
 // ReadResult is what one read of a transcript found.
@@ -193,6 +204,10 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 				res.Mark.Offset = next
 				continue
 			}
+			if opts.Foreign != nil && opts.Foreign(key) {
+				res.Mark.Offset = next
+				continue
+			}
 		}
 		pr, ok := priceForUsage(msg.Model, *msg.Usage, opts.Overrides)
 		if !ok {
@@ -218,7 +233,27 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 		}
 		res.Mark.Offset = next
 	}
+	res.Mark.Skipped = mergeSkipped(mark.Skipped, res.Skipped)
 	return res, nil
+}
+
+// mergeSkipped joins the models a file has skipped so far with new ones.
+func mergeSkipped(have string, more []string) string {
+	set := map[string]bool{}
+	for _, m := range strings.Split(have, ",") {
+		if m != "" {
+			set[m] = true
+		}
+	}
+	for _, m := range more {
+		set[m] = true
+	}
+	out := make([]string, 0, len(set))
+	for m := range set {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }
 
 // TranscriptFiles lists the transcripts in Claude project directories: each

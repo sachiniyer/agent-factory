@@ -183,3 +183,94 @@ func TestAttributeReportsAllCost(t *testing.T) {
 		t.Fatalf("%+v", w)
 	}
 }
+
+// A model skipped for want of a price is priced later, once the user adds it
+// (Codex P2 on #6299): the file is read again from the start, and what was
+// already counted does not count twice.
+func TestScanPricesSkippedMessagesOnceTheModelHasAPrice(t *testing.T) {
+	home(t)
+	config := t.TempDir()
+	file := filepath.Join(config, "projects", "-p", "a.jsonl")
+	write(t, file, assistant("m1", opus, 1_000_000, 0), assistant("u1", "claude-x-9", 1_000_000, 0))
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	s := NewMeterState()
+	s.Scan(DefaultAccount, config, nil, nil, now)
+	a := s.Accounts[DefaultAccount]
+	if all, _ := a.costIn(now.Add(-5*time.Hour), now); !near(all, 4) {
+		t.Fatalf("before the price: %v", all)
+	}
+	if a.Files[file].Skipped != "claude-x-9" {
+		t.Fatalf("mark %+v", a.Files[file])
+	}
+	prices := map[string]Price{"claude-x-9": {Input: 2}}
+	if !s.Scan(DefaultAccount, config, nil, prices, now) {
+		t.Fatal("a newly priced model did not trigger a re-read")
+	}
+	if all, _ := a.costIn(now.Add(-5*time.Hour), now); !near(all, 6) {
+		t.Fatalf("after the price: %v, want the skipped message (2) added once to the first (4)", all)
+	}
+	if s.Scan(DefaultAccount, config, nil, prices, now) {
+		t.Fatal("a third scan re-read the file")
+	}
+}
+
+// A conversation copied into another account's config dir by a handoff consumed
+// the SOURCE account's plan; the copy must not count for the destination (Codex
+// P2 on #6299), whichever account is listed first.
+func TestScanDoesNotCountACarriedConversationForTheDestination(t *testing.T) {
+	home(t)
+	src, dst := t.TempDir(), t.TempDir()
+	srcFile := filepath.Join(src, "projects", "-p", "c.jsonl")
+	dstFile := filepath.Join(dst, "projects", "-p", "c.jsonl")
+	write(t, srcFile, assistant("m1", opus, 1_000_000, 0), assistant("m2", opus, 1_000_000, 0))
+	// The copy, then one message made under the destination identity.
+	write(t, dstFile, assistant("m1", opus, 1_000_000, 0), assistant("m2", opus, 1_000_000, 0), assistant("m3", opus, 1_000_000, 0))
+	old := time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(srcFile, old, old); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(dstFile, now, now); err != nil {
+		t.Fatal(err)
+	}
+	s := NewMeterState()
+	s.ScanAll(map[string][]string{"aaa-dest": {dst}, "zzz-source": {src}}, nil, nil, now)
+	cost := func(name string) float64 {
+		all, _ := s.Accounts[name].costIn(now.Add(-5*time.Hour), now.Add(time.Hour))
+		return all
+	}
+	if !near(cost("zzz-source"), 8) || !near(cost("aaa-dest"), 4) {
+		t.Fatalf("source %v (want 8), destination %v (want only its own message, 4)", cost("zzz-source"), cost("aaa-dest"))
+	}
+}
+
+// A run's dedupe keys and buckets can be put back when its cost could not be
+// committed (Codex P2 on #6299), and its transcript directories are remembered
+// across the worktree being archived.
+func TestRunSnapshotRestoreAndRememberedDirs(t *testing.T) {
+	s := NewMeterState()
+	seen := s.RunSeenFor("s1")
+	seen["a"] = 1
+	s.AddRunEntries("s1", []Entry{{At: time.Date(2026, 10, 20, 10, 1, 0, 0, time.UTC), Cost: 3}})
+	snap := s.SnapshotRun("s1")
+	s.RunSeenFor("s1")["b"] = 2
+	s.AddRunEntries("s1", []Entry{{At: time.Date(2026, 10, 20, 10, 2, 0, 0, time.UTC), Cost: 5}})
+	s.RestoreRun("s1", snap)
+	if len(s.RunSeen["s1"]) != 1 || !near(s.RunBuckets["s1"][time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC).Unix()], 3) {
+		t.Fatalf("not restored: %+v %+v", s.RunSeen["s1"], s.RunBuckets["s1"])
+	}
+	s.RestoreRun("none", RunSnapshot{Seen: map[string]int64{}, Buckets: map[int64]float64{}})
+	if _, ok := s.RunBuckets["none"]; ok {
+		t.Fatal("an empty snapshot left an empty bucket map behind")
+	}
+	if dirs := s.RememberRunDirs("s1", []string{"/a", "/b"}); len(dirs) != 2 {
+		t.Fatal(dirs)
+	}
+	if dirs := s.RememberRunDirs("s1", []string{"/b", "/c"}); len(dirs) != 3 {
+		t.Fatalf("the earlier directories must stay after a later pass sees only the new one: %v", dirs)
+	}
+	s.KeepRunSeen(map[string]bool{})
+	if len(s.RunDirs) != 0 {
+		t.Fatal("dirs outlived the session")
+	}
+}

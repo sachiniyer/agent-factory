@@ -224,7 +224,7 @@ func TestAnsweredInSession(t *testing.T) {
 	it, _ := b.Add(NewItem{Title: "A"}, now)
 	it.Status = StatusRunning
 	it.Runs = []RunRef{{SessionID: "old", State: RunStarted}, {SessionID: "s1", State: RunStarted}}
-	if got := b.AnsweredInSession("s1", now); got != 0 {
+	if got := b.AnsweredInSession("s1", 1, now); got != 0 {
 		t.Fatalf("closed %d with nothing open", got)
 	}
 	if _, err := b.Ask(1, "old", "q", now); err == nil {
@@ -235,11 +235,23 @@ func TestAnsweredInSession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := b.AnsweredInSession("old", now); got != 0 {
+	if got := b.AnsweredInSession("old", 1, now); got != 0 {
 		t.Fatal("an old run closed the question")
 	}
-	if got := b.AnsweredInSession("s1", now); got != 1 {
+	// A question the agent posted after the user submitted is not the one the
+	// submission answered (Codex P2 on #6295): only the id captured before the
+	// line was forwarded closes, and only while it is still the oldest open.
+	if got := b.AnsweredInSession("s1", 2, now); got != 0 {
+		t.Fatalf("closed %d: a question the user never saw", got)
+	}
+	if got := b.AnsweredInSession("s1", 0, now); got != 0 {
+		t.Fatal("no captured question must close nothing")
+	}
+	if got := b.AnsweredInSession("s1", 1, now); got != 1 {
 		t.Fatal(got)
+	}
+	if id := b.OpenQuestionID("s1"); id != 2 {
+		t.Fatalf("OpenQuestionID = %d, want the remaining question", id)
 	}
 	th := b.Item(1).Thread
 	if th[0].Closed != ClosedAnsweredInSession || th[1].Closed != "" || b.OpenQuestionText(1) != "r" {

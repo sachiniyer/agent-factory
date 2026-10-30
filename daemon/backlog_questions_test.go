@@ -127,6 +127,9 @@ func TestBacklogAnswerHeldWhileAttached(t *testing.T) {
 	if sent.count() != 0 {
 		t.Fatal("sent while attached")
 	}
+	if inst.BacklogRunActive() {
+		t.Fatal("the run was armed while the answer was held: its completion gate would be open with nothing sent (Codex P2 on #6295)")
+	}
 	v, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +142,9 @@ func TestBacklogAnswerHeldWhileAttached(t *testing.T) {
 	m.backgroundMutationWG.Wait()
 	if len(sent.reqs) != 1 || sent.paused[0] {
 		t.Fatalf("sent %+v paused %v", sent.reqs, sent.paused)
+	}
+	if !inst.BacklogRunActive() {
+		t.Fatal("the run was not armed when the answer was sent")
 	}
 }
 
@@ -266,11 +272,17 @@ func mustLoad(t *testing.T, repoID string) *backlog.Backlog {
 
 func TestBacklogAnsweredInSessionOnSubmit(t *testing.T) {
 	m, repoID, inst := askedItem(t)
+	// The question the user's line answers is the one open when it is submitted;
+	// the agent posts the next one while the line is in flight.
+	answered := m.backlogOpenQuestion(inst)
+	if answered == 0 {
+		t.Fatal("no open question to capture")
+	}
 	if _, err := m.backlogService().PostMessage(backlog.PostMessageRequest{RepoID: repoID, ID: 1,
 		Kind: backlog.KindQuestion, Text: "And the port?", SessionID: inst.ID}); err != nil {
 		t.Fatal(err)
 	}
-	m.noteBacklogSubmitted(inst)
+	m.noteBacklogSubmitted(inst, answered)
 	m.backgroundMutationWG.Wait()
 	it := loadItem(t, repoID, 1)
 	if it.Thread[0].Closed != backlog.ClosedAnsweredInSession || it.Thread[1].Closed != "" {
@@ -311,5 +323,38 @@ func TestBacklogDoneClearsAttention(t *testing.T) {
 	}
 	if c := loadItem(t, repoID, 1).Thread[0].Closed; c != backlog.ClosedDone {
 		t.Fatal(c)
+	}
+}
+
+// Delivering an answer must not clear the attention of the NEXT open question
+// (Codex P2 on #6295): the backlog mirrors attention itself, so its sends are
+// not "the user answering whatever is set". A plain send still clears it.
+func TestBacklogSendKeepsTheNextQuestionsAttention(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		backlogOrigin bool
+		wantKept      bool
+	}{{"backlog answer delivery", true, true}, {"a user's send-prompt", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			backend := observedPromptBackend{
+				readyFakeBackend: readyFakeBackend{FakeBackend: session.NewFakeBackend()},
+				status:           session.PromptDelivered,
+			}
+			inst := registerStarted(t, manager, repoID, repoPath, "worker", backend, true, session.Ready)
+			if _, err := inst.SetAttention("the second question", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.SendPromptWithStatus(SendPromptRequest{Title: "worker", RepoID: repoID, Prompt: "answer", BacklogOrigin: tc.backlogOrigin}); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) && inst.HasAttention() == tc.wantKept {
+				time.Sleep(20 * time.Millisecond)
+			}
+			if inst.HasAttention() != tc.wantKept {
+				t.Fatalf("attention kept = %v, want %v", inst.HasAttention(), tc.wantKept)
+			}
+		})
 	}
 }

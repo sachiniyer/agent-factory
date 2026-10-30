@@ -564,7 +564,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
-	if !req.TaskOrigin && answered != nil && status != session.PromptNotDelivered {
+	if !req.TaskOrigin && !req.BacklogOrigin && answered != nil && status != session.PromptNotDelivered {
 		// A delivered prompt is the user's answer, same as a keystroke into the
 		// pane — and the only answer a client with no PTY input can send. Task
 		// deliveries are automation, not the user, and PromptNotDelivered (which
