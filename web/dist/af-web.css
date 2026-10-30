@@ -3819,6 +3819,10 @@ textarea[class] {
     padding: var(--af-space-2);
   }
 }
+.af-docs-tab-gone {
+  font-style: italic;
+  color: var(--af-ink-muted);
+}
 
 /* src/tokens.css */
 [data-af-theme=light] {

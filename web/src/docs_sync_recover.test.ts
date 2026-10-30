@@ -2,9 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type Draft, type Event, type Model, initialModel, statusOf, step } from "./docs_sync_model.js";
 
-function run(m: Model, ...events: Event[]): { m: Model; fx: ReturnType<typeof step>[1] } {
+type Loose = Event | { t: "save_ok" | "save_conflict" | "save_fail" | "save_fatal" | "reload_ok" | "reload_fail" | "reconcile_ok" | "reconcile_fail"; [k: string]: unknown };
+
+/** Runs events; a reply without a request id is addressed to the request in flight. */
+function run(m: Model, ...events: Loose[]): { m: Model; fx: ReturnType<typeof step>[1] } {
   let fx: ReturnType<typeof step>[1] = [];
-  for (const e of events) [m, fx] = step(m, e);
+  for (const e of events) {
+    const withSeq = "seq" in e || !/^(save_|reload_|reconcile_)/.test(e.t) ? e : { ...e, seq: m.flight?.seq ?? m.readSeq ?? 0 };
+    [m, fx] = step(m, withSeq as Event);
+  }
   return { m, fx };
 }
 
@@ -13,17 +19,18 @@ const open = (doc: { text: string; commit: string }, draft: Draft | null = null,
 
 const loaded = (): Model => open({ text: "v1", commit: "c1" }).m;
 
-test("a final save that fails keeps the buffer in storage and keeps retrying", () => {
+test("a final save that fails keeps the buffer in storage and reconciles before it retries", () => {
   // The user leaves with an unsaved edit; the final save goes out...
   let r = run(loaded(), { t: "edit", text: "v1 edited" }, { t: "close" });
   assert.deepEqual(r.fx.filter((f) => f.t === "save").map((f) => (f as { final: boolean }).final), [true]);
-  assert.ok(r.fx.some((f) => f.t === "stash") || r.m.stashed !== null, "the edit is in storage before the save is sent");
-  // ...and fails (a 5xx, or the network).
+  assert.ok(r.m.stashed !== null, "the edit is in storage before the save is sent");
+  // ...and its outcome is unknown (a 5xx, a timeout, the network).
   r = run(r.m, { t: "save_fail", error: "503 service unavailable" });
-  assert.equal(r.m.stashed !== null, true, "the failed save does not clear the stored edit");
-  assert.ok(r.fx.some((f) => f.t === "arm"), "it retries while the page is alive, though the tab is closed");
-  // The retry fires and this time lands.
-  r = run(r.m, { t: "timer" });
+  assert.equal(r.m.stashed !== null, true, "an unknown outcome does not clear the stored edit");
+  assert.equal(r.fx.some((f) => f.t === "save"), false, "nothing is resent blind");
+  assert.deepEqual(r.fx.filter((f) => f.t === "load").map((f) => (f as { kind: string }).kind), ["reconcile"], "the daemon's head is read first");
+  // The head is unchanged: the save did not land, so the closed tab sends it again.
+  r = run(r.m, { t: "reconcile_ok", doc: { text: "v1", commit: "c1" } });
   assert.deepEqual(r.fx.filter((f) => f.t === "save").map((f) => (f as { text: string }).text), ["v1 edited"]);
   r = run(r.m, { t: "save_ok", result: { kind: "saved", text: "v1 edited", commit: "c2", merged: false } });
   assert.equal(r.m.stashed, null, "storage is cleared once a save has landed");
@@ -52,31 +59,14 @@ test("recovered edits that collide with the agent's open a conflict instead of o
   assert.equal(r.m.buffer, "mine");
 });
 
-test("a conflict whose head is our own save with a lost reply is not an agent conflict", () => {
+test("a save whose reply was lost is reconciled against the head, and a landed one is not resent", () => {
   let r = run(loaded(), { t: "edit", text: "v1 a" }, { t: "timer" });
   r = run(r.m, { t: "save_fail", error: "network error: reply lost" });
-  r = run(r.m, { t: "edit", text: "v1 b" }, { t: "timer" });
-  r = run(r.m, { t: "save_conflict", result: { kind: "conflict", ours: "v1 b", theirs: "v1 a", base: "v1", head: "c2" } });
-  assert.equal(statusOf(r.m).status, "pending", "no banner: the head is our own earlier text");
+  assert.equal(r.m.unknown, true);
+  r = run(r.m, { t: "reconcile_ok", doc: { text: "v1 a", commit: "c2" } });
+  assert.equal(statusOf(r.m).status, "saved", "it landed: the buffer is clean on the new base");
   assert.equal(r.m.base, "c2");
-});
-
-test("a reconnect or remote change while the draft is being read cannot start a reload before the restore", () => {
-  const draft = { buffer: "my unresolved text", base: "v0", theirs: "agent text", head: "c1", kind: "conflict" as const };
-  // The load returned; before storage is read, the stream reconnects and the agent commits.
-  const r = open({ text: "agent text 2", commit: "c2" }, draft, { t: "reconnect" }, { t: "remote", commit: "c3" });
-  assert.equal(r.m.phase, "conflict", "the draft is restored, not overwritten by a reload");
-  assert.equal(r.m.buffer, "my unresolved text");
-  assert.equal(r.fx.some((f) => f.t === "load"), false, "no reload is started in the restoring phase");
-  assert.equal(r.m.stale, true, "the change is remembered and drained after the conflict is resolved");
-});
-
-test("the restoring phase takes no edits and arms nothing", () => {
-  let r = run(initialModel(), { t: "load_ok", doc: { text: "v1", commit: "c1" } });
-  assert.equal(r.m.phase, "restoring");
-  r = run(r.m, { t: "edit", text: "typed too early" });
-  assert.equal(r.m.buffer, "v1");
-  assert.equal(r.fx.length, 0);
+  assert.equal(r.fx.some((f) => f.t === "save"), false);
 });
 
 test("an undo back to the saved text keeps the draft while a different save is in flight", () => {
@@ -89,15 +79,56 @@ test("an undo back to the saved text keeps the draft while a different save is i
   assert.equal(statusOf(r.m).status, "pending", "B landed, so the undone text is unsaved work");
 });
 
-test("a reply-lost save that landed is not taken for an agent edit when the user has since undone part of it", () => {
+test("typing after a save with a lost reply is rebased onto the head that save left, undo included", () => {
   let r = run(open({ text: "a\nb\nc", commit: "c1" }).m, { t: "edit", text: "a\nb\nC" }, { t: "timer" });
   r = run(r.m, { t: "save_fail", error: "network error: reply lost" }); // it may have landed
-  r = run(r.m, { t: "edit", text: "a2\nb\nc" }, { t: "timer" }); // typed line 1, undid line 3
-  // The daemon merged against its own earlier commit: line 2 looked unchanged, so B stayed.
-  r = run(r.m, { t: "save_ok", result: { kind: "saved", text: "a2\nb\nC", commit: "c2", merged: true } });
+  r = run(r.m, { t: "edit", text: "a2\nb\nc" }); // typed line 1, undid line 3
+  assert.equal(r.fx.some((f) => f.t === "save"), false, "nothing is sent while the outcome is unknown");
+  // The head holds that save: reading it first is what lets the undo survive a merge.
+  r = run(r.m, { t: "reconcile_ok", doc: { text: "a\nb\nC", commit: "c2" } });
   assert.equal(r.m.buffer, "a2\nb\nc", "the undo is not replaced by the earlier save");
   assert.equal(r.m.base, "c2");
-  assert.equal(statusOf(r.m).status, "pending", "and it goes out again on the new base");
+  assert.equal(statusOf(r.m).status, "pending", "and it goes out on the new base");
+});
+
+test("a reply that carries an old request id is ignored", () => {
+  let r = run(loaded(), { t: "edit", text: "v1 a" }, { t: "timer" });
+  const first = r.m.flight!.seq;
+  r = run(r.m, { t: "save_fail", seq: first, error: "timed out" });
+  r = run(r.m, { t: "reconcile_ok", doc: { text: "v1", commit: "c1" } }, { t: "timer" }); // not landed; resend
+  assert.equal(r.m.phase, "saving");
+  const second = r.m.flight!.seq;
+  assert.notEqual(second, first);
+  // The first request's reply finally arrives (a duplicate, or out of order).
+  const late = step(r.m, { t: "save_ok", seq: first, result: { kind: "saved", text: "v1 a", commit: "c9", merged: false } });
+  assert.equal(late[0].phase, "saving", "it is not taken for the reply to the second request");
+  assert.equal(late[0].base, "c1");
+});
+
+test("a doc deleted under unsaved edits is kept, not dropped", () => {
+  let r = run(loaded(), { t: "edit", text: "v1 mine" });
+  r = run(r.m, { t: "gone" });
+  assert.equal(statusOf(r.m).status, "gone");
+  assert.notEqual(r.m.stashed, null, "the edits stay in storage");
+  assert.equal(r.fx.some((f) => f.t === "save" || f.t === "load"), false);
+  r = run(r.m, { t: "revive", head: { text: "template", commit: "c7" } });
+  assert.equal(r.m.base, "c7");
+  assert.equal(r.m.buffer, "v1 mine");
+  assert.equal(statusOf(r.m).status, "pending", "restored onto the new doc, and saved again");
+});
+
+test("a clean doc deleted remotely just ends", () => {
+  const r = run(loaded(), { t: "gone" });
+  assert.equal(r.m.dead, true);
+});
+
+test("a 4xx refusal is not retried and does not leave the outcome unknown", () => {
+  let r = run(loaded(), { t: "edit", text: "v1 too large" }, { t: "timer" });
+  r = run(r.m, { t: "save_fatal", error: "doc is larger than the limit" });
+  assert.equal(r.m.unknown, false);
+  assert.equal(r.fx.some((f) => f.t === "arm" || f.t === "save" || f.t === "load"), false);
+  r = run(r.m, { t: "edit", text: "v1 smaller" });
+  assert.ok(r.fx.some((f) => f.t === "arm"), "editing again tries again");
 });
 
 test("a suspended sync (its doc is being deleted) neither retries nor arms a timer; abandon ends it", () => {

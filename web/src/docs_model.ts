@@ -40,6 +40,8 @@ export function statusText(status: SyncStatus, detail = ""): string {
       return "Resolve the markers to save";
     case "recovered":
       return "Unsaved changes recovered";
+    case "gone":
+      return "Doc deleted · your changes are kept";
     case "error":
       return detail ? `Not saved · ${detail}` : "Not saved";
   }

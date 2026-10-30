@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AUTOSAVE_DELAY_MS, DocSync, SAVE_RETRY_MS, type SyncStatus } from "./docs_sync.js";
+import { AUTOSAVE_DELAY_MS, DocSync, SAVE_RETRY_MS, SAVE_TIMEOUT_MS, type SyncStatus } from "./docs_sync.js";
 import type { DocText, SaveResult } from "./proposal_api.js";
 
 interface Deferred<T> {
@@ -230,16 +230,35 @@ test("Show both writes conflict markers and holds the save until they are gone",
   assert.deepEqual([h2.saves[1]!.text, h2.saves[1]!.base], ["a\nmine and theirs\nc", "c7"]);
 });
 
-test("a failed save retries after a pause", async () => {
+test("a failed save reads the daemon's head before it is sent again", async () => {
   const h = await started();
   h.type("x");
   await h.fire();
+  const loadsBefore = h.loads;
   h.saves[0]!.reply.reject(new Error("cannot reach the daemon"));
   await tick();
-  assert.equal(h.status, "error");
-  assert.equal(h.liveTimers()[0]!.ms, SAVE_RETRY_MS);
+  assert.equal(h.loads, loadsBefore + 1, "the outcome is unknown, so the head is read first");
+  assert.equal(h.saves.length, 1, "nothing is resent blind");
   await h.fire();
-  assert.equal(h.saves.length, 2);
+  assert.equal(h.saves.length, 2, "the head is where it was, so the save goes out again");
+  assert.deepEqual([h.saves[1]!.text, h.saves[1]!.base], ["x", "c1"]);
+});
+
+test("a save with no reply is treated as unknown after the timeout, and its late reply is ignored", async () => {
+  const h = await started();
+  h.type("x");
+  await h.fire();
+  assert.equal(h.status, "saving");
+  const loadsBefore = h.loads;
+  const timeout = h.liveTimers().find((t) => t.ms === SAVE_TIMEOUT_MS);
+  assert.ok(timeout, "a reply timeout is armed with the save");
+  timeout!.fn();
+  await tick();
+  assert.equal(h.loads, loadsBefore + 1, "the daemon's head is read");
+  // The reply to the first request finally arrives; it must not be mistaken for anything.
+  h.saves[0]!.reply.resolve({ kind: "saved", text: "x", commit: "c2", merged: false });
+  await tick();
+  assert.equal(h.sync.baseCommit, "c1");
 });
 
 test("an agent change reloads a clean buffer", async () => {
