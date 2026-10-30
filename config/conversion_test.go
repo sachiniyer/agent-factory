@@ -584,3 +584,77 @@ func TestConversionAcceptsConcurrentJSONUpdate(t *testing.T) {
 		"the converted config reflects the replacement, not the pre-stat original")
 	assert.FileExists(t, tomlPath, "config.toml was written from the replacement")
 }
+
+// TestConversionAcceptsConcurrentlyRemovedSibling pins the parent-directory
+// classification added for the codex finding on filelock.go:182 — when an
+// editor or remover deletes config.json after confirmSiblingDir's Stat
+// succeeds but before its Fstatat lookup, the ENOENT from Fstatat is in the
+// SAME directory the lock covers, so it is a concurrently removed sibling
+// (readSibling answers with defaults) rather than the freshly introduced
+// TOML-symlink race. Without the classification the ENOENT would abort
+// startup with a misleading out-of-home-symlink error.
+func TestConversionAcceptsConcurrentlyRemovedSibling(t *testing.T) {
+	const aJSON = `{"default_program": "codex"}`
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	require.NoError(t, os.Mkdir(home, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName), []byte(aJSON), 0o644))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	fastShell(t)
+
+	configDir, err := GetConfigDir()
+	require.NoError(t, err)
+	configPath := filepath.Join(configDir, ConfigFileName)
+	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+
+	// Remove config.json between confirmSiblingDir's Stat(siblingPath) and its
+	// Fstatat lookup — the check-then-act window an editor or rm slips into.
+	confirmSiblingDirStatHookForTest = func() {
+		require.NoError(t, os.Remove(configPath))
+	}
+	t.Cleanup(func() { confirmSiblingDirStatHookForTest = nil })
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err,
+		"a concurrently removed sibling is readSibling's to answer with defaults, not a refusal that aborts startup")
+	assert.Equal(t, DefaultConfig().DefaultProgram, cfg.DefaultProgram,
+		"the load falls back to built-in defaults when the legacy config.json vanishes under the lock")
+	assert.NoFileExists(t, tomlPath,
+		"no conversion is written when the legacy config.json is gone before the read")
+	assert.NoFileExists(t, configPath,
+		"the concurrently removed config.json stays gone")
+}
+
+// TestConversionOrdinaryRenameFailureNamesPinnedSource pins the codex finding
+// on config_load.go:648: an ordinary rename failure (no retarget) must not
+// point a "delete it yourself" instruction through the mutable home link,
+// which by the time the user follows it could reach another home's active
+// config. Every rename failure now names the pinned source the lock still
+// covers instead, the same as a retarget refusal.
+func TestConversionOrdinaryRenameFailureNamesPinnedSource(t *testing.T) {
+	const aJSON = `{"default_program": "codex"}`
+	const bJSON = `{"default_program": "aider"}`
+
+	// B is staged but unused: the home stays pointed at A throughout, so the
+	// pre-rename confirm passes and the rename fails for an ordinary reason.
+	_, _, first, _ := retargetableJSONHome(t, aJSON, bJSON, "")
+
+	convertRenameFailForTest = func() error { return assert.AnError }
+	t.Cleanup(func() { convertRenameFailForTest = nil })
+
+	warnBuf := captureLog(t, &aflog.WarningLog)
+	cfg, err := LoadConfig()
+	require.NoError(t, err,
+		"the conversion must succeed: config.toml landed in the locked directory under the lock")
+	assert.Equal(t, "codex", cfg.DefaultProgram)
+
+	assert.Contains(t, warnBuf.String(), "could not move the original",
+		"a failed rename is logged, not silent")
+	assert.Contains(t, warnBuf.String(), "the original remains at",
+		"an ordinary rename failure names where the original sits (the pinned directory), not the mutable link")
+	assert.Contains(t, warnBuf.String(), filepath.Join(first, ConfigFileName),
+		"the named location is the locked directory's config.json, not the link that could later reach another home")
+	assert.NotContains(t, warnBuf.String(), "yourself to silence the duplicate-config warning",
+		"an ordinary rename failure must not point a deletion instruction through the mutable home link")
+}

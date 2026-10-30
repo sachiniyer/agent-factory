@@ -644,8 +644,16 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 				log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original remains at %s (the home moved, so %s no longer reaches it); re-run to move it aside once the home symlink is stable",
 					prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, pinnedSource, prettyConfigPath)
 			} else {
-				log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; delete %s yourself to silence the duplicate-config warning",
-					prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, prettyConfigPath)
+				// The link can move again between this recheck and the user
+				// acting on the message, so prettyConfigPath — the link — is
+				// not a safe target for a deletion instruction: by the time the
+				// user follows it, it could reach another home's active
+				// config. Name the pinned source the lock still covers, the
+				// same as a retarget refusal, and let the next run move it
+				// aside.
+				pinnedSource := filepath.Join(locked.dirResolved, filepath.Base(configPath))
+				log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original remains at %s; re-run to move it aside",
+					prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, pinnedSource)
 			}
 		} else {
 			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",

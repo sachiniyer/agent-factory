@@ -173,11 +173,26 @@ func (t lockedTarget) confirmSiblingDir(siblingPath string) error {
 	}
 	// Fstatat with flags=0 follows a symlink the way readSibling's openat does,
 	// so the ENOENT check confirms whether the legacy name is in the pinned
-	// directory at all. An ENOENT is the TOML-symlink race: dirFD points at the
-	// symlink target's directory, not the home holding the legacy config.json.
+	// directory at all. An ENOENT here can mean one of two things: the pinned
+	// directory is not the one siblingPath reaches (the TOML-symlink race),
+	// or the sibling was concurrently removed between the stat above and this
+	// lookup. The latter is readSibling's to answer with defaults, not a
+	// refusal that aborts startup, so classify by the parent-directory
+	// identity: refuse only when the directories differ; when they match, let
+	// the pinned read handle absence the way a vanished sibling already does.
 	var got unix.Stat_t
 	if err := unix.Fstatat(t.dirFD, filepath.Base(siblingPath), &got, 0); err != nil {
 		if errors.Is(err, unix.ENOENT) {
+			same, dErr := t.reachesPinnedDir(siblingPath)
+			if dErr != nil {
+				return dErr
+			}
+			if same {
+				// The sibling was removed in the same directory the lock covers
+				// between the stat above and this lookup; readSibling answers
+				// that with defaults rather than aborting startup.
+				return nil
+			}
 			return fmt.Errorf("cannot convert %s under the lock on %s: the legacy config.json is not in the directory the lock covers (%s) — a freshly introduced config.toml symlink points elsewhere than the home holding it; re-run once config.toml is not a symlink out of its home",
 				siblingPath, t.link, t.dirResolved)
 		}
@@ -190,18 +205,32 @@ func (t lockedTarget) confirmSiblingDir(siblingPath string) error {
 	// refusal. The file-level stat above only confirms the name exists in the
 	// pinned directory; the inode can change between that and the directory
 	// check below when an editor rewrites config.json in place.
-	var wantDir, gotDir unix.Stat_t
-	if err := unix.Stat(filepath.Dir(siblingPath), &wantDir); err != nil {
-		return fmt.Errorf("failed to inspect the directory holding the legacy %s: %w", siblingPath, err)
+	same, dErr := t.reachesPinnedDir(siblingPath)
+	if dErr != nil {
+		return dErr
 	}
-	if err := unix.Fstat(t.dirFD, &gotDir); err != nil {
-		return fmt.Errorf("failed to confirm the directory the lock covers for %s: %w", t.link, err)
-	}
-	if sameInode(&wantDir, &gotDir) {
+	if same {
 		return nil
 	}
 	return fmt.Errorf("cannot convert %s under the lock on %s: the config.json in the directory the lock covers (%s) is not the legacy %s — a freshly introduced config.toml symlink points at a directory other than the one holding the legacy config.json; re-run once config.toml is not a symlink out of its home",
 		siblingPath, t.link, t.dirResolved, siblingPath)
+}
+
+// reachesPinnedDir reports whether the directory siblingPath reaches is the
+// one the lock covers. confirmSiblingDir uses it both to confirm a present
+// sibling sits beside the locked file and to classify an ENOENT from the
+// pinned lookup: a same-directory ENOENT is a concurrently removed sibling
+// (readSibling answers with defaults), while a different-directory ENOENT is
+// the freshly introduced TOML-symlink race.
+func (t lockedTarget) reachesPinnedDir(siblingPath string) (bool, error) {
+	var wantDir, gotDir unix.Stat_t
+	if err := unix.Stat(filepath.Dir(siblingPath), &wantDir); err != nil {
+		return false, fmt.Errorf("failed to inspect the directory holding the legacy %s: %w", siblingPath, err)
+	}
+	if err := unix.Fstat(t.dirFD, &gotDir); err != nil {
+		return false, fmt.Errorf("failed to confirm the directory the lock covers for %s: %w", t.link, err)
+	}
+	return sameInode(&wantDir, &gotDir), nil
 }
 
 // confirmSiblingDirStatHookForTest, when non-nil, runs between the
