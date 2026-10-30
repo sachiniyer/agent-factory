@@ -432,6 +432,20 @@ export const ACTION_LABELS: Record<ItemAction, string> = {
   delete: "Delete",
 };
 
+/** Whether "Start now" is offered. It follows the daemon's start rule
+ *  (backlog/runs.go BeginStart) so the button is never offered where the daemon
+ *  refuses: not a parent (parents run through their children), not a closed item
+ *  (done or dropped: reopen first), and not one already Starting or Working (an
+ *  active run is "already working"). The daemon would accept a "continue" to an item
+ *  that is waiting on an answer, but the answer is the next step there, so the
+ *  button is not offered while the item Needs you. What only the daemon can see (a
+ *  usage-limited session) it still refuses, with its own message. */
+export function canStartNow(b: Backlog, it: Item, derived: Derived): boolean {
+  if (isParent(b, it.id)) return false;
+  if (it.status === "done" || it.status === "dropped") return false;
+  return derived.state !== "working" && derived.state !== "starting" && derived.state !== "needs_you";
+}
+
 /** The actions the panel offers for an item, in the order it shows them. A
  *  parent only queues its draft children and drops its open ones. Send to
  *  review answers af's own question, such as the cap per run. */
@@ -446,7 +460,7 @@ export function itemActions(b: Backlog, it: Item, derived: Derived): ItemAction[
   const s = it.status;
   if (s === "draft" || s === "review") out.push("queue");
   if (s === "queued" || s === "review") out.push("draft");
-  if (s !== "done" && s !== "dropped" && derived.state !== "working" && derived.state !== "starting") out.push("start");
+  if (canStartNow(b, it, derived)) out.push("start");
   if (s === "running" && openQuestion(it)?.author === "af") out.push("review");
   if (s !== "done" && s !== "dropped") out.push("done", "drop");
   else out.push("reopen");

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   type Backlog, type BacklogView, type Item, type ListOptions, type State,
-  applyMove, dropMove, itemActions, keyboardMove, listRows, needsYouCount, needsYouLabel, neededBy, parseBacklogView, safeHttpUrl,
+  applyMove, canStartNow, dropMove, itemActions, keyboardMove, listRows, needsYouCount, needsYouLabel, neededBy, parseBacklogView, safeHttpUrl,
   sessionItems, sources, topQueued,
 } from "./backlog_model.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
@@ -190,10 +190,11 @@ test("itemActions offers only the changes the daemon allows", () => {
   assert.deepEqual(at(5, { status: "running" }, "starting"), ["done", "drop"]);
   assert.deepEqual(at(5, { status: "running" }, "stopped"), ["start", "done", "drop"]);
   const capQ = { id: 1, kind: "question", author: "af", text: "This run used 11%…", at: "" };
-  assert.deepEqual(at(5, { status: "running", thread: [capQ] }, "needs_you"), ["start", "review", "done", "drop"]);
+  assert.deepEqual(at(5, { status: "running", thread: [capQ] }, "needs_you"), ["review", "done", "drop"]);
   const agentQ = { ...capQ, author: "agent:s1" };
-  assert.deepEqual(at(5, { status: "running", thread: [agentQ] }, "needs_you"), ["start", "done", "drop"]);
+  assert.deepEqual(at(5, { status: "running", thread: [agentQ] }, "needs_you"), ["done", "drop"]);
   assert.deepEqual(at(5, { status: "done", thread: [] }, "done"), ["reopen"]);
+  assert.deepEqual(at(5, { status: "dropped", thread: [] }, "dropped"), ["reopen"]);
   assert.deepEqual(at(6, { status: "draft", thread: [{ id: 1, kind: "note", author: "user", text: "n", at: "" }] }),
     ["queue", "start", "done", "drop"]);
   assert.deepEqual(at(1, {}), ["queue", "drop"]);
@@ -229,4 +230,17 @@ test("safeHttpUrl keeps http and https links only", () => {
 test("needsYouLabel agrees with its count", () => {
   assert.equal(needsYouLabel(1), "1 needs you");
   assert.equal(needsYouLabel(3), "3 need you");
+});
+
+test("canStartNow offers Start now only where the daemon's start rule accepts it", () => {
+  const b = tree();
+  const leaf = b.items.find((it) => it.id === 5) as Item;
+  const parent = b.items.find((it) => it.id === 1) as Item;
+  const ok = (state: State, status: Item["status"] = "queued"): boolean => canStartNow(b, { ...leaf, status }, { state });
+  assert.equal(canStartNow(b, parent, { state: "queued" }), false, "a parent runs through its children");
+  for (const status of ["done", "dropped"] as const) assert.equal(ok(status, status), false, `${status} must be reopened first`);
+  assert.equal(ok("starting", "running"), false, "already starting");
+  assert.equal(ok("working", "running"), false, "an active run is already working");
+  assert.equal(ok("needs_you", "running"), false, "the answer is the next step");
+  for (const state of ["draft", "queued", "waiting", "in_review", "stopped"] as const) assert.equal(ok(state), true, state);
 });

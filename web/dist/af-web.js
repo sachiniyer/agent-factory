@@ -17921,6 +17921,11 @@ var ACTION_LABELS = {
   reopen: "Reopen",
   delete: "Delete"
 };
+function canStartNow(b, it, derived) {
+  if (isParent(b, it.id)) return false;
+  if (it.status === "done" || it.status === "dropped") return false;
+  return derived.state !== "working" && derived.state !== "starting" && derived.state !== "needs_you";
+}
 function itemActions(b, it, derived) {
   if (isParent(b, it.id)) {
     const out2 = [];
@@ -17932,7 +17937,7 @@ function itemActions(b, it, derived) {
   const s = it.status;
   if (s === "draft" || s === "review") out.push("queue");
   if (s === "queued" || s === "review") out.push("draft");
-  if (s !== "done" && s !== "dropped" && derived.state !== "working" && derived.state !== "starting") out.push("start");
+  if (canStartNow(b, it, derived)) out.push("start");
   if (s === "running" && openQuestion(it)?.author === "af") out.push("review");
   if (s !== "done" && s !== "dropped") out.push("done", "drop");
   else out.push("reopen");

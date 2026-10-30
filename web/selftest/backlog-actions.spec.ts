@@ -65,12 +65,27 @@ for (const width of [1280, 390]) {
     // Queue it.
     await panel.getByRole("button", { name: "Queue", exact: true }).click();
     await expect(row(page, child).locator(".af-backlog-chip")).toContainText("Queued");
+    // The action row lines up at this width: buttons that share a row share its top and height.
+    const rects = await panel.locator(".af-backlog-actions > button").evaluateAll((els) =>
+      els.map((e) => { const r = e.getBoundingClientRect(); return { top: r.top, height: r.height, bottom: r.bottom, right: r.right }; }));
+    expect(rects.length).toBeGreaterThanOrEqual(3);
+    for (const a of rects) {
+      expect(a.right, "no button overflows the viewport").toBeLessThanOrEqual(width);
+      for (const b of rects) {
+        if (Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1) {
+          expect(Math.abs(a.top - b.top), "same-row buttons share a top").toBeLessThan(1);
+          expect(Math.abs(a.height - b.height), "same-row buttons share a height").toBeLessThan(1);
+        }
+      }
+    }
     await shot("3-queued");
 
     // Start now: a session is created for the item; the row reads Starting, then Working.
     await panel.getByRole("button", { name: "Start now", exact: true }).click();
     await expect(row(page, child).locator(".af-backlog-chip")).toContainText(/Starting|Working/, { timeout: 60_000 });
     await expect(row(page, child).locator(".af-backlog-chip")).toContainText("Working", { timeout: 60_000 });
+    // Nor while it is Working or Starting: the daemon refuses an active run.
+    await expect(panel.getByRole("button", { name: "Start now", exact: true })).toHaveCount(0);
     await shot("4-started");
 
     // A question arrives from the item's session (as `af backlog ask` would send it).
@@ -81,6 +96,9 @@ for (const width of [1280, 390]) {
     await expect(row(page, child).locator(".af-backlog-chip")).toContainText("Needs you");
     await expect(page.locator('.af-viewtab[data-view="backlog"] .af-viewtab-badge')).toBeVisible();
     await shot("5-question");
+
+    // Start now is not offered while the item Needs you: the answer is the next step.
+    await expect(panel.getByRole("button", { name: "Start now", exact: true })).toHaveCount(0);
 
     // Answer it in the UI.
     const answer = panel.getByRole("textbox", { name: "Answer" });
