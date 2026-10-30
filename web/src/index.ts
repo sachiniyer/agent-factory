@@ -2837,22 +2837,26 @@ function openEditTask(task: TaskData): void {
 /** Enables/disables a task (UpdateTask with `enabled` flipped), then refetches. A
  *  failure surfaces as the shared transient toast (task ops have no modal). Keys off
  *  the task's stable id — requireTaskID in the api layer refuses a missing one. */
-function toggleTask(task: TaskData): void {
+async function toggleTask(task: TaskData): Promise<boolean> {
   const tok = token;
   if (tok === null) {
-    return;
+    return false;
   }
   // Ship ONLY the flipped bit as a field-level patch (#1700): the toggle must
   // not carry the rest of this (possibly-stale) cached task, or it could revert a
   // concurrent edit another client made to the prompt/trigger/target.
-  void updateTask(task, { enabled: !task.enabled }, tok)
-    .then(refreshTasks)
-    .catch((e) => {
-      if (isMutationCommittedError(e)) {
-        refreshTasks();
-      }
-      surfaceTabError(e);
-    });
+  try {
+    await updateTask(task, { enabled: !task.enabled }, tok);
+  } catch (e) {
+    const committed = isMutationCommittedError(e);
+    if (committed) {
+      refreshTasks();
+    }
+    surfaceTabError(e);
+    return committed;
+  }
+  refreshTasks();
+  return true;
 }
 
 /** Fires a task now (TriggerTask), then refetches to pick up the new last-run. The

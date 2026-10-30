@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1123037.000 | 1123037.000–1123037.000 | 0.000 | 1179188.850 |
-| gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
+| raw_bytes | 1126071.000 | 1126071.000–1126071.000 | 0.000 | 1182374.550 |
+| gzip_bytes | 255761.000 | 255761.000–255761.000 | 0.000 | 268549.050 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -122,6 +122,10 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Bundle refresh provenance (#6289)
+
+Master's committed bundle (1,123,102 raw / 254,923 gzip over `web/dist/**.{js,css}`, gzip level 9, after #6290) is where this branch started from; #6289 (the task switch pending state) takes it to 1,126,071 raw / 255,761 gzip, +2,969 raw / +838 gzip. Comments do not ship (esbuild strips them), so the growth is the flip state machine's code. Both entries are moved to the deterministic byte sums, three identical samples, margin baseline x 0.05; every timing and layout-shift baseline is unchanged. Computed from a clean `npm ci` build of the merged tree rather than recorded with `make perf-container`, which is not a routine local run; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6290)
 
