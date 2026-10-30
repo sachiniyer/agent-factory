@@ -54,7 +54,7 @@ type MeterState struct {
 	RunSeen map[string]map[string]int64 `json:"run_seen,omitempty"`
 	// RunBuckets holds, per item session, its cost per BucketSpan keyed by
 	// the bucket's start in epoch seconds, for the last 5-hour window.
-	RunBuckets map[string]map[int64]float64 `json:"run_buckets,omitempty"`
+	RunBuckets map[string]map[int64]float64 `json:"run_buckets,omitempty"` // key: session|account
 	// RunDirs holds, per item session, the transcript directories seen for it.
 	// Claude files a conversation under the directory it was launched in, and a
 	// local session's worktree moves when it is archived, so the directory
@@ -88,21 +88,41 @@ func (s *MeterState) RememberRunDirs(sessionID string, dirs []string) []string {
 	return have
 }
 
+// runBucketKey keys a run's window buckets by the session AND the account the
+// cost was incurred under: a session handed from one account to another keeps
+// the spend of each in its own series, so a window only sums what was spent
+// under its account (Codex P2 on #6299).
+func runBucketKey(sessionID, account string) string { return sessionID + "|" + account }
+
+func sessionOfBucketKey(key string) string {
+	if i := strings.LastIndex(key, "|"); i >= 0 {
+		return key[:i]
+	}
+	return key
+}
+
 // RunSnapshot is a session's run metering state, to put back when the cost it
 // produced could not be committed.
 type RunSnapshot struct {
 	Seen    map[string]int64
-	Buckets map[int64]float64
+	Buckets map[string]map[int64]float64 // by account
 }
 
 // SnapshotRun copies the session's counted-message keys and window buckets.
 func (s *MeterState) SnapshotRun(sessionID string) RunSnapshot {
-	snap := RunSnapshot{Seen: map[string]int64{}, Buckets: map[int64]float64{}}
+	snap := RunSnapshot{Seen: map[string]int64{}, Buckets: map[string]map[int64]float64{}}
 	for k, v := range s.RunSeen[sessionID] {
 		snap.Seen[k] = v
 	}
-	for k, v := range s.RunBuckets[sessionID] {
-		snap.Buckets[k] = v
+	for key, b := range s.RunBuckets {
+		if sessionOfBucketKey(key) != sessionID {
+			continue
+		}
+		cp := make(map[int64]float64, len(b))
+		for k, v := range b {
+			cp[k] = v
+		}
+		snap.Buckets[key] = cp
 	}
 	return snap
 }
@@ -115,43 +135,51 @@ func (s *MeterState) RestoreRun(sessionID string, snap RunSnapshot) {
 		s.RunSeen = map[string]map[string]int64{}
 	}
 	s.RunSeen[sessionID] = snap.Seen
+	for key := range s.RunBuckets {
+		if sessionOfBucketKey(key) == sessionID {
+			delete(s.RunBuckets, key)
+		}
+	}
 	if len(snap.Buckets) == 0 {
-		delete(s.RunBuckets, sessionID)
 		return
 	}
 	if s.RunBuckets == nil {
 		s.RunBuckets = map[string]map[int64]float64{}
 	}
-	s.RunBuckets[sessionID] = snap.Buckets
+	for key, b := range snap.Buckets {
+		s.RunBuckets[key] = b
+	}
 }
 
-// AddRunEntries buckets a run's newly metered messages.
-func (s *MeterState) AddRunEntries(sessionID string, entries []Entry) {
+// AddRunEntries buckets a run's newly metered messages under the account that
+// incurred them.
+func (s *MeterState) AddRunEntries(sessionID, account string, entries []Entry) {
 	if len(entries) == 0 {
 		return
 	}
 	if s.RunBuckets == nil {
 		s.RunBuckets = map[string]map[int64]float64{}
 	}
-	b := s.RunBuckets[sessionID]
+	key := runBucketKey(sessionID, account)
+	b := s.RunBuckets[key]
 	if b == nil {
 		b = map[int64]float64{}
-		s.RunBuckets[sessionID] = b
+		s.RunBuckets[key] = b
 	}
 	for _, e := range entries {
 		b[e.At.Truncate(BucketSpan).Unix()] += e.Cost
 	}
 }
 
-// RunWindowCost sums a run's buckets in the 5-hour window w; 0 when w has no
-// valid reading.
-func (s *MeterState) RunWindowCost(sessionID string, w PlanWindow) float64 {
+// RunWindowCost sums a run's buckets incurred under account in the 5-hour window
+// w; 0 when w has no valid reading.
+func (s *MeterState) RunWindowCost(sessionID, account string, w PlanWindow) float64 {
 	if !w.Valid() {
 		return 0
 	}
 	from, to := w.ResetsAt.Add(-FiveHourSpan).Unix(), w.ResetsAt.Unix()
 	total := 0.0
-	for k, c := range s.RunBuckets[sessionID] {
+	for k, c := range s.RunBuckets[runBucketKey(sessionID, account)] {
 		if k >= from && k < to {
 			total += c
 		}
@@ -194,9 +222,9 @@ func (s *MeterState) KeepRunSeen(keep map[string]bool) {
 			delete(s.RunSeen, id)
 		}
 	}
-	for id := range s.RunBuckets {
-		if !keep[id] {
-			delete(s.RunBuckets, id)
+	for key := range s.RunBuckets {
+		if !keep[sessionOfBucketKey(key)] {
+			delete(s.RunBuckets, key)
 		}
 	}
 	for id := range s.RunDirs {
