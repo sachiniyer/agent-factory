@@ -33,6 +33,10 @@ type Attention struct {
 	// record without IdleSince predates it and counts as long enough.
 	SeenIdle  bool      `json:"seen_idle,omitempty"`
 	IdleSince time.Time `json:"idle_since,omitzero"`
+	// setEpoch is the state epoch the request was raised at. A status observation
+	// decided at an earlier epoch predates the request and cannot answer it. Not
+	// persisted: a request reloaded after a restart has no observation in flight.
+	setEpoch uint64
 }
 
 func cloneAttention(a *Attention) *Attention {
@@ -94,6 +98,7 @@ func (i *Instance) SetAttention(reason string, now time.Time) (AttentionUndo, er
 	// A status decision captured before the request must not mark it seen idle
 	// or clear it; the poll re-observes on its next tick.
 	i.stateEpoch++
+	i.attention.setEpoch = i.stateEpoch
 	i.touchLocked()
 	return AttentionUndo{previous: previous, epoch: i.stateEpoch}, nil
 }
@@ -174,10 +179,12 @@ func (i *Instance) attentionAnsweredByWorkLocked() bool {
 // in-turn indicator, not merely a repainted pane) against the open request, and
 // returns the SetAt of the request that work answers, for a keyed clear. It does
 // not clear: the caller persists and publishes the clear like any other.
-func (i *Instance) AttentionAnsweredByWork() (time.Time, bool) {
+// epoch is the state epoch the observation was decided at: a request raised
+// after that cannot be answered by work the poll saw before it existed.
+func (i *Instance) AttentionAnsweredByWork(epoch uint64) (time.Time, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.attention == nil {
+	if i.attention == nil || epoch < i.attention.setEpoch {
 		return time.Time{}, false
 	}
 	if i.attentionAnsweredByWorkLocked() {

@@ -251,20 +251,37 @@ func TestAttentionAnsweredByWorkNeedsAnIdleSpellFirst(t *testing.T) {
 	_, err := i.SetAttention("pick A or B", time.Unix(1_000, 0))
 	require.NoError(t, err)
 
-	_, ok := i.AttentionAnsweredByWork()
+	_, ok := i.AttentionAnsweredByWork(i.stateEpoch)
 	require.False(t, ok, "work seen before the agent ever went idle is its own turn")
 
 	moveLiveness(i, LiveReady)
 	advance(time.Second)
-	_, ok = i.AttentionAnsweredByWork()
+	_, ok = i.AttentionAnsweredByWork(i.stateEpoch)
 	require.False(t, ok, "a short still spell is the agent pausing inside its turn")
 	require.False(t, i.Attention().SeenIdle, "and it resets the idle record")
 
 	moveLiveness(i, LiveRunning)
 	moveLiveness(i, LiveReady)
 	advance(attentionAnswerIdle)
-	setAt, ok := i.AttentionAnsweredByWork()
+	setAt, ok := i.AttentionAnsweredByWork(i.stateEpoch)
 	require.True(t, ok)
 	require.True(t, setAt.Equal(time.Unix(1_000, 0)), "it names the request it answers, for a keyed clear")
 	require.True(t, i.HasAttention(), "naming it does not clear it; the caller clears under the repo lock")
+}
+
+// A frame captured before the agent raised its request cannot answer it
+// (Codex P2 on #5581): a request raised at Ready inherits a satisfied idle
+// spell, so only the observation epoch tells the stale frame apart.
+func TestAttentionAnsweredByWorkIgnoresAnObservationFromBeforeTheRequest(t *testing.T) {
+	fakeAttentionClock(t)
+	i := &Instance{Title: "w", liveness: LiveReady}
+	observed := i.stateEpoch
+	_, err := i.SetAttention("pick A or B", time.Unix(1_000, 0))
+	require.NoError(t, err)
+	require.True(t, i.Attention().SeenIdle, "precondition: the request inherits the idle spell")
+
+	_, ok := i.AttentionAnsweredByWork(observed)
+	require.False(t, ok, "work seen before the request existed is not its answer")
+	_, ok = i.AttentionAnsweredByWork(i.stateEpoch)
+	require.True(t, ok, "control: the same frame observed after it does answer")
 }
