@@ -161,6 +161,26 @@ func (m *Manager) meterUsageWithin(age time.Duration) planusage.Usage {
 	return st.current()
 }
 
+// itemSessionTranscriptDirs are the transcript directories of every live item
+// session, linked or not.
+func (m *Manager) itemSessionTranscriptDirs() []string {
+	m.mu.Lock()
+	var insts []*session.Instance
+	for _, inst := range m.instances {
+		if inst != nil && inst.BacklogItem != 0 {
+			insts = append(insts, inst)
+		}
+	}
+	m.mu.Unlock()
+	var out []string
+	for _, inst := range insts {
+		if _, dirs, err := inst.ClaudeRunTranscriptDirs(); err == nil {
+			out = append(out, dirs...)
+		}
+	}
+	return out
+}
+
 // rememberItemRunDirs records where a new item session's transcripts will be,
 // right after its start is committed and before it can be archived (which moves
 // the worktree they are derived from). It skips when a pass is running: that
@@ -261,23 +281,35 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	// cost cannot be committed to the backlog this pass; runConfigs are the
 	// effective config dirs the item sessions write to, scanned for the plan
 	// window even when they are not a registered account's.
+	// An item session whose start is not recorded yet (its transcript can appear
+	// before the link is committed) already counts as backlog spend: classify its
+	// directories now, since a message counted as plain spend is never reclassified.
+	backlogDirs = append(backlogDirs, m.itemSessionTranscriptDirs()...)
 	runSnaps := map[string]planusage.RunSnapshot{}
 	runConfigs := map[string][]string{}
 	for _, r := range m.startedItemRuns(home) {
 		usage.Runs[r.run.SessionID] = r.run.Cost()
 		running := r.item.Status == backlog.StatusRunning
-		if r.inst == nil {
-			continue
-		}
-		configDir, dirs, err := r.inst.ClaudeRunTranscriptDirs()
-		if errors.Is(err, session.ErrNotClaude) {
-			if running {
-				program := r.inst.ResolvedAgent()
-				if program == "" {
-					program = r.inst.Program
+		var configDir string
+		var dirs []string
+		if r.inst != nil {
+			var err error
+			configDir, dirs, err = r.inst.ClaudeRunTranscriptDirs()
+			if errors.Is(err, session.ErrNotClaude) {
+				if running {
+					program := r.inst.ResolvedAgent()
+					if program == "" {
+						program = r.inst.Program
+					}
+					usage.Unmeterable[r.run.SessionID] = backlog.UnmeterableProgram(r.item.ID, program)
 				}
-				usage.Unmeterable[r.run.SessionID] = backlog.UnmeterableProgram(r.item.ID, program)
+				continue
 			}
+		}
+		// A session killed between passes has no instance, but its transcripts
+		// are still where they were: the remembered directories finish its
+		// metering (and keep its final cost out of the non-backlog total).
+		if r.inst == nil && len(state.RunDirs[r.run.SessionID]) == 0 {
 			continue
 		}
 		// The directories seen for this session before, too: archiving moves the
@@ -291,9 +323,11 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		rm := backlog.MeterRun(r.item.ID, r.run, planusage.TranscriptFiles(dirs), seen, overrides, now)
 		usage.Runs[r.run.SessionID] = rm.Cost()
 		state.AddRunEntries(r.run.SessionID, rm.Entries)
-		account := planusage.AccountForConfigDir(home, configDir)
-		runAccount[r.run.SessionID] = account
-		runConfigs[account] = append(runConfigs[account], configDir)
+		if configDir != "" {
+			account := planusage.AccountForConfigDir(home, configDir)
+			runAccount[r.run.SessionID] = account
+			runConfigs[account] = append(runConfigs[account], configDir)
+		}
 		if running && rm.Unmeterable != "" {
 			usage.Unmeterable[r.run.SessionID] = rm.Unmeterable
 		}
@@ -344,7 +378,7 @@ func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlo
 	sources := map[string][]string{planusage.DefaultAccount: {ambientClaudeConfigDir()}}
 	if names, err := agentaccount.List(home, tmux.ProgramClaude); err == nil {
 		for _, name := range names {
-			if acct, err := agentaccount.Selected(home, tmux.ProgramClaude, name); err == nil && acct.Dir != "" && name != planusage.DefaultAccount {
+			if acct, err := agentaccount.Selected(home, tmux.ProgramClaude, name); err == nil && acct.Dir != "" {
 				sources[name] = []string{acct.Dir}
 			}
 		}

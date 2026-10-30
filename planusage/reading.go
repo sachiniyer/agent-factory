@@ -20,8 +20,11 @@ import (
 const (
 	// DirName is $AF_HOME/plan.
 	DirName = "plan"
-	// DefaultAccount names the ambient Claude identity.
-	DefaultAccount = "default"
+	// DefaultAccount is the key of the ambient Claude identity (the login in the
+	// user's own config dir, no af account). It starts with an underscore, which
+	// agentaccount.ValidateName rejects, so no registered account (including one
+	// named "default") can share its readings or its meter.
+	DefaultAccount = "_ambient"
 
 	FiveHourSpan = 5 * time.Hour
 	SevenDaySpan = 7 * 24 * time.Hour
@@ -113,7 +116,7 @@ func AccountForConfigDir(home, dir string) string {
 		return DefaultAccount
 	}
 	name := filepath.Base(clean)
-	if agentaccount.ValidateName(name) != nil || name == DefaultAccount {
+	if agentaccount.ValidateName(name) != nil {
 		return DefaultAccount
 	}
 	return name
