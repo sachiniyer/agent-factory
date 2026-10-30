@@ -294,19 +294,25 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 		}
 	}
 	if sendErr != nil {
-		if _, err := svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
-			return []int{id}, b.ContinueFailed(id, prev, sendErr, svc.Now())
-		}); err != nil {
-			m.warn().Printf("restore %s after a failed continue: %v", backlog.FormatID(id), err)
-		}
-		// Arming bumped the run generation, so an idle edge queued for the run that
-		// ended before this continue now fails its fence, and nothing will see that
-		// edge again. The rollback put the item back; settle the session's current
-		// state (idle, marker clear) so it is not left running with no run.
-		if inst.GetLiveness() == session.LiveReady && !inst.BacklogRunActive() {
-			gen := inst.BacklogRunGeneration()
-			m.launchBackgroundMutation(func(stop <-chan struct{}) { m.settleRunEnd(ref.ID, inst.ID, gen, stop) })
-		}
+		// Roll the item back on a tracked, cancellable worker that retries a busy
+		// backlog (the RPC must not hang on the lock), and settle the previous run's
+		// end only AFTER the rollback commits: settling first would move an item
+		// that is still marked running to review although nothing was delivered.
+		// Arming bumped the generation, so an idle edge queued for the run that
+		// ended before this continue now fails its fence and nothing would see it
+		// again; the settle replays it against the session's current idle state.
+		rollbackErr := sendErr
+		m.launchBackgroundMutation(func(stop <-chan struct{}) {
+			if err := m.applyRetrying(ref.ID, stop, func(b *backlog.Backlog) ([]int, error) {
+				return []int{id}, b.ContinueFailed(id, prev, rollbackErr, svc.Now())
+			}); err != nil {
+				m.warn().Printf("restore %s after a failed continue: %v", backlog.FormatID(id), err)
+				return
+			}
+			if inst.GetLiveness() == session.LiveReady && !inst.BacklogRunActive() {
+				m.settleRunEnd(ref.ID, inst.ID, inst.BacklogRunGeneration(), stop)
+			}
+		})
 		return backlog.RunRef{}, sendErr
 	}
 	runs := out.Item(id).Runs
