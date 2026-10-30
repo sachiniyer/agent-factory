@@ -344,11 +344,25 @@ func (m *Manager) withOpenContinuations(repoID string, b *backlog.Backlog, state
 	if free <= 0 {
 		return p.Start
 	}
+	// Scan the WHOLE queue: a new-session item at the front (rejected by the
+	// default's closed gate) must not hide a continuation behind it. Each
+	// continuation is paced by its own account's reading, like the normal path.
 	out := p.Start
-	for _, id := range b.Runnable(states, free, m.backlog.runner.backingOff(repoID, now)) {
-		if acct := m.continuationAccount(repoID, b, id); acct != "" && m.backlogGateFor(acct, budget, usage, now).Open() {
-			out = append(out, id)
+	started := 0
+	for _, id := range b.Runnable(states, len(b.Items), m.backlog.runner.backingOff(repoID, now)) {
+		if started >= free {
+			break
 		}
+		acct := m.continuationAccount(repoID, b, id)
+		if acct == "" || !m.backlogGateFor(acct, budget, usage, now).Open() {
+			continue
+		}
+		limit := m.backlog.runner.startLimit(func(pc *backlog.StartPacer) int { return pc.Limit(usageFor(usage, acct), now) })
+		if limit >= 0 && started >= limit {
+			continue
+		}
+		out = append(out, id)
+		started++
 	}
 	return out
 }
