@@ -43,7 +43,7 @@ const lastDoc = new Map<string, string>();
 // Tabs that closed with a save still in flight, per doc. A tab that reopens the
 // doc waits for it, so its first load does not return text older than what the
 // user just typed.
-const closing = new Map<string, DocSync>();
+const closing = new Map<string, Set<DocSync>>();
 
 function draftKey(sessionId: string, slug: string, doc: string): string {
   return `af.docs.draft\n${sessionId}\n${slug}\n${doc}`;
@@ -233,10 +233,34 @@ export class DocsPane {
     const key = draftKey(this.opts.sessionId, this.opts.slug, name);
     sync.dispose();
     if (forget) draftStore(key).clear();
-    closing.set(key, sync);
+    const set = closing.get(key) ?? new Set<DocSync>();
+    set.add(sync);
+    closing.set(key, set);
     void sync.whenQuiet().then(() => {
-      if (closing.get(key) === sync) closing.delete(key);
+      set.delete(sync);
+      if (set.size === 0 && closing.get(key) === set) closing.delete(key);
     });
+  }
+
+  /** The doc is being deleted: every sync of it, the shown one and a tab that closed
+   *  earlier and may still be retrying, stops. Their unsaved edits stay stored until
+   *  the delete lands (`finishDelete`) or fails. */
+  private suspendDoc(name: string): DocSync[] {
+    const key = draftKey(this.opts.sessionId, this.opts.slug, name);
+    const syncs = [this.syncs.get(name), ...(closing.get(key) ?? [])].filter((s): s is DocSync => s !== undefined);
+    for (const s of syncs) s.suspend();
+    this.syncs.delete(name);
+    if (this.sync && syncs.includes(this.sync)) this.sync = null;
+    return syncs;
+  }
+
+  /** The delete landed or failed: the suspended syncs end. A failed delete keeps the
+   *  stored draft for the tab that reopens the doc. */
+  private finishDelete(name: string, suspended: DocSync[], deleted: boolean): void {
+    const key = draftKey(this.opts.sessionId, this.opts.slug, name);
+    for (const s of suspended) s.abandon(!deleted);
+    closing.delete(key);
+    if (deleted) draftStore(key).clear();
   }
 
   /** The event stream reconnected: events may have been missed, so every open
@@ -397,15 +421,16 @@ export class DocsPane {
 
   private async removeDoc(doc: ProposalDocRef): Promise<void> {
     const wasOpen = this.current?.name === doc.name;
-    this.closeSync(doc.name, false);
+    const suspended = this.suspendDoc(doc.name);
     try {
       await removeDoc(this.opts.sessionId, this.opts.slug, doc.name, this.opts.token);
     } catch (e) {
+      this.finishDelete(doc.name, suspended, false);
       if (wasOpen && !this.disposed) void this.openDoc(doc, false, true);
       throw e;
     }
+    this.finishDelete(doc.name, suspended, true);
     if (this.disposed) return;
-    draftStore(draftKey(this.opts.sessionId, this.opts.slug, doc.name)).clear();
     this.texts.delete(doc.name);
     if (wasOpen) {
       this.current = null;
@@ -558,8 +583,9 @@ export class DocsPane {
     const key = draftKey(this.opts.sessionId, this.opts.slug, doc.name);
     const sync = new DocSync({
       load: async () => {
-        const prior = closing.get(key);
-        if (prior && prior !== this.syncs.get(doc.name)) await prior.whenQuiet();
+        // Wait for every tab that closed on this doc with a save still in flight.
+        const priors = [...(closing.get(key) ?? [])].filter((p) => p !== sync);
+        await Promise.all(priors.map((p) => p.whenQuiet()));
         return getDoc(this.opts.sessionId, this.opts.slug, doc.name, this.opts.token);
       },
       save: (text, base, final) => putDoc(this.opts.sessionId, this.opts.slug, doc.name, text, base,
@@ -643,7 +669,8 @@ export class DocsPane {
         }
         const current = this.current;
         for (const name of [...this.syncs.keys()]) {
-          if (!this.ordered.some((d) => d.name === name)) this.closeSync(name, true);
+          // The agent or another window deleted the doc: its syncs end for good.
+          if (!this.ordered.some((d) => d.name === name)) this.finishDelete(name, this.suspendDoc(name), true);
         }
         if (current && !this.ordered.some((d) => d.name === current.name)) {
           this.current = null;

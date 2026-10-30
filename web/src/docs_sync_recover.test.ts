@@ -78,3 +78,45 @@ test("the restoring phase takes no edits and arms nothing", () => {
   assert.equal(r.m.buffer, "v1");
   assert.equal(r.fx.length, 0);
 });
+
+test("an undo back to the saved text keeps the draft while a different save is in flight", () => {
+  let r = run(loaded(), { t: "edit", text: "v1 B" }, { t: "timer" }); // B is on its way
+  r = run(r.m, { t: "edit", text: "v1" }); // the user undoes back to what is saved
+  assert.equal(r.m.buffer, r.m.saved);
+  assert.notEqual(r.m.stashed, null, "B may land: the undo must stay recoverable");
+  r = run(r.m, { t: "save_ok", result: { kind: "saved", text: "v1 B", commit: "c2", merged: false } });
+  assert.equal(r.m.buffer, "v1");
+  assert.equal(statusOf(r.m).status, "pending", "B landed, so the undone text is unsaved work");
+});
+
+test("a reply-lost save that landed is not taken for an agent edit when the user has since undone part of it", () => {
+  let r = run(open({ text: "a\nb\nc", commit: "c1" }).m, { t: "edit", text: "a\nb\nC" }, { t: "timer" });
+  r = run(r.m, { t: "save_fail", error: "network error: reply lost" }); // it may have landed
+  r = run(r.m, { t: "edit", text: "a2\nb\nc" }, { t: "timer" }); // typed line 1, undid line 3
+  // The daemon merged against its own earlier commit: line 2 looked unchanged, so B stayed.
+  r = run(r.m, { t: "save_ok", result: { kind: "saved", text: "a2\nb\nC", commit: "c2", merged: true } });
+  assert.equal(r.m.buffer, "a2\nb\nc", "the undo is not replaced by the earlier save");
+  assert.equal(r.m.base, "c2");
+  assert.equal(statusOf(r.m).status, "pending", "and it goes out again on the new base");
+});
+
+test("a suspended sync (its doc is being deleted) neither retries nor arms a timer; abandon ends it", () => {
+  let r = run(loaded(), { t: "edit", text: "v1 edited" }, { t: "timer" });
+  r = run(r.m, { t: "suspend" });
+  r = run(r.m, { t: "save_fail", error: "404 doc not found" });
+  assert.equal(r.fx.some((f) => f.t === "arm"), false, "no retry while the doc is being deleted");
+  r = run(r.m, { t: "timer" });
+  assert.equal(r.fx.some((f) => f.t === "save"), false);
+  assert.notEqual(r.m.stashed, null, "the edits stay stored until the delete has landed");
+  r = run(r.m, { t: "abandon", keepDraft: false });
+  assert.ok(r.fx.some((f) => f.t === "unstash"), "a landed delete drops the draft");
+  r = run(r.m, { t: "edit", text: "x" }, { t: "timer" }, { t: "reconnect" });
+  assert.equal(r.fx.length, 0, "an abandoned sync does nothing");
+});
+
+test("a failed delete keeps the draft for the tab that reopens the doc", () => {
+  let r = run(loaded(), { t: "edit", text: "v1 edited" }, { t: "timer" });
+  r = run(r.m, { t: "suspend" });
+  r = run(r.m, { t: "abandon", keepDraft: true });
+  assert.equal(r.fx.some((f) => f.t === "unstash"), false);
+});
