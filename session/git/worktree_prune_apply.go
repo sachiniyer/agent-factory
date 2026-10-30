@@ -47,16 +47,9 @@ func StampArchiveNonce(worktreePath string) (string, error) {
 }
 
 func registrationLeaf(worktreePath string) (string, error) {
-	var leaf string
-	err := boundedPointerCheck("regleaf", worktreePath, func(path string) error {
-		target, err := verifyWorktreePointerShape(path)
-		if err != nil {
-			return err
-		}
-		leaf = target
-		return nil
+	return boundedPointerCheckValue("regleaf", worktreePath, func(path string) (string, error) {
+		return verifyWorktreePointerShape(path)
 	})
-	return leaf, err
 }
 
 // VerifyArchiveOccupant proves the worktree at worktreePath is the one that was
@@ -107,7 +100,17 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := probeUnrecoverable(worktreePath, "", 0, leaf, &reasons); err != nil {
+	// The two roots prune deletes, resolved once: the worktree tree and its
+	// registration leaf.
+	deleted := make([]string, 0, 2)
+	for _, p := range []string{worktreePath, leaf} {
+		real, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			return nil, fmt.Errorf("could not resolve %s: %w", p, err)
+		}
+		deleted = append(deleted, real)
+	}
+	if err := probeUnrecoverable(worktreePath, "", 0, deleted, &reasons); err != nil {
 		return nil, err
 	}
 	return reasons, nil
@@ -115,7 +118,7 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 
 const maxSubmoduleDepth = 8
 
-func probeUnrecoverable(dir, label string, depth int, leaf string, reasons *[]string) error {
+func probeUnrecoverable(dir, label string, depth int, deleted []string, reasons *[]string) error {
 	if depth > maxSubmoduleDepth {
 		return fmt.Errorf("submodules under %s nest deeper than %d levels", dir, maxSubmoduleDepth)
 	}
@@ -171,18 +174,29 @@ func probeUnrecoverable(dir, label string, depth int, leaf string, reasons *[]st
 		if label != "" {
 			next = label + "/" + sub
 		}
-		// A submodule's object database can live UNDER the registration leaf
-		// (.git/worktrees/<id>/modules/…), and removing the leaf would delete the
-		// only copy of commits the kept branch references only as gitlink hashes.
-		// Refuse rather than prove every referenced commit survives elsewhere.
+		// Do not enumerate the places a submodule's objects can die — invert the
+		// rule. Its real git directory (rev-parse follows gitfile indirection) must
+		// provably lie OUTSIDE both roots prune deletes, the worktree tree (a
+		// non-absorbed submodule keeps .git inside it) and the registration leaf
+		// (an absorbed one keeps it under modules/), or the kept branch's gitlink
+		// hash may name a commit that exists nowhere else. One predicate covers
+		// absorbed, non-absorbed and nested submodules; anything unresolvable
+		// refuses.
 		subGitDir, err := runBoundedWorktreeGit(subDir, true, "--no-optional-locks", "rev-parse", "--absolute-git-dir")
 		if err != nil {
 			return fmt.Errorf("could not locate the git directory of submodule %s: %w", next, err)
 		}
-		if within(strings.TrimSpace(string(subGitDir)), leaf) {
-			*reasons = append(*reasons, fmt.Sprintf("submodule %s keeps its object database inside this worktree's registration (%s), which pruning removes — its commits may exist nowhere else; push or relocate the submodule's git directory first", next, strings.TrimSpace(string(subGitDir))))
+		realGitDir, err := filepath.EvalSymlinks(strings.TrimSpace(string(subGitDir)))
+		if err != nil {
+			return fmt.Errorf("could not resolve the git directory of submodule %s: %w", next, err)
 		}
-		if err := probeUnrecoverable(subDir, next, depth+1, leaf, reasons); err != nil {
+		for _, root := range deleted {
+			if within(realGitDir, root) {
+				*reasons = append(*reasons, fmt.Sprintf("submodule %s keeps its object database at %s, which pruning deletes — its commits may exist nowhere else; move the submodule's git directory outside this worktree (git submodule absorbgitdirs, then relocate it) or push its commits first", next, realGitDir))
+				break
+			}
+		}
+		if err := probeUnrecoverable(subDir, next, depth+1, deleted, reasons); err != nil {
 			return err
 		}
 	}
@@ -243,8 +257,24 @@ func StampPruneNonce(worktreePath string) (leafName, nonce string, err error) {
 		return "", "", err
 	}
 	nonce = hex.EncodeToString(raw[:])
-	if err := os.WriteFile(filepath.Join(leaf, pruneNonceFile), []byte(nonce+"\n"), 0o600); err != nil {
+	// Creating a file bumps the leaf directory's mtime, and that mtime is the
+	// evidence VerifyArchiveOccupant judges a legacy (nonce-less) archive by.
+	// Capture it first and put it back, so stamping never alters the proof a later
+	// check relies on (a resume that abandons and re-judges, for one). If the time
+	// cannot be restored the stamp is withdrawn and prune refuses before touching
+	// anything else.
+	st, err := BoundedLstat(leaf)
+	if err != nil {
+		return "", "", fmt.Errorf("could not stat worktree registration %s: %w", leaf, err)
+	}
+	stamp := filepath.Join(leaf, pruneNonceFile)
+	if err := os.WriteFile(stamp, []byte(nonce+"\n"), 0o600); err != nil {
 		return "", "", fmt.Errorf("could not stamp the prune nonce: %w", err)
+	}
+	if err := os.Chtimes(leaf, st.ModTime(), st.ModTime()); err != nil {
+		_ = os.Remove(stamp)
+		_ = os.Chtimes(leaf, st.ModTime(), st.ModTime())
+		return "", "", fmt.Errorf("could not preserve the registration's timestamp while stamping: %w", err)
 	}
 	return filepath.Base(leaf), nonce, nil
 }

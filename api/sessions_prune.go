@@ -120,7 +120,16 @@ refuses with guidance; pass --daemon-url or start af first.`,
 			}
 			return jsonError(err)
 		}
-		return jsonOut(resp)
+		if err := jsonOut(resp); err != nil {
+			return err
+		}
+		if n := len(resp.Incomplete); n > 0 {
+			// The structured result above is the answer; the exit status reports
+			// that some sessions are only partly pruned (re-run to finish them).
+			silenceCobraOutput()
+			return fmt.Errorf("%d session(s) were only partly pruned; re-run `af sessions prune --apply` to finish them", n)
+		}
+		return nil
 	},
 }
 
@@ -128,11 +137,17 @@ refuses with guidance; pass --daemon-url or start af first.`,
 // sees the plan, confirms it, and the apply is bound to exactly the sessions it
 // listed (Only) — never re-scanned into something larger.
 func applyPrunePlan(cmd *cobra.Command, req daemon.PruneSessionsRequest, plan daemon.PruneSessionsResponse) (daemon.PruneSessionsResponse, error) {
-	if len(plan.Candidates) == 0 {
+	// An interrupted prune is part of the plan: apply finishes it from its durable
+	// intent, whatever age the row now reads as.
+	var interrupted []daemon.PruneSkippedEntry
+	for _, sk := range plan.Skipped {
+		if sk.Interrupted {
+			interrupted = append(interrupted, sk)
+		}
+	}
+	if len(plan.Candidates) == 0 && len(interrupted) == 0 {
 		// Nothing to delete: report the plan (and why every session was skipped)
-		// without asking for a confirmation that would guard nothing. A prune an
-		// earlier run left unfinished is completed by the daemon at start-up and
-		// by the next apply that has something to do.
+		// without asking for a confirmation that would guard nothing.
 		return plan, nil
 	}
 	if !sessionsPruneYesFlag {
@@ -144,6 +159,9 @@ func applyPrunePlan(cmd *cobra.Command, req daemon.PruneSessionsRequest, plan da
 		for _, c := range plan.Candidates {
 			_, _ = fmt.Fprintf(out, "  %s  (branch %s, archived %s)\n", c.Title, c.Branch, c.ArchivedAt.Format("2006-01-02"))
 		}
+		for _, sk := range interrupted {
+			_, _ = fmt.Fprintf(out, "  %s  (finish an interrupted prune)\n", sk.Title)
+		}
 		_, _ = fmt.Fprint(out, "Delete them? [y/N] ")
 		line, _ := bufio.NewReader(pruneConfirmIn).ReadString('\n')
 		if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
@@ -154,6 +172,9 @@ func applyPrunePlan(cmd *cobra.Command, req daemon.PruneSessionsRequest, plan da
 	req.Only = nil
 	for _, c := range plan.Candidates {
 		req.Only = append(req.Only, c.ID)
+	}
+	for _, sk := range interrupted {
+		req.Only = append(req.Only, sk.ID)
 	}
 	return pruneSessionsViaDaemon(req)
 }

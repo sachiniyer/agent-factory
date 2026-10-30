@@ -72,6 +72,11 @@ func (i *Instance) ArchiveNonce() string {
 	return i.prune.nonce
 }
 
+// None of these bookkeeping methods touches UpdatedAt: for a row archived before
+// archived_at existed, UpdatedAt IS the archive time (ArchiveTimeFor), and a prune
+// that moved it would make its own interrupted work look too recent to resume or
+// re-judge.
+//
 // SetPruneIntent records the intent. It refuses a row that is not archived,
 // already carries an intent, or is already a tombstone, so two runs cannot both
 // own the deletion.
@@ -87,7 +92,6 @@ func (i *Instance) SetPruneIntent(intent PruneIntentData) error {
 		return fmt.Errorf("session %q already has a prune in progress", i.Title)
 	}
 	i.prune.intent = clonePruneIntent(&intent)
-	i.touchLocked()
 	return nil
 }
 
@@ -100,7 +104,6 @@ func (i *Instance) MarkPruneRenamed() error {
 		return fmt.Errorf("session %q has no prune in progress", i.Title)
 	}
 	i.prune.intent.Renamed = true
-	i.touchLocked()
 	return nil
 }
 
@@ -110,7 +113,6 @@ func (i *Instance) ClearPruneIntent() {
 	defer i.mu.Unlock()
 	if i.prune.intent != nil {
 		i.prune.intent = nil
-		i.touchLocked()
 	}
 }
 
@@ -125,7 +127,6 @@ func (i *Instance) CompletePrune(at time.Time) error {
 		i.prune.prunedAt = at
 	}
 	i.prune.intent = nil
-	i.touchLocked()
 	return nil
 }
 

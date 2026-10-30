@@ -326,3 +326,31 @@ func TestSessionsPrune_DaemonUnavailableIsAnActionableError(t *testing.T) {
 	assert.Contains(t, err.Error(), "no daemon is running")
 	assert.Contains(t, err.Error(), "--daemon-url")
 }
+
+// An interrupted prune is part of the plan even when nothing new is reclaimable
+// (it reads as too recent once the row was touched), and an apply that leaves rows
+// incomplete still prints the structured result before reporting them as such.
+func TestSessionsPrune_ApplyFinishesInterruptedAndReportsIncomplete(t *testing.T) {
+	setupRepoForCmd(t)
+	resetPruneFlags(t)
+	sessionsPruneOlderThanStr = "720h"
+	sessionsPruneApplyFlag = true
+	sessionsPruneYesFlag = true
+
+	var reqs []daemon.PruneSessionsRequest
+	stubPruneDaemon(t, func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
+		reqs = append(reqs, req)
+		if !req.Apply {
+			return daemon.PruneSessionsResponse{OK: true, Candidates: []daemon.PruneCandidate{},
+				Skipped: []daemon.PruneSkippedEntry{{ID: "id-half", Title: "half", Interrupted: true, Reason: "interrupted"}}}, nil
+		}
+		return daemon.PruneSessionsResponse{OK: true, Applied: true,
+			Incomplete: []daemon.PruneIncompleteEntry{{ID: "id-half", Title: "half", Step: "remove", Reason: "still running"}}}, nil
+	})
+	out, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
+	require.Error(t, err, "incomplete rows are reported as such")
+	assert.Contains(t, err.Error(), "partly pruned")
+	assert.Contains(t, string(out), "incomplete", "the structured result was printed, not lost")
+	require.Len(t, reqs, 2)
+	assert.Equal(t, []string{"id-half"}, reqs[1].Only)
+}

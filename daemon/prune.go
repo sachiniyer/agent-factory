@@ -81,10 +81,13 @@ type PruneCandidate struct {
 // too-recent archives, and rows the daemon could not materialize all land here
 // rather than being silently filtered out.
 type PruneSkippedEntry struct {
-	ID     string `json:"id,omitempty"`
-	Title  string `json:"title"`
-	RepoID string `json:"repo_id"`
-	Reason string `json:"reason"`
+	ID string `json:"id,omitempty"`
+	// Interrupted marks a row whose earlier prune did not finish: an apply
+	// completes it from its durable intent, so it belongs in the plan.
+	Interrupted bool   `json:"interrupted,omitempty"`
+	Title       string `json:"title"`
+	RepoID      string `json:"repo_id"`
+	Reason      string `json:"reason"`
 }
 
 // PruneSessionsResponse is the dry run's full accounting.
@@ -122,7 +125,6 @@ type PruneSessionsResponse struct {
 	FreeBytesBefore uint64 `json:"free_bytes_before,omitempty"`
 	FreeBytesAfter  uint64 `json:"free_bytes_after,omitempty"`
 	FreeBytesKnown  bool   `json:"free_bytes_known,omitempty"`
-	MutationOutcome
 }
 
 // PruneSessions evaluates archived sessions against req and lists the ones
@@ -536,13 +538,6 @@ func (s *controlServer) PruneSessions(req PruneSessionsRequest, resp *PruneSessi
 	}
 	result, err := s.manager.PruneSessions(req)
 	*resp = result
-	if req.Apply {
-		// A run that deleted something is durable even when a later row failed.
-		if !resp.record(err) {
-			return err
-		}
-		return nil
-	}
 	return err
 }
 

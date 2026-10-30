@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -101,7 +102,7 @@ func TestUnrecoverableContentRefusesASubmoduleWhoseObjectsLiveInTheRegistration(
 	require.NoError(t, err)
 	require.NotEmpty(t, reasons)
 	assert.Contains(t, strings.Join(reasons, " "), "submodule mod")
-	assert.Contains(t, strings.Join(reasons, " "), "registration")
+	assert.Contains(t, strings.Join(reasons, " "), "pruning deletes")
 }
 
 // BLOCKING (round 9): the occupant is bound by an af-owned nonce. A worktree
@@ -196,4 +197,129 @@ func TestLocalBranchExistsInABareOrigin(t *testing.T) {
 	ok, err = LocalBranchExists(bare, "af/missing")
 	require.NoError(t, err)
 	assert.False(t, ok)
+}
+
+// One predicate, every shape (Codex P1 round 2 on #6186): a submodule's real git
+// directory must lie outside BOTH roots prune deletes — the worktree tree and the
+// registration leaf — or the worktree is refused.
+func TestSubmoduleObjectsMustLiveOutsideEveryDeletedRoot(t *testing.T) {
+	commitSub := func(t *testing.T, wt string) {
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", "only-here.txt"), []byte("x"), 0o644))
+		gitIn(t, filepath.Join(wt, "mod"), "add", "only-here.txt")
+		gitIn(t, filepath.Join(wt, "mod"), "commit", "-qm", "submodule-only commit")
+		gitIn(t, wt, "add", "mod")
+		gitIn(t, wt, "commit", "-qm", "bump")
+	}
+	refused := func(t *testing.T, wt string, want ...string) {
+		t.Helper()
+		reasons, err := WorktreeUnrecoverableContent(wt)
+		require.NoError(t, err)
+		joined := strings.Join(reasons, " ")
+		require.NotEmpty(t, reasons)
+		for _, w := range want {
+			assert.Contains(t, joined, w)
+		}
+	}
+
+	t.Run("absorbed under the registration leaf", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		gitIn(t, wt, "submodule", "add", newPruneGuardRepo(t), "mod")
+		commitSub(t, wt)
+		refused(t, wt, "submodule mod")
+	})
+
+	t.Run("not absorbed: .git directory inside the tree", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		src := newPruneGuardRepo(t)
+		gitIn(t, wt, "clone", src, "mod") // a real .git directory under the worktree
+		gitIn(t, wt, "submodule", "add", src, "mod")
+		fi, err := os.Stat(filepath.Join(wt, "mod", ".git"))
+		require.NoError(t, err)
+		require.True(t, fi.IsDir(), "premise: the submodule's .git is a directory inside the tree")
+		commitSub(t, wt)
+		refused(t, wt, "submodule mod")
+	})
+
+	t.Run("nested submodule", func(t *testing.T) {
+		inner := newPruneGuardRepo(t)
+		outer := newPruneGuardRepo(t)
+		gitIn(t, outer, "submodule", "add", inner, "inner")
+		gitIn(t, outer, "commit", "-qm", "add inner")
+		_, wt := pruneWorktree(t)
+		gitIn(t, wt, "submodule", "add", outer, "mod")
+		gitIn(t, wt, "submodule", "update", "--init", "--recursive")
+		gitIn(t, wt, "commit", "-qm", "add outer")
+		refused(t, wt, "submodule mod", "mod/inner")
+	})
+
+	t.Run("outside both roots is allowed", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		gitIn(t, wt, "submodule", "add", newPruneGuardRepo(t), "mod")
+		gitIn(t, wt, "commit", "-qm", "add submodule")
+		// Relocate the submodule's git directory outside the tree and the leaf.
+		old := gitIn(t, filepath.Join(wt, "mod"), "rev-parse", "--absolute-git-dir")
+		outside := filepath.Join(t.TempDir(), "mod.git")
+		require.NoError(t, os.Rename(old, outside))
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", ".git"), []byte("gitdir: "+outside+"\n"), 0o644))
+		gitIn(t, wt, "config", "--file", filepath.Join(outside, "config"), "core.worktree", filepath.Join(wt, "mod"))
+
+		reasons, err := WorktreeUnrecoverableContent(wt)
+		require.NoError(t, err)
+		assert.Empty(t, reasons, "a submodule whose objects survive the deletion is reclaimable")
+	})
+
+	t.Run("an unresolvable git directory refuses", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		gitIn(t, wt, "submodule", "add", newPruneGuardRepo(t), "mod")
+		gitIn(t, wt, "commit", "-qm", "add submodule")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", ".git"), []byte("gitdir: /nonexistent/elsewhere\n"), 0o644))
+		_, err := WorktreeUnrecoverableContent(wt)
+		require.Error(t, err, "unknown is never reclaimable")
+	})
+}
+
+// Stamping the prune nonce must not alter the evidence a legacy (nonce-less)
+// archive is judged by: the leaf's mtime. A resume that abandons and re-judges
+// would otherwise find a freshly "re-created" leaf (Codex on #6186).
+func TestStampingPruneNonceKeepsTheLegacyOccupantProof(t *testing.T) {
+	_, wt := pruneWorktree(t)
+	leaf, err := registrationLeaf(wt)
+	require.NoError(t, err)
+	archivedAt := time.Now()
+	old := archivedAt.Add(-time.Hour)
+	require.NoError(t, os.Chtimes(leaf, old, old))
+	require.NoError(t, VerifyArchiveOccupant(wt, "", archivedAt), "premise: the legacy proof passes")
+
+	_, _, err = StampPruneNonce(wt)
+	require.NoError(t, err)
+	st, err := os.Stat(leaf)
+	require.NoError(t, err)
+	assert.WithinDuration(t, old, st.ModTime(), time.Second, "the leaf's mtime is unchanged by the stamp")
+	require.NoError(t, VerifyArchiveOccupant(wt, "", archivedAt), "and so is the proof")
+}
+
+// Concurrent verifies share the flight's RESULT, not just its error: every caller
+// gets the resolved leaf (Codex on #6186).
+func TestRegistrationLeafFlightSharesTheResolvedPath(t *testing.T) {
+	_, wt := pruneWorktree(t)
+	want, err := registrationLeaf(wt)
+	require.NoError(t, err)
+	require.NotEmpty(t, want)
+
+	var wg sync.WaitGroup
+	results := make([]string, 16)
+	for i := range results {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := registrationLeaf(wt)
+			if err == nil {
+				results[i] = got
+			}
+		}()
+	}
+	wg.Wait()
+	for _, got := range results {
+		assert.Equal(t, want, got)
+	}
 }

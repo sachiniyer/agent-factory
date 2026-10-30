@@ -55,6 +55,9 @@ func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
 	if !data.PrunedAt.IsZero() {
 		return fmt.Sprintf("already pruned at %s — branch %s was kept", data.PrunedAt.Format(time.RFC3339), data.Branch)
 	}
+	if data.PruneIntent != nil {
+		return "a prune of this archive was interrupted — run `af sessions prune --apply` to finish it"
+	}
 	if data.UserKilled {
 		return "kill tombstone — teardown is still owed"
 	}

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -111,7 +110,7 @@ func (m *Manager) pruneApply(req PruneSessionsRequest, resp PruneSessionsRespons
 	// A deletion an earlier run started is finished first, from its durable
 	// intent, so a crash never leaves a half-pruned row blocking the listing.
 	for _, row := range m.pruneRows(req) {
-		if row.instance.PruneIntent() == nil {
+		if row.instance.PruneIntent() == nil || (len(req.Only) > 0 && !containsString(req.Only, row.instance.ID)) {
 			continue
 		}
 		entry, inc := m.resumePruneIntent(row.repoID, row.instance)
@@ -173,12 +172,6 @@ func (m *Manager) pruneApply(req PruneSessionsRequest, resp PruneSessionsRespons
 		resp.ReclaimedEstimateBytes += p.EstimatedBytes
 	}
 	resp.FreeBytesBefore, resp.FreeBytesAfter, resp.FreeBytesKnown = free.delta()
-	if len(resp.Incomplete) > 0 {
-		// Something irreversible landed for these rows: tell the caller it is not
-		// safe to treat the run as a clean failure (see MutationOutcome).
-		resp.Code = apiproto.ErrorCodeMutationCommitted
-		resp.Warning = fmt.Sprintf("%d session(s) were only partly pruned; re-run `af sessions prune --apply` to finish them", len(resp.Incomplete))
-	}
 	return resp, nil
 }
 
@@ -526,17 +519,19 @@ func (p *freeSpaceProbe) delta() (before, after uint64, known bool) {
 
 func sumFree(dirs []string) (uint64, bool) {
 	var total uint64
-	seen := map[string]bool{}
+	seen := map[uint64]bool{}
 	for _, d := range dirs {
-		if seen[d] {
-			continue
-		}
-		seen[d] = true
-		n, ok := freeBytesAt(d)
+		free, dev, ok := freeBytesAt(d)
 		if !ok {
 			return 0, false
 		}
-		total += n
+		// One count per FILESYSTEM (device), not per path: many archive roots share
+		// a mount, and summing each would multiply its free space.
+		if seen[dev] {
+			continue
+		}
+		seen[dev] = true
+		total += free
 	}
 	return total, len(seen) > 0
 }
@@ -551,4 +546,13 @@ func (m *Manager) pruneArchiveRoots(req PruneSessionsRequest) []string {
 		}
 	}
 	return dirs
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

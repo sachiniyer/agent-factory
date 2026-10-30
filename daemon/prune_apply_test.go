@@ -8,7 +8,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -174,7 +173,6 @@ func TestPruneApply_CrashAtEveryStepConverges(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, resp.Incomplete, 1)
 			assert.Equal(t, s.crashAt, resp.Incomplete[0].Step)
-			assert.Equal(t, apiproto.ErrorCodeMutationCommitted, resp.Code, "an interrupted prune is a committed-but-incomplete outcome")
 
 			_, statErr := os.Lstat(archived)
 			assert.Equal(t, s.want.original, statErr == nil, "original present")
@@ -289,4 +287,17 @@ func TestPruneApply_ResumeNeverRemovesAReoccupyingWorktreesRegistration(t *testi
 	_ = inc
 	assert.FileExists(t, filepath.Join(archived, "replacement.txt"), "the replacement worktree is untouched")
 	assert.Contains(t, gitOut(t, repoPath, "worktree", "list", "--porcelain"), archived, "and its registration stays")
+}
+
+// Free space is counted once per filesystem, not once per path (Codex on #6186).
+func TestSumFreeCountsASharedFilesystemOnce(t *testing.T) {
+	root := t.TempDir()
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	require.NoError(t, os.Mkdir(a, 0o755))
+	require.NoError(t, os.Mkdir(b, 0o755))
+	one, ok := sumFree([]string{a})
+	require.True(t, ok)
+	two, ok := sumFree([]string{a, b})
+	require.True(t, ok)
+	assert.Equal(t, one, two, "two archive roots on one mount are one filesystem")
 }

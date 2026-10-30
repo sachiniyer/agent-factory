@@ -19,7 +19,7 @@ func (m *Manager) pruneVerdict(repoID string, instance *session.Instance, cutoff
 	var warnings []string
 	data := instance.ToInstanceData()
 	skip := func(reason string) (PruneCandidate, *PruneSkippedEntry, []string) {
-		return PruneCandidate{}, &PruneSkippedEntry{ID: data.ID, Title: data.Title, RepoID: repoID, Reason: reason}, warnings
+		return PruneCandidate{}, &PruneSkippedEntry{ID: data.ID, Title: data.Title, RepoID: repoID, Reason: reason, Interrupted: data.PruneIntent != nil}, warnings
 	}
 	if reason := session.PruneSkipReason(data, cutoff); reason != "" {
 		return skip(reason)

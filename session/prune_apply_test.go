@@ -60,3 +60,21 @@ func TestPrunedRestoreErrorNamesTheKeptBranch(t *testing.T) {
 	assert.Contains(t, err.Error(), "siyer/old")
 	assert.Contains(t, err.Error(), "git worktree add")
 }
+
+// Prune's own bookkeeping must not move UpdatedAt: for a legacy row it IS the
+// archive time, and a prune that advanced it would make its interrupted work look
+// too recent to resume (Codex on #6186).
+func TestPruneBookkeepingDoesNotMoveTheArchiveTimeOfALegacyRow(t *testing.T) {
+	d := prunedBaseline(t)
+	d.ArchivedAt = time.Time{} // archived before archived_at existed
+	inst, err := FromInstanceData(d)
+	require.NoError(t, err)
+	before := ArchiveTimeFor(inst.ToInstanceData())
+
+	require.NoError(t, inst.SetPruneIntent(PruneIntentData{WorktreePath: "/a", At: time.Now()}))
+	require.NoError(t, inst.MarkPruneRenamed())
+	inst.ClearPruneIntent()
+	require.NoError(t, inst.SetPruneIntent(PruneIntentData{WorktreePath: "/a", At: time.Now()}))
+	assert.True(t, before.Equal(ArchiveTimeFor(inst.ToInstanceData())))
+	assert.Contains(t, PruneSkipReason(inst.ToInstanceData(), time.Now()), "interrupted")
+}
