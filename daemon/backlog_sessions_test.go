@@ -295,3 +295,58 @@ func TestStaleCompletionDoesNotFinishALaterContinue(t *testing.T) {
 		}
 	}
 }
+
+// An idle edge observed before the session's start record is committed has no
+// item to land on: it is held and replayed when the link is recorded, so the item
+// is not left running (Codex P2 on #6294).
+func TestCompletionBeforeTheStartRecordIsHeldAndReplayed(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	gen := inst.BacklogRunGeneration()
+	inst.DisarmBacklogRun()
+	// Unlink the run, as if finishBacklogStart had not committed yet.
+	var run backlog.RunRef
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		r := &b.Item(1).Runs[0]
+		run = *r
+		r.State, r.SessionID, r.Title = backlog.RunStarting, "", ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.settleRunEnd(repoID, inst.ID, gen, nil)
+	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusRunning {
+		t.Fatalf("an unlinked session's completion was applied: %s", it.Status)
+	}
+	// finishBacklogStart commits the link and replays the held edge.
+	m.backlog.reserve(repoID)
+	m.finishBacklogStart(backlog.ProjectRef{ID: repoID}, 1, run.StartedAt,
+		session.InstanceData{ID: inst.ID, Title: inst.Title}, nil, nil)
+	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusReview {
+		t.Fatalf("status = %s, want review: the held completion was lost", it.Status)
+	}
+}
+
+// A busy backlog does not drop a completion (Codex P2 on #6294): it is retried.
+func TestCompletionIsRetriedWhileTheBacklogIsBusy(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	gen := inst.BacklogRunGeneration()
+	inst.DisarmBacklogRun()
+	prevApply, prevBackoff := applyBacklog, finishStartBackoff
+	finishStartBackoff = time.Millisecond
+	busy := 3
+	applyBacklog = func(svc *backlog.Service, ref backlog.ProjectRef, fn func(*backlog.Backlog) ([]int, error)) (*backlog.Backlog, error) {
+		if busy > 0 {
+			busy--
+			return nil, backlog.ErrBusy
+		}
+		return prevApply(svc, ref, fn)
+	}
+	t.Cleanup(func() { applyBacklog, finishStartBackoff = prevApply, prevBackoff })
+	m.settleRunEnd(repoID, inst.ID, gen, nil)
+	if busy != 0 {
+		t.Fatalf("the completion gave up with %d busy answers left", busy)
+	}
+	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusReview {
+		t.Fatalf("status = %s, want review", it.Status)
+	}
+}

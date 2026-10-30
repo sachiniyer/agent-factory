@@ -19,6 +19,8 @@ type itemSession struct {
 	instance *session.Instance
 	view     session.LifecycleView
 	resetAt  string
+	// gen is the session's run generation in the same snapshot as view.
+	gen int
 }
 
 // itemSessions returns the project's item sessions by session id.
@@ -33,7 +35,7 @@ func (m *Manager) itemSessions(repoID string) map[string]itemSession {
 		if rid, _ := splitDaemonInstanceKey(key); rid != repoID {
 			continue
 		}
-		s := itemSession{instance: inst, view: inst.LifecycleView()}
+		s := itemSession{instance: inst, view: inst.LifecycleView(), gen: inst.BacklogRunGeneration()}
 		if at, ok := inst.LimitResetAt(); ok && !at.IsZero() {
 			s.resetAt = at.Local().Format("15:04")
 		}
@@ -111,43 +113,81 @@ func (m *Manager) noteBacklogRunEnd(repoID string, instance *session.Instance, w
 		return
 	}
 	sessionID, gen := instance.ID, instance.BacklogRunGeneration()
-	m.launchBackgroundMutation(func(<-chan struct{}) {
-		m.backlogRunEndedGen(repoID, sessionID, gen)
+	m.launchBackgroundMutation(func(stop <-chan struct{}) {
+		m.settleRunEnd(repoID, sessionID, gen, stop)
 	})
 }
 
-// backlogRunEnded moves a silent run's item to review, and archives the
-// session when the user already marked the item done and on_done is archive.
+// backlogRunEnded settles the end of whatever run the session has, with no
+// generation fence. Tests and callers that hold no observation use it.
 func (m *Manager) backlogRunEnded(repoID, sessionID string) {
-	m.backlogRunEndedGen(repoID, sessionID, -1)
+	m.settleRunEnd(repoID, sessionID, -1, nil)
 }
 
-// backlogRunEndedGen is backlogRunEnded for the run of generation gen (-1: any).
-// The check runs inside the backlog transaction, and continueBacklogItem arms
-// the next run inside its own, so a completion queued for the previous run
-// cannot finish a continue that was accepted after it (Codex P2 on #6294).
+// backlogRunEndedGen settles the end of the run of generation gen (-1: any).
 func (m *Manager) backlogRunEndedGen(repoID, sessionID string, gen int) {
+	m.settleRunEnd(repoID, sessionID, gen, nil)
+}
+
+// applyBacklog runs a backlog transaction. A package var so a test can make the
+// lock busy.
+var applyBacklog = func(svc *backlog.Service, ref backlog.ProjectRef, fn func(*backlog.Backlog) ([]int, error)) (*backlog.Backlog, error) {
+	return svc.Apply(ref, fn)
+}
+
+// settleRunEnd moves a silent run's item to review, and archives the session
+// when the user already marked the item done and on_done is archive. It is the
+// one place a run's end is written, and keeps the lifecycle model:
+//
+//   - fenced: gen is the generation observed at the idle edge; the transaction
+//     applies only while the session's marker is inactive and still at gen, so a
+//     continue or an answer accepted since is never finished by an old edge;
+//   - not lost: a busy backlog is retried with backoff until it lands or stop
+//     closes (a nil stop retries until it lands), and an edge observed before the
+//     session's start record is committed is held and replayed by
+//     finishBacklogStart.
+func (m *Manager) settleRunEnd(repoID, sessionID string, gen int, stop <-chan struct{}) {
 	svc := m.backlogService()
-	var end backlog.RunEnd
-	_, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
-		if gen >= 0 {
-			if s, ok := m.itemSessions(repoID)[sessionID]; ok &&
-				(s.instance.BacklogRunActive() || s.instance.BacklogRunGeneration() != gen) {
+	delay := finishStartBackoff
+	for {
+		var end backlog.RunEnd
+		_, err := applyBacklog(svc, backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+			if gen >= 0 {
+				if s, ok := m.itemSessions(repoID)[sessionID]; ok &&
+					(s.instance.BacklogRunActive() || s.instance.BacklogRunGeneration() != gen) {
+					return nil, errBacklogNoChange
+				}
+			}
+			if b.ItemForSession(sessionID) == nil {
+				// Not linked yet: inside the transaction, so finishBacklogStart's
+				// own transaction (which links it) is ordered after this hold.
+				m.backlog.holdEnd(sessionID, gen)
 				return nil, errBacklogNoChange
 			}
+			end = b.RunEnded(sessionID, svc.Now())
+			if !end.Changed {
+				return nil, errBacklogNoChange
+			}
+			return []int{end.ID}, nil
+		})
+		switch {
+		case err == nil || errors.Is(err, errBacklogNoChange):
+			if end.Archive {
+				m.archiveDoneItemSession(repoID, sessionID)
+			}
+			return
+		case errors.Is(err, backlog.ErrBusy):
+			select {
+			case <-stop:
+				m.warn().Printf("backlog run end for session %s: %v; recovery will settle it", sessionID, err)
+				return
+			case <-time.After(delay):
+			}
+			delay = min(delay*2, 5*time.Second)
+		default:
+			m.warn().Printf("backlog run end for session %s: %v", sessionID, err)
+			return
 		}
-		end = b.RunEnded(sessionID, svc.Now())
-		if !end.Changed {
-			return nil, errBacklogNoChange
-		}
-		return []int{end.ID}, nil
-	})
-	if err != nil && !errors.Is(err, errBacklogNoChange) {
-		m.warn().Printf("backlog run end for session %s: %v", sessionID, err)
-		return
-	}
-	if end.Archive {
-		m.archiveDoneItemSession(repoID, sessionID)
 	}
 }
 
@@ -323,7 +363,9 @@ func (m *Manager) recoverBacklog(repoID string) bool {
 		}
 	}
 	for _, sessionID := range idleRunEnds(b, sessions) {
-		m.backlogRunEnded(repoID, sessionID)
+		// The generation observed in the snapshot: a continue accepted since is
+		// not finished by this stale observation.
+		m.backlogRunEndedGen(repoID, sessionID, sessions[sessionID].gen)
 	}
 	return true
 }
