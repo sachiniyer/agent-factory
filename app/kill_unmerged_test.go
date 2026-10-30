@@ -189,8 +189,18 @@ func TestHandleKill_AgentSwitchesBranch_WarnsForSessionBranchCommits(t *testing.
 	rendered := flatten(hm.confirmationOverlay.Render())
 	assert.Contains(t, rendered, "dev/session-work",
 		"confirmation must identify the branch that kill will delete")
-	assert.NotContains(t, rendered, "agent-scratch",
-		"confirmation must not describe the branch merely checked out at HEAD")
+	// The branch merely checked out at HEAD may be named only to say it is KEPT
+	// (#6233); it must never appear in a loss sentence, which is about the
+	// recorded session branch.
+	for _, sentence := range strings.SplitAfter(rendered, ".") {
+		if strings.Contains(sentence, "agent-scratch") {
+			assert.Contains(t, sentence, "kept in the repo",
+				"the HEAD branch may appear only in the kept sentence: %q", sentence)
+			assert.NotContains(t, sentence, "permanently deletes",
+				"the HEAD branch must not be described as lost: %q", sentence)
+		}
+	}
+	assert.Contains(t, rendered, "'agent-scratch'", "the kept HEAD branch is named")
 	assert.Contains(t, rendered, "1 commit",
 		"confirmation must count commits on the branch that kill will delete")
 	assert.Contains(t, rendered, "permanently deletes it")
