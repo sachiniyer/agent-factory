@@ -115,11 +115,13 @@ var shellSiteRegistry = map[string][]classifiedSite{
 			"(TestInRepoConfigRejectsMoveCmd, config/inrepo_move_cmd_test.go).",
 	}},
 	"session/archive_sandbox.go:lsRemoteArgs": {{
-		class: notAShell,
-		note: "`git -c <key>=<helper> ls-remote` — git's config flag, not a shell. The value is af's fixed " +
-			"githubEnvironmentCredential helper (variable NAMES only, no URL or branch text interpolated); " +
-			"only the config KEY is scoped by the origin's host, and a key is never shell-evaluated. " +
-			"The origin URL and branch are plain argv after ls-remote",
+		class: afAuthored,
+		note: "`git -c <key>=<helper> ls-remote`: the `-c` is git's config flag, but the VALUE is a credential " +
+			"helper beginning with `!`, which git runs through `sh`. So this site does hand an af-authored shell " +
+			"snippet to a shell. The snippet is constant: githubEnvironmentCredential's helper reads variable " +
+			"NAMES only (GH_TOKEN/GITHUB_TOKEN and the enterprise pair), and no URL or branch text is " +
+			"interpolated; the origin host only scopes the config KEY, which git never shell-evaluates. " +
+			"The origin URL and branch are plain argv after ls-remote. No operator value reaches the shell",
 	}},
 	"session/git/hooks.go:runPostWorktreeHooks": {{
 		class: operatorConfig, keys: []string{"post_worktree_commands"}, note: "the plain child",
