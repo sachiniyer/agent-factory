@@ -28,7 +28,7 @@ func (m *Manager) guardRepoGoneRestore(
 	} else if !errors.Is(err, sessiongit.ErrRepoGone) {
 		probeErr := fmt.Errorf("cannot establish origin repo state for %s for session %q: %w", repoPath, title, err)
 		instance.PreserveWorktreeRelocationClaimAsUnresolved(claim)
-		if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+		if persistErr := m.persistUnderAdmission(repoID, instance); persistErr != nil {
 			return false, errors.Join(probeErr, fmt.Errorf(
 				"could not persist the unresolved archived worktree identity: %w", persistErr,
 			))
@@ -55,7 +55,7 @@ func (m *Manager) persistRestorePathFailure(
 ) error {
 	pathErr := fmt.Errorf("cannot determine restore location for %q: %w", title, pathCause)
 	instance.PreserveWorktreeRelocationClaimAsUnresolved(claim)
-	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+	if persistErr := m.persistUnderAdmission(repoID, instance); persistErr != nil {
 		return errors.Join(pathErr, fmt.Errorf(
 			"could not persist the unresolved archived worktree identity: %w", persistErr,
 		))
@@ -71,7 +71,7 @@ func (m *Manager) persistUnresolvedRestoreFailure(
 ) error {
 	wrapped := fmt.Errorf("failed to restore worktree for %q: %w", title, restoreErr)
 	instance.PreserveWorktreeRelocationClaimAsUnresolved(claim)
-	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+	if persistErr := m.persistUnderAdmission(repoID, instance); persistErr != nil {
 		return errors.Join(wrapped, fmt.Errorf(
 			"could not persist its unresolved archived worktree identity: %w", persistErr,
 		))
@@ -89,7 +89,7 @@ func (m *Manager) claimRestoreRelocation(
 		return claim, nil
 	}
 	if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
-		if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+		if persistErr := m.persistUnderAdmission(repoID, instance); persistErr != nil {
 			return sessiongit.RelocationClaim{}, fmt.Errorf(
 				"cannot resolve restore source for session %q and could not persist its recovery record (%v): %w",
 				title, persistErr, err,
@@ -125,7 +125,15 @@ func (m *Manager) persistAndInstallRepoGoneCleanup(
 	operation, repoID, title, repoPath string,
 	instance *session.Instance,
 ) error {
-	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+	// The restore arm runs under the repository's worktree admission lock (the
+	// archived restore holds it from before destination selection), and the start
+	// lock sits to its LEFT in the documented order, so it must not be taken here
+	// (#6197). The kill arm holds no admission and keeps the ordered write.
+	persist := m.persistInstanceErr
+	if operation == "restore" {
+		persist = m.persistUnderAdmission
+	}
+	if persistErr := persist(repoID, instance); persistErr != nil {
 		wrapped := fmt.Errorf(
 			"cannot %s session %q because its origin repo %s is gone, and could not persist an unresolved archived worktree identity: %w",
 			operation, title, repoPath, persistErr,
@@ -163,14 +171,14 @@ func (m *Manager) persistAndInstallRepoGoneCleanup(
 		// evidence when the cleanup generation cannot be established. Persist that
 		// fail-closed transition before returning; otherwise the previous on-disk
 		// record could still be interpreted as an admissible retry after restart.
-		if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+		if persistErr := persist(repoID, instance); persistErr != nil {
 			return errors.Join(prepareErr, fmt.Errorf(
 				"could not persist the unresolved archived worktree identity: %w", persistErr,
 			))
 		}
 		return prepareErr
 	}
-	if err := m.persistInstanceErr(repoID, instance); err != nil {
+	if err := persist(repoID, instance); err != nil {
 		// The in-memory cleanup-ready record remains fail-closed. The previous
 		// on-disk recovery record is conservative too.
 		return fmt.Errorf(
