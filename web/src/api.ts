@@ -794,6 +794,37 @@ export async function registerProject(path: string, token: string): Promise<Regi
   return resp.project;
 }
 
+/** Reports whether a user-typed add-project value routes to the URL half of
+ *  RegisterProject rather than the path half — the mirror of
+ *  internal/projectclone.LooksLikeURL, which the CLI and TUI route on the same
+ *  way. ROUTING only: a scheme-bearing value ("https://…", "ssh://…", and yes
+ *  "file://…") or an scp-like "user@host:path" is sent as `url`; anything else
+ *  ("./repo", "/srv/repo", "~/repo", "a:b") stays a `path`. The VERDICT stays
+ *  where it is on the other two surfaces too — the daemon's
+ *  projectclone.Validate refuses what routing let through (file://, a
+ *  password-embedded URL, an option-like value), and its message surfaces
+ *  verbatim. There is deliberately no client copy of Validate to drift. */
+const SCP_LIKE_GIT_URL = /^[A-Za-z0-9._-]+@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~/-]+$/;
+export function looksLikeGitURL(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.includes("://") || SCP_LIKE_GIT_URL.test(trimmed);
+}
+
+/** Registers a project by git URL (mirrors `af projects add <url>`, W9.10): the
+ *  RegisterProject RPC's `url` half, so the DAEMON clones it on its own host,
+ *  with its own credentials (ssh keys, credential helper), under its
+ *  projects_root, then registers the checkout — never anything the caller
+ *  names. The clone runs INSIDE the request, so this is by far the slowest RPC
+ *  the client can make (projectclone.Budget bounds it server-side): callers
+ *  must not hold a form open on the reply. Same envelope and error contract as
+ *  registerProject — a refused URL or a failed clone throws an ApiError
+ *  carrying the daemon's actionable message, and the echoed projects.changed
+ *  refetches the registry when it lands. */
+export async function registerProjectURL(url: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RegisterProject", { url }, token);
+  return resp.project;
+}
+
 /** The documented remedy when a guarded rebind's versioned route proves absent:
  *  mirrors daemon.ErrGuardedRebindUnsupported's wording so every client names
  *  the same fix. */

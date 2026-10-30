@@ -31,6 +31,8 @@ import {
   probeWebTab,
   reapConfigAssistant,
   registerProject,
+  registerProjectURL,
+  looksLikeGitURL,
   rebindProject,
   removeTask,
   renameTab,
@@ -1118,6 +1120,67 @@ test("registerProject surfaces a non-git path error for inline display", async (
   // prefix — the exact P1 regression #2543 fixed (describeError -> errorText).
   assert.equal(errorText(err), "resolve git common directory: not a git repository");
   assert.doesNotMatch(errorText(err), /Login failed/);
+});
+
+// --- registerProjectURL + looksLikeGitURL: add-project by git URL --------------
+//
+// W9.10 / project.add.url: the same RegisterProject RPC's `url` half — the
+// daemon clones on ITS host and registers the checkout. looksLikeGitURL is the
+// ROUTING mirror of internal/projectclone.LooksLikeURL (which picks `url` vs
+// `path` on the CLI and TUI); the verdict stays the daemon's Validate, which is
+// why file:// still routes as a URL — it must reach the refusal that owns it.
+
+test("registerProjectURL sends the url field, not path, to RegisterProject", async () => {
+  const cap = stubFetch();
+  await registerProjectURL("https://github.com/owner/repo", "tok");
+  assert.ok(cap.url.endsWith("/v1/RegisterProject"), `posted to ${cap.url}`);
+  assert.equal(cap.body.url, "https://github.com/owner/repo");
+  assert.equal(cap.body.path, undefined, "exactly one of path/url is given — sending both is refused");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("registerProjectURL returns the daemon's registered project and surfaces its refusal", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: {
+        ok: true,
+        project: {
+          id: "prj_00000000000000000000000000000000",
+          checkout_id: "chk_00000000000000000000000000000000",
+          root: "/daemon/projects/repo",
+          relative_root: ".",
+          path_exists: true,
+        },
+      },
+      error: null,
+    }),
+  });
+  const project = await registerProjectURL("git@github.com:owner/repo.git", "tok");
+  assert.equal(project.root, "/daemon/projects/repo");
+
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({ data: null, error: { message: "project git URL must not embed a password" } }),
+  });
+  const err = await registerProjectURL("https://u:p@x/o/r", "tok").then(() => null, (e: unknown) => e);
+  assert.ok(err instanceof ApiError);
+  assert.match(err.message, /must not embed a password/);
+});
+
+test("looksLikeGitURL mirrors the projectclone.LooksLikeURL routing table", () => {
+  // The Go table (internal/projectclone TestLooksLikeURLRoutesPathsAndURLs):
+  // every surface routes on the same rule so the same input cannot become a
+  // path on one surface and a clone on another.
+  for (const u of ["https://x/y", "file:///etc", "ssh://h/p", "git@github.com:o/r.git"]) {
+    assert.equal(looksLikeGitURL(u), true, u);
+  }
+  for (const p of [".", "./repo", "/srv/repo", "~/repo", "repo", "C:repo", "a:b"]) {
+    assert.equal(looksLikeGitURL(p), false, p);
+  }
 });
 
 // --- rebindProject: the web rebind affordance (project.rebind parity) ----------

@@ -555,16 +555,16 @@
         "pointer": "app/switch_project.go handleAddProject (a git URL) → registerProjectURLThroughDaemon (apiclient RegisterProjectURL)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/index.ts openAddProject routes a URL-shaped value (api.ts looksLikeGitURL, mirroring projectclone.LooksLikeURL) to api.ts registerProjectURL → {url}; modal releases for the clone and a daemon refusal remounts it with the message inline (web/src/add_project_flow.test.ts)"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/projects.go newProjectsAddCmd (a git URL argument) → daemon.RegisterProjectRequest.URL"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5571",
-      "notes": "W9.10. The daemon clones the URL on ITS host with ITS credentials under the global projects_root and registers the checkout; the URL is validated there (https/ssh/scp-like only; file://, paths, option-like values and embedded passwords refused). The CLI and the TUI add-project prompt accept a URL; the web add-project modal still takes only a daemon-host path. When the modal learns to send `url`, flip the web cell to yes and delete the web_rpcs field_coverage gap for RegisterProject.url."
+      "notes": "W9.10. The daemon clones the URL on ITS host with ITS credentials under the global projects_root and registers the checkout; the URL is validated there (https/ssh/scp-like only; file://, paths, option-like values and embedded passwords refused). All three surfaces take one field and route on the same rule: LooksLikeURL on CLI (api/projects.go) and TUI (app/switch_project.go), its mirror looksLikeGitURL on web — routing only, Validate stays daemon-side so the surfaces cannot disagree on what counts. The web modal closes for the in-request clone (up to projectclone.Budget — minutes, like a remote create) and reports the outcome create-style: success lands via projects.changed, a definite refusal remounts the form with the daemon's message and the typed URL intact, an unknown outcome is surfaced as such. The web_rpcs field_coverage gap for RegisterProject.url is deleted with this flip — the web now sends both fields."
     },
     {
       "id": "project.browse",
@@ -2860,11 +2860,6 @@
       "PruneSessionsRequest": {}
     },
     "web_rpcs": {
-      "RegisterProject": {
-        "url": {
-          "gap": "project.add.url"
-        }
-      },
       "SetConfigValue": {
         "hosts_edit": {
           "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."

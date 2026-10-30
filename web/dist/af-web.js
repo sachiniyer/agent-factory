@@ -7181,6 +7181,15 @@ async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
   return resp.project;
 }
+var SCP_LIKE_GIT_URL = /^[A-Za-z0-9._-]+@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~/-]+$/;
+function looksLikeGitURL(value) {
+  const trimmed = value.trim();
+  return trimmed.includes("://") || SCP_LIKE_GIT_URL.test(trimmed);
+}
+async function registerProjectURL(url, token2) {
+  const resp = await af("RegisterProject", { url }, token2);
+  return resp.project;
+}
 var GUARDED_REBIND_UNSUPPORTED = "this daemon predates guarded rebinds \u2014 upgrade it, or rebind from the daemon host";
 async function rebindProject(id, path, token2, expectedRoot = null, expectedCheckoutID = null) {
   const request = {
@@ -13251,7 +13260,9 @@ function addProjectModal(callbacks) {
   return checkoutPathModal({
     title: "Add project",
     confirmLabel: "Add project",
-    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    fieldLabel: "Repository path or git URL",
+    placeholder: "/path/to/repo  \xB7  ~/repo  \xB7  https://host/owner/repo",
+    hint: "An absolute repo path on the daemon host (~ works), or a git URL for the daemon to clone and register: https://host/owner/repo, ssh://host/owner/repo, or git@host:owner/repo.",
     ...callbacks
   });
 }
@@ -13271,13 +13282,14 @@ function checkoutPathModal(opts) {
     confirmClass: "af-primary",
     onCancel: opts.onCancel
   });
+  const fieldLabel = opts.fieldLabel ?? "Repository path";
   const pathInput = h("input", {
     type: "text",
     class: "af-input",
-    placeholder: "/path/to/repo  or  ~/repo",
+    placeholder: opts.placeholder ?? "/path/to/repo  or  ~/repo",
     autocomplete: "off"
   });
-  pathInput.setAttribute("aria-label", "Repository path");
+  pathInput.setAttribute("aria-label", fieldLabel);
   const { loadDirectory, errorText: errorText2 } = opts;
   let picker = null;
   if (loadDirectory && errorText2) {
@@ -13300,7 +13312,7 @@ function checkoutPathModal(opts) {
     );
   }
   body.append(
-    field("Repository path", pathInput),
+    field(fieldLabel, pathInput),
     h(
       "p",
       { class: "af-modal-hint" },
@@ -18750,7 +18762,7 @@ var AppShell = class {
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
     add.dataset.projectFocus = "add";
-    add.setAttribute("title", "Register a git checkout by path as a project");
+    add.setAttribute("title", "Register a git checkout by path or git URL as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
@@ -20575,6 +20587,7 @@ function openDeleteProject(root2, label) {
   );
 }
 function openAddProject() {
+  const invoker = captureModalInvoker();
   openModal(
     addProjectModal({
       // #2788: the picker's daemon read. The token is resolved PER CALL, not
@@ -20589,14 +20602,40 @@ function openAddProject() {
       // The daemon's own message ("cannot read /x: permission denied"), never the
       // login-framed describeError — a refused directory is not an auth failure.
       errorText,
-      onSubmit: (path) => {
+      onSubmit: (value) => {
         const tok = token;
         if (tok === null || !modal) {
           return;
         }
         const m = modal;
+        if (looksLikeGitURL(value)) {
+          m.setBusy(true);
+          closeModal();
+          showTransientNotice(`Cloning ${value} on the daemon host \u2014 the project appears in the switcher when it lands.`);
+          void registerProjectURL(value, tok).then(() => {
+            refreshRegisteredProjects();
+          }).catch((e) => {
+            if (isMutationOutcomeUncertain(e)) {
+              refreshRegisteredProjects();
+              surfaceMutationError(
+                new Error(`The registration of ${value} could not be confirmed. ${errorText(e)}`),
+                "uncertain"
+              );
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+            if (!modal && token === tok) {
+              openModal(m, true, invoker);
+              m.el.querySelector(".af-modal-card input")?.focus({ preventScroll: true });
+            } else {
+              surfaceMutationError(e);
+            }
+          });
+          return;
+        }
         m.setBusy(true);
-        void registerProject(path, tok).then(() => {
+        void registerProject(value, tok).then(() => {
           if (modal === m) closeModal();
         }).catch((e) => {
           m.setBusy(false);
