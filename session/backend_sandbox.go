@@ -416,6 +416,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 				LaunchScript:       p.launchScript,
 				CallbackRef:        p.callbackRef,
 				CallbackReverse:    p.callbackReverse(),
+				AccountSyncHost:    p.accountSyncHost(),
 			},
 		},
 		Endpoint: endpoint,
