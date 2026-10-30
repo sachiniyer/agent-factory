@@ -188,11 +188,13 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 		), nil
 	}
 	deleteDone := make(chan error, 1)
+	// Seams read at spawn: the deadline may abandon this worker.
+	cleanupRetained, removeDirectory := repoGoneCleanupRetainedTrees, repoGoneRemoveDirectory
 	go func() {
 		// Current archives may carry complete retained source trees for files the
 		// published copy could not read. Consume those handles and the primary
 		// archive inside one deadline-bound transaction.
-		err := repoGoneCleanupRetainedTrees(g)
+		err := cleanupRetained(g)
 		if err != nil {
 			deleteDone <- fmt.Errorf("remove retained archive trees before repo-gone cleanup: %w", err)
 			return
@@ -201,7 +203,7 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 			deleteDone <- fmt.Errorf("repo-gone cleanup identity changed before reaping writers: %w", err)
 			return
 		}
-		err = repoGoneRemoveDirectory(claim.Path, claim.identity, claim.cleanupGeneration, func(securedPath string) error {
+		err = removeDirectory(claim.Path, claim.identity, claim.cleanupGeneration, func(securedPath string) error {
 			return g.checkpointRepoGoneFinalization(claim, securedPath, checkpoint)
 		})
 		if err == nil {

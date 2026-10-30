@@ -62,7 +62,7 @@ func TestHookProgressDirectorySyncIsBoundedUnderProgressLock(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("publication error = %v, want deadline exceeded", err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		releaseOnce.Do(func() { close(release) })
 		<-result
 		t.Fatal("stalled directory sync retained the progress lock past its bound")
@@ -137,7 +137,7 @@ func TestHookProgressRetirementSyncIsBoundedUnderProgressLock(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("retirement error = %v, want deadline exceeded", err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		releaseOnce.Do(func() { close(release) })
 		<-result
 		t.Fatal("stalled retirement sync retained the progress lock past its bound")
@@ -217,7 +217,7 @@ func TestHookProgressPreparationIsBoundedUnderProgressLock(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("publication error = %v, want deadline exceeded", err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		releaseOnce.Do(func() { close(release) })
 		<-result
 		t.Fatal("stalled journal preparation retained the progress lock past its bound")
