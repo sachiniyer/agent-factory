@@ -102,14 +102,33 @@ func (b *CapabilityBroker) Mint(c Capability) (string, error) {
 	if len(b.recs) >= capabilityMaxRecords {
 		return "", errors.New("too many unclaimed launch capabilities")
 	}
-	b.recs[token] = &capRecord{cap: c, expires: b.now().Add(capabilityTTL)}
+	rec := &capRecord{cap: c, expires: b.now().Add(capabilityTTL)}
+	if c.PerPane {
+		// Backs tmux's session-long default-command: new windows open at any time,
+		// so it lives until the session ends (Revoke), never by the clock.
+		rec.expires = time.Time{}
+	}
+	b.recs[token] = rec
 	return token, nil
 }
 
 func (b *CapabilityBroker) expireLocked() {
 	now := b.now()
 	for token, rec := range b.recs {
-		if now.After(rec.expires) {
+		if !rec.expires.IsZero() && now.After(rec.expires) {
+			delete(b.recs, token)
+		}
+	}
+}
+
+// Revoke drops every capability bound to a tmux session. The owner of a PerPane
+// capability calls it when the session ends, which is what bounds a record that
+// has no expiry.
+func (b *CapabilityBroker) Revoke(session string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for token, rec := range b.recs {
+		if rec.cap.Session == session {
 			delete(b.recs, token)
 		}
 	}

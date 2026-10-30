@@ -260,3 +260,25 @@ func TestExeIdentitySurvivesABinarySwap(t *testing.T) {
 	require.False(t, got.deleted)
 	require.Equal(t, spoof, got.path)
 }
+
+func TestCapability_PerPaneCapabilityOutlivesTheShortExpiryUntilRevoked(t *testing.T) {
+	b := NewCapabilityBroker(paneOf("s", 1))
+	now := time.Now()
+	b.now = func() time.Time { return now }
+	perPane := testCap()
+	perPane.PerPane = true
+	pt, err := b.Mint(perPane)
+	require.NoError(t, err)
+	ot, err := b.Mint(testCap()) // one-shot keeps the short expiry
+	require.NoError(t, err)
+
+	now = now.Add(24 * time.Hour) // a long-lived session opening a new window
+	_, err = b.Claim(context.Background(), pt, "%1", 1)
+	require.NoError(t, err, "tmux default-command runs for every new window for the whole session")
+	_, err = b.Claim(context.Background(), ot, "%1", 1)
+	require.ErrorContains(t, err, "unknown or already used", "a one-shot launch capability still expires")
+
+	b.Revoke("s")
+	_, err = b.Claim(context.Background(), pt, "%2", 1)
+	require.ErrorContains(t, err, "unknown or already used", "ending the session revokes it")
+}

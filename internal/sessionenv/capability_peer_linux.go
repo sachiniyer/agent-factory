@@ -86,7 +86,15 @@ func readAttestedLine(conn net.Conn) ([]byte, int, error) {
 	buf := make([]byte, 4096)
 	oob := make([]byte, unix.CmsgSpace(unix.SizeofUcred)*4)
 	for len(line) < claimMaxMessage {
-		n, oobn, _, _, err := uc.ReadMsgUnix(buf, oob)
+		n, oobn, flags, _, err := uc.ReadMsgUnix(buf, oob)
+		// ReadMsgUnix installs any SCM_RIGHTS descriptors in THIS process. Close
+		// every one before anything else: a peer must not be able to exhaust the
+		// broker's descriptors by attaching them, and a message that carries any
+		// is refused.
+		rights := closeReceivedRights(oob[:oobn])
+		if rights > 0 || flags&unix.MSG_CTRUNC != 0 {
+			return nil, 0, fmt.Errorf("message carries file descriptors or truncated ancillary data; refused")
+		}
 		if n > 0 {
 			msgs, perr := unix.ParseSocketControlMessage(oob[:oobn])
 			if perr != nil {
@@ -112,4 +120,28 @@ func readAttestedLine(conn net.Conn) ([]byte, int, error) {
 		}
 	}
 	return nil, 0, fmt.Errorf("message too long")
+}
+
+// closeReceivedRights closes every descriptor delivered in oob and reports how
+// many there were.
+func closeReceivedRights(oob []byte) int {
+	msgs, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return 0
+	}
+	closed := 0
+	for i := range msgs {
+		if msgs[i].Header.Level != unix.SOL_SOCKET || msgs[i].Header.Type != unix.SCM_RIGHTS {
+			continue
+		}
+		fds, perr := unix.ParseUnixRights(&msgs[i])
+		if perr != nil {
+			continue
+		}
+		for _, fd := range fds {
+			_ = unix.Close(fd)
+			closed++
+		}
+	}
+	return closed
 }

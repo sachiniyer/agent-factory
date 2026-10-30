@@ -84,8 +84,17 @@ func TestCapability_ForkThenExecResponderIsRefused(t *testing.T) {
 
 	parent := exec.Command(self)
 	parent.Env = []string{"AF_ATTACK_ROLE=parent", "AF_ATTACK_SOCK=" + sock, "AF_ATTACK_EVIL=" + evil}
+	// Own process group: the forked responder is not a child of the test, so
+	// killing the group is the only way to be sure none outlives it.
+	parent.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	require.NoError(t, parent.Start())
-	t.Cleanup(func() { _ = parent.Process.Kill(); _, _ = parent.Process.Wait() })
+	pgid := parent.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		_, _ = parent.Process.Wait()
+		require.Eventually(t, func() bool { return syscall.Kill(-pgid, 0) == syscall.ESRCH },
+			5*time.Second, 20*time.Millisecond, "a process of the attack group is still running")
+	})
 	require.Eventually(t, func() bool { _, err := os.Stat(sock); return err == nil }, 5*time.Second, 20*time.Millisecond)
 	time.Sleep(300 * time.Millisecond) // the parent has exec'd the real binary by now
 
