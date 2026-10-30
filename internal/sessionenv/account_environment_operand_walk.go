@@ -199,6 +199,22 @@ var accountChildTailSuffixBuiltinVerdictNames = map[string]struct{}{
 	"export": {}, "readonly": {}, "declare": {}, "typeset": {}, "local": {},
 }
 
+// shadowedLiteralChildTailMutates judges a wrapper's real child argv by the
+// exec-boundary rule: the boundary is decided at COMMAND POSITION, so words[0]
+// is judged as a command (a dynamic word there refuses), and once it is literal
+// its arguments are opaque — `ionice codex "$PROMPT"` runs codex with a prompt.
+// A shadowed wrapper (`shift N; exec "$@"`) can still land on a LITERAL later
+// word that begins a mutating command, so those suffixes are judged too.
+func shadowedLiteralChildTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+	if len(words) == 0 {
+		return false
+	}
+	if judgeShadowedChildSuffix(words, names, memo) {
+		return true
+	}
+	return laterLiteralChildSuffixMutates(words[1:], names, memo)
+}
+
 // laterLiteralChildSuffixMutates judges each suffix of words that begins at a
 // literal verdict word. A non-literal word is skipped: it is an argument, not
 // the command the wrapper runs, so it is not an exec boundary. Every words slice
