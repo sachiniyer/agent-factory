@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -114,12 +116,7 @@ func (f *sweepFixture) workspace(dir string, unpushed bool) {
 // carries ref, standing in for an agent-server.
 func (f *sweepFixture) agentServer(bin, ref string) *exec.Cmd {
 	f.t.Helper()
-	sleep, err := exec.LookPath("sleep")
-	require.NoError(f.t, err)
-	data, err := os.ReadFile(sleep)
-	require.NoError(f.t, err)
-	require.NoError(f.t, os.MkdirAll(filepath.Dir(bin), 0o755))
-	require.NoError(f.t, os.WriteFile(bin, data, 0o755))
+	sleeper.Named(f.t, bin)
 	cmd := exec.Command(bin, "300")
 	cmd.Env = append(os.Environ(), runtimetoken.RefEnvName+"="+ref)
 	require.NoError(f.t, cmd.Start())
