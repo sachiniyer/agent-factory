@@ -209,6 +209,17 @@ func (it *Item) OpenQuestion() *Message {
 	return nil
 }
 
+// answerPending reports whether an answer to one of the item's questions has not
+// been delivered to its session yet.
+func (it *Item) answerPending() bool {
+	for _, m := range it.Thread {
+		if m.Kind == KindAnswer && m.Delivery == DeliveryPending {
+			return true
+		}
+	}
+	return false
+}
+
 func (it *Item) closeOpenQuestions(reason string) {
 	for q := it.OpenQuestion(); q != nil; q = it.OpenQuestion() {
 		q.Closed = reason

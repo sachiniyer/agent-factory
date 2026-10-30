@@ -254,7 +254,7 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 	var sendErr error
 	if armed {
 		m.persistAndPublishInstance(ref.ID, inst)
-		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt})
+		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt, BacklogOrigin: true})
 		if sendErr != nil {
 			m.disarmBacklogRun(ref.ID, inst)
 			sendErr = fmt.Errorf("send continue to session %q: %w", inst.Title, sendErr)

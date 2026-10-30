@@ -73,10 +73,11 @@ func (h backlogHost) DeliverAnswer(repoID string, a backlog.PendingAnswer) {
 }
 
 // deliverBacklogAnswer finishes a pending answer. The caller reserved a slot
-// for it; the slot passes to the run marker once it is armed. A restore comes
-// first. The run is armed before any hold, so a held answer shows Working and
-// keeps its slot, and the send takes the per-target lock task deliveries use.
-// A client attached full screen or a usage limit holds the send.
+// for it, kept while the send is held and passed to the run marker when the
+// run is armed. A restore comes first. The run is armed immediately before the
+// send (sendBacklogAnswer), which takes the per-target lock task deliveries
+// use; a client attached full screen or a usage limit holds the send, and a held
+// answer keeps its reserved slot without opening the completion gate.
 func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a backlog.PendingAnswer) {
 	reserved := true
 	release := func() {
@@ -109,25 +110,18 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 		m.backlogAnswerFailed(repoID, a, "the session is running a task")
 		return
 	}
-	if !inst.ArmBacklogRun(time.Now()) {
-		m.backlogAnswerFailed(repoID, a, "the session is not an item session")
-		return
-	}
-	m.persistAndPublishInstance(repoID, inst)
-	release()
 	for {
 		err := m.sendBacklogAnswer(repoID, inst, a.Prompt)
 		if err == nil {
+			release() // the armed run marker holds the slot from here
 			m.backlogAnswerDelivered(repoID, a)
 			return
 		}
 		if !errors.Is(err, errBacklogAnswerHeld) {
-			m.disarmBacklogRun(repoID, inst)
 			m.backlogAnswerFailed(repoID, a, err.Error())
 			return
 		}
 		if !backlogAnswerWait(stop) {
-			m.disarmBacklogRun(repoID, inst)
 			m.backlogAnswerFailed(repoID, a, "af stopped while the answer was held")
 			return
 		}
@@ -140,14 +134,25 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 
 // sendBacklogAnswer sends under the per-target lock, or returns
 // errBacklogAnswerHeld while a client is attached or the session is parked at
-// a usage limit.
+// a usage limit. The run is armed here, immediately before the submission and
+// disarmed again if it fails: a held answer has no open completion gate (an
+// attached idle pane could otherwise satisfy the silent fallback and end a run
+// whose prompt was never sent), and its slot stays reserved by the caller.
 func (m *Manager) sendBacklogAnswer(repoID string, inst *session.Instance, prompt string) error {
 	unlock := m.lockTarget(repoID, inst.Title)
 	defer unlock()
 	if m.isPollPaused(repoID, inst.Title, inst.ID) || inst.GetLiveness() == session.LiveLimitReached {
 		return errBacklogAnswerHeld
 	}
-	return sendBacklogPrompt(m, SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID, Prompt: prompt})
+	if !inst.ArmBacklogRun(time.Now()) {
+		return errors.New("the session is not an item session")
+	}
+	m.persistAndPublishInstance(repoID, inst)
+	if err := sendBacklogPrompt(m, SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID, Prompt: prompt, BacklogOrigin: true}); err != nil {
+		m.disarmBacklogRun(repoID, inst)
+		return err
+	}
+	return nil
 }
 
 // syncBacklogAttention mirrors the item's oldest open question on a session
@@ -182,11 +187,29 @@ func (m *Manager) backlogAnswerFailed(repoID string, a backlog.PendingAnswer, re
 	}
 }
 
-// noteBacklogSubmitted closes the item's oldest open question as answered in
-// session when the user submits a line in the agent pane, and arms the run if
-// the item is running without one.
-func (m *Manager) noteBacklogSubmitted(instance *session.Instance) {
+// backlogOpenQuestion is the id of the open question a line submitted now would
+// answer (0 when none); read BEFORE the line is forwarded.
+func (m *Manager) backlogOpenQuestion(instance *session.Instance) int {
 	if instance == nil || instance.BacklogItem == 0 {
+		return 0
+	}
+	repoID, ok := m.repoIDForInstance(instance)
+	if !ok {
+		return 0
+	}
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		return 0
+	}
+	return b.OpenQuestionID(instance.ID)
+}
+
+// noteBacklogSubmitted closes question questionID as answered in session when
+// the user submitted a line in the agent pane while it was open, and arms the
+// run if the item is running without one. questionID was captured before the
+// line was forwarded (backlogOpenQuestion).
+func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionID int) {
+	if instance == nil || instance.BacklogItem == 0 || questionID == 0 {
 		return
 	}
 	repoID, ok := m.repoIDForInstance(instance)
@@ -195,17 +218,10 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance) {
 	}
 	sessionID := instance.ID
 	m.launchBackgroundMutation(func(<-chan struct{}) {
-		b, err := backlog.Load(repoID)
-		if err != nil {
-			return
-		}
-		if it := b.ItemForSession(sessionID); it == nil || it.OpenQuestion() == nil {
-			return
-		}
 		svc := m.backlogService()
 		running := false
-		_, err = svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
-			id := b.AnsweredInSession(sessionID, svc.Now())
+		_, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+			id := b.AnsweredInSession(sessionID, questionID, svc.Now())
 			if id == 0 {
 				return []int{}, nil
 			}
@@ -224,18 +240,27 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance) {
 }
 
 // backlogSubmitBinding reports a line the user submits in an item session's
-// agent pane, so an open question there closes as answered in session. The fork
-// hung this on its attention-clearing binding; here it wraps that binding (#5581)
-// and shares its isSubmittedInput.
+// agent pane, so the open question it answers closes as answered in session. The
+// question is captured BEFORE the line is forwarded, like the attention-clearing
+// binding captures its request: one the agent raises while the input is in
+// flight is a different question the user never saw. The fork hung this on the
+// attention binding; here it wraps that binding (#5581) and shares its
+// isSubmittedInput.
 type backlogSubmitBinding struct {
 	ptyTabBinding
-	submitted func()
+	openQuestion func() int
+	submitted    func(questionID int)
 }
 
 func (b backlogSubmitBinding) input(p []byte) error {
+	submit := isSubmittedInput(p)
+	questionID := 0
+	if submit {
+		questionID = b.openQuestion()
+	}
 	err := b.ptyTabBinding.input(p)
-	if err == nil && isSubmittedInput(p) {
-		b.submitted()
+	if err == nil && submit && questionID != 0 {
+		b.submitted(questionID)
 	}
 	return err
 }

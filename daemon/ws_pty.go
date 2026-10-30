@@ -162,7 +162,9 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		cs.manager.acknowledgeRootRecreate(instance)
 		binding = attentionClearingBinding{ptyTabBinding: binding, instance: instance, clear: func(setAt time.Time) { cs.manager.queueAttentionClear(instance, setAt) }}
 		if instance.BacklogItem != 0 {
-			binding = backlogSubmitBinding{ptyTabBinding: binding, submitted: func() { cs.manager.noteBacklogSubmitted(instance) }}
+			binding = backlogSubmitBinding{ptyTabBinding: binding,
+				openQuestion: func() int { return cs.manager.backlogOpenQuestion(instance) },
+				submitted:    func(q int) { cs.manager.noteBacklogSubmitted(instance, q) }}
 		}
 	}
 	servePTYStream(binding, sub, conn)
