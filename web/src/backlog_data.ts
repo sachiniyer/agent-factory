@@ -24,13 +24,31 @@ export const EMPTY_BACKLOG_DATA: BacklogData = { views: new Map(), errors: new M
 
 const DEBOUNCE_MS = 150;
 
+/** The sessions that item runs point at: the ones whose lifecycle moves an item's
+ *  derived state and the runner's slot count without any backlog write. */
+export function runSessionIds(data: BacklogData): Set<string> {
+  const ids = new Set<string>();
+  for (const view of data.views.values()) {
+    for (const it of view.backlog.items) {
+      for (const run of it.runs ?? []) if (run.session_id) ids.add(run.session_id);
+    }
+  }
+  return ids;
+}
+
+const SESSION_EVENTS: ReadonlySet<string> = new Set(["session.updated", "session.killed", "session.archived", "session.restored"]);
+
 /** What a wire event asks of the loader. The frame's ids are a hint and are never
  *  read: a parent's derived state moves without being named, and an empty list is a
  *  project-level change, so every backlog.changed and backlog.runner frame is a full
- *  re-read. backlog.spend moves only the budget. */
-export function backlogEventAction(type: string): "refresh" | "budget" | null {
+ *  re-read. backlog.spend moves only the budget. A session event for a session an
+ *  item run points at is a refresh too: killing, archiving or limiting it changes the
+ *  item's state and the slot count with no backlog frame. Other sessions' events are
+ *  not the backlog's business. */
+export function backlogEventAction(type: string, sessionId?: string, runSessions?: ReadonlySet<string>): "refresh" | "budget" | null {
   if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
   if (type === "backlog.spend") return "budget";
+  if (SESSION_EVENTS.has(type) && sessionId && runSessions?.has(sessionId)) return "refresh";
   return null;
 }
 

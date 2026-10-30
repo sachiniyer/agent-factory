@@ -17,7 +17,8 @@ import { formatTime } from "./time.js";
 import type { SessionData } from "./types.js";
 
 export interface PanelActions {
-  update(id: number, update: ItemUpdate): void;
+  /** A promise settles true once the write and the refresh after it have landed (the body editor's acknowledgement). */
+  update(id: number, update: ItemUpdate): Promise<boolean> | void;
   status(id: number, status: Status): void;
   remove(id: number): void;
   move(id: number, to: MoveTarget): void;
@@ -28,6 +29,8 @@ export interface PanelActions {
   openSession(id: string): void;
   archiveSession(id: string): void;
   restoreSession(id: string): void;
+  /** Reads sessions the rail has not loaded (archived rows are paged in lazily) into the session list. Rejects when it cannot tell. */
+  loadSessions(ids: string[]): Promise<void>;
 }
 
 const ACTION_STATUS: Record<Exclude<ItemAction, "delete">, Status> = {
@@ -85,6 +88,8 @@ export class ItemPanel {
   private moveOpen = false;
   private view: BacklogView | null = null;
   private sessions: SessionData[] = [];
+  // Run sessions the rail did not hold, by id: asked for, answered, or unanswerable.
+  private readonly lookups = new Map<string, "pending" | "done" | "failed">();
 
   constructor(readonly root: string, readonly id: number, private readonly actions: PanelActions) {
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
@@ -133,6 +138,20 @@ export class ItemPanel {
     this.closeButton.focus({ preventScroll: true });
   }
 
+  /** An absent run session is not proof it is gone: the rail pages archived rows in
+   *  only when the archive filter is on. Ask the daemon for them by id once. */
+  private lookUpMissing(it: Item): void {
+    const missing = (it.runs ?? []).map((r) => r.session_id)
+      .filter((id): id is string => !!id && !this.lookups.has(id) && !this.sessions.some((s) => s.id === id));
+    if (missing.length === 0) return;
+    for (const id of missing) this.lookups.set(id, "pending");
+    const settle = (state: "done" | "failed"): void => {
+      for (const id of missing) this.lookups.set(id, state);
+      if (this.view) this.render(this.view, this.sessions);
+    };
+    this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
+  }
+
   private item(): Item | undefined {
     return this.view ? itemByID(this.view.backlog, this.id) : undefined;
   }
@@ -142,6 +161,7 @@ export class ItemPanel {
     this.sessions = sessions;
     const it = this.item();
     if (!it) return;
+    this.lookUpMissing(it);
     if (document.activeElement !== this.title) this.title.value = it.title;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
@@ -320,7 +340,9 @@ export class ItemPanel {
     const list = h("ul", { class: "af-backlog-runs" });
     for (const run of [...runs].reverse()) {
       const s = run.session_id ? this.sessions.find((x) => x.id === run.session_id) : undefined;
-      const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : "Gone";
+      const asked = run.session_id ? this.lookups.get(run.session_id) : undefined;
+      const absent = asked === "pending" ? "Checking…" : asked === "failed" ? "Unavailable" : "Gone";
+      const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : absent;
       const by = run.started_by === "runner" ? "runner" : "you";
       const meta = [`Started by ${by}`, formatTime(run.started_at), live].join(" · ");
       const btns = h("div", { class: "af-backlog-run-actions" });

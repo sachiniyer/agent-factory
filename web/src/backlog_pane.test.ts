@@ -94,6 +94,7 @@ function host(over: Partial<BacklogHost> = {}): BacklogHost & { notices: string[
     openSession: () => {},
     archiveSession: () => {},
     restoreSession: () => {},
+    loadSessions: async () => {},
     ...over,
   };
   return h;
@@ -178,8 +179,89 @@ test("the body saves after a pause, and a stored body does not overwrite an edit
   mock.timers.tick(1);
   const saves = calls.filter((c) => c.method === "UpdateBacklogItem");
   assert.deepEqual(saves.map((c) => c.body.body), ["typing"]);
+  await settle();   // the save and the refresh after it have landed: the edit is acknowledged
   pane.update(data({ "/a": view(item(1, { body: "from agent" })) }, 3), "/a", []);
   assert.equal(editors[0].text, "from agent");
+});
+
+test("a refresh that read the old body mid-save does not revert the edit", async () => {
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1, { body: "old" })) }), "/a", []);
+  pane.select(1);
+  await settle();
+  let finish: () => void = () => {};
+  reply = (method) => method === "UpdateBacklogItem" ? new Promise((r) => { finish = () => r({}); }) : Promise.resolve({});
+  editors[0].change("typed");
+  mock.timers.tick(800);                      // the debounce fires: the save is in flight
+  pane.update(data({ "/a": view(item(1, { body: "old" })) }, 2), "/a", []);   // a refresh that started before it
+  assert.equal(editors[0].text, "typed", "the timer is gone but the edit is not acknowledged");
+  pane.select(1);
+  assert.equal(editors[0].text, "typed", "re-rendering the panel for another reason keeps it too");
+  finish();
+  await settle();
+  pane.update(data({ "/a": view(item(1, { body: "typed" })) }, 3), "/a", []);
+  assert.equal(editors[0].text, "typed");
+  pane.update(data({ "/a": view(item(1, { body: "from agent" })) }, 4), "/a", []);
+  assert.equal(editors[0].text, "from agent", "acknowledged: the stored body shows again");
+});
+
+test("a failed body save keeps the edit instead of reverting to the stored body", async () => {
+  const h = host();
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1, { body: "old" })) }), "/a", []);
+  pane.select(1);
+  await settle();
+  reply = async (method) => { if (method === "UpdateBacklogItem") throw new Error("daemon said no"); return {}; };
+  editors[0].change("kept");
+  mock.timers.tick(800);
+  await settle();
+  assert.deepEqual(h.notices, ["daemon said no"]);
+  pane.update(data({ "/a": view(item(1, { body: "old" })) }, 2), "/a", []);
+  assert.equal(editors[0].text, "kept");
+});
+
+function runItem(sessionID: string): Item {
+  return item(1, { runs: [{ session_id: sessionID, state: "active", started_by: "user", started_at: "", title: "run" }] as never });
+}
+const runLine = (pane: BacklogPane): string => el(pane).querySelector(".af-backlog-run")?.textContent ?? "";
+
+test("a run session the rail has not loaded is looked up before it is called Gone", async () => {
+  const asked: string[][] = [];
+  let answer: () => void = () => {};
+  const h = host({ loadSessions: (ids) => { asked.push(ids); return new Promise<void>((r) => { answer = r; }); } });
+  const pane = mount(h);
+  pane.update(data({ "/a": view(runItem("s-arch")) }), "/a", []);
+  pane.select(1);
+  assert.deepEqual(asked, [["s-arch"]]);
+  assert.match(runLine(pane), /Checking…/);
+  assert.doesNotMatch(runLine(pane), /Gone/);
+  pane.select(1);                      // another render does not ask again
+  assert.equal(asked.length, 1);
+  answer();
+  await settle();
+  assert.match(runLine(pane), /Gone/, "asked and still absent: the daemon does not know it");
+});
+
+test("a run session that was adopted into the list gets Open and is not asked about again", async () => {
+  const asked: string[][] = [];
+  const pane = mount(host({ loadSessions: async (ids) => { asked.push(ids); } }));
+  pane.update(data({ "/a": view(runItem("s-arch")) }), "/a", []);
+  pane.select(1);
+  await settle();
+  pane.update(data({ "/a": view(runItem("s-arch")) }, 2), "/a",
+    [{ id: "s-arch", title: "t", liveness: "archived" } as never]);
+  assert.match(runLine(pane), /Open/);
+  assert.doesNotMatch(runLine(pane), /Gone/);
+  assert.equal(asked.length, 1);
+});
+
+test("a lookup that cannot be answered says so instead of Gone", async () => {
+  const pane = mount(host({ loadSessions: async () => { throw new Error("offline"); } }));
+  pane.update(data({ "/a": view(runItem("s-x")) }), "/a", []);
+  pane.select(1);
+  await settle();
+  assert.match(runLine(pane), /Unavailable/);
+  assert.doesNotMatch(runLine(pane), /Gone/);
 });
 
 test("opening an item focuses its panel; Escape closes it and returns focus to the row", () => {

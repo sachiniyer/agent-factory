@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1192724.000 | 1192724.000–1192724.000 | 0.000 | 1252360.200 |
-| gzip_bytes | 271182.000 | 271182.000–271182.000 | 0.000 | 284741.100 |
+| raw_bytes | 1198730.000 | 1198730.000–1198730.000 | 0.000 | 1258666.500 |
+| gzip_bytes | 272405.000 | 272405.000–272405.000 | 0.000 | 286025.250 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -125,7 +125,7 @@ reason to move a budget.
 
 ### Bundle refresh provenance (Backlog web view)
 
-Master's committed bundle is 1,123,102 raw / 254,923 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,192,724 raw / 271,182 gzip, +69,622 raw / +16,259 gzip. The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the unmerged daemon stack branch (#6295), which sits on the attention-dot rail work. Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
+Master's committed bundle is 1,123,102 raw / 254,923 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,198,730 raw / 272,405 gzip, +75,628 raw / +17,482 gzip. The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the unmerged daemon stack branch (#6295), which sits on the attention-dot rail work. Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6290)
 

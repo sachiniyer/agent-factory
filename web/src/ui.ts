@@ -1355,6 +1355,7 @@ export class AppShell {
       openSession: () => {},
       archiveSession: () => {},
       restoreSession: () => {},
+      loadSessions: async () => {},
     });
     this.backlogPane.el.hidden = true;
     this.configPane = new ConfigPane({

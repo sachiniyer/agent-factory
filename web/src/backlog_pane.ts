@@ -26,6 +26,7 @@ export interface BacklogHost {
   openSession(id: string): void;
   archiveSession(id: string): void;
   restoreSession(id: string): void;
+  loadSessions(ids: string[]): Promise<void>;
   addProject?(): void;
 }
 
@@ -152,12 +153,13 @@ export class BacklogPane {
     if (this.root) this.write(run);
   }
 
-  private write(run: (token: string) => Promise<unknown>): void {
+  /** Settles true once the write and the refresh after it have landed, false when the write failed. */
+  private write(run: (token: string) => Promise<unknown>): Promise<boolean> {
     const token = this.host.token();
-    if (token === null) return;
-    run(token).then(() => this.host.refresh(), (e: unknown) => {
+    if (token === null) return Promise.resolve(false);
+    return run(token).then(() => this.host.refresh().then(() => true), (e: unknown) => {
       this.host.notify(errorText(e));
-      void this.host.refresh();
+      return this.host.refresh().then(() => false);
     });
   }
 
@@ -445,6 +447,7 @@ export class BacklogPane {
       openSession: (id: string) => this.host.openSession(id),
       archiveSession: (id: string) => this.host.archiveSession(id),
       restoreSession: (id: string) => this.host.restoreSession(id),
+      loadSessions: (ids: string[]) => this.host.loadSessions(ids),
     };
   }
 }

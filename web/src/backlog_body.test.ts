@@ -33,7 +33,7 @@ const settle = (): Promise<void> => new Promise((r) => setImmediate(r));
 
 test("flush saves a pending edit once and is a no-op otherwise", async () => {
   const saves: string[] = [];
-  const ed = new BodyEditor((t) => saves.push(t), "Body");
+  const ed = new BodyEditor((t) => { saves.push(t); }, "Body");
   ed.setText("stored");
   await settle();
   assert.equal(text, "stored");
@@ -50,7 +50,7 @@ test("flush saves a pending edit once and is a no-op otherwise", async () => {
 
 test("dispose saves a pending edit and destroys the editor", async () => {
   const saves: string[] = [];
-  const ed = new BodyEditor((t) => saves.push(t), "Body");
+  const ed = new BodyEditor((t) => { saves.push(t); }, "Body");
   await settle();
   change("last words");
   ed.dispose();
@@ -64,4 +64,38 @@ test("the stored body shows as plain text while the editor bundle is missing", a
   ed.setText("plain");
   await settle();
   assert.equal((ed.el as unknown as { textContent: string }).textContent, "plain");
+});
+
+test("an edit stays until the save is acknowledged, and a failed save keeps it", async () => {
+  let settleSave: (ok: boolean) => void = () => {};
+  const ed = new BodyEditor(() => new Promise<boolean>((r) => { settleSave = r; }), "Body");
+  await settle();
+  ed.setText("stored");
+  change("edit");
+  mock.timers.tick(SAVE_DELAY_MS);      // debounce fired, save in flight, timer cleared
+  ed.setText("stored");
+  assert.equal(text, "edit");
+  settleSave(false);                    // a failed save keeps the draft
+  await settle();
+  ed.setText("stored");
+  assert.equal(text, "edit");
+  change("edit 2");
+  mock.timers.tick(SAVE_DELAY_MS);
+  settleSave(true);                     // acknowledged
+  await settle();
+  ed.setText("edit 2 stored");
+  assert.equal(text, "edit 2 stored");
+});
+
+test("typing during a save keeps the newer draft when the older save is acknowledged", async () => {
+  const resolvers: ((ok: boolean) => void)[] = [];
+  const ed = new BodyEditor(() => new Promise<boolean>((r) => { resolvers.push(r); }), "Body");
+  await settle();
+  change("one");
+  mock.timers.tick(SAVE_DELAY_MS);
+  change("one two");
+  resolvers[0](true);                   // acknowledges "one" only
+  await settle();
+  ed.setText("one");
+  assert.equal(text, "one two");
 });
