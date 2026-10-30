@@ -47,9 +47,16 @@ export class BodyEditor {
   private editor: BodyEditorHandle | null = null;
   private text = "";
   private timer: ReturnType<typeof setTimeout> | null = null;
+  // The edit the user made that no confirming response has covered yet: typed (the
+  // debounce is running) or saved and still in flight. Stored text arriving while it
+  // is set is older than the edit and must not replace it. It survives a failed save,
+  // so the edit is kept (and the next change saves it again).
+  private draft: string | null = null;
   private disposed = false;
 
-  constructor(private readonly save: (text: string) => void, label: string) {
+  /** `save` may return a promise that settles true once the write AND the refresh
+   *  after it have landed; a plain void return acknowledges at once. */
+  constructor(private readonly save: (text: string) => Promise<boolean> | void, label: string) {
     this.el = document.createElement("div");
     this.el.className = "af-backlog-body";
     const fallback = document.createElement("pre");
@@ -64,9 +71,9 @@ export class BodyEditor {
     });
   }
 
-  /** Shows the stored body. An edit the user is typing is kept. */
+  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. */
   setText(text: string): void {
-    if (this.timer !== null || text === this.text) return;
+    if (this.draft !== null || text === this.text) return;
     this.text = text;
     if (this.editor) {
       if (this.editor.getText() !== text) this.editor.setText(text);
@@ -78,6 +85,7 @@ export class BodyEditor {
 
   private changed(text: string): void {
     this.text = text;
+    this.draft = text;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.flush(), SAVE_DELAY_MS);
   }
@@ -86,7 +94,14 @@ export class BodyEditor {
     if (this.timer === null) return;
     clearTimeout(this.timer);
     this.timer = null;
-    this.save(this.text);
+    const text = this.text;
+    const done = this.save(text);
+    const acknowledge = (ok: boolean): void => {
+      // Newer typing has replaced the draft; only the edit this save carried is covered.
+      if (ok && this.draft === text) this.draft = null;
+    };
+    if (done) done.then(acknowledge, () => {});
+    else acknowledge(true);
   }
 
   dispose(): void {

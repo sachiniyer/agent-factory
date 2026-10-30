@@ -287,6 +287,12 @@ type SendPromptRequest struct {
 	// manual send-prompt leaves it false because an operator may need to answer a
 	// limit or credits picker in that pane.
 	TaskOrigin bool `json:"-"`
+	// BacklogOrigin is daemon-internal provenance: the backlog sends an answer or
+	// a "continue" itself and manages the session's attention itself (it mirrors
+	// the item's open question), so this send must not be taken as the user
+	// answering whatever attention request happens to be set (it may be the NEXT
+	// question's).
+	BacklogOrigin bool `json:"-"`
 }
 
 type SendPromptResponse struct {

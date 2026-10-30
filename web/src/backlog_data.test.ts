@@ -163,7 +163,7 @@ test("unmeterable runs follow the newest source that names them", async () => {
   assert.deepEqual(state.usage?.unmeterable, { s8: "new" });
 });
 
-import { backlogEventAction } from "./backlog_data.js";
+import { backlogEventAction, runSessionIds } from "./backlog_data.js";
 
 test("every backlog.changed frame is a full re-read, whatever its ids say", () => {
   // The frame's ids are not an input: a parent's derived state moves unnamed, and an
@@ -172,4 +172,25 @@ test("every backlog.changed frame is a full re-read, whatever its ids say", () =
   assert.equal(backlogEventAction("backlog.runner"), "refresh");
   assert.equal(backlogEventAction("backlog.spend"), "spend");
   assert.equal(backlogEventAction("session.updated"), null);
+});
+
+test("a lifecycle event for a session an item run points at is a refresh; any other is not", () => {
+  const runs = new Set(["s-run"]);
+  for (const type of ["session.killed", "session.archived", "session.restored", "session.updated"]) {
+    assert.equal(backlogEventAction(type, "s-run", runs), "refresh", type);
+    assert.equal(backlogEventAction(type, "s-other", runs), null, type);
+    assert.equal(backlogEventAction(type, undefined, runs), null, type);
+  }
+  assert.equal(backlogEventAction("session.created", "s-run", runs), null);
+  assert.equal(backlogEventAction("session.killed", "s-run"), null);
+});
+
+test("runSessionIds collects every run's session across projects", () => {
+  const run = (session_id: string) => ({ session_id });
+  const mk = (...items: unknown[]) => ({ backlog: { items } }) as never;
+  const ids = runSessionIds({
+    views: new Map([["/a", mk({ runs: [run("s1"), run("")] }, { runs: undefined })], ["/b", mk({ runs: [run("s2")] })]]),
+    errors: new Map(), budget: null, usage: null, generation: 1,
+  });
+  assert.deepEqual([...ids].sort(), ["s1", "s2"]);
 });

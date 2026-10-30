@@ -269,7 +269,15 @@ func (b *Backlog) RunEnded(sessionID string, now time.Time) RunEnd {
 		if it.OpenQuestion() != nil {
 			return out
 		}
+		if it.answerPending() {
+			// An answer accepted after this run's idle edge is on its way (it may
+			// be held behind an attached client): its delivery arms the next run,
+			// which ends on its own idle edge. Ending the old one now would put
+			// the item in review while the agent is about to work.
+			return out
+		}
 		it.Status = StatusReview
+		it.LiveAnswers = 0
 		it.UpdatedAt = now
 		_, _ = b.AddNote(it.ID, AuthorAF, RunEndNote, now)
 		out.Changed = true

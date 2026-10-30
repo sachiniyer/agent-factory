@@ -160,7 +160,7 @@ import {
 import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
 import type { AccountsResponse, SessionData, SkippedRepo, TaskData, WireEvent } from "./types.js";
-import { BacklogLoader, EMPTY_BACKLOG_DATA, backlogEventAction } from "./backlog_data.js";
+import { BacklogLoader, EMPTY_BACKLOG_DATA, backlogEventAction, runSessionIds } from "./backlog_data.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
 // mounts (before first paint), so an explicit light/dark choice shows no flash. This
@@ -739,6 +739,23 @@ async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
     },
     missing,
   });
+}
+
+/** Reads the sessions with these stable ids that the lazy startup snapshot left out
+ *  (archived rows) and adopts them into the model, so an item's runs can open and
+ *  restore a session the Sessions archive filter has not paged in yet. Throws when
+ *  the read fails, so the caller can tell "gone" from "could not check". */
+async function adoptSessionsById(ids: string[]): Promise<void> {
+  const tok = token;
+  if (tok === null) return;
+  const known = new Set(store.get().sessions.map((s) => s.id));
+  const want = ids.filter((id) => !known.has(id));
+  if (want.length === 0) return;
+  const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
+  const rows = await fetchSessionsById(tok, want);
+  if (token !== tok || connectionGeneration !== generation) return;
+  if (optimisticSessions.adopt(rows, fence).length > 0) applySessions(optimisticSessions.project());
 }
 
 /** Shows an item's session in the Sessions view, as a deep link does. */
@@ -3193,6 +3210,7 @@ const actions = {
       const s = store.get().sessions.find((x) => x.id === id);
       if (s && isActionableSession(s)) openConfirm("restore", s);
     },
+    loadSessions: adoptSessionsById,
     addProject: () => openAddProject(),
     confirm: confirmBacklog,
   },
@@ -3371,14 +3389,15 @@ function onEvent(ev: WireEvent): void {
   // ListTasks refetch (the authoritative task projection). The session reducer
   // no-ops these, so run both: the reducer for session.* and the task refetch for
   // task.*.
-  const backlogAction = backlogEventAction(ev.type);
+  const backlogAction = backlogEventAction(ev.type, ev.data?.id, runSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
   if (backlogAction === "spend") {
     backlogLoader.applySpend(ev.data);
     return;
   }
   if (backlogAction === "refresh") {
     backlogLoader.request();
-    return;
+    // A session event still belongs to the session reducer below.
+    if (ev.type.startsWith("backlog.")) return;
   }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
     requestTaskResync();

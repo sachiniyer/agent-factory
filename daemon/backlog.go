@@ -36,10 +36,51 @@ type backlogState struct {
 	// observed before the session's start record was committed: the completion
 	// has no item to land on yet, and is replayed by finishBacklogStart.
 	pendingEnds map[string]int
+	// answering holds the answers with a delivery worker outstanding, by
+	// project/item/answer id.
+	answering map[string]bool
+	// restoring serializes the restoration of an archived item session.
+	restoring sync.Map
+	// asked is the question text each item session was last shown (session id ->
+	// reason), kept apart from the attention display so dismissing the chip does not
+	// make a terminal answer invisible to the backlog.
+	asked sync.Map
 	// recovered, recovering and recoveryDone track restart recovery.
 	recovered    map[string]bool
 	recovering   bool
 	recoveryDone bool
+}
+
+// restoreLock is the per-session restore mutex.
+func (s *backlogState) restoreLock(sessionID string) *sync.Mutex {
+	mu, _ := s.restoring.LoadOrStore(sessionID, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+func answerKey(repoID string, a backlog.PendingAnswer) string {
+	return fmt.Sprintf("%s\x00%d\x00%d", repoID, a.ID, a.AnswerID)
+}
+
+// claimAnswer reports whether the caller may start a delivery worker for a;
+// false when one is outstanding.
+func (s *backlogState) claimAnswer(repoID string, a backlog.PendingAnswer) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := answerKey(repoID, a)
+	if s.answering[k] {
+		return false
+	}
+	if s.answering == nil {
+		s.answering = map[string]bool{}
+	}
+	s.answering[k] = true
+	return true
+}
+
+func (s *backlogState) releaseAnswer(repoID string, a backlog.PendingAnswer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.answering, answerKey(repoID, a))
 }
 
 func (s *backlogState) holdEnd(sessionID string, gen int) {

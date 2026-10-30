@@ -504,7 +504,11 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	}
 	releaseObservationFence := func() {}
 	releaseLimitFence := func() {}
-	if req.TaskOrigin {
+	// Automated deliveries (tasks, and the backlog's answers and continues) take the
+	// authoritative usage-limit fence; a manual send-prompt may be answering the
+	// limit picker itself.
+	automated := req.TaskOrigin || req.BacklogOrigin
+	if automated {
 		// The per-instance fence lets any older pane snapshot publish its derived
 		// liveness before this check. The manager fence orders the final read with
 		// direct limit publication, while this session's op lock and observation
@@ -517,7 +521,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		m.accountLimitMu.Lock()
 		releaseLimitFence = m.accountLimitMu.Unlock
 	}
-	livenessErr := taskPromptTargetLivenessError(req.Title, instance.GetLiveness(), req.TaskOrigin)
+	livenessErr := taskPromptTargetLivenessError(req.Title, instance.GetLiveness(), automated)
 	releaseLimitFence()
 	if livenessErr != nil {
 		releaseObservationFence()
@@ -564,7 +568,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
-	if !req.TaskOrigin && answered != nil && status != session.PromptNotDelivered {
+	if !req.TaskOrigin && !req.BacklogOrigin && answered != nil && status != session.PromptNotDelivered {
 		// A delivered prompt is the user's answer, same as a keystroke into the
 		// pane — and the only answer a client with no PTY input can send. Task
 		// deliveries are automation, not the user, and PromptNotDelivered (which

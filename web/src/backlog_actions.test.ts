@@ -115,6 +115,7 @@ function host(): TestHost {
     openSession: () => {},
     archiveSession: () => {},
     restoreSession: () => {},
+    loadSessions: async () => {},
     confirm: async (title: string, body: string, label: string) => {
       h.asked.push([title, body, label]);
       return h.answerConfirm;

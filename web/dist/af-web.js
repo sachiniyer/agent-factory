@@ -8081,7 +8081,10 @@ function attentionChip(onDismiss) {
   const patch = (on, reason) => {
     el2.hidden = !on;
     const title = reason ? `Needs attention: ${reason}` : "Needs attention";
-    if (el2.title !== title) el2.title = title;
+    if (el2.title !== title) {
+      el2.title = title;
+      el2.setAttribute("aria-label", title);
+    }
   };
   return { el: el2, dismiss, patch };
 }
@@ -18280,6 +18283,8 @@ var bodyEditorLoader = {
   load: async () => ({ createDocsEditor: createTextareaEditor })
 };
 var BodyEditor = class {
+  /** `save` may return a promise that settles true once the write AND the refresh
+   *  after it have landed; a plain void return acknowledges at once. */
   constructor(save, label) {
     this.save = save;
     this.el = document.createElement("div");
@@ -18299,10 +18304,15 @@ var BodyEditor = class {
   editor = null;
   text = "";
   timer = null;
+  // The edit the user made that no confirming response has covered yet: typed (the
+  // debounce is running) or saved and still in flight. Stored text arriving while it
+  // is set is older than the edit and must not replace it. It survives a failed save,
+  // so the edit is kept (and the next change saves it again).
+  draft = null;
   disposed = false;
-  /** Shows the stored body. An edit the user is typing is kept. */
+  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. */
   setText(text) {
-    if (this.timer !== null || text === this.text) return;
+    if (this.draft !== null || text === this.text) return;
     this.text = text;
     if (this.editor) {
       if (this.editor.getText() !== text) this.editor.setText(text);
@@ -18313,6 +18323,7 @@ var BodyEditor = class {
   }
   changed(text) {
     this.text = text;
+    this.draft = text;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.flush(), SAVE_DELAY_MS);
   }
@@ -18320,7 +18331,14 @@ var BodyEditor = class {
     if (this.timer === null) return;
     clearTimeout(this.timer);
     this.timer = null;
-    this.save(this.text);
+    const text = this.text;
+    const done2 = this.save(text);
+    const acknowledge = (ok) => {
+      if (ok && this.draft === text) this.draft = null;
+    };
+    if (done2) done2.then(acknowledge, () => {
+    });
+    else acknowledge(true);
   }
   dispose() {
     this.flush();
@@ -18555,8 +18573,22 @@ var ItemPanel = class {
   view = null;
   sessions = [];
   usage = null;
+  // Run sessions the rail did not hold, by id: asked for, answered, or unanswerable.
+  lookups = /* @__PURE__ */ new Map();
   focus() {
     this.closeButton.focus({ preventScroll: true });
+  }
+  /** An absent run session is not proof it is gone: the rail pages archived rows in
+   *  only when the archive filter is on. Ask the daemon for them by id once. */
+  lookUpMissing(it) {
+    const missing = (it.runs ?? []).map((r) => r.session_id).filter((id) => !!id && !this.lookups.has(id) && !this.sessions.some((s) => s.id === id));
+    if (missing.length === 0) return;
+    for (const id of missing) this.lookups.set(id, "pending");
+    const settle = (state) => {
+      for (const id of missing) this.lookups.set(id, state);
+      if (this.view) this.render(this.view, this.sessions);
+    };
+    this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
   }
   item() {
     return this.view ? itemByID(this.view.backlog, this.id) : void 0;
@@ -18577,6 +18609,7 @@ var ItemPanel = class {
     this.usage = usage;
     const it = this.item();
     if (!it) return;
+    this.lookUpMissing(it);
     if (document.activeElement !== this.title) this.title.value = it.title;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
@@ -18790,7 +18823,9 @@ var ItemPanel = class {
     const list = h("ul", { class: "af-backlog-runs" });
     for (const run of [...runs].reverse()) {
       const s = run.session_id ? this.sessions.find((x) => x.id === run.session_id) : void 0;
-      const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : "Gone";
+      const asked = run.session_id ? this.lookups.get(run.session_id) : void 0;
+      const absent = asked === "pending" ? "Checking\u2026" : asked === "failed" ? "Unavailable" : "Gone";
+      const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : absent;
       const by = run.started_by === "runner" ? "runner" : "you";
       const meta = h("div", { class: "af-backlog-reason" }, [`Started by ${by}`, formatTime(run.started_at), live].join(" \xB7 "));
       const cost = run.session_id ? this.usage?.runs[run.session_id] : void 0;
@@ -19303,12 +19338,13 @@ ${id}`;
   mutate(run) {
     if (this.root) this.write(run);
   }
+  /** Settles true once the write and the refresh after it have landed, false when the write failed. */
   write(run) {
     const token2 = this.host.token();
-    if (token2 === null) return;
-    run(token2).then(() => this.host.refresh(), (e) => {
+    if (token2 === null) return Promise.resolve(false);
+    return run(token2).then(() => this.host.refresh().then(() => true), (e) => {
       this.host.notify(errorText(e));
-      void this.host.refresh();
+      return this.host.refresh().then(() => false);
     });
   }
   move(id, to) {
@@ -19593,7 +19629,8 @@ ${id}`;
       },
       openSession: (id) => this.host.openSession(id),
       archiveSession: (id) => this.host.archiveSession(id),
-      restoreSession: (id) => this.host.restoreSession(id)
+      restoreSession: (id) => this.host.restoreSession(id),
+      loadSessions: (ids) => this.host.loadSessions(ids)
     };
   }
 };
@@ -20055,6 +20092,8 @@ var AppShell = class {
       archiveSession: () => {
       },
       restoreSession: () => {
+      },
+      loadSessions: async () => {
       }
     });
     this.backlogPane.el.hidden = true;
@@ -21187,6 +21226,7 @@ var AppShell = class {
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
       [chrome.newTabs, this.header],
+      [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
     ]);
@@ -21948,9 +21988,20 @@ function captureTabDeleteTarget(target) {
 // src/backlog_data.ts
 var EMPTY_BACKLOG_DATA = { views: /* @__PURE__ */ new Map(), errors: /* @__PURE__ */ new Map(), budget: null, usage: null, generation: 0 };
 var DEBOUNCE_MS = 150;
-function backlogEventAction(type) {
+function runSessionIds(data) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const view of data.views.values()) {
+    for (const it of view.backlog.items) {
+      for (const run of it.runs ?? []) if (run.session_id) ids.add(run.session_id);
+    }
+  }
+  return ids;
+}
+var SESSION_EVENTS = /* @__PURE__ */ new Set(["session.updated", "session.killed", "session.archived", "session.restored"]);
+function backlogEventAction(type, sessionId, runSessions) {
   if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
   if (type === "backlog.spend") return "spend";
+  if (SESSION_EVENTS.has(type) && sessionId && runSessions?.has(sessionId)) return "refresh";
   return null;
 }
 var BacklogLoader = class {
@@ -22420,6 +22471,18 @@ async function resolveArchivedRoute(id, ticket) {
     },
     missing
   });
+}
+async function adoptSessionsById(ids) {
+  const tok = token;
+  if (tok === null) return;
+  const known = new Set(store.get().sessions.map((s) => s.id));
+  const want = ids.filter((id) => !known.has(id));
+  if (want.length === 0) return;
+  const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
+  const rows = await fetchSessionsById(tok, want);
+  if (token !== tok || connectionGeneration !== generation) return;
+  if (optimisticSessions.adopt(rows, fence).length > 0) applySessions(optimisticSessions.project());
 }
 function openBacklogSession(id) {
   const session = store.get().sessions.find((s) => s.id === id);
@@ -23909,6 +23972,7 @@ var actions = {
       const s = store.get().sessions.find((x) => x.id === id);
       if (s && isActionableSession(s)) openConfirm("restore", s);
     },
+    loadSessions: adoptSessionsById,
     addProject: () => openAddProject(),
     confirm: confirmBacklog
   },
@@ -24021,14 +24085,14 @@ function stopStream() {
   }
 }
 function onEvent(ev) {
-  const backlogAction = backlogEventAction(ev.type);
+  const backlogAction = backlogEventAction(ev.type, ev.data?.id, runSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
   if (backlogAction === "spend") {
     backlogLoader.applySpend(ev.data);
     return;
   }
   if (backlogAction === "refresh") {
     backlogLoader.request();
-    return;
+    if (ev.type.startsWith("backlog.")) return;
   }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
     requestTaskResync();
