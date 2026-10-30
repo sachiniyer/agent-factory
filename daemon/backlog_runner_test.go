@@ -501,14 +501,26 @@ func TestCapInterruptRetryStopsAfterTheRunIsRearmed(t *testing.T) {
 }
 
 // A registered account named "default" is its own identity: the ambient identity
-// has a key no account name can equal (Codex P2 on #6300).
+// has a key no account name can equal (Codex P2 on #6300). The account comes from
+// the global config on DISK, exactly as a session create resolves it
+// (config.DefaultAccountLayersFor treats the repo resolution as authoritative), so
+// the fixture writes config.toml rather than mutating the in-memory config.
 func TestItemAccountKeepsARegisteredDefaultSeparateFromTheAmbientIdentity(t *testing.T) {
 	m, repoID := runnerTestManager(t)
-	m.Config().DefaultAccounts = map[string]string{"claude": "default"}
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[default_accounts]\nclaude = \"default\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if acct, err := m.itemAccount(repoID); err != nil || acct != "default" || acct == planusage.DefaultAccount {
 		t.Fatalf("a registered account named default: %q %v", acct, err)
 	}
-	m.Config().DefaultAccounts = nil
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatal(err)
+	}
 	if acct, err := m.itemAccount(repoID); err != nil || acct != planusage.DefaultAccount {
 		t.Fatalf("the ambient identity: %q %v", acct, err)
 	}
