@@ -16554,18 +16554,24 @@ function paintSwitch(el2, on, busy) {
     el2.removeAttribute("aria-disabled");
   }
 }
-function flipSwitch(pending, t, toggle, paint) {
+function flipSwitch(pending, t, toggle, paint, settledAt) {
   if (pending.has(t.id)) return;
   const next = !t.enabled;
-  pending.set(t.id, next);
+  const flip = { value: next, settled: false };
+  pending.set(t.id, flip);
   paint(next, true);
-  void toggle().then(
-    (applied) => applied ? next : t.enabled,
-    () => t.enabled
-  ).then((on) => {
+  void toggle().then((applied) => applied, () => false).then((applied) => {
+    if (applied) {
+      flip.settled = true;
+      settledAt?.(t.id);
+      return;
+    }
     pending.delete(t.id);
-    paint(on, false);
+    paint(t.enabled, false);
   });
+}
+function releaseSettled(pending) {
+  for (const [id, flip] of pending) if (flip.settled) pending.delete(id);
 }
 var TasksPane = class {
   constructor(actions2) {
@@ -16592,6 +16598,7 @@ var TasksPane = class {
       return;
     }
     this.lastError = error;
+    releaseSettled(this.pending);
     const token2 = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token2;
@@ -16615,9 +16622,17 @@ var TasksPane = class {
     }
   }
   flip(t) {
-    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => {
-      const el2 = this.el.querySelector(`[data-task-id="${CSS.escape(t.id)}"] .af-task-switch`);
+    const paint = (id, on, busy) => {
+      const el2 = this.el.querySelector(`[data-task-id="${CSS.escape(id)}"] .af-task-switch`);
       if (el2) paintSwitch(el2, on, busy);
+    };
+    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy), (id) => {
+      window.setTimeout(() => {
+        if (!this.pending.get(id)?.settled) return;
+        this.pending.delete(id);
+        const known = this.lastTasks?.find((x) => x.id === id);
+        if (known) paint(id, known.enabled, false);
+      }, 5e3);
     });
   }
   render(tasks) {
@@ -16701,7 +16716,7 @@ var TasksPane = class {
     toggle.title = t.enabled ? "Enabled \xB7 click to disable" : "Disabled \xB7 click to enable";
     const inFlight = this.pending.get(t.id);
     if (inFlight !== void 0) {
-      paintSwitch(toggle, inFlight, true);
+      paintSwitch(toggle, inFlight.value, true);
     }
     toggle.addEventListener("click", () => this.flip(t));
     const verbs = taskVerbs(t, this.actions);

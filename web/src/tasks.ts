@@ -375,28 +375,44 @@ export function paintSwitch(el: SwitchEl, on: boolean, busy: boolean): void {
   }
 }
 
+/** One in-flight (or applied-but-unreconciled) switch flip: the value it is moving to. */
+export interface PendingFlip { value: boolean; settled: boolean }
+
 /**
- * Runs one switch flip: shows the requested value and busy at once, ignores a second
- * click while it is in flight, and settles to the requested value when the toggle
- * applied it or back to the old one when it failed or was refused.
+ * Runs one switch flip: shows the requested value and busy at once and ignores a
+ * second click while it is in flight. A failed or refused request puts the old value
+ * back. An applied one stays busy, showing the new value, until the list refetch has
+ * reconciled it (releaseSettled): the click handler toggles from the task it was
+ * rendered with, so the switch accepts a click only when what it displays and what
+ * the handler will toggle from are the same reconciled value.
  */
 export function flipSwitch(
-  pending: Map<string, boolean>,
+  pending: Map<string, PendingFlip>,
   t: Pick<TaskData, "id" | "enabled">,
   toggle: () => Promise<boolean>,
   paint: (on: boolean, busy: boolean) => void,
+  settledAt?: (id: string) => void,
 ): void {
   if (pending.has(t.id)) return;
   const next = !t.enabled;
-  pending.set(t.id, next);
+  const flip: PendingFlip = { value: next, settled: false };
+  pending.set(t.id, flip);
   paint(next, true);
-  void toggle().then(
-    (applied) => (applied ? next : t.enabled),
-    () => t.enabled,
-  ).then((on) => {
+  void toggle().then((applied) => applied, () => false).then((applied) => {
+    if (applied) {
+      flip.settled = true;
+      settledAt?.(t.id);
+      return;
+    }
     pending.delete(t.id);
-    paint(on, false);
+    paint(t.enabled, false);
   });
+}
+
+/** Drops every applied flip: called when a list arrives, which carries the value the
+ *  next render and the next click handler are both built from. */
+export function releaseSettled(pending: Map<string, PendingFlip>): void {
+  for (const [id, flip] of pending) if (flip.settled) pending.delete(id);
 }
 
 /**
@@ -415,7 +431,7 @@ export class TasksPane {
   private lastToken: string | null = null;
   // Task id -> the value an in-flight toggle is moving to. Rebuilds re-apply it so
   // a refetch mid-request cannot hand back an enabled switch for the same task.
-  private readonly pending = new Map<string, boolean>();
+  private readonly pending = new Map<string, PendingFlip>();
 
   constructor(private readonly actions: TaskActions) {
     this.el = h("section", { class: "af-tasks" });
@@ -430,6 +446,7 @@ export class TasksPane {
       return;
     }
     this.lastError = error;
+    releaseSettled(this.pending);
     const token = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token;
@@ -456,9 +473,18 @@ export class TasksPane {
   }
 
   private flip(t: TaskData): void {
-    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => {
-      const el = this.el.querySelector<HTMLButtonElement>(`[data-task-id="${CSS.escape(t.id)}"] .af-task-switch`);
+    const paint = (id: string, on: boolean, busy: boolean): void => {
+      const el = this.el.querySelector<HTMLButtonElement>(`[data-task-id="${CSS.escape(id)}"] .af-task-switch`);
       if (el) paintSwitch(el, on, busy);
+    };
+    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy), (id) => {
+      // Backstop: if no list ever arrives to reconcile it, fall back to the last one.
+      window.setTimeout(() => {
+        if (!this.pending.get(id)?.settled) return;
+        this.pending.delete(id);
+        const known = this.lastTasks?.find((x) => x.id === id);
+        if (known) paint(id, known.enabled, false);
+      }, 5000);
     });
   }
 
@@ -557,7 +583,7 @@ export class TasksPane {
     toggle.title = t.enabled ? "Enabled · click to disable" : "Disabled · click to enable";
     const inFlight = this.pending.get(t.id);
     if (inFlight !== undefined) {
-      paintSwitch(toggle, inFlight, true);
+      paintSwitch(toggle, inFlight.value, true);
     }
     toggle.addEventListener("click", () => this.flip(t));
 
