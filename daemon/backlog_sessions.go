@@ -371,11 +371,17 @@ func (m *Manager) recoverBacklog(repoID string) bool {
 }
 
 // idleRunEnds lists the sessions whose run ended unobserved: the item is still
-// running on its latest started run, and the session is live with no run.
+// running (or done, with on_done archive) on its latest started run, and the session is live with no run.
 func idleRunEnds(b *backlog.Backlog, sessions map[string]itemSession) []string {
 	var out []string
 	for _, it := range b.Items {
-		if it.Status != backlog.StatusRunning || len(it.Runs) == 0 {
+		// A done item is settled too when on_done is archive: the user marked it
+		// done during the run, and the archive waits for the run's idle edge, which
+		// a crash between the marker clearing and the completion running loses.
+		// archiveDoneItemSession's guards decide whether it can still be archived.
+		settle := it.Status == backlog.StatusRunning ||
+			(it.Status == backlog.StatusDone && b.Settings.OnDone == backlog.OnDoneArchive)
+		if !settle || len(it.Runs) == 0 {
 			continue
 		}
 		r := it.Runs[len(it.Runs)-1]

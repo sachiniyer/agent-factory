@@ -350,3 +350,23 @@ func TestCompletionIsRetriedWhileTheBacklogIsBusy(t *testing.T) {
 		t.Fatalf("status = %s, want review", it.Status)
 	}
 }
+
+// An item the user marked done during its run, whose session went idle while no
+// daemon watched (a crash between the marker clearing and the completion), still
+// gets its on_done archive from restart recovery (Codex P2 on #6294).
+func TestRecoveryArchivesADoneItemWhoseRunEndedUnobserved(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	setOnDoneArchive(t, m, repoID)
+	archived := stubBacklogArchive(t)
+	if _, err := m.backlogService().SetItemStatus(backlog.SetItemStatusRequest{RepoID: repoID, ID: 1, Status: backlog.StatusDone}); err != nil {
+		t.Fatal(err)
+	}
+	idleItemSession(t, inst) // the marker cleared and the session settled; nobody saw the edge
+	if !m.recoverBacklog(repoID) {
+		t.Fatal("recovery did not settle the project")
+	}
+	m.backgroundMutationWG.Wait()
+	if len(*archived) != 1 || (*archived)[0] != inst.ID {
+		t.Fatalf("archived %v, want the done item's session", *archived)
+	}
+}
