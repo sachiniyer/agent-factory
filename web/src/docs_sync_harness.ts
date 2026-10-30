@@ -12,6 +12,10 @@ export interface SyncLike {
   readonly text: string;
   readonly currentStatus: string;
   whenQuiet?(): Promise<void>;
+  /** The doc is being deleted: stop retrying and timers, keep the draft. */
+  suspend?(): void;
+  /** The delete landed: drop the sync and its draft. `keepDraft` when it failed. */
+  abandon?(keepDraft?: boolean): void;
   /** Flushes unsaved edits and resolves when they have landed ("saved") or cannot
    *  ("blocked": a conflict, markers, or a failed save). */
   whenSaved?(): Promise<"saved" | "blocked">;
@@ -66,6 +70,7 @@ export function rng(seed: number): () => number {
 }
 
 class Daemon {
+  deleted = false;
   private readonly texts = new Map<string, string>();
   head = "";
   private n = 0;
@@ -88,7 +93,13 @@ class Daemon {
     return [...this.texts.values()].some((t) => t.split("\n").includes(token));
   }
   read(): DocText {
+    if (this.deleted) throw new Error("404 doc not found");
     return { text: this.text, commit: this.head };
+  }
+  /** The doc is added again from its template: a new commit with the original text. */
+  readd(initial: string): void {
+    this.deleted = false;
+    this.commit(initial);
   }
   setLine(line: number, token: string): string {
     const lines = this.text.split("\n");
@@ -97,6 +108,7 @@ class Daemon {
   }
   /** SaveProposalDoc: fast-forward on the head, else a per-line three-way merge. */
   save(text: string, base: string): SaveResult {
+    if (this.deleted) throw new Error("404 doc not found");
     if (base === this.head) {
       return { kind: "saved", text, commit: text === this.text ? this.head : this.commit(text), merged: false };
     }
@@ -149,6 +161,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const names = ["goals", "api"];
   const daemons = new Map(names.map((n) => [n, new Daemon(Array.from({ length: LINES }, (_, i) => `${n}${i}`).join("\n"))]));
   const stash = new Map<string, Draft>();
+  const initialText = (n: string): string => Array.from({ length: LINES }, (_, i) => `${n}${i}`).join("\n");
+  // The values each line had before the user typed over it, for undo.
+  const lineStack = new Map<string, Map<number, string[]>>(names.map((n) => [n, new Map()]));
   const net: Pending[] = [];
   let now = 0;
   const timers: { at: number; fn: () => void; live: boolean }[] = [];
@@ -166,7 +181,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
 
   const syncs = new Map<string, SyncLike>();
   /** Tabs that closed with a save still in flight, per doc (the pane keeps this map). */
-  const closing = new Map<string, SyncLike>();
+  const closing = new Map<string, Set<SyncLike>>();
   const editor = { doc: "" as string, text: "" };
   let attached = "";
   const events: { doc: string; commit: string }[] = [];
@@ -183,13 +198,14 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     const deps: SyncDepsLike = {
       load: async () => {
         // A reopened tab loads only after the closing tab's final save has landed.
-        const prior = closing.get(doc);
-        if (prior && prior !== syncs.get(doc)) await prior.whenQuiet?.();
+        const priors = [...(closing.get(doc) ?? [])].filter((p) => p !== self);
+        await Promise.all(priors.map((p) => p.whenQuiet?.()));
         return call(() => d.read());
       },
       save: (text, base, final) => {
         saves.push({ doc, text, bufferHadMarkers: self ? hasConflictMarkers(self.text) : false });
         void final;
+        if (process.env.AF_STASHLOG) console.log("SAVE", doc, JSON.stringify(text), base, "final=" + final);
         const fault = rand() < (o.faults ?? 0) ? (rand() < 0.5 ? "drop" : "lose-reply") : null;
         return call(() => {
           if (fault === "drop") throw new Error("503 service unavailable");
@@ -214,8 +230,14 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       },
       draft: {
         load: () => stash.get(doc) ?? null,
-        store: (x) => void stash.set(doc, x),
-        clear: () => void stash.delete(doc),
+        store: (x) => {
+          if (process.env.AF_STASHLOG) console.log("STASH store", doc, JSON.stringify(x));
+          stash.set(doc, x);
+        },
+        clear: () => {
+          if (process.env.AF_STASHLOG) console.log("STASH clear", doc);
+          stash.delete(doc);
+        },
       },
     };
     const s = o.makeSync(deps);
@@ -257,10 +279,66 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     const token = `u${++seq}`;
     const lines = editor.text.split("\n");
     if (lines.length !== LINES) return; // the buffer holds conflict markers: leave it to the resolver
+    const stackFor = lineStack.get(attached)!;
+    stackFor.set(line, [...(stackFor.get(line) ?? []), lines[line]!]);
     lines[line] = token;
     editor.text = lines.join("\n");
     typed.get(attached)!.set(line, token);
     s.edit(editor.text);
+  }
+
+  /** The user undoes a line back to what it was before they typed over it. */
+  function userUndo(): void {
+    const s = syncs.get(attached);
+    if (!s || !isLoaded(s)) return;
+    const stackFor = lineStack.get(attached)!;
+    const candidates = [...stackFor.entries()].filter(([, v]) => v.length > 0).map(([k]) => k);
+    if (!candidates.length) return;
+    const line = pick(candidates);
+    const prev = stackFor.get(line)!.pop()!;
+    const lines = editor.text.split("\n");
+    if (lines.length !== LINES) return;
+    lines[line] = prev;
+    editor.text = lines.join("\n");
+    typed.get(attached)!.set(line, prev);
+    s.edit(editor.text);
+  }
+
+  /** The doc is deleted while it has unsaved edits, then added again from its
+   *  template. The old sync must stop: no retry may write into the new doc. */
+  async function deleteAndReadd(doc: string): Promise<void> {
+    const s = syncs.get(doc);
+    const olds = [...(closing.get(doc) ?? [])]; // tabs that closed earlier and may still be retrying
+    if (!s && !olds.length) return;
+    const d = daemons.get(doc)!;
+    for (const x of [s, ...olds]) {
+      if (!x) continue;
+      if (x.suspend) x.suspend();
+      else x.dispose(); // an engine without suspend: the old pane just disposed and deleted
+    }
+    d.deleted = true;
+    await advance(1000);
+    await drain();
+    for (const x of [s, ...olds]) x?.abandon?.();
+    syncs.delete(doc);
+    closing.delete(doc);
+    if (attached === doc) {
+      attached = "";
+      editor.text = "";
+    }
+    typed.get(doc)!.clear();
+    lineStack.get(doc)!.clear();
+    stash.delete(doc);
+    const savesAfterDelete = saves.length;
+    d.readd(initialText(doc));
+    await advance(30_000);
+    await drain();
+    const late = saves.slice(savesAfterDelete).filter((x) => x.doc === doc);
+    // I7: a deleted doc's sync stops retrying, so nothing is written into the new doc.
+    if (late.length) fail("deleted-doc-sync-kept-saving", `${doc}: ${late.length} save(s) after the delete, text ${JSON.stringify(late[0]!.text)}`);
+    if (d.text !== initialText(doc)) fail("deleted-doc-overwrote-new-doc", `${doc}: new doc holds ${JSON.stringify(d.text)}`);
+    await open(doc);
+    await drain();
   }
 
   function isLoaded(s: SyncLike): boolean {
@@ -328,6 +406,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
    *  daemon or not, replies are lost, and only per-viewer storage and the daemon
    *  survive. The user then opens the page again on the same doc. */
   async function pageClose(): Promise<void> {
+    if (process.env.AF_STASHLOG) console.log("PAGECLOSE");
     const doc = attached;
     if (!doc) return;
     for (const s of syncs.values()) s.saveBeforeLeaving();
@@ -359,6 +438,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
     if (unsaved.length && back.currentStatus === "pending") {
       fail("recovered-draft-not-shown", `${doc}: reopened as pending, not recovered`);
+    }
+    for (let i = 0; i < 3; i++) {
+      await advance(6000);
+      await drain();
     }
   }
 
@@ -495,11 +578,12 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       const doc = attached;
       const s = syncs.get(doc);
       if (s) {
+        if (process.env.AF_STASHLOG) console.log("CLOSEREOPEN", doc);
         const wasConflict = s.currentStatus === "conflict";
         const draft = s.text;
         const savesBefore = saves.length;
         s.dispose();
-        closing.set(doc, s);
+        closing.set(doc, (closing.get(doc) ?? new Set()).add(s));
         syncs.delete(doc);
         await tick();
         if (wasConflict && saves.length !== savesBefore) {
@@ -511,9 +595,16 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         // flight: a reconnect or a remote change arrives before the load returns.
         if (rand() < 0.6) syncs.get(doc)?.reconnect?.();
         if (rand() < 0.4) syncs.get(doc)?.remoteChanged("");
+        // A closed tab that is still retrying holds the load back until its save lands.
+        for (let i = 0; i < 3; i++) {
+          await drain();
+          await advance(6000);
+        }
         await drain();
         const back = syncs.get(doc)!;
-        if (wasConflict && (back.currentStatus !== "conflict" || back.text !== draft)) {
+        // A draft equal to what the daemon holds is no conflict: nothing is lost.
+        const vacuous = draft === daemons.get(doc)!.text;
+        if (wasConflict && !vacuous && (back.currentStatus !== "conflict" || back.text !== draft)) {
           fail("conflict-draft-lost-on-close", `${doc}: reopened as ${back.currentStatus}, draft ${JSON.stringify(draft)}, now ${JSON.stringify(back.text)}, daemon ${JSON.stringify(daemons.get(doc)!.text)}`);
         }
       }
@@ -521,6 +612,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       await pageClose();
     } else if (r < 0.855) {
       sendNow();
+    } else if (r < 0.87 && (o.faults ?? 0) > 0) {
+      userUndo();
+    } else if (r < 0.875 && (o.faults ?? 0) > 0) {
+      await deleteAndReadd(attached);
     } else if (r < 0.86) outage = !outage;
     else if (r < 0.89) {
       if (outage) outage = false;

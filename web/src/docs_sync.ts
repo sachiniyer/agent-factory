@@ -135,6 +135,20 @@ export class DocSync {
     this.dispatch({ t: "leave" });
   }
 
+  /** The doc is being deleted. Stops the timers and retries; the unsaved edits stay
+   *  in per-viewer storage until the delete has landed or failed. */
+  suspend(): void {
+    this.dispatch({ t: "suspend" });
+  }
+
+  /** The delete landed: this sync is finished, and its draft is dropped. When the
+   *  delete failed, `keepDraft` leaves the draft for the tab that reopens the doc. */
+  abandon(keepDraft = false): void {
+    this.attached = false;
+    this.closed = true;
+    this.dispatch({ t: "abandon", keepDraft });
+  }
+
   dispose(): void {
     this.attached = false;
     this.closed = true;

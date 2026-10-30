@@ -70,6 +70,10 @@ export interface Model {
   leaving: boolean;
   /** The tab is gone: no timers, no reloads, only the final save. */
   closed: boolean;
+  /** The doc is being deleted: no timers, saves or reloads; the draft stays stored. */
+  suspended: boolean;
+  /** The sync is finished: every event is ignored. */
+  dead: boolean;
   timer: "save" | "retry" | null;
   note: { kind: "merged" | "error" | "recovered"; detail: string } | null;
   /** Texts of saves that failed without a reply: any of them may have landed. A
@@ -94,6 +98,11 @@ export type Event =
   | { t: "reload_ok"; doc: DocText }
   | { t: "reload_fail"; error: string }
   | { t: "reconnect" }
+  /** The doc is being deleted: stop retrying and arming; the draft stays stored. */
+  | { t: "suspend" }
+  /** The delete landed (or was given up on): the sync is finished. `keepDraft`
+   *  leaves the stored draft for the next tab to restore. */
+  | { t: "abandon"; keepDraft: boolean }
   | { t: "flush" }
   | { t: "leave" }
   | { t: "close" }
@@ -125,6 +134,9 @@ export interface Draft {
   head: string;
   /** Absent means a conflict draft (the only kind stored before this field). */
   kind?: "conflict" | "unsent";
+  /** Texts a save of ours may have left on the daemon: the user's edit may be to
+   *  revert one of them, which a merge against `base` cannot see. */
+  maybe?: string[];
 }
 
 export function initialModel(): Model {
@@ -141,6 +153,8 @@ export function initialModel(): Model {
     backoff: false,
     leaving: false,
     closed: false,
+    suspended: false,
+    dead: false,
     timer: null,
     note: null,
     stashed: null,
@@ -169,6 +183,7 @@ export function statusOf(m: Model): { status: SyncStatus; detail: string } {
 
 /** Returns the next model and the effects to run. The input is not modified. */
 export function step(prev: Model, e: Event): [Model, Effect[]] {
+  if (prev.dead) return [prev, []];
   const m: Model = { ...prev };
   const fx: Effect[] = [];
   reduce(m, e, fx);
@@ -196,7 +211,10 @@ function restoreDraft(m: Model, fx: Effect[], draft: Draft): void {
   m.stashed = draftKey(draft);
   if (draft.buffer === m.saved) return;
   const unsent = draft.kind === "unsent";
-  const rebased = unsent ? mergeWithMarkers(draft.base, draft.buffer, m.saved) : draft.buffer;
+  // If the daemon holds a text one of our saves may have left there, the edits were
+  // made against that text (an undo back to the old one is only visible that way).
+  const base = unsent ? (draft.maybe?.find((t) => t === m.saved) ?? draft.base) : draft.base;
+  const rebased = unsent ? mergeWithMarkers(base, draft.buffer, m.saved) : draft.buffer;
   const clean = unsent && !hasConflictMarkers(rebased);
   m.buffer = clean ? rebased : draft.buffer;
   fx.push({ t: "set_buffer", text: m.buffer });
@@ -206,7 +224,7 @@ function restoreDraft(m: Model, fx: Effect[], draft: Draft): void {
     m.note = { kind: "recovered", detail: "" };
     return;
   }
-  enterConflict(m, fx, { ours: draft.buffer, theirs: m.saved, base: draft.base, head: m.base });
+  enterConflict(m, fx, { ours: draft.buffer, theirs: m.saved, base, head: m.base });
 }
 
 function draftKey(d: Draft): string {
@@ -221,7 +239,15 @@ function wantedDraft(m: Model): Draft | null {
   if (m.phase === "conflict" && m.conflict) {
     return { buffer: m.buffer, base: m.conflict.base, theirs: m.conflict.theirs, head: m.conflict.head, kind: "conflict" };
   }
-  if (isDirty(m)) return { buffer: m.buffer, base: m.saved, theirs: "", head: "", kind: "unsent" };
+  // A save of text other than what is acknowledged may have landed, or may yet
+  // land, so a buffer that equals the acknowledged text (the user undid back to
+  // it) is still unsaved work as far as the daemon is concerned.
+  const maybe = [...(m.flight ? [m.flight.text] : []), ...m.maybeLanded].filter((t) => t !== m.saved);
+  if (isDirty(m) || maybe.length > 0) {
+    const d: Draft = { buffer: m.buffer, base: m.saved, theirs: "", head: "", kind: "unsent" };
+    if (maybe.length > 0) d.maybe = [...new Set(maybe)];
+    return d;
+  }
   return null;
 }
 
@@ -298,6 +324,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       const kind = m.timer;
       m.timer = null;
       m.backoff = false;
+      if (m.suspended) return;
       if (kind === "save" && m.phase === "idle" && m.loaded && isDirty(m)) {
         // A closed tab keeps retrying a failed final save while the page lives.
         if (m.closed) startSave(m, fx, true);
@@ -319,7 +346,20 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.flight = null;
       m.phase = "idle";
       m.note = null;
+      // The daemon merged against a head that is an earlier save of ours whose reply
+      // was lost: it cannot tell that the user has since changed their mind (an undo
+      // back to the old text looks like "no change"), so what it returned is that
+      // earlier save, not an agent's edit. Take it as the base and send ours again.
+      const ownEarlierSave =
+        r.merged &&
+        r.text !== sent &&
+        m.maybeLanded.some((landed) => landed === r.text || mergeWithMarkers(m.saved, sent, landed) === r.text);
       m.maybeLanded = [];
+      if (ownEarlierSave) {
+        m.base = r.commit;
+        m.saved = r.text;
+        return;
+      }
       const mergedAgentEdits = r.merged && r.text !== sent;
       if (!mergedAgentEdits) {
         // The commit holds exactly what was sent, so it is the new base; typing
@@ -365,6 +405,13 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
         m.maybeLanded = [];
         return;
       }
+      if (m.buffer === r.theirs) {
+        // Both sides hold the same text: there is nothing to choose between.
+        m.phase = "idle";
+        m.base = r.head;
+        m.saved = r.theirs;
+        return;
+      }
       // Even when the tab is leaving, the draft goes to per-viewer storage, not
       // into the proposal doc.
       enterConflict(m, fx, { ours: r.ours, theirs: r.theirs, base: r.base, head: r.head });
@@ -379,13 +426,31 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.note = { kind: "error", detail: e.error };
       // Retry while the page is alive, closed tab or not: the edits stay in
       // per-viewer storage (see syncStash) until a save lands.
-      arm(m, fx, "save", SAVE_RETRY_MS);
+      if (!m.suspended) arm(m, fx, "save", SAVE_RETRY_MS);
       return;
 
     case "remote":
       if (m.closed) return;
       if (e.commit !== "" && e.commit === m.base && m.phase !== "loading" && m.phase !== "restoring") return;
       m.stale = true;
+      return;
+
+    case "suspend":
+      m.suspended = true;
+      m.leaving = false;
+      disarm(m, fx);
+      return;
+
+    case "abandon":
+      m.dead = true;
+      m.suspended = true;
+      m.closed = true;
+      m.leaving = false;
+      disarm(m, fx);
+      if (!e.keepDraft && m.stashed !== null) {
+        m.stashed = null;
+        fx.push({ t: "unstash" });
+      }
       return;
 
     case "reconnect":
@@ -477,7 +542,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
  *  clean, stale document reloads; an idle, dirty one without markers arms autosave. */
 function settle(m: Model, fx: Effect[]): void {
   syncStash(m, fx);
-  if (m.phase !== "idle" || !m.loaded) return;
+  if (m.phase !== "idle" || !m.loaded || m.suspended) return;
   if (m.leaving) {
     m.leaving = false;
     if (isDirty(m)) startSave(m, fx, true);
