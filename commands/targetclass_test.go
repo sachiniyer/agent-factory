@@ -87,6 +87,7 @@ var verbTargetClass = map[string]string{
 	"af proposal list":       classRouted,
 	"af proposal path":       classRouted,
 	"af proposal push-mode":  classRouted,
+	"af proposal remove-doc": classRouted,
 	"af proposal send":       classRouted,
 	"af proposal start":      classRouted,
 	"af proposal write":      classRouted,

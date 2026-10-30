@@ -349,6 +349,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"AttachProposal":      blockedDuringProbation,
 	"DetachProposal":      blockedDuringProbation,
 	"AddProposalDoc":      blockedDuringProbation,
+	"RemoveProposalDoc":   blockedDuringProbation,
 	"ReadProposalDoc":     blockedDuringProbation,
 	"SaveProposalDoc":     blockedDuringProbation,
 	"WriteProposalDoc":    blockedDuringProbation,

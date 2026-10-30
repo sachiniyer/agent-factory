@@ -750,7 +750,7 @@ func TestTaskFireLeftoverRecordCarriesTmuxName(t *testing.T) {
 	}
 	title := "leftover-title"
 	branch := git.BranchForTitle(cfg.BranchPrefix, title)
-	wtPath := filepath.Join(t.TempDir(), "leftover-wt")
+	wtPath := filepath.Join(resolvedTempDir(t), "leftover-wt")
 	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
 		t.Fatalf("seed leftover worktree: %v: %s", err, out)
 	}
@@ -945,7 +945,7 @@ func TestTaskFireLeftoverRecord_ForeignRowOwningCollidingTmuxName(t *testing.T) 
 	// return a quarantine record (never reach the kill) on a host without a
 	// colliding live session, isolating the foreign-scan verdict from the
 	// runtime-stop ordering.
-	wtPath := filepath.Join(t.TempDir(), "leftover-wt")
+	wtPath := filepath.Join(resolvedTempDir(t), "leftover-wt")
 	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
 		t.Fatalf("seed leftover worktree: %v: %s", err, out)
 	}

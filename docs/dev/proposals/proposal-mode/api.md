@@ -6,7 +6,7 @@ All commands print JSON, the same as the other `af` commands.
 
 | Command | Needs a session | What it does |
 |---|---|---|
-| `af proposal start <slug> [--docs goals,technical,api,ui,future]` | yes | Creates the proposal from templates, attaches, and prints the rules. Fails if the slug exists. The default is all five docs. |
+| `af proposal start <slug> [--docs goals,technical,api,ui,steps,future]` | yes | Creates the proposal from templates, attaches, and prints the rules. Fails if the slug exists. The default is all six docs. |
 | `af proposal attach [<slug>]` | yes | Attaches to an existing proposal and prints the rules. With no slug, prints the current proposal and the rules again. |
 | `af proposal detach` | yes | Removes this session's attachment and cursor. |
 | `af proposal list` | no | Lists proposals by last edit: slug, docs, attached sessions, and last edit time. |
@@ -117,6 +117,7 @@ or `api.md`). Replies always use the file name (`api.md`).
 | `POST /v1/AttachProposal` | `session_id`, `slug` (optional) | `attached proposal` |
 | `POST /v1/DetachProposal` | `session_id` | `{slug, detached, tab}` |
 | `POST /v1/AddProposalDoc` | target, `slug`, `name`, `author` | `{slug, doc, path, commit}` |
+| `POST /v1/RemoveProposalDoc` | target, `slug`, `doc`, `author` | `{slug, doc, path, commit}`; the doc stays in history |
 | `POST /v1/ReadProposalDoc` | target, `slug`, `doc` | `{slug, doc, text, commit}` |
 | `POST /v1/SaveProposalDoc` | target, `slug`, `doc`, `text`, `base` | `{slug, doc, text, commit, merged}`, or 409 |
 | `POST /v1/WriteProposalDoc` | target, `slug`, `doc`, `text`, `author` | `{slug, doc, path, commit, author}` |
