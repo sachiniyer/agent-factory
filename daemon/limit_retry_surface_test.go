@@ -55,17 +55,21 @@ func TestResumeFromLimit_IsInThePublicCatalog(t *testing.T) {
 // TestResumeFromLimit_BrowserBodyDecodes is the lock on the trap that eats web
 // requests in this repo.
 //
-// A BROWSER sends no X-AF-Client-Version header, and the daemon decodes a
-// header-less body with DisallowUnknownFields (daemon/httpserver.go) — so a field
-// the request struct does not declare is a 400 "unknown field", not an ignored
-// extra. That is exactly why restoreSession must NOT send `id` (see the comment on
-// web/src/api.ts restoreSession): RestoreSessionRequest has no such field.
+// A HEADER-LESS request is decoded with DisallowUnknownFields
+// (daemon/httpserver.go): a field the request struct does not declare is a 400
+// "unknown field", not an ignored extra. That is the hand-authored (curl/`af api`)
+// population — the one a browser BELONGED to before af() began sending
+// X-AF-Client-Version (web/src/api.ts), which routes the web onto the daemon's
+// tolerant decoder. The web's restoreSession still deliberately sends only fields
+// RestoreSessionRequest declares (see the comment on web/src/api.ts restoreSession),
+// so even on a header-less/strict path its body decodes; this pin was what caught the
+// class before the header made the strict path the browser's no longer.
 //
 // This verb is the opposite case only because #1934 ADDED the field. Without that,
-// the web's Retry would have 400'd on every click, and the api-layer unit test —
-// which asserts the body it SENDS, not what the daemon accepts — would have passed
-// anyway. So the decode is pinned here, against the real mux, from the real
-// header-less shape the browser produces.
+// a header-less web Retry would have 400'd on every click, and the api-layer unit
+// test — which asserts the body it SENDS, not what the daemon accepts — would have
+// passed anyway. So the decode is pinned here, against the real mux, from the real
+// header-less shape a hand-authored caller produces.
 //
 // It asserts the body was UNDERSTOOD, not that the resume succeeded: there is no
 // such session, so an error is expected. The distinction under test is which kind.
@@ -80,15 +84,17 @@ func TestResumeFromLimit_BrowserBodyDecodes(t *testing.T) {
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 
-	// Byte-for-byte what web/src/api.ts resumeFromLimit posts.
+	// Byte-for-byte what web/src/api.ts resumeFromLimit posts; sent header-less here
+	// to exercise the strict path a hand-authored caller still hits (the browser
+	// itself now sends X-AF-Client-Version, so it decodes tolerantly instead).
 	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/ResumeFromLimit",
 		`{"id":"id-abc","title":"feature","repo_id":""}`)
 
 	env := decodeEnvelope(t, rec)
 	require.NotNil(t, env.Error, "no such session, so this must fail — the question is HOW")
 	assert.NotContains(t, env.Error.Message, "unknown field",
-		"the browser's body must DECODE: a field the struct does not declare is a 400 under "+
-			"DisallowUnknownFields, and the web would never reach the handler at all")
+		"the header-less body must DECODE: a field the struct does not declare is a 400 under "+
+			"DisallowUnknownFields, and a caller sending it would never reach the handler at all")
 	assert.NotContains(t, env.Error.Message, "malformed JSON")
 }
 

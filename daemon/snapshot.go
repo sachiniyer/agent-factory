@@ -52,7 +52,12 @@ type SnapshotRequest struct {
 	// a request that sets none of them is answered exactly as before, and a daemon
 	// that predates them ignores them and answers with every row, so a client
 	// that asked for LazyArchive detects the absence of ArchivedTotal in the reply
-	// and treats the rows it got as the complete list.
+	// and treats the rows it got as the complete list. That ignores-them fallback
+	// is the daemon's tolerant-decode branch (daemon/httpserver.go decodeHTTPRequest),
+	// which applies only to a request carrying agentproto.ClientVersionHeader — the
+	// path every af client (TUI/CLI/web) takes. A header-less (strict) caller instead
+	// 400s with `unknown field "…"` (#1273), so the additive contract is the header's
+	// to buy, not a property of the wire shape alone.
 
 	// LazyArchive asks for the live (non-archived) rows only, with ArchivedTotal
 	// and ArchivedByProject standing in for the archived rows left out — counted
