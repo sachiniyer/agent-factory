@@ -1408,6 +1408,11 @@ export class AppShell {
   update(state: AppState, prioritizeTerminal = false): void {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
+    // Archive state is replaced, never mutated, so identity is the honest gate: any
+    // transition (loading, a page's cursor, exhausted, error, retry) repaints the
+    // rail's footer even when no session changed in the same update (#6201).
+    const archiveChanged = archiveRepaintNeeded(this.lastArchive, state);
+    this.lastArchive = state.archive;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
@@ -1553,7 +1558,7 @@ export class AppShell {
     // the terminal host (it lives in the main pane), so events never blur it.
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged) {
       // Mount/bind a routed terminal before spending the first frame on the rail.
       // Further updates coalesce into that first paint; later gestures stay immediate.
       if (!this.railPainted && prioritizeTerminal) {
@@ -1898,6 +1903,8 @@ export class AppShell {
    *  time, so the rail says how many older sessions are still on the daemon and
    *  offers the next page, reports a read in flight, or names a failed one and
    *  offers the retry. Null while the archived group is hidden or fully loaded. */
+  private lastArchive: ArchiveState | undefined;
+
   private archiveFooter(state: AppState): HTMLElement | null {
     const a = state.archive;
     if (!a.lazy || !state.statusFilter.archived) return null;
@@ -3373,6 +3380,11 @@ function inertRowReason(s: SessionData): string {
  *  only a lifecycle-actionable session by stable id; a kill-only startup-unknown row
  *  retains its button without becoming attachable. Every inert row carries
  *  aria-disabled, and a managed-but-inert one's title says why (#4394). */
+/** Whether the rail must repaint because the archive state moved. */
+export function archiveRepaintNeeded(last: ArchiveState | undefined, state: Pick<AppState, "archive">): boolean {
+  return last !== state.archive;
+}
+
 /** The inputs archiveFooter reads, as a string, so the rail rebuilds it only when
  *  they change. */
 function archiveFooterSignature(state: AppState): string {
