@@ -45,6 +45,28 @@ jobs:
           echo "== /proc/self/status"; cat /proc/self/status
           echo "== kernel.pid_max / threads"; cat /proc/sys/kernel/pid_max
           echo "== ps -eo of own tree"; ps -eo pid,ppid,stat,comm | head -30
+      - name: Fixture experiments (renamed sleep)
+        continue-on-error: true
+        run: |
+          set +e
+          echo "== sleep identity"; command -v sleep; ls -l "$(command -v sleep)"; readlink -f "$(command -v sleep)"; dpkg -S "$(readlink -f "$(command -v sleep)")"; sleep --version | head -2
+          echo "== sleep inode links"; stat -c '%n links=%h inode=%i size=%s' "$(readlink -f "$(command -v sleep)")"
+          d=$(mktemp -d); cp "$(command -v sleep)" "$d/tmux"
+          echo "== renamed copy: ./tmux 300"
+          "$d/tmux" 300 & p=$!; sleep 0.3
+          echo "pid=$p alive?"; kill -0 $p && echo alive || echo DEAD
+          cat /proc/$p/comm 2>&1; tr '\0' ' ' </proc/$p/cmdline; echo; kill $p 2>/dev/null
+          wait $p; echo "exit=$?"
+          echo "== direct run of renamed copy, stderr shown"; "$d/tmux" 1; echo "exit=$?"
+          echo "== exec -a af-renamed sleep 0.5"
+          time bash -c 'exec -a af-renamed sleep 0.5'; echo "exit=$?"
+          echo "== bash version"; bash --version | head -1
+          echo "== ls -l /usr/bin/{sleep,true,env}"; ls -l /usr/bin/sleep /usr/bin/true /usr/bin/env
+      - name: Daemon wait test x40 (flake rate)
+        continue-on-error: true
+        run: |
+          set +e
+          go test -count=40 ./daemon/ -run '^TestWaitForShutdownCompletionIgnoresProcessName$' 2>&1 | grep -E "^(--- FAIL|ok|FAIL|\s+shutdown_pid)" | sort | uniq -c
       - name: Four liveness tests
         continue-on-error: true
         run: |
