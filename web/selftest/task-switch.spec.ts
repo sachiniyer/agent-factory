@@ -2,9 +2,16 @@
 // it shows the requested value and stays busy while UpdateTask is in flight, and a
 // refused request puts the old value back. Each test owns its page.
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const SEEDED_TASK = process.env.AF_WEB_TASK_NAME ?? "probe-task";
+
+/** The task list rebuilds on refetch, so a screenshot can race a detach: retry once. */
+async function shot(target: Locator, path: string) {
+  for (let attempt = 0; ; attempt++) {
+    try { await target.screenshot({ path }); return; } catch (err) { if (attempt > 2) throw err; }
+  }
+}
 
 async function openTasks(page: Page) {
   await page.goto("/");
@@ -18,7 +25,7 @@ async function openTasks(page: Page) {
 test("task switch: shows the requested value and stays busy while UpdateTask is in flight", async ({ page }, info) => {
   const sw = await openTasks(page);
   const row = page.locator(".af-tasks .af-task-row", { hasText: SEEDED_TASK });
-  await row.screenshot({ path: info.outputPath("switch-before.png") });
+  await shot(row, info.outputPath("switch-before.png"));
   const was = (await sw.getAttribute("aria-checked")) === "true";
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -35,14 +42,14 @@ test("task switch: shows the requested value and stays busy while UpdateTask is 
   await expect(sw).toHaveAttribute("aria-disabled", "true");
   // aria-disabled, not disabled: the switch keeps keyboard focus while busy.
   await expect(sw).not.toHaveAttribute("disabled", /.*/);
-  await row.screenshot({ path: info.outputPath("switch-busy.png") });
+  await shot(row, info.outputPath("switch-busy.png"));
   await sw.click({ force: true });
   expect(updates, "a second click while in flight sends nothing").toBe(1);
 
   release();
   await expect(sw).not.toHaveAttribute("aria-busy", "true");
   await expect(sw).toHaveAttribute("aria-checked", String(!was));
-  await row.screenshot({ path: info.outputPath("switch-settled.png") });
+  await shot(row, info.outputPath("switch-settled.png"));
   // The daemon applied it: a fresh load reads the new value.
   await page.unroute("**/v1/UpdateTask");
   await page.reload();
