@@ -246,7 +246,7 @@ func TestHookProgressPruneUsesOneReadDeadlineForStalledJournals(t *testing.T) {
 	started := time.Now()
 	pruneHookProgress(filepath.Dir(paths[0]), time.Now().Add(48*time.Hour))
 	elapsed := time.Since(started)
-	if elapsed >= 3*relocationIdentityTimeout {
+	if elapsed >= 3*relocationIdentityTimeout.Load() {
 		t.Fatalf("%d stalled journals consumed serial read deadlines: %s", count, elapsed)
 	}
 	for _, path := range paths {

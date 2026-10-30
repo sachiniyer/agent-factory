@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -126,7 +127,25 @@ var worktreeMoveFast = func(g *GitWorktree, src, dest string) error {
 // relocationIdentityTimeout bounds every read-only identity check around a
 // bounded worktree move. The filesystem itself may be stalled, so neither the
 // pre-move snapshot nor a later recovery probe may wedge teardown.
-var relocationIdentityTimeout = 2 * time.Second
+//
+// It is atomic because bounded workers a caller may abandon (for example the
+// per-journal reads spawned by reconcileHookProgressBatch) read it after the
+// operation has returned, and a test restoring the production value must not
+// race them. Production never stores to it.
+var relocationIdentityTimeout = newAtomicDuration(2 * time.Second)
+
+// atomicDuration is a time.Duration that is safe to read from goroutines that
+// outlive the operation which spawned them.
+type atomicDuration struct{ v atomic.Int64 }
+
+func newAtomicDuration(d time.Duration) *atomicDuration {
+	a := &atomicDuration{}
+	a.v.Store(int64(d))
+	return a
+}
+
+func (a *atomicDuration) Load() time.Duration   { return time.Duration(a.v.Load()) }
+func (a *atomicDuration) Store(d time.Duration) { a.v.Store(int64(d)) }
 
 func inspectRelocationPathIdentity(path string) (pathIdentity, error) {
 	parent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(path), "relocation parent")
@@ -156,12 +175,13 @@ func boundedRelocationPathIdentity(path string) (pathIdentity, error) {
 		err      error
 	}
 	resultC := make(chan result, 1)
+	inspect := relocationPathIdentity // seam read at spawn: the worker may be abandoned
 	go func() {
-		identity, err := relocationPathIdentity(path)
+		identity, err := inspect(path)
 		resultC <- result{identity: identity, err: err}
 	}()
 
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case observed := <-resultC:
@@ -169,7 +189,7 @@ func boundedRelocationPathIdentity(path string) (pathIdentity, error) {
 	case <-timer.C:
 		return pathIdentity{}, fmt.Errorf(
 			"timed out after %s while checking relocation path %s: %w",
-			relocationIdentityTimeout, path, context.DeadlineExceeded,
+			relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
 		)
 	}
 }
