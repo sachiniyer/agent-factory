@@ -305,6 +305,22 @@ func (m *Manager) meterPassLocked(now time.Time) {
 			updates[r.repoID][r.run.SessionID] = rm.Meter
 		}
 	}
+	state.KeepRunSeen(metered)
+	state.PruneRunBuckets(now)
+	m.meterAccounts(home, state, backlogDirs, runConfigs, overrides, now, &usage)
+	for sessionID, account := range runAccount {
+		usage.RunWindow[sessionID] = state.RunWindowCost(sessionID, account, usage.Accounts[account].Windows.FiveHour)
+	}
+	// Save the dedupe keys and buckets BEFORE the offsets and costs that depend
+	// on them advance in backlog.json: the other order leaves a failed save with
+	// offsets ahead of keys, and the next pass skips messages that were never
+	// priced into the run window (Codex P2 on #6299). A failed save advances
+	// nothing.
+	if err := state.Save(); err != nil {
+		m.warn().Printf("plan meter: %v", err)
+		return
+	}
+	failed := false
 	for repoID, meters := range updates {
 		if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
 			b.SetRunMeters(meters)
@@ -317,16 +333,13 @@ func (m *Manager) meterPassLocked(now time.Time) {
 			for sessionID := range meters {
 				state.RestoreRun(sessionID, runSnaps[sessionID])
 			}
+			failed = true
 		}
 	}
-	state.KeepRunSeen(metered)
-	state.PruneRunBuckets(now)
-	m.meterAccounts(home, state, backlogDirs, runConfigs, overrides, now, &usage)
-	for sessionID, account := range runAccount {
-		usage.RunWindow[sessionID] = state.RunWindowCost(sessionID, account, usage.Accounts[account].Windows.FiveHour)
-	}
-	if err := state.Save(); err != nil {
-		m.warn().Printf("plan meter: %v", err)
+	if failed {
+		if err := state.Save(); err != nil {
+			m.warn().Printf("plan meter: %v", err)
+		}
 	}
 	st.usageMu.Lock()
 	st.usage, st.finished = usage, now
