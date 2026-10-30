@@ -587,3 +587,86 @@ func TestUnquoteGitPathDecodesLikeGit(t *testing.T) {
 		assert.Error(t, err, bad)
 	}
 }
+
+// P2 (Codex on #6186): a store reached THROUGH a symlink that lives inside a
+// deletion root passes a destination-only check, yet deleting the root deletes the
+// link and the repository can no longer reach its store. Every prefix and hop of the
+// lookup path must lie outside both roots.
+func TestObjectStorePathThroughASymlinkInsideTheLeafIsRefused(t *testing.T) {
+	repo, wt := pruneWorktree(t)
+	leaf, err := registrationLeaf(wt)
+	require.NoError(t, err)
+
+	// The real store lives OUTSIDE both roots ...
+	outside := filepath.Join(t.TempDir(), "real-objects")
+	objects := filepath.Join(repo, ".git", "objects")
+	require.NoError(t, os.Rename(objects, outside))
+	// ... but the repository reaches it through a symlink INSIDE the leaf.
+	link := filepath.Join(leaf, "objects-link")
+	require.NoError(t, os.Symlink(outside, link))
+	require.NoError(t, os.MkdirAll(filepath.Join(objects, "info"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(objects, "info", "alternates"), []byte(link+"\n"), 0o644))
+	gitIn(t, wt, "status", "--porcelain") // premise: git reads objects through the link
+
+	// The destination alone is outside both roots (the old check passed this).
+	real, err := filepath.EvalSymlinks(link)
+	require.NoError(t, err)
+	realOutside, err := filepath.EvalSymlinks(outside)
+	require.NoError(t, err)
+	require.Equal(t, realOutside, real)
+
+	deps, err := objectStoresInsideDeletedRoots(wt)
+	require.NoError(t, err)
+	require.NotEmpty(t, deps, "the path goes through the leaf")
+	assert.Contains(t, strings.Join(deps, " "), "objects-link")
+	reasons, err := WorktreeUnrecoverableContent(wt)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(reasons, " "), "object store")
+
+	t.Run("a relative entry through a symlink inside the worktree tree", func(t *testing.T) {
+		repo2, wt2 := pruneWorktree(t)
+		out2 := filepath.Join(t.TempDir(), "real-objects")
+		obj2 := filepath.Join(repo2, ".git", "objects")
+		require.NoError(t, os.Rename(obj2, out2))
+		link2 := filepath.Join(wt2, "vendor-objects")
+		require.NoError(t, os.Symlink(out2, link2))
+		require.NoError(t, os.MkdirAll(filepath.Join(obj2, "info"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(obj2, "info", "alternates"), []byte(link2+"\n"), 0o644))
+		deps, err := objectStoresInsideDeletedRoots(wt2)
+		require.NoError(t, err)
+		assert.NotEmpty(t, deps)
+	})
+
+	t.Run("a path that never touches a root passes", func(t *testing.T) {
+		repo3, wt3 := pruneWorktree(t)
+		out3 := filepath.Join(t.TempDir(), "real-objects")
+		obj3 := filepath.Join(repo3, ".git", "objects")
+		require.NoError(t, os.Rename(obj3, out3))
+		elsewhere := filepath.Join(t.TempDir(), "link-outside")
+		require.NoError(t, os.Symlink(out3, elsewhere))
+		require.NoError(t, os.MkdirAll(filepath.Join(obj3, "info"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(obj3, "info", "alternates"), []byte(elsewhere+"\n"), 0o644))
+		deps, err := objectStoresInsideDeletedRoots(wt3)
+		require.NoError(t, err)
+		assert.Empty(t, deps, "a symlink outside both roots is fine")
+	})
+}
+
+func TestWalkPhysicalAppliesDotDotToTheResolvedPrefix(t *testing.T) {
+	base := t.TempDir()
+	real, err := filepath.EvalSymlinks(base)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(real, "a", "b"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(real, "elsewhere", "x"), 0o755))
+	// a/link -> ../elsewhere ; so a/link/x/.. is elsewhere, not a.
+	require.NoError(t, os.Symlink("../elsewhere", filepath.Join(real, "a", "link")))
+	got, hit, err := walkPhysical(real+"/a/link/x/..", []string{filepath.Join(real, "a", "b")})
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(real, "elsewhere"), got)
+	assert.Empty(t, hit)
+	_, hit, err = walkPhysical(real+"/a/b/deeper", []string{filepath.Join(real, "a", "b")})
+	require.NoError(t, err)
+	assert.NotEmpty(t, hit)
+	_, _, err = walkPhysical("relative/path", nil)
+	assert.Error(t, err)
+}
