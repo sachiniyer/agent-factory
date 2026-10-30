@@ -135,6 +135,24 @@ var applyBacklog = func(svc *backlog.Service, ref backlog.ProjectRef, fn func(*b
 	return svc.Apply(ref, fn)
 }
 
+// applyRetrying runs a backlog transaction, retrying a busy backlog with backoff
+// until it lands or stop closes (a nil stop retries until it lands).
+func (m *Manager) applyRetrying(repoID string, stop <-chan struct{}, fn func(*backlog.Backlog) ([]int, error)) error {
+	delay := finishStartBackoff
+	for {
+		_, err := applyBacklog(m.backlogService(), backlog.ProjectRef{ID: repoID}, fn)
+		if !errors.Is(err, backlog.ErrBusy) {
+			return err
+		}
+		select {
+		case <-stop:
+			return err
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, 5*time.Second)
+	}
+}
+
 // settleRunEnd moves a silent run's item to review, and archives the session
 // when the user already marked the item done and on_done is archive. It is the
 // one place a run's end is written, and keeps the lifecycle model:
@@ -215,32 +233,61 @@ func (m *Manager) archiveDoneItemSession(repoID, sessionID string) {
 		m.backlog.deferArchive(sessionID)
 		return
 	}
-	guard := backlogArchiveGuard(sessionID)
-	if err := guard(s.instance); err != nil {
+	// The pre-check only reads; the guard handed to the teardown closes the
+	// adoption fence (browser terminal input takes no manager lock and serializes
+	// against a teardown only through it) and reopens it however the archive
+	// ends, as the task-session lifecycle does.
+	if err := backlogArchiveCheck(sessionID, s.instance, s.instance.AdoptionDeliveries()); err != nil {
 		m.info().Printf("backlog on_done: keeping session %q: %v", s.instance.Title, err)
 		return
 	}
+	var fenced *session.Instance
+	defer func() {
+		if fenced != nil {
+			fenced.ReopenAdoptionFence()
+		}
+	}()
+	guard := backlogArchiveGuard(sessionID, func(cur *session.Instance) { fenced = cur })
 	if err := archiveSessionForLifecycle(m, ArchiveSessionRequest{ID: sessionID, RepoID: repoID}, guard); err != nil {
 		m.warn().Printf("backlog on_done archive of session %q: %v", s.instance.Title, err)
 	}
 }
 
-// backlogArchiveGuard refuses the on_done archive unless the session is still
+// backlogArchiveCheck refuses the on_done archive unless the session is still
 // the same idle item session with nothing done in it since its run ended: no
-// new run, no delivery, and no pane change.
-func backlogArchiveGuard(sessionID string) sessionTeardownGuard {
+// new run, no delivery (deliveries is the count read with the adoption fence
+// shut, or the live count for a pre-check), and no pane change.
+func backlogArchiveCheck(sessionID string, current *session.Instance, deliveries uint64) error {
+	switch {
+	case current == nil || current.ID != sessionID:
+		return fmt.Errorf("session %s was replaced", sessionID)
+	case current.BacklogRunActive():
+		return errors.New("a new run started")
+	case current.GetLiveness() != session.LiveReady:
+		return errors.New("the session is not idle")
+	case deliveries != current.AdoptionDeliveriesAtRunEnd():
+		return errors.New("a prompt reached the session after its run ended")
+	case current.LastPaneChurnAt().After(current.BacklogRunEndedAt()):
+		return errors.New("the session changed after its run ended")
+	}
+	return nil
+}
+
+// backlogArchiveGuard is backlogArchiveCheck as the teardown's guard: it shuts
+// the adoption fence and reads the delivery count in one critical section, so
+// input that arrives after the check cannot start work the archive then
+// interrupts. A refusal reopens the fence at once; otherwise the caller reopens
+// it when the archive is over (fenced reports the instance to reopen).
+func backlogArchiveGuard(sessionID string, fenced func(*session.Instance)) sessionTeardownGuard {
 	return func(current *session.Instance) error {
-		switch {
-		case current == nil || current.ID != sessionID:
-			return fmt.Errorf("session %s was replaced", sessionID)
-		case current.BacklogRunActive():
-			return errors.New("a new run started")
-		case current.GetLiveness() != session.LiveReady:
-			return errors.New("the session is not idle")
-		case current.AdoptionDeliveries() != current.AdoptionDeliveriesAtRunEnd():
-			return errors.New("a prompt reached the session after its run ended")
-		case current.LastPaneChurnAt().After(current.BacklogRunEndedAt()):
-			return errors.New("the session changed after its run ended")
+		if current == nil || current.ID != sessionID {
+			return backlogArchiveCheck(sessionID, current, 0)
+		}
+		deliveries := current.CloseAdoptionFence()
+		fenced(current)
+		if err := backlogArchiveCheck(sessionID, current, deliveries); err != nil {
+			current.ReopenAdoptionFence()
+			return err
 		}
 		return nil
 	}
