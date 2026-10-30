@@ -36,7 +36,8 @@ import (
 //     for the same non-answer.
 //
 // This is a positive gate in ExistsOrUnknown's sense, so it takes the
-// tri-state probe (probeRestoredTabSession, ProbeSession in production) and
+// tri-state probe (probeRestoredTabSession, ProbeSessionForRestore in production: an unlinked
+// socket under a possibly-live server is unknown, not absent, #6254) and
 // handles !known itself (#1917/#1962). No state re-executes the command,
 // which is the only outcome this path must exclude. All failures here are
 // warnings — a process tab's failure mode is inert, and aborting setupTabs over
