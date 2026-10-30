@@ -103,7 +103,11 @@ func VerifyArchiveOccupant(worktreePath, recordedNonce string, archivedAt time.T
 //     reports ignored files inside one, so each is probed itself, recursively.
 func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 	var reasons []string
-	if err := probeUnrecoverable(worktreePath, "", 0, &reasons); err != nil {
+	leaf, err := registrationLeaf(worktreePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := probeUnrecoverable(worktreePath, "", 0, leaf, &reasons); err != nil {
 		return nil, err
 	}
 	return reasons, nil
@@ -111,7 +115,7 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 
 const maxSubmoduleDepth = 8
 
-func probeUnrecoverable(dir, label string, depth int, reasons *[]string) error {
+func probeUnrecoverable(dir, label string, depth int, leaf string, reasons *[]string) error {
 	if depth > maxSubmoduleDepth {
 		return fmt.Errorf("submodules under %s nest deeper than %d levels", dir, maxSubmoduleDepth)
 	}
@@ -167,7 +171,18 @@ func probeUnrecoverable(dir, label string, depth int, reasons *[]string) error {
 		if label != "" {
 			next = label + "/" + sub
 		}
-		if err := probeUnrecoverable(subDir, next, depth+1, reasons); err != nil {
+		// A submodule's object database can live UNDER the registration leaf
+		// (.git/worktrees/<id>/modules/…), and removing the leaf would delete the
+		// only copy of commits the kept branch references only as gitlink hashes.
+		// Refuse rather than prove every referenced commit survives elsewhere.
+		subGitDir, err := runBoundedWorktreeGit(subDir, true, "--no-optional-locks", "rev-parse", "--absolute-git-dir")
+		if err != nil {
+			return fmt.Errorf("could not locate the git directory of submodule %s: %w", next, err)
+		}
+		if within(strings.TrimSpace(string(subGitDir)), leaf) {
+			*reasons = append(*reasons, fmt.Sprintf("submodule %s keeps its object database inside this worktree's registration (%s), which pruning removes — its commits may exist nowhere else; push or relocate the submodule's git directory first", next, strings.TrimSpace(string(subGitDir))))
+		}
+		if err := probeUnrecoverable(subDir, next, depth+1, leaf, reasons); err != nil {
 			return err
 		}
 	}
@@ -211,36 +226,68 @@ func WorktreeHeadMatchesBranch(worktreePath, repoRoot, branch string) (string, e
 	return h, nil
 }
 
-// RemoveArchivedRegistrationLeaf removes the registration leaf of the archived
-// worktree that used to live at oldPath, and ONLY that leaf. `git worktree prune`
-// would drop every stale registration in the repository, including other
-// sessions' (a user's unmounted worktree); this removes exactly the one whose
-// gitdir names oldPath and refuses a locked one. A leaf already gone is success.
-func RemoveArchivedRegistrationLeaf(repoRoot, oldPath string) error {
+// pruneNonceFile is stamped into the registration leaf just before prune records
+// its intent, so a later resume can prove a leaf is the one prune meant to remove.
+const pruneNonceFile = "af-prune-nonce"
+
+// StampPruneNonce writes a fresh prune nonce into the worktree's registration leaf
+// and returns the leaf's name (its directory under <repo>/.git/worktrees) and the
+// nonce. Both go into the durable intent.
+func StampPruneNonce(worktreePath string) (leafName, nonce string, err error) {
+	leaf, err := registrationLeaf(worktreePath)
+	if err != nil {
+		return "", "", err
+	}
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", "", err
+	}
+	nonce = hex.EncodeToString(raw[:])
+	if err := os.WriteFile(filepath.Join(leaf, pruneNonceFile), []byte(nonce+"\n"), 0o600); err != nil {
+		return "", "", fmt.Errorf("could not stamp the prune nonce: %w", err)
+	}
+	return filepath.Base(leaf), nonce, nil
+}
+
+// ErrRegistrationNotOurs marks a registration at the recorded leaf that is not
+// the one prune recorded (a different worktree now occupies the name).
+var ErrRegistrationNotOurs = fmt.Errorf("the registration at the recorded leaf is not the pruned worktree's")
+
+// RemoveArchivedRegistrationLeaf removes the registration leaf prune recorded, and
+// ONLY that leaf, and only when it still carries the recorded nonce. `git worktree
+// prune` would drop every stale registration in the repository, including other
+// sessions'; a path-only match would drop a replacement that now occupies the
+// original path. A leaf already gone is success; one that does not match is left
+// alone and reported as ErrRegistrationNotOurs; a locked one is refused.
+func RemoveArchivedRegistrationLeaf(repoRoot, leafName, nonce string) error {
+	if leafName == "" || nonce == "" || leafName != filepath.Base(leafName) {
+		return fmt.Errorf("no recorded registration to remove")
+	}
 	meta, err := resolveRepoMetadataRoot(repoRoot)
 	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(filepath.Join(meta, "worktrees"))
-	if err != nil {
+	leaf := filepath.Join(meta, "worktrees", leafName)
+	if _, err := os.Lstat(leaf); err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	want := filepath.Clean(oldPath) + "/.git"
-	for _, e := range entries {
-		leaf := filepath.Join(meta, "worktrees", e.Name())
-		raw, err := os.ReadFile(filepath.Join(leaf, "gitdir"))
-		if err != nil || filepath.Clean(strings.TrimSpace(string(raw))) != filepath.Clean(want) {
-			continue
-		}
-		if _, err := os.Lstat(filepath.Join(leaf, "locked")); err == nil {
-			return fmt.Errorf("registration %s is locked — refusing to remove it", leaf)
-		}
-		return os.RemoveAll(leaf)
+	got, err := os.ReadFile(filepath.Join(leaf, pruneNonceFile))
+	if err != nil || strings.TrimSpace(string(got)) != nonce {
+		return fmt.Errorf("%w (%s)", ErrRegistrationNotOurs, leaf)
 	}
-	return nil
+	if _, err := os.Lstat(filepath.Join(leaf, "locked")); err == nil {
+		return fmt.Errorf("registration %s is locked — refusing to remove it", leaf)
+	}
+	return os.RemoveAll(leaf)
+}
+
+// within reports whether path is dir or lies beneath it.
+func within(path, dir string) bool {
+	path, dir = filepath.Clean(path), filepath.Clean(dir)
+	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
 }
 
 func sampleList(sample []string, total int) string {

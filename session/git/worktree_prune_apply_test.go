@@ -59,33 +59,49 @@ func TestUnrecoverableContentSeesHidingFlags(t *testing.T) {
 }
 
 // BLOCKING (round 9): an ignored file inside an initialized submodule is invisible
-// to the superproject's status.
+// to the superproject's status, so each submodule is probed itself.
 func TestUnrecoverableContentSeesIgnoredFilesInSubmodules(t *testing.T) {
 	sub := newPruneGuardRepo(t)
-	repo, wt := pruneWorktree(t)
+	_, wt := pruneWorktree(t)
 	gitIn(t, wt, "submodule", "add", sub, "mod")
 	gitIn(t, wt, "commit", "-qm", "add submodule")
-	require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", ".gitignore"), []byte("secret.env\n"), 0o644))
-	gitIn(t, filepath.Join(wt, "mod"), "add", ".gitignore")
-	gitIn(t, filepath.Join(wt, "mod"), "commit", "-qm", "ignore")
-	gitIn(t, wt, "add", "mod")
-	gitIn(t, wt, "commit", "-qm", "bump")
-	_ = repo
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", "secret.env"), []byte("only copy"), 0o644))
 
 	reasons, err := WorktreeUnrecoverableContent(wt)
 	require.NoError(t, err)
-	require.Empty(t, reasons, "premise: a clean submodule is reclaimable")
+	assert.Contains(t, strings.Join(reasons, " "), "submodule mod")
+	assert.Contains(t, strings.Join(reasons, " "), "secret.env")
+}
 
-	require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", "secret.env"), []byte("only copy"), 0o644))
+// P1 (Codex on #6186): in a linked worktree a submodule's object database lives
+// under the registration leaf (.git/worktrees/<id>/modules/…). The kept branch
+// holds only the gitlink hash, so removing the leaf would destroy submodule
+// commits that exist nowhere else. A clean worktree with such a submodule must be
+// refused, naming the submodule.
+func TestUnrecoverableContentRefusesASubmoduleWhoseObjectsLiveInTheRegistration(t *testing.T) {
+	sub := newPruneGuardRepo(t)
+	_, wt := pruneWorktree(t)
+	gitIn(t, wt, "submodule", "add", sub, "mod")
+	// A submodule commit that exists nowhere else.
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", "local-only.txt"), []byte("only here"), 0o644))
+	gitIn(t, filepath.Join(wt, "mod"), "add", "local-only.txt")
+	gitIn(t, filepath.Join(wt, "mod"), "commit", "-qm", "submodule-only commit")
+	gitIn(t, wt, "add", "mod")
+	gitIn(t, wt, "commit", "-qm", "bump submodule")
+
 	n, err := WorktreeDirtyFiles(wt)
 	require.NoError(t, err)
-	require.Zero(t, n, "premise: the superproject's status does not see an ignored file in the submodule")
+	require.Zero(t, n, "premise: the worktree reads clean")
+	gitDir := gitIn(t, filepath.Join(wt, "mod"), "rev-parse", "--absolute-git-dir")
+	leaf, err := registrationLeaf(wt)
+	require.NoError(t, err)
+	require.True(t, within(gitDir, leaf), "premise: the submodule's objects live under the registration leaf: %s", gitDir)
 
-	reasons, err = WorktreeUnrecoverableContent(wt)
+	reasons, err := WorktreeUnrecoverableContent(wt)
 	require.NoError(t, err)
 	require.NotEmpty(t, reasons)
 	assert.Contains(t, strings.Join(reasons, " "), "submodule mod")
-	assert.Contains(t, strings.Join(reasons, " "), "secret.env")
+	assert.Contains(t, strings.Join(reasons, " "), "registration")
 }
 
 // BLOCKING (round 9): the occupant is bound by an af-owned nonce. A worktree
@@ -132,27 +148,39 @@ func TestWorktreeHeadMatchesBranch(t *testing.T) {
 	require.Error(t, err, "a commit only the detached HEAD references is not on the kept branch")
 }
 
-// Only the archived worktree's own leaf is removed; another session's stale
-// registration (which `git worktree prune` would drop) stays.
-func TestRemoveArchivedRegistrationLeafIsScoped(t *testing.T) {
+// Only the recorded leaf is removed, and only while it still carries the recorded
+// nonce: another session's stale registration (which `git worktree prune` would
+// drop) stays, and a replacement that now occupies the same path is left alone.
+func TestRemoveArchivedRegistrationLeafIsBoundToTheRecordedOccupant(t *testing.T) {
 	repo, wt := pruneWorktree(t)
 	other := filepath.Join(t.TempDir(), "other")
 	gitIn(t, repo, "worktree", "add", "-b", "af/other", other)
 	require.NoError(t, os.RemoveAll(other)) // now stale, as an unmounted worktree would be
 
+	leafName, nonce, err := StampPruneNonce(wt)
+	require.NoError(t, err)
 	moved := wt + "-moved"
 	require.NoError(t, os.Rename(wt, moved))
-	require.NoError(t, RemoveArchivedRegistrationLeaf(repo, wt))
+	require.NoError(t, RemoveArchivedRegistrationLeaf(repo, leafName, nonce))
 	list := gitIn(t, repo, "worktree", "list", "--porcelain")
 	assert.NotContains(t, list, wt)
 	assert.Contains(t, list, other, "another session's registration is not ours to drop")
-	require.NoError(t, RemoveArchivedRegistrationLeaf(repo, wt), "a second removal is a no-op")
+	require.NoError(t, RemoveArchivedRegistrationLeaf(repo, leafName, nonce), "a leaf already gone is done")
+
+	// A replacement now occupies the original path and the same leaf name: it is
+	// not the recorded occupant, so it is left alone.
+	gitIn(t, repo, "worktree", "add", wt, "af/p")
+	err = RemoveArchivedRegistrationLeaf(repo, leafName, nonce)
+	require.ErrorIs(t, err, ErrRegistrationNotOurs)
+	assert.Contains(t, gitIn(t, repo, "worktree", "list", "--porcelain"), wt, "the replacement stays registered")
 
 	locked := filepath.Join(t.TempDir(), "locked")
 	gitIn(t, repo, "worktree", "add", "-b", "af/locked", locked)
+	lname, lnonce, err := StampPruneNonce(locked)
+	require.NoError(t, err)
 	gitIn(t, repo, "worktree", "lock", locked)
 	require.NoError(t, os.Rename(locked, locked+"-moved"))
-	require.Error(t, RemoveArchivedRegistrationLeaf(repo, locked), "a locked registration is refused")
+	require.Error(t, RemoveArchivedRegistrationLeaf(repo, lname, lnonce), "a locked registration is refused")
 }
 
 // A bare origin keeps refs at its root: the branch probe must find a live branch

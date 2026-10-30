@@ -248,6 +248,13 @@ func (m *Manager) pruneApplyOne(c PruneCandidate, cutoff time.Time) (*PrunedEntr
 		Nonce: instance.ArchiveNonce(), At: time.Now(),
 	}
 	if fresh.head != "" { // an out-of-band-deleted tree has nothing to rename
+		// Stamp the registration while the occupant is still the verified one; the
+		// intent carries the stamp so resume can prove which leaf is ours.
+		leafName, leafNonce, err := sessiongit.StampPruneNonce(wt)
+		if err != nil {
+			return skip(fmt.Sprintf("could not mark the worktree's registration, so nothing was touched: %v", err))
+		}
+		intent.LeafName, intent.LeafNonce = leafName, leafNonce
 		intent.TombstonePath = filepath.Join(filepath.Dir(wt), ".prune-"+shortPruneID(data.ID)+"-"+randomSuffix())
 	}
 
@@ -307,8 +314,10 @@ func (m *Manager) pruneFinish(repoID string, instance *session.Instance, intent 
 	if err := pruneStep("leaf"); err != nil {
 		return "leaf", err
 	}
-	if err := sessiongit.RemoveArchivedRegistrationLeaf(repoPath, intent.WorktreePath); err != nil {
-		return "leaf", fmt.Errorf("could not remove the worktree registration: %w", err)
+	if intent.LeafName != "" { // none when the tree was already gone out of band
+		if err := sessiongit.RemoveArchivedRegistrationLeaf(repoPath, intent.LeafName, intent.LeafNonce); err != nil {
+			return "leaf", fmt.Errorf("could not remove the worktree registration: %w", err)
+		}
 	}
 	if err := pruneStep("remove"); err != nil {
 		return "remove", err

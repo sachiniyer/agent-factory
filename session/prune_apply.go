@@ -22,6 +22,11 @@ type PruneIntentData struct {
 	Head          string `json:"head"`
 	Branch        string `json:"branch"`
 	Nonce         string `json:"nonce,omitempty"`
+	// LeafName and LeafNonce identify the registration prune removes: the leaf's
+	// directory name and the nonce stamped into it before the intent was written.
+	// Resume removes a leaf only if it still carries LeafNonce.
+	LeafName  string `json:"leaf_name,omitempty"`
+	LeafNonce string `json:"leaf_nonce,omitempty"`
 	// Renamed is set once the rename happened and was persisted, so a resume knows
 	// which side of step 5 it is on without guessing from the filesystem alone.
 	Renamed bool      `json:"renamed,omitempty"`

@@ -259,3 +259,34 @@ func TestPruneApply_OnlyWithoutApplyIsRejected(t *testing.T) {
 func sessionIntent(worktree, tomb string) session.PruneIntentData {
 	return session.PruneIntentData{WorktreePath: worktree, TombstonePath: tomb}
 }
+
+// P1 (Codex on #6186): after a crash between removing the registration and
+// tombstoning, another worktree can occupy the original path (even under the same
+// leaf name). Resume must not remove a registration it cannot prove is the
+// recorded one, and must not touch the replacement.
+func TestPruneApply_ResumeNeverRemovesAReoccupyingWorktreesRegistration(t *testing.T) {
+	manager, repoID, repoPath, inst, archived := seedPrunableArchive(t, "reoccupied")
+	c := planOf(t, manager, repoID)
+	pruneStepHook = func(step string) error {
+		if step == "remove" { // after the leaf is gone, before the tree is deleted
+			return errPruneCrash
+		}
+		return nil
+	}
+	t.Cleanup(func() { pruneStepHook = nil })
+	_, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	pruneStepHook = nil
+	require.Len(t, tombstones(t, archived), 1)
+
+	// Another worktree takes the original path on the kept branch (its registration
+	// may even reuse the original leaf's name).
+	gitOut(t, repoPath, "worktree", "add", archived, c.Branch)
+	require.NoError(t, os.WriteFile(filepath.Join(archived, "replacement.txt"), []byte("not ours"), 0o644))
+
+	entry, inc := manager.resumePruneIntent(repoID, inst)
+	_ = entry
+	_ = inc
+	assert.FileExists(t, filepath.Join(archived, "replacement.txt"), "the replacement worktree is untouched")
+	assert.Contains(t, gitOut(t, repoPath, "worktree", "list", "--porcelain"), archived, "and its registration stays")
+}
