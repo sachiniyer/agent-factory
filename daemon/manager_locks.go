@@ -16,6 +16,18 @@ import "sync"
 // established order is repoStartLock BEFORE m.mu (CreateSession holds the start
 // lock across its body and takes m.mu under it), so the reverse closes an ABBA
 // cycle — the #2006 lock-inversion class.
+//
+// GLOBAL LOCK ORDER for session lifecycle work (take left to right, release in
+// reverse; never take one to the LEFT of a lock already held):
+//
+//	per-session operation lock (opLockFor)
+//	  -> repository start lock (this lock)
+//	    -> repository worktree admission lock (worktreeAdmissionLockForRepo)
+//	      -> m.mu
+//
+// CreateSession takes start -> admission -> m.mu; kill and prune take op -> start;
+// prune therefore takes op -> start -> admission (lockForPrune), never admission
+// before start (#5189: that inversion deadlocks a prune against a create).
 func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()

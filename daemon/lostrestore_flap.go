@@ -80,14 +80,19 @@ func pruneLostRestoreConfirmations(times []time.Time, now time.Time) []time.Time
 // the probeAnsweredDead preserve-and-reap arm, which can otherwise burn
 // preserve-push retries forever before the bound is ever reached (#5238
 // review).
-func (m *Manager) lostRestoreFlapGiveUpIfBound(key, repoID, stateKey string, inst *session.Instance) bool {
+//
+// underAdmission is true for the final gate before a local respawn, which runs
+// holding the repository's worktree admission lock: the verdict is then written
+// without the start lock, which sits to the LEFT of admission in the documented
+// order (#6197).
+func (m *Manager) lostRestoreFlapGiveUpIfBound(key, repoID, stateKey string, inst *session.Instance, underAdmission bool) bool {
 	m.mu.Lock()
 	n := m.lostRestoreConfirmationCountLocked(stateKey, nowFunc())
 	m.mu.Unlock()
 	if n < lostRestoreFlapMaxRestores {
 		return false
 	}
-	m.lostRestoreFlapGiveUp(key, repoID, stateKey, inst, n)
+	m.lostRestoreFlapGiveUp(key, repoID, stateKey, inst, n, underAdmission)
 	return true
 }
 
@@ -97,7 +102,7 @@ func (m *Manager) lostRestoreFlapGiveUpIfBound(key, repoID, stateKey string, ins
 // with the flap-specific reason and the operator's explicit way back. The
 // in-memory flap history is kept: it IS the evidence, and nothing reads it
 // once the durable flag suppresses further restores anyway.
-func (m *Manager) lostRestoreFlapGiveUp(key, repoID, stateKey string, inst *session.Instance, confirmedRestores int) {
+func (m *Manager) lostRestoreFlapGiveUp(key, repoID, stateKey string, inst *session.Instance, confirmedRestores int, underAdmission bool) {
 	hint := shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, inst.Title)
 	flapErr := fmt.Errorf("the session was confirmed restored %d times in %s and went lost again each time — automatic restore is stopped; find out why the agent exits soon after launch, then bring it back with %s",
 		confirmedRestores, lostRestoreFlapWindow, hint)
@@ -113,7 +118,11 @@ func (m *Manager) lostRestoreFlapGiveUp(key, repoID, stateKey string, inst *sess
 	m.mu.Unlock()
 	m.err().Printf("restore of lost session %q (repo %s): giving up after %d confirmed restores in %s: %v",
 		inst.Title, repoID, confirmedRestores, lostRestoreFlapWindow, flapErr)
-	if persistErr := m.persistSettlement(repoID, key, inst); persistErr != nil {
+	persist := m.persistSettlement
+	if underAdmission {
+		persist = m.persistSettlementUnderAdmission
+	}
+	if persistErr := persist(repoID, key, inst); persistErr != nil {
 		m.warn().Printf("restore of lost session %q gave up in memory but its terminal state is not yet durable: %v", inst.Title, persistErr)
 	}
 }
