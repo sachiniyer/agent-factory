@@ -407,6 +407,19 @@ func ampFrameBottomRule(content string) (string, bool) {
 	return lastBottomRule, found
 }
 
+// PublishesWorkingContent reports whether IsWorkingContent can answer for agent:
+// it publishes an in-turn indicator the daemon can read off the pane. Only for
+// these agents is a changed pane NOT the evidence of work — a typed draft repaints
+// the composer too — so a caller that needs "the agent is working" asks
+// IsWorkingContent instead of the churn. Everything else has only the churn.
+func PublishesWorkingContent(agent string) bool {
+	switch agent {
+	case tmux.ProgramAmp, tmux.ProgramOpencode, tmux.ProgramClaude:
+		return true
+	}
+	return false
+}
+
 // IsWorkingContent reports whether the captured pane shows POSITIVE evidence
 // that the given agent is mid-turn — the agent itself saying "I am busy", not an
 // inference drawn from the pane changing.

@@ -128,6 +128,14 @@ func (m *Manager) clearAttentionOnInput(instance *session.Instance) {
 	m.queueAttentionClear(instance, seen.SetAt)
 }
 
+// answerAttentionByWork clears the open attention request when the agent shows
+// its own in-turn indicator after the idle spell the request waited out.
+func (m *Manager) answerAttentionByWork(instance *session.Instance) {
+	if setAt, ok := instance.AttentionAnsweredByWork(); ok {
+		m.queueAttentionClear(instance, setAt)
+	}
+}
+
 // queueAttentionClear schedules a keyed clear of the request set at setAt.
 // Keys name the request an answer saw, so a newer key always wins over a queued
 // older one: the older clear is already a no-op on the request that replaced
