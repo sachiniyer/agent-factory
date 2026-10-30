@@ -134,19 +134,43 @@ func (h backlogHost) Gate(repoID string) backlog.Gate {
 // backlogGate checks the gates for the account the project's item sessions
 // launch with, and returns that account.
 func (m *Manager) backlogGate(repoID string, budget backlog.Budget, usage planusage.Usage, now time.Time) (backlog.Gate, string) {
-	in := backlog.GateInput{Budget: budget, Now: now, Loc: time.Local}
 	account, err := m.itemAccount(repoID)
 	if err != nil {
-		in.NoAccount = err.Error()
-		return backlog.CheckGates(in), ""
+		return backlog.CheckGates(backlog.GateInput{Budget: budget, Now: now, Loc: time.Local, NoAccount: err.Error()}), ""
 	}
+	return m.backlogGateFor(account, budget, usage, now), account
+}
+
+// continuationAccount names the account an automatic start of item id would
+// spend: the account of its live session when it continues one (the work goes to
+// that session whatever the project's default is now), else "" (a new session,
+// which launches with the project's default account).
+func (m *Manager) continuationAccount(repoID string, b *backlog.Backlog, id int) string {
+	r := b.LatestRun(id)
+	if r == nil || r.State != backlog.RunStarted || r.SessionID == "" {
+		return ""
+	}
+	s, ok := m.itemSessions(repoID)[r.SessionID]
+	if !ok {
+		return ""
+	}
+	switch s.view.Liveness {
+	case session.LiveArchived, session.LiveDead, session.LiveLost:
+		return "" // restarted or replaced, not continued in place
+	}
+	return planAccount(s.instance.Account)
+}
+
+// backlogGateFor checks the gates for one named account.
+func (m *Manager) backlogGateFor(account string, budget backlog.Budget, usage planusage.Usage, now time.Time) backlog.Gate {
+	in := backlog.GateInput{Budget: budget, Now: now, Loc: time.Local}
 	in.Usage = usageFor(usage, account)
 	limited, until, err := m.claudeUsageLimit(account, now)
 	if err != nil {
 		in.LimitUnknown = err.Error()
 	}
 	in.Limited, in.LimitUntil = limited, until
-	return backlog.CheckGates(in), account
+	return backlog.CheckGates(in)
 }
 
 // itemAccount names the Claude account a new item session of the project

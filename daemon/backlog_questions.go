@@ -279,10 +279,12 @@ type backlogSubmitBinding struct {
 	ptyTabBinding
 	openQuestion func() int
 	submitted    func(questionID int)
+	// submit carries bracketed-paste state across the connection's frames.
+	submit *submitDetector
 }
 
 func (b backlogSubmitBinding) input(p []byte) error {
-	submit := isSubmittedInput(p)
+	submit := b.submit.Submitted(p) // every frame, so paste state stays current
 	questionID := 0
 	if submit {
 		questionID = b.openQuestion()

@@ -530,3 +530,23 @@ func TestAutomaticStartRevalidatesTheItemAtAdmission(t *testing.T) {
 		t.Fatalf("the drafted item was started: %+v", it)
 	}
 }
+
+// A continuation spends its own session's account, not the project default's
+// (Codex P2 on #6300).
+func TestContinuationAccountIsTheLiveSessionsAccount(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.continuationAccount(repoID, b, 1); got != planusage.DefaultAccount {
+		t.Fatalf("an ambient session continues on the ambient key, got %q", got)
+	}
+	inst.Account = "alt"
+	if got := m.continuationAccount(repoID, b, 1); got != "alt" {
+		t.Fatalf("got %q, want the session's own account", got)
+	}
+	if got := m.continuationAccount(repoID, b, 99); got != "" {
+		t.Fatalf("an item with no run starts a new session on the default: %q", got)
+	}
+}

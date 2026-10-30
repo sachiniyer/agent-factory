@@ -213,6 +213,13 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 		p = plan()
 	}
 	for _, id := range p.Start {
+		// A continuation spends its own session's account, whatever the project's
+		// default is now: that account's gates decide (Codex P2 on #6300).
+		if acct := m.continuationAccount(repoID, b, id); acct != "" {
+			if g := m.backlogGateFor(acct, *budget, usage, now); !g.Open() {
+				continue
+			}
+		}
 		_, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: id}, backlog.StartedByRunner)
 		if errors.Is(err, errSlotsFull) || errors.Is(err, errRunnerOff) {
 			break
