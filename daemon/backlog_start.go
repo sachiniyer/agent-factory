@@ -22,10 +22,20 @@ var createBacklogSession = func(m *Manager, ctx context.Context, req CreateSessi
 var validateBacklogCreate = validateCreateFirst
 
 // sendBacklogPrompt sends "continue" to an item's live session.
+//
+// A runtime that observed the prompt absent reports PromptNotDelivered with a
+// nil error; that is a failed continue, not a delivery, so it is returned as an
+// error and continueBacklogItem disarms the run and restores the item (Codex P2
+// on #6294).
 var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
-	_, err := m.SendPromptWithStatus(req)
+	status, err := m.SendPromptWithStatus(req)
+	if err == nil && status == session.PromptNotDelivered {
+		return errBacklogPromptNotDelivered
+	}
 	return err
 }
+
+var errBacklogPromptNotDelivered = errors.New("the agent did not take the prompt")
 
 func (s *controlServer) StartBacklogItem(req StartBacklogItemRequest, resp *StartBacklogItemResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
