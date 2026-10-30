@@ -199,7 +199,8 @@ func (m *Manager) clearAttentionNow(instance *session.Instance, setAt time.Time)
 }
 
 // attentionClearingBinding clears the session's attention request when the
-// user types into the agent pane.
+// user submits a line in the agent pane. A keystroke alone does not clear it,
+// so focusing the pane and typing a draft keeps the request.
 type attentionClearingBinding struct {
 	ptyTabBinding
 	instance *session.Instance
@@ -207,7 +208,7 @@ type attentionClearingBinding struct {
 }
 
 func (b attentionClearingBinding) input(p []byte) error {
-	// The keystroke answers the request set when it was sent, so capture it
+	// The submitted line answers the request set when it was sent, so capture it
 	// before transport: a request that lands while input is in flight is a
 	// different question and must survive this clear.
 	var answered time.Time
@@ -215,7 +216,7 @@ func (b attentionClearingBinding) input(p []byte) error {
 		answered = seen.SetAt
 	}
 	err := b.ptyTabBinding.input(p)
-	if err == nil && isTypedInput(p) && !answered.IsZero() {
+	if err == nil && isSubmittedInput(p) && !answered.IsZero() {
 		b.clear(answered)
 	}
 	return err
@@ -235,4 +236,28 @@ func isTypedInput(p []byte) bool {
 		return len(rest) > 0 && !bytes.Equal(rest, bracketedPasteEnd)
 	}
 	return len(p) > 0 && p[0] != 0x1b
+}
+
+// isSubmittedInput reports whether a typed frame ends a line: the user sent what
+// they typed. A newline inside a bracketed paste is part of the pasted text, not
+// a submission.
+func isSubmittedInput(p []byte) bool {
+	if !isTypedInput(p) {
+		return false
+	}
+	for len(p) > 0 {
+		if rest, ok := bytes.CutPrefix(p, bracketedPasteStart); ok {
+			_, after, found := bytes.Cut(rest, bracketedPasteEnd)
+			if !found {
+				return false
+			}
+			p = after
+			continue
+		}
+		if p[0] == '\r' || p[0] == '\n' {
+			return true
+		}
+		p = p[1:]
+	}
+	return false
 }

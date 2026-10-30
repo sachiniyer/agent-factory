@@ -6119,6 +6119,329 @@ WARNING: This link could potentially be dangerous`)) {
   }
 });
 
+// src/dom.ts
+function h(tag, props = {}, ...children) {
+  const el2 = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "class") {
+      el2.className = value;
+    } else {
+      el2[key] = value;
+    }
+  }
+  for (const child of children) {
+    el2.append(child);
+  }
+  return el2;
+}
+
+// src/terminal_ansi.ts
+var TERMINAL_ANSI = {
+  "light": {
+    "black": "#2E3440",
+    "red": "#944049",
+    "green": "#51693C",
+    "yellow": "#7C5A15",
+    "blue": "#426486",
+    "magenta": "#7F5478",
+    "cyan": "#2D6271",
+    "white": "#434C5E",
+    "brightBlack": "#000000",
+    "brightRed": "#76333A",
+    "brightGreen": "#415430",
+    "brightYellow": "#634811",
+    "brightBlue": "#35506B",
+    "brightMagenta": "#664360",
+    "brightCyan": "#244E5A",
+    "brightWhite": "#171A20"
+  },
+  "dark": {
+    "black": "#9D9D9D",
+    "red": "#D9B2B9",
+    "green": "#A3BE8C",
+    "yellow": "#EBCB8B",
+    "blue": "#81A1C1",
+    "magenta": "#B590AF",
+    "cyan": "#90C4D3",
+    "white": "#CCCCCC",
+    "brightBlack": "#B0B0B0",
+    "brightRed": "#E1C1C7",
+    "brightGreen": "#B5CBA3",
+    "brightYellow": "#EFD5A2",
+    "brightBlue": "#9AB4CD",
+    "brightMagenta": "#C4A6BF",
+    "brightCyan": "#A6D0DC",
+    "brightWhite": "#FFFFFF"
+  }
+};
+
+// src/theme.ts
+var THEME_CHOICES = ["light", "dark", "system"];
+var STORAGE_KEY = "af-theme";
+function connectionAttemptMayCommit(request, installedToken, candidate) {
+  return request.isCurrent() && installedToken === candidate;
+}
+function normalizeThemeChoice(value) {
+  return value === "light" || value === "dark" ? value : "system";
+}
+function readThemeChoice() {
+  try {
+    return normalizeThemeChoice(localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return "system";
+  }
+}
+function persistThemeChoice(choice) {
+  try {
+    localStorage.setItem(STORAGE_KEY, choice);
+  } catch {
+  }
+}
+function currentMode() {
+  const attr = document.documentElement.getAttribute("data-theme");
+  if (attr === "light" || attr === "dark") return attr;
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  } catch {
+    return "dark";
+  }
+}
+function surface(mode, token2 = "--af-surface") {
+  const probe = document.createElement("span");
+  probe.dataset.afTheme = mode;
+  probe.hidden = true;
+  document.documentElement.append(probe);
+  const color = getComputedStyle(probe).getPropertyValue(token2).trim();
+  probe.remove();
+  return color;
+}
+function themeSurfaces() {
+  const both = (mode) => [surface(mode), surface(mode, "--af-surface-raised")];
+  return { light: both("light"), dark: both("dark") };
+}
+function themeColorMetaContents(choice) {
+  return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
+}
+function refreshThemeMode() {
+  const mode = currentMode();
+  document.documentElement.dataset.afTheme = mode;
+  for (const chrome of document.querySelectorAll("[data-af-theme]")) chrome.dataset.afTheme = mode;
+  const colors = themeColorMetaContents(document.documentElement.hasAttribute("data-theme") ? mode : "system");
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
+  }
+}
+function stampTheme(choice) {
+  if (choice === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", choice);
+  refreshThemeMode();
+}
+function bootStampTheme() {
+  const choice = readThemeChoice();
+  stampTheme(choice);
+  return choice;
+}
+function xtermTheme(mode) {
+  return TERMINAL_ANSI[mode];
+}
+function currentXtermTheme() {
+  return xtermTheme(currentMode());
+}
+
+// src/recovery.ts
+function recoveryScreen(state) {
+  const action = h("button", { type: "button", class: "af-recovery-action" }, state.action);
+  action.addEventListener("click", state.run);
+  const screen = h(
+    "section",
+    { class: "af-recovery" },
+    h("h1", { class: state.failed ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.condition),
+    ...state.detail ? [h("p", { class: "af-recovery-detail" }, state.detail)] : [],
+    action
+  );
+  scopeRecovery(screen);
+  if (state.failed) screen.setAttribute("role", "alert");
+  return screen;
+}
+function mutationNotice(condition, detail, action, failed = true) {
+  return scopeRecovery(h(
+    "div",
+    { class: "af-recovery af-recovery-notice", role: "alert" },
+    h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
+    h("p", { class: "af-recovery-detail" }, detail),
+    h("p", { class: "af-recovery-next" }, action)
+  ));
+}
+function scopeRecovery(element) {
+  element.setAttribute("data-af-theme", currentMode());
+  return element;
+}
+function renderMutationOutcome(notice) {
+  if (notice.kind === "uncertain") {
+    return mutationNotice("Outcome not confirmed", notice.detail, "Check the session before acting.", false);
+  }
+  if (notice.kind === "confirmed") {
+    return mutationNotice("Operation completed", notice.detail, "Review the result before acting.", false);
+  }
+  return mutationNotice("Operation failed", notice.detail, "Check the error, then retry.");
+}
+function appendMutationOutcome(previous, next) {
+  return {
+    kind: previous?.kind === "uncertain" || next.kind === "uncertain" ? "uncertain" : previous?.kind === "confirmed" || next.kind === "confirmed" ? "confirmed" : "failed",
+    detail: [previous?.detail, next.detail].filter(Boolean).join("\n\n")
+  };
+}
+
+// src/route.ts
+function parseRoute(hash) {
+  const match = /^#\/session\/([^/]+)$/.exec(hash);
+  if (!match) return null;
+  try {
+    const session = decodeURIComponent(match[1]);
+    return session.trim() && !/[\x00-\x1f\x7f]/.test(session) ? { session } : null;
+  } catch {
+    return null;
+  }
+}
+function serializeRoute(route) {
+  return route?.session ? `#/session/${encodeURIComponent(route.session)}` : "";
+}
+var ROUTE_KEY = "af-session-route";
+function stashRoute(hash, storage) {
+  try {
+    const route = parseRoute(hash);
+    if (route) storage.setItem(ROUTE_KEY, serializeRoute(route));
+    else storage.removeItem(ROUTE_KEY);
+  } catch {
+  }
+}
+function restoreRoute(hash, storage) {
+  try {
+    const saved = storage.getItem(ROUTE_KEY);
+    storage.removeItem(ROUTE_KEY);
+    return hash || serializeRoute(parseRoute(saved ?? ""));
+  } catch {
+    return hash;
+  }
+}
+function replaceRoute(route) {
+  const hash = serializeRoute(route);
+  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
+}
+function sessionURL(id) {
+  return new URL("/" + serializeRoute({ session: id }), location.origin).href;
+}
+function restoreLoginRoute() {
+  try {
+    const hash = restoreRoute(location.hash, sessionStorage);
+    if (hash !== location.hash) history.replaceState(null, "", location.pathname + location.search + hash);
+  } catch {
+  }
+}
+function stashLoginRoute() {
+  try {
+    stashRoute(location.hash, sessionStorage);
+  } catch {
+  }
+}
+function clearLoginRoute() {
+  try {
+    sessionStorage.removeItem(ROUTE_KEY);
+  } catch {
+  }
+}
+
+// src/clipboard.ts
+function chordIsLetter(ev, letter, code) {
+  const typed = ev.key.toLowerCase();
+  if (typed.length === 1 && typed >= "a" && typed <= "z") {
+    return typed === letter;
+  }
+  return ev.code === code;
+}
+var ETX = "";
+var LF = "\n";
+function handleClipboardKeydown(ev, deps) {
+  if (ev.type !== "keydown") {
+    return true;
+  }
+  if (deps.composerNewline && ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    deps.sendUserInput(LF);
+    return false;
+  }
+  if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && chordIsLetter(ev, "c", "KeyC")) {
+    if (!deps.hasSelection()) {
+      return true;
+    }
+    ev.preventDefault();
+    deps.copy(deps.getSelection());
+    return false;
+  }
+  if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
+    return true;
+  }
+  if (chordIsLetter(ev, "v", "KeyV")) {
+    return false;
+  }
+  if (chordIsLetter(ev, "c", "KeyC")) {
+    if (ev.shiftKey) {
+      return true;
+    }
+    if (deps.hasSelection()) {
+      ev.preventDefault();
+      deps.copy(deps.getSelection());
+      deps.clearSelection();
+      return false;
+    }
+    ev.preventDefault();
+    deps.sendUserInput(ETX);
+    return false;
+  }
+  return true;
+}
+function handleTerminalCopy(ev, deps) {
+  if (!deps.hasSelection()) {
+    return false;
+  }
+  const text = deps.getSelection();
+  if (text === "") {
+    return false;
+  }
+  ev.preventDefault();
+  if (ev.clipboardData) {
+    ev.clipboardData.setData("text/plain", text);
+    return true;
+  }
+  deps.copy(text);
+  return true;
+}
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+  }
+  const previous = document.activeElement;
+  const input = document.createElement("textarea");
+  try {
+    input.className = "af-clipboard-fallback";
+    input.value = text;
+    input.readOnly = true;
+    document.body.append(input);
+    input.select();
+    input.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    input.remove();
+    if (previous instanceof HTMLElement) previous.focus();
+  }
+}
+
 // src/types.ts
 var Liveness = {
   Unset: 0,
@@ -6529,363 +6852,6 @@ function placementDetail(s) {
   }
   if (p.location) parts.push(p.location);
   return parts.filter(Boolean).join(" \xB7 ");
-}
-
-// src/attention_seen.ts
-function attentionSeen(state, paneExposed) {
-  if (!paneExposed || state.phase !== "app" || state.view !== "sessions" || state.selectedId === null) {
-    return null;
-  }
-  if (!state.openTabs.includes(0)) {
-    return null;
-  }
-  const s = state.sessions.find((x) => x.id === state.selectedId);
-  return s && hasAttention(s) ? state.selectedId : null;
-}
-function agentPaneExposed(doc, narrow) {
-  return doc.visibilityState === "visible" && doc.hasFocus() && doc.querySelector('[aria-modal="true"]') === null && !(narrow && doc.querySelector(".af-app.af-nav-open") !== null);
-}
-var AttentionClearer = class {
-  constructor(clear) {
-    this.clear = clear;
-  }
-  sent = /* @__PURE__ */ new Set();
-  note(state, paneExposed) {
-    const id = attentionSeen(state, paneExposed);
-    if (id === null) {
-      return;
-    }
-    const setAt = state.sessions.find((x) => x.id === id)?.attention?.set_at ?? "";
-    const key = `${id}@${setAt}`;
-    if (this.sent.has(key)) {
-      return;
-    }
-    this.sent.add(key);
-    this.clear(id, setAt).catch(() => this.sent.delete(key));
-  }
-};
-
-// src/dom.ts
-function h(tag, props = {}, ...children) {
-  const el2 = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (key === "class") {
-      el2.className = value;
-    } else {
-      el2[key] = value;
-    }
-  }
-  for (const child of children) {
-    el2.append(child);
-  }
-  return el2;
-}
-
-// src/terminal_ansi.ts
-var TERMINAL_ANSI = {
-  "light": {
-    "black": "#2E3440",
-    "red": "#944049",
-    "green": "#51693C",
-    "yellow": "#7C5A15",
-    "blue": "#426486",
-    "magenta": "#7F5478",
-    "cyan": "#2D6271",
-    "white": "#434C5E",
-    "brightBlack": "#000000",
-    "brightRed": "#76333A",
-    "brightGreen": "#415430",
-    "brightYellow": "#634811",
-    "brightBlue": "#35506B",
-    "brightMagenta": "#664360",
-    "brightCyan": "#244E5A",
-    "brightWhite": "#171A20"
-  },
-  "dark": {
-    "black": "#9D9D9D",
-    "red": "#D9B2B9",
-    "green": "#A3BE8C",
-    "yellow": "#EBCB8B",
-    "blue": "#81A1C1",
-    "magenta": "#B590AF",
-    "cyan": "#90C4D3",
-    "white": "#CCCCCC",
-    "brightBlack": "#B0B0B0",
-    "brightRed": "#E1C1C7",
-    "brightGreen": "#B5CBA3",
-    "brightYellow": "#EFD5A2",
-    "brightBlue": "#9AB4CD",
-    "brightMagenta": "#C4A6BF",
-    "brightCyan": "#A6D0DC",
-    "brightWhite": "#FFFFFF"
-  }
-};
-
-// src/theme.ts
-var THEME_CHOICES = ["light", "dark", "system"];
-var STORAGE_KEY = "af-theme";
-function connectionAttemptMayCommit(request, installedToken, candidate) {
-  return request.isCurrent() && installedToken === candidate;
-}
-function normalizeThemeChoice(value) {
-  return value === "light" || value === "dark" ? value : "system";
-}
-function readThemeChoice() {
-  try {
-    return normalizeThemeChoice(localStorage.getItem(STORAGE_KEY));
-  } catch {
-    return "system";
-  }
-}
-function persistThemeChoice(choice) {
-  try {
-    localStorage.setItem(STORAGE_KEY, choice);
-  } catch {
-  }
-}
-function currentMode() {
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light" || attr === "dark") return attr;
-  try {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  } catch {
-    return "dark";
-  }
-}
-function surface(mode, token2 = "--af-surface") {
-  const probe = document.createElement("span");
-  probe.dataset.afTheme = mode;
-  probe.hidden = true;
-  document.documentElement.append(probe);
-  const color = getComputedStyle(probe).getPropertyValue(token2).trim();
-  probe.remove();
-  return color;
-}
-function themeSurfaces() {
-  const both = (mode) => [surface(mode), surface(mode, "--af-surface-raised")];
-  return { light: both("light"), dark: both("dark") };
-}
-function themeColorMetaContents(choice) {
-  return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
-}
-function refreshThemeMode() {
-  const mode = currentMode();
-  document.documentElement.dataset.afTheme = mode;
-  for (const chrome of document.querySelectorAll("[data-af-theme]")) chrome.dataset.afTheme = mode;
-  const colors = themeColorMetaContents(document.documentElement.hasAttribute("data-theme") ? mode : "system");
-  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
-    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
-  }
-}
-function stampTheme(choice) {
-  if (choice === "system") document.documentElement.removeAttribute("data-theme");
-  else document.documentElement.setAttribute("data-theme", choice);
-  refreshThemeMode();
-}
-function bootStampTheme() {
-  const choice = readThemeChoice();
-  stampTheme(choice);
-  return choice;
-}
-function xtermTheme(mode) {
-  return TERMINAL_ANSI[mode];
-}
-function currentXtermTheme() {
-  return xtermTheme(currentMode());
-}
-
-// src/recovery.ts
-function recoveryScreen(state) {
-  const action = h("button", { type: "button", class: "af-recovery-action" }, state.action);
-  action.addEventListener("click", state.run);
-  const screen = h(
-    "section",
-    { class: "af-recovery" },
-    h("h1", { class: state.failed ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.condition),
-    ...state.detail ? [h("p", { class: "af-recovery-detail" }, state.detail)] : [],
-    action
-  );
-  scopeRecovery(screen);
-  if (state.failed) screen.setAttribute("role", "alert");
-  return screen;
-}
-function mutationNotice(condition, detail, action, failed = true) {
-  return scopeRecovery(h(
-    "div",
-    { class: "af-recovery af-recovery-notice", role: "alert" },
-    h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
-    h("p", { class: "af-recovery-detail" }, detail),
-    h("p", { class: "af-recovery-next" }, action)
-  ));
-}
-function scopeRecovery(element) {
-  element.setAttribute("data-af-theme", currentMode());
-  return element;
-}
-function renderMutationOutcome(notice) {
-  if (notice.kind === "uncertain") {
-    return mutationNotice("Outcome not confirmed", notice.detail, "Check the session before acting.", false);
-  }
-  if (notice.kind === "confirmed") {
-    return mutationNotice("Operation completed", notice.detail, "Review the result before acting.", false);
-  }
-  return mutationNotice("Operation failed", notice.detail, "Check the error, then retry.");
-}
-function appendMutationOutcome(previous, next) {
-  return {
-    kind: previous?.kind === "uncertain" || next.kind === "uncertain" ? "uncertain" : previous?.kind === "confirmed" || next.kind === "confirmed" ? "confirmed" : "failed",
-    detail: [previous?.detail, next.detail].filter(Boolean).join("\n\n")
-  };
-}
-
-// src/route.ts
-function parseRoute(hash) {
-  const match = /^#\/session\/([^/]+)$/.exec(hash);
-  if (!match) return null;
-  try {
-    const session = decodeURIComponent(match[1]);
-    return session.trim() && !/[\x00-\x1f\x7f]/.test(session) ? { session } : null;
-  } catch {
-    return null;
-  }
-}
-function serializeRoute(route) {
-  return route?.session ? `#/session/${encodeURIComponent(route.session)}` : "";
-}
-var ROUTE_KEY = "af-session-route";
-function stashRoute(hash, storage) {
-  try {
-    const route = parseRoute(hash);
-    if (route) storage.setItem(ROUTE_KEY, serializeRoute(route));
-    else storage.removeItem(ROUTE_KEY);
-  } catch {
-  }
-}
-function restoreRoute(hash, storage) {
-  try {
-    const saved = storage.getItem(ROUTE_KEY);
-    storage.removeItem(ROUTE_KEY);
-    return hash || serializeRoute(parseRoute(saved ?? ""));
-  } catch {
-    return hash;
-  }
-}
-function replaceRoute(route) {
-  const hash = serializeRoute(route);
-  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
-}
-function sessionURL(id) {
-  return new URL("/" + serializeRoute({ session: id }), location.origin).href;
-}
-function restoreLoginRoute() {
-  try {
-    const hash = restoreRoute(location.hash, sessionStorage);
-    if (hash !== location.hash) history.replaceState(null, "", location.pathname + location.search + hash);
-  } catch {
-  }
-}
-function stashLoginRoute() {
-  try {
-    stashRoute(location.hash, sessionStorage);
-  } catch {
-  }
-}
-function clearLoginRoute() {
-  try {
-    sessionStorage.removeItem(ROUTE_KEY);
-  } catch {
-  }
-}
-
-// src/clipboard.ts
-function chordIsLetter(ev, letter, code) {
-  const typed = ev.key.toLowerCase();
-  if (typed.length === 1 && typed >= "a" && typed <= "z") {
-    return typed === letter;
-  }
-  return ev.code === code;
-}
-var ETX = "";
-var LF = "\n";
-function handleClipboardKeydown(ev, deps) {
-  if (ev.type !== "keydown") {
-    return true;
-  }
-  if (deps.composerNewline && ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-    ev.preventDefault();
-    deps.sendUserInput(LF);
-    return false;
-  }
-  if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && chordIsLetter(ev, "c", "KeyC")) {
-    if (!deps.hasSelection()) {
-      return true;
-    }
-    ev.preventDefault();
-    deps.copy(deps.getSelection());
-    return false;
-  }
-  if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
-    return true;
-  }
-  if (chordIsLetter(ev, "v", "KeyV")) {
-    return false;
-  }
-  if (chordIsLetter(ev, "c", "KeyC")) {
-    if (ev.shiftKey) {
-      return true;
-    }
-    if (deps.hasSelection()) {
-      ev.preventDefault();
-      deps.copy(deps.getSelection());
-      deps.clearSelection();
-      return false;
-    }
-    ev.preventDefault();
-    deps.sendUserInput(ETX);
-    return false;
-  }
-  return true;
-}
-function handleTerminalCopy(ev, deps) {
-  if (!deps.hasSelection()) {
-    return false;
-  }
-  const text = deps.getSelection();
-  if (text === "") {
-    return false;
-  }
-  ev.preventDefault();
-  if (ev.clipboardData) {
-    ev.clipboardData.setData("text/plain", text);
-    return true;
-  }
-  deps.copy(text);
-  return true;
-}
-async function copyText(text) {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-  }
-  const previous = document.activeElement;
-  const input = document.createElement("textarea");
-  try {
-    input.className = "af-clipboard-fallback";
-    input.value = text;
-    input.readOnly = true;
-    document.body.append(input);
-    input.select();
-    input.setSelectionRange(0, text.length);
-    return document.execCommand("copy");
-  } catch {
-    return false;
-  } finally {
-    input.remove();
-    if (previous instanceof HTMLElement) previous.focus();
-  }
 }
 
 // src/backends.ts
@@ -7603,6 +7569,17 @@ var ArrowRight = [
   ["path", { d: "m12 5 7 7-7 7" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/bell.mjs
+var Bell = [
+  ["path", { d: "M10.268 21a2 2 0 0 0 3.464 0" }],
+  [
+    "path",
+    {
+      d: "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"
+    }
+  ]
+];
+
 // node_modules/lucide/dist/esm/icons/bot.mjs
 var Bot = [
   ["path", { d: "M12 8V4H8" }],
@@ -7812,6 +7789,7 @@ var ICONS = {
   archive: Archive,
   "archive-restore": ArchiveRestore,
   "arrow-right": ArrowRight,
+  bell: Bell,
   bot: Bot,
   check: Check,
   "chevron-down": ChevronDown,
@@ -8055,8 +8033,27 @@ function terminalChrome(opts) {
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  const attention = attentionChip(opts.clearAttention);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+}
+function attentionChip(onDismiss) {
+  const label = h("span", { class: "af-term-attention-label" }, "Attention");
+  const dismiss = h("button", { type: "button", class: "af-term-attention-dismiss", title: "Dismiss attention request" }, icon("x"));
+  dismiss.setAttribute("aria-label", "Dismiss attention request");
+  dismiss.addEventListener("click", (event) => {
+    event.stopPropagation();
+    dismiss.blur();
+    onDismiss();
+  });
+  const el2 = h("div", { class: "af-term-attention", role: "status" }, icon("bell", "af-term-attention-bell"), label, dismiss);
+  el2.hidden = true;
+  const patch = (on, reason) => {
+    el2.hidden = !on;
+    const title = reason ? `Needs attention: ${reason}` : "Needs attention";
+    if (el2.title !== title) el2.title = title;
+  };
+  return { el: el2, dismiss, patch };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -18194,6 +18191,7 @@ var AppShell = class {
   // treatment, and for the same reason, as lifecycleBtn above: a session hits the
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
+  attentionChip = null;
   retryBtn = null;
   retryKind = null;
   // The "Mark delivered" button and whether it is currently shown (#4429). Same
@@ -19027,6 +19025,7 @@ var AppShell = class {
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
+      this.attentionChip = null;
       this.archiveWarning = null;
       this.headActions = null;
       this.headActionSig = "";
@@ -19072,11 +19071,13 @@ var AppShell = class {
       },
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
+      clearAttention: () => this.actions.clearAttention(),
       closePane: () => this.actions.closePane?.(),
       fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta)
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
+    this.attentionChip = chrome.attention;
     this.retryBtn = chrome.retry;
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
@@ -19519,6 +19520,7 @@ var AppShell = class {
     if (this.terminalChrome) {
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
+    this.attentionChip?.patch(hasAttention(selected), attentionReason(selected));
     const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
@@ -19931,13 +19933,6 @@ var pendingRestores = new PendingRestores(
   requestPendingRestoreResync
 );
 var connectionGate = createLatestRequestGate();
-var attentionClearer = new AttentionClearer(
-  (id, setAt) => token === null ? Promise.reject(new Error("not authorized")) : clearAttention(id, setAt, token)
-);
-var narrowViewport = window.matchMedia("(max-width: 768px)");
-function noteAttentionSeen() {
-  attentionClearer.note(store.get(), agentPaneExposed(document, narrowViewport.matches));
-}
 var loadHosts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token).then((catalog) => catalog.hosts ?? []);
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
@@ -19978,11 +19973,6 @@ function mount() {
   restoreLoginRoute();
   window.addEventListener("hashchange", resolveRoute);
   store.subscribe(rerender);
-  store.subscribe(noteAttentionSeen);
-  window.addEventListener("focus", noteAttentionSeen);
-  document.addEventListener("visibilitychange", noteAttentionSeen);
-  document.addEventListener("focusin", noteAttentionSeen);
-  narrowViewport.addEventListener("change", noteAttentionSeen);
   rerender();
   document.addEventListener("keydown", onKeydown, true);
   document.addEventListener("keyup", (e) => tabShortcutRepeat.release(e.code), true);
@@ -21525,6 +21515,15 @@ function doTriggerTask(task) {
     surfaceTabError(e);
   });
 }
+function doClearAttention() {
+  const sel = selectedSessionData();
+  const tok = token;
+  const setAt = sel?.attention?.set_at;
+  if (!sel || tok === null || !setAt) {
+    return;
+  }
+  void clearAttention(sel.id ?? "", setAt, tok).catch(surfaceTabError);
+}
 function doRetryLimit() {
   const sel = selectedSession2();
   const tok = token;
@@ -21674,13 +21673,11 @@ var actions = {
   archive: (session) => openConfirm("archive", session),
   restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  clearAttention: doClearAttention,
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
-  layoutChanged: () => {
-    splitView.refit();
-    noteAttentionSeen();
-  },
+  layoutChanged: () => splitView.refit(),
   closePane: () => splitView.closeFocusedPane(),
   openTab,
   newTab: createSessionTab,
@@ -22137,6 +22134,7 @@ if (document.readyState === "loading") {
 lucide/dist/esm/icons/archive-restore.mjs:
 lucide/dist/esm/icons/archive.mjs:
 lucide/dist/esm/icons/arrow-right.mjs:
+lucide/dist/esm/icons/bell.mjs:
 lucide/dist/esm/icons/bot.mjs:
 lucide/dist/esm/icons/check.mjs:
 lucide/dist/esm/icons/chevron-down.mjs:

@@ -76,9 +76,11 @@ such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` add context.
 
 Agents learn `af sessions attention --self` from the af skill, and run it only when
 they are blocked on a decision or question that only you can answer. The yellow
-circle clears when you type into the agent pane, view the agent tab, or when the
-agent starts work again after it went idle. When your system asks for reduced
-motion, it does not blink and has a ring around it. The TUI rail does not show the
+circle clears when you submit a line in the agent pane, dismiss it with the **×** on
+the **Attention** chip in the session header, or when the agent starts work again
+after it went idle. Typing a draft or just viewing the tab does not clear it. When
+your system asks for reduced motion, the circle does not blink and has a ring
+around it, and the chip's bell is still. The TUI rail does not show the
 request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
 
 The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting

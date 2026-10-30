@@ -74,3 +74,24 @@ func TestClearAttentionOnInputDoesNotWaitForTheRepoStartLock(t *testing.T) {
 	pending[2]()
 	require.False(t, inst.HasAttention(), "the in-flight clear also clears the request the later key saw")
 }
+
+func TestIsSubmittedInputNeedsAnEnterOutsideAPaste(t *testing.T) {
+	cases := map[string]bool{
+		"h":                                    false,
+		"\x7f":                                 false,
+		"\x03":                                 false,
+		"\x1b[I":                               false,
+		"\r":                                   true,
+		"\n":                                   true,
+		"yes\r":                                true,
+		"\x1b[200~line one\nline two\x1b[201~": false,
+		"\x1b[200~line\x1b[201~\r":             true,
+		"\x1b[200~unterminated\n":              false,
+		"":                                     false,
+	}
+	for in, want := range cases {
+		if got := isSubmittedInput([]byte(in)); got != want {
+			t.Errorf("isSubmittedInput(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
