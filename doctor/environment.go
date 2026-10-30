@@ -44,8 +44,9 @@ func checkConfigAndStorage(ctx *scanContext, report *Report) *config.Config {
 	return cfg
 }
 
-func checkEnvironment(_ *scanContext, report *Report, cfg *config.Config) {
+func checkEnvironment(ctx *scanContext, report *Report, cfg *config.Config) {
 	checkTmuxEnvironment(report)
+	checkTmuxServerState(ctx.opts.ConfigDir, report)
 	checkAgentBinaries(cfg, report)
 }
 
@@ -225,4 +226,28 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 		}
 	}
 	report.AddHeader("agents", strings.Join(header, ", "))
+}
+
+// checkTmuxServerState reports how the daemon is hosting its sessions (#6180) and
+// what ended the last dedicated server (#5429). Both come from files the daemon
+// writes, so a host that never ran the Linux daemon has neither and says nothing.
+func checkTmuxServerState(home string, report *Report) {
+	if home == "" {
+		return
+	}
+	state, ok, err := tmux.ReadServerState(home)
+	switch {
+	case err != nil:
+		report.Warn(sectionEnvironment, "tmux server", fmt.Sprintf("could not read the daemon's tmux server record: %v", err),
+			"delete tmux-server-state.json in the AF home; the daemon rewrites it", false)
+	case ok && state.Mode == tmux.ServerModeFallback:
+		report.Warn(sectionEnvironment, "tmux server",
+			fmt.Sprintf("the dedicated tmux server could not be launched (%s), so sessions run in per-session systemd scopes on the shared socket %s: any plain `tmux` on this machine reaches every session, `kill-server` included", state.Reason, state.Socket),
+			"see tmux-server.log in the AF home; when the cause is gone the daemon launches a dedicated server again once no tmux server is running. For your own tmux use `env -u TMUX tmux -S <your own socket>`", true)
+	case ok:
+		report.Pass(sectionEnvironment, "tmux server", fmt.Sprintf("dedicated, unit %s.scope, socket %s", state.Unit, state.Socket))
+	}
+	if death, found, derr := tmux.ReadServerDeath(home); derr == nil && found {
+		report.Info(sectionEnvironment, "tmux server last exit", death.Describe())
+	}
 }

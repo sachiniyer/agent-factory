@@ -28,7 +28,11 @@ func shSingleQuote(s string) string {
 // `exec -a 'af --daemon af-test' sleep 60` recipe jammed everything into a
 // single argv[0], so it could never test real boundary handling.
 //
-// It returns only once the fake is ready to be classified: see waitForFakeDaemon.
+// It returns once the crafted argv is visible, and no further: a caller that
+// classifies or binds the fake BY HOME (StopDaemon's PID binding,
+// classifyDaemonHome) must use spawnFakeDaemonHomeProc, which also waits for the
+// environ. Keeping the environ out of this one means an argv-only caller never
+// depends on environ access (#6195).
 //
 // The underlying program is bash running `script`. `script` MUST be a compound
 // command (contain a `;`, a loop, etc.) so bash's single-simple-command exec
@@ -37,6 +41,17 @@ func shSingleQuote(s string) string {
 // — bash dies by the test's SIGTERM/SIGKILL, orphaning any `sleep` child in the
 // group.
 func spawnFakeDaemonProc(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
+	t.Helper()
+	cmd := fakeDaemonCmd(t, argv0, script, extraArgs...)
+	testguard.StartGroupProcess(t, cmd)
+	waitForFakeDaemonArgv(t, cmd, argv0)
+	return cmd
+}
+
+// spawnFakeDaemonHomeProc is spawnFakeDaemonProc for a caller that classifies the
+// fake by home: it returns only once the environ is readable too, or skips the
+// test when this host will not let the test read it. See waitForFakeDaemon.
+func spawnFakeDaemonHomeProc(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
 	t.Helper()
 	cmd := fakeDaemonCmd(t, argv0, script, extraArgs...)
 	testguard.StartGroupProcess(t, cmd)
@@ -70,11 +85,12 @@ func fakeDaemonCmd(t *testing.T, argv0, script string, extraArgs ...string) *exe
 // fakeDaemonHomeKey is the variable daemon scoping reads from a process's environ.
 const fakeDaemonHomeKey = "AGENT_FACTORY_HOME"
 
-// waitForFakeDaemon blocks until cmd's fake daemon can be classified: its argv is
-// the one it was built to expose AND its environ is readable and agrees with the
-// environment it was started with. Every test that starts a fake daemon must wait
-// here (never on argv alone) before anything classifies or binds it, because
-// classification is by home (classifyDaemonHome, StopDaemon's PID binding).
+// waitForFakeDaemon blocks until cmd's fake daemon can be classified BY HOME: its
+// argv is the one it was built to expose AND its environ is readable and agrees
+// with the environment it was started with. A test that classifies or binds the
+// fake by home (classifyDaemonHome, StopDaemon's PID binding) must wait here
+// (never on argv alone). A test that reads only argv waits on
+// waitForFakeDaemonArgv and never touches the environ (#6195).
 //
 // argv and environ are separate /proc reads with no ordering guarantee between
 // them. A fake can show its crafted argv while its environ is still empty or
@@ -90,6 +106,11 @@ const fakeDaemonHomeKey = "AGENT_FACTORY_HOME"
 // assertion that should fail passes, and one that should pass fails, for a reason
 // that has nothing to do with the code under test.
 //
+// When the environ stays unreadable (EnvUnknown) the test is SKIPPED with the
+// reason, not failed: on a SIP-enabled Mac with Apple's /bin/bash, this binary can
+// read its own environ but not the SIP-protected bash child's, so no amount of
+// waiting helps and the failure would say nothing about the code under test.
+//
 // The expected home is read from cmd.Env (the whole environment the child was
 // given), or from this process's environment when cmd.Env is nil. A child started
 // without AGENT_FACTORY_HOME must read back EnvAbsent, i.e. an environ that was
@@ -98,17 +119,8 @@ const fakeDaemonHomeKey = "AGENT_FACTORY_HOME"
 // skipped.
 func waitForFakeDaemon(t *testing.T, cmd *exec.Cmd, argv0 string) {
 	t.Helper()
+	waitForFakeDaemonArgv(t, cmd, argv0)
 	pid := cmd.Process.Pid
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if args := daemonArgs(pid); len(args) > 0 && args[0] == argv0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if args := daemonArgs(pid); len(args) == 0 || args[0] != argv0 {
-		t.Fatalf("fake daemon pid %d never exec'd into argv0 %q (argv=%q)", pid, argv0, daemonArgs(pid))
-	}
 
 	if _, own := proctree.LookupEnv(os.Getpid(), fakeDaemonHomeKey); own == proctree.EnvUnknown {
 		return
@@ -130,7 +142,7 @@ func waitForFakeDaemon(t *testing.T, cmd *exec.Cmd, argv0 string) {
 		}
 		return got, status, status == proctree.EnvAbsent
 	}
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, _, ok := ready(); ok {
 			return
@@ -138,8 +150,30 @@ func waitForFakeDaemon(t *testing.T, cmd *exec.Cmd, argv0 string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	got, status, ok := ready()
+	if !ok && status == proctree.EnvUnknown {
+		t.Skipf("cannot read fake daemon pid %d's environ although this process can read its own "+
+			"(SIP-protected bash on macOS?); a test that classifies by home needs it", pid)
+	}
 	if !ok {
 		t.Fatalf("fake daemon pid %d never exposed a readable environ with %s=%q set=%v (got %q, status %v)",
 			pid, fakeDaemonHomeKey, want, wantSet, got, status)
+	}
+}
+
+// waitForFakeDaemonArgv blocks until cmd's process has exec'd into the crafted
+// argv (argv[0] == argv0). It reads nothing but cmdline, so it works wherever the
+// argv is visible, whether or not the environ is.
+func waitForFakeDaemonArgv(t *testing.T, cmd *exec.Cmd, argv0 string) {
+	t.Helper()
+	pid := cmd.Process.Pid
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if args := daemonArgs(pid); len(args) > 0 && args[0] == argv0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if args := daemonArgs(pid); len(args) == 0 || args[0] != argv0 {
+		t.Fatalf("fake daemon pid %d never exec'd into argv0 %q (argv=%q)", pid, argv0, daemonArgs(pid))
 	}
 }

@@ -364,3 +364,42 @@ func TestRemotePIDIdentityKillScriptEscalatesToKillWhenTermIgnored(t *testing.T)
 	require.NoError(t, err, "a SIGTERM-ignoring server is killed and confirmed gone: %s", out)
 	require.Error(t, <-waited, "the process must have died by signal")
 }
+
+// A restart records the PID it launched on the HOST before af learns it. When the
+// daemon exits in that window the row still names the DEAD server while the
+// restarted one runs, and a reap that checked only the row's PID would remove the
+// session directory under it. The reap consults the host's launch record too
+// (#5995 review).
+func TestSandboxReapStopsTheServerOnlyTheHostRecorded(t *testing.T) {
+	dir := testguard.CanonicalTempDir(t)
+	afPath := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(afPath, []byte("dummy"), 0o755))
+
+	live := startAgentServerLikeProcess(t, afPath)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, agentServerPIDName), []byte(strconv.Itoa(live.Process.Pid)+"\n"), 0o600))
+
+	// The row names a PID that is long gone.
+	p := &sandboxProvisioner{sessionDir: dir, remotePID: "2999999"}
+	script, expect := p.reapScript("deadbeef")
+	out, err := exec.Command("sh", "-c", script).CombinedOutput()
+
+	require.NoError(t, err, "reap output: %s", out)
+	assert.Contains(t, string(out), expect)
+	require.Error(t, live.Wait(), "the host-recorded server must have been stopped, not orphaned")
+	_, statErr := os.Stat(dir)
+	assert.True(t, os.IsNotExist(statErr), "and only then is the session directory removed")
+}
+
+func TestSandboxReapRefusesWhenTheHostRecordIsNotAPID(t *testing.T) {
+	dir := testguard.CanonicalTempDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, agentServerPIDName), []byte("not-a-pid\n"), 0o600))
+
+	p := &sandboxProvisioner{sessionDir: dir, remotePID: "2999999"}
+	script, expect := p.reapScript("deadbeef")
+	out, err := exec.Command("sh", "-c", script).CombinedOutput()
+
+	require.Error(t, err, "an unreadable launch record cannot prove nothing runs there")
+	assert.NotContains(t, string(out), expect)
+	_, statErr := os.Stat(dir)
+	assert.NoError(t, statErr, "the session directory is left in place")
+}

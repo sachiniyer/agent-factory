@@ -26,7 +26,7 @@ import "sync"
 //	    -> repository worktree admission lock (worktreeAdmissionLockForRepo)
 //	      -> m.mu (never held while waiting for any lock to its left)
 //
-// Audit, path by path (the order each actually takes; (!) = deviates):
+// Audit, path by path (the order each takes):
 //
 //	CreateSession        start -> admission (bounded) -> m.mu
 //	kill                 claim -> op -> start (persists)
@@ -34,15 +34,16 @@ import "sync"
 //	prune apply, resume  op -> start -> claim; takes NO admission (it selects no
 //	                     branch or path), every wait bounded
 //	title reuse/rename   inside CreateSession: start -> m.mu
-//	archived restore (!) op -> admission (bounded) -> claim; its body then persists
-//	                     (start) while still holding admission: admission -> start
-//	automatic Lost restore (!) try-admission (non-blocking) -> persists (start)
+//	archived restore     op -> admission (bounded) -> claim; persists made while
+//	                     admission is held use persistUnderAdmission (no start
+//	                     lock), the rest run after admission is released (#6198)
+//	automatic Lost restore  try-admission (non-blocking), released right after the
+//	                     rebuild; its persists under admission use
+//	                     persistUnderAdmission (#6198)
 //
-// The two (!) paths predate prune and invert admission/start against CreateSession;
-// the cycle is broken today only because CreateSession's admission wait is bounded.
-// Prune is outside that cycle by construction (no admission). Giving restore the
-// canonical order means holding the start lock across its body and persisting
-// lock-free — a change to that path's contract, tracked separately (#6197).
+// A path that needs the start lock (a persist through persistInstanceErr) must not
+// be holding admission when it asks for it: that is the inversion CreateSession's
+// start -> admission order deadlocks against (#6197, fixed by #6198).
 func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()

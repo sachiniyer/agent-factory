@@ -228,8 +228,13 @@ There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,
 that kind. `w` asks to delete the active deletable tab, and `1`–`9` select a tab
 without attaching. Clicking a tab selects and attaches it.
 
-When a backend cannot create local tabs, the **Terminal** and **VS Code** buttons
-are hidden and **…** explains the restriction.
+When a backend cannot create local tabs, the **Terminal** button is hidden, the
+**VS Code** button stays when the backend offers the editor relay, and **…**
+explains the restriction only when no menu kind remains available. The button
+reflects the backend's capability, not whether an editor binary is installed: a
+remote backend projects the `vscode` kind as long as its host supports it, and
+the binary is detected only when the pane opens — a missing one leaves the tab
+created and shows an install hint (see [VS Code tabs](#vs-code-tabs)).
 Archived sessions must be restored before creating tabs. Agents can also create
 [web tabs](#web-tabs) for dev-server previews through the CLI or API; these do not
 appear as a creation button in the pane header.
@@ -711,16 +716,39 @@ af sessions tab-create my-session --kind vscode --name editor
     This key is **global-only**: it names a binary the daemon executes, so a
     repo's checked-in config can never choose what af runs on your machine.
 
-**How it runs.** The daemon starts **one** code-server per session — shared by
+    For an **off-box** session (docker, ssh, sandbox, or a remote-hook backend)
+    the editor is detected, started, and stopped on the **session's host** by the
+    agent-server running there — not on the daemon's machine — so the `PATH`
+    search runs on the workspace host: install `code-server`/`openvscode-server`
+    there, and the daemon only relays the editor's socket to the browser (see
+    [Remote hooks](remote-hooks.md#capabilities-the-agent-server)). The
+    `vscode_server_binary` override is read from the host's
+    `~/.agent-factory/config.toml` only by an agent-server launched **without**
+    the install policy — a launch-style remote hook. The built-in `docker`,
+    `ssh`, and `sandbox` backends start the agent-server with `--policy-file`,
+    whose policy does not carry `vscode_server_binary`, so on those the editor is
+    selected by the `PATH` lookup alone, which only recognises the names
+    `code-server` and `openvscode-server`: to use a renamed or out-of-PATH binary
+    there, put it on the workspace host's `PATH` under one of those names (a
+    symlink or wrapper works).
+
+**How it runs.** Locally the daemon starts **one** code-server per session — shared by
 every VS Code tab and pane in it — the first time a pane renders, listening on
 a **0600 unix socket** in a `0700` directory under the af home (no TCP listener
-at all). The browser reaches the editor through the daemon's `/v1/webtab/` proxy,
+at all). For an off-box session the agent-server on the session's host starts
+that code-server instead, and the daemon relays its socket. The browser reaches the editor through the daemon's `/v1/webtab/` proxy,
 which is what makes it work for a **remote viewer** (Tailscale/SSH) and what puts
 the daemon's auth policy in front of that route. On a cold start the pane briefly
 shows "VS Code is still starting…" and resolves itself.
 
 The editor is stopped when its last VS Code tab is closed, and when the session is
-archived or killed — and on daemon shutdown, so nothing is left running. If it
+archived or killed — and, **locally**, on daemon shutdown, so nothing is left
+running. For an off-box session the stop on tab close is best effort: if the
+agent-server is unreachable at that moment the tab still closes and the failure
+is only logged, so the host-side editor keeps running until the session is
+archived or killed (or the agent-server itself is torn down). An **off-box** editor is owned by the agent-server on the session's
+host, which uses a separate namespace from the daemon's, so a daemon restart does
+not stop it: it keeps running and is relayed again on the next render. If it
 ever dies, the next render starts a fresh one. Nothing about it is persisted: the
 tab survives a restart and simply starts a new editor when you next open it.
 
@@ -732,6 +760,16 @@ tab survives a restart and simply starts a new editor when you next open it.
     the protection, not the proxy. Your browser reaches it through the daemon's
     `/v1/webtab/` proxy, so the daemon's auth policy applies to that route. It
     runs as **you**, with your `PATH` and your code-server settings/extensions.
+
+    That filesystem boundary is the protection only **locally**, where the
+    editor's socket never leaves the daemon host. For an **off-box** session the
+    editor is instead reached through the agent-server's `/v1/agent/relay`
+    route, which `startTCPListener` token-gates with the agent-server's bearer
+    token over the same plain-HTTP listener its other routes use — so the
+    boundary there is that token plus the private transport the agent-server
+    is reached over — the tunnel or network the built-in `docker`, `ssh` and
+    `sandbox` backends set up themselves, or, for a launch-style remote hook,
+    whatever your `launch_cmd` exposes it on — not a same-user socket.
 
     Note that a VS Code pane is deliberately **not** origin-sandboxed the way a web
     tab is: VS Code cannot run under an opaque origin. That is acceptable because

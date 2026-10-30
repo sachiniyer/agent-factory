@@ -71,6 +71,8 @@ type sandboxWorkspace struct {
 	// variable.
 	tokenRef         string
 	agentServerToken string
+	// launchScript is the command startAgentServer ran, kept for a restart.
+	launchScript string
 
 	// adoptedWorktree is the linked worktree an adopting launch binds (W8.6).
 	adoptedWorktree string
@@ -495,6 +497,7 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 		// casual test. `|| exit 1` keeps the abort-on-failure that && provided.
 		launch = "set -a && . " + shellQuote(w.CallbackEnvPath()) + " && set +a || exit 1; " + launch
 	}
+	w.launchScript = launch
 	out, err := w.shell.Run(timeout, launch, nil, false)
 	if err != nil {
 		return fmt.Errorf("starting af agent-server on the remote failed: %s: %w", strings.TrimSpace(string(out)), err)

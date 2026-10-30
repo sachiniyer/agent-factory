@@ -1,10 +1,13 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -194,4 +197,42 @@ func TestRemoteChannelReplayContiguityGatesRepaint(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the clamped hello must land")
 	require.False(t, ch.ReplaysHistory(),
 		"a clamped hello leaves a gap the ring cannot backfill — repaint stays owed")
+}
+
+func remoteReadLoopStacks() int {
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	n := 0
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "remoteClientlessChannel).readLoop") {
+			n++
+		}
+	}
+	return n
+}
+
+// A readLoop blocked writing PTY output into a pipe whose reader has gone away
+// must be released by StopCapture: neither the context nor the socket close
+// reaches a goroutine parked in io.Pipe's write, so without closing the reader
+// it would block forever (the package leak guard's find).
+func TestRemoteChannelStopCaptureReleasesAReadLoopBlockedOnAnUnreadPipe(t *testing.T) {
+	probe := &streamProbe{frames: []agentproto.Frame{
+		agentproto.HelloFrame(0),
+		agentproto.PTYOutFrame(bytes.Repeat([]byte("x"), 64*1024)),
+	}}
+	ch := newStreamProbeChannel(t, probe)
+	before := remoteReadLoopStacks()
+
+	_, err := ch.StartCapture() // the reader is never read
+	require.NoError(t, err)
+	// The pipe is unbuffered, so the first PTY_OUT parks the loop in the write.
+	require.Eventually(t, func() bool {
+		buf := make([]byte, 1<<20)
+		buf = buf[:runtime.Stack(buf, true)]
+		return strings.Contains(string(buf), "io.(*pipe).write") && remoteReadLoopStacks() > before
+	}, 5*time.Second, 10*time.Millisecond, "the read loop never reached the blocked write this test stages")
+
+	require.NoError(t, ch.StopCapture())
+	require.Eventually(t, func() bool { return remoteReadLoopStacks() <= before }, 5*time.Second, 10*time.Millisecond,
+		"StopCapture left the read loop blocked writing to a reader that is gone")
 }

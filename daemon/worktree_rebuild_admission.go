@@ -56,6 +56,14 @@ func (m *Manager) tryLocalWorktreeAdmission(repoID string, instance *session.Ins
 	return lock, lock.TryLock()
 }
 
+// admissionReleaser returns an idempotent release for an admission lock, so a
+// restore can hand admission back right after the rebuild choke point and still
+// defer the same release for its early returns (#6197). A nil lock is a no-op.
+func admissionReleaser(lock *sync.Mutex) func() {
+	var once sync.Once
+	return func() { once.Do(func() { unlockWorktreeAdmission(lock) }) }
+}
+
 func unlockWorktreeAdmission(lock *sync.Mutex) {
 	if lock != nil {
 		lock.Unlock()

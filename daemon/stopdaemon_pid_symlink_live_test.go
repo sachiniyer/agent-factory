@@ -32,7 +32,7 @@ func TestStopDaemon_DoesNotUnlinkSymlinkedPIDFile_LiveDaemonFifthSite(t *testing
 	// Spawn a process that responds to SIGTERM and presents an "af --daemon"
 	// argv so isAgentFactoryDaemon classifies it as ours (same recipe as
 	// TestStopDaemon_SIGTERMFirst).
-	cmd := spawnFakeDaemonProc(t, "af", "sleep 60; :", "--daemon", "af-test")
+	cmd := spawnFakeDaemonHomeProc(t, "af", "sleep 60; :", "--daemon", "af-test")
 	pid := cmd.Process.Pid
 	waitForReady(t, fmt.Sprintf("fake daemon pid=%d cmdline exposes --daemon", pid), func() bool {
 		return isAgentFactoryDaemon(pid)

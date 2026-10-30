@@ -308,11 +308,11 @@ func TestNewTmuxServerCommandDoesNotTrustInheritedSystemdMarker(t *testing.T) {
 func TestDedicatedServerScopeIsNamedAndIndependent(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), dedicatedServerLogName)
 	t.Setenv("AF_TEST_UNRELATED_SECRET", "must-not-enter-tmux-server")
-	cmd := dedicatedServerScopeCommand(logPath)
+	cmd := dedicatedServerScopeCommand(logPath, "agent-factory-tmux-server-unit-under-test")
 	got := strings.Join(cmd.Args, " ")
 	for _, want := range []string{
 		"systemd-run --user --scope --quiet --collect",
-		"--unit=agent-factory-tmux-server-",
+		"--unit=agent-factory-tmux-server-unit-under-test",
 		"--property=KillMode=control-group",
 		" /proc/" + strconv.Itoa(os.Getpid()) + "/exe " + dedicatedServerExecMarker,
 	} {
@@ -428,9 +428,11 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read systemctl args: %v", err)
 	}
-	wantStopArgs := "--user kill --kill-who=all --signal=KILL " + dedicatedServerScopeName() + ".scope"
-	if got := strings.TrimSpace(string(stopArgs)); got != wantStopArgs {
-		t.Fatalf("systemctl cleanup args = %q, want %q", got, wantStopArgs)
+	// The unit is unique per launch (#6180), so check its shape rather than a name.
+	gotStop := strings.TrimSpace(string(stopArgs))
+	wantStopPrefix := "--user kill --kill-who=all --signal=KILL " + dedicatedServerScopeName() + "-"
+	if !strings.HasPrefix(gotStop, wantStopPrefix) || !strings.HasSuffix(gotStop, ".scope") {
+		t.Fatalf("systemctl cleanup args = %q, want a per-launch unit starting %q ending .scope", gotStop, wantStopPrefix)
 	}
 	for label, pidPath := range map[string]string{"launcher": parentPIDPath, "launcher child": childPIDPath} {
 		rawPID, err := os.ReadFile(pidPath)
@@ -734,5 +736,65 @@ func TestSystemdRunRefusalIsActionableButCleanupUnsafe(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "timed out waiting for tmux") {
 		t.Fatalf("systemd-run refusal was misreported as a tmux readiness timeout: %v", err)
+	}
+}
+
+// TestDedicatedServerUnitNeverCollidesWithAStaleOne is #6180: the unit name used
+// to be deterministic, so a unit the dead server left loaded (any leftover
+// process in its cgroup keeps a scope alive) made every relaunch fail with "was
+// already loaded or has a fragment file". Two launches must name different units
+// that both keep the per-socket prefix.
+func TestDedicatedServerUnitNeverCollidesWithAStaleOne(t *testing.T) {
+	a := newDedicatedServerUnit()
+	time.Sleep(time.Millisecond)
+	b := newDedicatedServerUnit()
+	if a == b {
+		t.Fatalf("two launches got the same unit %q", a)
+	}
+	for _, unit := range []string{a, b} {
+		if !strings.HasPrefix(unit, dedicatedServerScopeName()+"-") {
+			t.Fatalf("unit %q lost the per-socket prefix %q", unit, dedicatedServerScopeName())
+		}
+	}
+}
+
+// TestServerDeathMarkerRecordsExitAndSignal pins #5429 ask 1: the wrapper's
+// record of how tmux ended.
+func TestServerDeathMarkerRecordsExitAndSignal(t *testing.T) {
+	home := t.TempDir()
+	run := func(script string) error { return exec.Command("sh", "-c", script).Run() }
+
+	recordServerDeath(home, "unit-x", time.Now().Add(-3*time.Second), run("exit 3"))
+	d, ok, err := ReadServerDeath(home)
+	if err != nil || !ok || d.ExitCode != 3 || d.Signal != "" || d.Unit != "unit-x" || d.UptimeSeconds < 2 {
+		t.Fatalf("exit marker = %+v ok=%v err=%v", d, ok, err)
+	}
+	recordServerDeath(home, "unit-x", time.Now(), run("kill -KILL $$"))
+	d, _, _ = ReadServerDeath(home)
+	if d.Signal != "killed" || d.ExitCode != -1 {
+		t.Fatalf("signal marker = %+v, want signal killed, exit code -1", d)
+	}
+	recordServerDeath(home, "unit-x", time.Now(), nil)
+	d, _, _ = ReadServerDeath(home)
+	if d.ExitCode != 0 || d.Signal != "" || d.Error != "" {
+		t.Fatalf("clean marker = %+v", d)
+	}
+}
+
+func TestServerStateRoundTripAndDedupe(t *testing.T) {
+	home := t.TempDir()
+	lastServerState = ServerState{}
+	st := ServerState{Mode: ServerModeFallback, Socket: "/tmp/tmux-1/default", Reason: "boom", At: time.Now()}
+	recordServerState(home, st)
+	got, ok, err := ReadServerState(home)
+	if err != nil || !ok || got.Mode != ServerModeFallback || got.Socket != st.Socket || got.Reason != "boom" {
+		t.Fatalf("state = %+v ok=%v err=%v", got, ok, err)
+	}
+	if err := os.Remove(filepath.Join(home, serverStateFileName)); err != nil {
+		t.Fatal(err)
+	}
+	recordServerState(home, st) // identical decision: no rewrite on every spawn
+	if _, ok, _ := ReadServerState(home); ok {
+		t.Fatal("an unchanged decision was rewritten")
 	}
 }

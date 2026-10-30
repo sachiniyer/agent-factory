@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -169,7 +168,16 @@ type sandboxProvisioner struct {
 	//	remoteAddr         the agent-server's loopback address on the sandbox
 	//	                   (the banner's addr) — the -L forward's destination.
 	//	agentServerVersion the version the remote binary reported in its banner.
-	tokenRef           string
+	tokenRef string
+	// launchScript is the exact command that started the agent-server, persisted
+	// so a crashed one can be relaunched from the row alone (W1.4). It names the
+	// session dir's env files and flags, never a secret.
+	launchScript string
+	adoptPending bool // a restarted server has not adopted its workspace yet (W1.4)
+	// persistIdentity is the daemon-installed durable write of the row a W1.4
+	// restart fires before it spawns, before it adopts and when adoption ends.
+	// In memory only; the daemon reinstalls it per reattach attempt.
+	persistIdentity    func(*Instance) error
 	remoteAddr         string
 	agentServerVersion string
 
@@ -344,7 +352,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.remotePID = w.RemotePID
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	p.remotePID = w.RemotePID
+	p.remotePID, p.launchScript = w.RemotePID, w.launchScript
 	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)
 	if err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
@@ -405,6 +413,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 				RemoteAddr:         p.remoteAddr,
 				AgentServerVersion: p.agentServerVersion,
 				TokenRef:           p.tokenRef,
+				LaunchScript:       p.launchScript,
 				CallbackRef:        p.callbackRef,
 				CallbackReverse:    p.callbackReverse(),
 			},
@@ -745,10 +754,17 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// A subshell so `exit "$rc"` reports rm's status as this group's status
 	// without terminating anything that might follow it.
 	removeAndConfirm := "( " + rm + "; rc=$?; " + respond + `; exit "$rc" )`
+	afPath := p.sessionDir + "/" + sshAfBinaryName
+	// A restart records the PID it launched on the HOST before af learns it, so a
+	// daemon that exited in between leaves a row naming the dead server while the
+	// restarted one runs. Reaping removes the session directory under whatever
+	// still runs there, so the host's record is consulted too and a live match is
+	// stopped (or the reap refused) first.
+	hostKill := "( " + remoteRecordedPIDKillScript(p.agentServerPIDPath(), p.remotePID, afPath, p.tokenRef) + " )"
 	if p.remotePID == "" {
-		return removeAndConfirm, expect
+		return hostKill + " && " + removeAndConfirm, expect
 	}
-	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef)
+	kill := remotePIDIdentityKillScript(p.remotePID, afPath, p.tokenRef)
 	// A SUBSHELL, not a { } group. The identity-kill script ends in `exit 0` when
 	// the process is already gone — the common case after a clean shutdown — and a
 	// group command runs in the CURRENT shell, so that exit terminated the whole
@@ -756,7 +772,7 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// looked like "exited 0, never confirmed": the directory survived and the
 	// record was retained forever. A subshell contains the exit and yields it as
 	// the group's status, which is what `&&` needs.
-	return "( " + kill + " ) && " + removeAndConfirm, expect
+	return hostKill + " && ( " + kill + " ) && " + removeAndConfirm, expect
 }
 
 // sandboxReapNonce makes each reap's challenge unique, so a marker captured from
@@ -807,89 +823,3 @@ type sandboxBackend struct {
 }
 
 func (b *sandboxBackend) Type() string { return "sandbox" }
-
-// ErrOutputOverLimit reports that a remote command produced more output than the
-// caller allowed. The command was killed the moment the limit was crossed; nothing
-// past the limit was ever held.
-var ErrOutputOverLimit = errors.New("remote command output exceeded its limit")
-
-// limitedShell is the optional capability of a sandboxShell that can bound a
-// command's stdout while it streams (#5865). The host is untrusted by W7.3's own
-// design, so a response that is read in full before it is checked bounds nothing.
-type limitedShell interface {
-	// RunLimited runs script and returns its stdout, holding at most limit bytes.
-	// Past the limit the command is killed and ErrOutputOverLimit is returned.
-	RunLimited(timeout time.Duration, script string, limit int64) ([]byte, error)
-}
-
-// limitWriter accepts at most limit bytes, then cancels the command and refuses
-// the rest. It never buffers beyond the limit.
-type limitWriter struct {
-	limit    int64
-	buf      bytes.Buffer
-	exceeded bool
-	cancel   context.CancelFunc
-}
-
-func (w *limitWriter) Write(p []byte) (int, error) {
-	if w.exceeded {
-		return 0, ErrOutputOverLimit
-	}
-	room := w.limit - int64(w.buf.Len())
-	if int64(len(p)) > room {
-		w.buf.Write(p[:room])
-		w.exceeded = true
-		w.cancel()
-		return int(room), ErrOutputOverLimit
-	}
-	return w.buf.Write(p)
-}
-
-// RunLimited satisfies limitedShell over the operator's ssh invocation, with the
-// same command composition, process group and deadline as Run.
-func (p *sandboxProvisioner) RunLimited(timeout time.Duration, script string, limit int64) ([]byte, error) {
-	if p.runCommandFn != nil {
-		// A test seam that returns whole buffers cannot stream; it is bounded after
-		// the fact, which is all a seam can honestly do.
-		out, err := p.runCommandFn(timeout, script, nil, false)
-		if err == nil && int64(len(out)) > limit {
-			return nil, ErrOutputOverLimit
-		}
-		return out, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := p.buildRunCommand(ctx, script, nil)
-	out := &limitWriter{limit: limit, cancel: cancel}
-	var stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = out, &boundedBuffer{buf: &stderr, max: 4096}
-	err := cmd.Run()
-	if out.exceeded {
-		return nil, ErrOutputOverLimit
-	}
-	if errors.Is(err, exec.ErrWaitDelay) {
-		err = nil
-	}
-	if err != nil && ctx.Err() != nil {
-		return out.buf.Bytes(), fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
-	}
-	return out.buf.Bytes(), err
-}
-
-// boundedBuffer keeps the first max bytes written and discards the rest, so a
-// chatty stderr cannot grow the daemon either.
-type boundedBuffer struct {
-	buf *bytes.Buffer
-	max int
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if room := b.max - b.buf.Len(); room > 0 {
-		if len(p) > room {
-			b.buf.Write(p[:room])
-		} else {
-			b.buf.Write(p)
-		}
-	}
-	return len(p), nil
-}
