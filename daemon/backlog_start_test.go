@@ -235,7 +235,7 @@ func TestRecoverBacklogMatchesStartingRun(t *testing.T) {
 	prevStart := daemonProcessStart
 	t.Cleanup(func() { daemonProcessStart = prevStart })
 	daemonProcessStart = time.Now()
-	m.recoverBacklog(repoID)
+	m.recoverBacklog(repoID, nil)
 	it := loadItem(t, repoID, 1)
 	if it.Runs[0].State != backlog.RunStarted || it.Runs[0].SessionID != inst.ID {
 		t.Fatalf("run %+v", it.Runs[0])
