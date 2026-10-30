@@ -67,6 +67,15 @@ var pruneStepHook func(step string) error
 // pruneRemoveTimeout bounds the recursive removal of one tombstoned tree.
 var pruneRemoveTimeout = 10 * time.Minute
 
+// pruneTombstonePersist writes the tombstone record under the repo's ordering lock.
+// A package var so a test can fail exactly that write.
+var pruneTombstonePersist = func(m *Manager, repoID string, data session.InstanceData) error {
+	lock := m.startLockForRepo(repoID)
+	lock.Lock()
+	defer lock.Unlock()
+	return persistInstanceData(repoID, data)
+}
+
 var errPruneCrash = errors.New("prune stopped (injected)")
 
 func pruneStep(step string) error {
@@ -323,11 +332,18 @@ func (m *Manager) pruneFinish(repoID string, instance *session.Instance, intent 
 	if err := pruneStep("tombstone"); err != nil {
 		return "tombstone", err
 	}
-	if err := instance.CompletePrune(time.Now()); err != nil {
-		return "tombstone", err
-	}
-	if err := m.persistInstanceErr(repoID, instance); err != nil {
+	// The tombstone is written FIRST and memory follows it. If the write fails the
+	// row keeps its intent in memory as well as on disk, so the next apply (or the
+	// start-up resume) in this same daemon finishes it, and the row reports as
+	// incomplete instead of reading as pruned until a restart repairs it.
+	at := time.Now()
+	tomb := instance.ToInstanceData()
+	tomb.PrunedAt, tomb.PruneIntent = at, nil
+	if err := pruneTombstonePersist(m, repoID, tomb); err != nil {
 		return "tombstone", fmt.Errorf("the worktree is deleted but the record could not be saved (re-run to finish): %w", err)
+	}
+	if err := instance.CompletePrune(at); err != nil {
+		return "tombstone", err
 	}
 	return "", nil
 }

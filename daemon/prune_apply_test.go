@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -300,4 +301,34 @@ func TestSumFreeCountsASharedFilesystemOnce(t *testing.T) {
 	two, ok := sumFree([]string{a, b})
 	require.True(t, ok)
 	assert.Equal(t, one, two, "two archive roots on one mount are one filesystem")
+}
+
+// In-memory prune state moves forward only after the durable write that records it
+// succeeds (Codex on #6186): a failed tombstone write leaves the intent in memory,
+// the row reports incomplete, and the next apply in the SAME daemon completes it.
+func TestPruneApply_FailedTombstoneWriteKeepsTheIntentForTheNextApply(t *testing.T) {
+	manager, repoID, _, inst, archived := seedPrunableArchive(t, "tombstone-write-fails")
+	c := planOf(t, manager, repoID)
+
+	prev := pruneTombstonePersist
+	pruneTombstonePersist = func(*Manager, string, session.InstanceData) error { return errors.New("disk full") }
+	t.Cleanup(func() { pruneTombstonePersist = prev })
+
+	resp, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	require.Len(t, resp.Incomplete, 1)
+	assert.Equal(t, "tombstone", resp.Incomplete[0].Step)
+	assert.Empty(t, resp.Pruned)
+	assert.NoDirExists(t, archived, "the worktree is already deleted")
+	assert.False(t, inst.IsPruned(), "memory did not move ahead of the failed write")
+	require.NotNil(t, inst.PruneIntent(), "the intent is still there to resume from")
+
+	pruneTombstonePersist = prev
+	resp, err = manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	assert.Empty(t, resp.Incomplete)
+	require.Len(t, resp.Pruned, 1)
+	assert.True(t, resp.Pruned[0].Resumed)
+	assert.True(t, inst.IsPruned())
+	assert.Nil(t, inst.PruneIntent())
 }
