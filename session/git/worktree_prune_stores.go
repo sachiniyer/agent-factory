@@ -115,12 +115,26 @@ func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
 			return fmt.Errorf("cannot decode the alternates of %s: %w", real, err)
 		}
 		for _, entry := range entries {
+			// A relative entry is judged under every reading of it, against the
+			// CANONICAL form of the store that lists it (a temp root or home reached
+			// through a symlink — /var -> /private/var on macOS — makes the as-written
+			// and canonical spellings differ): ".." applied physically to the as-written
+			// store, physically to the canonical store, and lexically to the canonical
+			// store (git normalizes the joined path lexically).
+			candidates := []string{entry}
 			if !filepath.IsAbs(entry) {
-				entry = store + string(filepath.Separator) + entry // as written; ".." applies physically
+				sep := string(filepath.Separator)
+				candidates = []string{
+					store + sep + entry,
+					real + sep + entry,
+					filepath.Join(real, entry),
+				}
 			}
-			stores = append(stores, entry)
-			if err := follow(entry, depth+1); err != nil {
-				return err
+			for _, cand := range candidates {
+				stores = append(stores, cand)
+				if err := follow(cand, depth+1); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
