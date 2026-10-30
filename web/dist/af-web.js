@@ -6306,11 +6306,26 @@ function parseRoute(hash) {
 function serializeRoute(route) {
   return route?.session ? `#/session/${encodeURIComponent(route.session)}` : "";
 }
+function parseProjectRoute(hash) {
+  const match = /^#\/project\/([^/]+)$/.exec(hash);
+  if (!match) return null;
+  try {
+    const project = decodeURIComponent(match[1]);
+    return project.trim() && !/[\x00-\x1f\x7f]/.test(project) ? { project } : null;
+  } catch {
+    return null;
+  }
+}
+function serializeProjectRoute(route) {
+  return route.project ? `#/project/${encodeURIComponent(route.project)}` : "";
+}
+function isRoute(hash) {
+  return parseRoute(hash) !== null || parseProjectRoute(hash) !== null;
+}
 var ROUTE_KEY = "af-session-route";
 function stashRoute(hash, storage) {
   try {
-    const route = parseRoute(hash);
-    if (route) storage.setItem(ROUTE_KEY, serializeRoute(route));
+    if (isRoute(hash)) storage.setItem(ROUTE_KEY, hash);
     else storage.removeItem(ROUTE_KEY);
   } catch {
   }
@@ -6319,7 +6334,7 @@ function restoreRoute(hash, storage) {
   try {
     const saved = storage.getItem(ROUTE_KEY);
     storage.removeItem(ROUTE_KEY);
-    return hash || serializeRoute(parseRoute(saved ?? ""));
+    return hash || (saved && isRoute(saved) ? saved : "");
   } catch {
     return hash;
   }
@@ -10698,6 +10713,33 @@ var TouchScroll = (now) => {
   };
 };
 
+// src/url.ts
+function safeHttpUrl(raw) {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return (u.protocol === "http:" || u.protocol === "https:") && u.host ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+// src/terminal_links.ts
+function terminalLinkHandler(open, setTooltip) {
+  return {
+    activate(_event, text) {
+      const href = safeHttpUrl(text);
+      if (href) open(href, "_blank", "noopener,noreferrer");
+    },
+    hover(_event, text) {
+      setTooltip(safeHttpUrl(text) ?? "");
+    },
+    leave() {
+      setTooltip("");
+    }
+  };
+}
+
 // src/terminal.ts
 function holdClockMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -10735,7 +10777,13 @@ var AttachTerminal = class {
       // choice elsewhere), giving onMouseDownCapture ONE bit to invert on every
       // platform. It also keeps Option out of xterm's block-select gesture, which
       // would otherwise fire on the inverted bit.
-      macOptionClickForcesSelection: true
+      macOptionClickForcesSelection: true,
+      // Opens OSC 8 links without xterm's default confirm() warning, and shows the
+      // real URL as a tooltip on hover (terminal_links.ts).
+      linkHandler: terminalLinkHandler(
+        (url, target, features) => window.open(url, target, features),
+        (tip) => tip ? container.setAttribute("title", tip) : container.removeAttribute("title")
+      )
     });
     this.fit = new import_addon_fit.FitAddon();
     this.term.loadAddon(this.fit);
@@ -11219,6 +11267,7 @@ var AttachTerminal = class {
     this.unsubscribeFontSizes?.();
     this.unsubscribeFontSizes = null;
     this.closeSocket();
+    this.container.removeAttribute("title");
     this.term.dispose();
   }
   applicationOwnsMouse() {
@@ -16554,7 +16603,7 @@ function paintSwitch(el2, on, busy) {
     el2.removeAttribute("aria-disabled");
   }
 }
-function flipSwitch(pending, t, toggle, paint, backstop) {
+function flipSwitch(pending, t, toggle, paint, latest, backstop) {
   if (pending.has(t.id)) return;
   const next = !t.enabled;
   const flip = { value: next, settled: false, timer: null };
@@ -16574,16 +16623,21 @@ function flipSwitch(pending, t, toggle, paint, backstop) {
       return;
     }
     pending.delete(t.id);
-    paint(t.enabled, false);
+    paint(latest(), false);
   });
 }
-function releaseSettled(pending, backstop) {
+function releaseSettled(pending, tasks, backstop) {
+  const enabled = new Map(tasks.map((t) => [t.id, t.enabled]));
   for (const [id, flip] of pending) {
     if (!flip.settled) continue;
+    if (enabled.has(id) && enabled.get(id) !== flip.value) continue;
     if (flip.timer !== null) backstop?.clear(flip.timer);
     flip.timer = null;
     pending.delete(id);
   }
+}
+function reconcileOnUpdate(pending, previous, tasks, backstop) {
+  if (previous !== tasks) releaseSettled(pending, tasks, backstop);
 }
 var TasksPane = class {
   constructor(actions2) {
@@ -16610,7 +16664,7 @@ var TasksPane = class {
       return;
     }
     this.lastError = error;
-    releaseSettled(this.pending, { clear: (h2) => window.clearTimeout(h2) });
+    reconcileOnUpdate(this.pending, this.lastTasks, tasks, { clear: (h2) => window.clearTimeout(h2) });
     const token2 = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token2;
@@ -16650,7 +16704,14 @@ var TasksPane = class {
       const el2 = this.el.querySelector(`[data-task-id="${CSS.escape(id)}"] .af-task-switch`);
       if (el2) paintSwitch(el2, on, busy);
     };
-    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy), this.backstop(paint));
+    flipSwitch(
+      this.pending,
+      t,
+      () => this.actions.toggle(t),
+      (on, busy) => paint(t.id, on, busy),
+      () => this.lastTasks?.find((x) => x.id === t.id)?.enabled ?? t.enabled,
+      this.backstop(paint)
+    );
   }
   render(tasks) {
     if (this.lastError) {
@@ -18898,6 +18959,8 @@ var AppShell = class {
     const focusFallback = this.projectSwitchBtn.getClientRects().length ? this.projectSwitchBtn : this.appControls.trigger;
     replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
+  /** The project whose Space press is armed, awaiting its release (see projectItem). */
+  projectSpaceArmed = null;
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
    *  switches the active project and closes the menu. `record` is the registry
@@ -18927,15 +18990,37 @@ var AppShell = class {
       { class: "af-project-item-meta" },
       ...record && !record.path_exists ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` \xB7 ${projectMeta(p)}`] : [projectMeta(p)]
     );
-    const item = h("button", { type: "button", class: cls }, check, label, meta);
+    const item = h("a", { class: cls, href: serializeProjectRoute({ project: p.root }) }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
-    item.addEventListener("click", (e) => {
+    const activate = (e) => {
+      e.preventDefault();
       e.stopPropagation();
       this.closeProjectMenu();
       this.appControls.dismiss();
       this.actions.switchProject(p.root);
+    };
+    item.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) {
+        e.stopPropagation();
+        return;
+      }
+      activate(e);
+    });
+    item.addEventListener("keydown", (e) => {
+      if (e.key !== " " || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      if (!e.repeat) this.projectSpaceArmed = p.root;
+    });
+    item.addEventListener("keyup", (e) => {
+      if (e.key !== " " || this.projectSpaceArmed !== p.root) return;
+      this.projectSpaceArmed = null;
+      activate(e);
+    });
+    item.addEventListener("blur", (e) => {
+      const to = e.relatedTarget;
+      if (to instanceof Node && !this.projectMenu.contains(to)) this.projectSpaceArmed = null;
     });
     return item;
   }
@@ -20176,6 +20261,7 @@ function resolveRoute() {
     return;
   }
   const route = parseRoute(location.hash);
+  const projectRoute = route ? null : parseProjectRoute(location.hash);
   resolvingRoute = true;
   let lookup = false;
   try {
@@ -20187,6 +20273,15 @@ function resolveRoute() {
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
+    } else if (projectRoute) {
+      const { sessions, tasks, registeredProjects } = store.get();
+      const known = pickerProjects(sessions, tasks, projectRoots(registeredProjects)).includes(projectRoute.project);
+      if (known) {
+        switchProject(projectRoute.project);
+        store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      } else {
+        showTransientNotice("No project at that path in this daemon");
+      }
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");

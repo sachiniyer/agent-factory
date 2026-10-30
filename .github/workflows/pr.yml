@@ -448,6 +448,44 @@ jobs:
           fi
           exit "$status"
 
+  # The Go suite on Ubuntu 26.04, the next ubuntu-latest (#6281). Report-only:
+  # continue-on-error means a red run never blocks, so the leg makes drift
+  # visible without gating anything. 26.04 changes the host's coreutils to a
+  # multi-call uutils build and ships tmux 3.6, which is what broke the
+  # copy-and-rename test fixtures. Make it blocking once it has run green for a
+  # day. It never runs for a fail-first probe, which wants only the Linux Test.
+  test-ubuntu-26:
+    name: ${{ inputs.probe && 'Test (Ubuntu 26.04, skipped by probe)' || 'Test (Ubuntu 26.04, report-only)' }}
+    if: ${{ !inputs.probe }}
+    runs-on: ubuntu-26.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      # Runner facts first: when this leg goes red, the image and the tmux and
+      # coreutils builds are what to compare against the 24.04 Test job.
+      - name: Runner facts
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          uname -r
+          tmux -V
+          sleep --version | head -1
+          zsh --version || true
+
+      # Same install as the Test job, for the same reason (internal/shellsuggest
+      # runs its tests under zsh).
+      - name: Install zsh
+        run: scripts/ci-apt-install.sh zsh
+
+      - name: Run tests
+        run: go test -v -race -count=1 -timeout 30m ./...
+
   # The round-trip image builds must resolve NOTHING against a registry (#2521).
   #
   # That property is an absence — no request went out — and the ordinary suite

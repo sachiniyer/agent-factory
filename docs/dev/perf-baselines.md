@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1122651.000 | 1122651.000–1122651.000 | 0.000 | 1178783.550 |
-| gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
+| raw_bytes | 1126071.000 | 1126071.000–1126071.000 | 0.000 | 1182374.550 |
+| gzip_bytes | 255761.000 | 255761.000–255761.000 | 0.000 | 268549.050 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -125,7 +125,11 @@ reason to move a budget.
 
 ### Bundle refresh provenance (#6289)
 
-Master's committed bundle (1,120,104 raw / 254,141 gzip over `web/dist/**.{js,css}`, gzip level 9) sat 319 bytes under the 1,120,423.5 raw budget, so any web change tripped it. #6289 (the task switch pending state) takes the bundle to 1,122,651 raw, +2,547 raw over master; comments do not ship (esbuild strips them), so the growth is feature code. Only the raw entry is moved (gzip is unchanged at 253,171 and its budget still holds); it is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`, which is not a routine local run; the figure is byte-exact and matches what the Performance job reported.
+Master's committed bundle (1,123,102 raw / 254,923 gzip over `web/dist/**.{js,css}`, gzip level 9, after #6290) is where this branch started from; #6289 (the task switch pending state) takes it to 1,126,071 raw / 255,761 gzip, +2,969 raw / +838 gzip. Comments do not ship (esbuild strips them), so the growth is the flip state machine's code. Both entries are moved to the deterministic byte sums, three identical samples, margin baseline x 0.05; every timing and layout-shift baseline is unchanged. Computed from a clean `npm ci` build of the merged tree rather than recorded with `make perf-container`, which is not a routine local run; the figure is byte-exact.
+
+### Bundle refresh provenance (#6290)
+
+Master's committed bundle (1,120,104 raw / 254,141 gzip over `web/dist/**.{js,css}`, gzip level 9) sat 319 bytes under the 1,120,423.5 raw budget, so any web change tripped it. #6290 (terminal links without confirm() and project switcher rows as links) takes the bundle to 1,123,037 raw, +2,933 raw over master; comments do not ship (esbuild strips them), so the growth is feature code. Only the raw entry is moved (gzip is unchanged at 253,171 and its budget still holds); it is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`, which is not a routine local run; the figure is byte-exact and matches what the Performance job reported.
 
 ### Bundle refresh provenance (#6212)
 

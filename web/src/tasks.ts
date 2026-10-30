@@ -389,8 +389,9 @@ export interface Backstop {
 
 /**
  * Runs one switch flip: shows the requested value and busy at once and ignores a
- * second click while it is in flight. A failed or refused request puts the old value
- * back. An applied one stays busy, showing the new value, until the list refetch has
+ * second click while it is in flight. A failed or refused request puts back the LATEST
+ * known value (`latest`: a list may have changed the task while the request was in
+ * flight, and the rebuilt click handler toggles from that one). An applied one stays busy, showing the new value, until the list refetch has
  * reconciled it (releaseSettled): the click handler toggles from the task it was
  * rendered with, so the switch accepts a click only when what it displays and what
  * the handler will toggle from are the same reconciled value.
@@ -400,6 +401,7 @@ export function flipSwitch(
   t: Pick<TaskData, "id" | "enabled">,
   toggle: () => Promise<boolean>,
   paint: (on: boolean, busy: boolean) => void,
+  latest: () => boolean,
   backstop?: Backstop,
 ): void {
   if (pending.has(t.id)) return;
@@ -423,19 +425,39 @@ export function flipSwitch(
       return;
     }
     pending.delete(t.id);
-    paint(t.enabled, false);
+    paint(latest(), false);
   });
 }
 
-/** Drops every applied flip: called when a list arrives, which carries the value the
- *  next render and the next click handler are both built from. */
-export function releaseSettled(pending: Map<string, PendingFlip>, backstop?: Pick<Backstop, "clear">): void {
+/** Drops the applied flips a newly arrived task list reflects: the list carries the
+ *  value the next render and the next click handler are both built from. A flip whose
+ *  task still shows the old value (a list fetched before the update landed) stays
+ *  pending; the backstop is its way out. A task the list no longer holds has nothing
+ *  left to reconcile. */
+export function releaseSettled(
+  pending: Map<string, PendingFlip>,
+  tasks: readonly Pick<TaskData, "id" | "enabled">[],
+  backstop?: Pick<Backstop, "clear">,
+): void {
+  const enabled = new Map(tasks.map((t) => [t.id, t.enabled]));
   for (const [id, flip] of pending) {
     if (!flip.settled) continue;
+    if (enabled.has(id) && enabled.get(id) !== flip.value) continue;
     if (flip.timer !== null) backstop?.clear(flip.timer);
     flip.timer = null;
     pending.delete(id);
   }
+}
+
+/** Only a NEW list reconciles a flip: a project switch re-renders the same array, which
+ *  carries no news about an update still being refetched. */
+export function reconcileOnUpdate(
+  pending: Map<string, PendingFlip>,
+  previous: readonly Pick<TaskData, "id" | "enabled">[] | null,
+  tasks: readonly Pick<TaskData, "id" | "enabled">[],
+  backstop?: Pick<Backstop, "clear">,
+): void {
+  if (previous !== tasks) releaseSettled(pending, tasks, backstop);
 }
 
 /**
@@ -469,7 +491,7 @@ export class TasksPane {
       return;
     }
     this.lastError = error;
-    releaseSettled(this.pending, { clear: (h) => window.clearTimeout(h as number) });
+    reconcileOnUpdate(this.pending, this.lastTasks, tasks, { clear: (h) => window.clearTimeout(h as number) });
     const token = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token;
@@ -513,7 +535,8 @@ export class TasksPane {
       const el = this.el.querySelector<HTMLButtonElement>(`[data-task-id="${CSS.escape(id)}"] .af-task-switch`);
       if (el) paintSwitch(el, on, busy);
     };
-    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy), this.backstop(paint));
+    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy),
+      () => this.lastTasks?.find((x) => x.id === t.id)?.enabled ?? t.enabled, this.backstop(paint));
   }
 
   private render(tasks: TaskData[]): void {

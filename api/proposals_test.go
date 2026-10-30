@@ -130,6 +130,13 @@ func stubProposalDaemon(t *testing.T) (*proposalTestHost, *[]string) {
 			}
 			return svc.AddDoc(tgt(r.SessionID, r.RepoID, r.RepoPath), r.Slug, r.Name, proposal.Author(r.Author))
 		},
+		"RemoveProposalDoc": func(raw []byte) (any, error) {
+			r, err := decodeInto[daemon.RemoveProposalDocRequest](raw)
+			if err != nil {
+				return nil, err
+			}
+			return svc.RemoveDoc(tgt(r.SessionID, r.RepoID, r.RepoPath), r.Slug, r.Doc, proposal.Author(r.Author))
+		},
 		"ReadProposalDoc": func(raw []byte) (any, error) {
 			r, err := decodeInto[daemon.ReadProposalDocRequest](raw)
 			if err != nil {
@@ -359,6 +366,7 @@ func TestProposalInsideTmuxSurfacesLookupFailure(t *testing.T) {
 		{proposalChangesCmd, nil},
 		{proposalWriteCmd, []string{"p", "goals"}},
 		{proposalAddDocCmd, []string{"p", "notes"}},
+		{proposalRemoveDocCmd, []string{"p", "goals"}},
 	} {
 		_, err := runCmdCaptureStdout(t, tc.cmd, tc.args)
 		if err == nil || !strings.Contains(err.Error(), "AF_SESSION") || strings.Contains(err.Error(), "needs a session") {
@@ -396,6 +404,7 @@ func TestProposalCommandOutputsKeepTheirShape(t *testing.T) {
 	}{
 		{cmd: proposalPathCmd, args: []string{"p"}, want: []string{"path", "slug"}},
 		{cmd: proposalAddDocCmd, args: []string{"p", "notes"}, want: []string{"doc", "path", "slug"}},
+		{cmd: proposalRemoveDocCmd, args: []string{"p", "notes"}, want: []string{"doc", "path", "slug"}},
 		{cmd: proposalCatCmd, args: []string{"p", "goals"}, want: []string{"doc", "slug", "text"}},
 		{cmd: proposalWriteCmd, args: []string{"p", "goals"}, stdin: "new\n", want: []string{"author", "commit", "doc", "path", "slug"}},
 		{cmd: proposalCheckpointCmd, want: []string{"commit", "cursor", "slug", "unseen"}},

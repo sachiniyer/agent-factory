@@ -290,6 +290,7 @@ button:disabled,
   font: inherit;
   font-size: var(--af-type-body);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 }
 .af-project-item:hover {
@@ -1482,6 +1483,7 @@ body[data-project-color] [data-af-theme=dark] {
   min-height: 0;
   padding: 0;
   overflow: hidden;
+  isolation: isolate;
 }
 .af-pane-host .xterm {
   height: 100%;
@@ -1589,9 +1591,13 @@ body[data-project-color] [data-af-theme=dark] {
 .af-webpane-fallback-retry[hidden] {
   display: none;
 }
-.af-kb-terminal .af-split-multi .af-pane-focused {
-  outline: calc(var(--af-space-1) * 0.5) solid var(--af-accent);
-  outline-offset: calc(var(--af-space-1) * -0.5);
+.af-kb-terminal .af-split-multi .af-pane-focused::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  border: calc(var(--af-space-1) * 0.5) solid var(--af-accent);
 }
 .af-dragging-tab .af-pane {
   outline: calc(var(--af-space-1) * 0.25) dashed var(--af-accent);

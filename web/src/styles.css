@@ -362,6 +362,7 @@ button:disabled,
   font: inherit;
   font-size: var(--af-type-body);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 }
 
@@ -1873,6 +1874,7 @@ body[data-project-color] [data-af-theme="dark"] {
   min-height: 0;
   padding: 0;
   overflow: hidden;
+  isolation: isolate;
 }
 
 .af-pane-host .xterm {
@@ -2043,10 +2045,16 @@ body[data-project-color] [data-af-theme="dark"] {
 
 /* The focused pane, marked only when the layout is split (a single pane already reads
  * as focused via the whole-pane .af-kb-terminal outline). An inner accent ring shows
- * which pane the keyboard, Alt+w close, and a tab-bar click act on. */
-.af-kb-terminal .af-split-multi .af-pane-focused {
-  outline: calc(var(--af-space-1) * 0.5) solid var(--af-accent);
-  outline-offset: calc(var(--af-space-1) * -0.5);
+ * which pane the keyboard, Alt+w close, and a tab-bar click act on. It is an overlay,
+ * not an outline: xterm and the Docs editor paint over an outline, which left the
+ * ring visible only around the pane head. .af-pane-host isolates their z-indexes. */
+.af-kb-terminal .af-split-multi .af-pane-focused::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  border: calc(var(--af-space-1) * 0.5) solid var(--af-accent);
 }
 
 /* While a tab is being dragged, every pane hints it can receive the drop. */

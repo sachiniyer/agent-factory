@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { flipSwitch, paintSwitch, releaseSettled, type PendingFlip, type SwitchEl } from "./tasks.js";
+import { flipSwitch, paintSwitch, reconcileOnUpdate, releaseSettled, type PendingFlip, type SwitchEl } from "./tasks.js";
 
 function fakeSwitch(): SwitchEl & { attrs: Map<string, string>; on: boolean } {
   const attrs = new Map<string, string>();
@@ -31,9 +31,9 @@ function harness(enabled: boolean) {
   };
   // The rendered task: the click handler toggles from THIS value, like the pane's.
   let task = { id: "t1", enabled };
-  const click = () => flipSwitch(pending, task, toggle, (on, busy) => paintSwitch(el, on, busy));
+  const click = () => flipSwitch(pending, task, toggle, (on, busy) => paintSwitch(el, on, busy), () => task.enabled);
   // A list arrives: releases applied flips and rebuilds the handler's task from it.
-  const refetch = (nowEnabled: boolean) => { releaseSettled(pending); task = { id: "t1", enabled: nowEnabled }; paintSwitch(el, nowEnabled, pending.has("t1")); };
+  const refetch = (nowEnabled: boolean) => { releaseSettled(pending, [{ id: "t1", enabled: nowEnabled }]); task = { id: "t1", enabled: nowEnabled }; paintSwitch(el, nowEnabled, pending.has("t1")); };
   return { el, pending, click, refetch, settle: (r: boolean | Error) => settle(r), calls: () => calls };
 }
 
@@ -133,7 +133,7 @@ function backstopHarness() {
   const resolvers: ((r: boolean) => void)[] = [];
   const toggle = () => new Promise<boolean>((res) => { resolvers.push(res); });
   let enabled = true;
-  const click = () => flipSwitch(pending, { id: "t1", enabled }, toggle, (on, busy) => paintSwitch(el, on, busy), backstop);
+  const click = () => flipSwitch(pending, { id: "t1", enabled }, toggle, (on, busy) => paintSwitch(el, on, busy), () => enabled, backstop);
   return { clock, expired, pending, el, resolvers, click, setEnabled: (v: boolean) => { enabled = v; } };
 }
 
@@ -143,7 +143,7 @@ test("a backstop timer clears only the flip it was armed for", async () => {
   h.resolvers[0](true);
   await flush();                     // applied: backstop 1 armed for t=5000
   h.clock.advance(1000);
-  releaseSettled(h.pending, { clear: h.clock.clear }); // the list reconciles flip 1
+  releaseSettled(h.pending, [{ id: "t1", enabled: false }], { clear: h.clock.clear }); // the list reconciles flip 1
   h.setEnabled(false);
   h.clock.advance(1000);
   h.click();                         // flip 2 at t=2000
@@ -165,7 +165,7 @@ test("a stale backstop that was never cancelled still cannot clear a newer flip"
   h.resolvers[0](true);
   await flush();
   h.clock.advance(1000);
-  releaseSettled(h.pending);         // no clear: the old timer stays armed
+  releaseSettled(h.pending, [{ id: "t1", enabled: false }]); // no clear: the old timer stays armed
   h.setEnabled(false);
   h.click();
   h.clock.advance(2000);
@@ -182,8 +182,59 @@ test("reconciling cancels the backstop", async () => {
   h.resolvers[0](true);
   await flush();
   assert.equal(h.clock.pendingTimers(), 1);
-  releaseSettled(h.pending, { clear: h.clock.clear });
+  releaseSettled(h.pending, [{ id: "t1", enabled: false }], { clear: h.clock.clear });
   assert.equal(h.clock.pendingTimers(), 0);
   h.clock.advance(10000);
   assert.deepEqual(h.expired, []);
+});
+
+test("a failed flip repaints the latest list value, not the one captured at click time", async () => {
+  const h = harness(true);
+  h.click();                // disable requested
+  h.refetch(false);         // another client disabled it: the list now says false
+  // (an unsettled flip is not released, so the switch still shows the pending value)
+  h.settle(false);          // our request is refused
+  await flush();
+  assert.equal(h.el.attrs.get("aria-checked"), "false", "the latest list value, not the captured enabled=true");
+  assert.equal(h.el.attrs.has("aria-busy"), false);
+  h.click();
+  assert.equal(h.calls(), 2, "the next click is accepted, toggling from the displayed value");
+  assert.equal(h.el.attrs.get("aria-checked"), "true");
+});
+
+test("a list that does not carry the flipped value leaves an applied flip pending", async () => {
+  const h = harness(true);
+  h.click();
+  h.settle(true);
+  await flush();
+  h.refetch(true);          // a list fetched before the update landed
+  assert.equal(h.pending.has("t1"), true, "no authoritative list yet");
+  assert.equal(h.el.attrs.get("aria-busy"), "true");
+  h.click();
+  assert.equal(h.calls(), 1);
+  h.refetch(false);         // the list that reflects it
+  assert.equal(h.pending.size, 0);
+});
+
+test("a task the new list no longer holds is released", async () => {
+  const h = backstopHarness();
+  h.click();
+  h.resolvers[0](true);
+  await flush();
+  releaseSettled(h.pending, [], { clear: h.clock.clear });
+  assert.equal(h.pending.size, 0);
+  assert.equal(h.clock.pendingTimers(), 0);
+});
+
+test("a project switch re-renders the same list and keeps an applied flip pending", async () => {
+  const h = backstopHarness();
+  const list = [{ id: "t1", enabled: true }];
+  h.click();
+  h.resolvers[0](true);
+  await flush();
+  reconcileOnUpdate(h.pending, list, list, { clear: h.clock.clear });   // away and back: same array
+  assert.equal(h.pending.has("t1"), true, "no authoritative list arrived");
+  assert.equal(h.clock.pendingTimers(), 1);
+  reconcileOnUpdate(h.pending, list, [{ id: "t1", enabled: false }], { clear: h.clock.clear });
+  assert.equal(h.pending.size, 0, "a new list that carries the flipped value releases it");
 });
