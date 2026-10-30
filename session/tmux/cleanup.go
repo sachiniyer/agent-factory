@@ -165,6 +165,22 @@ func probeSessionContext(ctx context.Context, cmdExec cmd.Executor, name string)
 	return false, true
 }
 
+// probeTarget is probeSession against an explicit tmux target (a "$N" session
+// id), as the (exists, known) tri-state. It cannot use has-session's `-t=name`
+// exact-match form: that prefix is for names, an id is addressed as-is.
+func probeTarget(cmdExec cmd.Executor, target string) (exists bool, known bool) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", "-t", target)
+	if err == nil {
+		return true, true
+	}
+	if ctx.Err() != nil {
+		return false, false
+	}
+	return false, true
+}
+
 // recoveryWindowObserver is notified when a vanished-session recovery's bounded
 // GRACE WAIT opens and closes. Production leaves it nil, so this costs one nil
 // check per wait.

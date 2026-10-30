@@ -306,6 +306,11 @@ type TmuxSession struct {
 	// environment allowlist. It is protected by programMu because a start reads
 	// it alongside program and sibling tabs copy both launch settings.
 	envPassthrough []string
+	// instanceID is the stable id of the instance whose agent this session runs,
+	// stamped into the session environment at new-session as AF_INSTANCE_ID
+	// (#6258). Guarded by programMu with the other launch settings. Empty for
+	// sessions that are not an instance's agent (siblings, login panes).
+	instanceID string
 	// account is the credential account this session runs its agent as, or empty
 	// for the ambient identity. Guarded by programMu with envPassthrough (#3051).
 	account string

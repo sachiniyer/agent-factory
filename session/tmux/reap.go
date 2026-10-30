@@ -93,10 +93,17 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 // or a concrete finding, the way the package already treats an unreadable
 // process table or session list.
 func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
+	return captureSessionProcessTreesAt(cmdExec, sanitizedName, exactTarget(sanitizedName))
+}
+
+// captureSessionProcessTreesAt is CaptureSessionProcessTrees against an explicit
+// tmux target, so a pinned teardown lists the panes of the probed incarnation
+// rather than of whatever now holds the name (#6258).
+func captureSessionProcessTreesAt(cmdExec cmd.Executor, sanitizedName, target string) ([]proctree.Process, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
-		"list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", paneRowFormat)
+		"list-panes", "-s", "-t", target, "-F", paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
@@ -120,7 +127,14 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		// all exit 1. tmuxProvedSessionAbsent classifies the third by asking for
 		// the session listing, because that answer names nothing to match on
 		// (#3469).
-		if tmuxProvedSessionAbsent(cmdExec, err, sanitizedName) {
+		// An id target's absence is named by the id; a name's by the listing.
+		absent := false
+		if strings.HasPrefix(target, "$") {
+			absent = missingTmuxSession(err, target)
+		} else {
+			absent = tmuxProvedSessionAbsent(cmdExec, err, sanitizedName)
+		}
+		if absent {
 			return nil, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
 		}
 		return nil, fmt.Errorf("cannot list panes before teardown: %w", err)

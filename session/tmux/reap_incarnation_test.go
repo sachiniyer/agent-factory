@@ -1,0 +1,348 @@
+package tmux
+
+import (
+	"fmt"
+	"os/exec"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+)
+
+// fakeIncarnation is one tmux session as a server holds it.
+type fakeIncarnation struct {
+	id, name, pid, created string
+	env                    map[string]string
+}
+
+// fakeTmuxServer answers the commands ReapProvenIncarnation issues the way a
+// tmux server does: a target is either `=name:` (the session called name) or
+// `$N` (the session with that id), a missing session exits 1 with "can't find
+// session: <target>", and a missing variable exits 1 with "unknown variable".
+// It records every argv so a test asserts what was and was not run.
+type fakeTmuxServer struct {
+	t        *testing.T
+	mu       sync.Mutex
+	sessions []*fakeIncarnation
+	commands []string
+	// after, when set, runs after every command whose argv contains the key — the
+	// hook that replaces a session between two commands of one reap.
+	after map[string]func(*fakeTmuxServer)
+	// unreadableEnv makes every show-environment fail with a non-"unknown
+	// variable" error, the shape of an environment that cannot be read.
+	unreadableEnv bool
+	// delay makes every command outlast tmuxCommandTimeout.
+	delay time.Duration
+}
+
+func exitOneWith(t *testing.T, stderr string) error {
+	t.Helper()
+	_, err := exec.Command("sh", "-c", `printf '%s\n' "$1" >&2; exit 1`, "sh", stderr).Output()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	return err
+}
+
+func (s *fakeTmuxServer) find(target string) *fakeIncarnation {
+	for _, sess := range s.sessions {
+		if strings.HasPrefix(target, "$") && sess.id == target {
+			return sess
+		}
+		if target == "="+sess.name+":" || target == "="+sess.name {
+			return sess
+		}
+	}
+	return nil
+}
+
+func fakeTargetOf(args []string) string {
+	for i, a := range args {
+		if a == "-t" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, "-t=") {
+			return "=" + strings.TrimPrefix(a, "-t=")
+		}
+	}
+	return ""
+}
+
+func (s *fakeTmuxServer) answer(c *exec.Cmd) ([]byte, error) {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+		return nil, fmt.Errorf("tmux did not answer in time")
+	}
+	args := c.Args[1:]
+	line := strings.Join(args, " ")
+	s.mu.Lock()
+	s.commands = append(s.commands, line)
+	var hook func(*fakeTmuxServer)
+	for key, h := range s.after {
+		if strings.Contains(line, key) {
+			hook = h
+		}
+	}
+	out, err := s.answerLocked(args)
+	s.mu.Unlock()
+	if hook != nil {
+		s.mu.Lock()
+		hook(s)
+		s.mu.Unlock()
+	}
+	return out, err
+}
+
+func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
+	target := fakeTargetOf(args)
+	sess := s.find(target)
+	missing := exitOneWith(s.t, "can't find session: "+strings.TrimSuffix(strings.TrimPrefix(target, "="), ":"))
+	switch args[0] {
+	case "display-message":
+		if sess == nil {
+			return nil, missing
+		}
+		format := args[len(args)-1]
+		switch format {
+		case "#{session_id} #{pid} #{session_created}":
+			return []byte(sess.id + " " + sess.pid + " " + sess.created + "\n"), nil
+		case "#{pid} #{session_created}":
+			return []byte(sess.pid + " " + sess.created + "\n"), nil
+		}
+		return nil, fmt.Errorf("fake tmux: unexpected display-message format %q", format)
+	case "show-environment":
+		if sess == nil {
+			return nil, missing
+		}
+		if s.unreadableEnv {
+			return nil, exitOneWith(s.t, "protocol version mismatch")
+		}
+		if len(args) < 4 {
+			return nil, nil
+		}
+		name := args[3]
+		if v, ok := sess.env[name]; ok {
+			return []byte(name + "=" + v + "\n"), nil
+		}
+		return nil, exitOneWith(s.t, "unknown variable: "+name)
+	case "list-panes":
+		if sess == nil {
+			return nil, missing
+		}
+		return nil, nil
+	case "has-session":
+		if sess == nil {
+			return nil, missing
+		}
+		return nil, nil
+	case "kill-session":
+		if sess == nil {
+			return nil, missing
+		}
+		for i, other := range s.sessions {
+			if other == sess {
+				s.sessions = append(s.sessions[:i], s.sessions[i+1:]...)
+				break
+			}
+		}
+		return nil, nil
+	case "list-sessions":
+		var b strings.Builder
+		for _, other := range s.sessions {
+			b.WriteString("\t" + other.name + "\n")
+		}
+		return []byte(b.String()), nil
+	}
+	return nil, fmt.Errorf("fake tmux: unexpected command %q", strings.Join(args, " "))
+}
+
+func (s *fakeTmuxServer) executor() cmd_test.MockCmdExec {
+	return cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			_, err := s.answer(c)
+			return err
+		},
+		OutputFunc: s.answer,
+	}
+}
+
+func (s *fakeTmuxServer) kills() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, c := range s.commands {
+		if strings.HasPrefix(c, "kill-session") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (s *fakeTmuxServer) has(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.find("="+name+":") != nil
+}
+
+const (
+	reapName     = "af_repo_fire"
+	reapHome     = "/home/u/.agent-factory"
+	reapInstance = "inst-6258-a"
+)
+
+func newFakeTmuxServer(t *testing.T, env map[string]string) *fakeTmuxServer {
+	t.Helper()
+	return &fakeTmuxServer{t: t, sessions: []*fakeIncarnation{{
+		id: "$7", name: reapName, pid: "4242", created: "1700000000", env: env,
+	}}}
+}
+
+func provenEnv() map[string]string {
+	return map[string]string{
+		EnvMarkerSession:  reapName,
+		EnvMarkerHome:     reapHome,
+		EnvMarkerInstance: reapInstance,
+	}
+}
+
+func reapProof() IncarnationProof {
+	return IncarnationProof{SessionName: reapName, Home: reapHome, InstanceID: reapInstance}
+}
+
+// #6258: a session whose own environment carries this fire's instance id is
+// stopped, and the kill addresses the probed incarnation by its tmux id, never
+// by the name.
+func TestReapProvenIncarnationKillsTheProbedIdOnAMatch(t *testing.T) {
+	srv := newFakeTmuxServer(t, provenEnv())
+	got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+
+	require.True(t, got.Stopped, "why: %s", got.Why)
+	require.Equal(t, []string{"kill-session -t $7"}, srv.kills(),
+		"the kill must target the probed incarnation id, and nothing else")
+	require.False(t, srv.has(reapName))
+}
+
+// Each of these leaves the session ALONE, asserted on the recorded argv: no
+// kill-session of any target was issued.
+func TestReapProvenIncarnationLeavesUnprovenSessionsAlone(t *testing.T) {
+	without := func(drop string) map[string]string {
+		env := provenEnv()
+		delete(env, drop)
+		return env
+	}
+	with := func(key, value string) map[string]string {
+		env := provenEnv()
+		env[key] = value
+		return env
+	}
+	cases := []struct {
+		name string
+		env  map[string]string
+		mod  func(*fakeTmuxServer)
+	}{
+		{name: "a different instance id (a concurrent create, same name and home)", env: with(EnvMarkerInstance, "inst-someone-else")},
+		{name: "no instance id (a session from before the marker existed)", env: without(EnvMarkerInstance)},
+		{name: "a different install's home", env: with(EnvMarkerHome, "/other/home")},
+		{name: "no home marker", env: without(EnvMarkerHome)},
+		{name: "a different AF_SESSION", env: with(EnvMarkerSession, "af_other")},
+		{name: "an environment that cannot be read", env: provenEnv(), mod: func(s *fakeTmuxServer) { s.unreadableEnv = true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeTmuxServer(t, tc.env)
+			if tc.mod != nil {
+				tc.mod(srv)
+			}
+			got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+
+			require.False(t, got.Stopped)
+			require.NotEmpty(t, got.Why, "a refusal must say which condition kept the session alone")
+			require.Empty(t, srv.kills(), "an unproven session must not be killed, by id or by name")
+			require.True(t, srv.has(reapName))
+		})
+	}
+}
+
+func TestReapProvenIncarnationRequiresEveryProofField(t *testing.T) {
+	for name, proof := range map[string]IncarnationProof{
+		"no instance id (the fire recorded none before its spawn)": {SessionName: reapName, Home: reapHome},
+		"no home": {SessionName: reapName, InstanceID: reapInstance},
+		"no name": {Home: reapHome, InstanceID: reapInstance},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newFakeTmuxServer(t, provenEnv())
+			got := ReapProvenIncarnation(srv.executor(), "claude", proof)
+
+			require.False(t, got.Stopped)
+			require.NotEmpty(t, got.Why)
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			require.Empty(t, srv.commands, "an incomplete proof must not even probe tmux")
+		})
+	}
+}
+
+// Unknown is never ours: a probe that does not answer leaves the session alone.
+func TestReapProvenIncarnationLeavesAnUnansweredProbeAlone(t *testing.T) {
+	previous := tmuxCommandTimeout
+	tmuxCommandTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { tmuxCommandTimeout = previous })
+
+	srv := newFakeTmuxServer(t, provenEnv())
+	srv.delay = 120 * time.Millisecond
+	got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+
+	require.False(t, got.Stopped)
+	require.NotEmpty(t, got.Why)
+	require.Empty(t, srv.kills())
+}
+
+// The name is re-created between the probe and the kill. Whatever the interleaving,
+// the replacement is never killed.
+func TestReapProvenIncarnationNeverKillsASessionRecreatedUnderTheName(t *testing.T) {
+	recreate := func(s *fakeTmuxServer) {
+		// The probed incarnation dies and another is created under the same name
+		// with a new id, carrying the SAME markers a real create would stamp.
+		s.sessions = []*fakeIncarnation{{
+			id: "$9", name: reapName, pid: "4242", created: "1700000099", env: provenEnv(),
+		}}
+	}
+	cases := map[string]string{
+		// After the environment is read: the re-confirmation finds the id gone.
+		"after the environment read": "show-environment -t $7 AF_SESSION",
+		// After the re-confirmation: the kill itself finds the id gone.
+		"after the re-confirmation": "display-message -p -t $7 #{pid} #{session_created}",
+	}
+	for name, trigger := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := newFakeTmuxServer(t, provenEnv())
+			srv.after = map[string]func(*fakeTmuxServer){trigger: recreate}
+			ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+
+			require.True(t, srv.has(reapName), "the session re-created under the name must survive")
+			for _, kill := range srv.kills() {
+				require.Equal(t, "kill-session -t $7", kill, "only the probed incarnation id may ever be targeted")
+			}
+		})
+	}
+}
+
+// A replacement server reissues "$7": the id alone is not an identity, the server
+// pid and creation stamp are.
+func TestReapProvenIncarnationRejectsAServerThatReissuedTheId(t *testing.T) {
+	srv := newFakeTmuxServer(t, provenEnv())
+	srv.after = map[string]func(*fakeTmuxServer){
+		"show-environment -t $7 AF_SESSION": func(s *fakeTmuxServer) {
+			s.sessions[0].pid = "9999"
+			s.sessions[0].created = "1700000555"
+		},
+	}
+	got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+
+	require.False(t, got.Stopped)
+	require.Contains(t, got.Why, "replaced")
+	require.Empty(t, srv.kills())
+}
