@@ -264,7 +264,13 @@ type InstanceData struct {
 	// never to a time before the real archive — so the fallback can only make a
 	// legacy row look younger and therefore under-delete, never over-delete.
 	ArchivedAt time.Time `json:"archived_at,omitzero"`
-	Prompt     string    `json:"prompt,omitempty"`
+	// ArchiveNonce is the occupant nonce stamped into the archived worktree's registration leaf (#5189).
+	ArchiveNonce string `json:"archive_nonce,omitempty"`
+	// PrunedAt marks a prune tombstone: the worktree was deleted, the branch kept (#5189).
+	PrunedAt time.Time `json:"pruned_at,omitzero"`
+	// PruneIntent is the durable record written before prune's first irreversible step (#5189).
+	PruneIntent *PruneIntentData `json:"prune_intent,omitempty"`
+	Prompt      string           `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
 	// Unlike Prompt, it is cleared only after the exact mission lands (or is

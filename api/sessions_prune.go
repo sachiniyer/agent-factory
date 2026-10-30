@@ -1,9 +1,14 @@
 package api
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
+
+	"golang.org/x/term"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +19,12 @@ import (
 var (
 	sessionsPruneAllFlag      bool
 	sessionsPruneOlderThanStr string
+	sessionsPruneApplyFlag    bool
+	sessionsPruneYesFlag      bool
+
+	// pruneStdinIsTTY and pruneConfirmIn are seams for the confirmation prompt.
+	pruneStdinIsTTY           = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+	pruneConfirmIn  io.Reader = os.Stdin
 )
 
 // `af sessions prune` is the manual, opt-in reclaim for archived sessions
@@ -25,15 +36,24 @@ var (
 // tombstone record that keeps the row listed — lands in the follow-up issue
 // referenced on the PR, and carries the guard stack this listing previews.
 var sessionsPruneCmd = &cobra.Command{
-	Use:   "prune --older-than <duration> [--repo <path> | --all]",
-	Short: "List disk reclaimable from old archived sessions (dry run)",
+	Use:   "prune --older-than <duration> [--repo <path> | --all] [--apply [--yes]]",
+	Short: "List (or with --apply, delete) old archived worktrees",
 	Long: `Report archived sessions older than --older-than, measured from each
 session's archive time.
 
-This is a dry run: it lists each archived session a reclaim would remove
-(title, archive time, allocated bytes) plus a total, and the reasons every
-other session was skipped. af writes nothing — no deletion, no record
-update, no git mutation — so it is safe to run at any time.
+Without --apply this is a dry run: it lists each archived session a reclaim
+would remove (title, archive time, allocated bytes) plus a total, and the
+reasons every other session was skipped. af writes nothing — no deletion, no
+record update, no git mutation — so it is safe to run at any time.
+
+With --apply, af prints that plan, asks you to confirm it (or pass --yes; a
+non-interactive run requires it), and then deletes exactly the worktrees the
+plan listed — the SAME judgment as the dry run, re-made under each session's
+lock just before it deletes. The branch is always kept and the session row
+stays, marked pruned, naming the branch; restore refuses a pruned session and
+tells you where the work is. A refusal names the first offending paths so you
+can clean up and re-run. Nothing outside the archived worktree is touched:
+provider transcripts and other sessions' registrations are left alone.
 
 Only archived sessions are eligible; live, lost, dead or in-flight sessions,
 archives whose move is incomplete, and worktrees still holding uncommitted or
@@ -82,11 +102,15 @@ refuses with guidance; pass --daemon-url or start af first.`,
 			}
 		}
 
-		resp, err := pruneSessionsViaDaemon(daemon.PruneSessionsRequest{
+		req := daemon.PruneSessionsRequest{
 			RepoID:    repoID,
 			All:       sessionsPruneAllFlag,
 			OlderThan: sessionsPruneOlderThanStr,
-		})
+		}
+		resp, err := pruneSessionsViaDaemon(req)
+		if err == nil && sessionsPruneApplyFlag {
+			resp, err = applyPrunePlan(cmd, req, resp)
+		}
 		if err != nil {
 			if errors.Is(err, daemon.ErrDaemonUnavailable) {
 				// A read must not launch a daemon — the socket dial alone is
@@ -98,4 +122,38 @@ refuses with guidance; pass --daemon-url or start af first.`,
 		}
 		return jsonOut(resp)
 	},
+}
+
+// applyPrunePlan turns the dry run just made into a confirmed apply: the user
+// sees the plan, confirms it, and the apply is bound to exactly the sessions it
+// listed (Only) — never re-scanned into something larger.
+func applyPrunePlan(cmd *cobra.Command, req daemon.PruneSessionsRequest, plan daemon.PruneSessionsResponse) (daemon.PruneSessionsResponse, error) {
+	if len(plan.Candidates) == 0 {
+		// Nothing to delete: report the plan (and why every session was skipped)
+		// without asking for a confirmation that would guard nothing. A prune an
+		// earlier run left unfinished is completed by the daemon at start-up and
+		// by the next apply that has something to do.
+		return plan, nil
+	}
+	if !sessionsPruneYesFlag {
+		if !pruneStdinIsTTY() {
+			return daemon.PruneSessionsResponse{}, fmt.Errorf("--apply deletes archived worktrees and needs a confirmation: run it in a terminal, or pass --yes to confirm the plan non-interactively")
+		}
+		out := cmd.ErrOrStderr()
+		_, _ = fmt.Fprintf(out, "Plan: delete %d archived worktree(s), up to %d byte(s); each branch is kept.\n", len(plan.Candidates), plan.ReclaimableBytes)
+		for _, c := range plan.Candidates {
+			_, _ = fmt.Fprintf(out, "  %s  (branch %s, archived %s)\n", c.Title, c.Branch, c.ArchivedAt.Format("2006-01-02"))
+		}
+		_, _ = fmt.Fprint(out, "Delete them? [y/N] ")
+		line, _ := bufio.NewReader(pruneConfirmIn).ReadString('\n')
+		if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+			return daemon.PruneSessionsResponse{}, fmt.Errorf("not confirmed; nothing was deleted")
+		}
+	}
+	req.Apply = true
+	req.Only = nil
+	for _, c := range plan.Candidates {
+		req.Only = append(req.Only, c.ID)
+	}
+	return pruneSessionsViaDaemon(req)
 }

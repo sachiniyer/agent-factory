@@ -34,6 +34,17 @@ import (
 // is returned, so the caller fails closed instead of treating "unknown" as
 // "clean".
 func WorktreeDirtyFiles(worktreePath string) (int, error) {
+	n, _, err := WorktreeDirtyEntries(worktreePath)
+	return n, err
+}
+
+// pruneSamplePaths is how many offending paths a refusal names: enough to act
+// on, not a dump.
+const pruneSamplePaths = 3
+
+// WorktreeDirtyEntries is WorktreeDirtyFiles plus the first few porcelain
+// entries ("?? .env", "!! node_modules/") so a refusal can say what to clean.
+func WorktreeDirtyEntries(worktreePath string) (int, []string, error) {
 	// --no-optional-locks makes the probe a pure read: without it `git
 	// status` opportunistically rewrites the worktree index's stat cache,
 	// which would break slice 1's "af writes nothing anywhere" promise
@@ -57,19 +68,23 @@ func WorktreeDirtyFiles(worktreePath string) (int, error) {
 		"status", "--porcelain", "--untracked-files=normal", "--ignored",
 		"--ignore-submodules=none")
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	dirty := 0
+	var sample []string
 	for _, line := range strings.Split(string(out), "\n") {
 		if line == "" {
 			continue
 		}
 		if len(line) < 3 || line[2] != ' ' {
-			return 0, fmt.Errorf("git status reported an incomplete traversal of %s: %s", worktreePath, line)
+			return 0, nil, fmt.Errorf("git status reported an incomplete traversal of %s: %s", worktreePath, line)
 		}
 		dirty++
+		if len(sample) < pruneSamplePaths {
+			sample = append(sample, line)
+		}
 	}
-	return dirty, nil
+	return dirty, sample, nil
 }
 
 // VerifyRegisteredWorktreeOccupantBranch is VerifyRegisteredWorktreeOccupant

@@ -498,7 +498,7 @@ func TestPruneFilesystemRefusal_BareCloneExistingBranchIsCandidate(t *testing.T)
 			WorktreePath: filepath.Join(t.TempDir(), "archived-worktree-gone-out-of-band"),
 		},
 	}
-	refusal := pruneFilesystemRefusal(data)
+	_, refusal := pruneFilesystemRefusal(data)
 	assert.Empty(t, refusal,
 		"a bare origin whose branch exists must list as reclaimable, not refuse as 'branch missing'")
 }
@@ -521,7 +521,7 @@ func TestPruneFilesystemRefusal_BareCloneMissingBranchRefuses(t *testing.T) {
 			WorktreePath: filepath.Join(t.TempDir(), "archived-worktree-gone-out-of-band"),
 		},
 	}
-	refusal := pruneFilesystemRefusal(data)
+	_, refusal := pruneFilesystemRefusal(data)
 	assert.Contains(t, refusal, "recovery branch",
 		"a bare origin whose branch is gone must still refuse, not list as reclaimable")
 }

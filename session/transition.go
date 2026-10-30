@@ -813,6 +813,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	// own commit above.
 	if from.liveness == LiveArchived && to.liveness != LiveArchived {
 		i.archivedAt = time.Time{}
+		i.prune.nonce = ""
 	}
 	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
 		close(i.archiveSettled)

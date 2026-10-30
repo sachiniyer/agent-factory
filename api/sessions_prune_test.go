@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,8 @@ func resetPruneFlags(t *testing.T) {
 	reset := func() {
 		sessionsPruneAllFlag = false
 		sessionsPruneOlderThanStr = ""
+		sessionsPruneApplyFlag = false
+		sessionsPruneYesFlag = false
 	}
 	t.Cleanup(reset)
 	reset()
@@ -46,13 +49,62 @@ func dryPlan() daemon.PruneSessionsResponse {
 	}
 }
 
-// TestSessionsPrune_HasNoApplyFlag: slice 1 ships the dry run only — the
-// command must not carry a mutation flag at all (#5136 split). If --apply is
-// ever re-added it lands in the follow-up's own PR, so this lookup must stay
-// nil until then.
-func TestSessionsPrune_HasNoApplyFlag(t *testing.T) {
-	assert.Nil(t, sessionsPruneCmd.Flags().Lookup("apply"),
-		"slice 1 is strictly read-only — no --apply flag may be registered")
+// TestSessionsPrune_ApplyIsBoundToTheConfirmedPlan: --apply makes the dry run
+// first, asks for confirmation, and then applies ONLY the sessions that plan
+// listed; a non-interactive run without --yes refuses before deleting anything.
+func TestSessionsPrune_ApplyIsBoundToTheConfirmedPlan(t *testing.T) {
+	setupRepoForCmd(t)
+	resetPruneFlags(t)
+	sessionsPruneOlderThanStr = "720h"
+	sessionsPruneApplyFlag = true
+
+	var reqs []daemon.PruneSessionsRequest
+	stubPruneDaemon(t, func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
+		reqs = append(reqs, req)
+		resp := dryPlan()
+		resp.Candidates[0].ID = "id-old"
+		resp.Applied = req.Apply
+		return resp, nil
+	})
+
+	prevTTY, prevIn := pruneStdinIsTTY, pruneConfirmIn
+	t.Cleanup(func() { pruneStdinIsTTY, pruneConfirmIn = prevTTY, prevIn })
+
+	// Not a terminal and no --yes: refuses, and only the read-only dry run ran.
+	pruneStdinIsTTY = func() bool { return false }
+	_, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--yes")
+	require.Len(t, reqs, 1)
+	assert.False(t, reqs[0].Apply)
+
+	// A terminal answering "no": nothing is deleted.
+	reqs = nil
+	pruneStdinIsTTY = func() bool { return true }
+	pruneConfirmIn = strings.NewReader("n\n")
+	_, err = runCmdCaptureStdout(t, sessionsPruneCmd, nil)
+	require.Error(t, err)
+	require.Len(t, reqs, 1)
+	assert.False(t, reqs[0].Apply)
+
+	// A terminal answering "y": the apply carries exactly the planned IDs.
+	reqs = nil
+	pruneConfirmIn = strings.NewReader("y\n")
+	_, err = runCmdCaptureStdout(t, sessionsPruneCmd, nil)
+	require.NoError(t, err)
+	require.Len(t, reqs, 2)
+	assert.False(t, reqs[0].Apply)
+	assert.True(t, reqs[1].Apply)
+	assert.Equal(t, []string{"id-old"}, reqs[1].Only)
+
+	// --yes skips the prompt but still binds to the plan.
+	reqs = nil
+	sessionsPruneYesFlag = true
+	pruneStdinIsTTY = func() bool { return false }
+	_, err = runCmdCaptureStdout(t, sessionsPruneCmd, nil)
+	require.NoError(t, err)
+	require.Len(t, reqs, 2)
+	assert.Equal(t, []string{"id-old"}, reqs[1].Only)
 }
 
 // TestSessionsPrune_ResponseJSONKeys pins the wire contract (#5136 review):

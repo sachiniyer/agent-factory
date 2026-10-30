@@ -628,6 +628,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// rather than waiting for the first poll tick; createSweepMu keeps a create
 	// admitted after this point out of the protected-slug window (#2632).
 	launchDeferredOrphanSweepIfReady(manager, stopCh, wg)
+	// Finish a prune the previous daemon began (#5189): bounded, logged, off readiness.
+	launchPruneIntentResume(manager, stopCh, wg)
 
 	// Start the daemon-owned release check only now, past the readiness barrier:
 	// a box that never opens the TUI never reaches the launch-path updater, so
