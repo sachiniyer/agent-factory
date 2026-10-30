@@ -114,6 +114,7 @@ func (b *Backlog) Answer(id, questionID int, text string, deliver bool, now time
 		}
 		answer.Delivery, answer.PrevStatus = DeliveryPending, prev
 		it.Status = StatusRunning
+		it.LiveAnswers++
 	}
 	out := Answered{Answer: *it.appendMessage(answer, now)}
 	if last := it.lastRun(); last != nil {
@@ -176,15 +177,13 @@ func (b *Backlog) AnswerFailed(id, answerID int, reason string, now time.Time) e
 	}
 	prev := m.PrevStatus
 	m.Delivery = DeliveryFailed
-	// A newer answer that is pending or was delivered is work the item is
-	// running for: the status this answer replaced must not come back over it.
-	newerWork := false
-	for _, x := range it.Thread {
-		if x.Kind == KindAnswer && x.ID > answerID && (x.Delivery == DeliveryPending || x.Delivery == DeliveryDelivered) {
-			newerWork = true
-		}
+	// The item is running for every live answer: pending ones and delivered ones
+	// whose run has not ended. The status this answer replaced comes back only
+	// when its failure leaves no other live answer, whichever order they fail in.
+	if it.LiveAnswers > 0 {
+		it.LiveAnswers--
 	}
-	if !newerWork && it.Status == StatusRunning && prev.Valid() && prev != StatusRunning && CheckStatusChange(StatusChange{ID: id,
+	if it.LiveAnswers == 0 && it.Status == StatusRunning && prev.Valid() && prev != StatusRunning && CheckStatusChange(StatusChange{ID: id,
 		From: it.Status, To: prev, By: ActorAF, StartFailed: true, PrevStatus: prev}) == nil {
 		it.Status = prev
 	}
@@ -227,13 +226,18 @@ func (b *Backlog) PendingAnswers() []PendingAnswer {
 // question's text) before forwarding the line, without touching the backlog
 // file. It closes the oldest open question only if that is the question with this
 // text; a different or newer one is left alone. It returns the item id, or 0.
-func (b *Backlog) AnsweredInSessionText(sessionID, text string, now time.Time) int {
+func (b *Backlog) AnsweredInSessionText(sessionID, text string, normalize func(string) string, now time.Time) int {
 	it := b.ItemForSession(sessionID)
 	if it == nil || it.lastRun().SessionID != sessionID || text == "" {
 		return 0
 	}
 	open := it.OpenQuestion()
-	if open == nil || open.Text != text {
+	if normalize == nil {
+		normalize = func(s string) string { return s }
+	}
+	// The attention mirror is display-capped, so compare in its normalization:
+	// the text the user saw is the capped form of the full question.
+	if open == nil || normalize(open.Text) != text {
 		return 0
 	}
 	open.Closed = ClosedAnsweredInSession

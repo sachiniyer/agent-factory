@@ -275,6 +275,7 @@ func TestAnswerFailedKeepsRunningForANewerAnswer(t *testing.T) {
 	it, _ := b.Add(NewItem{Title: "A"}, now)
 	it.Status = StatusRunning
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+	it.LiveAnswers = 2
 	it.Thread = []Message{
 		{ID: 1, Kind: KindAnswer, Answers: 0, Delivery: DeliveryPending, PrevStatus: StatusReview},
 		{ID: 2, Kind: KindAnswer, Answers: 0, Delivery: DeliveryDelivered, PrevStatus: StatusRunning},
@@ -286,6 +287,7 @@ func TestAnswerFailedKeepsRunningForANewerAnswer(t *testing.T) {
 		t.Fatalf("status = %s: the first answer's rollback overwrote the work the second started", b.Item(1).Status)
 	}
 	// With no newer answer, the rollback still happens.
+	b.Item(1).LiveAnswers = 1
 	b.Item(1).Thread = []Message{{ID: 1, Kind: KindAnswer, Delivery: DeliveryPending, PrevStatus: StatusReview}}
 	if err := b.AnswerFailed(1, 1, "pane gone", now); err != nil {
 		t.Fatal(err)
@@ -346,22 +348,78 @@ func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
 	if _, err := b.Ask(1, "s1", "first?", now); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.AnsweredInSessionText("s1", "second?", now); got != 0 {
+	if got := b.AnsweredInSessionText("s1", "second?", nil, now); got != 0 {
 		t.Fatalf("closed %d for a question the user did not see", got)
 	}
-	if got := b.AnsweredInSessionText("s1", "", now); got != 0 {
+	if got := b.AnsweredInSessionText("s1", "", nil, now); got != 0 {
 		t.Fatal("no seen question must close nothing")
 	}
 	if _, err := b.Ask(1, "s1", "second?", now); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.AnsweredInSessionText("s1", "second?", now); got != 0 {
+	if got := b.AnsweredInSessionText("s1", "second?", nil, now); got != 0 {
 		t.Fatal("only the oldest open question can have been answered by a line")
 	}
-	if got := b.AnsweredInSessionText("s1", "first?", now); got != 1 {
+	if got := b.AnsweredInSessionText("s1", "first?", nil, now); got != 1 {
 		t.Fatalf("got %d", got)
 	}
 	if b.OpenQuestionText(1) != "second?" {
 		t.Fatalf("the newer question must stay open, got %q", b.OpenQuestionText(1))
+	}
+}
+
+// The reverse order: the first answer is delivered and the second fails. The agent
+// is still working on the first, so the item stays running (Codex P2 on #6295).
+func TestALaterAnswerFailingKeepsEarlierDeliveredWorkRunning(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusReview
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+	for _, q := range []string{"one?", "two?"} {
+		if _, err := b.Ask(1, "s1", q, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, _ := b.Answer(1, 0, "a", true, now)
+	second, _ := b.Answer(1, 0, "b", true, now)
+	if err := b.AnswerDelivered(1, first.Answer.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AnswerFailed(1, second.Answer.ID, "pane gone", now); err != nil {
+		t.Fatal(err)
+	}
+	if b.Item(1).Status != StatusRunning {
+		t.Fatalf("status = %s: the delivered first answer's work was rolled back over", b.Item(1).Status)
+	}
+	// Once the run ends the count resets, so a later answer batch rolls back normally.
+	if end := b.RunEnded("s1", now); !end.Changed || b.Item(1).LiveAnswers != 0 {
+		t.Fatalf("run end: %+v live answers %d", end, b.Item(1).LiveAnswers)
+	}
+}
+
+// The attention mirror is capped; the terminal binding compares in that
+// normalization (Codex P2 on #6295).
+func TestAnsweredInSessionTextMatchesACappedQuestion(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusRunning
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+	long := strings.Repeat("why? ", 200)
+	if _, err := b.Ask(1, "s1", long, now); err != nil {
+		t.Fatal(err)
+	}
+	capped := func(s string) string {
+		if r := []rune(s); len(r) > 500 {
+			return string(r[:500])
+		}
+		return s
+	}
+	if got := b.AnsweredInSessionText("s1", capped(long), nil, now); got != 0 {
+		t.Fatal("without the normalization the capped text cannot match")
+	}
+	if got := b.AnsweredInSessionText("s1", capped(long), capped, now); got != 1 {
+		t.Fatalf("a capped question the user saw was not closed: %d", got)
 	}
 }

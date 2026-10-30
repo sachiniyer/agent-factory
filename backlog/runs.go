@@ -277,6 +277,7 @@ func (b *Backlog) RunEnded(sessionID string, now time.Time) RunEnd {
 			return out
 		}
 		it.Status = StatusReview
+		it.LiveAnswers = 0
 		it.UpdatedAt = now
 		_, _ = b.AddNote(it.ID, AuthorAF, RunEndNote, now)
 		out.Changed = true
