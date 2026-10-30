@@ -47,6 +47,11 @@ type remoteClientlessChannel struct {
 	conn   *websocket.Conn
 	ctx    context.Context
 	cancel context.CancelFunc
+	// pr is the reader end of the live capture's pipe. StopCapture closes it so
+	// a readLoop parked in pw.Write for a reader that is gone is released: a
+	// context cancel and a socket close cannot reach a goroutine blocked on an
+	// io.Pipe write.
+	pr *io.PipeReader
 	// remoteSeq is this channel's cursor in the REMOTE broker's ring (#5571
 	// W1.2): the OpHello start seq of the current subscription plus the bytes
 	// it has delivered since. A re-dial sends it as ?since=, so bytes the
@@ -63,6 +68,10 @@ type remoteClientlessChannel struct {
 	dialSeq          uint64
 	helloPending     bool
 	replayContiguous bool
+	// paneReplaced marks the next capture as following a replacement of the
+	// remote pane (an in-place relaunch, #5871): it never claims to replay
+	// history, so the recovery repaint is always owed. Cleared by StopCapture.
+	paneReplaced bool
 	// writeMu serializes SendRaw/Resize writes: coder/websocket allows one
 	// concurrent reader + one writer, but two goroutines writing (an input and a
 	// resize) would race the frame boundary.
@@ -131,9 +140,9 @@ func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		cancel()
 		return nil, err
 	}
-	c.conn, c.ctx, c.cancel = conn, ctx, cancel
-	c.dialSeq, c.helloPending, c.replayContiguous = c.remoteSeq, true, false
 	pr, pw := io.Pipe()
+	c.conn, c.ctx, c.cancel, c.pr = conn, ctx, cancel, pr
+	c.dialSeq, c.helloPending, c.replayContiguous = c.remoteSeq, true, false
 	go c.readLoop(ctx, conn, pw)
 	return pr, nil
 }
@@ -221,7 +230,19 @@ func (c *remoteClientlessChannel) advanceRemoteSeqLocked(conn *websocket.Conn, d
 func (c *remoteClientlessChannel) ReplaysHistory() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.conn != nil && c.replayContiguous
+	return c.conn != nil && c.replayContiguous && !c.paneReplaced
+}
+
+// PaneReplaced records that the remote pane this channel streams was replaced
+// by a new process (an in-place relaunch). The cursor into the old pane's ring
+// means nothing to the replacement, so the next dial is a live tail, and that
+// capture never reports contiguous history: the broker owes every attached
+// client a repaint of the replacement's screen.
+func (c *remoteClientlessChannel) PaneReplaced() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.remoteSeq = 0
+	c.paneReplaced = true
 }
 
 // StopCapture cancels the read loop and closes the WS, so the broker's read side
@@ -229,12 +250,17 @@ func (c *remoteClientlessChannel) ReplaysHistory() bool {
 func (c *remoteClientlessChannel) StopCapture() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.paneReplaced = false
 	if c.conn == nil {
 		return nil
 	}
 	c.cancel()
 	err := c.conn.Close(websocket.StatusNormalClosure, "")
-	c.conn, c.ctx, c.cancel = nil, nil, nil
+	// Release a readLoop blocked writing PTY output to a reader that will not
+	// read again (the capture is over, or its owner dropped the reader). The
+	// loop then returns and closes its end; it can never outlive the capture.
+	_ = c.pr.Close()
+	c.conn, c.ctx, c.cancel, c.pr = nil, nil, nil, nil
 	return err
 }
 

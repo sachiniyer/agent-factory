@@ -218,12 +218,18 @@ func (m *Manager) persistWorktreeMissing(repoID string, instance *session.Instan
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
+	// Row-write lock (#6210): held from the fence re-check through the write, so a
+	// restore's lock-free admission write cannot be overtaken by this snapshot.
+	rowLock := m.rowWriteLockForRepo(repoID)
+	rowLock.Lock()
 	data := instance.ToInstanceData()
 	if data.InFlightOp != session.OpNone {
+		rowLock.Unlock()
 		m.settleWorktreeMissingWrite(repoID, instance, nil, false)
 		return false
 	}
 	err := persistInstanceData(repoID, data)
+	rowLock.Unlock()
 	// Memory has changed either way; clients converge on it, as with every
 	// other poll publish.
 	if !m.settleWorktreeMissingWrite(repoID, instance, &data, err == nil) {

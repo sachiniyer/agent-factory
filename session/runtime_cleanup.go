@@ -52,6 +52,15 @@ type SandboxRuntimeCleanupData struct {
 	RemoteAddr         string `json:"remote_addr,omitempty"`
 	AgentServerVersion string `json:"agent_server_version,omitempty"`
 	TokenRef           string `json:"token_ref,omitempty"`
+	// LaunchScript is the command that started the agent-server (W1.4), so a
+	// crashed one can be relaunched after proof it is dead. No secret in it: the
+	// token and callback credential live in the 0600 env files it sources.
+	LaunchScript string `json:"launch_script,omitempty"`
+	// AdoptPending records that a restarted agent-server is running but has not
+	// yet adopted its surviving workspace (W1.4). A reattach that finds the
+	// server responsive finishes the adoption instead of binding a server that
+	// holds no session.
+	AdoptPending bool `json:"adopt_pending,omitempty"`
 	// CallbackRef and CallbackReverse are the callback half of the runtime
 	// identity (#5571 W3.6): the reference the sandbox's callback credential
 	// derives from and the `-R` spec its forward uses. Neither is a secret — the
@@ -132,6 +141,8 @@ type SSHRuntimeCleanupData struct {
 	RemoteAddr         string `json:"remote_addr,omitempty"`
 	AgentServerVersion string `json:"agent_server_version,omitempty"`
 	TokenRef           string `json:"token_ref,omitempty"`
+	LaunchScript       string `json:"launch_script,omitempty"`
+	AdoptPending       bool   `json:"adopt_pending,omitempty"`
 	// CallbackRef and CallbackReverse are the callback half of the runtime
 	// identity (#5571 W3.6): the reference the sandbox's callback credential
 	// derives from and the `-R` spec its forward uses. Neither is a secret — the
@@ -371,6 +382,7 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 		p.remoteAddr = data.SSH.RemoteAddr
 		p.agentServerVersion = data.SSH.AgentServerVersion
 		p.tokenRef = data.SSH.TokenRef
+		p.launchScript, p.adoptPending = data.SSH.LaunchScript, data.SSH.AdoptPending
 		p.restoreCallbackIdentity(data.SSH.CallbackRef, data.SSH.CallbackReverse)
 		p.launchAttempted = data.SSH.LaunchUnconfirmed
 		p.restoreAccountWorkspace(account, data.SSH.HostName)
@@ -410,6 +422,8 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 			remoteAddr:         data.Sandbox.RemoteAddr,
 			agentServerVersion: data.Sandbox.AgentServerVersion,
 			tokenRef:           data.Sandbox.TokenRef,
+			launchScript:       data.Sandbox.LaunchScript,
+			adoptPending:       data.Sandbox.AdoptPending,
 		}
 		p.restoreCallbackIdentity(data.Sandbox.CallbackRef, data.Sandbox.CallbackReverse)
 		p.launchAttempted = data.Sandbox.LaunchUnconfirmed

@@ -71,6 +71,8 @@ type sandboxWorkspace struct {
 	// variable.
 	tokenRef         string
 	agentServerToken string
+	// launchScript is the command startAgentServer ran, kept for a restart.
+	launchScript string
 
 	// adoptedWorktree is the linked worktree an adopting launch binds (W8.6).
 	adoptedWorktree string
@@ -393,7 +395,7 @@ func (w *sandboxWorkspace) callbackReverseForward() (string, string) {
 	remote := w.CallbackSocketPath()
 	// "remote:local" is ssh's -R grammar, so a colon (or whitespace) in either
 	// path would be re-parsed as part of it.
-	if w.SessionDir == "" || !strings.HasPrefix(remote, "/") || len(remote) > sandboxSocketPathMax ||
+	if w.SessionDir == "" || !strings.HasPrefix(remote, "/") || filepath.Clean(remote) != remote || len(remote) > sandboxSocketPathMax ||
 		strings.ContainsAny(remote, ": \t\n") {
 		return fail("the session directory's socket path is unusable on the sandbox host")
 	}
@@ -495,6 +497,7 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 		// casual test. `|| exit 1` keeps the abort-on-failure that && provided.
 		launch = "set -a && . " + shellQuote(w.CallbackEnvPath()) + " && set +a || exit 1; " + launch
 	}
+	w.launchScript = launch
 	out, err := w.shell.Run(timeout, launch, nil, false)
 	if err != nil {
 		return fmt.Errorf("starting af agent-server on the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
@@ -557,7 +560,17 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	// compares against a resolved path; resolveSessionDirSymlinks provisions that
 	// resolved path before the launch so the reaper's `expected` stays in
 	// agreement.
-	filteredInner, err := sessionenv.WrapAgentServerCommand(w.AfPath(), extras, args)
+	// An account-bound agent-server is scoped to that account in the host's own
+	// environment: the plain handoff keeps the agent's credential variables, so an
+	// ambient ANTHROPIC_API_KEY in the host's ssh environment would outrank the
+	// synced scope (#5863).
+	wrap := func() (string, error) { return sessionenv.WrapAgentServerCommand(w.AfPath(), extras, args) }
+	if _, _, ok := w.accountEnv(); ok {
+		wrap = func() (string, error) {
+			return sessionenv.WrapAgentServerAccountCommand(w.AfPath(), w.spec.Account.Agent, extras, args)
+		}
+	}
+	filteredInner, err := wrap()
 	if err != nil {
 		return "", fmt.Errorf("preparing filtered agent-server environment failed: %w", err)
 	}

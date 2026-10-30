@@ -73,7 +73,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
-- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
+- [`af sessions prune`](#af-sessions-prune) — List (or with --apply, delete) old archived worktrees
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -896,6 +896,7 @@ Settable keys:
   program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
   session_env_passthrough    compact JSON array of exact environment variable names
+  sandbox_agent_config       compact JSON array of agent:file entries (claude:settings.json, claude:CLAUDE.md, claude:.claude.json, codex:config.toml, codex:AGENTS.md) placed in a sandbox session's account scope
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
   root_agent.enabled         true | false
@@ -2201,7 +2202,7 @@ af sessions
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
-- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
+- [`af sessions prune`](#af-sessions-prune) — List (or with --apply, delete) old archived worktrees
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -2328,8 +2329,9 @@ from the same precondition checks.
 
 An available backend may also carry "callback_unavailable_reason": a create on
 it succeeds but the session gets no af callback, because the daemon cannot mint
-a credential under its current listener/auth posture. It is advisory, not a
-precondition — the session still works, it just cannot call back into af.
+a credential while its dedicated sandbox callback endpoint is not running. It is
+advisory, not a precondition — the session still works, it just cannot call back
+into af.
 
 Example:
   af sessions backends
@@ -2616,15 +2618,24 @@ af sessions preview <title> [flags]
 
 ## af sessions prune
 
-List disk reclaimable from old archived sessions (dry run)
+List (or with --apply, delete) old archived worktrees
 
 Report archived sessions older than --older-than, measured from each
 session's archive time.
 
-This is a dry run: it lists each archived session a reclaim would remove
-(title, archive time, allocated bytes) plus a total, and the reasons every
-other session was skipped. af writes nothing — no deletion, no record
-update, no git mutation — so it is safe to run at any time.
+Without --apply this is a dry run: it lists each archived session a reclaim
+would remove (title, archive time, allocated bytes) plus a total, and the
+reasons every other session was skipped. af writes nothing — no deletion, no
+record update, no git mutation — so it is safe to run at any time.
+
+With --apply, af prints that plan, asks you to confirm it (or pass --yes; a
+non-interactive run requires it), and then deletes exactly the worktrees the
+plan listed — the SAME judgment as the dry run, re-made under each session's
+lock just before it deletes. The branch is always kept and the session row
+stays, marked pruned, naming the branch; restore refuses a pruned session and
+tells you where the work is. A refusal names the first offending paths so you
+can clean up and re-run. Nothing outside the archived worktree is touched:
+provider transcripts and other sessions' registrations are left alone.
 
 Only archived sessions are eligible; live, lost, dead or in-flight sessions,
 archives whose move is incomplete, and worktrees still holding uncommitted or
@@ -2643,7 +2654,7 @@ one — a read must not write even a socket or a log. With no daemon up it
 refuses with guidance; pass --daemon-url or start af first.
 
 ```
-af sessions prune --older-than <duration> [--repo <path> | --all] [flags]
+af sessions prune --older-than <duration> [--repo <path> | --all] [--apply [--yes]] [flags]
 ```
 
 **Flags**
@@ -2651,7 +2662,9 @@ af sessions prune --older-than <duration> [--repo <path> | --all] [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--all` |  | Span every project instead of only the current/--repo one |
+| `--apply` |  | Delete the archived worktrees the dry run lists (the branch is kept; the row stays as a pruned tombstone) |
 | `--older-than` | `string` | Report sessions archived longer than this duration ago (required, for example 720h for thirty days) |
+| `--yes` |  | With --apply: skip the confirmation prompt (required when stdin is not a terminal) |
 
 **Global flags**
 
@@ -2878,8 +2891,11 @@ no PTY and spawns no process. An external HTTPS URL is iframed
 directly, and a loopback target (including --port) is served from the session's
 own workspace through the agent-server's port relay, so it shows what listens on
 that port in the sandbox rather than on the daemon host. Plain-HTTP external URLs
-cannot be framed by an HTTPS Agent Factory UI. Shell and process tabs still
-require local runtime/worktree resources.
+cannot be framed by an HTTPS Agent Factory UI. Shell and process tabs are
+admitted when the session's agent-server advertises "tab-api" (a current build
+does): they run on the session's host. An older agent-server without that
+advertisement keeps the refusal, because those kinds then need a daemon-side
+worktree the off-box session does not have.
 
 ```
 af sessions tab-create <title> [flags]
@@ -2921,8 +2937,10 @@ step rather than a dead end.
 
 The agent tab can't be deleted — use "af sessions kill" to tear down the whole
 session. Deleting a tab or session that doesn't exist is an error, not a silent
-success. On remote sessions, admitted metadata-only web tabs can be deleted;
-PTY-backed kinds are never admitted there.
+success. On remote sessions, metadata-only web tabs can be deleted, and so can shell and
+process tabs when the session's agent-server advertises "tab-api" (it closes
+them on the session's host); an older agent-server without that advertisement
+never admits those kinds.
 
 ```
 af sessions tab-delete <title> [flags]
@@ -2964,9 +2982,10 @@ success — that is what the tab is actually called, and what the other tab verb
 now address it by.
 
 The rename persists across a daemon/af restart and does not disturb the tab's
-running process. On remote sessions, admitted metadata-only web tabs can be
-renamed; PTY-backed kinds are never admitted there. Archived sessions still
-have to be restored first.
+running process. On remote sessions, metadata-only web tabs can be renamed, and so can process
+tabs when the session's agent-server advertises "tab-api"; an older
+agent-server without that advertisement never admits process tabs. Archived
+sessions still have to be restored first.
 
 ```
 af sessions tab-rename <title> [flags]
@@ -3004,9 +3023,10 @@ can be moved in front of it. That is structural, not cosmetic — the agent tab 
 identified by its position throughout a session's lifecycle.
 
 The new order persists across a daemon/af restart and does not disturb any tab's
-running process. On remote sessions, admitted metadata-only web tabs can be
-reordered; PTY-backed kinds are never admitted there. Archived sessions still
-have to be restored first.
+running process. On remote sessions, metadata-only web tabs can be reordered, and so can shell
+and process tabs when the session's agent-server advertises "tab-api"; an older
+agent-server without that advertisement never admits those kinds. Archived
+sessions still have to be restored first.
 
 ```
 af sessions tab-reorder <title> [flags]

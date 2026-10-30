@@ -52,7 +52,7 @@ func (r *redactor) noteUnknownJSONRecord(v any) {
 				case titleJSONKeys[key]:
 					titles[s] = struct{}{}
 					r.noteTitle(s)
-				case key == "tmux_name":
+				case key == "tmux_name" || key == "sandbox_tmux":
 					r.noteTmuxName(s)
 				case key == "repo_path":
 					repoPaths[s] = struct{}{}
@@ -225,7 +225,7 @@ var sensitiveJSONKeys = map[string]bool{
 	// This walk is key-driven and depth-agnostic, which is why it kept
 	// covering pending_tab_cleanup[].tmux_name for the whole window the typed
 	// path did not (#2776) — the fallback is the broader net by design.
-	"tmux_name": true, "session_name": true,
+	"tmux_name": true, "sandbox_tmux": true, "session_name": true,
 	// conversation and agent_conversation mirror the typed-path redaction
 	// (redactInstanceData clears Tabs[].Conversation.ID and
 	// AgentConversation.ID): the provider conversation id resumes an agent

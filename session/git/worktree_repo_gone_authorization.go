@@ -211,8 +211,9 @@ func startRepoGoneOriginProbe(worktree *GitWorktree) (*repoGoneOriginProbeFlight
 	}
 	repoGoneOriginProbeFlights.byPath[worktree.repoPath] = flight
 	repoGoneOriginProbeFlights.Unlock()
+	probe := repoGoneOriginProbe // seam read at spawn: the flight may be abandoned
 	go func() {
-		flight.err = repoGoneOriginProbe(ctx, worktree)
+		flight.err = probe(ctx, worktree)
 		cancel()
 		repoGoneOriginProbeFlights.Lock()
 		if repoGoneOriginProbeFlights.byPath[worktree.repoPath] == flight {
@@ -226,7 +227,7 @@ func startRepoGoneOriginProbe(worktree *GitWorktree) (*repoGoneOriginProbeFlight
 }
 
 func waitForRepoGoneOriginProbe(repoPath string, flight *repoGoneOriginProbeFlight) error {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -239,7 +240,7 @@ func waitForRepoGoneOriginProbe(repoPath string, flight *repoGoneOriginProbeFlig
 			repoGoneOriginProbeFlights.Unlock()
 			return fmt.Errorf(
 				"timed out after %s while checking origin repository %s: %w",
-				relocationIdentityTimeout, repoPath, context.DeadlineExceeded,
+				relocationIdentityTimeout.Load(), repoPath, context.DeadlineExceeded,
 			)
 		}
 		repoGoneOriginProbeFlights.Unlock()
@@ -325,7 +326,7 @@ func boundedRelocationCleanupInspection(
 		inspection, err := inspect(path)
 		resultC <- result{inspection: inspection, err: err}
 	}()
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case observed := <-resultC:
@@ -333,7 +334,7 @@ func boundedRelocationCleanupInspection(
 	case <-timer.C:
 		return cleanupPathInspection{}, fmt.Errorf(
 			"timed out after %s while checking cleanup identity at %s: %w",
-			relocationIdentityTimeout, path, context.DeadlineExceeded,
+			relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
 		)
 	}
 }
@@ -366,8 +367,9 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 	}
 	cleanupGenerationInstallFlights.byPath[path] = flight
 	cleanupGenerationInstallFlights.Unlock()
+	install := cleanupGenerationInstall // seam read at spawn: the flight may be abandoned
 	go func() {
-		flight.generation, flight.err = cleanupGenerationInstall(path, expected)
+		flight.generation, flight.err = install(path, expected)
 		cleanupGenerationInstallFlights.Lock()
 		if cleanupGenerationInstallFlights.byPath[path] == flight {
 			delete(cleanupGenerationInstallFlights.byPath, path)
@@ -376,7 +378,7 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 		cleanupGenerationInstallFlights.Unlock()
 		flight.afterUnpublish()
 	}()
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -391,7 +393,7 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 		cleanupGenerationInstallFlights.Unlock()
 		return "", fmt.Errorf(
 			"timed out after %s while installing cleanup generation at %s: %w",
-			relocationIdentityTimeout, path, context.DeadlineExceeded,
+			relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
 		)
 	}
 }
@@ -608,6 +610,7 @@ func VerifyRegisteredWorktreeOccupant(worktreePath, repoPath string) error {
 // finally returns and unpublishes itself — is the containment.
 type pointerCheckFlight struct {
 	done     chan struct{}
+	value    string // the check's result, shared with every caller that joins
 	err      error
 	timedOut bool
 }
@@ -618,12 +621,21 @@ var pointerCheckFlights = struct {
 }{byKey: map[string]*pointerCheckFlight{}}
 
 func boundedPointerCheck(kind, worktreePath string, check func(string) error) error {
+	_, err := boundedPointerCheckValue(kind, worktreePath, func(path string) (string, error) { return "", check(path) })
+	return err
+}
+
+// boundedPointerCheckValue is boundedPointerCheck for a check that also produces
+// a result (the resolved registration leaf). The result is part of the flight, so a
+// caller that joins one in progress receives it along with the error instead of an
+// empty value beside a nil error.
+func boundedPointerCheckValue(kind, worktreePath string, check func(string) (string, error)) (string, error) {
 	key := kind + "\x00" + worktreePath
 	pointerCheckFlights.Lock()
 	if active := pointerCheckFlights.byKey[key]; active != nil {
 		if active.timedOut {
 			pointerCheckFlights.Unlock()
-			return fmt.Errorf(
+			return "", fmt.Errorf(
 				"worktree pointer check under %s is still running after an earlier deadline: %w",
 				worktreePath, context.DeadlineExceeded,
 			)
@@ -635,7 +647,7 @@ func boundedPointerCheck(kind, worktreePath string, check func(string) error) er
 	pointerCheckFlights.byKey[key] = flight
 	pointerCheckFlights.Unlock()
 	go func() {
-		flight.err = check(worktreePath)
+		flight.value, flight.err = check(worktreePath)
 		pointerCheckFlights.Lock()
 		if pointerCheckFlights.byKey[key] == flight {
 			delete(pointerCheckFlights.byKey, key)
@@ -646,25 +658,25 @@ func boundedPointerCheck(kind, worktreePath string, check func(string) error) er
 	return waitForPointerCheckFlight(key, worktreePath, flight)
 }
 
-func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFlight) error {
-	timer := time.NewTimer(relocationIdentityTimeout)
+func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFlight) (string, error) {
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
-		return flight.err
+		return flight.value, flight.err
 	case <-timer.C:
 		pointerCheckFlights.Lock()
 		if pointerCheckFlights.byKey[key] == flight {
 			flight.timedOut = true
 			pointerCheckFlights.Unlock()
-			return fmt.Errorf(
+			return "", fmt.Errorf(
 				"timed out after %s while verifying worktree pointer under %s: %w",
-				relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
+				relocationIdentityTimeout.Load(), worktreePath, context.DeadlineExceeded,
 			)
 		}
 		pointerCheckFlights.Unlock()
 		<-flight.done
-		return flight.err
+		return flight.value, flight.err
 	}
 }
 

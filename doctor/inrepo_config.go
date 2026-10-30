@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"strings"
 
@@ -9,9 +10,9 @@ import (
 
 // defaultInRepoUnknownLeaves loads the in-repo config of the repository
 // containing the current working directory and returns the [docker]/[ssh]
-// leaves it dropped as unknown. Outside a git repo, with no in-repo file, or
-// when the file fails to load for another reason, it returns nothing: the
-// load error itself is reported by the checks that resolve the repo config.
+// leaves that made the load fail (#4845). Outside a git repo, with no in-repo
+// file, or when the file fails to load for another reason, it returns nothing:
+// any other load error is reported by the checks that resolve the repo config.
 func defaultInRepoUnknownLeaves() []config.InRepoUnknownLeaf {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -21,17 +22,18 @@ func defaultInRepoUnknownLeaves() []config.InRepoUnknownLeaf {
 	if err != nil {
 		return nil
 	}
-	cfg, _, err := config.LoadInRepoConfig(repo.Root)
-	if err != nil {
-		return nil
+	_, _, err = config.LoadInRepoConfig(repo.Root)
+	var unknown *config.InRepoUnknownLeavesError
+	if errors.As(err, &unknown) {
+		return unknown.Leaves
 	}
-	return cfg.UnknownLeaves()
+	return nil
 }
 
-// checkInRepoUnknownLeaves turns each unknown [docker]/[ssh] leaf in the repo's
-// checked-in config into a WARN (#4599). The config still loads and the key is
-// ignored, so the finding is advisory (problem=false, exit 0) until a later
-// release makes it a load error (#4845). A clean file adds no row.
+// checkInRepoUnknownLeaves reports each unknown [docker]/[ssh] leaf in the repo's
+// checked-in config as a FAIL. Since #4845 such a leaf fails the config load, so
+// every af command in the repo errors until it is fixed; the finding names the
+// file and key and gives the rename. A clean file adds no row.
 func checkInRepoUnknownLeaves(ctx *scanContext, report *Report) {
 	resolve := ctx.opts.inRepoUnknownLeaves
 	if resolve == nil {
@@ -44,6 +46,6 @@ func checkInRepoUnknownLeaves(ctx *scanContext, report *Report) {
 		}
 		// The row is already named "in-repo config"; don't say it twice.
 		detail := strings.TrimPrefix(leaf.Message, "in-repo config ")
-		report.Warn(sectionConfig, "in-repo config", detail, remedy, false)
+		report.Fail(sectionConfig, "in-repo config", detail, remedy)
 	}
 }

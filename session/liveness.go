@@ -148,7 +148,13 @@ func opIsTeardown(op InFlightOp) bool {
 // a worktree the daemon cannot reach, and Restore's live recheck would refuse
 // — both verbs fail on press exactly like the #2500 fence above, so the flag
 // hides them for the outage's duration while Kill stays available.
-func lifecycleActionFor(id, title string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap, unreachable bool) LifecycleAction {
+func lifecycleActionFor(id, title string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap, unreachable, pruned bool) LifecycleAction {
+	// A pruned row's worktree is gone by design: restore would refuse it by naming
+	// the kept branch, so projecting the verb offers a control that can never
+	// succeed (#5189).
+	if pruned {
+		return LifecycleActionNone
+	}
 	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning || op == OpRestoring ||
 		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap || unreachable {
 		return LifecycleActionNone
@@ -215,7 +221,7 @@ func canKillFor(id string, op InFlightOp) bool {
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycleActionFor(i.ID, i.Title, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil)
+	return lifecycleActionFor(i.ID, i.Title, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil, !i.prune.prunedAt.IsZero())
 }
 
 // CanKill reports whether interactive clients may offer explicit teardown for

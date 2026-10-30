@@ -35,8 +35,9 @@ import (
 // will run. trustBase is true only when base exactly matches the built-in
 // detected override from the same resolved config snapshot. paneGeneratedArgs
 // is the af-authored argument declaration a pane recorded for its frozen program
-// and is non-empty only when the swap's base came from ResolvedPaneProgram
-// rather than RuntimeProgram (see validateAccountSwapPlan): that base already
+// and is non-empty only when the swap's base is the pane's frozen program,
+// whether that base came from ResolvedPaneProgram or RuntimeProgram (see
+// validateAccountSwapPlan): that base already
 // carries af's own injected flags, so the proof must seed from the recorded
 // declaration instead of recomputing it from a base that treats af's words as
 // the user's (#5433). trustBase and paneGeneratedArgs are mutually exclusive —

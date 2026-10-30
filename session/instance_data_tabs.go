@@ -11,6 +11,7 @@ func (i *Instance) tabDataLocked(tab *Tab) TabData {
 	if tab.tmux != nil {
 		td.TmuxName = tab.tmux.SanitizedName()
 	}
+	td.SandboxTmux = tab.sandboxTmux
 	td.Conversation = conversationDataPtr(tab.Conversation)
 	if len(tab.Handoffs) > 0 {
 		td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
@@ -121,11 +122,21 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 // it. Every other kind is dropped as before — they describe a worktree and a PTY
 // that no longer exist, so a row for them would be an entry every later operation
 // fails on.
-func metadataTabsFrom(data InstanceData) []TabData {
+//
+// A VS Code tab is the exception when the runtime's host runs the editor itself
+// (caps.RemoteEditor, W5.4): it names no worktree path and binds no PTY, so it is
+// metadata off-box and must survive the restart like the other off-box tabs (#6090).
+func metadataTabsFrom(data InstanceData, caps Capabilities) []TabData {
 	var out []TabData
 	for _, td := range data.Tabs {
 		kind := tabKindForData(td.Kind)
-		if kind == TabKindAgent || TabKindRequires(kind) != TabNeedsMetadataOnly {
+		if kind == TabKindAgent {
+			continue
+		}
+		// A sandbox's shell/process row with a recorded session is kept so a
+		// reattach can hand it back to a restarted agent-server (#6162).
+		restorable := (kind == TabKindShell || kind == TabKindProcess) && td.SandboxTmux != "" && td.ID != "" && caps.Workspace == WorkspaceRemote
+		if TabKindRequires(kind) != TabNeedsMetadataOnly && !(kind == TabKindVSCode && caps.RemoteEditor) && !restorable {
 			continue
 		}
 		out = append(out, td)

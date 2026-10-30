@@ -44,7 +44,7 @@ func TestHookProgressPublicationLockTimesOut(t *testing.T) {
 	t.Cleanup(func() { close(release); <-lockDone; <-done })
 	select {
 	case <-done:
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		t.Fatal("publication waited indefinitely for the held progress lock")
 	}
 	if !errors.Is(publishErr, config.ErrLockTimeout) {

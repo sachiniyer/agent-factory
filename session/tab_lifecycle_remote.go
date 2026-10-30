@@ -40,9 +40,13 @@ type tabCreateIntent struct {
 	requested string
 	name      string
 	at        time.Time
-	// adopted records that the sweep already put the sandbox's tab on the roster.
-	// The intent stays until the retry consumes it (or it expires), but there is
-	// nothing left for the sweep to do with it.
+	// adopted records that the sweep already put the sandbox's tab on the roster
+	// (the row was already present, or the sweep just appended it). The intent
+	// stays until the retry consumes it (or it expires), but there is nothing
+	// left for the sweep to do with it. It is latched ONLY for an adoption that
+	// actually happened: a spawn refused because the session is inert or a
+	// spawn-block fence is up leaves it false so a later sweep retries, or the
+	// tab the sandbox started would stay untracked after the block clears.
 	adopted bool
 }
 
@@ -251,6 +255,10 @@ func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 			}
 		}
 	}
+	// Taken ahead of the roster read, and a reason to read it: a row the sandbox
+	// does not hold must be noticed even when nothing else is pending (#5954).
+	rows := i.offBoxPTYRowsLocked()
+	work = work || len(rows) > 0
 	remote := i.capabilitiesLocked().Workspace == WorkspaceRemote
 	hasClient := i.remoteClient != nil
 	i.mu.RUnlock()
@@ -281,6 +289,13 @@ func (i *Instance) ReconcileOffBoxTabs() (changed bool) {
 		byID[td.ID] = td
 	}
 	changed = i.retryPendingRemoteClose(rs, byID)
+	for _, id := range i.retireLostOffBoxTabs(rows, byID) {
+		// End the stream outside i.mu: a subscriber must see it end, not block on
+		// an id the new sandbox will never serve.
+		rs.closeTabStream(id)
+		changed = true
+		i.markLoadRuntimeReplaced()
+	}
 	rosterChanged, adopted := i.applyOffBoxRoster(byID)
 	for _, id := range adopted {
 		// An adopted replacement may reuse a closed id: lift its terminal mark, as
@@ -353,21 +368,34 @@ func (i *Instance) applyOffBoxRoster(byID map[string]TabData) (changed bool, ado
 		if !ok || in.adopted || td.Command != in.command {
 			continue
 		}
-		if _, have := i.tabIndexByIDLocked(in.id); !have && i.started && i.tabSpawnBlockedLocked() == nil {
+		// Latch adopted ONLY once the row is actually on the daemon roster. A
+		// spawn refused because the session is inert (!started) or a spawn-block
+		// fence is up (tabSpawnBlockedLocked) must NOT latch, or every later sweep
+		// skips the intent (the !in.adopted check in ReconcileOffBoxTabs stops
+		// motivating work too) and the tab the sandbox started is never adopted
+		// even after the block clears — a running command left invisible and
+		// unclosable, and a post-TTL retry that runs it a second time (#5996).
+		//
+		// The intent is NOT retired in either arm: a caller whose create failed
+		// with an unknown outcome retries, and that retry must still resolve to
+		// this id and join the one execution; adoption only makes the join find
+		// it. The retry consumes the intent; the TTL bounds the rest.
+		if _, have := i.tabIndexByIDLocked(in.id); have {
+			in.adopted = true // already on the roster: nothing left for the sweep to do
+		} else if i.started && i.tabSpawnBlockedLocked() == nil {
 			name := uniqueTabNameReserving(i.Tabs, i.tabDisplayClaims, in.name)
 			i.Tabs = append(i.Tabs, &Tab{
 				ID: in.id, Name: name, Kind: in.kind, Command: in.command,
-				Exit: tabExitFromData(td.Exit), gen: td.Gen,
+				Exit: tabExitFromData(td.Exit), gen: td.Gen, sandboxTmux: td.TmuxName,
 			})
 			i.touchLocked()
 			changed = true
 			adopted = append(adopted, in.id)
+			in.adopted = true
 		}
-		// The intent is NOT retired here. A caller whose create failed with an
-		// unknown outcome will retry, and that retry must still resolve to this
-		// id and join the one execution (#5996); adopting the row only makes the
-		// join find it. The retry consumes the intent; the TTL bounds the rest.
-		in.adopted = true
+		// otherwise (row not on the roster and the spawn was refused): leave
+		// adopted false so a later sweep retries the intent once the session is
+		// started and the spawn-block fence has lifted.
 	}
 	for idx, tab := range i.Tabs {
 		if tab.Kind != TabKindProcess || tab.tmux != nil || tab.Exit != nil || tab.gen == "" {

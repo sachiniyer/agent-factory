@@ -53,3 +53,25 @@ func TestParseRefusesWhatIsNotAnAbsoluteCleanSocketPath(t *testing.T) {
 	assert.False(t, ok)
 	assert.NoError(t, err)
 }
+
+// Build is permissive: it percent-escapes whatever path it is given, so a caller
+// can hand it a non-clean path (a trailing slash, a doubled slash, a "."
+// component — the spellings an operator workspace_root survives mktemp with)
+// and receive a syntactically valid URL that Parse then refuses. The
+// provisioner guard that authorises Building the callback URL must refuse those
+// spellings itself; this test pins the asymmetry so a future "Build cleans its
+// input" change (a belt-and-braces complement) flips it loudly here (#5870).
+func TestBuildAcceptsNonCleanInputThatParseRefuses(t *testing.T) {
+	for _, path := range []string{
+		"/srv/work//s.AAA/af-callback.sock",
+		"/srv/work/./s.AAA/af-callback.sock",
+		"/srv/work/s.AAA//af-callback.sock",
+	} {
+		t.Run(path, func(t *testing.T) {
+			got, ok, err := Parse(Build(path))
+			assert.True(t, ok, "a unix URL is recognised; what fails is the clean-path check, not the scheme")
+			assert.Error(t, err, "Parse refuses the non-clean path Build accepted — Build and Parse disagree on cleanness")
+			assert.Empty(t, got)
+		})
+	}
+}

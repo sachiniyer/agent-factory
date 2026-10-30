@@ -7,7 +7,7 @@ task is actually firing.
 
 A task delivers a prompt to an AI agent session automatically. Every task has exactly one **trigger** — a cron schedule (`cron_expr`) or a long-running watch script (`watch_cmd`) — and one **delivery mode**: create a fresh session per fire, or send the prompt into an existing session (`target_session`).
 
-Tasks are hosted by the agent-factory daemon, which starts automatically whenever `af` runs and an enabled task exists. There are no per-task OS scheduler units — see [Daemon lifecycle](#daemon-lifecycle) and [Migration notes](#migration-notes).
+Tasks are hosted by the agent-factory daemon, which starts automatically whenever `af` runs against the default local target and an enabled task exists. There are no per-task OS scheduler units — see [Daemon lifecycle](#daemon-lifecycle) and [Migration notes](#migration-notes).
 
 ## Trigger × delivery matrix
 
@@ -45,7 +45,7 @@ af tasks add --name "Daily captain check" --program claude --cron "0 9 * * 1-5" 
 
 At the same weekday time, the prompt arrives in this project's `captain`
 session, preserving its conversation and worktree. If it does not exist, the
-first fire creates it. Later deliveries record `sent`; they do not create a
+first fire creates it. Later deliveries record `sent` (or `sent-unverified` / `sent-unconfirmed` when the pane could not prove the prompt landed — neither is a failure, and neither is proof; see the `last_run_status` row below); they do not create a
 new session for each check. The program flag selects the agent for creation,
 not a replacement for the agent already running in the target.
 
@@ -149,7 +149,7 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `repo_id` | The owning project's id, resolved once when the task is bound and retained. Derived, not editable — it is recomputed only when `project_path` changes. It exists so that deleting the recorded directory cannot strand the task outside its own project; rows created before this field fall back to resolving `project_path` |
 | `program` | Agent to run (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`). Empty = configured `default_program` |
 | `enabled` | Disabled tasks never fire; their watch script is stopped |
-| `last_run_at` / `last_run_status` | Set by the daemon: `started` (session created — also what a watch earns back once a re-armed run stays healthy for a full crash window, see below), `sent` (prompt delivered into a session), `parked: usage limit` (a created or targeted session is waiting at a plan usage-limit wall, not failed — see [usage-limits.md](usage-limits.md#task-runs-park-dont-fail)), and for watch tasks `stopped`, `errored` — a crash-loop give-up reads `errored: gave up after N failures in W (last: <exit>): <newest output line>` — or `dropped: event rate limit exceeded` (see below) |
+| `last_run_at` / `last_run_status` | Set by the daemon: `started` (session created — also what a watch earns back once a re-armed run stays healthy for a full crash window, see below), `sent` (prompt delivered into a session **and the pane showed it land**), `sent-unverified` (the prompt was pasted and submitted into a session but the pane never proved it landed — a collapsed-paste placeholder that stayed staged, a remedy Enter withheld, or a redelivery withheld; the daemon logs the same verdict as a `submit:` warning), `sent-unconfirmed` (the send went out but the pane could not be observed, so there is no verdict either way), `parked: usage limit` (a created or targeted session is waiting at a plan usage-limit wall, not failed — see [usage-limits.md](usage-limits.md#task-runs-park-dont-fail)), and for watch tasks `stopped`, `errored` — a crash-loop give-up reads `errored: gave up after N failures in W (last: <exit>): <newest output line>` — or `dropped: event rate limit exceeded` (see below) |
 | `dropped_events` | Cumulative source events this watch task lost without delivering or queueing them: events past `watcher_events_per_minute`, and undelivered events the durable replay queue could not accept (no queue available, a failed append, or a stop while the queue was unreadable). Each one records `last_run_status` as `dropped: event rate limit exceeded`, whatever the cause, unless the watcher has since stopped or errored — that newer terminal status is preserved rather than clobbered by the drop. Daemon-owned and not editable. It does not count the separately bounded durable queue's overflow or expiry |
 | `audit` | Bounded trail (last 20 entries) of mutations to this task: `{at, actor, action, fields}`, where `action` is `created` / `updated` / `enabled` / `disabled` and `actor` is the surface that made it (`cli`, `tui`, `api`, `daemon-upgrade`, `unknown`). Written by the task store inside the same locked write that commits the change; never a client input. See [Is it actually firing?](#is-it-actually-firing) |
 | `overdue` / `missed_occurrences` | **Derived at read time, never stored.** Whether an enabled cron task has gone more than one slack window past its most recent scheduled occurrence, and how many fires the schedule has had since — both measured from the latest of its last run, its last enable or retime, and its creation. Absent (`false` / `0`) on a task that is on schedule |
@@ -366,7 +366,7 @@ on Linux, subject to `XDG_CONFIG_HOME`). The message bodies include:
 
 ```text
 task <id> started successfully as instance "<title>"
-task <id> delivered prompt to target session "captain" (sent)
+task <id> delivered prompt to target session "captain" (sent)   # or (sent-unverified) / (sent-unconfirmed)
 task <id> parked at a usage limit as instance "<title>"; waiting for the limit window to reset
 scheduled task <id> failed to run: <reason>
 ```
@@ -417,7 +417,7 @@ In the TUI, an automation that has stopped firing — or whose expression the sc
 
 The daemon is the single scheduler host: it evaluates cron expressions and supervises watch scripts.
 
-- Every `af` invocation ensures the daemon is running whenever an enabled task exists, and the daemon keeps running after the TUI exits.
+- On the default local target, every `af` invocation ensures the daemon is running whenever an enabled task exists, and the daemon keeps running after the TUI exits. Remote-targeted task and TUI operations never start a local daemon for scheduling — the target owns the schedule (see [remote daemons](cli.md#remote-daemons)). `af upgrade` is client-local and still restarts this machine's daemon by default.
 - To keep tasks firing across **reboots** without opening `af`, register the user-level autostart unit (a systemd user service on Linux, a launchd agent on macOS):
 
 ```bash

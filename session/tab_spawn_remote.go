@@ -142,7 +142,7 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 	// adopting its name could duplicate one. The name reserved for this create is
 	// kept, re-derived only if something took it since (#5962).
 	name := displayName
-	tab := &Tab{ID: id, Name: name, Kind: kind, Command: command, Exit: tabExitFromData(td.Exit), gen: td.Gen}
+	tab := &Tab{ID: id, Name: name, Kind: kind, Command: command, Exit: tabExitFromData(td.Exit), gen: td.Gen, sandboxTmux: td.TmuxName}
 
 	i.mu.Lock()
 	stale := !i.started || i.tabSpawnBlockedLocked() != nil

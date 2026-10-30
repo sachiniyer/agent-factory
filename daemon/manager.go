@@ -285,6 +285,9 @@ type Manager struct {
 	// licence to exceed max_concurrent_runs after every restart.
 	ghostTaskRuns                          map[string]int
 	repoStartLocks, worktreeAdmissionLocks map[string]*sync.Mutex
+	// repoRowLocks is the innermost leaf lock of the row-write order (#6210); see
+	// rowWriteLockForRepo. Zero value is ready: entries are created lazily.
+	repoRowLocks sync.Map
 	// aliveObservations counts POSITIVE liveness observations per session (keyed by
 	// stableSessionKey, so a same-title successor never inherits its predecessor's).
 	// Incremented only where the poll actually gets an answer OUT of a runtime; read

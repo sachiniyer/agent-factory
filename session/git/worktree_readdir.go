@@ -77,7 +77,7 @@ var boundedReadDirFlights = struct {
 }{byPath: map[string]*boundedReadDirFlight{}}
 
 func waitForBoundedReadDir(path string, flight *boundedReadDirFlight) ([]os.DirEntry, error) {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -89,7 +89,7 @@ func waitForBoundedReadDir(path string, flight *boundedReadDirFlight) ([]os.DirE
 			boundedReadDirFlights.Unlock()
 			return nil, fmt.Errorf(
 				"timed out after %s while listing directory %s: %w",
-				relocationIdentityTimeout, path, context.DeadlineExceeded,
+				relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
 			)
 		}
 		boundedReadDirFlights.Unlock()

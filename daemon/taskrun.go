@@ -23,6 +23,43 @@ import (
 // targeted cron occurrences skip, while targeted watch events queue for replay.
 const TaskStatusLimitParked = "parked: usage limit"
 
+// The "sent" run status carries the delivery verdict the daemon itself reached
+// (#6224). Plain "sent" means the pane evidence PROVED the prompt landed; the two
+// values below are the sends that were made but not proven, so an operator
+// reading af tasks list/get can tell "the agent got it" from "staged in the
+// composer, possibly forever". Neither is "errored:"-prefixed: the keystrokes
+// were accepted, so nothing here is a failed run, and no surface counts them as
+// one. They are their own heads (no ':'), so a closed-vocabulary consumer needs
+// them listed (sandboxRunStatusHeads).
+const (
+	// TaskStatusSentUnverified: tmux accepted the paste and Enter, but the pane
+	// never showed proof the prompt was received — a collapsed-paste placeholder
+	// that stayed staged, a withheld remedy Enter, or a withheld redelivery.
+	TaskStatusSentUnverified = "sent-unverified"
+	// TaskStatusSentUnconfirmed: the pane could not be observed at all, so the
+	// daemon has no verdict either way.
+	TaskStatusSentUnconfirmed = "sent-unconfirmed"
+)
+
+// taskSendStatus is the run status for a send into an existing target session:
+// "sent" only when delivery was proven, otherwise the matching unproven value.
+// A verdict the daemon does not recognise (an older or newer peer) is not
+// evidence of delivery and reads as unconfirmed.
+func taskSendStatus(deliveryStatus session.PromptDeliveryStatus) string {
+	switch deliveryStatus {
+	case session.PromptDelivered:
+		return "sent"
+	case session.PromptSentUnverified:
+		return TaskStatusSentUnverified
+	case session.PromptNotDelivered:
+		// A send that returns without an error cannot also have provably failed;
+		// if one does, record the failure rather than a send.
+		return taskStatusErroredPromptUndelivered
+	default:
+		return TaskStatusSentUnconfirmed
+	}
+}
+
 // Indirected so delivery tests can observe the daemon RPCs without dialing —
 // or spawning — a real daemon. Both helpers loop back through the daemon's
 // own control socket when called from inside the daemon process.
@@ -194,6 +231,9 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 	if status == TaskStatusLimitParked {
 		log.InfoLog.Printf("task %s parked delivery to target session %q at a usage limit; prompt not sent", t.ID, target)
 		return status, result.promptRetained, nil
+	}
+	if status == "sent" {
+		status = taskSendStatus(result.deliveryStatus)
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
 	return status, false, nil

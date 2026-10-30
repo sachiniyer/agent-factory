@@ -83,7 +83,10 @@ var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 		"id": closedVocab("task id"), "name": callerText, "prompt": callerText, "cron_expr": callerText,
 		"target_session": callerText, "last_run_status": closedVocab("run status heads"),
 	},
-	reflect.TypeFor[SnapshotResponse]():              {"boot_id": closedVocab("daemon boot id"), "caller": closedVocab("session id")},
+	reflect.TypeFor[SnapshotResponse](): {"boot_id": closedVocab("daemon boot id"), "caller": closedVocab("session id")},
+	// The paging cursor is never returned to a sandbox (HandleSnapshot withholds
+	// next_before); the type walk still reaches it, so it is declared withheld.
+	reflect.TypeFor[SnapshotCursor]():                {"id": withheld},
 	reflect.TypeFor[DeliveryAlarm]():                 {"task_id": withheld, "task_name": withheld, "target_session": withheld, "last_error": withheld},
 	reflect.TypeFor[SkippedRepo]():                   {"repo_id": withheld, "reason": withheld},
 	reflect.TypeFor[MutationOutcome]():               {"code": closedVocab("outcome code enum"), "warning": withheld},
@@ -100,7 +103,7 @@ var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 // word before the first ':'). The rest of a status is a free-form message that can
 // carry a path or caller text, so a sandbox is shown only the head.
 var sandboxRunStatusHeads = map[string]bool{
-	"started": true, "sent": true, "errored": true, "deferred": true, "parked": true,
+	"started": true, "sent": true, "sent-unverified": true, "sent-unconfirmed": true, "errored": true, "deferred": true, "parked": true,
 	"dropped": true, "stopped": true, "skipped": true, "ok": true,
 }
 
