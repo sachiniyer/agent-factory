@@ -470,12 +470,11 @@ type Instance struct {
 	// exists for exactly one caller: the daemon's root-agent heal, which reaps
 	// the vanished root's record — and with it agent_conversation — and creates a
 	// replacement in place, where every other Lost session is re-spawned on its
-	// own surviving record. Write-once by NewInstance and read only while
-	// planning the first launch, so it needs no lock (the inPlace precedent).
-	//
-	// It is a REQUEST, not a fact: the recorded conversation is only honored when
-	// the resolved command can actually express it, and the conversation the
-	// session ends up with is whatever the launch plan committed to Tabs[0].
+	// own surviving record. Set by NewInstance or SetResumeConversation; not
+	// consumed by a launch (root-recreate classification reads it afterwards);
+	// retired when the account changes (retireConversationsLocked, #6189). A
+	// REQUEST, not a fact: honored only when the resolved command can express it,
+	// and the session's conversation is whatever the launch committed to Tabs[0].
 	carriedConversation AgentConversationData
 
 	// reportedConversation is the last conversation a remote agent-server reported

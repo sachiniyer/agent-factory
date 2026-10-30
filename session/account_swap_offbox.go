@@ -461,6 +461,7 @@ func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, progr
 	if len(i.Tabs) > 0 {
 		i.setAgentConversationLocked(AgentConversationData{})
 	}
+	i.retireConversationsLocked()
 	i.setRuntimeEvidenceLocked(strings.TrimSpace(program), 0, 0)
 	i.touchLocked()
 	i.mu.Unlock()

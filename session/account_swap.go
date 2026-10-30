@@ -625,6 +625,8 @@ func (i *Instance) selectAccountLocked(from, name, accountAgent string, automati
 		previous = i.Tabs[0].Conversation
 		i.setAgentConversationLocked(AgentConversationData{})
 	}
+	// The ids held outside the tab belong to the account being left too (#6189).
+	i.retireConversationsLocked()
 	// Invalidate asynchronous discovery attached to the stopped process before it
 	// can put that process's account-local conversation back into the live slot.
 	i.agentRuntimeGeneration++

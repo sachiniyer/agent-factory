@@ -153,6 +153,17 @@ func (i *Instance) setAgentConversationLocked(conv AgentConversationData) bool {
 	return true
 }
 
+// retireConversationsLocked drops every conversation id this instance holds
+// outside the agent tab — the carried request and the remote-reported handle.
+// A provider conversation lives in ONE account's store, so crossing the account
+// boundary must leave no id behind that a later respawn could name against the
+// other account's home (#6189). The caller holds i.mu and clears the agent tab's
+// own conversation itself.
+func (i *Instance) retireConversationsLocked() {
+	i.carriedConversation = AgentConversationData{}
+	i.reportedConversation = AgentConversationData{}
+}
+
 func prepareLaunchConversation(i *Instance, program string) string {
 	rewritten, conversation := planCreateConversation(i, program)
 	if conversation.HasID() {
