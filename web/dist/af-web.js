@@ -17951,7 +17951,7 @@ function itemActions(b, it, derived) {
   if (s === "draft" && (it.runs ?? []).length === 0 && (it.thread ?? []).length === 0) out.push("delete");
   return out;
 }
-function safeHttpUrl(raw) {
+function safeHttpUrl2(raw) {
   if (!raw) return null;
   try {
     const u = new URL(raw);
@@ -18500,7 +18500,7 @@ var ItemPanel = class {
   runsSection(it) {
     const runs = it.runs ?? [];
     const parts = [];
-    const pr = safeHttpUrl(it.pr);
+    const pr = safeHttpUrl2(it.pr);
     if (pr) parts.push(h("a", { class: "af-backlog-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, icon("external-link"), "Pull request"));
     if (runs.length === 0) parts.push(h("p", { class: "af-backlog-reason" }, "No runs yet"));
     const list = h("ul", { class: "af-backlog-runs" });
