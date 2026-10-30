@@ -350,6 +350,8 @@ func TestConversionKeepsTheLegacyRenameInsideTheLockedDirectory(t *testing.T) {
 		"the refusal names where the original actually sits (the pinned directory), not the moved link")
 	assert.Contains(t, warnBuf.String(), filepath.Join(first, ConfigFileName),
 		"the named location is the locked directory's config.json, not the link that now reaches B")
+	assert.Contains(t, warnBuf.String(), filepath.Join(first, TomlConfigFileName),
+		"the refusal names the pinned TOML the lock covers, not the link that now reaches B")
 	assert.NotContains(t, warnBuf.String(), "yourself to silence the duplicate-config warning",
 		"a retarget refusal must not invite the user to delete through a link that no longer names the original")
 
@@ -492,7 +494,12 @@ func TestConversion_RefusesTOMLSymlinkOutOfTheHome(t *testing.T) {
 // renameSibling leaves prettyConfigPath pointing at another home's active
 // config.json. Without the recheck, the "delete it yourself" instruction
 // would tell the user to delete the wrong file. The recheck turns the
-// refusal into a retarget refusal and names the pinned source.
+// refusal into a retarget refusal and names the pinned source. The hook
+// also removes the source the rename reaches for, so renameSibling returns
+// ENOENT; the ENOENT is classified independently of the retarget (the codex
+// finding on line 645), so the warning says the original may no longer exist
+// at the pinned source rather than asserting it remains and recommending a
+// rerun that has nothing to move.
 func TestConversionRenameRefusedAfterConfirmRechecksLink(t *testing.T) {
 	const aJSON = `{"default_program": "codex"}`
 	const bJSON = `{"default_program": "aider"}`
@@ -504,7 +511,8 @@ func TestConversionRenameRefusedAfterConfirmRechecksLink(t *testing.T) {
 	// confirm and renameSibling — the check-then-act window the recheck must
 	// close. The retarget alone does not make renameSibling fail (it goes
 	// through the pinned fd), so remove the source the rename reaches for
-	// too; that is the concurrent-removal case the finding names.
+	// too; that is the concurrent-removal case the finding names, and it
+	// makes the ENOENT classification below observable.
 	convertRenameRaceHookForTest = func() {
 		retargetHome(t, home, second)
 		require.NoError(t, os.Remove(filepath.Join(first, ConfigFileName)))
@@ -522,12 +530,14 @@ func TestConversionRenameRefusedAfterConfirmRechecksLink(t *testing.T) {
 	// config.json.
 	assert.Contains(t, warnBuf.String(), "could not move the original",
 		"a refused rename is logged, not silent — the user is told the link move cost the move-aside")
-	assert.Contains(t, warnBuf.String(), "the original remains at",
-		"the refusal names where the original actually sits (the pinned directory), not the moved link")
+	assert.Contains(t, warnBuf.String(), "may no longer exist at",
+		"an ENOENT rename under a retarget says the original may be gone, not that it remains — the source was removed during conversion")
 	assert.Contains(t, warnBuf.String(), filepath.Join(first, ConfigFileName),
 		"the named location is the locked directory's config.json, not the link that now reaches B")
 	assert.NotContains(t, warnBuf.String(), "yourself to silence the duplicate-config warning",
 		"a retarget refusal must not invite the user to delete through a link that no longer names the original")
+	assert.NotContains(t, warnBuf.String(), "re-run to move it aside",
+		"there is nothing to move aside when the source was removed during conversion")
 
 	// The rename failed (the source was removed concurrently), so no
 	// backup was created in the locked directory.
@@ -761,4 +771,61 @@ func TestConversionRenameFailureENOENTSaysOriginalMayNoLongerExist(t *testing.T)
 		"no backup was created when the source was removed before the rename")
 	assert.Contains(t, readString(t, filepath.Join(first, TomlConfigFileName)), "codex",
 		"config.toml landed in the directory the lock covers")
+}
+
+// TestConversionRenameSucceedsAfterRetargetReportsRetarget pins the codex finding
+// on config_load.go:615: when the home link retargets between the pre-rename
+// confirm and renameSibling but the source is NOT removed, renameSibling still
+// SUCCEEDS — it goes through the pinned fd, so the move lands in the locked
+// directory whatever the link did. Without a post-rename recheck the
+// conversion would log an unqualified success through prettyTomlPath /
+// prettyHomePath(bakPath), which after a retarget reach the NEW home, while the
+// files this conversion touched stay in the locked directory. The post-rename
+// recheck catches the retarget and names the pinned locations instead of an
+// unqualified success.
+func TestConversionRenameSucceedsAfterRetargetReportsRetarget(t *testing.T) {
+	const aJSON = `{"default_program": "codex"}`
+	const bJSON = `{"default_program": "aider"}`
+
+	_, home, first, second := retargetableJSONHome(t, aJSON, bJSON, "")
+
+	// Retarget the home link between the pre-rename confirm and
+	// renameSibling, but leave the source in place — so the rename goes
+	// through the pinned fd and SUCCEEDS. The retarget alone does not make
+	// renameSibling fail; only the post-rename recheck catches it.
+	convertRenameRaceHookForTest = func() {
+		retargetHome(t, home, second)
+	}
+	t.Cleanup(func() { convertRenameRaceHookForTest = nil })
+
+	warnBuf := captureLog(t, &aflog.WarningLog)
+	infoBuf := captureLog(t, &aflog.InfoLog)
+	cfg, err := LoadConfig()
+	require.NoError(t, err,
+		"the conversion must succeed: config.toml landed in the locked directory under the lock")
+	assert.Equal(t, "codex", cfg.DefaultProgram,
+		"the returned config is the one converted from the locked directory's config.json, read through the pinned fd")
+
+	// The post-rename recheck caught the retarget: the warning names the
+	// pinned locations the lock still covers, not the moved link.
+	assert.Contains(t, warnBuf.String(), "the home symlink moved during the conversion",
+		"a successful rename under a retarget is reported as a retarget, not an unqualified success")
+	assert.Contains(t, warnBuf.String(), filepath.Join(first, TomlConfigFileName),
+		"the warning names the pinned TOML the lock covers, not the link that now reaches B")
+	assert.Contains(t, warnBuf.String(), filepath.Join(first, ConfigFileName+".bak"),
+		"the warning names the pinned backup the lock covers, not the link that now reaches B")
+	assert.NotContains(t, infoBuf.String(), "migrated config to TOML: wrote",
+		"the unqualified success message is suppressed when the home moved during the conversion")
+
+	// The rename landed in the locked directory A; nothing reached B.
+	assert.Contains(t, readString(t, filepath.Join(first, TomlConfigFileName)), "codex",
+		"config.toml landed in the directory the lock covers")
+	assert.NoFileExists(t, filepath.Join(first, ConfigFileName),
+		"the locked directory's config.json was moved aside to its .bak inside the pinned directory")
+	assert.FileExists(t, filepath.Join(first, ConfigFileName+".bak"),
+		"the backup landed in the locked directory, not the retargeted one")
+	assert.Equal(t, bJSON, readString(t, filepath.Join(second, ConfigFileName)),
+		"B's active config.json must survive untouched — the move never followed the link there")
+	assert.NoFileExists(t, filepath.Join(second, TomlConfigFileName),
+		"no config.toml was written in the retargeted directory")
 }

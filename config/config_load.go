@@ -633,16 +633,29 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 					retargetRefused = true
 				}
 			}
+			pinnedToml := filepath.Join(locked.dirResolved, filepath.Base(tomlPath))
 			if retargetRefused {
-				// The link moved after the write, so prettyConfigPath — the link
-				// — no longer reaches the original this conversion left in place;
-				// a "delete it yourself" instruction aimed at it could remove
-				// another home's only config. Name the pinned source the lock
-				// still covers instead, and let the next run move it aside once
-				// the home is stable.
+				// The link moved after the write, so prettyConfigPath and
+				// prettyTomlPath — the link — no longer reach the files this
+				// conversion touched: a "delete it yourself" instruction aimed
+				// at prettyConfigPath could remove another home's only config,
+				// and naming prettyTomlPath as canonical points the user at a
+				// file in the new home this conversion never wrote. Name the
+				// pinned locations the lock still covers instead, and let the
+				// next run move the original aside once the home is stable.
+				// Classify ENOENT independently of the retarget: a rename that
+				// returned ENOENT means the source was removed during
+				// conversion, so the original may no longer exist at the pinned
+				// source — do not assert it remains and recommend a rerun that
+				// has nothing to move.
 				pinnedSource := filepath.Join(locked.dirResolved, filepath.Base(configPath))
-				log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original remains at %s (the home moved, so %s no longer reaches it); re-run to move it aside once the home symlink is stable",
-					prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, pinnedSource, prettyConfigPath)
+				if os.IsNotExist(renameErr) {
+					log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original may no longer exist at %s (it was removed during conversion; the home moved, so %s no longer reaches it)",
+						pinnedToml, prettyConfigPath, renameErr, pinnedToml, pinnedSource, prettyConfigPath)
+				} else {
+					log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original remains at %s (the home moved, so %s no longer reaches it); re-run to move it aside once the home symlink is stable",
+						pinnedToml, prettyConfigPath, renameErr, pinnedToml, pinnedSource, prettyConfigPath)
+				}
 			} else {
 				// The link can move again between this recheck and the user
 				// acting on the message, so prettyConfigPath — the link — is
@@ -665,8 +678,26 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 				}
 			}
 		} else {
-			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
-				prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
+			// Re-confirm after a successful rename: renameSibling goes through
+			// the pinned fd, so a home link that retargeted between the
+			// pre-rename confirm and the rename still succeeds — the move
+			// landed in the locked directory whatever the link did. But
+			// prettyTomlPath and prettyHomePath(bakPath) resolve the link
+			// afresh, so after a retarget they name the NEW home, and the
+			// unqualified success below would report a clean move of paths
+			// that no longer reach the files this conversion touched. Confirm
+			// again and report the retarget (naming the pinned locations)
+			// rather than logging an unqualified success through the moved
+			// link.
+			if cErr := locked.confirm(); cErr != nil {
+				pinnedToml := filepath.Join(locked.dirResolved, filepath.Base(tomlPath))
+				pinnedBak := filepath.Join(locked.dirResolved, filepath.Base(bakPath))
+				log.WarningLog.Printf("migrated config to TOML in the locked directory (wrote %s and moved the original to %s), but the home symlink moved during the conversion: %s and %s now reach another home — %s is now canonical; re-run once the home symlink is stable to point it at %s",
+					pinnedToml, pinnedBak, prettyTomlPath, prettyHomePath(bakPath), pinnedToml, pinnedToml)
+			} else {
+				log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
+					prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
+			}
 		}
 		warnConvertedLegacyRootAgents(cfg.RootAgents, prettyConfigPath, prettyTomlPath)
 		result, err = parseLoadedConfigTOML(tomlBytes, prettyTomlPath, tomlPath)
