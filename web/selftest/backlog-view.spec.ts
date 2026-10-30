@@ -60,8 +60,8 @@ test("add, nest, queue and note an item through the UI", async ({ page }, info) 
 
   // Queue the child: it reads Queued, and the parent's roll-up follows without being asked.
   await panel.getByRole("button", { name: "Queue", exact: true }).click();
-  await expect(row(page, child).locator(".af-backlog-state")).toContainText("Queued");
-  await expect(row(page, epic).locator(".af-backlog-state")).toContainText("Queued");
+  await expect(row(page, child).locator(".af-backlog-chip")).toContainText("Queued");
+  await expect(row(page, epic).locator(".af-backlog-chip")).toContainText("Queued");
 
   // A note lands on the thread.
   await panel.locator("textarea.af-backlog-note").fill("a note from the walkthrough");
@@ -79,7 +79,7 @@ test("a backlog.changed frame is a re-read: a child queued elsewhere moves the p
   const childId = await add(request, root, child, epicId);
   await openBacklog(page);
   await expect(row(page, epic)).toBeVisible();
-  await expect(row(page, epic).locator(".af-backlog-state")).toContainText("Draft");
+  await expect(row(page, epic).locator(".af-backlog-chip")).toContainText("Draft");
 
   // Frames name ids [childId] only; the epic's state must still move.
   const frames: string[] = [];
@@ -95,8 +95,8 @@ test("a backlog.changed frame is a re-read: a child queued elsewhere moves the p
     data: { repo_path: root, id: childId, status: "queued" },
   })).json();
   expect(queued.error).toBeNull();
-  await expect(row(page, child).locator(".af-backlog-state")).toContainText("Queued");
-  await expect(row(page, epic).locator(".af-backlog-state")).toContainText("Queued");
+  await expect(row(page, child).locator(".af-backlog-chip")).toContainText("Queued");
+  await expect(row(page, epic).locator(".af-backlog-chip")).toContainText("Queued");
   expect(frames.join("")).toContain(`"ids":[${childId}]`);
   expect(frames.join(""), "the frame did not name the parent").not.toContain(`${epicId},`);
 
