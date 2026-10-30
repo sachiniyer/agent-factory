@@ -125,7 +125,7 @@ export class DocsPane {
     });
     const stripWrap = h("div", { class: "af-docs-stripwrap" }, this.strip, addWrap, this.docMenu);
     this.statusText = h("span", { class: "af-docs-status-text" });
-    this.status = h("span", { class: "af-docs-status", role: "status" }, icon("circle-dashed"), this.statusText);
+    this.status = h("span", { class: "af-docs-status", role: "status" }, icon("loader-circle"), this.statusText);
     this.questions = h("button", { type: "button", class: "af-ghost af-docs-questions", hidden: true });
     this.questions.addEventListener("click", () => void this.goToNextQuestion());
     this.chipText = h("span", { class: "af-docs-chip-text" });

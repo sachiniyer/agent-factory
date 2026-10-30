@@ -7658,6 +7658,9 @@ var Link = [
   ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/loader-circle.mjs
+var LoaderCircle = [["path", { d: "M21 12a9 9 0 1 1-6.219-8.56" }]];
+
 // node_modules/lucide/dist/esm/icons/menu.mjs
 var Menu = [
   ["path", { d: "M4 5h16" }],
@@ -7772,6 +7775,7 @@ var ICONS = {
   folder: Folder,
   "folder-git": FolderGit2,
   funnel: Funnel,
+  "loader-circle": LoaderCircle,
   "git-branch": GitBranch,
   link: Link,
   menu: Menu,
@@ -22197,6 +22201,7 @@ lucide/dist/esm/icons/folder.mjs:
 lucide/dist/esm/icons/funnel.mjs:
 lucide/dist/esm/icons/git-branch.mjs:
 lucide/dist/esm/icons/link.mjs:
+lucide/dist/esm/icons/loader-circle.mjs:
 lucide/dist/esm/icons/menu.mjs:
 lucide/dist/esm/icons/octagon-x.mjs:
 lucide/dist/esm/icons/panels-top-left.mjs:

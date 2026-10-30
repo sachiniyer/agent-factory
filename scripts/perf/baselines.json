@@ -1,13 +1,13 @@
 {
   "raw_bytes": {
-    "baseline": 1133090,
+    "baseline": 1133510,
     "samples": [
-      1133090,
-      1133090,
-      1133090
+      1133510,
+      1133510,
+      1133510
     ],
     "stddev": 0,
-    "margin": 56654.5
+    "margin": 56675.5
   },
   "gzip_bytes": {
     "baseline": 253171,
@@ -20,24 +20,24 @@
     "margin": 12658.55
   },
   "lazy_raw_bytes": {
-    "baseline": 345212,
+    "baseline": 345283,
     "samples": [
-      345212,
-      345212,
-      345212
+      345283,
+      345283,
+      345283
     ],
     "stddev": 0,
-    "margin": 17260.600000000002
+    "margin": 17264.15
   },
   "lazy_gzip_bytes": {
-    "baseline": 112391,
+    "baseline": 112428,
     "samples": [
-      112391,
-      112391,
-      112391
+      112428,
+      112428,
+      112428
     ],
     "stddev": 0,
-    "margin": 5619.55
+    "margin": 5621.400000000001
   },
   "first_terminal_ms": {
     "baseline": 2870.4166666666665,
