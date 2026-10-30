@@ -142,3 +142,24 @@ func TestBacklogRunEndRecordsFenceBaseline(t *testing.T) {
 	require.True(t, inst.ArmBacklogRun(time.Now()))
 	require.True(t, inst.BacklogRunEndedAt().IsZero(), "a new run clears the end time")
 }
+
+// Disarming a continuation that never started puts the previous run's end back
+// (Codex P2 on #6294): arming cleared it, and pane churn since would otherwise
+// read as "changed after its run ended" and block the on_done archive forever.
+func TestDisarmRestoresThePreviousRunEnd(t *testing.T) {
+	inst := backlogRunSession(t)
+	inst.EndBacklogRunForTest()
+	ended := inst.BacklogRunEndedAt()
+	require.False(t, ended.IsZero())
+
+	require.True(t, inst.ArmBacklogRun(time.Now()))
+	require.True(t, inst.BacklogRunEndedAt().IsZero(), "an armed run has no end yet")
+	require.True(t, inst.DisarmBacklogRun())
+	require.True(t, inst.BacklogRunEndedAt().Equal(ended), "the failed continuation must leave the previous run's end alone")
+
+	// A re-arm while a run is already active keeps the ORIGINAL previous end.
+	require.True(t, inst.ArmBacklogRun(time.Now()))
+	require.True(t, inst.ArmBacklogRun(time.Now()))
+	require.True(t, inst.DisarmBacklogRun())
+	require.True(t, inst.BacklogRunEndedAt().Equal(ended))
+}

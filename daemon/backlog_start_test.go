@@ -376,6 +376,7 @@ func TestContinueWithAnUncertainDeliveryKeepsTheRun(t *testing.T) {
 	if !inst.BacklogRunActive() {
 		t.Fatal("the run marker was dropped for a send that may have landed")
 	}
+	m.backgroundMutationWG.Wait() // the advisory note is written by a tracked worker
 	it := loadItem(t, repoID, 1)
 	if it.Status != backlog.StatusRunning {
 		t.Fatalf("status = %s, want running", it.Status)
