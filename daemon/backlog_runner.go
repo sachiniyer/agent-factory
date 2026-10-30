@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/planusage"
 )
 
 const (
@@ -212,6 +213,7 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 		usage = m.meterUsageWithin(meterFreshFor)
 		p = plan()
 	}
+	p.Start = m.withOpenContinuations(repoID, b, states, p, *budget, usage, now)
 	for _, id := range p.Start {
 		// A continuation spends its own session's account, whatever the project's
 		// default is now: that account's gates decide (Codex P2 on #6300).
@@ -325,4 +327,28 @@ func (s *controlServer) RunBacklog(req RunBacklogRequest, resp *RunBacklogRespon
 	}
 	*resp = out
 	return nil
+}
+
+// withOpenContinuations adds the continuations whose OWN session's account has
+// open gates when the project's default-account gate is closed: a queued item
+// with a live session under account A is not blocked by account B (the project's
+// current default) being out of budget, since the work goes to A's session
+// (Codex P2 on #6300). New sessions still use the default's gates, so a closed
+// default gate adds nothing for them. The per-start check in the pass loop
+// applies the continuation's gate again.
+func (m *Manager) withOpenContinuations(repoID string, b *backlog.Backlog, states map[int]backlog.Derived, p backlog.RunnerPlan, budget backlog.Budget, usage planusage.Usage, now time.Time) []int {
+	if !b.Settings.Runner || len(p.Start) > 0 || p.View.Gate == "" || p.View.Gate == backlog.GatePlanUsageOff {
+		return p.Start
+	}
+	free := backlog.FreeSlots(b.Settings.MaxRunning, m.backlogSlotsUsed(repoID))
+	if free <= 0 {
+		return p.Start
+	}
+	out := p.Start
+	for _, id := range b.Runnable(states, free, m.backlog.runner.backingOff(repoID, now)) {
+		if acct := m.continuationAccount(repoID, b, id); acct != "" && m.backlogGateFor(acct, budget, usage, now).Open() {
+			out = append(out, id)
+		}
+	}
+	return out
 }
