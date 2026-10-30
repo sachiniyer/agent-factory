@@ -96,7 +96,7 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1067070.000 | 1067070.000–1067070.000 | 0.000 | 1120423.500 |
+| raw_bytes | 1123422.000 | 1123422.000–1123422.000 | 0.000 | 1179593.100 |
 | gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
@@ -122,6 +122,10 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Bundle refresh provenance (#5581)
+
+Master's committed bundle (1,120,104 raw over `web/dist/**.{js,css}`) sat 319 bytes under the 1,120,423.5 raw budget, so #5581 (glyph-only rail states and the agent-set attention dot) could not land without moving it. After merging master the bundle is 1,123,422 raw / 255,069 gzip, +3,318 raw over master. Comments do not ship, so the growth is the feature's code: the attention-seen store (`attention_seen.ts`), the glyph-only status model (`status.ts`) and the rail wiring. Only the raw entry is moved; gzip (255,069) is still inside its 265,829.55 budget. The raw entry is the deterministic sum, three identical samples, margin baseline x 0.05, confirmed by the `make perf-container` mean (1123422.000); every timing and layout-shift baseline is unchanged.
 
 ### Bundle refresh provenance (#6212)
 
