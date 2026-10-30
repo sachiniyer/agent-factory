@@ -30,7 +30,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Status:                   i.statusLocked(),
 		Liveness:                 i.liveness,
 		InFlightOp:               i.inFlightOp,
-		LifecycleAction:          lifecycleActionFor(i.ID, i.Title, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil),
+		LifecycleAction:          lifecycleActionFor(i.ID, i.Title, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil, i.unreachableDataLocked() != nil, !i.prune.prunedAt.IsZero()),
 		CanKill:                  canKillFor(i.ID, i.inFlightOp),
 		CanHandoff:               i.canHandoffLocked(),
 		CurrentAgent:             i.currentAgentNameLocked(),
@@ -50,6 +50,9 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		CreatedAt:                i.CreatedAt,
 		UpdatedAt:                i.UpdatedAt,
 		ArchivedAt:               i.archivedAt,
+		ArchiveNonce:             i.prune.nonce,
+		PrunedAt:                 i.prune.prunedAt,
+		PruneIntent:              clonePruneIntent(i.prune.intent),
 		Program:                  i.Program,
 		RuntimeProgram:           i.runtimeProgram,
 		RuntimePID:               i.runtimePID,
@@ -169,6 +172,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// run has already spent its active marker, and the interruption is exactly
 	// the fact startup reconcile needs after a restart (#4222 review).
 	data.TaskRunInterrupted = i.taskRunInterrupted
+	data.TaskRunInterruptedAt = i.taskRunInterruptedAt
 	data.TaskRunFailurePending = i.taskRunFailurePending
 	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
 	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
@@ -217,7 +221,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		if len(data.Tabs) == 0 {
 			data.Tabs = append(data.Tabs, TabData{Name: "agent", Kind: TabKindAgent})
 		}
-		data.Tabs = append(data.Tabs, i.pendingMetadataTabs...)
+		for _, td := range i.pendingMetadataTabs {
+			if !isRestorableRow(td) {
+				data.Tabs = append(data.Tabs, td)
+			}
+		}
 	}
 
 	// Cleanup handles for tabs whose roster removal is durable but whose tmux
@@ -479,10 +487,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		taskRunActive:       data.TaskRunActive,
-		taskRunInterrupted:  data.TaskRunInterrupted && !data.TaskRunActive,
-		taskRunIdleEdgeHeld: data.TaskRunActive && data.TaskRunIdleEdgeHeld,
-		taskRunTurnGateHeld: data.TaskRunActive && data.TaskRunTurnGateHeld,
+		taskRunActive:        data.TaskRunActive,
+		taskRunInterrupted:   data.TaskRunInterrupted && !data.TaskRunActive,
+		taskRunInterruptedAt: data.TaskRunInterruptedAt,
+		taskRunIdleEdgeHeld:  data.TaskRunActive && data.TaskRunIdleEdgeHeld,
+		taskRunTurnGateHeld:  data.TaskRunActive && data.TaskRunTurnGateHeld,
 		// Gate on the run still being in flight, mirroring the write side and
 		// the held flag: a finished run's stale observation cannot release the
 		// next run's delivery window.
@@ -509,6 +518,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		CreatedAt:                data.CreatedAt,
 		UpdatedAt:                data.UpdatedAt,
 		archivedAt:               data.ArchivedAt,
+		prune:                    pruneState{nonce: data.ArchiveNonce, prunedAt: data.PrunedAt, intent: clonePruneIntent(data.PruneIntent)},
 		Program:                  data.Program,
 		runtimeProgram:           data.RuntimeProgram,
 		runtimePID:               data.RuntimePID,
@@ -599,7 +609,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// stop Launch seeding the agent tab and leave a web tab in index 0.
 		// From both sources: rows that were on the roster when the record was written,
 		// and rows a previous recovery staged but never drained.
-		instance.pendingMetadataTabs = append(metadataTabsFrom(data), data.PendingTabs...)
+		instance.pendingMetadataTabs = append(metadataTabsFrom(data, instance.backend.Capabilities()), data.PendingTabs...)
 		// The recorded conversation survives the reload (#5826): the agent tab is
 		// seeded by the next Launch, so the handle waits in reportedConversation,
 		// is sent on that launch, and is written back by every checkpoint meanwhile.
@@ -627,7 +637,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// workspace is still on the host, and a kill of the row must reap it.
 		preservedArchive := liveness == LiveArchived && hadPersistedCleanupHandle && data.keepsPreservedWorkspaceHandle()
 		if preservedArchive || (liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle)) {
-			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
+			backend, teardown, cleanupErr := restoreRuntimeCleanupWithAccount(data.Title, data.BackendType, data.RuntimeCleanup,
+				restoredAccount{Name: data.Account, Agent: data.AccountAgent, Program: data.Program})
 			if cleanupErr != nil {
 				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {
 					// Inert-at-kill tombstone: the kill was committed against an inert

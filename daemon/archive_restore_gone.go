@@ -115,7 +115,7 @@ func (m *Manager) rebuildAbsentArchivedWorktree(repoID, title string, instance *
 		wrapped := fmt.Errorf(
 			"cannot restore session %q: its archived worktree %s is gone, and rebuilding it from branch %s at %s failed; the session stays archived with its branch kept: %w",
 			title, source, instance.GetBranch(), dest, err)
-		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+		if perr := m.persistUnderAdmission(repoID, instance); perr != nil {
 			return errors.Join(wrapped, fmt.Errorf("could not persist the archived row: %w", perr))
 		}
 		return wrapped
@@ -140,7 +140,7 @@ func (m *Manager) adoptRebuiltArchivedWorktree(repoID, title string, instance *s
 		wrapped := fmt.Errorf(
 			"cannot restore session %q: its archived worktree %s is gone, and git has its branch checked out at %s, where restore rebuilds it, but af could not prove that checkout is this session's own (inspect %s; if it is the session's work, retry, otherwise remove it with 'git worktree remove' and retry to rebuild it from the branch): %w",
 			title, source, moved, moved, err)
-		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+		if perr := m.persistUnderAdmission(repoID, instance); perr != nil {
 			return errors.Join(wrapped, fmt.Errorf("could not persist the archived row: %w", perr))
 		}
 		return wrapped
@@ -167,7 +167,7 @@ func (m *Manager) reconfirmPlacedRestoreWorktree(repoID, title string, instance 
 	refusal := fmt.Errorf(
 		"cannot restore session %q: the worktree af placed at %s is no longer the directory it verified there, so af stopped %s; the record is fenced and af will not start an agent in or remove that path — inspect %s, then retry: %w",
 		title, path, boundary, path, err)
-	if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+	if perr := m.persistUnderAdmission(repoID, instance); perr != nil {
 		return errors.Join(refusal, fmt.Errorf("could not persist its worktree fence: %w", perr))
 	}
 	return refusal

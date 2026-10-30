@@ -22,6 +22,22 @@ func (s *remoteAgentServer) hasFeatureCached(name string) bool {
 	return s.idPlaneKnown && slices.Contains(s.features, name)
 }
 
+// featureVerdict resolves the advertisement, asking the server once if it has
+// not yet answered. A health fetch that fails leaves the verdict unknown — never
+// absent — so a transient failure is not read as an old server (#6236).
+func (s *remoteAgentServer) featureVerdict(name string) featureVerdict {
+	s.idNative()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case !s.idPlaneKnown:
+		return featureUnknown
+	case slices.Contains(s.features, name):
+		return featurePresent
+	}
+	return featureAbsent
+}
+
 // remoteTabServerCached returns the cached remote agent-server without building
 // one. Safe under i.mu (reads only); nil for a local instance or one nobody has
 // asked for the server yet.
@@ -142,7 +158,7 @@ func (i *Instance) addOffBoxTab(id string, kind TabKind, command, requestedName 
 	// adopting its name could duplicate one. The name reserved for this create is
 	// kept, re-derived only if something took it since (#5962).
 	name := displayName
-	tab := &Tab{ID: id, Name: name, Kind: kind, Command: command, Exit: tabExitFromData(td.Exit), gen: td.Gen}
+	tab := &Tab{ID: id, Name: name, Kind: kind, Command: command, Exit: tabExitFromData(td.Exit), gen: td.Gen, sandboxTmux: td.TmuxName}
 
 	i.mu.Lock()
 	stale := !i.started || i.tabSpawnBlockedLocked() != nil

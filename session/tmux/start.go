@@ -171,7 +171,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: prepare filtered session environment: %w", ErrSessionNotStarted, envErr)
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
-	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
+	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration(), t.launchInstanceID())...)
 	for _, entry := range sessionEnv {
 		args = append(args, "-e", entry)
 	}
@@ -304,8 +304,8 @@ func (t *TmuxSession) Start(workDir string) error {
 	// 10s and leave that give-up case unreachable past the poll's own 2s deadline
 	// (#2099 poll-loop class). probeSessionWithin/tmuxTimeoutContextWithin are what
 	// make the deadline actually fire on time. Mirrors the paste-delivery poll.
-	timeout := time.After(2 * time.Second)
-	pollDeadline := time.Now().Add(2 * time.Second)
+	timeout := time.After(sessionReadyDeadline)
+	pollDeadline := time.Now().Add(sessionReadyDeadline)
 	sleepDuration := 5 * time.Millisecond
 	for {
 		if exists, known := t.probeSessionWithin(time.Until(pollDeadline)); known && exists {
@@ -361,11 +361,12 @@ func (t *TmuxSession) Start(workDir string) error {
 			}
 		case <-timeout:
 			ptmx.Close()
-			// The pane program exiting instantly (bad path, rejected flag)
-			// takes the whole tmux session down before this existence poll
-			// ever sees it — name the likely cause and the exact command so
-			// the user isn't left with a bare timeout (#1116, #1131).
-			timeoutErr := fmt.Errorf("timed out waiting for tmux session %s; the pane program may have exited immediately after launch — check that it runs and accepts its flags (program: %q)", t.sanitizedName, t.programCmd())
+			// Two things look identical from here: tmux never showed us the
+			// session inside the deadline (a loaded machine delays the server
+			// fork, #4606), or the pane program exited instantly (bad path,
+			// rejected flag) and took the whole session down before this poll saw
+			// it (#1116, #1131). Say what was observed and name both.
+			timeoutErr := sessionReadyTimeoutError(t.sanitizedName, t.programCmd())
 			if systemdScoped {
 				timeoutErr = fmt.Errorf("systemd-run --user --scope completed but the tmux session did not appear: %w", timeoutErr)
 			}
@@ -553,7 +554,7 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
 		// Program AND declaration together: the resume flags are af-authored, so a
 		// stale declaration would refuse an account-scoped restore (#3083 review).
-		t.rewriteProgramCmdByAf(resumeProgram)
+		t.rewriteProgramCmdByAf(t.resumeRewrite())
 		if err := t.Start(workDir); err != nil {
 			return RestoreReattached, err
 		}
@@ -710,4 +711,18 @@ func (t *TmuxSession) reattach(opts reattachOptions) error {
 		startedAt:  resolvedAt,
 	})
 	return nil
+}
+
+// sessionReadyDeadline bounds how long Start waits for tmux to report a freshly
+// created session. It is scheduler latency, not work, so a machine under heavy
+// load can exceed it with a healthy program (#4606).
+const sessionReadyDeadline = 2 * time.Second
+
+// sessionReadyTimeoutError is the Start deadline error. It reports the wait
+// that expired and both causes it cannot tell apart, rather than blaming the
+// program's flags. The leading "timed out waiting for tmux session <name>" is
+// matched by callers and tests.
+func sessionReadyTimeoutError(name, program string) error {
+	return fmt.Errorf("timed out waiting for tmux session %s: it did not appear within %s. Either the machine is too busy for tmux to create it in time (check the load average and retry), or the pane program exited immediately after launch (check that it runs and accepts its flags) (program: %q)",
+		name, sessionReadyDeadline, program)
 }

@@ -49,6 +49,7 @@ var (
 	errHostsNotReady          = errors.New("the host is saved but not ready to run a session")
 	errHostsCheckHasProblems  = errors.New("one or more hosts are not ready to run a session")
 	errHostsUnreachableOrBusy = errors.New("one or more hosts could not be probed")
+	errHostsCheckIncomplete   = errors.New("one or more hosts answered but not with a recognisable git, tmux and gh report")
 )
 
 var hostsCmd = &cobra.Command{
@@ -278,7 +279,8 @@ func hostsEnvelopeError(cmd *cobra.Command, data any, err error, code string) er
 // ordinary failure).
 const (
 	// hostsCodeNotReady: the host is saved, the probe answered, and it cannot run a
-	// session yet (or could not be reached). data carries the probe result.
+	// session yet (or could not be reached, or answered unrecognisably). data
+	// carries the probe result.
 	hostsCodeNotReady = "host_not_ready"
 	// apiproto.ErrorCodeMutationCommitted: the host is saved but a later step (the
 	// default pick, or the probe itself) could not run.
@@ -368,9 +370,13 @@ func describeHost(h config.HostConfig) string {
 	return s
 }
 
-// hostReady reports a probed host that answered, with no blocking problem.
+// hostReady reports a probed host that answered recognisably (git, tmux and gh
+// each gave a recognised answer) with no blocking problem. A reachable host
+// whose probe output was garbled/truncated has Complete false and is unknown,
+// not ready — the same contract doctor honors (#5841). Absent from an older
+// daemon's reply, Complete decodes false, so it too reads as not ready.
 func hostReady(r daemon.HostCheckResult) bool {
-	return r.Probed && r.Reachable && len(r.Problems) == 0
+	return r.Probed && r.Reachable && r.Complete && len(r.Problems) == 0
 }
 
 // renderHostCheck prints one host's probe result and, for anything short of
@@ -392,6 +398,15 @@ func renderHostCheck(w io.Writer, r daemon.HostCheckResult, entry config.HostCon
 			fmt.Fprintf(w, "    fix: %s\n", p)
 		}
 		fmt.Fprintf(w, "    then run `af hosts check %s`\n", r.Name)
+	case !r.Complete:
+		// The host answered something af could not read (truncated/garbled
+		// output, banner or profile noise on a probe line, a broken tmux -V).
+		// That is unknown, never ready — the same arm doctor renders (#5841).
+		fmt.Fprintf(w, "  %s: unknown: the host answered but not with a recognisable git, tmux and gh report", r.Name)
+		if r.Readiness != "" {
+			fmt.Fprintf(w, "; cached state: %s", r.Readiness)
+		}
+		fmt.Fprintf(w, "\n    fix: check that a non-interactive `%s` prints no banner or extra output for a plain command, then run `af hosts check %s`\n", sshRemedyCommand(entry), r.Name)
 	default:
 		fmt.Fprintf(w, "  %s: ready (git, tmux and gh answered)\n", r.Name)
 	}
@@ -469,7 +484,7 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 			fmt.Fprintln(cmd.OutOrStdout(), "no hosts saved; add one with `af hosts add <name> <ssh-destination>`")
 		}
 		hosts, _, _ := hostsLoad()
-		blocked, unreachable := false, false
+		blocked, unreachable, incomplete := false, false, false
 		for _, r := range resp.Hosts {
 			if !hostsJSONFlag {
 				renderHostCheck(cmd.OutOrStdout(), r, hosts[r.Name])
@@ -479,6 +494,10 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 				blocked = true
 			case !r.Probed || !r.Reachable:
 				unreachable = true
+			case !r.Complete:
+				// A reachable, problem-free host whose probe af could not read is
+				// unknown, not a silent exit 0 (#5841).
+				incomplete = true
 			}
 		}
 		var outcome error
@@ -487,6 +506,8 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 			outcome = errHostsCheckHasProblems
 		case unreachable:
 			outcome = errHostsUnreachableOrBusy
+		case incomplete:
+			outcome = errHostsCheckIncomplete
 		}
 		if hostsJSONFlag {
 			// One envelope on stdout: the probe results are the data, and a host

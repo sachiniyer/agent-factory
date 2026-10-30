@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -63,6 +64,13 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 	return projects, registryDegraded
 }
 
+// projectSnapshotFetchTimeout bounds the cross-repo snapshot read the project
+// picker and the Projects section make synchronously on the event loop. It is
+// deliberately short — the loop is parked for up to this long — where
+// rebindConflictRefreshTimeout bounds the same fetch off-loop and can afford
+// ten seconds. A var so tests can shrink it.
+var projectSnapshotFetchTimeout = 3 * time.Second
+
 // buildProjectListWithSnapshotStatus is buildProjectList, also reporting whether
 // the picker's cross-repo session snapshot fetch FAILED. The failure is a
 // first-class degraded state, distinct from the registry read's: the union
@@ -74,9 +82,20 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 // destructive consumers of the counts (refreshSidebarProjects) drop it via
 // buildProjectList.
 func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bool) {
-	data, err := allReposSnapshotFetcher(context.Background())
+	// This runs on the bubbletea event loop (Ctrl+P, launch, project switch,
+	// add/delete/rebind completion), and the local daemon transport bounds only
+	// the dial, so a daemon that accepts the connection and never answers would
+	// park Update — key input, repaint and the Ctrl+C hard exit with it — until
+	// the process is killed (#6045). The deadline rides the transport read, and
+	// its expiry lands in the same snapshotDegraded path as any failed fetch.
+	ctx, cancel := context.WithTimeout(context.Background(), projectSnapshotFetchTimeout)
+	defer cancel()
+	data, err := allReposSnapshotFetcher(ctx)
 	snapshotDegraded := false
 	if err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("no answer from the daemon within %s: %w", projectSnapshotFetchTimeout, err)
+		}
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
 		snapshotDegraded = true
 		data = nil

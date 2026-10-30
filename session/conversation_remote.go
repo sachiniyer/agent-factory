@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -128,4 +129,27 @@ func (i *Instance) MarkConversationPersisted(persisted AgentConversationData) {
 	if current == persisted {
 		i.conversationUnpersisted = false
 	}
+}
+
+// RefuseGuessedRespawn is the agent-server's guard for a restore-launch that
+// carries the daemon's recorded conversation. When the agent's tmux session is
+// definitively gone the launch would RESPAWN it, and a lazy respawn resumes by
+// heuristic ("--continue", "resume --last"), which can attach the replacement to
+// a different conversation than the recorded one (#4797). With an exact id
+// recorded, af refuses that guess and leaves the session needing attention
+// rather than resuming onto another conversation. A surviving session (or one
+// whose state could not be established) is reattached, never respawned, so it
+// proceeds.
+func (i *Instance) RefuseGuessedRespawn(conv AgentConversationData) error {
+	if !conv.HasID() {
+		return nil
+	}
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil || ts.ExistsOrUnknown() {
+		return nil
+	}
+	return fmt.Errorf("the agent's tmux session is gone and would be respawned, but resuming conversation %s exactly "+
+		"is not something a lazy respawn does (it resumes the latest conversation instead); not guessing", conv.ID)
 }

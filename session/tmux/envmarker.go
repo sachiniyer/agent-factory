@@ -36,6 +36,12 @@ const (
 	// the same sanitized name and Agent Factory home. AF_SESSION proves the
 	// reusable name, not which process generation carried it (#3309).
 	EnvMarkerGeneration = "AF_SESSION_GEN"
+	// EnvMarkerInstance holds the stable instance id of the create attempt whose
+	// launch options started this session (InstanceOptions.ID). The id is minted
+	// and, for a cron fire, recorded durably before the spawn, so a match proves
+	// THIS attempt's spawn created the session — which no name, home or clock can
+	// (#6258). Only the agent session carries it.
+	EnvMarkerInstance = "AF_INSTANCE_ID"
 	// envMarkerTestguardRun carries a test process's stable ownership identity
 	// across per-test AGENT_FACTORY_HOME overrides. It is deliberately private:
 	// production consumers authorize ownership with AF_HOME, while testguard uses
@@ -119,7 +125,7 @@ func SetNewSessionEnvSupportForTest(supported bool) func() {
 // new-session`, or nil when the running tmux predates `-e` (added in 3.2) —
 // passing it there would fail session creation outright, which is far worse
 // than a missing diagnostic marker.
-func sessionEnvFlags(sanitizedName, generation string) []string {
+func sessionEnvFlags(sanitizedName, generation, instanceID string) []string {
 	if !SessionEnvSupported() {
 		return nil
 	}
@@ -129,6 +135,9 @@ func sessionEnvFlags(sanitizedName, generation string) []string {
 	}
 	if home, err := afHomeDir(); err == nil {
 		flags = append(flags, "-e", EnvMarkerHome+"="+home)
+	}
+	if instanceID != "" {
+		flags = append(flags, "-e", EnvMarkerInstance+"="+instanceID)
 	}
 	if testRun := os.Getenv(envMarkerTestguardRun); testRun != "" {
 		flags = append(flags, "-e", envMarkerTestguardRun+"="+testRun)
@@ -199,8 +208,16 @@ func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 // sessionEnvMarker binds the query, response parser, and absence classifier to
 // one marker name so readers cannot accidentally classify a different variable.
 func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker string) (string, bool, error) {
+	return sessionEnvMarkerAt(cmdExec, exactTarget(sanitizedName), sanitizedName, marker)
+}
+
+// sessionEnvMarkerAt is sessionEnvMarker against an explicit tmux target: the
+// exact-name form for a name lookup, or a "$N" session id to read the
+// environment of one probed incarnation rather than whatever the name resolves
+// to by the time the command runs (#6258). sanitizedName only labels errors.
+func sessionEnvMarkerAt(cmdExec cmd.Executor, target, sanitizedName, marker string) (string, bool, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), marker)
+	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", target, marker)
 	markerTimedOut := ctx.Err() != nil
 	cancel()
 	if markerErr == nil {
@@ -229,7 +246,7 @@ func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker string) (strin
 	// session answered and the marker alone was absent. A generic targeted error
 	// never reaches this fallback, even if this second command would succeed.
 	allCtx, allCancel := tmuxTimeoutContext()
-	_, allErr := outputTmuxBoundedWith(allCtx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName))
+	_, allErr := outputTmuxBoundedWith(allCtx, cmdExec, "show-environment", "-t", target)
 	allTimedOut := allCtx.Err() != nil
 	allCancel()
 	if allErr == nil {

@@ -111,7 +111,7 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	as, instance, err := cs.manager.agentServerForStreamTarget(target)
+	as, instance, err := cs.manager.agentServerForAttachTarget(target)
 	if err != nil {
 		writeHTTPError(w, r, http.StatusNotFound, err)
 		return
@@ -523,7 +523,7 @@ func (cs *controlServer) streamInfoHandler(w http.ResponseWriter, r *http.Reques
 		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	as, _, err := cs.manager.agentServerForStreamTarget(target)
+	as, _, err := cs.manager.agentServerForAttachTarget(target)
 	if err != nil {
 		writeHTTPError(w, r, http.StatusNotFound, err)
 		return

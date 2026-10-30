@@ -80,7 +80,7 @@ const shadowedTailOperandLimit = 64
 // past shadowedTailOperandLimit fails closed instead. That bound is a property
 // of CHILDLESS tails: PIDs and permuted operands are meaningless past a handful
 // of words, so length there is a reasonable fail-closed signal. A wrapper's
-// returned child tail uses shadowedChildTailMutates instead, which drops it.
+// returned child tail uses shadowedLiteralChildTailMutates instead, which drops it.
 func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	if len(words) > shadowedTailOperandLimit {
 		return true
@@ -362,7 +362,7 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// argv, the child-tail scan drops the childless PID bound — their
 			// length is not a mutation (the selector and terminal branches keep
 			// the capped shadowedOperandTailMutates for their childless tails).
-			if shadowedChildTailMutates(words[1:], names, memo) {
+			if shadowedLiteralChildTailMutates(words[1:], names, memo) {
 				return run.done(nil, true)
 			}
 			return run.done(words[1:], false)
@@ -434,7 +434,7 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// --class/--classdata value, and the attached -c/-n forms) whose loops
 			// land here once the real child is reached, while staying clear of
 			// their future option words (#4460/#4532 dynamic `-c"$CLASS"`).
-			if shadowedChildTailMutates(words[1:], names, memo) {
+			if childTailBuriesMutation(words, names, memo) {
 				return run.done(nil, true)
 			}
 			return run.done(words, false)

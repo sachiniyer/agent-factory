@@ -1,17 +1,23 @@
 package session
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -203,4 +209,86 @@ func TestWithoutForceAnUnreachableSandboxIsNotReplaced(t *testing.T) {
 		func(*Instance) error { replaced++; return nil })
 	require.NoError(t, err)
 	assert.Equal(t, 1, replaced, "an older sandbox falls back to replacement")
+}
+
+// After an in-place relaunch the sandbox repaints ITS subscribers, but the
+// daemon's broker is a subscriber of the old pane whose socket survives: a
+// client still attached must be re-seeded with the replacement's screen, from a
+// fresh upstream dial, with no reconnect of its own (#5871).
+func TestRemoteRelaunchRepaintsAClientThatStaysConnected(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		screen = "OLD SCREEN"
+		dials  int
+		sinces []string
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sessions/{id}/stream", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		dials++
+		n := dials
+		sinces = append(sinces, r.URL.Query().Get("since"))
+		mu.Unlock()
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		ctx := context.Background()
+		_ = agentproto.WriteFrame(ctx, conn, agentproto.HelloFrame(0))
+		if n >= 2 {
+			// The replacement's own output, emitted after the relaunch.
+			_ = agentproto.WriteFrame(ctx, conn, agentproto.PTYOutFrame([]byte("replacement output")))
+		}
+		<-conn.CloseRead(ctx).Done()
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	})
+	mux.HandleFunc("/v1/agent/preview", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		s := screen
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"content": s}, "error": nil})
+	})
+	mux.HandleFunc("/v1/agent/relaunch", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ok": true}, "error": nil})
+	})
+	httpSrv := httptest.NewServer(mux)
+	t.Cleanup(httpSrv.Close)
+	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: httpSrv.URL, Token: "tok"}, "probe")
+	require.NoError(t, err)
+	as := &remoteAgentServer{rc: rc}
+	t.Cleanup(func() { _ = as.Kill(false) })
+
+	sub, err := as.Subscribe(0, 0)
+	require.NoError(t, err)
+	defer sub.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	first, err := sub.NextEvent(ctx)
+	require.NoError(t, err)
+	require.Equal(t, PTYRepaint, first.Kind)
+	require.Contains(t, string(first.Data), "OLD SCREEN")
+
+	mu.Lock()
+	screen = "NEW SCREEN"
+	mu.Unlock()
+	require.NoError(t, as.Relaunch())
+
+	var repainted, sawOutput bool
+	for !(repainted && sawOutput) {
+		ev, err := sub.NextEvent(ctx)
+		require.NoError(t, err, "the attached client missed the replacement's screen or its output (repainted=%v output=%v)", repainted, sawOutput)
+		switch {
+		case ev.Kind == PTYRepaint && strings.Contains(string(ev.Data), "NEW SCREEN"):
+			repainted = true
+		case ev.Kind == PTYData && strings.Contains(string(ev.Data), "replacement output"):
+			require.True(t, repainted, "output must land after the repaint, never under it")
+			sawOutput = true
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 2, dials, "the upstream must be re-dialled, not left on the old pane's socket")
+	require.Empty(t, sinces[1], "a cursor into the old pane's ring means nothing to the replacement")
 }

@@ -89,3 +89,37 @@ func TestWithFollowedFileLock_RepinsAReplacedDirectory(t *testing.T) {
 	_, statErr := os.Stat(path + ".lock")
 	require.NoError(t, statErr, "the lock file lives in the new directory")
 }
+
+// A symlinked home retargeted from A to B, with A removed before the lock is
+// opened, must be refused: re-pinning from the path would silently adopt B and
+// confirmDir (B against B) would pass (#6130).
+func TestWithFollowedFileLock_RefusesARetargetedHomeLink(t *testing.T) {
+	prevN, prevB := lockOpenAttempts, lockOpenBackoff
+	lockOpenAttempts, lockOpenBackoff = 5, time.Microsecond
+	t.Cleanup(func() { lockOpenAttempts, lockOpenBackoff = prevN, prevB })
+
+	root := t.TempDir()
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	for _, d := range []string{a, b} {
+		require.NoError(t, os.Mkdir(d, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(d, "config.toml"), []byte("x = 1\n"), 0o644))
+	}
+	link := filepath.Join(root, "home")
+	require.NoError(t, os.Symlink(a, link))
+	path := filepath.Join(link, "config.toml")
+
+	followedLockRaceHookForTest = func() {
+		require.NoError(t, os.Remove(link))
+		require.NoError(t, os.Symlink(b, link))
+		require.NoError(t, os.RemoveAll(a))
+	}
+	t.Cleanup(func() { followedLockRaceHookForTest = nil })
+
+	ran := false
+	err := withFollowedFileLock(path, func(lockedTarget) error { ran = true; return nil })
+	require.Error(t, err)
+	require.False(t, ran, "a retargeted home must not run the operation")
+	require.Contains(t, err.Error(), "moved")
+	_, statErr := os.Stat(filepath.Join(b, "config.toml.lock"))
+	require.True(t, os.IsNotExist(statErr), "no lock file may be created in the new destination")
+}

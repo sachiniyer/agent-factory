@@ -7079,15 +7079,33 @@ async function af(method, body, token2, signal) {
   }
   return env?.data;
 }
+var ARCHIVED_PAGE_SIZE = 50;
 async function fetchSessionSnapshot(token2) {
-  const resp = await af("Snapshot", { repo_id: "" }, token2);
+  const resp = await af("Snapshot", { repo_id: "", lazy_archive: true }, token2);
   return {
     sessions: resp.instances ?? [],
+    archived: resp.archived_total === void 0 ? void 0 : { total: resp.archived_total, byProject: resp.archived_by_project ?? {} },
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
     operationClockMs: resp.operation_clock_ms,
     daemonBootId: resp.boot_id,
     skippedRepos: resp.skipped_repos
   };
+}
+async function fetchArchivedPage(token2, opts) {
+  const resp = await af("Snapshot", {
+    repo_id: "",
+    statuses: ["archived"],
+    newest_first: true,
+    limit: opts.limit ?? ARCHIVED_PAGE_SIZE,
+    ...opts.project ? { project_path: opts.project } : {},
+    ...opts.before ? { before: opts.before } : {}
+  }, token2);
+  return { sessions: resp.instances ?? [], next: resp.next_before ?? null };
+}
+async function fetchSessionsById(token2, ids) {
+  if (ids.length === 0) return [];
+  const resp = await af("Snapshot", { repo_id: "", ids }, token2);
+  return resp.instances ?? [];
 }
 async function probeAuthRequired() {
   let resp;
@@ -7228,6 +7246,15 @@ async function deleteProject(root2, token2) {
 }
 async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
+  return resp.project;
+}
+var SCP_LIKE_GIT_URL = /^[A-Za-z0-9._-]+@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~/-]+$/;
+function looksLikeGitURL(value) {
+  const trimmed = value.trim();
+  return trimmed.includes("://") || SCP_LIKE_GIT_URL.test(trimmed);
+}
+async function registerProjectURL(url, token2) {
+  const resp = await af("RegisterProject", { url }, token2);
   return resp.project;
 }
 var GUARDED_REBIND_UNSUPPORTED = "this daemon predates guarded rebinds \u2014 upgrade it, or rebind from the daemon host";
@@ -8574,6 +8601,8 @@ var ConfigPane = class {
     const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
     const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
     const saveFocusedKey = active instanceof HTMLButtonElement && active.closest(".af-config-list") !== null && active.classList.contains("af-config-save") ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null : null;
+    const accountsLoginFocusedKey = active instanceof HTMLButtonElement && active.classList.contains("af-accounts-login") ? active.closest("[data-account]")?.getAttribute("data-account") ?? null : null;
+    const accountsAddFocusedAgent = active instanceof HTMLButtonElement && active.classList.contains("af-accounts-add") ? active.closest(".af-accounts-register")?.querySelector(`input[${ACCOUNT_INPUT_ATTR}]`)?.getAttribute(ACCOUNT_INPUT_ATTR) ?? null : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -8612,6 +8641,12 @@ var ConfigPane = class {
       if (field2 && accountCaret?.start != null) {
         field2.setSelectionRange(accountCaret.start, accountCaret.end ?? accountCaret.start);
       }
+    } else if (accountsLoginFocusedKey !== null) {
+      this.el.querySelector(
+        `.af-accounts-row[data-account="${CSS.escape(accountsLoginFocusedKey)}"] .af-accounts-login`
+      )?.focus({ preventScroll: true });
+    } else if (accountsAddFocusedAgent !== null) {
+      this.accountInput(accountsAddFocusedAgent)?.closest(".af-accounts-register")?.querySelector(".af-accounts-add")?.focus({ preventScroll: true });
     }
   }
   /** Every register field's current text, keyed by agent. */
@@ -11944,7 +11979,9 @@ var AttachTerminal = class {
       if (this.stopped) {
         return;
       }
-      this.fitVisibleHost();
+      if (!this.fitVisibleHost()) {
+        this.scheduleVisibleFit();
+      }
     }, RESIZE_DEBOUNCE_MS);
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
@@ -13298,7 +13335,9 @@ function addProjectModal(callbacks) {
   return checkoutPathModal({
     title: "Add project",
     confirmLabel: "Add project",
-    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    fieldLabel: "Repository path or git URL",
+    placeholder: "/path/to/repo  \xB7  ~/repo  \xB7  https://host/owner/repo",
+    hint: "An absolute repo path on the daemon host (~ works), or a git URL for the daemon to clone and register: https://host/owner/repo, ssh://host/owner/repo, or git@host:owner/repo.",
     ...callbacks
   });
 }
@@ -13318,13 +13357,14 @@ function checkoutPathModal(opts) {
     confirmClass: "af-primary",
     onCancel: opts.onCancel
   });
+  const fieldLabel = opts.fieldLabel ?? "Repository path";
   const pathInput = h("input", {
     type: "text",
     class: "af-input",
-    placeholder: "/path/to/repo  or  ~/repo",
+    placeholder: opts.placeholder ?? "/path/to/repo  or  ~/repo",
     autocomplete: "off"
   });
-  pathInput.setAttribute("aria-label", "Repository path");
+  pathInput.setAttribute("aria-label", fieldLabel);
   const { loadDirectory, errorText: errorText2 } = opts;
   let picker = null;
   if (loadDirectory && errorText2) {
@@ -13347,7 +13387,7 @@ function checkoutPathModal(opts) {
     );
   }
   body.append(
-    field("Repository path", pathInput),
+    field(fieldLabel, pathInput),
     h(
       "p",
       { class: "af-modal-hint" },
@@ -15584,6 +15624,117 @@ var SplitView = class {
   }
 };
 
+// src/archive.ts
+function emptyArchive() {
+  return { lazy: false, total: 0, byProject: {}, cursors: {}, loading: false };
+}
+function archiveFromSnapshot(previous, summary) {
+  if (!summary) return emptyArchive();
+  return { ...previous, lazy: true, total: summary.total, byProject: summary.byProject };
+}
+function archiveKey(project) {
+  return project ?? "";
+}
+function archivedCount(archive, project, scoped) {
+  const loaded = scoped.reduce((n, s) => n + (isArchived(s) ? 1 : 0), 0);
+  if (!archive.lazy) return loaded;
+  const known = project ? archive.byProject[project] ?? 0 : archive.total;
+  return Math.max(known, loaded);
+}
+function railKindCounts(archive, project, scoped) {
+  const counts = kindCounts(scoped);
+  counts.archived = archivedCount(archive, project, scoped);
+  return counts;
+}
+function archiveHasMore(archive, project) {
+  return archive.lazy && archive.cursors[archiveKey(project)] != null;
+}
+function archiveNeedsFirstPage(archive, project) {
+  if (!archive.lazy || archive.loading || archive.error) return false;
+  const key = archiveKey(project);
+  if (archive.cursors[key] !== void 0) return false;
+  return (project ? archive.byProject[project] ?? 0 : archive.total) > 0;
+}
+
+// src/route_lookup.ts
+function settleLookup(intent, ticket, id, rows, effects) {
+  if (!intent.isCurrent(ticket)) return "stale";
+  const row = rows.find((r) => r.id === id);
+  if (!row) {
+    effects.missing();
+    return "missing";
+  }
+  effects.found(row);
+  return "found";
+}
+
+// src/archive_window.ts
+var REREAD_BATCH = 500;
+var DISCOVERY_PAGE = 200;
+async function rereadHeld(ids, fetchById) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += REREAD_BATCH) {
+    out.push(...await fetchById(ids.slice(i, i + REREAD_BATCH)));
+  }
+  return out;
+}
+function aheadOfCursor(row, cursor) {
+  const order = compareTimestamps(row.created_at ?? "", cursor.created_at);
+  if (order === null) return true;
+  if (order !== 0) return order > 0;
+  return (row.id ?? "") > cursor.id;
+}
+function compareTimestamps(a, b) {
+  const split = (s) => ({
+    sec: Date.parse(s.replace(/\.\d+/, "")),
+    frac: (/\.(\d+)/.exec(s)?.[1] ?? "").padEnd(9, "0")
+  });
+  const x = split(a);
+  const y = split(b);
+  if (Number.isNaN(x.sec) || Number.isNaN(y.sec)) return null;
+  if (x.sec !== y.sec) return x.sec > y.sec ? 1 : -1;
+  if (x.frac === y.frac) return 0;
+  return x.frac > y.frac ? 1 : -1;
+}
+async function discoverHead(cursor, fetchPage, maxPages) {
+  const rows = [];
+  let before = null;
+  for (let page = 0; page < maxPages; page++) {
+    const got = await fetchPage(before, DISCOVERY_PAGE);
+    rows.push(...got.sessions);
+    if (got.next === null || got.sessions.length === 0) return { rows, complete: true };
+    const last = got.sessions[got.sessions.length - 1];
+    if (cursor !== null && !aheadOfCursor(last, cursor)) return { rows, complete: true };
+    before = got.next;
+  }
+  return { rows, complete: false };
+}
+function discoveryNeeded(dirty, previous, next) {
+  if (dirty || previous.total !== next.total) return true;
+  const keys = /* @__PURE__ */ new Set([...Object.keys(previous.byProject), ...Object.keys(next.byProject)]);
+  for (const k of keys) if ((previous.byProject[k] ?? 0) !== (next.byProject[k] ?? 0)) return true;
+  return false;
+}
+async function reconcileWindow(i) {
+  const byId = new Map(i.held.map((s) => [s.id ?? "", s]));
+  if (!discoveryNeeded(i.dirty, i.archive, i.summary)) return { rows: [...byId.values()], complete: true };
+  byId.clear();
+  const keep = (row) => {
+    if (i.isArchived(row) && !i.live.has(row.id)) byId.set(row.id ?? "", row);
+  };
+  let complete = true;
+  for (const row of await rereadHeld(i.held.flatMap((s) => s.id ? [s.id] : []), i.fetchById)) keep(row);
+  for (const [key, cursor] of Object.entries(i.archive.cursors)) {
+    if (cursor === void 0) continue;
+    const project = key === "" ? null : key;
+    const maxPages = Math.ceil(i.summary.total / DISCOVERY_PAGE) + 2;
+    const found = await discoverHead(cursor, (before, limit) => i.fetchPage(project, before, limit), maxPages);
+    for (const row of found.rows) keep(row);
+    if (!found.complete) complete = false;
+  }
+  return { rows: [...byId.values()], complete };
+}
+
 // src/pending_restores.ts
 var RESTORE_ADMISSION_MARGIN_MS = 1e3;
 var RESTORE_RECONCILE_RETRY_MIN_MS = 2e3;
@@ -15837,14 +15988,35 @@ var OptimisticSessions = class {
   snapshotFence() {
     return this.revision;
   }
-  snapshot(sessions, fence) {
+  /** The one door for archive rows read outside a snapshot (an archived page, a
+   *  deep-linked session, #6206-#6209). `fence` is `snapshotFence()` captured BEFORE
+   *  the read. A row is adopted only if no session event for it is newer than the
+   *  fence: a deletion or kill that arrived while the read was in flight beats the
+   *  stale row, in either arrival order. Adopting anything advances the revision, so
+   *  a snapshot fetched before the adopt fails its own fence and is re-requested
+   *  rather than overwriting the rows. A row already known is replaced in place.
+   *  Returns the rows actually adopted. */
+  adopt(rows, fence) {
+    const taken = rows.filter((row) => {
+      const seen = this.sessionEvents.get(sessionKey(row));
+      return !seen || seen.revision <= fence;
+    });
+    if (taken.length === 0) return taken;
+    for (const row of taken) this.authoritative = upsertSession(this.authoritative, row);
+    this.revision++;
+    return taken;
+  }
+  /** `leftLiveSet`: the snapshot was live-only, so a row ABSENT from it may have
+   *  been archived rather than killed (#6178); an archive request is then settled by
+   *  its absence, as a full snapshot settled it by the row's archived liveness. */
+  snapshot(sessions, fence, leftLiveSet = false) {
     if (fence !== this.revision) return false;
     this.authoritative = sessions;
     this.revision++;
     for (const [key, op] of this.pending) {
       if (op.kind !== "create" && op.row.id) {
         const target = sessions.find((row) => row.id === op.row.id);
-        if (op.kind === "kill" && !target || op.kind === "archive" && target?.liveness === Liveness.Archived) op.confirmed = true;
+        if (op.kind === "kill" && !target || op.kind === "archive" && (target?.liveness === Liveness.Archived || leftLiveSet && !target)) op.confirmed = true;
       }
       if (op.acknowledged) this.pending.delete(key);
     }
@@ -15853,7 +16025,7 @@ var OptimisticSessions = class {
   /** A tab mutation requires a snapshot accepted after its RPC. Never return
    * the old projection when events cross that request; retry a bounded number
    * of times and cancel silently when this connection no longer owns the work. */
-  async refresh(fetch2) {
+  async refresh(fetch2, leftLiveSet = () => false) {
     const epoch = this.epoch;
     for (let attempt = 0; attempt < 3; attempt++) {
       const fence = this.snapshotFence();
@@ -15865,7 +16037,7 @@ var OptimisticSessions = class {
         throw error;
       }
       if (epoch !== this.epoch) return null;
-      if (this.snapshot(sessions, fence)) return this.project();
+      if (this.snapshot(sessions, fence, leftLiveSet())) return this.project();
     }
     throw new Error("Could not refresh sessions after the operation because they kept changing. Check the session before trying again.");
   }
@@ -15987,6 +16159,11 @@ var CreateSelectionIntent = class {
   }
   submit() {
     return ++this.generation;
+  }
+  /** The generation now: a by-id route lookup (#6204) takes it and applies its answer
+   *  only while isCurrent, so ANY navigation or selection since supersedes it. */
+  snapshot() {
+    return this.generation;
   }
   isCurrent(intent) {
     return intent === this.generation;
@@ -18131,6 +18308,8 @@ var AppShell = class {
   update(state, prioritizeTerminal = false) {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
+    const archiveChanged = archiveRepaintNeeded(this.lastArchive, state);
+    this.lastArchive = state.archive;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
@@ -18209,7 +18388,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -18298,7 +18477,7 @@ var AppShell = class {
     const visible = visibleRailSessions(state);
     const count = String(visible.length);
     if (this.railCount.textContent !== count) this.railCount.textContent = count;
-    const filterSignature = JSON.stringify([kindCounts(scoped), state.statusFilter]);
+    const filterSignature = JSON.stringify([railKindCounts(state.archive, state.selectedProject, scoped), state.statusFilter]);
     if (filterSignature !== this.lastFilterSignature) {
       this.lastFilterSignature = filterSignature;
       this.renderFilterMenu(state, scoped);
@@ -18342,13 +18521,15 @@ var AppShell = class {
       state.selectedProject,
       scoped.length,
       scoped.some((s) => !isArchived(s)),
-      scoped.filter(isArchived).length,
+      archivedCount(state.archive, state.selectedProject, scoped),
       visible.length,
-      state.statusFilter
+      state.statusFilter,
+      archiveFooterSignature(state)
     ]);
     if (noticeSignature !== this.lastRailNoticeSignature) {
       this.lastRailNoticeSignature = noticeSignature;
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
+      this.cachedArchiveFooter = state.selectedProject ? this.archiveFooter(state) : null;
     }
     const skipped = state.skippedRepos ?? [];
     const skippedRoots = state.registeredProjects.filter((p) => p.repo_id && skipped.some((s) => s.repo_id === p.repo_id)).map((p) => [p.repo_id, p.root]);
@@ -18359,7 +18540,8 @@ var AppShell = class {
     }
     const head = [];
     if (this.cachedRailNotice) head.push(this.cachedRailNotice);
-    orderChildren(this.railList, [...head, ...rows]);
+    const foot = this.cachedArchiveFooter ? [this.cachedArchiveFooter] : [];
+    orderChildren(this.railList, [...head, ...rows, ...foot]);
     const railNav = this.railList.parentElement;
     if (this.cachedSkippedNotice !== this.mountedSkippedNotice) {
       this.mountedSkippedNotice?.remove();
@@ -18381,6 +18563,7 @@ var AppShell = class {
   lastFilterSignature = "";
   lastRailNoticeSignature = "";
   cachedRailNotice = null;
+  cachedArchiveFooter = null;
   lastSkippedNoticeSignature = "";
   cachedSkippedNotice = null;
   // The element currently mounted as a sibling of the rail listbox; null when the
@@ -18486,8 +18669,34 @@ var AppShell = class {
    *    with the way back, rather than a rail that looks broken.
    *  - otherwise nothing: rows are showing.
    */
+  /** The control under the archived rows (#6178): the archive is read a page at a
+   *  time, so the rail says how many older sessions are still on the daemon and
+   *  offers the next page, reports a read in flight, or names a failed one and
+   *  offers the retry. Null while the archived group is hidden or fully loaded. */
+  lastArchive;
+  archiveFooter(state) {
+    const a = state.archive;
+    if (!a.lazy || !state.statusFilter.archived) return null;
+    if (a.error) {
+      const retry = h("button", { type: "button", class: "af-rail-empty-new af-rail-archive-retry" }, "Retry");
+      retry.addEventListener("click", () => this.actions.loadMoreArchived());
+      return h("li", { class: "af-rail-archive-status" }, `Could not load archived sessions: ${a.error} `, retry);
+    }
+    if (a.loading) return h("li", { class: "af-rail-archive-status" }, "Loading archived sessions\u2026");
+    if (!archiveHasMore(a, state.selectedProject)) return null;
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const remaining = Math.max(0, archivedCount(a, state.selectedProject, scoped) - scoped.filter(isArchived).length);
+    const more = h(
+      "button",
+      { type: "button", class: "af-rail-empty-new af-rail-archive-more" },
+      remaining > 0 ? `Show older archived \xB7 ${remaining} more` : "Show older archived"
+    );
+    more.addEventListener("click", () => this.actions.loadMoreArchived());
+    return h("li", { class: "af-rail-archive-status" }, more);
+  }
   railNotice(state, scoped, visible) {
-    if (scoped.length === 0) return null;
+    const archived = archivedCount(state.archive, state.selectedProject, scoped);
+    if (scoped.length === 0 && archived === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
@@ -18499,7 +18708,6 @@ var AppShell = class {
       );
       newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
       const empty = h("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} \u2014 `, newBtn);
-      const archived = scoped.filter(isArchived).length;
       if (archived > 0 && !state.statusFilter.archived) {
         const show = h("button", { type: "button", class: "af-rail-empty-new af-rail-show-archived" }, "Show archived");
         show.addEventListener("click", () => this.actions.setStatusFilter("archived", true));
@@ -18574,7 +18782,7 @@ var AppShell = class {
    *  the menu governs. Rebuilt in place — the menu's open state is preserved across
    *  rebuilds so a live event never snaps it shut mid-narrowing. */
   renderFilterMenu(state, scoped) {
-    const counts = kindCounts(scoped);
+    const counts = railKindCounts(state.archive, state.selectedProject, scoped);
     const narrowed = !isDefaultFilter(state.statusFilter);
     this.filterDot.classList.toggle("af-rail-filter-dot-on", narrowed);
     this.filterBtn.classList.toggle("af-rail-filter-narrowed", narrowed);
@@ -18633,7 +18841,7 @@ var AppShell = class {
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
     add.dataset.projectFocus = "add";
-    add.setAttribute("title", "Register a git checkout by path as a project");
+    add.setAttribute("title", "Register a git checkout by path or git URL as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
@@ -19500,6 +19708,13 @@ function inertRowReason(s) {
   }
   return cause === "" ? "cannot be opened" : `cannot be opened \xB7 ${cause}`;
 }
+function archiveRepaintNeeded(last, state) {
+  return last !== state.archive;
+}
+function archiveFooterSignature(state) {
+  const a = state.archive;
+  return JSON.stringify([a.lazy, a.loading, a.error ?? "", archiveHasMore(a, state.selectedProject), state.statusFilter.archived]);
+}
 function sessionRow(s, selected, openSession, buildActions, previous) {
   const status = rowStatus(s);
   const operator = operatorKind(s);
@@ -19682,6 +19897,7 @@ var store = new Store({
   connecting: true,
   loginError: null,
   sessions: [],
+  archive: emptyArchive(),
   // No skipped repos until a Snapshot carries the incompleteness channel (#4742);
   // the rail renders no notice in this default state.
   skippedRepos: [],
@@ -19821,6 +20037,7 @@ function rerender() {
   routeSelection = state.selectedId;
   shell.update(state, parseRoute(location.hash) !== null);
   syncSplit(state);
+  maybeLoadArchive(state);
 }
 async function connect(candidate) {
   const attempt = connectionGate.begin();
@@ -19832,9 +20049,11 @@ async function connect(candidate) {
   let operationClockMs;
   let daemonBootId;
   let skippedRepos;
+  let archived;
   try {
     const snapshot = await fetchSessionSnapshot(candidate);
     sessions = snapshot.sessions;
+    archived = snapshot.archived;
     operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
     operationClockMs = snapshot.operationClockMs;
     daemonBootId = snapshot.daemonBootId;
@@ -19882,6 +20101,7 @@ async function connect(candidate) {
     connecting: false,
     loginError: null,
     sessions,
+    archive: archiveFromSnapshot(emptyArchive(), archived),
     skippedRepos: skippedRepos ?? [],
     selectedId: pickSelection(sessions, store.get().selectedId),
     live: "connecting",
@@ -19902,7 +20122,8 @@ async function connect(candidate) {
     operationLockTimeoutMs,
     operationClockMs,
     daemonBootId,
-    skippedRepos
+    skippedRepos,
+    archived
   }, sessions);
   resolvingRoute = false;
   resolveRoute();
@@ -19974,12 +20195,16 @@ function resolveRoute() {
   }
   const route = parseRoute(location.hash);
   resolvingRoute = true;
+  let lookup = false;
   try {
     const session = route && store.get().sessions.find((s) => s.id === route.session);
+    lookup = !session && route !== null && store.get().archive.lazy && store.get().archive.total > 0;
     if (session?.id) {
       if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
+    } else if (lookup && route) {
+      void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -19987,8 +20212,40 @@ function resolveRoute() {
   } finally {
     resolvingRoute = false;
     const id = store.get().selectedId;
-    replaceRoute(id ? { session: id } : null);
+    if (!lookup) replaceRoute(id ? { session: id } : null);
   }
+}
+async function resolveArchivedRoute(id, ticket) {
+  const tok = token;
+  const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
+  let rows = [];
+  try {
+    if (tok !== null) rows = await fetchSessionsById(tok, [id]);
+  } catch (e) {
+    if (tok !== null && token === tok && shouldForgetToken(e)) {
+      disconnect(describeError(e), true);
+      return;
+    }
+  }
+  if (token !== tok || connectionGeneration !== generation) return;
+  const missing = () => {
+    store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+    showTransientNotice("No session with that id in this daemon");
+    replaceRoute(null);
+  };
+  settleLookup(createSelectionIntent, ticket, id, rows, {
+    found: (row) => {
+      if (optimisticSessions.adopt([row], fence).length === 0) {
+        if (store.get().sessions.some((s) => s.id === id)) resolveRoute();
+        else missing();
+        return;
+      }
+      applySessions(optimisticSessions.project());
+      resolveRoute();
+    },
+    missing
+  });
 }
 function moveSelection(id) {
   createSelectionIntent.navigate();
@@ -20426,6 +20683,7 @@ function openDeleteProject(root2, label) {
   );
 }
 function openAddProject() {
+  const invoker = captureModalInvoker();
   openModal(
     addProjectModal({
       // #2788: the picker's daemon read. The token is resolved PER CALL, not
@@ -20440,14 +20698,40 @@ function openAddProject() {
       // The daemon's own message ("cannot read /x: permission denied"), never the
       // login-framed describeError — a refused directory is not an auth failure.
       errorText,
-      onSubmit: (path) => {
+      onSubmit: (value) => {
         const tok = token;
         if (tok === null || !modal) {
           return;
         }
         const m = modal;
+        if (looksLikeGitURL(value)) {
+          m.setBusy(true);
+          closeModal();
+          showTransientNotice(`Cloning ${value} on the daemon host \u2014 the project appears in the switcher when it lands.`);
+          void registerProjectURL(value, tok).then(() => {
+            refreshRegisteredProjects();
+          }).catch((e) => {
+            if (isMutationOutcomeUncertain(e)) {
+              refreshRegisteredProjects();
+              surfaceMutationError(
+                new Error(`The registration of ${value} could not be confirmed. ${errorText(e)}`),
+                "uncertain"
+              );
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+            if (!modal && !configAssistant && !accountLogin && token === tok) {
+              openModal(m, true, invoker);
+              m.el.querySelector(".af-modal-card input")?.focus({ preventScroll: true });
+            } else {
+              surfaceMutationError(e);
+            }
+          });
+          return;
+        }
         m.setBusy(true);
-        void registerProject(path, tok).then(() => {
+        void registerProject(value, tok).then(() => {
           if (modal === m) closeModal();
         }).catch((e) => {
           m.setBusy(false);
@@ -20655,7 +20939,8 @@ function guardedTabRebind(selId, run, resolve, verb) {
       operationLockTimeoutMs,
       operationClockMs,
       daemonBootId,
-      skippedRepos
+      skippedRepos,
+      archived
     } = snapshot;
     const targetIdx = resolve(sessions);
     const currentGen = splitView.layoutGeneration();
@@ -20665,7 +20950,8 @@ function guardedTabRebind(selId, run, resolve, verb) {
       operationLockTimeoutMs,
       operationClockMs,
       daemonBootId,
-      skippedRepos
+      skippedRepos,
+      archived
     }, authoritative);
     const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
     const outcome = rebindTargetAfterAwait({
@@ -20802,7 +21088,8 @@ function renameSessionTab(id, name, editedSessionId) {
       operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
       operationClockMs: snapshot.operationClockMs,
       daemonBootId: snapshot.daemonBootId,
-      skippedRepos: snapshot.skippedRepos
+      skippedRepos: snapshot.skippedRepos,
+      archived: snapshot.archived
     }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
@@ -20827,7 +21114,8 @@ function reorderSessionTab(from, to) {
       operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
       operationClockMs: snapshot.operationClockMs,
       daemonBootId: snapshot.daemonBootId,
-      skippedRepos: snapshot.skippedRepos
+      skippedRepos: snapshot.skippedRepos,
+      archived: snapshot.archived
     }, snapshot.authoritative);
   }).catch((e) => surfaceTabError(e));
 }
@@ -21421,6 +21709,7 @@ var actions = {
   switchProject,
   setStatusFilter,
   resetStatusFilter,
+  loadMoreArchived,
   addTask: openAddTask,
   editTask: openEditTask,
   toggleTask,
@@ -21467,9 +21756,13 @@ function startStream(tok) {
   stream = new EventStream(tok, {
     onEvent,
     onResync: () => {
+      markArchiveDirty();
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s }),
+    onStatus: (s) => {
+      if (s !== "open") markArchiveDirty();
+      store.set({ live: s });
+    },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
     // Not /v1/auth-info, which says whether a token is required, not whether
@@ -21548,13 +21841,76 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
     selectedProject,
     selectedId,
     activeTab,
-    ...evidence?.kind === "snapshot" ? { skippedRepos: evidence.skippedRepos ?? [] } : {}
+    ...evidence?.kind === "snapshot" ? {
+      skippedRepos: evidence.skippedRepos ?? [],
+      archive: archiveFromSnapshot(store.get().archive, evidence.archived)
+    } : {}
   });
   if (evidence) pendingRestores.observe(authoritative.map((s) => ({
     id: s.id,
     restoreEligible: isActionableSession(s) && s.lifecycle_action === "restore",
     restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive"
   })), evidence);
+}
+var archiveDirtyEpoch = 1;
+var archiveCleanEpoch = 0;
+function markArchiveDirty() {
+  archiveDirtyEpoch++;
+}
+function clearArchiveDirty(epoch) {
+  if (epoch > archiveCleanEpoch) archiveCleanEpoch = epoch;
+}
+async function fetchSnapshotWithArchiveWindow(tok) {
+  const epoch = archiveDirtyEpoch;
+  const snapshot = await fetchSessionSnapshot(tok);
+  if (!snapshot.archived) return { ...snapshot, archiveEpoch: epoch };
+  const live = new Set(snapshot.sessions.map((s) => s.id));
+  const archive = store.get().archive;
+  const { rows: kept, complete } = await reconcileWindow({
+    held: optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id)),
+    live,
+    archive,
+    summary: snapshot.archived,
+    dirty: epoch > archiveCleanEpoch,
+    isArchived,
+    fetchById: (ids) => fetchSessionsById(tok, ids),
+    fetchPage: (project, before, limit) => fetchArchivedPage(tok, { project, before, limit })
+  });
+  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: complete ? epoch : archiveCleanEpoch };
+}
+async function loadArchivedPage() {
+  const tok = token;
+  if (tok === null) return;
+  const project = store.get().selectedProject;
+  const key = archiveKey(project);
+  const start = store.get().archive;
+  if (!start.lazy || start.loading || start.cursors[key] === null) return;
+  const generation = connectionGeneration;
+  const before = start.cursors[key] ?? null;
+  store.set({ archive: { ...start, loading: true, error: void 0 } });
+  try {
+    const fence = optimisticSessions.snapshotFence();
+    const page = await fetchArchivedPage(tok, { project, before });
+    if (token !== tok || connectionGeneration !== generation) return;
+    optimisticSessions.adopt(page.sessions, fence);
+    applySessions(optimisticSessions.project());
+    const archive = store.get().archive;
+    store.set({ archive: { ...archive, loading: false, cursors: { ...archive.cursors, [key]: page.next } } });
+  } catch (e) {
+    if (token !== tok || connectionGeneration !== generation) return;
+    if (shouldForgetToken(e)) {
+      disconnect(describeError(e), true);
+      return;
+    }
+    store.set({ archive: { ...store.get().archive, loading: false, error: errorText(e) } });
+  }
+}
+function loadMoreArchived() {
+  void loadArchivedPage();
+}
+function maybeLoadArchive(state) {
+  if (state.phase !== "app" || !state.statusFilter.archived) return;
+  if (archiveNeedsFirstPage(state.archive, state.selectedProject)) queueMicrotask(() => void loadArchivedPage());
 }
 async function fetchProjectedSnapshot(tok) {
   if (token !== tok) return null;
@@ -21565,16 +21921,21 @@ async function fetchProjectedSnapshot(tok) {
     let operationClockMs;
     let daemonBootId;
     let skippedRepos;
+    let archived;
+    let archiveEpoch = 0;
     const sessions = await optimisticSessions.refresh(async () => {
       generation = pendingRestores.beginSnapshot();
-      const snapshot = await fetchSessionSnapshot(tok);
+      const snapshot = await fetchSnapshotWithArchiveWindow(tok);
       authoritative = snapshot.sessions;
       operationLockTimeoutMs = snapshot.operationLockTimeoutMs;
       operationClockMs = snapshot.operationClockMs;
       daemonBootId = snapshot.daemonBootId;
       skippedRepos = snapshot.skippedRepos;
+      archived = snapshot.archived;
+      archiveEpoch = snapshot.archiveEpoch;
       return authoritative;
-    });
+    }, () => archived !== void 0);
+    if (sessions !== null) clearArchiveDirty(archiveEpoch);
     return sessions === null ? null : {
       sessions,
       authoritative,
@@ -21582,7 +21943,8 @@ async function fetchProjectedSnapshot(tok) {
       operationLockTimeoutMs,
       operationClockMs,
       daemonBootId,
-      skippedRepos
+      skippedRepos,
+      archived
     };
   } catch (error) {
     requestResync();
@@ -21604,7 +21966,7 @@ function requestResync() {
     const eventGeneration = sessionEventGeneration;
     const mutationFence = optimisticSessions.snapshotFence();
     const restoreSnapshot = pendingRestores.beginSnapshot();
-    void fetchSessionSnapshot(tok).then((snapshot) => {
+    void fetchSnapshotWithArchiveWindow(tok).then((snapshot) => {
       const sessions = snapshot.sessions;
       if (requestGeneration !== resyncRequestGeneration || token !== tok) {
         return;
@@ -21613,7 +21975,7 @@ function requestResync() {
         requestResync();
         return;
       }
-      if (!optimisticSessions.snapshot(sessions, mutationFence)) {
+      if (!optimisticSessions.snapshot(sessions, mutationFence, snapshot.archived !== void 0)) {
         requestResync();
         return;
       }
@@ -21623,8 +21985,10 @@ function requestResync() {
         operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
         operationClockMs: snapshot.operationClockMs,
         daemonBootId: snapshot.daemonBootId,
-        skippedRepos: snapshot.skippedRepos
+        skippedRepos: snapshot.skippedRepos,
+        archived: snapshot.archived
       }, sessions);
+      clearArchiveDirty(snapshot.archiveEpoch);
       root?.setAttribute("data-af-resync-settled", "");
       resolveResyncCompletions();
     }).catch((error) => {

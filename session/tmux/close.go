@@ -106,6 +106,19 @@ func (r *closeRun) tmux(args ...string) error {
 	return err
 }
 
+// output is tmux for a command whose stdout matters (the guarded kill prints
+// which branch ran): the same bounded run, recording a tripped deadline.
+func (r *closeRun) output(args ...string) ([]byte, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := r.t.outputTmuxBounded(ctx, args...)
+	if err != nil && ctx.Err() != nil {
+		r.unknown = true
+		return nil, fmt.Errorf("%w: %s after %s", ErrTmuxTimeout, args[0], tmuxCommandTimeout)
+	}
+	return out, err
+}
+
 // probe asks whether the session still exists. A timed-out probe marks the run
 // unknown via the shared probe helper and reports ok=false, so "could not ask" is
 // never read as "not there".
@@ -168,6 +181,24 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// itself: an unbounded kill-session against a wedged server blocks
 	// daemon.KillSession forever behind its kills-in-flight guard, leaving the
 	// session undeletable until the daemon restarts.
+	// Sessions grouped with this one share its windows, so they go first: the
+	// source kill below would otherwise leave the window, and the process in it,
+	// alive behind a mate (#6078). Best-effort — a mate that is already gone is
+	// the desired end state.
+	//
+	// Skipped when this close has already seen the server fail to answer (the
+	// process-tree capture or an earlier command tripped the deadline): the listing
+	// would spend another full deadline against the same wedged server, which is
+	// exactly what the rest of this path refuses to do. The loop stops at the first
+	// mate kill that trips it for the same reason.
+	if !r.unknown && !errors.Is(captureErr, ErrTmuxTimeout) {
+		for _, mate := range t.groupMateSessions() {
+			if r.unknown {
+				break
+			}
+			_ = r.tmux("kill-session", "-t", exactTarget(mate))
+		}
+	}
 	if err := r.tmux("kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
 		switch {
 		case r.unknown:

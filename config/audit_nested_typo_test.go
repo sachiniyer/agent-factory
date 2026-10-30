@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,19 +16,20 @@ import (
 // saw the zero value with err == nil. The in-repo loader's stated intent
 // (inrepo.go: "typos fail loudly in a checked-in file that can execute
 // commands") is that this cannot change runtime behavior without a
-// diagnostic; per the owner's "warn now, reject later" decision that
-// diagnostic is a loud WARNING, not a load failure — the config still loads.
+// diagnostic. #4599 shipped that diagnostic as a WARNING (owner decision: warn
+// now, reject later); #4845 turns it into a load ERROR now that the warning has
+// shipped in stable releases.
 //
-// After the fix every typo row loads with NO error (the config still loads)
-// and the warning names the typo'd leaf, its table, and — when the typo is
-// close to an allowed key — the likely intended key ("did you mean X?").
-// The correct-key baselines still load cleanly and emit no warning.
+// Every typo row fails the load with an error that names the file, the typo'd
+// leaf, its table, and — when the typo is close to an allowed key — the
+// closest valid key ("did you mean X?"). The correct-key baselines still load
+// cleanly.
 func TestAuditNestedTypoSilentDrop(t *testing.T) {
 	tests := []struct {
 		name        string
 		format      string
 		body        string
-		wantWarn    bool
+		wantErr     bool
 		wantKey     string
 		wantTable   string
 		wantSuggest string
@@ -42,7 +42,7 @@ func TestAuditNestedTypoSilentDrop(t *testing.T) {
 			name:        "toml docker.runargs typo",
 			format:      "toml",
 			body:        "[docker]\nimage = \"myimg\"\nrunargs = [\"--memory\", \"2g\"]\n",
-			wantWarn:    true,
+			wantErr:     true,
 			wantKey:     "runargs",
 			wantTable:   "docker",
 			wantSuggest: "run_args",
@@ -51,7 +51,7 @@ func TestAuditNestedTypoSilentDrop(t *testing.T) {
 			name:        "json docker.runargs typo",
 			format:      "json",
 			body:        `{"docker":{"image":"myimg","runargs":["--memory","2g"]}}`,
-			wantWarn:    true,
+			wantErr:     true,
 			wantKey:     "runargs",
 			wantTable:   "docker",
 			wantSuggest: "run_args",
@@ -64,7 +64,7 @@ func TestAuditNestedTypoSilentDrop(t *testing.T) {
 			name:        "toml docker.iamge typo (image misspelled)",
 			format:      "toml",
 			body:        "[docker]\niamge = \"myimg\"\nrun_args = [\"--read-only\"]\n",
-			wantWarn:    true,
+			wantErr:     true,
 			wantKey:     "iamge",
 			wantTable:   "docker",
 			wantSuggest: "image",
@@ -75,7 +75,7 @@ func TestAuditNestedTypoSilentDrop(t *testing.T) {
 			name:        "toml ssh.hots typo (host misspelled)",
 			format:      "toml",
 			body:        "[ssh]\nhots = \"example.com\"\nuser = \"root\"\n",
-			wantWarn:    true,
+			wantErr:     true,
 			wantKey:     "hots",
 			wantTable:   "ssh",
 			wantSuggest: "host",
@@ -84,7 +84,7 @@ func TestAuditNestedTypoSilentDrop(t *testing.T) {
 			name:        "json ssh.unser typo (user misspelled)",
 			format:      "json",
 			body:        `{"ssh":{"host":"example.com","unser":"root"}}`,
-			wantWarn:    true,
+			wantErr:     true,
 			wantKey:     "unser",
 			wantTable:   "ssh",
 			wantSuggest: "user",
@@ -94,7 +94,7 @@ func TestAuditNestedTypoSilentDrop(t *testing.T) {
 			name:        "toml correct docker keys baseline",
 			format:      "toml",
 			body:        "[docker]\nimage = \"myimg\"\nrun_args = [\"--read-only\"]\n",
-			wantWarn:    false,
+			wantErr:     false,
 			wantKey:     "",
 			wantTable:   "",
 			wantSuggest: "",
@@ -103,7 +103,7 @@ func TestAuditNestedTypoSilentDrop(t *testing.T) {
 			name:        "json correct ssh keys baseline",
 			format:      "json",
 			body:        `{"ssh":{"host":"example.com","user":"root","port":2222,"identity_file":"/keys/id","known_hosts":"/hostkeys"}}`,
-			wantWarn:    false,
+			wantErr:     false,
 			wantKey:     "",
 			wantTable:   "",
 			wantSuggest: "",
@@ -123,30 +123,27 @@ func TestAuditNestedTypoSilentDrop(t *testing.T) {
 			path := filepath.Join(dir, filename)
 			require.NoError(t, os.WriteFile(path, []byte(tc.body), 0o644))
 
-			resetUnknownTableLeafWarnings()
-			warnings := captureLog(t, &aflog.WarningLog)
 			cfg, _, err := LoadInRepoConfig(repoRoot)
-			require.NoError(t, err, "an unknown leaf must not fail the load (warn now, reject later)")
-			require.NotNil(t, cfg, "the config must still load")
-			logged := warnings.String()
-			if tc.wantWarn {
-				assert.Contains(t, logged, tc.wantKey, "warning must name the typo'd leaf")
-				assert.Contains(t, logged, tc.wantTable, "warning must name the table")
-				assert.Contains(t, logged, "unknown key", "warning must call out the unknown key")
-				assert.Contains(t, logged, "ignored", "warning must say the leaf is ignored")
-				assert.Contains(t, logged, "config still loads", "warning must say the config still loads")
+			if tc.wantErr {
+				require.Error(t, err, "an unknown leaf must fail the load (#4845)")
+				assert.Nil(t, cfg)
+				msg := err.Error()
+				assert.Contains(t, msg, path, "the error must name the file")
+				assert.Contains(t, msg, fmt.Sprintf("unknown key %q under %q", tc.wantKey, tc.wantTable),
+					"the error must name the typo'd leaf and its table")
 				if tc.wantSuggest != "" {
-					assert.Contains(t, logged, fmt.Sprintf("did you mean %q?", tc.wantSuggest),
-						"warning must suggest the likely intended key")
+					assert.Contains(t, msg, fmt.Sprintf("did you mean %q?", tc.wantSuggest),
+						"the error must suggest the closest valid key")
 				}
-			} else {
-				assert.Empty(t, logged, "a config with no typo'd leaves must not warn")
+				return
 			}
+			require.NoError(t, err, "a config with no typo'd leaves must load")
+			require.NotNil(t, cfg)
 		})
 	}
 }
 
-// TestAuditNestedTypoCorrectValuesKept confirms the fix does not warn on
+// TestAuditNestedTypoCorrectValuesKept confirms the fix does not reject
 // valid leaves and that their values round-trip through the typed decode
 // unchanged. This guards against an overly broad leaf check that would
 // regress the happy path. (The allowlist's own completeness is pinned
@@ -183,11 +180,11 @@ func TestAuditNestedTypoCorrectValuesKept(t *testing.T) {
 	// go-toml/v2 both match field names case-insensitively, so the typed
 	// decode accepts [docker] Image into DockerConfig.Image. The leaf check
 	// folds case to match, so this previously-working spelling continues to
-	// load instead of being warned about as an "unknown key". A typo'd leaf
-	// (e.g. "runargs") still earns a warning — that is the bug being fixed,
+	// load instead of being rejected as an "unknown key". A typo'd leaf
+	// (e.g. "runargs") still fails the load — that is the bug being fixed,
 	// not this. The case fold only changes casing, not spelling: "RunArgs"
-	// (no underscore) still earns the warning, since neither the typed
-	// decode nor the allowlist treats it as "run_args".
+	// (no underscore) still fails, since neither the typed decode nor the
+	// allowlist treats it as "run_args".
 	t.Run("docker case-insensitive leaf loads", func(t *testing.T) {
 		repoRoot := t.TempDir()
 		writeInRepoTomlConfig(t, repoRoot, "[docker]\nImage = \"af-runtime:latest\"\nRUN_ARGS = [\"--read-only\"]\n")
@@ -212,7 +209,7 @@ func TestAuditNestedTypoCorrectValuesKept(t *testing.T) {
 	})
 
 	// An empty docker table is valid — it means "docker backend with all
-	// defaults" — and must not be warned about by the leaf check.
+	// defaults" — and must not be rejected by the leaf check.
 	t.Run("empty docker table", func(t *testing.T) {
 		repoRoot := t.TempDir()
 		writeInRepoTomlConfig(t, repoRoot, "backend = \"docker\"\n[docker]\n")
@@ -269,43 +266,33 @@ func TestAuditNestedTypoGlobalOnlyLeafStillActionable(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.key)
 			assert.Contains(t, err.Error(), "global setting")
-			assert.NotContains(t, err.Error(), "ignored",
-				"a global-only leaf must not fall through to the soft leaf warning path")
+			assert.NotContains(t, err.Error(), "unknown key",
+				"a global-only leaf must keep its actionable naming, not fall through to the generic unknown-leaf error")
 		})
 	}
 }
 
-// TestAuditNestedTypoWarningNamesFileSuggestionAndAllowedKeys pins the
-// warning message format: it must name the repo-relative file path, the
-// typo'd leaf, its table, the likely intended key ("did you mean run_args?"),
-// and the sorted allowed leaves so the user can fix the typo without
-// consulting docs. It also pins the "config still loads" half of the
-// contract: the load returns no error, the typo'd runargs value is ignored,
-// and the correctly-spelled sibling decodes normally.
-func TestAuditNestedTypoWarningNamesFileSuggestionAndAllowedKeys(t *testing.T) {
+// TestAuditNestedTypoErrorNamesFileSuggestionAndAllowedKeys pins the error
+// message format: it must name the repo-relative file path, the typo'd leaf, its
+// table, the closest valid key ("did you mean run_args?"), and the sorted allowed
+// leaves so the user can fix the typo without consulting docs. The load returns
+// no config at all: a half-applied repo config would be worse than none.
+func TestAuditNestedTypoErrorNamesFileSuggestionAndAllowedKeys(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	repoRoot := t.TempDir()
 	path := writeInRepoTomlConfig(t, repoRoot, "[docker]\nimage = \"myimg\"\nrunargs = [\"--memory\", \"2g\"]\n")
 
-	resetUnknownTableLeafWarnings()
-	warnings := captureLog(t, &aflog.WarningLog)
 	cfg, _, err := LoadInRepoConfig(repoRoot)
-	require.NoError(t, err, "an unknown leaf must warn, not fail the load")
-	require.NotNil(t, cfg)
-	require.NotNil(t, cfg.Docker, "the [docker] table still loads under the typo")
-	// The typo'd runargs is ignored; the correctly-spelled sibling still loads.
-	assert.Equal(t, "myimg", cfg.Docker.Image)
-	assert.Nil(t, cfg.Docker.RunArgs, "the typo'd runargs value is ignored, so RunArgs stays empty")
+	require.Error(t, err, "an unknown leaf must fail the load")
+	assert.Nil(t, cfg)
 
-	msg := warnings.String()
+	msg := err.Error()
 	assert.Contains(t, msg, "runargs")
 	assert.Contains(t, msg, "docker")
 	assert.Contains(t, msg, "unknown key")
 	assert.Contains(t, msg, "did you mean \"run_args\"?")
-	assert.Contains(t, msg, "ignored")
-	assert.Contains(t, msg, "config still loads")
-	// The full allowed set is still listed so the user does not need the docs.
+	// The full allowed set is listed so the user does not need the docs.
 	assert.Contains(t, msg, "image")
 	assert.Contains(t, msg, "run_args")
 	// The file path (repo-relative under .agent-factory/) must be named.

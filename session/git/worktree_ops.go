@@ -810,7 +810,15 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 
 // Test seams for the repo-gone cleanup's final destructive boundary.
 var (
-	repoGoneCleanupTimeout        = localGitTimeout
+	repoGoneCleanupTimeout = localGitTimeout
+	// repoGoneCleanupDeadline starts the cleanup's deadline clock: the channel
+	// fires when it expires, and stop releases it. A test substitutes a channel it
+	// fires itself, so a deadline can be placed after a given worker phase instead
+	// of racing the scheduler for it.
+	repoGoneCleanupDeadline = func() (<-chan time.Time, func()) {
+		t := time.NewTimer(repoGoneCleanupTimeout)
+		return t.C, func() { t.Stop() }
+	}
 	repoGoneBeforeWriterReap      = func(string) {}
 	repoGoneBeforeRecursiveDelete = func(string) {}
 	removeTreeAfterEntryClaim     = func(*os.File, string, string, string) error { return nil }

@@ -76,3 +76,30 @@ func TestWrapperCommandPositionBoundary(t *testing.T) {
 		}
 	}
 }
+
+// ionice and taskset follow the same command-position rule as the five
+// siblings (#5034): a dynamic word where the command goes refuses, a literal
+// command's dynamic arguments are opaque, and a buried LITERAL suffix still
+// refuses.
+func TestIoniceTasksetCommandPositionBoundary(t *testing.T) {
+	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
+	for _, wrapper := range []string{"ionice", "ionice -c 3", "ionice --", "taskset 0x1", "taskset -c 0-3"} {
+		for _, test := range []struct {
+			tail string
+			want bool
+		}{
+			{`$CMD codex`, true},
+			{`"$X" codex`, true},
+			{"nice $CMD", true},
+			{`codex "$PROMPT"`, false},
+			{`echo a "$P"`, false},
+			{`nice codex "$PROMPT"`, false},
+			{"echo a a a xargs --process-slot-var CODEX_HOME codex", true},
+			{"echo unset CODEX_HOME", true},
+			{`echo "$P" unset CODEX_HOME`, true},
+		} {
+			command := wrapper + " " + test.tail
+			require.Equal(t, test.want, commandMutatesAccountEnvironment(command, names), "command %q", command)
+		}
+	}
+}

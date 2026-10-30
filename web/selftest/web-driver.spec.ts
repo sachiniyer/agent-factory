@@ -4885,6 +4885,212 @@ test("accounts: one Add account disclosure preserves a refused name and keyboard
   } finally { await ctx.close(); }
 });
 
+test("accounts: a Register button keeps focus on the rebuilt button after a refused registration", REAL_FIXTURE, async ({ browser }) => {
+  // The Accounts-section sibling of the Save-button focus test above (#6051). The
+  // Register button (button.af-accounts-add) lives OUTSIDE `.af-config-list`, so the
+  // Save-button rung (gated on `closest(".af-config-list")`) never matched it, and
+  // the restoration ladder had no other rung for it either. Clicking Register in
+  // Chromium focuses the button; the refusal reply's `.then`→`.catch` writes the
+  // account status that rebuilds the pane, detaching the focused button — focus
+  // fell to <body>, and the next `[`/`]` cycled the top-level view out of config
+  // (the body-focus hazard rerenderKeepingUserState's own header comment warns
+  // about). The Enter-on-the-input path is already covered by the disclosure-focus
+  // test above; this covers the mouse-click path the ladder missed.
+  //
+  // The route is intercepted, so the daemon is NOT mutated: no real account is
+  // created. The canned refusal drives setAccountStatus + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/RegisterAccount", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: null, error: { message: "simulated registration refusal" } }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the refusal response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    const add = pane.locator(".af-account-disclosure summary");
+    await add.click();
+    await expect(pane.locator(".af-accounts-register:visible")).toHaveCount(1);
+    await p.getByLabel("Account agent", { exact: true }).selectOption("claude");
+    const name = p.getByLabel("New claude account name", { exact: true });
+    await name.fill("focus-probe-account");
+    // Commit by CLICKING the Register button (the Enter path is already covered).
+    // The click focuses the button, so the button — not the input — holds focus
+    // when the refusal-driven rebuild lands.
+    const register = pane.locator(".af-accounts-register:visible .af-accounts-add");
+    await register.click();
+
+    // The refusal alert proves setAccountStatus drove ConfigPane.update (the
+    // .catch wrote the refusal + the rebuild ran) — the exact path that dropped
+    // focus to <body> before. The drafted name survives via the accounts-drafts
+    // capture (readAccountDrafts/restoreAccountDrafts).
+    await expect(pane.locator(".af-accounts-register:visible [role=alert]")).toBeVisible();
+    await expect(name).toHaveValue("focus-probe-account");
+    // RED without the fix: the rebuilt Register button replaced the focused one
+    // and the restoration ladder had no rung for it, so focus fell to <body>.
+    await expect(register).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native BUTTON the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix: focus
+    // on <body> let `[` cycle the view out from under the user mid-flow.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally { await ctx.close().catch(() => {}); }
+});
+
+test("accounts: a Log in button keeps focus on the rebuilt button across its own status writes", REAL_FIXTURE, async ({ browser }) => {
+  // The other Accounts-section sibling the focus ladder was missing. The Log in
+  // button (button.af-accounts-login) is per-row, and its flow writes its "Starting
+  // the … login…" status SYNCHRONOUSLY inside the click dispatch (index.ts
+  // doOpenAccountLogin → setAccountStatus → store.set, whose listeners fire
+  // synchronously — see store.ts), so the pane rebuild detaches the focused button
+  // BEFORE the click returns. The `.then` then re-rebuilds on the outcome. Both
+  // rebuilds ran while the button held focus and, with no matching rung, left focus
+  // on <body>. The no-pane exit (finished=true) is the branch the report flags as
+  // never masked by term.focus(): the outcome lands on the account's own row, not
+  // behind an overlay, so nothing re-focuses anything afterwards — the honest
+  // worst case for focus loss here.
+  //
+  // The route is intercepted, so the daemon spawns nothing: the canned no-pane
+  // reply drives setAccountStatus + refreshAccounts + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/AccountLogin", async (route) => {
+      const body = route.request().postDataJSON() as { agent: string; name: string };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            agent: body.agent,
+            name: body.name,
+            dir: "/tmp/af-accounts",
+            program: `${body.agent} login`,
+            session_name: "",
+            socket_path: "",
+            reused: false,
+            finished: true,
+            logged_in: false,
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // An existing-account row carries the Log in button. The harness seeds at
+    // least one account; click the first row's button. The locator is live, so it
+    // re-queries the rebuilt row after every rerender.
+    const row = pane.locator(".af-accounts-row[data-account]").first();
+    await expect(row).toBeVisible();
+    const login = row.locator(".af-accounts-login");
+    await expect(login).toBeVisible();
+    await login.click();
+
+    // The synchronous "Starting…" rebuilt the pane during the click dispatch; the
+    // no-pane finished status (logged_in=false → error → role=alert) then re-built
+    // on the row, and refreshAccounts re-read (preserving this status) re-built
+    // once more. The role=alert landing proves the outcome rebuild ran — the path
+    // that left focus on <body> before. RED without the fix: the rebuilt Log in
+    // button replaced the focused one and the ladder had no rung for it.
+    await expect(row.locator("[role=alert]")).toBeVisible();
+    await expect(login).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native BUTTON the document-level keydown gate returns early, so a bare
+    // `[` is NOT a view-cycle shortcut. RED without the fix: focus on <body> let
+    // `[` cycle the view out from under the user mid-flow.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally { await ctx.close().catch(() => {}); }
+});
+
+test("accounts: a Register button keeps focus after a successful registration (the .then + refreshAccounts rebuilds)", REAL_FIXTURE, async ({ browser }) => {
+  // The success sibling of the refusal test above. `doRegisterAccount`'s `.then`
+  // (not `.catch`) is the other Register rebuild trigger: it writes a NON-ERROR
+  // status, CLEARS the just-submitted name (registrationSucceeded in config.ts
+  // update()), and re-reads the accounts (refreshAccounts) — a SECOND rebuild that
+  // lands while the button still holds focus. Both rebuilds detached the focused
+  // button and, with no rung, left focus on <body>; the report flags this path (no
+  // overlay, no re-focus) as unmasked. The route is intercepted, so the daemon is
+  // NOT mutated: the canned success drives setAccountStatus + refreshAccounts +
+  // ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/RegisterAccount", async (route) => {
+      const body = route.request().postDataJSON() as { agent: string; name: string };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            entry: {
+              agent: body.agent,
+              name: body.name,
+              dir: `/tmp/af/accounts/${body.agent}/${body.name}`,
+              registration_only: false,
+              logged_in: false,
+            },
+            notices: [],
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    const add = pane.locator(".af-account-disclosure summary");
+    await add.click();
+    await expect(pane.locator(".af-accounts-register:visible")).toHaveCount(1);
+    await p.getByLabel("Account agent", { exact: true }).selectOption("claude");
+    const name = p.getByLabel("New claude account name", { exact: true });
+    await name.fill("focus-probe-account");
+    // The click focuses the Register button, so the button — not the input —
+    // holds focus when the success-driven rebuilds land.
+    const register = pane.locator(".af-accounts-register:visible .af-accounts-add");
+    await register.click();
+
+    // The success status is a non-error echo on the register form (not an alert);
+    // its landing proves the `.then` rebuild ran. registrationSucceeded cleared the
+    // submitted name, so the rebuilt input is empty — distinct from the refusal
+    // path that keeps the drafted name.
+    await expect(pane.locator(".af-accounts-register:visible .af-accounts-echo")).toBeVisible();
+    await expect(name).toHaveValue("");
+    // RED without the fix: the rebuilt Register button replaced the focused one
+    // across both the status rebuild and the refreshAccounts rebuild, so focus
+    // fell to <body>.
+    await expect(register).toBeFocused();
+
+    // Downstream contract: focus on a native BUTTON gates the document keydown,
+    // so a bare "[" does not cycle the view out of config.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally { await ctx.close().catch(() => {}); }
+});
+
 test("config assistant (#2467): open → live stream → close reaps → reopen spawns fresh", REAL_FIXTURE, async () => {
   // The web counterpart of the TUI's config-agent takeover, over the bare-session PTY
   // route (#2522). This proves the COMPOSED LIFECYCLE the unit tests structurally
@@ -7866,7 +8072,7 @@ test("add + delete a registered empty project (#2456): appears while another is 
   await add.click();
   const addModal = page.locator(".af-modal-card");
   await expect(addModal.locator(".af-modal-title")).toHaveText("Add project");
-  const pathInput = addModal.locator('input[aria-label="Repository path"]');
+  const pathInput = addModal.locator('input[aria-label="Repository path or git URL"]');
   await pathInput.fill("/work/definitely-not-a-git-repo");
   await addModal.locator("button.af-primary").click();
   await expect(addModal.locator(".af-modal-error")).toBeVisible();
@@ -8055,7 +8261,7 @@ test("add-project directory picker (#2788): descend, ascend, pick a repo — and
 
   // Picking fills the free-text field — the escape hatch stays the single input
   // the submit reads, so what gets registered is always what is on screen.
-  const pathInput = addModal.locator('input[aria-label="Repository path"]');
+  const pathInput = addModal.locator('input[aria-label="Repository path or git URL"]');
   await dirRow(browseRepo).locator(".af-dirpicker-use").click();
   await expect(pathInput).toHaveValue(`${browseRoot}/${level1}/${level2}/${browseRepo}`);
 
@@ -8144,7 +8350,7 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   await expect(add).toBeVisible();
   await add.click();
   const addModal = page.locator(".af-modal-card");
-  await addModal.locator('input[aria-label="Repository path"]').fill(emptyRepo!);
+  await addModal.locator('input[aria-label="Repository path or git URL"]').fill(emptyRepo!);
   await addModal.locator("button.af-primary").click();
   await expect(addModal).toBeHidden();
   await page.locator(".af-project-switch").click();

@@ -297,12 +297,26 @@ did not render exact prompt content; `could-not-confirm` means the pane observer
 itself was unavailable. Neither status claims delivery.
 `PruneSessions` returns
 `{ "ok": true, "older_than": "<duration>", "archived_before": "<rfc3339>", "candidates": [<entry>…], "skipped"?: [<entry>…], "reclaimable_bytes": <int>, "warnings"?: [<string>…] }`:
-the read-only dry run for the archived-session reclaim — it lists in
-`candidates` each archived session a reclaim would remove —
-`{ "id"?, "title", "repo_id", "branch", "archived_at", "reclaimable_bytes" }` —
-while af writes nothing: no deletion, no record update, no git write. (The apply
-half lands in the follow-up to #5142.) `skipped` entries
-(`{ "title", "repo_id", "reason" }`) were evaluated and refused. An archived
+without `"apply"` it is the read-only dry run for the archived-session
+reclaim — it lists in `candidates` each archived session a reclaim would
+remove — `{ "id"?, "title", "repo_id", "branch", "archived_at",
+"reclaimable_bytes" }` — while af writes nothing: no deletion, no record
+update, no git write. With `"apply": true` it deletes exactly the
+worktrees that same verdict lists — the branch is always kept and each
+deleted row stays as a tombstone marked pruned — and the response gains
+`"applied": true`, `"pruned": [<entry>…]` (the rows whose worktree was
+deleted), `"incomplete": [<entry>…]` (deletion started but the record is
+not final; a re-run finishes them), `"reclaimed_estimate_bytes"` (an
+"up to" sum of the pruned rows' allocated-size estimates, never measured
+free space), and `"free_bytes_before"`/`"free_bytes_after"`/
+`"free_bytes_known"` (the measured free space on the archive
+filesystem(s) around the run, so reflinks and shared extents surface as a
+visible gap rather than silent credit). `"only": [<session id>…]` binds an
+apply to the plan a caller already saw and confirmed — the CLI sends it
+after the operator approves the dry-run listing — and is refused on a dry
+run. `skipped` entries (`{ "id"?, "title", "repo_id", "reason" }`) were
+evaluated and refused; one marked `"interrupted": true` had an earlier
+apply not finish and belongs in a re-run's plan. An archived
 worktree still holding uncommitted or ignored files is **refused**, not
 counted: the kept branch does not contain them and they are the only copy —
 restore the session or clean the tree first. `older_than` is required and
@@ -323,8 +337,15 @@ returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?
 web/vscode tab that owns no PTY; it normally tracks the name but diverges
 after a rename, so read it from the response rather than re-deriving it);
 `CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `RenameTab` returns `{ "name": "<resolved-tab-name>" }`; `ReorderTab` returns `{ "name": "<resolved-tab-name>", "index": <int> }`; `ListTasks` returns
-`{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`
-(the merged record); the rest return `{ "ok": true }`. The `task` field of
+`{ "tasks": [<task>…] }`; `AddTask` and `UpdateTask` return
+`{ "ok": true, "task": <task> }` (the stored record; an older daemon omits
+`AddTask`'s); the rest return `{ "ok": true }`. `AddTask`'s `task` is the bare
+stored record — the daemon sets it before reloading schedules and, unlike
+`UpdateTask`'s live-enriched record, never attaches the live schedule-health
+fields (`arming`, `next_run_at`) that the next sentence attributes to every
+returned task; and a sandbox-credential `AddTask` receives a narrowed
+projection (`sandboxSafeTask`) that withholds persisted fields such as
+`project_path`, `repo_id`, `host`, and `program`. The request `task` field of
 `AddTask` is a full task object — the CLI/TUI build and validate it, and the
 daemon re-validates and owns the write. `UpdateTask` instead takes a target `id`
 and a FIELD-LEVEL `update` patch carrying only the fields to change (e.g.

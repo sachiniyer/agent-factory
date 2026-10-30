@@ -1777,7 +1777,14 @@ export class AttachTerminal {
       if (this.stopped) {
         return;
       }
-      this.fitVisibleHost();
+      // A resize that lands while xterm cannot measure (renderer metrics mid-
+      // invalidation, the element mid-move) gets no second observer event: the
+      // box has already changed. Dropping the failed fit here left the old grid in
+      // place until an unrelated signal (#6215, a phone's keyboard open/close). A
+      // failed measurement hands off to the scheduled path's retry budget.
+      if (!this.fitVisibleHost()) {
+        this.scheduleVisibleFit();
+      }
     }, RESIZE_DEBOUNCE_MS);
   }
 

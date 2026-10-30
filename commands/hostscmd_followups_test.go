@@ -169,7 +169,7 @@ func TestHostsAddJSON_NotReadyAndSuccessAreSingleEnvelopes(t *testing.T) {
 	assert.Empty(t, stderr)
 
 	f.hosts = map[string]config.HostConfig{}
-	f.reply = daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{{Name: "box1", Probed: true, Reachable: true}}}
+	f.reply = daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{{Name: "box1", Probed: true, Reachable: true, Complete: true}}}
 	_, stderr, env, err = runHostsJSON(t, hostsAddCmd, "box1", "box1.ts.net")
 	require.NoError(t, err)
 	assert.Nil(t, env.Error)
@@ -192,6 +192,22 @@ func TestHostsJSON_EarlyFailuresAndCheckAreEnvelopesOnStdout(t *testing.T) {
 	assert.Equal(t, hostsCodeNotReady, env.Error.Code)
 	assert.NotNil(t, env.Data)
 	assert.Empty(t, stderr)
+}
+
+// An incomplete probe is one envelope on stdout with the error beside the probe
+// results — a script can tell the host is not ready without scraping stderr
+// (#5841). The host_not_ready code is the same code a blocked host uses.
+func TestHostsCheckJSON_IncompleteIsOneEnvelopeNotReady(t *testing.T) {
+	f := &hostsFake{hosts: map[string]config.HostConfig{"a": {Host: "a.example"}}, reply: daemon.CheckHostResponse{Hosts: []daemon.HostCheckResult{
+		{Name: "a", Probed: true, Reachable: true},
+	}}}
+	installHostsFake(t, f)
+	_, stderr, env, err := runHostsJSON(t, hostsCheckCmd)
+	require.ErrorIs(t, err, errHostsCheckIncomplete, "the exit code stays non-zero")
+	require.NotNil(t, env.Error)
+	assert.Equal(t, hostsCodeNotReady, env.Error.Code)
+	assert.NotNil(t, env.Data, "the probe result is the data")
+	assert.Empty(t, stderr, "nothing on stderr in place of the JSON")
 }
 
 // --- #5852: every command af prints for the operator is valid as printed ---

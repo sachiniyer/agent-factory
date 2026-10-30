@@ -341,9 +341,9 @@ CI runner leg. See [lifecycle-testing.md](lifecycle-testing.md).
 ## Known limitations
 
 - **No systemd inside** — autostart-unit flows (`af daemon install`) still
-  need CI or careful host testing. It fails outright in the container
-  ("systemctl: executable file not found"), which is why the lifecycle gate
-  SKIPs its supervision assertion here and runs it on the CI runner instead.
+  need CI or careful host testing. It fails outright in the container (no
+  `systemctl`/`loginctl`), which is why the lifecycle gate SKIPs its
+  supervision assertion here and runs it on the CI runner instead.
 - **Network-dependent flows** (`gh`, pushing branches) need an explicitly
   injected token; the sandbox has none by default, which keeps external
   access opt-in and visible.

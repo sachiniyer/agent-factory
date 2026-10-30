@@ -744,6 +744,28 @@ func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) 
 	return persistInstanceData(repoID, instance.ToInstanceData())
 }
 
+// persistUnderAdmission is persistInstanceErr for code that already holds the
+// repository's worktree admission lock. The documented order is op lock -> start
+// lock -> admission -> m.mu (startLockForRepo), so taking the start lock from
+// under admission is the inversion CreateSession's start -> admission order
+// deadlocks against (#6197). It writes through persistInstanceData instead, which
+// takes only the instances.json file lock and is what actually serializes writers
+// of the row.
+//
+// Safe for the same reason rebuildTeardownNotify is: every caller runs under the
+// session's op-lock and restore/recover fence, the op axis already excludes the
+// poll's whole-row persist (the InFlightOp gate in settleInstancePoll), and every
+// other mutation writer for the row is action-gated while the op is up. The
+// snapshot is still taken inside the write, never passed in.
+func (m *Manager) persistUnderAdmission(repoID string, instance *session.Instance) error {
+	// Snapshot and write inside the row-write lock, so a poll that already passed
+	// its fence check cannot land an older snapshot after this one (#6210).
+	rowLock := m.rowWriteLockForRepo(repoID)
+	rowLock.Lock()
+	defer rowLock.Unlock()
+	return persistInstanceData(repoID, instance.ToInstanceData())
+}
+
 // persistHandoffCheckpointErr is persistInstanceErr for the one writer whose
 // durable and live projections differ ON PURPOSE: the post-swap handoff
 // checkpoint. Disk takes the caller's atomic projection — the crash-recovery

@@ -502,9 +502,9 @@ LC_LAUNCHD_LABEL="com.agent-factory.daemon"
 # lc_supervisor_available — can this environment actually supervise a daemon?
 #
 # The test container cannot: it has no systemd (PID 1 is docker-init), so
-# `af daemon install` fails outright with "systemctl: executable file not
-# found". That is why the supervision assertion is SKIPPED on container runs
-# and only really runs on the CI runner, which has a real systemd user manager.
+# `af daemon install` fails outright (no `systemctl`/`loginctl` on PATH). That
+# is why the supervision assertion is SKIPPED on container runs and only
+# really runs on the CI runner, which has a real systemd user manager.
 lc_supervisor_available() {
     case "$(uname -s)" in
     Linux)

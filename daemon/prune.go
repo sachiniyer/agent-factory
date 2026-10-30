@@ -16,15 +16,15 @@ import (
 
 // This file owns `af sessions prune` (#5136): the manual, opt-in reclaim
 // command for archived sessions whose worktrees accumulate forever (the
-// motivating fleet measured ~146G under <AF home>/archived). Slice 1 is the
-// READ-ONLY half — the dry-run listing: it reports which archived sessions a
-// future --apply would reclaim, what each would free, and why the ineligible
-// rows refuse. af writes NOTHING: no deletion, no tombstone, no record
-// update — every probe below is a bounded read (lstat, git status, git
-// worktree list), and the af-writes-nothing property is proven by a test that
-// fingerprints the AF home and the archive before and after a run. The apply
-// half — deletion, tombstones, the confirmed-plan binding — lands in the
-// follow-up issue filed from this PR's review.
+// motivating fleet measured ~146G under <AF home>/archived). The dry-run
+// listing reports which archived sessions an --apply would reclaim, what
+// each would free, and why the ineligible rows refuse. It writes NOTHING:
+// no deletion, no tombstone, no record update — every probe below is a
+// bounded read (lstat, git status, git worktree list), and the
+// af-writes-nothing property is proven by a test that fingerprints the AF
+// home and the archive before and after a run. The apply half — deletion,
+// tombstones, the confirmed-plan binding — landed in #5189 and lives in
+// prune_apply.go; PruneSessions dispatches to it when req.Apply is set.
 //
 // The eligibility rules are a pure function of the record (session.
 // PruneSkipReason) plus read-only filesystem evidence (pruneFilesystemRefusal)
@@ -41,6 +41,14 @@ type PruneSessionsRequest struct {
 	// no default retention because the owner chose an opt-in command, not a
 	// policy (#5136).
 	OlderThan string `json:"older_than"`
+	// Apply deletes what the verdict lists (#5189). Without it the call is the
+	// strictly read-only dry run.
+	Apply bool `json:"apply,omitempty"`
+	// Only binds an apply to the plan the user confirmed: session IDs the dry run
+	// listed. Apply acts on Only ∩ what the verdict still passes; a row outside it
+	// is never touched, and a planned row that no longer passes is reported as
+	// skipped. Empty means "plan and apply in one run".
+	Only []string `json:"only,omitempty"`
 }
 
 // PruneCandidate is one session the run lists as reclaimable.
@@ -57,8 +65,15 @@ type PruneCandidate struct {
 	// credited only when deleting this tree removes its last link (#5136
 	// Codex round 4). It is what `rm -rf` of the worktree would free — the
 	// dry run reclaims nothing, so the field names what is reclaimABLE;
-	// reclaimed_bytes belongs to the follow-up's apply (#5189).
+	// the apply (#5189) reports its estimate as reclaimed_estimate_bytes.
 	ReclaimableBytes int64 `json:"reclaimable_bytes"`
+	// BranchPushed is information, not a gate: the row records whether af ever
+	// saw the branch pushed. The kept local branch is the preservation, and it
+	// holds every commit of the worktree (HEAD == branch tip is a gate).
+	BranchPushed bool `json:"branch_pushed"`
+	// head is the object id the verdict proved equal to the branch tip; it goes
+	// into the durable intent.
+	head string
 }
 
 // PruneSkippedEntry is one session the run evaluated and refused, with the
@@ -66,9 +81,13 @@ type PruneCandidate struct {
 // too-recent archives, and rows the daemon could not materialize all land here
 // rather than being silently filtered out.
 type PruneSkippedEntry struct {
-	Title  string `json:"title"`
-	RepoID string `json:"repo_id"`
-	Reason string `json:"reason"`
+	ID string `json:"id,omitempty"`
+	// Interrupted marks a row whose earlier prune did not finish: an apply
+	// completes it from its durable intent, so it belongs in the plan.
+	Interrupted bool   `json:"interrupted,omitempty"`
+	Title       string `json:"title"`
+	RepoID      string `json:"repo_id"`
+	Reason      string `json:"reason"`
 }
 
 // PruneSessionsResponse is the dry run's full accounting.
@@ -76,9 +95,9 @@ type PruneSessionsResponse struct {
 	OK             bool      `json:"ok"`
 	OlderThan      string    `json:"older_than"`
 	ArchivedBefore time.Time `json:"archived_before"`
-	// Candidates holds the rows a future --apply would reclaim. The key is
-	// "candidates", not "pruned" — a dry run prunes nothing, and #5189's
-	// apply wants "pruned" for rows it actually removed.
+	// Candidates holds the rows an --apply would reclaim. The key is
+	// "candidates", not "pruned" — a dry run prunes nothing, and the apply
+	// (#5189) uses "pruned" for rows it actually removed.
 	Candidates []PruneCandidate `json:"candidates"`
 	// Skipped holds rows refused BEFORE anything was deleted — they are
 	// untouched. Re-running with a different --older-than or after the blocking
@@ -86,12 +105,31 @@ type PruneSessionsResponse struct {
 	Skipped          []PruneSkippedEntry `json:"skipped,omitempty"`
 	ReclaimableBytes int64               `json:"reclaimable_bytes"`
 	Warnings         []string            `json:"warnings,omitempty"`
+
+	// The fields below are set only by --apply (#5189).
+	//
+	// Applied is true when this was an apply run (so empty Pruned means "nothing
+	// was deleted", not "this was a dry run").
+	Applied bool `json:"applied,omitempty"`
+	// Pruned holds rows whose worktree was deleted and which are now tombstones.
+	Pruned []PrunedEntry `json:"pruned,omitempty"`
+	// Incomplete holds rows whose deletion started but whose record is not final;
+	// distinct from Skipped, which is untouched. Re-running completes them.
+	Incomplete []PruneIncompleteEntry `json:"incomplete,omitempty"`
+	// ReclaimedEstimateBytes is "up to": the sum of the allocated-size estimates
+	// of the pruned rows. It is never presented as freed space.
+	ReclaimedEstimateBytes int64 `json:"reclaimed_estimate_bytes,omitempty"`
+	// FreeBytes* are the MEASURED free space on the archive filesystem(s) before
+	// and after, so the gap to the estimate (reflink clones, shared extents) is
+	// visible rather than silently credited.
+	FreeBytesBefore uint64 `json:"free_bytes_before,omitempty"`
+	FreeBytesAfter  uint64 `json:"free_bytes_after,omitempty"`
+	FreeBytesKnown  bool   `json:"free_bytes_known,omitempty"`
 }
 
 // PruneSessions evaluates archived sessions against req and lists the ones
-// whose worktree bytes are reclaimable. af writes nothing — the
-// delete+tombstone apply lands in the follow-up issue referenced in the file
-// header.
+// whose worktree bytes are reclaimable. Without req.Apply it writes nothing;
+// with it, pruneApply deletes what the verdict lists (#5189).
 func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
 	// Candidates is a required array on the wire: a nil slice marshals as
 	// null and breaks clients that iterate without a null special case, so
@@ -114,6 +152,12 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 		return resp, fmt.Errorf("a scope is required: pass repo_id for one project or all=true for every project")
 	}
 
+	if req.Apply {
+		return m.pruneApply(req, resp)
+	}
+	if len(req.Only) > 0 {
+		return resp, fmt.Errorf("only binds an --apply to a confirmed plan; it has no meaning on a dry run")
+	}
 	candidates, skipped, warnings := m.pruneCandidates(req, resp.ArchivedBefore)
 	resp.Skipped = skipped
 	resp.Warnings = warnings
@@ -204,97 +248,12 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 		if deleting[row.repoID] {
 			continue
 		}
-		data := row.instance.ToInstanceData()
-		if reason := session.PruneSkipReason(data, cutoff); reason != "" {
-			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID, Reason: reason})
+		entry, skip, warns := m.pruneVerdict(row.repoID, row.instance, cutoff, false)
+		warnings = append(warnings, warns...)
+		if skip != nil {
+			skipped = append(skipped, *skip)
 			continue
 		}
-		m.mu.Lock()
-		_, busy := m.killsInFlight[daemonInstanceKey(row.repoID, data.Title)]
-		captures := m.pendingConversationCaptures[row.instance]
-		m.mu.Unlock()
-		if busy {
-			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
-				Reason: "an operation is already in progress for this session"})
-			continue
-		}
-		if captures > 0 {
-			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
-				Reason: "a provider conversation capture is still in flight"})
-			continue
-		}
-		if report := row.instance.GetArchiveReport(); !report.Empty() {
-			// The live worktree carries an incomplete-archive report the
-			// serialized row only stages: same refusal either way, read from
-			// the authoritative handle.
-			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
-				Reason: "incomplete archive — retained source trees are present and need manual review"})
-			continue
-		}
-		// The plan must read like the apply it previews (#5136 review): the
-		// same deletion-boundary refusals run here, so a foreign-path occupant
-		// or a dirty worktree shows as skipped in the dry run instead of
-		// appearing prunable and refusing only after --apply.
-		if reason := pruneFilesystemRefusal(data); reason != "" {
-			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID, Reason: reason})
-			continue
-		}
-		worktreeBytes, sizeErr := session.DirSizeBytes(data.Worktree.WorktreePath)
-		if sizeErr != nil {
-			warnings = append(warnings, fmt.Sprintf("session %q: could not fully measure %s: %v", data.Title, data.Worktree.WorktreePath, sizeErr))
-		}
-		if prunePostProbeHook != nil {
-			prunePostProbeHook(row.instance)
-		}
-		// Revalidate AFTER the filesystem probes AND the size walk: a
-		// restore or kill can begin while either ran — the stale snapshot
-		// still classifies archived, and the missing-path arm treats a
-		// moved-away tree as a zero-byte candidate — so a session already
-		// live again would publish (#5136 Codex round 13; the walk's 10s
-		// window is part of the gap, round 14). Re-read the instance and
-		// re-run every quiet-state gate rather than trusting the earlier
-		// snapshot.
-		fresh := row.instance.ToInstanceData()
-		if reason := session.PruneSkipReason(fresh, cutoff); reason != "" {
-			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
-				Reason: "session state changed while being evaluated: " + reason})
-			continue
-		}
-		// An archived-title reuse renames this row's title, worktree, and
-		// branch without touching liveness or holding an op — `fresh` still
-		// passes every gate above, but an entry built from `data` would
-		// advertise a title now owned by a different live session and a
-		// branch that may no longer resolve (#5136 Codex round 15).
-		if fresh.ID != data.ID || fresh.Title != data.Title ||
-			fresh.Worktree.WorktreePath != data.Worktree.WorktreePath ||
-			pruneBranchFor(fresh) != pruneBranchFor(data) ||
-			!session.ArchiveTimeFor(fresh).Equal(session.ArchiveTimeFor(data)) {
-			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
-				Reason: "session identity changed while being evaluated — rerun to see the current record"})
-			continue
-		}
-		m.mu.Lock()
-		_, busy = m.killsInFlight[daemonInstanceKey(row.repoID, fresh.Title)]
-		captures = m.pendingConversationCaptures[row.instance]
-		m.mu.Unlock()
-		switch {
-		case busy || captures > 0:
-			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
-				Reason: "session state changed while being evaluated: an operation is already in progress"})
-			continue
-		case !row.instance.GetArchiveReport().Empty():
-			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
-				Reason: "session state changed while being evaluated: incomplete archive"})
-			continue
-		}
-		entry := PruneCandidate{
-			ID:         data.ID,
-			Title:      data.Title,
-			RepoID:     row.repoID,
-			Branch:     pruneBranchFor(data),
-			ArchivedAt: session.ArchiveTimeFor(data),
-		}
-		entry.ReclaimableBytes = worktreeBytes
 		candidates = append(candidates, entry)
 	}
 	sort.Slice(candidates, func(a, b int) bool {
@@ -324,12 +283,29 @@ func (m *Manager) pruneGhostRows(req PruneSessionsRequest) ([]PruneSkippedEntry,
 		// log-file write in AF home, which the read-only run must not cause
 		// — the skip detail already reaches the caller through warnings
 		// (#5136 Codex round 12).
-		rows, skips, err = config.LoadAllRepoInstancesReportingSkipDetailsSilent()
+		type loaded struct {
+			rows  map[string]json.RawMessage
+			skips []config.RepoInstancesSkip
+			err   error
+		}
+		l := boundedRead(func() loaded {
+			r, sk, e := config.LoadAllRepoInstancesReportingSkipDetailsSilent()
+			return loaded{r, sk, e}
+		}, loaded{err: fmt.Errorf("reading the session records did not answer within %s", pruneProbeDeadline)})
+		rows, skips, err = l.rows, l.skips, l.err
 		if err != nil {
 			return nil, []string{fmt.Sprintf("could not enumerate repo session records for ghost detection: %v", err)}
 		}
 	} else {
-		raw, err := config.LoadRepoInstances(req.RepoID)
+		type loaded struct {
+			raw json.RawMessage
+			err error
+		}
+		l := boundedRead(func() loaded {
+			r, e := config.LoadRepoInstances(req.RepoID)
+			return loaded{r, e}
+		}, loaded{err: fmt.Errorf("reading the session records did not answer within %s", pruneProbeDeadline)})
+		raw, err := l.raw, l.err
 		if err != nil {
 			return nil, []string{fmt.Sprintf("could not read session records for repo %s: %v", req.RepoID, err)}
 		}
@@ -397,7 +373,7 @@ func (m *Manager) pruneGhostRows(req PruneSessionsRequest) ([]PruneSkippedEntry,
 // apply could not delete it while claiming the branch survives (#5136
 // review). Restore the repository first, or remove the directory by hand
 // once its contents are preserved elsewhere.
-func pruneFilesystemRefusal(data session.InstanceData) string {
+func pruneFilesystemRefusal(data session.InstanceData) (head, reason string) {
 	repoPath := data.Worktree.RepoPath
 	if repoPath == "" {
 		repoPath = data.Path
@@ -414,9 +390,9 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 		if errors.Is(lerr, os.ErrNotExist) {
 			switch {
 			case errors.Is(probeErr, sessiongit.ErrRepoGone):
-				return fmt.Sprintf("origin repository %s is gone, so the branch prune promises to keep is gone with it — restore the repository first, or preserve the worktree contents and remove it manually", repoPath)
+				return "", fmt.Sprintf("origin repository %s is gone, so the branch prune promises to keep is gone with it — restore the repository first, or preserve the worktree contents and remove it manually", repoPath)
 			case probeErr != nil:
-				return fmt.Sprintf("could not establish whether repo %s is present: %v", repoPath, probeErr)
+				return "", fmt.Sprintf("could not establish whether repo %s is present: %v", repoPath, probeErr)
 			}
 			// Repo present but the tree is gone, so the recorded branch is
 			// the ONLY recovery handle the candidate still promises — it
@@ -426,13 +402,13 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 			branch := pruneBranchFor(data)
 			switch exists, berr := boundedLocalBranchExists(repoPath, branch); {
 			case berr != nil:
-				return fmt.Sprintf("could not verify recovery branch %s in %s: %v", branch, repoPath, berr)
+				return "", fmt.Sprintf("could not verify recovery branch %s in %s: %v", branch, repoPath, berr)
 			case !exists:
-				return fmt.Sprintf("recovery branch %s no longer exists in %s — the record has no kept branch to promise", branch, repoPath)
+				return "", fmt.Sprintf("recovery branch %s no longer exists in %s — the record has no kept branch to promise", branch, repoPath)
 			}
-			return ""
+			return "", ""
 		}
-		return fmt.Sprintf("could not inspect %s before deletion: %v", wtPath, lerr)
+		return "", fmt.Sprintf("could not inspect %s before deletion: %v", wtPath, lerr)
 	}
 	// A symlink at the recorded path is an alias the record never wrote —
 	// archive relocates the directory, it does not link it. Identity checks
@@ -441,7 +417,7 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 	// size walk measures the link rather than the tree it names (#5136
 	// Codex round 14). Refuse rather than resolve.
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Sprintf("%s is a symlink — refusing to prove identity through an alias the record never wrote; restore the real archived directory or remove the link", wtPath)
+		return "", fmt.Sprintf("%s is a symlink — refusing to prove identity through an alias the record never wrote; restore the real archived directory or remove the link", wtPath)
 	}
 
 	switch {
@@ -451,15 +427,15 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 		// proves only same-repo membership, and a different session's worktree
 		// parked at this recycled path would pass it (#5136 review).
 		if err := sessiongit.VerifyRegisteredWorktreeOccupantBranch(wtPath, repoPath, pruneBranchFor(data)); err != nil {
-			return fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
+			return "", fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
 		}
 		// Repo+branch+path are still REUSABLE spellings: after the original
 		// archive's removal, `git worktree add <path> <branch>` recreates all
-		// three. The registration leaf's age is the evidence a re-create
-		// cannot fake — it is always younger than the archive it pretends
-		// to precede (#5136 Codex round 4).
-		if err := sessiongit.VerifyWorktreeRegistrationPredates(wtPath, session.ArchiveTimeFor(data)); err != nil {
-			return fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
+		// three. The af-owned nonce stamped into the registration leaf at archive
+		// time is the evidence a re-create cannot fake; a row archived before the
+		// nonce existed is held to a stricter predate rule instead (#5189).
+		if err := sessiongit.VerifyArchiveOccupant(wtPath, data.ArchiveNonce, session.ArchiveTimeFor(data)); err != nil {
+			return "", fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
 		}
 		// `git worktree list` porcelain reports the worktree's branch
 		// ATTRIBUTE, not that the ref resolves — `update-ref -d` leaves the
@@ -470,14 +446,14 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 		branch := pruneBranchFor(data)
 		switch exists, berr := boundedLocalBranchExists(repoPath, branch); {
 		case berr != nil:
-			return fmt.Sprintf("could not verify recovery branch %s in %s: %v", branch, repoPath, berr)
+			return "", fmt.Sprintf("could not verify recovery branch %s in %s: %v", branch, repoPath, berr)
 		case !exists:
-			return fmt.Sprintf("recovery branch %s no longer exists in %s — the record has no kept branch to promise", branch, repoPath)
+			return "", fmt.Sprintf("recovery branch %s no longer exists in %s — the record has no kept branch to promise", branch, repoPath)
 		}
 	case errors.Is(probeErr, sessiongit.ErrRepoGone):
-		return fmt.Sprintf("origin repository %s is gone, so the branch prune promises to keep is gone with it — restore the repository first, or preserve the worktree contents and remove it manually", repoPath)
+		return "", fmt.Sprintf("origin repository %s is gone, so the branch prune promises to keep is gone with it — restore the repository first, or preserve the worktree contents and remove it manually", repoPath)
 	default:
-		return fmt.Sprintf("could not establish whether repo %s is present: %v", repoPath, probeErr)
+		return "", fmt.Sprintf("could not establish whether repo %s is present: %v", repoPath, probeErr)
 	}
 
 	// Uncommitted content in an archived worktree is the ONLY copy — archive
@@ -487,25 +463,26 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 	// round 5). The branch survives reclaim, but it has no such content, so
 	// deleting here would silently destroy work the listing claims is
 	// recoverable. Restore it or clean it first.
-	dirty, err := sessiongit.WorktreeDirtyFiles(wtPath)
+	reasons, err := sessiongit.WorktreeUnrecoverableContent(wtPath)
 	if err != nil {
-		return fmt.Sprintf("could not verify %s is clean before deletion: %v", wtPath, err)
+		return "", fmt.Sprintf("could not verify %s is clean before deletion: %v", wtPath, err)
 	}
-	if dirty > 0 {
-		return fmt.Sprintf("worktree holds %d uncommitted or ignored file(s) that the kept branch does not contain — restore the session or clean the tree first", dirty)
+	if len(reasons) > 0 {
+		return "", fmt.Sprintf("worktree holds content the kept branch does not contain: %s", strings.Join(reasons, "; "))
 	}
-	return ""
+	// Every commit of the worktree must be on the kept branch: HEAD is the branch
+	// tip, so nothing detached or extra exists only here.
+	head, err = sessiongit.WorktreeHeadMatchesBranch(wtPath, repoPath, pruneBranchFor(data))
+	if err != nil {
+		return "", fmt.Sprintf("%s holds work the kept branch does not: %v", wtPath, err)
+	}
+	return head, ""
 }
 
 // pruneBranchFor resolves the branch reclaim promises to keep. Branch is the
 // record-level field; Worktree.BranchName is the worktree's own copy and the
 // fallback for rows written before the top-level field.
-func pruneBranchFor(data session.InstanceData) string {
-	if data.Branch != "" {
-		return data.Branch
-	}
-	return data.Worktree.BranchName
-}
+func pruneBranchFor(data session.InstanceData) string { return session.KeptBranchOf(data) }
 
 // boundedLocalBranchExists wraps sessiongit.LocalBranchExists — whose own
 // stat/git probes are unbounded — in the same goroutine-flight concession
@@ -543,10 +520,32 @@ func (s *controlServer) PruneSessions(req PruneSessionsRequest, resp *PruneSessi
 	if err := s.requireManagerReady(); err != nil {
 		return err
 	}
+	if req.Apply {
+		// The dry run stays a pure read; apply deletes, so it re-enters the
+		// mutation admission gate like every other state mutation (#5189).
+		if err := s.requireStateMutationAdmission(); err != nil {
+			return err
+		}
+	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
 	result, err := s.manager.PruneSessions(req)
 	*resp = result
 	return err
+}
+
+// boundedRead runs a persisted-row read on its own goroutine and returns its
+// answer, or timeout after pruneProbeDeadline: a stalled AF-home mount must not
+// wedge the prune handler (#5189). The parked read is the same accepted leak the
+// other bounded probes carry.
+func boundedRead[T any](read func() T, timeout T) T {
+	done := make(chan T, 1)
+	go func() { done <- read() }()
+	select {
+	case v := <-done:
+		return v
+	case <-time.After(pruneProbeDeadline):
+		return timeout
+	}
 }

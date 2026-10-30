@@ -61,8 +61,23 @@ func (m *Manager) reattachRestoredRuntimes() {
 				if !current {
 					return
 				}
+				// A W1.4 restart records its runtime identity (PID, address, the
+				// adoption it still owes) durably before it spawns and before it
+				// adopts: a daemon that exits mid-restart must reload a row that
+				// names the server it left running.
+				repoID, _ := splitDaemonInstanceKey(key)
+				inst.SetRuntimeIdentityPersist(func(i *session.Instance) error {
+					return m.persistInstanceErr(repoID, i)
+				})
 				err := inst.ReattachSandbox()
 				inst.SettleAttentionAfterReattach()
+				// An adopted restart may have respawned the agent: the session
+				// already ended an in-flight task run (before observations
+				// resumed); the owning task's status is stamped here.
+				if inst.ConsumeTaskRunInterrupted() {
+					stampTaskRunInterrupted(inst, m.taskRunPeerSnapshot())
+					m.persistInstance(repoID, inst)
+				}
 				if err != nil && !errors.Is(err, session.ErrReattachIneligible) {
 					log.WarningLog.Printf("daemon: could not reattach session %q to its sandbox after restart: %v", inst.Title, err)
 				}

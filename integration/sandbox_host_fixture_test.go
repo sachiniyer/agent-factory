@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,8 +76,12 @@ func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 		repo:      repo,
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", h.container).Run() })
+	// A FIXED host port, not an ephemeral one: restart() must come back on the
+	// address the operator's sandbox_ssh already names, and Docker may hand an
+	// ephemeral port out again differently after a restart.
+	fixedPort := freeLoopbackPort(t)
 	runExternal(t, "", "docker", "run", "-d", "--name", h.container,
-		"-p", "127.0.0.1::22",
+		"-p", "127.0.0.1:"+fixedPort+":22",
 		"-v", bare+":/repo.git",
 		"-v", priv+".pub:/authorized_keys:ro",
 		"af-sandbox-e2e:test")
@@ -84,6 +89,26 @@ func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 	waitForSSH(t, h.port)
 	h.known = writeKnownHostsForContainer(t, h.port)
 	return h
+}
+
+// freeLoopbackPort asks the kernel for a free loopback TCP port and releases it.
+func freeLoopbackPort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick a free port: %v", err)
+	}
+	defer l.Close()
+	_, port, _ := net.SplitHostPort(l.Addr().String())
+	return port
+}
+
+// restart bounces the container (docker restart): every process in it dies, the
+// filesystem and the published ssh port survive, and it returns once sshd answers.
+func (h *sandboxHost) restart(t *testing.T) {
+	t.Helper()
+	runExternal(t, "", "docker", "restart", "-t", "2", h.container)
+	waitForSSH(t, h.port)
 }
 
 // exec runs a shell snippet inside the container.
@@ -97,7 +122,8 @@ func (h *sandboxHost) exec(t *testing.T, script string) string {
 // test on any nonzero exit, returning stdout only. exec above discards the exit
 // status and interleaves stderr into its result, which is right for polling but
 // wrong for fixture setup and for fingerprints: a setup step that silently failed
-// leaves the assertion built on it testing nothing (#5947).
+// leaves the assertion built on it testing nothing (#5947). Leading whitespace is
+// preserved (hostStdout).
 func (h *sandboxHost) execOK(t *testing.T, script string) string {
 	t.Helper()
 	cmd := exec.Command("docker", "exec", h.container, "sh", "-c", "set -e; "+script)
@@ -107,8 +133,14 @@ func (h *sandboxHost) execOK(t *testing.T, script string) string {
 	if err != nil {
 		t.Fatalf("host command failed: %v\nscript: %s\nstdout: %s\nstderr: %s", err, script, out, stderr.String())
 	}
-	return strings.TrimSpace(string(out))
+	return hostStdout(out)
 }
+
+// hostStdout drops only the trailing newline(s). A leading TrimSpace would eat the
+// first column of `git status --porcelain`, where ' M f' (unstaged) and 'M  f'
+// (staged) differ only by position, so a fingerprint taken that way cannot tell a
+// restore that staged someone's edit from one that left it alone.
+func hostStdout(out []byte) string { return strings.TrimRight(string(out), "\r\n") }
 
 // waitFor polls cond until it holds or the deadline passes.
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {

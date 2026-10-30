@@ -317,15 +317,22 @@ func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, bo
 // it: on the chip row at its insert or content-end column, or on the absorbed
 // Enter's blank row at the insert column. A hidden cursor (Claude's ordinary
 // composer draws one) cannot prove that, so it withholds.
-func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText string) bool {
+//
+// The second return names the condition that failed, so the withheld-remedy
+// warning says WHICH of hidden cursor, foreign composer content, moved
+// anchor, changed region or misplaced cursor made the shape unprovable
+// (#6224): a bare "not a still, single-chip composer" cannot tell a Claude
+// pane (hidden cursor, by design) from a Codex pane whose footer bled into
+// the region.
+func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText string) (bool, string) {
 	if !cursor.Visible {
-		return false
+		return false, "the cursor is hidden, so where the draft left it cannot be proven (Claude's ordinary composer hides it)"
 	}
 	bRows := paneGridRows(boundary)
 	gRows := paneGridRows(pane)
 	anchor := lastComposerGlyphRow(bRows)
 	if anchor < 0 || anchor >= len(gRows) || lastComposerGlyphRow(gRows) != anchor {
-		return false
+		return false, "the composer's prompt-glyph row moved or is missing between the Enter boundary and the grace frame"
 	}
 	bRegion := composerRegion(bRows, anchor)
 	gRegion := composerRegion(gRows, anchor)
@@ -339,12 +346,12 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 		regionContent = regionContent[size:]
 	}
 	if regionContent != chipText {
-		return false
+		return false, fmt.Sprintf("the composer region at the Enter boundary held %q, not only the bound chip %q", regionContent, chipText)
 	}
 	// Stillness: every boundary region row must appear, in order, in the grace
 	// region; the grace region may add at most one row, and only whitespace.
 	if len(gRegion) > len(bRegion)+1 {
-		return false
+		return false, "the composer region grew by more than the one blank row an absorbed Enter appends"
 	}
 	i := 0
 	for _, row := range gRegion {
@@ -353,23 +360,28 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 			continue
 		}
 		if !blankComposerRow(row) {
-			return false
+			return false, "a composer row changed between the Enter boundary and the grace frame"
 		}
 	}
 	if i != len(bRegion) {
-		return false
+		return false, "a composer row present at the Enter boundary is gone from the grace frame"
 	}
 	// Position: the cursor must sit inside the region, parked where this draft
 	// alone could have left it.
 	if cursor.Row < anchor || cursor.Row >= anchor+len(gRegion) || cursor.Row >= len(gRows) {
-		return false
+		return false, "the cursor is outside the composer region"
 	}
 	insert := firstContentCol(gRows[anchor])
 	if blankComposerRow(gRows[cursor.Row]) {
-		return insert >= 0 && cursor.Col == insert
+		if insert >= 0 && cursor.Col == insert {
+			return true, ""
+		}
+		return false, "the cursor is on a blank composer row but not at the insert column"
 	}
-	return cursor.Row == anchor &&
-		(cursor.Col == insert || cursor.Col == contentEndCol(gRows[anchor]))
+	if cursor.Row == anchor && (cursor.Col == insert || cursor.Col == contentEndCol(gRows[anchor])) {
+		return true, ""
+	}
+	return false, "the cursor is not where an undisturbed draft leaves it"
 }
 
 // firstContentCol is the column of a row's first character that can be
@@ -459,11 +471,16 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 	// The draft is still staged. Only the bound chip in a byte-still composer
 	// authorizes the remedy Enter; every other staged shape — a literal draft,
 	// foreign content, a moved or hidden cursor — stands down.
-	if !bound.chip || !stillChipComposer(stripped, pane, cursor, bound.chipText) {
+	why := "the bound evidence is a literal tail, not a collapsed-paste chip"
+	stillChip := false
+	if bound.chip {
+		stillChip, why = stillChipComposer(stripped, pane, cursor, bound.chipText)
+	}
+	if !stillChip {
 		log.WarningLog.Printf("submit: session %q still shows this prompt's bound evidence staged in the composer after Enter, "+
-			"but it is not a still, single-chip composer this delivery can prove is only ours; "+
+			"but it is not a still, single-chip composer this delivery can prove is only ours (%s); "+
 			"withholding the remedy Enter and reporting sent-unverified (#4200). Pane tail: %s",
-			t.sanitizedName, oneLineTail(pane))
+			t.sanitizedName, why, oneLineTail(pane))
 		return unverified
 	}
 

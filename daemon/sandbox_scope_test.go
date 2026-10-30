@@ -169,6 +169,16 @@ func TestSandboxScope_SnapshotIsTheOwnersProjectOnly(t *testing.T) {
 	got := snap(f.secret)
 	require.NotNil(t, got.Capabilities, "a sandbox credential is denied /v1/health, so the host-pick capability rides on the Snapshot it is admitted to (#5892)")
 	assert.True(t, got.Capabilities.HostPick)
+	// Only HostPick is advertised to a sandbox credential. The scope's AddTask
+	// path clears Task.Host (stampSandboxTask), so advertising TaskHost would be a
+	// false promise the preflight trusts: `af tasks add --host` would pass the
+	// client's capability check, send the pick, and the daemon would store the
+	// task without a host. DeliverHostPick vouches for DeliverPromptRequest.Host,
+	// but /v1/DeliverPrompt is not admitted to the sandbox scope (no sandboxAllowed),
+	// so the field it vouches for can never be sent by this credential. Each bit
+	// must name a field the daemon demonstrably HONORS for the scope.
+	assert.False(t, got.Capabilities.TaskHost, "the sandbox AddTask path discards the caller's host pick, so TaskHost must not be advertised")
+	assert.False(t, got.Capabilities.DeliverHostPick, "/v1/DeliverPrompt is not admitted to the sandbox scope, so DeliverHostPick must not be advertised")
 	assert.Equal(t, []string{"local-one", "me", "peer"}, titlesOf(got.Instances), "the project's sessions, and no other project's")
 	assert.Equal(t, f.me.ID, got.Caller)
 	for _, d := range got.Instances {

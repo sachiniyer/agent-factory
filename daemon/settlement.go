@@ -62,11 +62,39 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 	// late and erase the retry obligation from a newer failed settlement.
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
+	err := m.writeSettlement(repoID, key, instance)
+	repoStartLock.Unlock()
+	return settlementError(instance, err)
+}
+
+// persistSettlementUnderAdmission is persistSettlement for a caller that already
+// holds the repository's worktree admission lock, which sits to the RIGHT of the
+// start lock in the documented order (startLockForRepo): taking the start lock
+// from there is the #6197 inversion. The bookkeeping stays in the same critical
+// section as the write as far as the row is concerned, because the restore/recover
+// op fence the caller runs under excludes every other settlement writer of it; see
+// persistUnderAdmission.
+func (m *Manager) persistSettlementUnderAdmission(repoID, key string, instance *session.Instance) error {
+	return settlementError(instance, m.writeSettlement(repoID, key, instance))
+}
+
+// writeSettlement is the write, announcement and retry bookkeeping of a
+// settlement. The caller owns the ordering: the start lock for persistSettlement,
+// the op fence under admission for persistSettlementUnderAdmission.
+func (m *Manager) writeSettlement(repoID, key string, instance *session.Instance) error {
+	// Snapshot and write in the row-write lock, so this snapshot orders against
+	// the admission writers whichever path reached it (#6210).
+	rowLock := m.rowWriteLockForRepo(repoID)
+	rowLock.Lock()
 	data := instance.ToInstanceData()
 	err := persistInstanceData(repoID, data)
+	rowLock.Unlock()
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	m.recordSettlementWrite(repoID, key, instance, err)
-	repoStartLock.Unlock()
+	return err
+}
+
+func settlementError(instance *session.Instance, err error) error {
 	if err != nil {
 		return fmt.Errorf(
 			"the settled state for %q could not be written to disk "+
@@ -99,7 +127,10 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 	// The stamp stays one-shot so the post-recovery noteRuntimeReplaced
 	// reports the outcome exactly once.
 	instance.InterruptTaskRunForRestoreBoundary()
-	if err := m.persistSettlement(repoID, key, instance); err != nil {
+	// Runs at the respawn's live boundary, inside Recover/Respawn, which every
+	// caller reaches while holding the repository's worktree admission lock — so
+	// the start lock must not be taken here (#6197).
+	if err := m.persistSettlementUnderAdmission(repoID, key, instance); err != nil {
 		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", err)
 	}
 	return nil

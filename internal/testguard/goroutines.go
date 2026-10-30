@@ -103,28 +103,6 @@ func newProductGoroutines(before GoroutineSet) []string {
 	return out
 }
 
-// TB is the slice of testing.TB the per-test check needs.
-type TB interface {
-	Helper()
-	Cleanup(func())
-	Errorf(format string, args ...any)
-	Name() string
-}
-
-// NoGoroutineOutlivesTest fails the test if a product goroutine it started is
-// still running after its cleanups have finished and settle has elapsed. Call it
-// FIRST in a test, so its cleanup runs LAST (t.Cleanup is LIFO).
-func NoGoroutineOutlivesTest(t TB, settle time.Duration) {
-	t.Helper()
-	before := GoroutineBaseline()
-	t.Cleanup(func() {
-		if leaked := LeakedGoroutines(before, settle); len(leaked) > 0 {
-			t.Errorf("%s: %d goroutine(s) outlived the test and will read package-level state the next test sets:\n\n%s",
-				t.Name(), len(leaked), strings.Join(leaked, "\n\n"))
-		}
-	})
-}
-
 // FormatLeaks renders leaked stacks for a package-level report.
 func FormatLeaks(leaked []string) string {
 	return fmt.Sprintf("%d goroutine(s) still running:\n\n%s", len(leaked), strings.Join(leaked, "\n\n"))

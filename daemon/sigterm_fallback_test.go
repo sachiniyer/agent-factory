@@ -208,7 +208,7 @@ func stubDaemonScan(t *testing.T, pids []int, err error) {
 // the zombie, defeating any "did it die?" check based on signal probes.
 func spawnFakeDaemonWithDaemonFlag(t *testing.T) *exec.Cmd {
 	t.Helper()
-	cmd := spawnFakeDaemonProc(t, "af", "sleep 60; :", "--daemon", "af-test")
+	cmd := spawnFakeDaemonHomeProc(t, "af", "sleep 60; :", "--daemon", "af-test")
 	// Wait until the crafted post-exec argv is visible. Event-driven with a
 	// generous bound so a loaded CI runner cannot miss the window — the old
 	// fixed ~500ms wait could expire just before the exec landed, failing the
@@ -892,7 +892,7 @@ func spawnFakeDaemonIn(t *testing.T, home, binDir, cwd string) int {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	return pid
 }
 
@@ -1039,7 +1039,7 @@ func spawnFakeDaemonWithDefaultHome(t *testing.T, homeEnv string) int {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	return pid
 }
 
@@ -1110,7 +1110,7 @@ func spawnFakeDaemonWithTildeHome(t *testing.T, afHome, homeEnv string) int {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	return pid
 }
 
