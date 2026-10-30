@@ -1,13 +1,16 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
+	"github.com/sachiniyer/agent-factory/config"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
@@ -440,4 +443,44 @@ func TestPruneApply_KillDuringAPendingPruneNeverOrphansTheCleanup(t *testing.T) 
 		return
 	}
 	assert.Empty(t, tombstones(t, archived), "the kill finished the prune's cleanup instead of orphaning it")
+}
+
+// The tombstone's durable write and its in-memory commit are one critical section
+// under the repository lock (Codex on #6186): a writer that arrives between the two
+// steps must wait, and then persists the committed state, never the intent beside a
+// missing worktree.
+func TestPruneApply_TombstoneWriteAndMemoryCommitAreOneCriticalSection(t *testing.T) {
+	manager, repoID, _, inst, _ := seedPrunableArchive(t, "tombstone-critical-section")
+	c := planOf(t, manager, repoID)
+
+	started, done := make(chan struct{}), make(chan struct{})
+	pruneBetweenTombstoneSteps = func() {
+		go func() { // the worktree-missing poll's checkpoint: persist after taking the repo lock
+			close(started)
+			_ = manager.persistInstanceErr(repoID, inst)
+			close(done)
+		}()
+		<-started
+		time.Sleep(100 * time.Millisecond) // give it every chance to run inside the window
+	}
+	t.Cleanup(func() { pruneBetweenTombstoneSteps = nil })
+
+	resp, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	require.Len(t, resp.Pruned, 1, "incomplete=%+v", resp.Incomplete)
+	<-done
+
+	raw, err := config.LoadRepoInstances(repoID)
+	require.NoError(t, err)
+	var rows []session.InstanceData
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	var row *session.InstanceData
+	for i := range rows {
+		if rows[i].ID == inst.ID {
+			row = &rows[i]
+		}
+	}
+	require.NotNil(t, row)
+	assert.False(t, row.PrunedAt.IsZero(), "disk holds the tombstone")
+	assert.Nil(t, row.PruneIntent, "and not the intent beside a missing worktree")
 }

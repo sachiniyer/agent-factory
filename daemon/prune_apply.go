@@ -69,11 +69,29 @@ var pruneRemoveTimeout = 10 * time.Minute
 
 // pruneTombstonePersist writes the tombstone record under the repo's ordering lock.
 // A package var so a test can fail exactly that write.
-var pruneTombstonePersist = func(m *Manager, repoID string, data session.InstanceData) error {
+var pruneTombstonePersist = func(_ *Manager, repoID string, data session.InstanceData) error {
+	return persistInstanceData(repoID, data)
+}
+
+// pruneBetweenTombstoneSteps is a test seam fired between the durable tombstone
+// write and the in-memory commit, to interleave a competing writer there.
+var pruneBetweenTombstoneSteps func()
+
+// commitPruneTombstone writes the tombstone and then commits it in memory, both
+// under the repository's ordering lock.
+func (m *Manager) commitPruneTombstone(repoID string, instance *session.Instance, at time.Time) error {
 	lock := m.startLockForRepo(repoID)
 	lock.Lock()
 	defer lock.Unlock()
-	return persistInstanceData(repoID, data)
+	tomb := instance.ToInstanceData()
+	tomb.PrunedAt, tomb.PruneIntent = at, nil
+	if err := pruneTombstonePersist(m, repoID, tomb); err != nil {
+		return fmt.Errorf("the worktree is deleted but the record could not be saved (re-run to finish): %w", err)
+	}
+	if pruneBetweenTombstoneSteps != nil {
+		pruneBetweenTombstoneSteps()
+	}
+	return instance.CompletePrune(at)
 }
 
 var errPruneCrash = errors.New("prune stopped (injected)")
@@ -332,17 +350,15 @@ func (m *Manager) pruneFinish(repoID string, instance *session.Instance, intent 
 	if err := pruneStep("tombstone"); err != nil {
 		return "tombstone", err
 	}
-	// The tombstone is written FIRST and memory follows it. If the write fails the
-	// row keeps its intent in memory as well as on disk, so the next apply (or the
-	// start-up resume) in this same daemon finishes it, and the row reports as
+	// The tombstone is written FIRST and memory follows it, and the two are ONE
+	// critical section under the repository ordering lock: any other writer (the
+	// worktree-missing poll, a status checkpoint) snapshots the row only after
+	// acquiring that same lock, so it can never see the durable tombstone beside an
+	// in-memory row that still carries the intent with its worktree gone. If the
+	// write fails the row keeps its intent in memory as well as on disk, so the next
+	// apply (or the start-up resume) in this daemon finishes it and the row reports
 	// incomplete instead of reading as pruned until a restart repairs it.
-	at := time.Now()
-	tomb := instance.ToInstanceData()
-	tomb.PrunedAt, tomb.PruneIntent = at, nil
-	if err := pruneTombstonePersist(m, repoID, tomb); err != nil {
-		return "tombstone", fmt.Errorf("the worktree is deleted but the record could not be saved (re-run to finish): %w", err)
-	}
-	if err := instance.CompletePrune(at); err != nil {
+	if err := m.commitPruneTombstone(repoID, instance, time.Now()); err != nil {
 		return "tombstone", err
 	}
 	return "", nil
