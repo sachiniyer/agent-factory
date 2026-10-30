@@ -545,10 +545,18 @@ func (s *Service) RemoveDoc(t Target, slug, doc string, author Author) (*DocResu
 	if err != nil {
 		return nil, err
 	}
-	file, commit, err := r.store.RemoveDoc(slug, doc, by)
+	before, err := r.store.Head()
 	if err != nil {
 		return nil, err
 	}
+	file, commit, err := r.store.RemoveDoc(slug, doc, by)
+	if err != nil {
+		// The snapshot of other docs' disk edits may have landed before the
+		// removal failed; publish it so attached tabs do not go stale (#5594).
+		s.publishSnapshot(r, before, "")
+		return nil, err
+	}
+	s.publishSnapshot(r, before, commit)
 	s.committed(r, slug, file, commit, author)
 	return &DocResult{Slug: slug, Doc: file, Path: filepath.Join(r.store.SlugPath(slug), file), Commit: commit}, nil
 }
