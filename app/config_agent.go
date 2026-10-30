@@ -207,7 +207,7 @@ func (m *home) enterConfigAgent(sessionName, socketPath string) tea.Cmd {
 	m.tookTerminal.Store(true)
 	cmd := execConfigAgentAttach(sessionName, socketPath)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		bareAttachCleanup(sessionName, socketPath)
+		bareAttachCleanup(cmd)
 		return configAgentDoneMsg{sessionName: sessionName, err: err}
 	})
 }
@@ -253,64 +253,13 @@ func bareTmuxAttachCommand(sessionName, socketPath string) *exec.Cmd {
 	if socketPath != "" {
 		args = append(args, "-S", socketPath)
 	}
-	args = append(args, bareAttachDetachArgs(sessionName)...)
+	route := newTakeoverRoute(sessionName, tmux.DetachKeyByte, tmux.DetachKeyDisplay)
+	args = append(args, route.attachArgs()...)
 	cmd := exec.Command("tmux", args...)
 	cmd.Env = configAgentAttachEnv()
+	registerTakeoverRoute(cmd, socketPath, route)
 	return cmd
 }
-
-// bareDetachTable names the key table that carries the detach binding for one
-// takeover's session.
-func bareDetachTable(sessionName string) string { return "af-detach-" + sessionName }
-
-// bareAttachDetachArgs is the tmux command sequence of a takeover: the same detach
-// key af documents (`detach_keys`, "Leave full-screen" in the help) is made to
-// detach the takeover's own client, and the attached client is told which key
-// leaves. A takeover is a real tmux client, so af's raw-proxy byte interception
-// that honours the key for session panes cannot see it; without this the only way
-// out was tmux's own C-b d (#6064).
-//
-// The binding is scoped to the takeover, never the server (a root-table bind-key
-// would turn the shell's delete-word key into "detach" for every client on the
-// bare server). It lives in a key table named for this session, selected by that
-// session's own `key-table` option: only clients attached to the takeover's
-// session use the table, the option dies with the session, and the table is
-// emptied when the takeover ends (bareAttachCleanup). C-b is routed back to the
-// prefix table so tmux's own escape keeps working. A byte tmux has no ctrl
-// spelling for degrades to the plain attach, with the tmux default left to leave.
-func bareAttachDetachArgs(sessionName string) []string {
-	attach := []string{"attach-session", "-t", sessionName}
-	key, ok := tmux.DetachKeyTmuxName(tmux.DetachKeyByte)
-	if !ok {
-		return attach
-	}
-	table := bareDetachTable(sessionName)
-	hint := tmux.DetachKeyDisplay + " leaves"
-	out := []string{
-		"set-option", "-t", sessionName, "key-table", table, ";",
-		"bind-key", "-T", table, key, "detach-client", ";",
-		"bind-key", "-T", table, "C-b", "switch-client", "-T", "prefix", ";",
-	}
-	out = append(out, attach...)
-	return append(out, ";", "display-message", "-d", "4000", hint)
-}
-
-// bareAttachCleanup empties the takeover's key table once the takeover is over, so
-// no binding outlives it. Best-effort: a crash skips it, which is harmless — the
-// table is reachable only through the dead session's own key-table option.
-func bareAttachCleanup(sessionName, socketPath string) {
-	args := make([]string, 0, 7)
-	if socketPath != "" {
-		args = append(args, "-S", socketPath)
-	}
-	args = append(args, "unbind-key", "-a", "-T", bareDetachTable(sessionName))
-	cmd := exec.Command("tmux", args...)
-	cmd.Env = configAgentAttachEnv()
-	_ = runBareAttachCleanup(cmd)
-}
-
-// runBareAttachCleanup runs the cleanup command; a var so tests need no tmux.
-var runBareAttachCleanup = func(cmd *exec.Cmd) error { return cmd.Run() }
 
 // configAgentAttachEnv is the current environment with the TMUX marker removed,
 // so the nested `tmux attach-session` above does not refuse to run (#2019).
