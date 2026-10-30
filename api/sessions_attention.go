@@ -55,7 +55,10 @@ after it went idle.
 					return jsonError(fmt.Errorf("a session <title> is required (or pass --self to target the current session)"))
 				}
 				var err error
-				repoID, err = resolveRepoID()
+				// The request goes to the TARGETED daemon (routedSetAttention), so the
+				// scope is the one every other routed session verb uses: against a
+				// remote daemon the client's cwd names a repo that exists here, not there.
+				repoID, err = resolveRepoIDForLookup()
 				if err != nil {
 					return jsonError(err)
 				}

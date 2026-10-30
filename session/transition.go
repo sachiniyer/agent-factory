@@ -119,6 +119,19 @@ type TransitionEvent struct {
 	resetAt     time.Time
 	epoch       uint64
 	epochScoped bool
+	churnOnly   bool
+}
+
+// ChurnOnly marks a Running observation as inferred from pane churn alone, with
+// no in-turn indicator from the agent. A repainted composer (a typed draft) churns
+// the pane too, so such an observation moves the liveness but is not the agent
+// starting work, and it must not count as the user's answer to an attention
+// request. Use it only for an agent whose indicator the daemon can read
+// (task.PublishesWorkingContent); the evidence is reported separately through
+// AttentionAnsweredByWork.
+func (ev TransitionEvent) ChurnOnly() TransitionEvent {
+	ev.churnOnly = true
+	return ev
 }
 
 // AtEpoch scopes an event to the state epoch its decision was made at (#2135):
@@ -579,6 +592,14 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// without an error, since being out-competed by newer truth is not a
 		// mis-ordered edge (#2135). The observer re-decides on its next tick.
 		return nil
+	}
+	if ev.kind == tkObserveLiveness && ev.churnOnly && ev.lv == LiveRunning {
+		keep := cloneAttention(i.attention)
+		defer func() {
+			if keep != nil && i.liveness == LiveRunning {
+				i.attention = keep
+			}
+		}()
 	}
 	if ev.kind == tkBeginArchive && i.archiveCheckpointSealed {
 		return fmt.Errorf("session %q cannot begin an archive after the daemon shutdown checkpoint was sealed", i.Title)

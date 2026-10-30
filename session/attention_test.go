@@ -219,3 +219,52 @@ func TestClearAttentionWithSetAtLeavesANewerRequest(t *testing.T) {
 	require.True(t, cleared)
 	require.False(t, i.HasAttention())
 }
+
+// A typed draft repaints the composer, so the daemon reads the pane as churning
+// and moves the session to Running. For an agent that publishes its own in-turn
+// indicator that churn is not work: it must not answer the request, however long
+// the agent sat idle first.
+func TestChurnOnlyRunningKeepsTheRequest(t *testing.T) {
+	advance := fakeAttentionClock(t)
+	i := &Instance{Title: "w", liveness: LiveRunning}
+	_, err := i.SetAttention("pick A or B", time.Unix(1_000, 0))
+	require.NoError(t, err)
+	moveLiveness(i, LiveReady)
+	advance(attentionAnswerIdle)
+	require.True(t, i.Attention().SeenIdle)
+
+	require.NoError(t, i.Transition(ObserveLiveness(LiveRunning).ChurnOnly()))
+	require.Equal(t, LiveRunning, i.GetLiveness(), "the churn still moves the liveness")
+	require.True(t, i.HasAttention(), "a repainted composer is not the user's answer")
+	require.True(t, i.Attention().SeenIdle, "and it leaves the idle record alone")
+
+	// Control: the same edge without ChurnOnly is the old rule and clears.
+	moveLiveness(i, LiveReady)
+	advance(attentionAnswerIdle)
+	require.NoError(t, i.Transition(ObserveLiveness(LiveRunning)))
+	require.False(t, i.HasAttention(), "an observation that is not churn-only still answers")
+}
+
+func TestAttentionAnsweredByWorkNeedsAnIdleSpellFirst(t *testing.T) {
+	advance := fakeAttentionClock(t)
+	i := &Instance{Title: "w", liveness: LiveRunning}
+	_, err := i.SetAttention("pick A or B", time.Unix(1_000, 0))
+	require.NoError(t, err)
+
+	_, ok := i.AttentionAnsweredByWork()
+	require.False(t, ok, "work seen before the agent ever went idle is its own turn")
+
+	moveLiveness(i, LiveReady)
+	advance(time.Second)
+	_, ok = i.AttentionAnsweredByWork()
+	require.False(t, ok, "a short still spell is the agent pausing inside its turn")
+	require.False(t, i.Attention().SeenIdle, "and it resets the idle record")
+
+	moveLiveness(i, LiveRunning)
+	moveLiveness(i, LiveReady)
+	advance(attentionAnswerIdle)
+	setAt, ok := i.AttentionAnsweredByWork()
+	require.True(t, ok)
+	require.True(t, setAt.Equal(time.Unix(1_000, 0)), "it names the request it answers, for a keyed clear")
+	require.True(t, i.HasAttention(), "naming it does not clear it; the caller clears under the repo lock")
+}
