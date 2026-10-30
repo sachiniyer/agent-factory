@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 type backlogTestHost struct{}
@@ -20,6 +22,7 @@ type backlogTestHost struct{}
 func (backlogTestHost) Facts(string) backlog.Facts { return nil }
 func (backlogTestHost) ProjectName(string) string  { return "" }
 func (backlogTestHost) Changed(string, []int)      {}
+func (backlogTestHost) SlotsUsed(string) int       { return 0 }
 func backlogRoute[Req, Resp any](call func(Req) (Resp, error)) func([]byte) (any, error) {
 	return func(raw []byte) (any, error) {
 		r, err := decodeInto[Req](raw)
@@ -53,6 +56,11 @@ func stubBacklogDaemon(t *testing.T) *[]string {
 			return empty(svc.DeleteItem(r))
 		}),
 	}
+	routes["StartBacklogItem"] = backlogRoute(func(r daemon.StartBacklogItemRequest) (any, error) {
+		return daemon.StartBacklogItemResponse{Run: backlog.RunRef{State: backlog.RunStarting, StartedBy: backlog.StartedByUser}}, nil
+	})
+	prevSelf := backlogSelfSession
+	backlogSelfSession = func() (*session.InstanceData, error) { return nil, errors.New("not in an af session") }
 	var methods []string
 	prev := callBacklogRoute
 	callBacklogRoute = func(method string, req, resp any) error {
@@ -76,7 +84,7 @@ func stubBacklogDaemon(t *testing.T) *[]string {
 		return json.Unmarshal(b, resp)
 	}
 	prevEnv := envelopeOutput
-	t.Cleanup(func() { callBacklogRoute = prev; envelopeOutput = prevEnv })
+	t.Cleanup(func() { callBacklogRoute = prev; envelopeOutput = prevEnv; backlogSelfSession = prevSelf })
 	return &methods
 }
 

@@ -370,6 +370,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"PostBacklogMessage":   blockedDuringProbation,
 	"SetBacklogSettings":   blockedDuringProbation,
 	"SetBudget":            blockedDuringProbation,
+	"StartBacklogItem":     blockedDuringProbation,
 }
 
 func TestControlServerProbationAdmissionLedger(t *testing.T) {

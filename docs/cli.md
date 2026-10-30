@@ -156,18 +156,22 @@ af backlog add --file items.json      # a batch; --file - reads stdin
 af backlog edit 12 --title "..." --waits-on 7
 af backlog move 12 --after 9
 af backlog queue 12
+af backlog start 12              # start it now: a new session, or "continue" in its live one
 af backlog review 12
 af backlog done 12
+af backlog done --self --pr https://…   # from inside an item session: send my item to review
 af backlog drop 12
 af backlog reopen 12
 af backlog delete 12            # a draft with no runs and no thread
 af backlog note 12 "text"       # a note on the item's thread
+af backlog note --self "text"   # from inside an item session: a note on my own item
 af backlog runner               # show or change this project's runner switch
 af backlog budget               # show or change the global budget
 ```
 
 - Items live in `$AF_HOME/repos/<repo-id>/backlog.json`; the budget in `$AF_HOME/budget.json`. `af reset` removes the budget and keeps each project's backlog.
-- Notes are stored on the item; they are not delivered to a session yet. This slice starts no sessions: the runner settings are stored, and session facts report nothing live.
+- `start` ignores the runner switch and the budget. An item with a live session gets `continue` in that session; any other item gets a new session on a new branch from the default branch. The command returns at once and the run reads *starting* until the session exists. Item sessions are ordinary sessions: they archive, restore and hand off like any other, but they are kept out of `limit_auto_resume`'s account swap and park at a usage limit instead. `--self` commands act on the item of the session they run in; they are for the agent, and the user-facing commands refuse to run from inside an item session.
+- Notes are stored on the item; they are not delivered to a session.
 - `budget` takes `--share`, `--stop-at`, `--max-per-run` (percents from 0 to 100) and `--usd-limit` (finite, 0 or more; 0 turns it off). With no flags it shows the settings.
 
 ## `af tasks`

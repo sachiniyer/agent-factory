@@ -623,6 +623,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/StartBacklogItem",
+		Description: "Start an item now, ignoring the runner switch and budget: send \"continue\" to its live session, or create a session for it; returns the run, which is starting until the session exists.",
+		requestType: reflect.TypeOf(StartBacklogItemRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.StartBacklogItem) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/SetBacklogSettings",
 		Description: "Change a project's runner switch, max running, or what happens to an item's session when the item is done.",
 		requestType: reflect.TypeOf(SetBacklogSettingsRequest{}),

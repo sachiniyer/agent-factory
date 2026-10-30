@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 
@@ -20,6 +22,137 @@ type routeServices struct {
 type backlogState struct {
 	once sync.Once
 	svc  *backlog.Service
+	// mu guards the in-memory bookkeeping below. None of it is durable: a
+	// restart has no starts in flight, and recovery settles their records.
+	mu sync.Mutex
+	// slots counts the item-session creates in flight per project.
+	slots map[string]int
+	// continuing holds the items whose "continue" is being sent.
+	continuing map[string]bool
+	// deferredArchive holds the sessions whose on_done archive waits for an
+	// attached client to leave.
+	deferredArchive map[string]bool
+	// pendingEnds holds, per session id, the run generation of an idle edge
+	// observed before the session's start record was committed: the completion
+	// has no item to land on yet, and is replayed by finishBacklogStart.
+	pendingEnds map[string]int
+	// recovered, recovering and recoveryDone track restart recovery.
+	recovered    map[string]bool
+	recovering   bool
+	recoveryDone bool
+}
+
+func (s *backlogState) holdEnd(sessionID string, gen int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingEnds == nil {
+		s.pendingEnds = map[string]int{}
+	}
+	s.pendingEnds[sessionID] = gen
+}
+
+func (s *backlogState) takeEnd(sessionID string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gen, ok := s.pendingEnds[sessionID]
+	delete(s.pendingEnds, sessionID)
+	return gen, ok
+}
+
+func (s *backlogState) reserve(repoID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.slots == nil {
+		s.slots = map[string]int{}
+	}
+	s.slots[repoID]++
+}
+
+func (s *backlogState) release(repoID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.slots[repoID] <= 1 {
+		delete(s.slots, repoID)
+		return
+	}
+	s.slots[repoID]--
+}
+
+func (s *backlogState) reserved(repoID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.slots[repoID]
+}
+
+func continueKey(repoID string, id int) string { return fmt.Sprintf("%s\x00%d", repoID, id) }
+
+// beginContinue claims the item's "continue"; false when one is in flight.
+func (s *backlogState) beginContinue(repoID string, id int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.continuing[continueKey(repoID, id)] {
+		return false
+	}
+	if s.continuing == nil {
+		s.continuing = map[string]bool{}
+	}
+	s.continuing[continueKey(repoID, id)] = true
+	return true
+}
+
+func (s *backlogState) endContinue(repoID string, id int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.continuing, continueKey(repoID, id))
+}
+
+func (s *backlogState) deferArchive(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deferredArchive == nil {
+		s.deferredArchive = map[string]bool{}
+	}
+	s.deferredArchive[sessionID] = true
+}
+
+func (s *backlogState) takeDeferredArchive(sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	owed := s.deferredArchive[sessionID]
+	delete(s.deferredArchive, sessionID)
+	return owed
+}
+
+func (s *backlogState) beginRecovery() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recoveryDone || s.recovering {
+		return false
+	}
+	s.recovering = true
+	return true
+}
+
+func (s *backlogState) endRecovery(pending bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recovering = false
+	s.recoveryDone = !pending
+}
+
+func (s *backlogState) isRecovered(repoID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recovered[repoID]
+}
+
+func (s *backlogState) markRecovered(repoID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recovered == nil {
+		s.recovered = map[string]bool{}
+	}
+	s.recovered[repoID] = true
 }
 
 func (m *Manager) backlogService() *backlog.Service {
@@ -34,11 +167,15 @@ type backlogHost struct {
 	m *Manager
 }
 
-// Facts reports nothing live: no item session exists until the backlog can
-// start sessions.
-func (h backlogHost) Facts(string) backlog.Facts {
-	return func(string) backlog.SessionFacts { return backlog.SessionFacts{} }
+func (h backlogHost) Facts(repoID string) backlog.Facts {
+	sessions := h.m.itemSessions(repoID)
+	return func(id string) backlog.SessionFacts {
+		s, ok := sessions[id]
+		return backlogSessionFacts(s, ok)
+	}
 }
+
+func (h backlogHost) SlotsUsed(repoID string) int { return h.m.backlogSlotsUsed(repoID) }
 
 func (h backlogHost) ProjectName(repoID string) string {
 	if root, err := registeredProjectRootForRepoID(repoID); err == nil && root != "" {
@@ -110,11 +247,17 @@ func (s *controlServer) SetBacklogItemStatus(req SetBacklogItemStatusRequest, re
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	s.manager.adoptStartingRun(req.RepoID, req.RepoPath, req.SessionID)
 	out, err := s.manager.backlogService().SetItemStatus(req)
 	if err != nil {
 		return err
 	}
 	*resp = *out
+	if out.Item.Status == backlog.StatusDone {
+		if ref, err := s.manager.backlogService().Resolve(req.RepoID, req.RepoPath); err == nil {
+			s.manager.onBacklogItemDone(ref.ID, out.Item)
+		}
+	}
 	return nil
 }
 
@@ -129,6 +272,7 @@ func (s *controlServer) PostBacklogMessage(req PostBacklogMessageRequest, resp *
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	s.manager.adoptStartingRun(req.RepoID, req.RepoPath, req.SessionID)
 	out, err := s.manager.backlogService().PostMessage(req)
 	if err != nil {
 		return err
@@ -171,4 +315,39 @@ func (s *controlServer) SetBudget(req SetBudgetRequest, resp *SetBudgetResponse)
 	}
 	*resp = *out
 	return nil
+}
+
+// adoptStartingRun links a session's still-starting run to it when the session
+// reports on its item (done, note, ask) before the start record is committed.
+// The start record is written after the session's initial prompt was delivered,
+// so a fast agent, or a busy backlog, can make the report arrive first; without
+// this the report fails and its pull request link or question is lost. The
+// session vouches for itself: its own item id (set at creation) and creation
+// time must match the run (Backlog.AdoptStarting). finishBacklogStart is then a
+// no-op for that run.
+func (m *Manager) adoptStartingRun(repoID, repoPath, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	ref, err := m.backlogService().Resolve(repoID, repoPath)
+	if err != nil {
+		return
+	}
+	s, ok := m.itemSessions(ref.ID)[sessionID]
+	if !ok {
+		return
+	}
+	svc := m.backlogService()
+	_, err = svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
+		if b.ItemForSession(sessionID) != nil {
+			return nil, errBacklogNoChange
+		}
+		if !b.AdoptStarting(s.instance.BacklogItem, sessionID, s.instance.Title, s.instance.CreatedAt, svc.Now()) {
+			return nil, errBacklogNoChange
+		}
+		return []int{s.instance.BacklogItem}, nil
+	})
+	if err != nil && !errors.Is(err, errBacklogNoChange) {
+		m.warn().Printf("adopt the starting run of session %s: %v", sessionID, err)
+	}
 }

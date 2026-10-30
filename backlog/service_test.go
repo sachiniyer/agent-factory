@@ -14,10 +14,13 @@ type testHost struct {
 	name    string
 	changed [][]int
 	lookups int
+	slots   int
+	facts   Facts
 }
 
-func (h *testHost) Facts(string) Facts          { return nil }
+func (h *testHost) Facts(string) Facts          { return h.facts }
 func (h *testHost) ProjectName(string) string   { h.lookups++; return h.name }
+func (h *testHost) SlotsUsed(string) int        { return h.slots }
 func (h *testHost) Changed(_ string, ids []int) { h.changed = append(h.changed, ids) }
 func (h *testHost) last() []int                 { return h.changed[len(h.changed)-1] }
 func ptr[T any](v T) *T                         { return &v }
@@ -209,7 +212,7 @@ func TestServiceStatus(t *testing.T) {
 		t.Error("pr without session accepted")
 	}
 	if _, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 3, Status: StatusReview, SessionID: "s1"}); err == nil ||
-		!strings.Contains(err.Error(), "not a run of B-3") {
+		!strings.Contains(err.Error(), "not the latest run of B-3") {
 		t.Error(err)
 	}
 }
@@ -220,10 +223,14 @@ func TestServiceAgentReview(t *testing.T) {
 	if _, err := Update(repoID, func(b *Backlog) error {
 		it := b.Item(1)
 		it.Status = StatusRunning
-		it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+		it.Runs = []RunRef{{SessionID: "s0", State: RunStarted}, {SessionID: "s1", State: RunStarted}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 1, Status: StatusReview, SessionID: "s0"}); err == nil ||
+		!strings.Contains(err.Error(), "not the latest run") {
+		t.Errorf("an older run's session sent the item to review: %v", err)
 	}
 	if _, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 1, Status: StatusDone, SessionID: "s1"}); err == nil {
 		t.Error("agent done accepted")

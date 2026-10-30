@@ -173,9 +173,13 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	data.TaskRunInterrupted = i.taskRunInterrupted
 	data.TaskRunInterruptedAt = i.taskRunInterruptedAt
 	data.TaskRunFailurePending = i.taskRunFailurePending
-	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
-	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
-	if i.taskRunActive {
+	data.BacklogItem = i.BacklogItem
+	data.BacklogRunActive = i.backlogRunActive
+	data.BacklogRunEndedAt = i.backlogRunEndedAt
+	gate := i.runGateActiveLocked()
+	data.TaskRunIdleEdgeHeld = gate && i.taskRunIdleEdgeHeld
+	data.TaskRunTurnGateHeld = gate && i.taskRunTurnGateHeld
+	if gate {
 		// Same gating as the held flag: a finished run's last turn observation
 		// is not evidence for anything, and persisting it would let a later run
 		// on this row inherit a boundary it never crossed.
@@ -487,10 +491,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
 		taskRunActive:        data.TaskRunActive,
+		BacklogItem:          data.BacklogItem,
+		backlogRunActive:     data.BacklogRunActive && data.BacklogItem != 0,
+		backlogRunEndedAt:    data.BacklogRunEndedAt,
 		taskRunInterrupted:   data.TaskRunInterrupted && !data.TaskRunActive,
 		taskRunInterruptedAt: data.TaskRunInterruptedAt,
-		taskRunIdleEdgeHeld:  data.TaskRunActive && data.TaskRunIdleEdgeHeld,
-		taskRunTurnGateHeld:  data.TaskRunActive && data.TaskRunTurnGateHeld,
+		taskRunIdleEdgeHeld:  runGateActiveInData(data) && data.TaskRunIdleEdgeHeld,
+		taskRunTurnGateHeld:  runGateActiveInData(data) && data.TaskRunTurnGateHeld,
 		// Gate on the run still being in flight, mirroring the write side and
 		// the held flag: a finished run's stale observation cannot release the
 		// next run's delivery window.

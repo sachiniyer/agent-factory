@@ -31,7 +31,7 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 	// An interrupted run whose agent resumed on its own (#6223) is watched from
 	// the interruption instead of a prompt boundary; chrome re-arms the run.
 	resumeFrom, resuming := time.Time{}, false
-	if !instance.TaskRunActive() {
+	if !instance.RunGateActive() {
 		if resumeFrom, resuming = instance.TaskRunResumableSince(nowFunc()); !resuming {
 			return false
 		}

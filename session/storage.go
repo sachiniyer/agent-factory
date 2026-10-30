@@ -42,9 +42,13 @@ type InstanceData struct {
 	// omitempty + additive: records written before #1892 simply have no task_id
 	// and count against no limit (rollforward, mirroring the ID precedent above).
 	TaskID string `json:"task_id,omitempty"`
-	Title  string `json:"title"`
-	Path   string `json:"path"`
-	Branch string `json:"branch"`
+	// BacklogItem is the backlog item this session was started for (backlog.json
+	// holds the authoritative link). omitempty: an older af drops it on its next
+	// write and loses only the client chip.
+	BacklogItem int    `json:"backlog_item,omitempty"`
+	Title       string `json:"title"`
+	Path        string `json:"path"`
+	Branch      string `json:"branch"`
 	// Status is the legacy single-axis status int (#1195). Still written for one
 	// release for rollback safety and read as the fallback source for records
 	// that predate the `liveness` field. New code should read Liveness.
@@ -227,6 +231,12 @@ type InstanceData struct {
 	// teardown that merely FAILED keeps it; the next daemon generation retries.
 	// omitempty + additive + rollforward, mirroring the TaskRunActive precedent.
 	PendingOnComplete *PendingOnCompleteData `json:"pending_on_complete,omitempty"`
+	// BacklogRunActive is the backlog run marker (Instance.backlogRunActive). The
+	// task-run gate fields above carry its prompt boundary and held edges.
+	BacklogRunActive bool `json:"backlog_run_active,omitempty"`
+	// BacklogRunEndedAt is when the latest backlog run ended; the on_done
+	// archive treats pane churn after it as the user taking the session over.
+	BacklogRunEndedAt time.Time `json:"backlog_run_ended_at,omitzero"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and
@@ -907,74 +917,6 @@ func (s *Storage) SaveInstancesForShutdown(instances []*Instance) error {
 // generous: this lock is held only across a read-modify-write of one small JSON
 // file, so exceeding it means a peer is genuinely wedged, not merely slow.
 var InstanceDeleteLockTimeout = 10 * time.Second
-
-// DeleteInstanceByStableID removes an instance from storage only when the
-// record still matches the stable session identity captured by the caller. A
-// false nil result means a same-titled record exists but belongs to a different
-// instance, so the caller must treat the delete as stale and leave it alone.
-// Empty IDs are legacy-compatible and fall back to title matching.
-//
-// It takes the instances flock with a DEADLINE (config.WithFileLockTimeout), not
-// the blocking WithFileLock every other Storage writer uses: a contended lock
-// surfaces as a retryable config.ErrLockTimeout instead of parking the caller
-// forever. See InstanceDeleteLockTimeout for why this writer in particular
-// cannot afford an unbounded wait.
-func (s *Storage) DeleteInstanceByStableID(title, id string) (bool, error) {
-	path, pathErr := config.RepoInstancesPath(s.repoID)
-	if pathErr != nil {
-		return false, pathErr
-	}
-	deleted := false
-	sameTitleDifferentID := false
-	if err := config.WithFileLockTimeout(path, InstanceDeleteLockTimeout, func() error {
-		raw, err := s.state.GetInstances(s.repoID)
-		if err != nil {
-			return err
-		}
-		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
-			return fmt.Errorf("instance not found: %s", title)
-		}
-
-		var data []InstanceData
-		if err := json.Unmarshal(raw, &data); err != nil {
-			return fmt.Errorf("failed to parse instances: %w", err)
-		}
-
-		filtered := make([]InstanceData, 0, len(data))
-		found := false
-		for _, d := range data {
-			if d.Title == title {
-				if stableIDMatches(d.ID, id) {
-					found = true
-					deleted = true
-					continue
-				}
-				sameTitleDifferentID = true
-			}
-			filtered = append(filtered, d)
-		}
-
-		if !found {
-			if sameTitleDifferentID {
-				return nil
-			}
-			return fmt.Errorf("instance not found: %s", title)
-		}
-
-		out, err := json.Marshal(filtered)
-		if err != nil {
-			return fmt.Errorf("failed to marshal instances: %w", err)
-		}
-		return s.state.SaveInstances(s.repoID, out)
-	}); err != nil {
-		return false, err
-	}
-	return deleted, nil
-}
-
-func stableIDMatches(recordID, expectedID string) bool {
-	return expectedID == "" || recordID == "" || recordID == expectedID
-}
 
 // LoadInstanceData reads and unmarshals instance data from disk without
 // constructing live Instance objects (no tmux session restoration).

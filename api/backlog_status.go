@@ -57,6 +57,9 @@ func backlogStatusCmd(use, short, long string, to backlog.Status, check statusCh
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runBacklog(func() (any, error) {
+				if err := refuseFromItemSession(use); err != nil {
+					return nil, err
+				}
 				id, err := backlog.ParseID(args[0])
 				if err != nil {
 					return nil, err
@@ -100,9 +103,6 @@ var (
 	backlogReopenCmd = backlogStatusCmd("reopen", "Reopen a done or dropped item as a draft",
 		"Set a done or dropped item's status back to draft. On a parent, reopen its done and "+
 			"dropped children.", backlog.StatusDraft, reopenCheck)
-	backlogDoneCmd = backlogStatusCmd("done", "Mark an item done after review",
-		"Mark the item done. Items that wait on it can then start. Open questions on it close; "+
-			"its session stays.", backlog.StatusDone, nil)
 	backlogDropCmd = backlogStatusCmd("drop", "Mark an item dropped",
 		"Mark the item dropped. On a parent, drop its open children. Its session stays.", backlog.StatusDropped, nil)
 )
@@ -114,6 +114,9 @@ var backlogDeleteCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
+			if err := refuseFromItemSession("delete"); err != nil {
+				return nil, err
+			}
 			id, err := backlog.ParseID(args[0])
 			if err != nil {
 				return nil, err
@@ -129,33 +132,6 @@ var backlogDeleteCmd = &cobra.Command{
 				return nil, err
 			}
 			return map[string]any{"id": id, "deleted": true}, nil
-		})
-	},
-}
-
-var backlogNoteCmd = &cobra.Command{
-	Use:   "note <id> <text>",
-	Short: "Add a note to an item's thread",
-	Long:  "Add a note to the item's thread. A note is not delivered to the item's session.",
-	Args:  cobra.MinimumNArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runBacklog(func() (any, error) {
-			id, err := backlog.ParseID(args[0])
-			if err != nil {
-				return nil, err
-			}
-			t, err := backlogProject()
-			if err != nil {
-				return nil, err
-			}
-			var resp daemon.PostBacklogMessageResponse
-			if err := callBacklogRoute("PostBacklogMessage", daemon.PostBacklogMessageRequest{
-				RepoID: t.repoID, RepoPath: t.repoPath, ID: id, Kind: backlog.KindNote,
-				Text: strings.Join(args[1:], " "),
-			}, &resp); err != nil {
-				return nil, err
-			}
-			return resp.Message, nil
 		})
 	},
 }
@@ -206,6 +182,11 @@ var backlogRunnerCmd = &cobra.Command{
 			}
 			if cmd.Flags().Changed("on-done") {
 				onDone, changed = &backlogRunnerOnDone, true
+			}
+			if changed {
+				if err := refuseControlsFromItemSession(); err != nil {
+					return nil, err
+				}
 			}
 			t, err := backlogProject()
 			if err != nil {
@@ -276,7 +257,13 @@ var backlogBudgetCmd = &cobra.Command{
 				}
 				usdLimit = &v
 			}
-			if share == nil && stopAt == nil && maxPerRun == nil && usdLimit == nil {
+			change := share != nil || stopAt != nil || maxPerRun != nil || usdLimit != nil
+			if change {
+				if err := refuseControlsFromItemSession(); err != nil {
+					return nil, err
+				}
+			}
+			if !change {
 				var resp daemon.GetBudgetResponse
 				if err := callBacklogRoute("GetBudget", daemon.GetBudgetRequest{}, &resp); err != nil {
 					return nil, err
@@ -319,6 +306,6 @@ func init() {
 	f.StringVar(&backlogBudgetMaxPerRun, "max-per-run", "", "Percent of the 5-hour window one run may use (0-100; default 10)")
 	f.StringVar(&backlogBudgetUSDLimit, "usd-limit", "", "Dollar limit at API prices for accounts with no plan readings; 0 turns it off")
 
-	BacklogCmd.AddCommand(backlogQueueCmd, backlogDraftCmd, backlogReviewCmd, backlogReopenCmd, backlogDoneCmd,
-		backlogDropCmd, backlogDeleteCmd, backlogNoteCmd, backlogRunnerCmd, backlogBudgetCmd)
+	BacklogCmd.AddCommand(backlogQueueCmd, backlogDraftCmd, backlogReviewCmd, backlogReopenCmd,
+		backlogDropCmd, backlogDeleteCmd, backlogRunnerCmd, backlogBudgetCmd)
 }

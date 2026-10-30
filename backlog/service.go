@@ -19,6 +19,9 @@ type Host interface {
 	ProjectName(repoID string) string
 	// Changed is called after a write with the ids it changed.
 	Changed(repoID string, ids []int)
+	// SlotsUsed counts the project's runs that hold a runner slot: starts in
+	// flight plus item sessions with an active run or that af will restore.
+	SlotsUsed(repoID string) int
 }
 
 // Service runs the backlog routes over the stores.
@@ -105,7 +108,9 @@ func (s *Service) Get(req GetRequest) (*View, error) {
 		return nil, err
 	}
 	states := b.DeriveAll(s.host.Facts(p.id))
-	return &View{Backlog: b, States: states, Runner: runnerView(b, states, budget)}, nil
+	runner := runnerView(b, states, budget)
+	runner.Used = s.host.SlotsUsed(p.id)
+	return &View{Backlog: b, States: states, Runner: runner}, nil
 }
 
 func runnerView(b *Backlog, states map[int]Derived, budget *Budget) RunnerView {
@@ -113,9 +118,6 @@ func runnerView(b *Backlog, states map[int]Derived, budget *Budget) RunnerView {
 	queued := false
 	for _, it := range b.Items {
 		d := states[it.ID]
-		if d.HoldsSlot {
-			v.Used++
-		}
 		if d.State == StateQueued && !b.IsParent(it.ID) {
 			queued = true
 		}
@@ -291,8 +293,8 @@ func checkAgentReview(b *Backlog, req SetItemStatusRequest) error {
 	if req.Status != StatusReview {
 		return fmt.Errorf("an item session can only send its item to review, not set it to %s", req.Status)
 	}
-	if !it.hasRun(req.SessionID) {
-		return fmt.Errorf("session %s is not a run of %s", req.SessionID, FormatID(req.ID))
+	if r := it.lastRun(); r == nil || r.SessionID != req.SessionID {
+		return fmt.Errorf("session %s is not the latest run of %s", req.SessionID, FormatID(req.ID))
 	}
 	return nil
 }

@@ -76,6 +76,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/SetBacklogItemStatus` | `repo_id`, `repo_path`, `id`, `status`, `session_id`, `pr` | Set an item's status (draft, queued, review, done, dropped); on a parent, queue queues its draft children and drop drops its open children. |
 | `POST` | `/v1/DeleteBacklogItem` | `repo_id`, `repo_path`, `id` | Delete a draft item that has no runs, thread or children. |
 | `POST` | `/v1/PostBacklogMessage` | `repo_id`, `repo_path`, `id`, `kind`, `text`, `session_id`, `question_id` | Add a note to an item's thread; notes are not delivered to a session. |
+| `POST` | `/v1/StartBacklogItem` | `repo_id`, `repo_path`, `id` | Start an item now, ignoring the runner switch and budget: send "continue" to its live session, or create a session for it; returns the run, which is starting until the session exists. |
 | `POST` | `/v1/SetBacklogSettings` | `repo_id`, `repo_path`, `runner`, `max_running`, `on_done` | Change a project's runner switch, max running, or what happens to an item's session when the item is done. |
 | `POST` | `/v1/GetBudget` | — | Read the global backlog budget: the share of each Claude plan window the backlog may use, the plan percent at which the runner stops, the cap per run, and the dollar limit for accounts with no plan readings. |
 | `POST` | `/v1/SetBudget` | `share`, `stop_at`, `max_per_run`, `usd_limit` | Change the global backlog budget: share, stop_at and max_per_run as percents from 0 to 100, and usd_limit in US dollars at API prices (0 turns it off). |
