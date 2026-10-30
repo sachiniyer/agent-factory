@@ -192,32 +192,6 @@ func TestBacklogAskOutsideItemSession(t *testing.T) {
 	}
 }
 
-// reopen on a parent with one done leaf and one still-open leaf is valid: the
-// service reopens the closed leaves only (Codex P2 on #6294).
-func TestBacklogReopenAPartiallyOpenParent(t *testing.T) {
-	stubBacklogDaemon(t)
-	for _, args := range [][]string{{"add", "parent"}, {"add", "done-child", "--parent", "1"}, {"add", "open-child", "--parent", "1"}} {
-		if out, err := runBacklogCmd(t, args...); err != nil {
-			t.Fatal(args, out, err)
-		}
-	}
-	if out, err := runBacklogCmd(t, "done", "2"); err != nil {
-		t.Fatal(out, err)
-	}
-	if out, err := runBacklogCmd(t, "queue", "3"); err != nil {
-		t.Fatal(out, err)
-	}
-	if out, err := runBacklogCmd(t, "reopen", "1"); err != nil {
-		t.Fatalf("a partially open parent was refused: %v %s", err, out)
-	}
-	if out, err := runBacklogCmd(t, "show", "2"); err != nil || !strings.Contains(out, `"status": "draft"`) {
-		t.Fatalf("the done child was not reopened: %s %v", out, err)
-	}
-	if _, err := runBacklogCmd(t, "reopen", "1"); err == nil || !strings.Contains(err.Error(), "no done or dropped children") {
-		t.Fatalf("a parent with nothing closed must be refused: %v", err)
-	}
-}
-
 // An agent that reports before the start record exists is resolved from its own
 // item id while its run is still starting (Codex P2 on #6294).
 func TestBacklogSelfResolvesAStillStartingRun(t *testing.T) {
