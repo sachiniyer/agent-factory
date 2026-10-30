@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/sachiniyer/agent-factory/config"
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"

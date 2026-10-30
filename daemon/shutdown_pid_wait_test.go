@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
+
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -448,18 +450,7 @@ func TestProcessStartTokenIdentifiesIncarnation(t *testing.T) {
 	}
 	name := "sleep"
 	if runtime.GOOS == "linux" {
-		sleepPath, err := exec.LookPath("sleep")
-		if err != nil {
-			t.Skip("sleep not available")
-		}
-		data, err := os.ReadFile(sleepPath)
-		if err != nil {
-			t.Skipf("read %s: %v", sleepPath, err)
-		}
-		name = filepath.Join(t.TempDir(), "a) (b c")
-		if err := os.WriteFile(name, data, 0o755); err != nil {
-			t.Fatalf("copy sleep: %v", err)
-		}
+		name = sleeper.Named(t, filepath.Join(t.TempDir(), "a) (b c"))
 	}
 	pid := startReapedProcess(t, name, "30")
 
