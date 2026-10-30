@@ -13405,7 +13405,7 @@ function confirmDeleteTabModal(opts) {
     confirmClass: "af-danger",
     onCancel: opts.onCancel
   });
-  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : opts.kind === TabKind.Docs ? "This removes the Proposal tab. The proposal and its docs stay. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
+  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : opts.kind === TabKind.Docs ? "This removes the Docs tab. The proposal and its docs stay. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
   asForm(handle.el.firstElementChild, opts.onConfirm);
   queueMicrotask(() => cancelBtn.focus());
   return handle;
@@ -14349,7 +14349,7 @@ function tabLabel(tab) {
     case TabKind.VSCode:
       return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     case TabKind.Docs:
-      return tab.name && tab.name !== "docs" ? tab.name : "Proposal";
+      return tab.name && tab.name !== "docs" ? tab.name : "Docs";
     default:
       return tab.name || "Tab";
   }

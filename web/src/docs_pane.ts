@@ -101,7 +101,7 @@ export class DocsPane {
 
   constructor(host: HTMLElement, private readonly opts: DocsPaneOptions) {
     this.strip = h("div", { class: "af-docs-strip", role: "tablist" });
-    this.strip.setAttribute("aria-label", "Proposal docs");
+    this.strip.setAttribute("aria-label", "Docs");
     this.addButton = h("button", { type: "button", class: "af-ghost af-docs-add", title: "Add doc" }, icon("plus"));
     this.addButton.setAttribute("aria-label", "Add doc");
     this.addButton.setAttribute("aria-haspopup", "menu");
