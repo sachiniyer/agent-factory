@@ -40,11 +40,19 @@ type backlogState struct {
 	// answering holds the answers with a delivery worker outstanding, by
 	// project/item/answer id.
 	answering map[string]bool
+	// restoring serializes the restoration of an archived item session.
+	restoring sync.Map
 	// recovered, recovering and recoveryDone track restart recovery.
 	recovered    map[string]bool
 	recovering   bool
 	recoveryDone bool
 	meter        meterState
+}
+
+// restoreLock is the per-session restore mutex.
+func (s *backlogState) restoreLock(sessionID string) *sync.Mutex {
+	mu, _ := s.restoring.LoadOrStore(sessionID, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 func answerKey(repoID string, a backlog.PendingAnswer) string {
