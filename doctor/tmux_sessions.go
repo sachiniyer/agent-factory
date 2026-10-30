@@ -314,6 +314,13 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 		}
 	}
 	sort.Strings(leaked)
+	// The leaked-session listing is pinned to the daemon's recorded socket
+	// when one was readable, so the manual remedy must target THAT server: a bare
+	// `tmux kill-session -t ...` resolves doctor's own $TMUX/$TMUX_TMPDIR and would
+	// miss the session (or, on a shared name, kill an unrelated one on the
+	// ambient server) — the same wrong-server divergence the listing pinning
+	// closed. With no record the listing was ambient, so the remedy stays ambient.
+	socket, kind := ctx.recordedSocket()
 	for _, name := range leaked {
 		origin := "no ancestry marker"
 		ownedByActiveHome := false
@@ -350,13 +357,17 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 		case present && home != "":
 			origin = "created by another agent-factory home: " + home
 		}
+		killCmd := shellsuggest.Command("tmux", "kill-session", "-t", "="+name+":")
+		if kind == recordedSocketPinned {
+			// "=name:" is tmux's exact-match target syntax — one argument, so
+			// it is one piece the seam quotes as a whole. `-S <socket>` pins
+			// the remedy to the server the listing found the session on.
+			killCmd = shellsuggest.Command("tmux", "-S", socket, "kill-session", "-t", "="+name+":")
+		}
 		finding := Finding{
 			Check: "leaked-tmux-session",
 			Detail: fmt.Sprintf("tmux session %s has no backing record in %s (%s); "+
-				"kill it with: %s", name, ctx.opts.ConfigDir, origin,
-				// "=name:" is tmux's exact-match target syntax — one argument, so
-				// it is one piece the seam quotes as a whole.
-				shellsuggest.Command("tmux", "kill-session", "-t", "="+name+":")),
+				"kill it with: %s", name, ctx.opts.ConfigDir, origin, killCmd),
 		}
 		if ownedByActiveHome {
 			// This install's marker plus no record is a proven leak with an

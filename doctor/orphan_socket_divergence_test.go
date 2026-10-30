@@ -303,3 +303,47 @@ func TestRecordedSocketPin_GenuineOrphanStillKilled(t *testing.T) {
 	require.Eventually(t, func() bool { return !alive(orphan) }, 5*time.Second, 25*time.Millisecond,
 		"a genuine orphan must still be killed by --fix once the listing is pinned to the recorded socket")
 }
+
+// TestRecordedSocketPin_LeakedSessionKillCommandPinnedToRecordedSocket asserts the
+// manual remedy checkLeakedTmuxSessions prints targets the SAME server the pinned
+// listing found the leaked session on. The listing is `tmux -S <socket> ls`, so a
+// bare `tmux kill-session -t ...` remedy would resolve doctor's own
+// $TMUX/$TMUX_TMPDIR and miss the session (or, on a shared name, kill an unrelated
+// one on the ambient server) — the wrong-server divergence the listing pinning
+// closed, reopened on the remedy side.
+func TestRecordedSocketPin_LeakedSessionKillCommandPinnedToRecordedSocket(t *testing.T) {
+	testguard.IsolateTmux(t) // doctor's ambient server (server B); TMUX cleared, TMUX_TMPDIR set
+	home := testguard.SocketTempDir(t)
+
+	// A leaked af session on the daemon's recorded socket (server A), carrying
+	// this home's ownership marker so it is a proven, actionable leak. No config
+	// instance backs it, so it is absent from recordedTmuxNames.
+	sockA := testguard.SocketPath(t, "a")
+	const leakedName = "af_doctor-leaked-on-recorded-socket"
+	out, err := exec.Command("tmux", "-S", sockA, "new-session", "-d", "-s", leakedName,
+		"-e", tmux.EnvMarkerHome+"="+home, "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session on server A: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockA, "kill-server").Run() })
+
+	writeTmuxServerState(t, home, tmux.ServerState{
+		Mode:   tmux.ServerModeDedicated,
+		Socket: sockA,
+		Unit:   "test-unit",
+		At:     time.Now(),
+	})
+
+	opts := testOptionsWithHome(t, home, false)
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	leaked := findByCheck(report, "leaked-tmux-session")
+	require.Len(t, leaked, 1, "exactly one leaked session on the recorded socket: %v", leaked)
+	require.True(t, leaked[0].Actionable,
+		"a session carrying this home's marker with no backing record is a proven leak: %s", leaked[0].Detail)
+	require.Contains(t, leaked[0].Detail, "-S "+sockA,
+		"the manual kill remedy must pin to the recorded socket the listing found the session on: %s", leaked[0].Detail)
+	require.Contains(t, leaked[0].Detail, "kill-session",
+		"the remedy is a kill-session: %s", leaked[0].Detail)
+	require.NotContains(t, leaked[0].Detail, "tmux kill-session -t",
+		"a bare ambient `tmux kill-session -t ...` would target the wrong server when the listing is pinned: %s", leaked[0].Detail)
+}
