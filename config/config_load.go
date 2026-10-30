@@ -650,10 +650,19 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 				// user follows it, it could reach another home's active
 				// config. Name the pinned source the lock still covers, the
 				// same as a retarget refusal, and let the next run move it
-				// aside.
+				// aside. An editor that removed config.json between the locked
+				// write and renameSibling surfaces here as an ENOENT rename
+				// with a stable home; the original no longer sits at the
+				// pinned source, so say it may remain rather than asserting it
+				// does and recommending a rerun that has nothing to move.
 				pinnedSource := filepath.Join(locked.dirResolved, filepath.Base(configPath))
-				log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original remains at %s; re-run to move it aside",
-					prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, pinnedSource)
+				if os.IsNotExist(renameErr) {
+					log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original may no longer exist at %s (it was removed during conversion), so there is nothing to move aside",
+						prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, pinnedSource)
+				} else {
+					log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original remains at %s; re-run to move it aside",
+						prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, pinnedSource)
+				}
 			}
 		} else {
 			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
