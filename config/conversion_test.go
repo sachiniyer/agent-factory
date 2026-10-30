@@ -658,3 +658,107 @@ func TestConversionOrdinaryRenameFailureNamesPinnedSource(t *testing.T) {
 	assert.NotContains(t, warnBuf.String(), "yourself to silence the duplicate-config warning",
 		"an ordinary rename failure must not point a deletion instruction through the mutable home link")
 }
+
+// TestConversion_RefusesTOMLSymlinkOutOfTheHomeWhenLegacyVanished pins the guard
+// added for the codex finding on filelock.go:167 — the early ENOENT branch of
+// confirmSiblingDir. When config.json is removed after LoadConfig read it while
+// another process installs config.toml as a symlink to a different directory,
+// dirFD points at the symlink target's directory; the prior Stat(configPath)
+// reports ENOENT and, without the directory-identity check, readSibling would
+// open an unrelated config.json there and the rename would move it aside. The
+// guard now refuses that one-shot symlink race up front rather than mis-reading
+// or mis-renaming, the same as the present-sibling branch.
+//
+// It calls convertJSONToTOML directly to stage the post-pin state LoadConfig's
+// own toml-existence check would otherwise short-circuit: here config.toml is a
+// symlink to an empty file in another directory and the legacy config.json is
+// GONE from the home (removed after LoadConfig read it).
+func TestConversion_RefusesTOMLSymlinkOutOfTheHomeWhenLegacyVanished(t *testing.T) {
+	const impostor = `{"default_program":"impostor"}`
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	require.NoError(t, os.Mkdir(home, 0o755))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	fastShell(t)
+
+	// config.toml in the home is a symlink to an empty file in another
+	// directory — the shape a peer process installing config.toml as a
+	// symlink during the conversion window pins the lock onto. The legacy
+	// config.json is gone from the home (removed after LoadConfig read it).
+	elsedir := filepath.Join(root, "elsewhere")
+	require.NoError(t, os.Mkdir(elsedir, 0o755))
+	tomlTarget := filepath.Join(elsedir, TomlConfigFileName)
+	require.NoError(t, os.WriteFile(tomlTarget, []byte(""), 0o644))
+	tomlLink := filepath.Join(home, TomlConfigFileName)
+	require.NoError(t, os.Symlink(tomlTarget, tomlLink))
+	// An unrelated config.json in the symlink target directory: without the
+	// guard, readSibling would open and convert this one.
+	require.NoError(t, os.WriteFile(filepath.Join(elsedir, ConfigFileName), []byte(impostor), 0o644))
+
+	configPath := filepath.Join(home, ConfigFileName)
+	cfg, err := convertJSONToTOML(configPath, tomlLink, configPath, tomlLink)
+	require.Error(t, err, "a vanished legacy config.json under a config.toml symlinked out of the home must not let the conversion read or rename an unrelated file")
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "is not in the directory the lock covers",
+		"the refusal names the directory the lock covers vs. the one the vanished legacy path reaches")
+
+	// Nothing was converted: no backup was created in the home, and the
+	// symlink target directory's unrelated config.json is untouched.
+	assert.NoFileExists(t, filepath.Join(home, ConfigFileName+".bak"),
+		"no backup was created in the home")
+	assert.Equal(t, impostor, readString(t, filepath.Join(elsedir, ConfigFileName)),
+		"the unrelated config.json in the symlink target directory is untouched")
+	info, lerr := os.Lstat(tomlLink)
+	require.NoError(t, lerr)
+	assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink,
+		"the config.toml symlink the peer installed is left for the operator to repair")
+}
+
+// TestConversionRenameFailureENOENTSaysOriginalMayNoLongerExist pins the codex
+// finding on config_load.go:656: when an editor removes config.json after the
+// locked TOML write but before renameSibling — home stable, so the pre-rename
+// confirm passes — Renameat returns ENOENT and the original no longer sits at
+// the pinned source. The warning must not assert the original remains there
+// and recommend a rerun that has nothing to move; it distinguishes that ENOENT
+// from an ordinary rename failure.
+func TestConversionRenameFailureENOENTSaysOriginalMayNoLongerExist(t *testing.T) {
+	const aJSON = `{"default_program": "codex"}`
+	const bJSON = `{"default_program": "aider"}`
+
+	// B is staged but unused: the home stays pointed at A throughout, so the
+	// pre-rename confirm passes and the rename fails because the source was
+	// concurrently removed, not because the link moved.
+	_, _, first, _ := retargetableJSONHome(t, aJSON, bJSON, "")
+
+	// Remove config.json between confirm and renameSibling — the
+	// check-then-act window an editor or rm slips into. The home stays on A,
+	// so the recheck confirm passes and the refusal is classified as an
+	// ordinary (non-retarget) rename failure carrying ENOENT.
+	convertRenameRaceHookForTest = func() {
+		require.NoError(t, os.Remove(filepath.Join(first, ConfigFileName)))
+	}
+	t.Cleanup(func() { convertRenameRaceHookForTest = nil })
+
+	warnBuf := captureLog(t, &aflog.WarningLog)
+	cfg, err := LoadConfig()
+	require.NoError(t, err,
+		"the conversion must succeed: config.toml landed in the locked directory under the lock")
+	assert.Equal(t, "codex", cfg.DefaultProgram)
+
+	assert.Contains(t, warnBuf.String(), "could not move the original",
+		"a failed rename is logged, not silent")
+	assert.Contains(t, warnBuf.String(), "may no longer exist at",
+		"a rename failure caused by a concurrently removed source says the original may be gone, not that it remains")
+	assert.NotContains(t, warnBuf.String(), "re-run to move it aside",
+		"there is nothing to move aside when the source was removed during conversion")
+	assert.NotContains(t, warnBuf.String(), "yourself to silence the duplicate-config warning",
+		"an ordinary rename failure must not point a deletion instruction through the mutable home link")
+
+	// No backup was created in the locked directory: the rename failed
+	// because the source was gone, not because it was misdirected.
+	assert.NoFileExists(t, filepath.Join(first, ConfigFileName+".bak"),
+		"no backup was created when the source was removed before the rename")
+	assert.Contains(t, readString(t, filepath.Join(first, TomlConfigFileName)), "codex",
+		"config.toml landed in the directory the lock covers")
+}
