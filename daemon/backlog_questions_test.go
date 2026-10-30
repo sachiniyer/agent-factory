@@ -388,3 +388,27 @@ func TestAnswerDeliveredWriteIsRetriedWhileTheBacklogIsBusy(t *testing.T) {
 		}
 	}
 }
+
+// A failed additional answer leaves the run that was already underway alone
+// (Codex P2 on #6295): only a run this send armed from idle is disarmed.
+func TestFailedAdditionalAnswerKeepsTheActiveRun(t *testing.T) {
+	m, repoID, inst := askedItem(t)
+	sent := stubBacklogSend(t, m, repoID)
+	if !inst.ArmBacklogRun(time.Now()) { // the first answer's run, still being worked on
+		t.Fatal("precondition: arm")
+	}
+	sent.err = errors.New("pane gone")
+	if err := m.sendBacklogAnswer(repoID, inst, "second answer"); err == nil {
+		t.Fatal("the send was expected to fail")
+	}
+	if !inst.BacklogRunActive() {
+		t.Fatal("a failed additional answer closed the run already underway")
+	}
+	inst.DisarmBacklogRun()
+	if err := m.sendBacklogAnswer(repoID, inst, "from idle"); err == nil {
+		t.Fatal("the send was expected to fail")
+	}
+	if inst.BacklogRunActive() {
+		t.Fatal("a run armed by the failed send itself must be disarmed")
+	}
+}
