@@ -15,8 +15,10 @@ async function openTasks(page: Page) {
   return row.getByRole("switch");
 }
 
-test("task switch: shows the requested value and stays busy while UpdateTask is in flight", async ({ page }) => {
+test("task switch: shows the requested value and stays busy while UpdateTask is in flight", async ({ page }, info) => {
   const sw = await openTasks(page);
+  const row = page.locator(".af-tasks .af-task-row", { hasText: SEEDED_TASK });
+  await row.screenshot({ path: info.outputPath("switch-before.png") });
   const was = (await sw.getAttribute("aria-checked")) === "true";
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -33,12 +35,14 @@ test("task switch: shows the requested value and stays busy while UpdateTask is 
   await expect(sw).toHaveAttribute("aria-disabled", "true");
   // aria-disabled, not disabled: the switch keeps keyboard focus while busy.
   await expect(sw).not.toHaveAttribute("disabled", /.*/);
+  await row.screenshot({ path: info.outputPath("switch-busy.png") });
   await sw.click({ force: true });
   expect(updates, "a second click while in flight sends nothing").toBe(1);
 
   release();
   await expect(sw).not.toHaveAttribute("aria-busy", "true");
   await expect(sw).toHaveAttribute("aria-checked", String(!was));
+  await row.screenshot({ path: info.outputPath("switch-settled.png") });
   // The daemon applied it: a fresh load reads the new value.
   await page.unroute("**/v1/UpdateTask");
   await page.reload();
