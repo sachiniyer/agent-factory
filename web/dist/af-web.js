@@ -18877,6 +18877,8 @@ var AppShell = class {
     const focusFallback = this.projectSwitchBtn.getClientRects().length ? this.projectSwitchBtn : this.appControls.trigger;
     replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
+  /** The project whose Space press is armed, awaiting its release (see projectItem). */
+  projectSpaceArmed = null;
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
    *  switches the active project and closes the menu. `record` is the registry
@@ -18924,19 +18926,19 @@ var AppShell = class {
       }
       activate(e);
     });
-    let spaceArmed = false;
     item.addEventListener("keydown", (e) => {
       if (e.key !== " " || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
-      if (!e.repeat) spaceArmed = true;
+      if (!e.repeat) this.projectSpaceArmed = p.root;
     });
     item.addEventListener("keyup", (e) => {
-      if (e.key !== " " || !spaceArmed) return;
-      spaceArmed = false;
+      if (e.key !== " " || this.projectSpaceArmed !== p.root) return;
+      this.projectSpaceArmed = null;
       activate(e);
     });
-    item.addEventListener("blur", () => {
-      spaceArmed = false;
+    item.addEventListener("blur", (e) => {
+      const to = e.relatedTarget;
+      if (to instanceof Node && !this.projectMenu.contains(to)) this.projectSpaceArmed = null;
     });
     return item;
   }

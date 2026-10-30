@@ -2159,6 +2159,9 @@ export class AppShell {
     replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
 
+  /** The project whose Space press is armed, awaiting its release (see projectItem). */
+  private projectSpaceArmed: string | null = null;
+
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
    *  switches the active project and closes the menu. `record` is the registry
@@ -2220,18 +2223,24 @@ export class AppShell {
     // only answers Enter, so restore Space here. Like a button, act on release:
     // acting on press lets held-key repeats land on the switcher button that takes
     // focus after the menu closes, and reopen the menu.
-    let spaceArmed = false;
+    // The armed press lives on the shell, keyed by project root, not in this row's
+    // closure: a live refresh rebuilds the menu between press and release and hands
+    // focus to a fresh row for the same project, which must still see the release.
     item.addEventListener("keydown", (e) => {
       if (e.key !== " " || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       e.preventDefault(); // no page scroll
-      if (!e.repeat) spaceArmed = true;
+      if (!e.repeat) this.projectSpaceArmed = p.root;
     });
     item.addEventListener("keyup", (e) => {
-      if (e.key !== " " || !spaceArmed) return;
-      spaceArmed = false;
+      if (e.key !== " " || this.projectSpaceArmed !== p.root) return;
+      this.projectSpaceArmed = null;
       activate(e);
     });
-    item.addEventListener("blur", () => { spaceArmed = false; });
+    // Focus genuinely leaving the menu disarms; a rebuild's blur (no related target) does not.
+    item.addEventListener("blur", (e) => {
+      const to = e.relatedTarget;
+      if (to instanceof Node && !this.projectMenu.contains(to)) this.projectSpaceArmed = null;
+    });
     return item;
   }
 
