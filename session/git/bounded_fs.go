@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -152,4 +153,21 @@ func BoundedPathExists(path string) (bool, error) {
 	default:
 		return false, err
 	}
+}
+
+// boundedDirIsEmpty reports whether dir is a directory with zero entries, bounded.
+// A non-directory, or any entry, is "not empty".
+func boundedDirIsEmpty(dir string) (bool, error) {
+	return BoundedFSOp("listing "+dir, func() (bool, error) {
+		f, err := os.Open(dir)
+		if err != nil {
+			return false, err
+		}
+		defer f.Close()
+		names, err := f.Readdirnames(1)
+		if err != nil && err != io.EOF {
+			return false, err
+		}
+		return len(names) == 0, nil
+	})
 }

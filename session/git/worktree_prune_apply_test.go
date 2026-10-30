@@ -500,3 +500,44 @@ func TestObjectStoresInsideDeletedRootsAreRefusedWhateverTheyAreNamed(t *testing
 		require.Error(t, err, "unknown refuses")
 	})
 }
+
+// An EMPTY leaf holds nothing to lose and nothing to prove: a crash between
+// removing the nonce and the final rmdir must leave a removal a resume can finish
+// (Codex on #6186), while a non-empty leaf that is not provably ours is still left
+// alone.
+func TestResumeFinishesAnEmptyLeafLeftAfterTheNonceWasRemoved(t *testing.T) {
+	repo, wt := pruneWorktree(t)
+	leafName, nonce, err := StampPruneNonce(wt)
+	require.NoError(t, err)
+	leaf, err := registrationLeaf(wt)
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(wt, wt+"-moved"))
+
+	prev := leafRemovalFailure
+	leafRemovalFailure = func(entry string) error {
+		if entry == "." { // after the nonce is gone, before the final rmdir
+			return fmt.Errorf("injected crash before rmdir")
+		}
+		return nil
+	}
+	t.Cleanup(func() { leafRemovalFailure = prev })
+	require.Error(t, RemoveArchivedRegistrationLeaf(repo, leafName, nonce))
+	entries, err := os.ReadDir(leaf)
+	require.NoError(t, err)
+	require.Empty(t, entries, "premise: only an empty directory remains, with no identity left to prove")
+
+	leafRemovalFailure = prev
+	require.NoError(t, RemoveArchivedRegistrationLeaf(repo, leafName, nonce), "resume removes the empty directory")
+	assert.NoDirExists(t, leaf)
+}
+
+func TestANonEmptyUnprovenLeafIsStillLeftAlone(t *testing.T) {
+	repo, wt := pruneWorktree(t)
+	leafName, _, err := StampPruneNonce(wt)
+	require.NoError(t, err)
+	leaf, err := registrationLeaf(wt)
+	require.NoError(t, err)
+	err = RemoveArchivedRegistrationLeaf(repo, leafName, "a-different-nonce")
+	require.ErrorIs(t, err, ErrRegistrationNotOurs)
+	assert.DirExists(t, leaf)
+}

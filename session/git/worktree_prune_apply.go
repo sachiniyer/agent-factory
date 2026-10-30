@@ -305,6 +305,16 @@ func RemoveArchivedRegistrationLeaf(repoRoot, leafName, nonce string) error {
 	}
 	got, err := boundedReadFile(filepath.Join(leaf, pruneNonceFile))
 	if err != nil || strings.TrimSpace(string(got)) != nonce {
+		// An EMPTY directory holds nothing to lose and nothing to prove: a crash
+		// (or a failed final rmdir) between removing the nonce and the directory
+		// leaves exactly this, and the removal must be finishable. Anything that is
+		// not provably empty and not provably ours is left alone.
+		if empty, rerr := boundedDirIsEmpty(leaf); rerr != nil {
+			return rerr
+		} else if empty {
+			return BoundedMutationWithin(pruneFSOpTimeout, "removing the empty "+leaf,
+				[]string{leaf, LeafMutationKey(repoRoot, leafName)}, func() error { return os.Remove(leaf) })
+		}
 		return fmt.Errorf("%w (%s)", ErrRegistrationNotOurs, leaf)
 	}
 	locked, err := BoundedPathExists(filepath.Join(leaf, "locked"))
@@ -522,6 +532,11 @@ func removeLeafIdentityLast(leaf string, inject func(entry string) error) error 
 	}
 	if err := os.Remove(filepath.Join(leaf, pruneNonceFile)); err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	if inject != nil {
+		if err := inject("."); err != nil { // between the nonce and the final rmdir
+			return err
+		}
 	}
 	return os.Remove(leaf)
 }

@@ -61,21 +61,6 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		return session.InstanceData{}, err
 	}
 	m.info().Printf("KillSession requested for session %q (id %s, repo %s) by %s", title, resolvedID, repoID, requester)
-	// A pending prune owns the archive's cleanup (the renamed .prune-* tree and the
-	// intent). Finish it through the same resume path before the kill proceeds, or
-	// refuse: a kill must never orphan either (#5189).
-	if instance != nil {
-		// One shared fence: an abandoned (timed-out) prune write or filesystem step
-		// refuses the kill even when the intent was cleared in memory.
-		if err := m.pruneAbandonedGuard(repoID, instance, nil); err != nil {
-			return session.InstanceData{}, fmt.Errorf("session %q has a prune step that timed out and may still be running: %w", title, err)
-		}
-	}
-	if instance != nil && instance.PruneIntent() != nil {
-		if _, inc := m.resumePruneIntent(repoID, instance); inc != nil {
-			return session.InstanceData{}, fmt.Errorf("session %q has an unfinished prune (stopped at %s: %s); run `af sessions prune --apply` to finish it, then kill it", title, inc.Step, inc.Reason)
-		}
-	}
 	// Canonicalize to the resolved session's title so the killsInFlight key,
 	// storage delete, and event all key off the identity we actually resolved
 	// (by id), not the request's title. req is a value copy, so this is local.
@@ -157,6 +142,17 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	if m.currentInstanceReplaced(key, instance, targetID) {
 		m.info().Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
 		return resolved, nil
+	}
+	// A pending prune owns the archive's cleanup (the renamed .prune-* tree and the
+	// intent), and a timed-out prune step may still be running. The check is made
+	// HERE, inside the fence — after the killsInFlight claim and the op lock that
+	// exclude a concurrent prune (which holds both for its whole run) — through the
+	// same shared check every lifecycle operation uses. Asked earlier, a prune could
+	// start and stop incomplete in the gap before the claim (#5189).
+	if instance != nil {
+		if err := m.pruneRowFence(repoID, instance); err != nil {
+			return session.InstanceData{}, fmt.Errorf("cannot kill session %q: %w; run `af sessions prune --apply` to finish it, then kill it", title, err)
+		}
 	}
 	// The caller's own precondition, asked here and nowhere earlier: this line
 	// sits inside both the killsInFlight claim (registered above, before the

@@ -427,7 +427,7 @@ func TestPruneApply_LockedRegistrationIsRefusedBeforeAnyMutation(t *testing.T) {
 }
 
 // A kill while a prune is pending never orphans the renamed tree or the intent: it
-// either completes the prune through the resume path or refuses with a message.
+// refuses with a message (the fence is checked inside the kill's own admission).
 func TestPruneApply_KillDuringAPendingPruneNeverOrphansTheCleanup(t *testing.T) {
 	manager, repoID, _, inst, archived := seedPrunableArchive(t, "kill-pending")
 	c := planOf(t, manager, repoID)
@@ -445,11 +445,12 @@ func TestPruneApply_KillDuringAPendingPruneNeverOrphansTheCleanup(t *testing.T) 
 
 	_, killErr := manager.KillSession(KillSessionRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID})
 	if killErr != nil {
-		assert.Contains(t, killErr.Error(), "unfinished prune")
+		assert.Contains(t, killErr.Error(), "pending or interrupted")
 		assert.NotNil(t, inst.PruneIntent(), "refused: the intent is still there to finish")
+		assert.Len(t, tombstones(t, archived), 1, "and the renamed tree is not orphaned or touched")
 		return
 	}
-	assert.Empty(t, tombstones(t, archived), "the kill finished the prune's cleanup instead of orphaning it")
+	t.Fatalf("a kill must not proceed while a prune intent is pending")
 }
 
 // The tombstone's durable write and its in-memory commit are one critical section
