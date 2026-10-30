@@ -119,18 +119,35 @@ test("a merged save replaces the buffer and says so", async () => {
   assert.equal(h.sync.dirty, false);
 });
 
-test("typing during a merged save keeps the edits and the old base for the next merge", async () => {
+test("typing during a merged save is rebased onto the merge and the base moves to its commit", async () => {
   const h = await started();
-  h.type("mine");
+  h.type("l1\nl2\nl3");
   await h.fire();
-  h.type("mine more");
-  h.saves[0]!.reply.resolve({ kind: "saved", text: "mine\nagent", commit: "c3", merged: true });
+  h.saves[0]!.reply.resolve({ kind: "saved", text: "l1\nl2\nl3", commit: "c2", merged: false });
   await tick();
-  assert.equal(h.buffer, "mine more", "the user's newer keystrokes are not replaced");
-  assert.equal(h.sync.baseCommit, "c1", "the buffer lacks the agent's edits, so the base stays");
+  h.type("l1x\nl2\nl3");
+  await h.fire();
+  h.type("l1xx\nl2\nl3");
+  // The daemon merged the agent's edit of line 3 into what was sent.
+  h.saves[1]!.reply.resolve({ kind: "saved", text: "l1x\nl2\nl3y", commit: "c3", merged: true });
+  await tick();
+  assert.equal(h.buffer, "l1xx\nl2\nl3y", "the newer keystrokes survive and the agent's line arrives");
+  assert.equal(h.sync.baseCommit, "c3", "the base is the merged commit, not the old one");
   assert.equal(h.status, "pending");
   await h.fire();
-  assert.deepEqual([h.saves[1]!.text, h.saves[1]!.base], ["mine more", "c1"]);
+  assert.deepEqual([h.saves[2]!.text, h.saves[2]!.base], ["l1xx\nl2\nl3y", "c3"]);
+});
+
+test("typing on the line the agent changed during a merged save opens a conflict instead of a doomed save", async () => {
+  const h = await started();
+  h.type("a\nb\nc");
+  await h.fire();
+  h.type("a\nb\nc2");
+  h.saves[0]!.reply.resolve({ kind: "saved", text: "a\nb\nC", commit: "c3", merged: true });
+  await tick();
+  assert.equal(h.status, "conflict", "the user's typing and the agent's edit hit the same line");
+  assert.equal(h.sync.text, "a\nb\nc2", "the draft stays in the buffer");
+  assert.equal(h.saves.length, 1, "no save that would conflict with our own commit");
 });
 
 test("typing during a plain save moves the base to the new commit", async () => {
@@ -311,7 +328,11 @@ test("leaving the page saves edits but keeps the doc open", async () => {
   h.sync.saveBeforeLeaving();
   assert.deepEqual(h.saves.map((s) => [s.text, s.final]), [["unsaved", true]]);
   h.type("unsaved more");
+  h.saves[0]!.reply.resolve({ kind: "saved", text: "unsaved", commit: "c2", merged: false });
+  await tick();
   assert.equal(h.status, "pending", "editing continues after a pagehide that did not unload");
+  await h.fire();
+  assert.deepEqual([h.saves[1]!.text, h.saves[1]!.base], ["unsaved more", "c2"]);
 });
 
 test("dispose does not send an open conflict the user has not resolved", async () => {

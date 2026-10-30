@@ -1,298 +1,256 @@
-// The save loop of one open doc in the Docs tab: autosave after a pause in
-// typing, three-way merges done by the daemon, conflicts, and reloads when the
-// agent changes the doc. No DOM here; the pane wires it to the editor.
+// The save loop of one open doc in the Docs tab. The decisions live in the pure
+// reducer in docs_sync_model.ts; this class runs its effects (loads, saves,
+// timers, the editor buffer) and feeds the replies back as events. No DOM here;
+// the pane wires it to the editor.
 
 import type { DocText, SaveResult } from "./proposal_api.js";
-import { hasConflictMarkers, mergeWithMarkers } from "./text_diff.js";
+import {
+  AUTOSAVE_DELAY_MS,
+  SAVE_RETRY_MS,
+  type Conflict,
+  type Draft,
+  type Effect,
+  type Event,
+  type Model,
+  type SyncStatus,
+  initialModel,
+  isDirty,
+  statusOf,
+  step,
+} from "./docs_sync_model.js";
 
-export const AUTOSAVE_DELAY_MS = 500;
-export const SAVE_RETRY_MS = 5000;
-
-export type SyncStatus =
-  | "loading"
-  | "saved"
-  | "pending"
-  | "saving"
-  | "merged"
-  | "conflict"
-  | "markers"
-  | "error";
-
-export interface Conflict {
-  ours: string;
-  theirs: string;
-  base: string;
-  /** The commit that `theirs` is at; "" when the daemon did not say. */
-  head: string;
-}
+export { AUTOSAVE_DELAY_MS, SAVE_RETRY_MS };
+export type { Conflict, Draft, SyncStatus };
 
 export interface DocSyncDeps {
   load(): Promise<DocText>;
   /** `final` marks the save that dispose or page unload sends; nobody waits
    *  for its reply. */
   save(text: string, base: string, final?: boolean): Promise<SaveResult>;
-  /** Replaces the editor buffer. The editor keeps the cursor and scroll. */
+  /** Replaces the editor buffer. The editor keeps the cursor and scroll. Called
+   *  only while the doc is attached. */
   setBuffer(text: string): void;
   onStatus(status: SyncStatus, detail: string): void;
+  /** Per-viewer storage for an unresolved conflict's draft. A draft never goes
+   *  into the proposal doc. Optional: without it a draft lives only in memory. */
+  draft?: {
+    load(): Draft | null;
+    store(draft: Draft): void;
+    clear(): void;
+  };
   setTimer(fn: () => void, ms: number): unknown;
   clearTimer(handle: unknown): void;
 }
 
 export class DocSync {
-  private buffer = "";
-  /** The text at `base`, as far as this tab knows. */
-  private saved = "";
-  private base = "";
-  private loaded = false;
-  private inflight = false;
-  private inflightText = "";
-  private loading = false;
-  private disposed = false;
-  private remotePending = false;
+  private model: Model = initialModel();
   private timer: unknown = null;
-  private conflict: Conflict | null = null;
-  private status: SyncStatus = "loading";
+  private attached = true;
+  private shown: { status: SyncStatus; detail: string } | null = null;
+  private starting: { resolve(): void; reject(e: unknown): void } | null = null;
+  private quietWaiters: (() => void)[] = [];
 
   constructor(private readonly deps: DocSyncDeps) {}
 
   get text(): string {
-    return this.buffer;
+    return this.model.buffer;
   }
 
   get currentStatus(): SyncStatus {
-    return this.status;
+    return statusOf(this.model).status;
   }
 
   get currentConflict(): Conflict | null {
-    return this.conflict;
+    return this.model.conflict;
   }
 
   get baseCommit(): string {
-    return this.base;
+    return this.model.base;
   }
 
   get dirty(): boolean {
-    return this.buffer !== this.saved;
+    return isDirty(this.model);
   }
 
-  async start(): Promise<void> {
-    this.setStatus("loading");
-    this.loading = true;
-    try {
-      const doc = await this.deps.load();
-      if (this.disposed) return;
-      this.loaded = true;
-      this.buffer = doc.text;
-      this.saved = doc.text;
-      this.base = doc.commit;
-      this.deps.setBuffer(doc.text);
-      this.setStatus("saved");
-    } catch (e) {
-      if (!this.disposed) this.setStatus("error", errorMessage(e));
-      throw e;
-    } finally {
-      this.loading = false;
-    }
+  get loaded(): boolean {
+    return this.model.loaded;
+  }
+
+  /** Loads the doc. Rejects when the first load fails. */
+  start(): Promise<void> {
+    const done = new Promise<void>((resolve, reject) => {
+      this.starting = { resolve, reject };
+    });
+    this.emit();
+    this.run({ t: "load", reload: false });
+    return done;
   }
 
   /** The user changed the buffer. */
   edit(text: string): void {
-    if (this.disposed || !this.loaded || text === this.buffer) {
-      return;
-    }
-    this.buffer = text;
-    if (this.conflict) {
-      return;
-    }
-    if (hasConflictMarkers(text)) {
-      this.cancelTimer();
-      this.setStatus("markers");
-      return;
-    }
-    this.setStatus(this.dirty ? "pending" : "saved");
-    this.schedule(AUTOSAVE_DELAY_MS);
+    this.dispatch({ t: "edit", text });
   }
 
-  /** The daemon reported a new commit that touches this doc. A clean buffer
-   *  reloads now; a dirty one waits for its next save, where the daemon merges. */
+  /** The daemon reported a new commit that touches this doc. */
   remoteChanged(commit: string): void {
-    if (this.disposed || !this.loaded || (commit !== "" && commit === this.base)) {
-      return;
-    }
-    if (this.dirty || this.inflight || this.loading || this.conflict) {
-      this.remotePending = true;
-      return;
-    }
-    void this.reload();
+    this.dispatch({ t: "remote", commit });
+  }
+
+  /** The event stream reconnected: events may have been missed, so the daemon
+   *  may be ahead of this tab. A clean doc reloads; a dirty one merges on save. */
+  reconnect(): void {
+    this.dispatch({ t: "reconnect" });
   }
 
   /** Saves now if there is anything to save. */
   flush(): void {
-    this.cancelTimer();
-    void this.save();
+    this.dispatch({ t: "flush" });
   }
 
-  /** Sends unsaved edits now, conflict markers included: autosave holds a
-   *  buffer with markers, but closing the tab or the page must not lose it, and
-   *  the agent can read both sides from the markers. A buffer with an open
-   *  conflict is not sent, because the user has not chosen yet. */
+  /** The user moved to another doc. Saves what is unsaved and keeps the whole
+   *  state, an open conflict draft included, until the doc is shown again. */
+  detach(): void {
+    this.dispatch({ t: "flush" });
+    this.attached = false;
+  }
+
+  /** The doc is shown again. Returns what the editor must show. */
+  attach(): { text: string; status: SyncStatus; detail: string } {
+    this.attached = true;
+    this.shown = null;
+    this.emit();
+    return { text: this.model.buffer, ...statusOf(this.model) };
+  }
+
+  /** Sends unsaved edits now, conflict markers included: closing the tab or the
+   *  page must not lose them. An unresolved conflict is not sent: its draft is
+   *  in per-viewer storage and comes back when the doc opens. If a save is in flight the final save waits for its reply
+   *  and goes out against the commit that reply establishes. */
   saveBeforeLeaving(): void {
-    if (this.disposed || !this.loaded || !this.dirty || this.conflict) return;
-    if (this.inflight && this.inflightText === this.buffer) return;
-    this.cancelTimer();
-    this.deps.save(this.buffer, this.base, true).catch(() => undefined);
+    this.dispatch({ t: "leave" });
   }
 
   dispose(): void {
-    this.saveBeforeLeaving();
-    this.disposed = true;
-    this.cancelTimer();
+    this.attached = false;
+    this.dispatch({ t: "close" });
   }
 
-  private headOf(conflict: Conflict): Promise<DocText> {
+  private async headOf(conflict: Conflict): Promise<DocText> {
     return conflict.head !== ""
-      ? Promise.resolve({ text: conflict.theirs, commit: conflict.head })
+      ? { text: conflict.theirs, commit: conflict.head }
       : this.deps.load();
   }
 
   /** Conflict banner: write my text over the agent's. */
   async keepMine(): Promise<void> {
-    if (!this.conflict) return;
-    const head = await this.headOf(this.conflict);
-    if (this.disposed) return;
-    this.conflict = null;
-    this.base = head.commit;
-    this.saved = head.text;
-    this.flush();
+    const head = await this.resolutionHead();
+    if (head) this.dispatch({ t: "keep_mine", head });
   }
 
   /** Conflict banner: drop my edits and take the agent's text. */
   async takeTheirs(): Promise<void> {
-    if (!this.conflict) return;
-    const head = await this.headOf(this.conflict);
-    if (this.disposed) return;
-    this.conflict = null;
-    this.adopt(head);
-    this.setStatus("saved");
+    const head = await this.resolutionHead();
+    if (head) this.dispatch({ t: "take_theirs", head });
   }
 
   /** Conflict banner: keep both versions between conflict markers, for the user
    *  to resolve. Saving waits until the markers are gone. */
   async showBoth(): Promise<void> {
-    const conflict = this.conflict;
-    if (!conflict) return;
+    const head = await this.resolutionHead();
+    if (head) this.dispatch({ t: "show_both", head });
+  }
+
+  private async resolutionHead(): Promise<DocText | null> {
+    const conflict = this.model.conflict;
+    if (!conflict) return null;
     const head = await this.headOf(conflict);
-    if (this.disposed) return;
-    this.conflict = null;
-    const merged = mergeWithMarkers(conflict.base, this.buffer, head.text);
-    this.base = head.commit;
-    this.saved = head.text;
-    this.buffer = merged;
-    this.deps.setBuffer(merged);
-    if (hasConflictMarkers(merged)) {
-      this.setStatus("markers");
-    } else {
-      this.setStatus("pending");
-      this.schedule(AUTOSAVE_DELAY_MS);
+    return this.model.closed ? null : head;
+  }
+
+  /** Resolves when no save is in flight and none is queued. A tab that reopens
+   *  a doc waits for the closing tab's final save, so its first load does not
+   *  return text older than what the user just typed. */
+  whenQuiet(): Promise<void> {
+    if (this.quiet()) return Promise.resolve();
+    return new Promise((resolve) => this.quietWaiters.push(resolve));
+  }
+
+  private quiet(): boolean {
+    return this.model.phase !== "saving" && !this.model.leaving;
+  }
+
+  private dispatch(e: Event): void {
+    const [next, effects] = step(this.model, e);
+    this.model = next;
+    for (const fx of effects) this.run(fx);
+    this.emit();
+    if (this.quiet() && this.quietWaiters.length) {
+      const waiters = this.quietWaiters;
+      this.quietWaiters = [];
+      for (const w of waiters) w();
     }
   }
 
-  private adopt(doc: DocText): void {
-    this.base = doc.commit;
-    this.saved = doc.text;
-    if (doc.text !== this.buffer) {
-      this.buffer = doc.text;
-      this.deps.setBuffer(doc.text);
-    }
+  private emit(): void {
+    if (!this.attached) return;
+    const now = statusOf(this.model);
+    if (this.shown && this.shown.status === now.status && this.shown.detail === now.detail) return;
+    this.shown = now;
+    this.deps.onStatus(now.status, now.detail);
   }
 
-  private async reload(): Promise<void> {
-    this.remotePending = false;
-    this.loading = true;
-    const before = this.buffer;
-    try {
-      const doc = await this.deps.load();
-      if (this.disposed) return;
-      if (this.buffer !== before || this.inflight) {
-        // The user typed while the reload was in flight: keep the edits and let
-        // the next save merge the agent's change.
-        this.remotePending = true;
+  private run(fx: Effect): void {
+    switch (fx.t) {
+      case "load": {
+        const reload = fx.reload;
+        this.deps.load().then(
+          (doc) => {
+            this.dispatch(reload ? { t: "reload_ok", doc } : { t: "load_ok", doc });
+            if (!reload) {
+              const draft = this.deps.draft?.load();
+              if (draft) this.dispatch({ t: "restore_draft", draft });
+              this.starting?.resolve();
+            }
+          },
+          (e: unknown) => {
+            this.dispatch(reload ? { t: "reload_fail", error: errorMessage(e) } : { t: "load_fail", error: errorMessage(e) });
+            if (!reload) this.starting?.reject(e);
+          },
+        );
         return;
       }
-      this.adopt(doc);
-    } catch {
-      this.remotePending = true;
-    } finally {
-      this.loading = false;
-    }
-  }
-
-  private async save(): Promise<void> {
-    if (this.disposed || !this.loaded || this.conflict || this.inflight) {
-      return;
-    }
-    if (!this.dirty) {
-      if (this.status !== "merged") this.setStatus("saved");
-      if (this.remotePending) void this.reload();
-      return;
-    }
-    if (hasConflictMarkers(this.buffer)) {
-      this.setStatus("markers");
-      return;
-    }
-    const sent = this.buffer;
-    const sentBase = this.base;
-    this.inflight = true;
-    this.inflightText = sent;
-    this.setStatus("saving");
-    let result: SaveResult;
-    try {
-      result = await this.deps.save(sent, sentBase);
-    } catch (e) {
-      this.inflight = false;
-      if (this.disposed) return;
-      this.setStatus("error", errorMessage(e));
-      this.schedule(SAVE_RETRY_MS);
-      return;
-    }
-    this.inflight = false;
-    if (this.disposed) return;
-    if (result.kind === "conflict") {
-      this.conflict = { ours: result.ours, theirs: result.theirs, base: result.base, head: result.head };
-      this.cancelTimer();
-      this.setStatus("conflict");
-      return;
-    }
-    const mergedAgentEdits = result.merged && result.text !== sent;
-    if (this.buffer === sent) {
-      this.base = result.commit;
-      this.saved = result.text;
-      if (result.text !== sent) {
-        this.buffer = result.text;
-        this.deps.setBuffer(result.text);
+      case "save": {
+        const sent = this.deps.save(fx.text, fx.base, fx.final);
+        if (!fx.track) {
+          sent.catch(() => undefined);
+          return;
+        }
+        sent.then(
+          (result) => this.dispatch(result.kind === "conflict" ? { t: "save_conflict", result } : { t: "save_ok", result }),
+          (e: unknown) => this.dispatch({ t: "save_fail", error: errorMessage(e) }),
+        );
+        return;
       }
-      this.setStatus(mergedAgentEdits ? "merged" : "saved");
-      if (this.remotePending) void this.reload();
-      return;
+      case "set_buffer":
+        if (this.attached) this.deps.setBuffer(fx.text);
+        return;
+      case "arm":
+        this.cancelTimer();
+        this.timer = this.deps.setTimer(() => {
+          this.timer = null;
+          this.dispatch({ t: "timer" });
+        }, fx.ms);
+        return;
+      case "disarm":
+        this.cancelTimer();
+        return;
+      case "stash":
+        this.deps.draft?.store(fx.draft);
+        return;
+      case "unstash":
+        this.deps.draft?.clear();
+        return;
     }
-    // The user typed during the save. Without a merge, the commit holds exactly
-    // what was sent, so it is the new base. With a merge, the buffer lacks the
-    // agent's edits, so keep the old base: the next save then merges again, and
-    // the lines both sides already share merge cleanly.
-    if (!mergedAgentEdits) {
-      this.base = result.commit;
-      this.saved = sent;
-    }
-    this.setStatus("pending");
-    this.schedule(AUTOSAVE_DELAY_MS);
-  }
-
-  private schedule(ms: number): void {
-    this.cancelTimer();
-    this.timer = this.deps.setTimer(() => {
-      this.timer = null;
-      void this.save();
-    }, ms);
   }
 
   private cancelTimer(): void {
@@ -300,11 +258,6 @@ export class DocSync {
       this.deps.clearTimer(this.timer);
       this.timer = null;
     }
-  }
-
-  private setStatus(status: SyncStatus, detail = ""): void {
-    this.status = status;
-    this.deps.onStatus(status, detail);
   }
 }
 
