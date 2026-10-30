@@ -22,10 +22,20 @@ var createBacklogSession = func(m *Manager, ctx context.Context, req CreateSessi
 var validateBacklogCreate = validateCreateFirst
 
 // sendBacklogPrompt sends "continue" to an item's live session.
+//
+// A runtime that observed the prompt absent reports PromptNotDelivered with a
+// nil error; that is a failed continue, not a delivery, so it is returned as an
+// error and continueBacklogItem disarms the run and restores the item (Codex P2
+// on #6294).
 var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
-	_, err := m.SendPromptWithStatus(req)
+	status, err := m.SendPromptWithStatus(req)
+	if err == nil && status == session.PromptNotDelivered {
+		return errBacklogPromptNotDelivered
+	}
 	return err
 }
+
+var errBacklogPromptNotDelivered = errors.New("the agent did not take the prompt")
 
 func (s *controlServer) StartBacklogItem(req StartBacklogItemRequest, resp *StartBacklogItemResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
@@ -194,6 +204,7 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 	var (
 		prev   backlog.Status
 		prompt string
+		armed  bool
 	)
 	out, err := svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
 		p, err := b.BeginStart(id, by, facts, svc.Now())
@@ -205,13 +216,23 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 		}
 		it := b.Item(id)
 		prev, prompt = it.Status, backlog.ContinuePrompt(it)
-		return []int{id}, b.Continued(id, sessionID, svc.Now())
+		if err := b.Continued(id, sessionID, svc.Now()); err != nil {
+			return nil, err
+		}
+		// Armed inside the transaction, so a completion queued for the previous
+		// run (backlogRunEndedGen) sees the new run or the old generation, never
+		// the gap between accepting the continue and arming it.
+		if !inst.ArmBacklogRun(time.Now()) {
+			return nil, fmt.Errorf("session %q is not an item session", inst.Title)
+		}
+		armed = true
+		return []int{id}, nil
 	})
 	if err != nil {
 		return backlog.RunRef{}, svc.Named(ref, err)
 	}
-	sendErr := fmt.Errorf("session %q is not an item session", inst.Title)
-	if inst.ArmBacklogRun(time.Now()) {
+	var sendErr error
+	if armed {
 		m.persistAndPublishInstance(ref.ID, inst)
 		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt})
 		if sendErr != nil {

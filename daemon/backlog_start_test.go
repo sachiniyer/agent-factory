@@ -283,3 +283,19 @@ func TestBacklogSlotReservations(t *testing.T) {
 		t.Fatal(s.reserved("r"))
 	}
 }
+
+// A continue whose prompt the runtime observed absent is a failed continue
+// (Codex P2 on #6294): the default sender turns PromptNotDelivered into an error.
+func TestSendBacklogPromptReportsObservedAbsenceAsAnError(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := observedPromptBackend{
+		readyFakeBackend: readyFakeBackend{FakeBackend: session.NewFakeBackend()},
+		status:           session.PromptNotDelivered,
+	}
+	registerStarted(t, manager, repoID, repoPath, "worker", backend, true, session.Ready)
+
+	err := sendBacklogPrompt(manager, SendPromptRequest{Title: "worker", RepoID: repoID, Prompt: "continue"})
+	if !errors.Is(err, errBacklogPromptNotDelivered) {
+		t.Fatalf("err = %v, want errBacklogPromptNotDelivered", err)
+	}
+}

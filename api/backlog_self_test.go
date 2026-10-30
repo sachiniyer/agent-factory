@@ -94,6 +94,8 @@ func TestBacklogGuardRails(t *testing.T) {
 	for _, args := range [][]string{
 		{"queue", "1"}, {"draft", "1"}, {"review", "1"}, {"reopen", "1"}, {"start", "1"}, {"done", "1"}, {"drop", "1"}, {"delete", "1"},
 		{"answer", "1", "yes"},
+		// Plan editing: an agent leaves a note instead (Codex P2 on #6294).
+		{"add", "another"}, {"add", "--file", "-"}, {"edit", "1", "--title", "x"}, {"move", "1", "--top"},
 	} {
 		if _, err := runBacklogCmd(t, args...); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
 			t.Errorf("%v: %v", args, err)
