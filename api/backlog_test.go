@@ -261,6 +261,19 @@ func TestBacklogEditMoveStatusDelete(t *testing.T) {
 	if strings.Join(*methods, ",") != "DeleteBacklogItem" {
 		t.Fatal(*methods)
 	}
+	// A parent is refused by draft (the daemon would read it as a reopen of its
+	// done children, leaving the queued ones eligible for the runner).
+	out, err = runBacklogCmd(t, "add", "parent-to-draft")
+	if err != nil {
+		t.Fatal(out, err)
+	}
+	parentID := fmt.Sprint(decodeOut[backlog.Item](t, out).ID)
+	if out, err := runBacklogCmd(t, "add", "child-of-it", "--parent", parentID); err != nil {
+		t.Fatal(out, err)
+	}
+	if _, err := runBacklogCmd(t, "draft", parentID); err == nil || !strings.Contains(err.Error(), "is a parent; draft its children one by one") {
+		t.Fatalf("draft on a parent: %v", err)
+	}
 }
 
 func TestBacklogAddFile(t *testing.T) {

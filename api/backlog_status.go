@@ -14,18 +14,24 @@ import (
 
 // statusCheck refuses a status change from the item's shown state before the
 // request is sent; nil sends it as is.
-type statusCheck func(id int, st backlog.State) error
+type statusCheck func(b *backlog.Backlog, id int, st backlog.State) error
 
 // reopenCheck lets reopen act only on done and dropped items.
-func reopenCheck(id int, st backlog.State) error {
+func reopenCheck(_ *backlog.Backlog, id int, st backlog.State) error {
 	if st != backlog.StateDone && st != backlog.StateDropped {
 		return fmt.Errorf("%s is %s; only a done or dropped item can be reopened", backlog.FormatID(id), strings.ToLower(st.Label()))
 	}
 	return nil
 }
 
-// draftCheck sends done and dropped items to reopen.
-func draftCheck(id int, st backlog.State) error {
+// draftCheck sends done and dropped items to reopen and refuses a parent: the
+// daemon reads a parent going to draft as "reopen its done and dropped
+// children", which would reopen finished work while leaving the queued children
+// eligible for the runner.
+func draftCheck(b *backlog.Backlog, id int, st backlog.State) error {
+	if b.IsParent(id) {
+		return fmt.Errorf("%s is a parent; draft its children one by one (\"af backlog reopen %d\" reopens its done and dropped children)", backlog.FormatID(id), id)
+	}
 	if st == backlog.StateDone || st == backlog.StateDropped {
 		return fmt.Errorf("%s is %s; reopen it with \"af backlog reopen %d\"", backlog.FormatID(id), strings.ToLower(st.Label()), id)
 	}
@@ -56,7 +62,7 @@ func backlogStatusCmd(use, short, long string, to backlog.Status, check statusCh
 					if v.Backlog.Item(id) == nil {
 						return nil, &backlog.NotFoundError{ID: id, Project: t.name}
 					}
-					if err := check(id, v.States[id].State); err != nil {
+					if err := check(v.Backlog, id, v.States[id].State); err != nil {
 						return nil, err
 					}
 				}
