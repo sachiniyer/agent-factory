@@ -11,6 +11,7 @@ func (i *Instance) tabDataLocked(tab *Tab) TabData {
 	if tab.tmux != nil {
 		td.TmuxName = tab.tmux.SanitizedName()
 	}
+	td.SandboxTmux = tab.sandboxTmux
 	td.Conversation = conversationDataPtr(tab.Conversation)
 	if len(tab.Handoffs) > 0 {
 		td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
@@ -132,7 +133,10 @@ func metadataTabsFrom(data InstanceData, caps Capabilities) []TabData {
 		if kind == TabKindAgent {
 			continue
 		}
-		if TabKindRequires(kind) != TabNeedsMetadataOnly && !(kind == TabKindVSCode && caps.RemoteEditor) {
+		// A sandbox's shell/process row with a recorded session is kept so a
+		// reattach can hand it back to a restarted agent-server (#6162).
+		restorable := (kind == TabKindShell || kind == TabKindProcess) && td.SandboxTmux != "" && td.ID != "" && caps.Workspace == WorkspaceRemote
+		if TabKindRequires(kind) != TabNeedsMetadataOnly && !(kind == TabKindVSCode && caps.RemoteEditor) && !restorable {
 			continue
 		}
 		out = append(out, td)

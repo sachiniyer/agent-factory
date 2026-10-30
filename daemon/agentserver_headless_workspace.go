@@ -103,3 +103,24 @@ func (hs *headlessServer) launchAdopted(req agentLifecycleRequest, resp *agentOK
 	}
 	return nil
 }
+
+// restoreSurvivingTabs is the rebind, a seam so the launch wrapper's wiring is
+// testable without a tmux server.
+var restoreSurvivingTabs = func(inst *session.Instance, rows []session.TabData) session.TabRestoreReport {
+	return inst.RestoreSurvivingTabs(rows)
+}
+
+// Launch runs the launch and then, for a restart adoption, rebinds the surviving
+// shell/process tabs (W1.4, #6162). It does so after EITHER launch path: a sandbox
+// created normally restarts through its persisted launch script with no
+// --adopt-worktree, so hs.adopted is false there and only this wrapper sees it.
+func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
+	if err := hs.launchWorkspace(req, resp); err != nil {
+		return err
+	}
+	if req.RestartAdoption && len(req.Tabs) > 0 && hs.inst != nil {
+		rep := restoreSurvivingTabs(hs.inst, req.Tabs)
+		resp.TabsRestored, resp.TabsGone = rep.Restored, rep.Gone
+	}
+	return nil
+}

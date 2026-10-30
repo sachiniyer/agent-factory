@@ -28,6 +28,9 @@ func (i *Instance) TabAlive(idx int) bool {
 	if rosterTab == nil || !i.StreamsViaAgentServer() {
 		return false
 	}
+	if rosterTab.restoreUnavailable {
+		return false
+	}
 	switch rosterTab.Kind {
 	case TabKindAgent, TabKindShell, TabKindProcess:
 		return rosterTab.Exit == nil

@@ -40,6 +40,12 @@ type TabData struct {
 	Kind     TabKind `json:"kind"`
 	Command  string  `json:"command,omitempty"`
 	TmuxName string  `json:"tmux_name,omitempty"`
+	// SandboxTmux is the tmux session a SANDBOX spawned for an off-box shell or
+	// process tab, as it reported at create. Distinct from TmuxName, which binds a
+	// session on the daemon's own host: this one names nothing the daemon can reach.
+	// It is what a restarted agent-server is handed to rebind the survivor (W1.4,
+	// #6162), so it survives a daemon restart.
+	SandboxTmux string `json:"sandbox_tmux,omitempty"`
 	// URL is the target of a TabKindWeb tab (the iframe/proxy address); empty for
 	// every other kind. Surfaced in the snapshot so the web UI can iframe it and
 	// so `af sessions get` shows the target.

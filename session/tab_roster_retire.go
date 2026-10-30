@@ -57,6 +57,11 @@ func (i *Instance) retireLostOffBoxTabs(before map[string]string, byID map[strin
 		if tab.gen != gen || !i.isOffBoxTabLocked(tab) {
 			continue
 		}
+		if tab.restoreUnavailable {
+			// A restarted server we could not hand the tab back to does not hold
+			// it, but its process may be alive: keep the row, flagged unavailable.
+			continue
+		}
 		td, held := byID[id]
 		if held && (gen == "" || td.Gen == "" || td.Gen == gen) {
 			continue
