@@ -2149,6 +2149,8 @@
       "af proposal path --help": "meta.discovery",
       "af proposal add-doc --help": "meta.discovery",
       "af proposal add-doc --session": "proposal.docs",
+      "af proposal remove-doc --help": "meta.discovery",
+      "af proposal remove-doc --session": "proposal.docs",
       "af proposal cat --help": "meta.discovery",
       "af proposal write --help": "meta.discovery",
       "af proposal write --session": "proposal.docs",
