@@ -330,12 +330,22 @@ func (m *Manager) meterPassLocked(now time.Time) {
 // dir and fills usage with each account's windows; the top-level windows are
 // the account with the newest reading.
 func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlogDirs []string, runConfigs map[string][]string, overrides map[string]planusage.Price, now time.Time, usage *planusage.Usage) {
-	sources := map[string][]string{planusage.DefaultAccount: {ambientClaudeConfigDir()}}
+	sources := map[string][]string{planusage.DefaultAccount: nil}
 	if names, err := agentaccount.List(home, tmux.ProgramClaude); err == nil {
 		for _, name := range names {
 			if acct, err := agentaccount.Selected(home, tmux.ProgramClaude, name); err == nil && acct.Dir != "" {
 				sources[name] = []string{acct.Dir}
 			}
+		}
+	}
+	// The daemon's own CLAUDE_CONFIG_DIR may itself be a registered account's
+	// directory: the tap files its readings under that account, so its
+	// transcripts are scanned under it too, not under the ambient key (Codex P2
+	// on #6299).
+	if ambient := ambientClaudeConfigDir(); ambient != "" {
+		account := planusage.AccountForConfigDir(home, ambient)
+		if !containsDir(sources[account], ambient) {
+			sources[account] = append(sources[account], ambient)
 		}
 	}
 	// A session's effective config dir (CLAUDE_CONFIG_DIR or HOME overridden in
@@ -356,6 +366,15 @@ func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlo
 			usage.Account, usage.Windows, usage.ReadingAt = name, au.Windows, au.ReadingAt
 		}
 	}
+}
+
+func containsDir(dirs []string, dir string) bool {
+	for _, d := range dirs {
+		if filepath.Clean(d) == filepath.Clean(dir) {
+			return true
+		}
+	}
+	return false
 }
 
 func ambientClaudeConfigDir() string {
