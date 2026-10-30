@@ -834,6 +834,10 @@ func (i *Instance) endTaskRunInterruptedLocked() {
 	i.taskRunTurnGateHeld = false
 	i.taskRunInterrupted = true
 	i.taskRunInterruptedAt = time.Now()
+	if at := i.agentReplacedAt; !at.IsZero() && at.Before(i.taskRunInterruptedAt) &&
+		i.taskRunInterruptedAt.Sub(at) <= taskRunResumeWindow {
+		i.taskRunInterruptedAt = at // the launch, not the settle (#6231)
+	}
 }
 
 // endTaskRunFailedLocked ends an in-flight task run as failed: the run's own

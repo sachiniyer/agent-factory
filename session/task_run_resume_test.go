@@ -57,3 +57,43 @@ func TestInterruptionWindowSurvivesTheRecord(t *testing.T) {
 	assert.False(t, data.TaskRunInterruptedAt.IsZero())
 	assert.True(t, data.TaskRunInterrupted)
 }
+
+// #6231: the boundary is the replacement's launch, not the settle edge, so an
+// agent already mid-turn when ConfirmLive settles still re-arms the run.
+func TestInterruptionBoundaryIsTheLaunchNotTheSettle(t *testing.T) {
+	inst := &Instance{Title: "task-run", liveness: LiveRunning, taskRunActive: true}
+	inst.markAgentRuntimeReplaced(true)
+	launched := time.Now().Add(-30 * time.Second)
+	inst.mu.Lock()
+	inst.agentReplacedAt = launched
+	inst.endTaskRunInterruptedLocked()
+	inst.mu.Unlock()
+
+	boundary, ok := inst.TaskRunResumableSince(time.Now())
+	require.True(t, ok)
+	assert.True(t, boundary.Equal(launched), "boundary %v, want the launch %v", boundary, launched)
+	// A turn that began after the launch but before the settle counts.
+	require.True(t, inst.ResumeInterruptedTaskRunAtEpoch(launched.Add(10*time.Second), inst.stateEpoch))
+}
+
+// A replacement launched long before the interruption is not its boundary.
+func TestStaleLaunchStampDoesNotWidenTheBoundary(t *testing.T) {
+	inst := &Instance{Title: "task-run", liveness: LiveRunning, taskRunActive: true}
+	inst.mu.Lock()
+	inst.agentReplacedAt = time.Now().Add(-2 * taskRunResumeWindow)
+	inst.endTaskRunInterruptedLocked()
+	inst.mu.Unlock()
+	boundary, ok := inst.TaskRunResumableSince(time.Now())
+	require.True(t, ok)
+	assert.WithinDuration(t, time.Now(), boundary, time.Second)
+}
+
+// #6230: every gate that decides whether to observe a run asks one predicate, so
+// an interrupted-but-resumable run is observed (attached or not).
+func TestTaskRunObservableCoversInFlightAndResumableRuns(t *testing.T) {
+	inflight := &Instance{taskRunActive: true}
+	assert.True(t, inflight.TaskRunObservable(time.Now()))
+	assert.True(t, interruptedRunning(t).TaskRunObservable(time.Now()))
+	assert.False(t, interruptedRunning(t).TaskRunObservable(time.Now().Add(taskRunResumeWindow+time.Minute)))
+	assert.False(t, (&Instance{}).TaskRunObservable(time.Now()))
+}
