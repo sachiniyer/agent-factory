@@ -112,12 +112,12 @@ test("a backlog.changed frame is a re-read: a child queued elsewhere moves the p
   await expect(row(page, late)).toBeVisible();
 });
 
-test("at 390 px a Queued item's action row fits and its buttons line up", async ({ page, request }, info) => {
+test("at 390 px an item's action row fits and its primary and ghost buttons line up", async ({ page, request }, info) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const root = await projectRoot(request);
   const title = `phone-${Date.now().toString(36)}`;
-  const id = await add(request, root, title);
-  await rpc(request, "SetBacklogItemStatus", { repo_path: root, id, status: "queued" });
+  await add(request, root, title);
+  // A draft item offers Queue, the primary action, beside ghost buttons.
   await openBacklog(page);
   await row(page, title).click();
   const panel = page.locator("aside.af-backlog-panel");
