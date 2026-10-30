@@ -130,10 +130,31 @@ func MergePreservingSessionRows(old, projects []Project, registryDegraded bool) 
 				continue
 			}
 			// The fresh registry row carries the record's new root, name and
-			// path state; the counts were last tallied by the snapshot that
-			// failed, so they carry over from the row it replaces.
-			fresh.SessionCount = row.SessionCount
-			fresh.InPlaceCount = row.InPlaceCount
+			// path state. Its counts carry over from the row it replaces only
+			// when the fresh row itself reports none — the same guard the
+			// RegistryID-less graft below already applies.
+			//
+			// Two callers reach this branch with opposite old-count semantics.
+			// The snapshot-FAILED caller (a sidebar poll whose fetchErr != nil,
+			// or the picker's SetRebindConflictPreserving) passes old rows whose
+			// counts are last-known while the fresh row's own are zero — the
+			// snapshot could not recount — so the copy restores the live tallies
+			// the failed read lost. The snapshot-LANDED caller (a degraded
+			// registry poll via registryBackedRows) zeroed the old row's counts
+			// precisely because the fresh row's own counts ARE the live truth;
+			// and in remote mode buildRemoteProjectList stamps a RegistryID on
+			// the fresh row from the stale cached registry even while degraded,
+			// so it lands HERE rather than the RegistryID-less graft. An
+			// unconditional copy would graft the zeros over the fresh live
+			// counts, and the sidebar would read (0) for every registered project
+			// for the life of the registry outage (#5833 over #4888). The fresh
+			// row's own counts win when it has them; the preserved row's
+			// last-known tallies survive only when the snapshot that produced the
+			// fresh row did not.
+			if fresh.SessionCount == 0 && fresh.InPlaceCount == 0 {
+				fresh.SessionCount = row.SessionCount
+				fresh.InPlaceCount = row.InPlaceCount
+			}
 			// So does the navigable workspace when the record's root is
 			// missing. A healthy build ranks a live session workspace above an
 			// unproven registry root, which is how the old row came to show a
