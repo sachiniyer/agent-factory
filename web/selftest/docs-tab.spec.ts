@@ -116,6 +116,7 @@ test("docs tab: right-click Delete removes a doc", async ({ page, request }) => 
   const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
   expect(session).toBeTruthy();
   await page.goto(`/#/session/${session.id}`);
+  await page.locator(".af-tab", { hasText: "Docs" }).click();
   const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
   await expect(pane.locator(".cm-content")).toBeVisible();
   await expect(pane.locator(".af-docs-tab")).toHaveText(["goals", "api"]);
