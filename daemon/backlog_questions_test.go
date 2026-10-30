@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -410,5 +411,28 @@ func TestFailedAdditionalAnswerKeepsTheActiveRun(t *testing.T) {
 	}
 	if inst.BacklogRunActive() {
 		t.Fatal("a run armed by the failed send itself must be disarmed")
+	}
+}
+
+// An answer whose delivery cannot be confirmed keeps the run marker and counts as
+// delivered, so a restart does not send it again (Codex P2 on #6294, invariant 1
+// of the run lifecycle model).
+func TestAnswerWithAnUncertainDeliveryKeepsTheRunAndIsNotResent(t *testing.T) {
+	m, repoID, inst := askedItem(t)
+	sent := stubBacklogSend(t, m, repoID)
+	sent.err = fmt.Errorf("%w: tmux send timed out", errBacklogDeliveryUncertain)
+	msg := answer(t, m, repoID, "Postgres")
+	m.backgroundMutationWG.Wait()
+	if !inst.BacklogRunActive() {
+		t.Fatal("the run marker was dropped for an answer that may have landed")
+	}
+	it := loadItem(t, repoID, 1)
+	for _, x := range it.Thread {
+		if x.ID == msg.ID && x.Delivery != backlog.DeliveryDelivered {
+			t.Fatalf("answer %+v is %q: a restart would send it again", x, x.Delivery)
+		}
+	}
+	if n := it.Thread[len(it.Thread)-1]; !strings.Contains(n.Text, "could not confirm") {
+		t.Fatalf("no note about the unconfirmed delivery: %+v", n)
 	}
 }

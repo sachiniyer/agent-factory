@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/backlog"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/proposal"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -21,21 +23,35 @@ var createBacklogSession = func(m *Manager, ctx context.Context, req CreateSessi
 // that stand in for the create need not have an agent installed.
 var validateBacklogCreate = validateCreateFirst
 
-// sendBacklogPrompt sends "continue" to an item's live session.
+// sendBacklogPrompt sends "continue" to an item's live session. It classifies
+// the outcome for the run lifecycle (invariant 1 of the model on #6294):
 //
-// A runtime that observed the prompt absent reports PromptNotDelivered with a
-// nil error; that is a failed continue, not a delivery, so it is returned as an
-// error and continueBacklogItem disarms the run and restores the item (Codex P2
-// on #6294).
+//   - nil: delivered.
+//   - errBacklogPromptNotDelivered: PROVEN not delivered. The runtime observed
+//     the prompt absent (PromptNotDelivered with a nil error), or the send was
+//     refused before a byte reached the pane (a pre-flight failure). The caller
+//     disarms the run and restores the item.
+//   - errBacklogDeliveryUncertain: the send may have landed (a timeout after
+//     Enter reached the pane, a lost reply). Unknown is never "not delivered":
+//     the caller keeps the run marker so the agent's completion is not ignored
+//     and a second start does not deliver duplicate work.
 var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
 	status, err := m.SendPromptWithStatus(req)
-	if err == nil && status == session.PromptNotDelivered {
+	switch {
+	case err == nil && status == session.PromptNotDelivered:
 		return errBacklogPromptNotDelivered
+	case err != nil && isNotAttemptedErr(err):
+		return fmt.Errorf("%w: %v", errBacklogPromptNotDelivered, err)
+	case err != nil:
+		return fmt.Errorf("%w: %v", errBacklogDeliveryUncertain, err)
 	}
 	return err
 }
 
-var errBacklogPromptNotDelivered = errors.New("the agent did not take the prompt")
+var (
+	errBacklogPromptNotDelivered = errors.New("the agent did not take the prompt")
+	errBacklogDeliveryUncertain  = errors.New("af could not confirm the prompt reached the agent")
+)
 
 func (s *controlServer) StartBacklogItem(req StartBacklogItemRequest, resp *StartBacklogItemResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
@@ -70,7 +86,16 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 	if plan.Continue != "" {
 		return m.continueBacklogItem(ref, req.ID, by, plan.Continue)
 	}
-	root := req.RepoPath
+	// The same normalization svc.Resolve applied to find the project (a leading
+	// "~" expanded against the daemon host's home): the raw value would reach the
+	// host preflight and CreateSession unexpanded, and a start of "~/project"
+	// would fail where listing and adding items with that path succeeded.
+	root := ""
+	if strings.TrimSpace(req.RepoPath) != "" {
+		if root, err = config.ResolveUserPath(strings.TrimSpace(req.RepoPath)); err != nil {
+			return backlog.RunRef{}, err
+		}
+	}
 	if root == "" {
 		if root, err = registeredProjectRootForRepoID(ref.ID); err != nil {
 			return backlog.RunRef{}, err
@@ -255,7 +280,13 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 	if armed {
 		m.persistAndPublishInstance(ref.ID, inst)
 		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt, BacklogOrigin: true})
-		if sendErr != nil {
+		switch {
+		case errors.Is(sendErr, errBacklogDeliveryUncertain):
+			// It may have landed: keep the run marker and the running item, say so
+			// on the thread, and do not report a failed start.
+			m.noteBacklogUncertainDelivery(ref, id, sendErr)
+			sendErr = nil
+		case sendErr != nil:
 			m.disarmBacklogRun(ref.ID, inst)
 			sendErr = fmt.Errorf("send continue to session %q: %w", inst.Title, sendErr)
 		}
@@ -278,6 +309,20 @@ func (m *Manager) sendBacklogPromptLocked(req SendPromptRequest) error {
 	unlock := m.lockTarget(req.RepoID, req.Title)
 	defer unlock()
 	return sendBacklogPrompt(m, req)
+}
+
+// noteBacklogUncertainDelivery records on the item that af could not confirm a
+// prompt reached its session, so the user knows the run is open on a send that
+// may or may not have landed.
+func (m *Manager) noteBacklogUncertainDelivery(ref backlog.ProjectRef, id int, cause error) {
+	svc := m.backlogService()
+	text := cause.Error() + " · the run stays open; if the agent is idle, start the item again"
+	if err := m.applyRetrying(ref.ID, nil, func(b *backlog.Backlog) ([]int, error) {
+		_, err := b.AddNote(id, backlog.AuthorAF, text, svc.Now())
+		return []int{id}, err
+	}); err != nil {
+		m.warn().Printf("note an unconfirmed delivery on %s: %v", backlog.FormatID(id), err)
+	}
 }
 
 func (m *Manager) disarmBacklogRun(repoID string, inst *session.Instance) {
