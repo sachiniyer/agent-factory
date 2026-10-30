@@ -274,9 +274,9 @@ only needs the workspace tooling:
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
 - A libc/architecture compatible with the daemon's `af` binary. The copied-in
   binary is the **daemon's own executable**, and the release artifacts
-  `install.sh` fetches are a plain `go build` (cgo on) on `ubuntu-latest` —
+  `install.sh` fetches are a plain `go build` (cgo on) on `ubuntu-24.04` —
   i.e. **dynamically linked against glibc**. So your base must be **glibc, and
-  its glibc must be ≥ the daemon build's** (`ubuntu-latest` is glibc 2.39
+  its glibc must be ≥ the daemon build's** (`ubuntu-24.04` is glibc 2.39
   today): `debian:trixie`/`ubuntu:24.04` work, `debian:bookworm` (2.36) is too
   old, and a musl base (alpine) will not run the binary at all. If you rebuild
   the daemon on a newer-glibc distro, rebuild the image on a matching-or-newer
