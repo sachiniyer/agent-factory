@@ -326,3 +326,24 @@ func TestAdoptStartingLinksAnUnrecordedSession(t *testing.T) {
 		t.Fatalf("the late start record must be a no-op for an adopted run: %v", err)
 	}
 }
+
+// A run's end does not move the item to review while an answer is on its way
+// (Codex P2 on #6295): delivery arms the next run, which ends on its own edge.
+func TestRunEndedWaitsForAPendingAnswer(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusRunning
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+	it.Thread = []Message{
+		{ID: 1, Kind: KindQuestion, Text: "?", Closed: ClosedAnswered},
+		{ID: 2, Kind: KindAnswer, Answers: 1, Delivery: DeliveryPending},
+	}
+	if end := b.RunEnded("s1", now); end.Changed || b.Item(1).Status != StatusRunning {
+		t.Fatalf("the old run's end finished an item with an answer pending: %+v %s", end, b.Item(1).Status)
+	}
+	b.Item(1).Thread[1].Delivery = DeliveryDelivered
+	if end := b.RunEnded("s1", now); !end.Changed || b.Item(1).Status != StatusReview {
+		t.Fatalf("with nothing pending the end moves to review: %+v %s", end, b.Item(1).Status)
+	}
+}
