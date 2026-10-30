@@ -309,12 +309,17 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 func (m *Manager) noteBacklogUncertainDelivery(ref backlog.ProjectRef, id int, cause error) {
 	svc := m.backlogService()
 	text := cause.Error() + " · the run stays open; if the agent is idle, start the item again"
-	if err := m.applyRetrying(ref.ID, nil, func(b *backlog.Backlog) ([]int, error) {
-		_, err := b.AddNote(id, backlog.AuthorAF, text, svc.Now())
-		return []int{id}, err
-	}); err != nil {
-		m.warn().Printf("note an unconfirmed delivery on %s: %v", backlog.FormatID(id), err)
-	}
+	// An advisory note: written by a tracked, cancellable worker so a busy
+	// backlog can neither hold the start's RPC open nor block shutdown. The run
+	// marker and the running item are already in place.
+	m.launchBackgroundMutation(func(stop <-chan struct{}) {
+		if err := m.applyRetrying(ref.ID, stop, func(b *backlog.Backlog) ([]int, error) {
+			_, err := b.AddNote(id, backlog.AuthorAF, text, svc.Now())
+			return []int{id}, err
+		}); err != nil {
+			m.warn().Printf("note an unconfirmed delivery on %s: %v", backlog.FormatID(id), err)
+		}
+	})
 }
 
 func (m *Manager) disarmBacklogRun(repoID string, inst *session.Instance) {

@@ -247,6 +247,9 @@ type Instance struct {
 	// backlogRunGen counts the runs armed on this session (in memory only): a
 	// completion queued for run N must not finish run N+1 (ArmBacklogRun).
 	backlogRunGen int
+	// backlogRunEndedAtBeforeArm is backlogRunEndedAt as ArmBacklogRun found it,
+	// for DisarmBacklogRun to restore (in memory only).
+	backlogRunEndedAtBeforeArm time.Time
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
