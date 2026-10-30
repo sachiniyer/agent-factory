@@ -280,7 +280,8 @@ func RemoveArchivedRegistrationLeaf(repoRoot, leafName, nonce string) error {
 	if leafName == "" || nonce == "" || leafName != filepath.Base(leafName) {
 		return fmt.Errorf("no recorded registration to remove")
 	}
-	meta, err := resolveRepoMetadataRoot(repoRoot)
+	// resolveRepoMetadataRoot does raw Lstat/EvalSymlinks/Stat/reads: bound it whole.
+	meta, err := BoundedFSOp("resolving the metadata root of "+repoRoot, func() (string, error) { return resolveRepoMetadataRoot(repoRoot) })
 	if err != nil {
 		return err
 	}

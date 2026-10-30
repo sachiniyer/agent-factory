@@ -71,7 +71,7 @@ var pruneRemoveTimeout = 10 * time.Minute
 // pruneTombstonePersist writes the tombstone record under the repo's ordering lock.
 // A package var so a test can fail exactly that write.
 var pruneTombstonePersist = func(_ *Manager, repoID string, data session.InstanceData) error {
-	return persistInstanceData(repoID, data)
+	return boundedPrunePersist(repoID, data)
 }
 
 // pruneBetweenTombstoneSteps is a test seam fired between the durable tombstone
@@ -642,7 +642,21 @@ func (m *Manager) lockForPrune(repoID, key, title, operation string, instance *s
 // persistPruneRow persists the row without taking the repository start lock, which
 // the caller already holds (lockForPrune). It is persistInstanceErr minus the lock.
 func (m *Manager) persistPruneRow(repoID string, instance *session.Instance) error {
-	return persistInstanceData(repoID, instance.ToInstanceData())
+	return boundedPrunePersist(repoID, instance.ToInstanceData())
+}
+
+// prunePersistTimeout bounds one write of the session records (a stalled AF-home
+// mount must not wedge prune under its locks). A var for tests.
+var prunePersistTimeout = 30 * time.Second
+
+func prunePersistKey(repoID string) string { return "instances\x00" + repoID }
+
+// boundedPrunePersist writes the repo's records with a deadline. A timeout is an
+// UNKNOWN outcome (the write may still land): it is registered under the records'
+// key, and nothing in prune acts on the repo's rows again until it finishes.
+func boundedPrunePersist(repoID string, data session.InstanceData) error {
+	return sessiongit.BoundedMutationWithin(prunePersistTimeout, "saving the session records",
+		[]string{prunePersistKey(repoID)}, func() error { return persistInstanceData(repoID, data) })
 }
 
 // pruneAbandonedGuard refuses to act on a row while a bounded filesystem mutation
@@ -655,7 +669,7 @@ func (m *Manager) pruneAbandonedGuard(repoID string, instance *session.Instance,
 	if repoPath == "" {
 		repoPath = data.Path
 	}
-	keys := []string{data.Worktree.WorktreePath}
+	keys := []string{data.Worktree.WorktreePath, prunePersistKey(repoID)}
 	if intent != nil {
 		keys = append(keys, intent.WorktreePath, intent.TombstonePath)
 		if intent.LeafName != "" {

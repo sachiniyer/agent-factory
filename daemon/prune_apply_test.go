@@ -604,3 +604,24 @@ func TestPruneApply_RefusesARowWithAnAbandonedMutationUntilItFinishes(t *testing
 		return len(r.Pruned) == 1
 	}, 10*time.Second, 50*time.Millisecond, "after the abandoned mutation finished the prune proceeds")
 }
+
+// A write of the session records that timed out has an unknown outcome; prune does
+// not act on the repository's rows again until it finishes.
+func TestPruneApply_RefusesWhileAnAbandonedRecordWriteMayStillBeRunning(t *testing.T) {
+	manager, repoID, _, _, archived := seedPrunableArchive(t, "abandoned-persist")
+	c := planOf(t, manager, repoID)
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	err := sessiongit.BoundedMutationWithin(50*time.Millisecond, "saving the session records",
+		[]string{prunePersistKey(repoID)}, func() error { <-release; close(finished); return nil })
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	resp, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	assert.Empty(t, resp.Pruned)
+	require.NotEmpty(t, resp.Skipped)
+	assert.Contains(t, resp.Skipped[0].Reason, "may still be running")
+	assert.DirExists(t, archived)
+	close(release)
+	<-finished
+}
