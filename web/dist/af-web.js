@@ -11895,7 +11895,9 @@ var AttachTerminal = class {
       if (this.stopped) {
         return;
       }
-      this.fitVisibleHost();
+      if (!this.fitVisibleHost()) {
+        this.scheduleVisibleFit();
+      }
     }, RESIZE_DEBOUNCE_MS);
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
