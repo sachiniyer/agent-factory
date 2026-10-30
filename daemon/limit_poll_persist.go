@@ -40,6 +40,12 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	// mutations and session creation. InFlightOpAndEpoch intentionally covers
 	// lifecycle state only, so using it as a whole-payload change detector lets
 	// an untracked roster mutation publish first and then get erased by this stale event.
+	// The row-write lock (#6210) is taken before the fence re-check below and held
+	// through the write: the admission writers (restore) do not take the start
+	// lock, so without it a restore could raise its fence and persist between this
+	// re-check and the write, and this older snapshot would then overwrite it.
+	rowLock := m.rowWriteLockForRepo(repoID)
+	rowLock.Lock()
 	data = instance.ToInstanceData()
 	// The lock-free gate above can pass an OpNone a client op raises before the
 	// re-read lands. A handoff is the concrete case: between the gate and this
@@ -60,13 +66,17 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 			key := daemonInstanceKey(repoID, instance.Title)
 			m.recordSettlementWrite(repoID, key, instance, errors.New("ceded to in-flight op"))
 		}
+		rowLock.Unlock()
 		repoStartLock.Unlock()
 		return
 	}
 	var err error
 	if durableChanged {
 		err = persistInstanceData(repoID, data)
+		rowLock.Unlock()
 		noteConversationWritten(instance, data, err)
+	} else {
+		rowLock.Unlock()
 	}
 	key := daemonInstanceKey(repoID, instance.Title)
 	testHookPollBeforeSettlementRecord()
