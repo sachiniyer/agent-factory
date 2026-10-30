@@ -226,6 +226,18 @@ func (s *controlServer) AddProposalDoc(req AddProposalDocRequest, resp *AddPropo
 	return nil
 }
 
+func (s *controlServer) RemoveProposalDoc(req RemoveProposalDocRequest, resp *RemoveProposalDocResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	out, err := s.manager.proposalService().RemoveDoc(target(req.SessionID, req.RepoID, req.RepoPath), req.Slug, req.Doc, proposal.Author(req.Author))
+	if err != nil {
+		return err
+	}
+	*resp = *out
+	return nil
+}
+
 func (s *controlServer) ReadProposalDoc(req ReadProposalDocRequest, resp *ReadProposalDocResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
