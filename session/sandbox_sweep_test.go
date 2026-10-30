@@ -114,7 +114,7 @@ func (f *sweepFixture) workspace(dir string, unpushed bool) {
 // carries ref, standing in for an agent-server.
 func (f *sweepFixture) agentServer(bin, ref string) *exec.Cmd {
 	f.t.Helper()
-	sleep, err := exec.LookPath("sleep")
+	sleep, err := probeSleeper(f.t)
 	require.NoError(f.t, err)
 	data, err := os.ReadFile(sleep)
 	require.NoError(f.t, err)

@@ -232,7 +232,7 @@ func TestProbeSessionStrictStaysUnknownWhenAnUnsignallableCandidateRemains(t *te
 	// liveTmuxServerPIDs' comm prefilter admits and isTmuxArgv accepts —
 	// but it is not a daemonised server (SID != PID, PPID != 1), so
 	// IsTmuxServer rejects it at tmuxServerIdentity's `case "tmux"`.
-	sleepPath, err := exec.LookPath("sleep")
+	sleepPath, err := probeSleeper(t)
 	require.NoError(t, err)
 	fakeBody, err := os.ReadFile(sleepPath)
 	require.NoError(t, err)

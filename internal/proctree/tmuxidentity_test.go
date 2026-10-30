@@ -21,7 +21,7 @@ import (
 // what IsTmuxServer concluded from a live process's own table entry (#4678).
 func tmuxNamedProcess(t *testing.T, dir string, attr *syscall.SysProcAttr) int {
 	t.Helper()
-	sleepPath, err := exec.LookPath("sleep")
+	sleepPath, err := probeSleeper(t)
 	require.NoError(t, err)
 	body, err := os.ReadFile(sleepPath)
 	require.NoError(t, err)
