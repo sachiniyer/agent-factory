@@ -541,6 +541,25 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	d.Path = r.collapsePathField(d.Path)
 	d.Worktree.RepoPath = r.collapsePathField(d.Worktree.RepoPath)
 	d.Worktree.WorktreePath = r.collapsePathField(d.Worktree.WorktreePath)
+	// The prune tombstone and its durable intent (#5189). The two paths are the
+	// archived worktree's location and its renamed sibling: WorktreePath's own
+	// treatment. LeafName is git's registration directory name, derived from the
+	// worktree directory (so from the session title): redacted. The nonces are
+	// random occupancy proofs, not user text, but they exist to be unguessable
+	// evidence, so a shared bundle does not carry them. Branch and Head stay
+	// verbatim under the same policies as Branch and BaseCommitSHA.
+	if d.ArchiveNonce != "" {
+		d.ArchiveNonce = redactedMarker
+	}
+	if d.PruneIntent != nil {
+		d.PruneIntent.WorktreePath = r.collapsePathField(d.PruneIntent.WorktreePath)
+		d.PruneIntent.TombstonePath = r.collapsePathField(d.PruneIntent.TombstonePath)
+		for _, f := range []*string{&d.PruneIntent.LeafName, &d.PruneIntent.LeafNonce, &d.PruneIntent.Nonce} {
+			if *f != "" {
+				*f = redactedMarker
+			}
+		}
+	}
 	if d.Worktree.RelocationRecovery != nil {
 		d.Worktree.RelocationRecovery.AlternatePath =
 			r.collapsePathField(d.Worktree.RelocationRecovery.AlternatePath)

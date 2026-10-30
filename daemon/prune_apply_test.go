@@ -112,12 +112,17 @@ func TestPruneApply_RefusesWhatTheVerdictRefusesAndNamesThePath(t *testing.T) {
 		{"untracked file", func(t *testing.T, a string) {
 			require.NoError(t, os.WriteFile(filepath.Join(a, "scratch.env"), []byte("secret"), 0o644))
 		}, []string{"scratch.env"}},
+		// A detached HEAD is refused by the occupant-identity check (the worktree no
+		// longer sits on the session's branch) before the HEAD == branch-tip proof is
+		// reached; that proof is exercised on its own in session/git
+		// (TestWorktreeHeadMatchesBranch). The shape is still refused, and the
+		// extra commit is still never deleted.
 		{"extra commit on a detached HEAD", func(t *testing.T, a string) {
 			gitOut(t, a, "checkout", "--detach")
 			require.NoError(t, os.WriteFile(filepath.Join(a, "extra.txt"), []byte("x"), 0o644))
 			gitOut(t, a, "add", "extra.txt")
 			gitOut(t, a, "commit", "-qm", "only here")
-		}, []string{"kept branch"}},
+		}, []string{"could not be verified as this session's worktree", "occupant"}},
 		{"occupant nonce replaced", func(t *testing.T, a string) {
 			gitDir := gitOut(t, a, "rev-parse", "--absolute-git-dir")
 			require.NoError(t, os.WriteFile(filepath.Join(gitDir, "af-archive-nonce"), []byte("someone-else\n"), 0o600))
