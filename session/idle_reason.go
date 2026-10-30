@@ -512,6 +512,48 @@ func (i *Instance) TaskRunInterrupted() bool {
 	return i.taskRunInterrupted
 }
 
+// taskRunResumeWindow bounds how long after an interruption the agent's own
+// in-turn chrome re-arms the run (#6223). A restored agent that resumes its
+// conversation starts its turn within moments; a human prompting the session
+// much later is not the task's run and must not be archived by on_complete.
+const taskRunResumeWindow = 15 * time.Minute
+
+// TaskRunResumableSince reports whether an interrupted run may still be resumed
+// by in-turn evidence, and the boundary that evidence must follow (#6223).
+func (i *Instance) TaskRunResumableSince(now time.Time) (time.Time, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.taskRunActive || !i.taskRunInterrupted || i.taskRunInterruptedAt.IsZero() ||
+		now.Sub(i.taskRunInterruptedAt) > taskRunResumeWindow {
+		return time.Time{}, false
+	}
+	return i.taskRunInterruptedAt, true
+}
+
+// ResumeInterruptedTaskRunAtEpoch re-arms a run that a restore ended as
+// interrupted, on proof that the agent itself is in a turn after the
+// interruption (#6223). #4222 ended the run so a REPLACEMENT'S first idle tick
+// could not read as completion; an agent that resumes its conversation and works
+// is the run continuing, and its next idle edge must complete it, or on_complete
+// is orphaned. The held-edge marker makes any later idle observation end it.
+func (i *Instance) ResumeInterruptedTaskRunAtEpoch(observedAt time.Time, observedEpoch uint64) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stateEpoch != observedEpoch || i.taskRunActive || !i.taskRunInterrupted ||
+		i.taskRunInterruptedAt.IsZero() || !observedAt.After(i.taskRunInterruptedAt) ||
+		observedAt.Sub(i.taskRunInterruptedAt) > taskRunResumeWindow {
+		return false
+	}
+	i.taskRunActive = true
+	i.taskRunInterrupted = false
+	i.taskRunInterruptedAt = time.Time{}
+	i.taskRunIdleEdgeHeld = true
+	i.taskRunPromptAttemptAt = time.Time{}
+	i.taskRunTurnObservedAt = time.Time{}
+	i.touchLocked()
+	return true
+}
+
 // ConsumeTaskRunInterrupted reports once that a restore's ConfirmLive ended an
 // in-flight task run as interrupted (#4222). The daemon calls it at its restore
 // sites to stamp the owning task's run status; in-memory and one-shot, so a
