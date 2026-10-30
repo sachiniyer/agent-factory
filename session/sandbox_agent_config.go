@@ -51,6 +51,16 @@ func (w *sandboxWorkspace) sandboxAgentConfigEntries() []string {
 	return files
 }
 
+// agentConfigMaxFileBytes bounds one operator-declared personalization read, one
+// way: from the operator's own agent home on the daemon box, the transfer this
+// feature makes. It is NOT the credential-sync bound (accountSyncMaxFileBytes),
+// which defends a write-back FROM an untrusted host's archive: claude's
+// .claude.json keeps per-project prompt history and grows past a megabyte for an
+// active operator, so the file this feature exists to carry was silently dropped
+// under the credential bound. Sized for that growth, and still bounded so a
+// runaway or hostile operator file cannot fill the daemon's memory.
+const agentConfigMaxFileBytes = 64 << 20
+
 // syncAgentConfigIn places the declared files in the session's account scope. A
 // declared file that does not exist on the daemon box is skipped with a warning —
 // the operator's declaration must not fail a create — and nothing is sent when no
@@ -143,8 +153,8 @@ func readOperatorAgentFile(agent, home, file string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	if info.Size() > accountSyncMaxFileBytes {
-		return nil, fmt.Errorf("%s is %d bytes, over the %d-byte bound", path, info.Size(), accountSyncMaxFileBytes)
+	if info.Size() > agentConfigMaxFileBytes {
+		return nil, fmt.Errorf("%s is %d bytes, over the %d-byte bound", path, info.Size(), agentConfigMaxFileBytes)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -100,6 +101,22 @@ func TestAgentConfigSkipsAMissingFile(t *testing.T) {
 	require.NoError(t, w.syncAgentConfigIn(time.Minute))
 	assert.NoFileExists(t, filepath.Join(w.AccountDir(), "CLAUDE.md"))
 	assert.FileExists(t, filepath.Join(w.AccountDir(), "settings.json"))
+}
+
+// A .claude.json over the old 1 MiB credential bound but under the larger
+// agent-config bound is now PLACED: the feature's headline file (the MCP server
+// config) no longer silently no-ops for an operator whose per-project history
+// grew it past a megabyte (#5571 W7.7).
+func TestAgentConfigPlacesAClaudeJsonOverTheOldCredentialBound(t *testing.T) {
+	operatorHome(t)
+	big := bytes.Repeat([]byte(" "), 2<<20) // 2 MiB: over the 1 MiB credential cap, under the 64 MiB agent-config cap
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), ".claude.json"), big, 0o600))
+	w := configWorkspace(t, "claude", "box1", "claude:.claude.json")
+	require.NoError(t, w.syncAgentConfigIn(time.Minute))
+	assert.FileExists(t, filepath.Join(w.AccountDir(), ".claude.json"))
+	got, err := os.ReadFile(filepath.Join(w.AccountDir(), ".claude.json"))
+	require.NoError(t, err)
+	assert.Len(t, got, len(big), "the whole file travels, byte for byte")
 }
 
 // A copied codex config.toml must not override the session's account: the
