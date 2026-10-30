@@ -64,6 +64,18 @@ type AddProposalDocRequest struct {
 
 type AddProposalDocResponse = proposal.DocResult
 
+type RemoveProposalDocRequest struct {
+	SessionID string `json:"session_id,omitempty"`
+	RepoID    string `json:"repo_id,omitempty"`
+	RepoPath  string `json:"repo_path,omitempty"`
+	Slug      string `json:"slug"`
+	Doc       string `json:"doc"`
+	// Author is human, agent or external; agent needs SessionID.
+	Author string `json:"author"`
+}
+
+type RemoveProposalDocResponse = proposal.DocResult
+
 type ReadProposalDocRequest struct {
 	SessionID string `json:"session_id,omitempty"`
 	RepoID    string `json:"repo_id,omitempty"`

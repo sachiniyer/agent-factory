@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
+
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,9 +56,7 @@ func localRunCommandFn() func(time.Duration, string, io.Reader, bool) ([]byte, e
 // is reaped on test completion if still alive.
 func startAgentServerLikeProcess(t *testing.T, argv0 string) *exec.Cmd {
 	t.Helper()
-	sleep, err := exec.LookPath("sleep")
-	require.NoError(t, err, "sleep is needed to hold a live process for the identity-kill")
-	cmd := exec.Command(sleep, "30")
+	cmd := exec.Command(sleeper.Path(t), "30")
 	cmd.Args[0] = argv0
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {

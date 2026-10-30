@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -235,7 +237,7 @@ func TestRecoverBacklogMatchesStartingRun(t *testing.T) {
 	prevStart := daemonProcessStart
 	t.Cleanup(func() { daemonProcessStart = prevStart })
 	daemonProcessStart = time.Now()
-	m.recoverBacklog(repoID)
+	m.recoverBacklog(repoID, nil)
 	it := loadItem(t, repoID, 1)
 	if it.Runs[0].State != backlog.RunStarted || it.Runs[0].SessionID != inst.ID {
 		t.Fatalf("run %+v", it.Runs[0])
@@ -297,5 +299,104 @@ func TestSendBacklogPromptReportsObservedAbsenceAsAnError(t *testing.T) {
 	err := sendBacklogPrompt(manager, SendPromptRequest{Title: "worker", RepoID: repoID, Prompt: "continue"})
 	if !errors.Is(err, errBacklogPromptNotDelivered) {
 		t.Fatalf("err = %v, want errBacklogPromptNotDelivered", err)
+	}
+}
+
+// A create that succeeds with the initial prompt proven undelivered is a failed
+// start, not a started run (Codex P2 on #6294): the run is disarmed so its first
+// idle edge cannot end it as a completion, and the item goes back.
+func TestStartBacklogItemFailsWhenTheInitialPromptWasNotDelivered(t *testing.T) {
+	m, repoID, repoPath := backlogTestManager(t)
+	prev := createBacklogSession
+	createBacklogSession = func(m *Manager, ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+		data, err := prev(m, ctx, req)
+		data.LastPromptDeliveryStatus = session.PromptNotDelivered
+		return data, err
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoPath: repoPath, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatal(err)
+	}
+	m.backgroundMutationWG.Wait()
+	it := loadItem(t, repoID, 1)
+	if it.Status != backlog.StatusDraft || len(it.Runs) != 1 || it.Runs[0].State != backlog.RunFailed {
+		t.Fatalf("a start whose prompt never reached the agent was recorded as started: %+v", it)
+	}
+	for _, s := range m.itemSessions(repoID) {
+		if s.instance.BacklogRunActive() {
+			t.Fatal("the run marker stayed armed")
+		}
+	}
+	if got := m.backlogSlotsUsed(repoID); got != 0 {
+		t.Fatalf("slot leaked: %d", got)
+	}
+}
+
+// A start named by "~/project" creates its session in the expanded path (Codex
+// P2 on #6294): the raw value used to reach the host preflight and CreateSession.
+func TestStartBacklogItemExpandsATildeRepoPath(t *testing.T) {
+	m, _, repoPath := backlogTestManager(t)
+	t.Setenv("HOME", filepath.Dir(repoPath))
+	var got string
+	prev := createBacklogSession
+	createBacklogSession = func(m *Manager, ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+		got = req.RepoPath
+		return prev(m, ctx, req)
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+	var validated string
+	prevValidate := validateBacklogCreate
+	validateBacklogCreate = func(req CreateSessionRequest) error { validated = req.RepoPath; return nil }
+	t.Cleanup(func() { validateBacklogCreate = prevValidate })
+	tilde := "~/" + filepath.Base(repoPath)
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoPath: tilde, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatal(err)
+	}
+	m.backgroundMutationWG.Wait()
+	if got != repoPath || validated != repoPath {
+		t.Fatalf("create got %q, preflight got %q, want the expanded %q", got, validated, repoPath)
+	}
+}
+
+// A continue whose delivery cannot be confirmed (a timeout after Enter reached
+// the pane) keeps the run marker and the running item (Codex P2 on #6294,
+// invariant 1 of the run lifecycle model): unknown is never "not delivered".
+func TestContinueWithAnUncertainDeliveryKeepsTheRun(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	inst.DisarmBacklogRun()
+	m.backlogRunEnded(repoID, inst.ID) // the previous run ended; the item is in review
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(*Manager, SendPromptRequest) error {
+		return fmt.Errorf("%w: tmux send timed out", errBacklogDeliveryUncertain)
+	}
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatalf("an unconfirmed delivery was reported as a failed start: %v", err)
+	}
+	if !inst.BacklogRunActive() {
+		t.Fatal("the run marker was dropped for a send that may have landed")
+	}
+	m.backgroundMutationWG.Wait() // the advisory note is written by a tracked worker
+	it := loadItem(t, repoID, 1)
+	if it.Status != backlog.StatusRunning {
+		t.Fatalf("status = %s, want running", it.Status)
+	}
+	if n := it.Thread[len(it.Thread)-1]; !strings.Contains(n.Text, "could not confirm") {
+		t.Fatalf("no note about the unconfirmed delivery: %+v", n)
+	}
+}
+
+// The default sender separates a proven refusal from an uncertain send.
+func TestSendBacklogPromptClassifiesDeliveryErrors(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &failingPromptBackend{readyFakeBackend: readyFakeBackend{session.NewFakeBackend()}}
+	registerStarted(t, manager, repoID, repoPath, "worker", backend, true, session.Ready)
+	err := sendBacklogPrompt(manager, SendPromptRequest{Title: "worker", RepoID: repoID, Prompt: "continue"})
+	if !errors.Is(err, errBacklogDeliveryUncertain) || errors.Is(err, errBacklogPromptNotDelivered) {
+		t.Fatalf("a send that errored after the pane was reached is uncertain, got %v", err)
+	}
+	err = sendBacklogPrompt(manager, SendPromptRequest{Title: "no-such-session", RepoID: repoID, Prompt: "continue"})
+	if !errors.Is(err, errBacklogPromptNotDelivered) {
+		t.Fatalf("a refusal before any byte was sent is proven not delivered, got %v", err)
 	}
 }

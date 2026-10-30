@@ -132,6 +132,15 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title stri
 		}
 	}
 	if run == nil {
+		// Already settled by AdoptStarting (the agent reported before this ran):
+		// the same run, linked to the same session.
+		if startErr == nil {
+			for i := range it.Runs {
+				if r := it.Runs[i]; r.State == RunStarted && r.StartedAt.Equal(startedAt) && r.SessionID == sessionID && r.Title == title {
+					return nil
+				}
+			}
+		}
 		return fmt.Errorf("%s has no starting run from %s", FormatID(id), startedAt.Format(time.RFC3339))
 	}
 	it.UpdatedAt = now
@@ -148,6 +157,25 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title stri
 	}
 	_, err = b.AddNote(id, AuthorAF, "The session could not start: "+startErr.Error(), now)
 	return err
+}
+
+// AdoptStarting links the latest run of item id, which is still starting with no
+// session, to sessionID created at createdAt: the session reported on its item
+// (done, note, ask) before the daemon's own start record was committed. The
+// session's own item id and creation time are what vouch for it. It reports
+// whether it linked a run.
+func (b *Backlog) AdoptStarting(id int, sessionID, title string, createdAt, now time.Time) bool {
+	it := b.Item(id)
+	if it == nil {
+		return false
+	}
+	r := it.lastRun()
+	if r == nil || r.State != RunStarting || r.SessionID != "" || createdAt.Before(r.StartedAt) {
+		return false
+	}
+	r.SessionID, r.Title, r.State = sessionID, title, RunStarted
+	it.UpdatedAt = now
+	return true
 }
 
 // ItemSession is one session the daemon knows was started for an item.
