@@ -113,7 +113,7 @@ import type { DragPayload } from "./layout.js";
 import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
 import { archiveKey, archiveFromSnapshot, archiveNeedsFirstPage, emptyArchive } from "./archive.js";
-import { RouteLookups, settleLookup } from "./route_lookup.js";
+import { settleLookup } from "./route_lookup.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
@@ -618,12 +618,10 @@ function tabSynthOf(list: SessionData[], id: string | null): string[] {
 
 // Resolve only against an authenticated snapshot, never a partially loaded rail.
 let resolvingRoute = false;
-const routeLookups = new RouteLookups();
 let routeSelection: string | null = null;
 const createSelectionIntent = new CreateSelectionIntent();
 function resolveRoute(): void {
   createSelectionIntent.navigate();
-  const ticket = routeLookups.begin();
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -641,7 +639,7 @@ function resolveRoute(): void {
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
     } else if (lookup && route) {
-      void resolveArchivedRoute(route.session, ticket);
+      void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -671,7 +669,7 @@ async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
     }
   }
   if (token !== tok || connectionGeneration !== generation) return;
-  settleLookup(routeLookups, ticket, id, rows, {
+  settleLookup(createSelectionIntent, ticket, id, rows, {
     found: (row) => {
       optimisticSessions.adopt([row]);
       applySessions(optimisticSessions.project());

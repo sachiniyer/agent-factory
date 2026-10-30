@@ -15564,18 +15564,8 @@ function archiveNeedsFirstPage(archive, project) {
 }
 
 // src/route_lookup.ts
-var RouteLookups = class {
-  latest = 0;
-  /** Takes a ticket, superseding every earlier one. */
-  begin() {
-    return ++this.latest;
-  }
-  current(ticket) {
-    return ticket === this.latest;
-  }
-};
-function settleLookup(lookups, ticket, id, rows, effects) {
-  if (!lookups.current(ticket)) return "stale";
+function settleLookup(intent, ticket, id, rows, effects) {
+  if (!intent.isCurrent(ticket)) return "stale";
   const row = rows.find((r) => r.id === id);
   if (!row) {
     effects.missing();
@@ -15998,6 +15988,11 @@ var CreateSelectionIntent = class {
   }
   submit() {
     return ++this.generation;
+  }
+  /** The generation now: a by-id route lookup (#6204) takes it and applies its answer
+   *  only while isCurrent, so ANY navigation or selection since supersedes it. */
+  snapshot() {
+    return this.generation;
   }
   isCurrent(intent) {
     return intent === this.generation;
@@ -20002,12 +19997,10 @@ function tabSynthOf(list, id) {
   return s ? synthIdentities(sessionTabs(s).map((t) => t.kind), sessionTabs(s).map((t) => t.name)) : [];
 }
 var resolvingRoute = false;
-var routeLookups = new RouteLookups();
 var routeSelection = null;
 var createSelectionIntent = new CreateSelectionIntent();
 function resolveRoute() {
   createSelectionIntent.navigate();
-  const ticket = routeLookups.begin();
   if (store.get().phase !== "app") {
     stashLoginRoute();
     return;
@@ -20023,7 +20016,7 @@ function resolveRoute() {
       setStatusFilter(operatorKind(session), true);
       openFromRail(session.id);
     } else if (lookup && route) {
-      void resolveArchivedRoute(route.session, ticket);
+      void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -20047,7 +20040,7 @@ async function resolveArchivedRoute(id, ticket) {
     }
   }
   if (token !== tok || connectionGeneration !== generation) return;
-  settleLookup(routeLookups, ticket, id, rows, {
+  settleLookup(createSelectionIntent, ticket, id, rows, {
     found: (row) => {
       optimisticSessions.adopt([row]);
       applySessions(optimisticSessions.project());
