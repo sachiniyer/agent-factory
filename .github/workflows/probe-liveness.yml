@@ -1,0 +1,56 @@
+name: probe liveness (26.04)
+
+# Report-only diagnostics for #6281 track 2. Do not merge.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/probe-liveness.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  liveness:
+    name: liveness on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Runner facts
+        continue-on-error: true
+        run: |
+          set +e
+          echo "== image"; echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"; cat /etc/os-release | head -4
+          echo "== uname -r"; uname -r
+          echo "== tmux -V"; tmux -V
+          echo "== procps"; ps --version; pgrep --version; dpkg -l procps | tail -1
+          echo "== yama ptrace_scope"; cat /proc/sys/kernel/yama/ptrace_scope
+          echo "== /proc mount"; grep ' /proc ' /proc/self/mountinfo; mount | grep ' /proc '
+          echo "== id"; id; echo "euid=$(id -u)"
+          echo "== namespaces"; ls -l /proc/self/ns/pid /proc/self/ns/user /proc/self/ns/mnt; ls -l /proc/1/ns/pid /proc/1/ns/user 2>&1
+          echo "== uid_map"; cat /proc/self/uid_map
+          echo "== pid 1"; cat /proc/1/comm; tr '\0' ' ' </proc/1/cmdline; echo
+          echo "== pid count"; ls /proc | grep -c '^[0-9]'
+          echo "== subreaper/ppid chain"; ps -o pid,ppid,comm -p $$ ; ps -o pid,ppid,comm -p $PPID
+          echo "== child_subreaper"; grep -i subreaper /proc/self/status
+          echo "== /proc/self/status"; cat /proc/self/status
+          echo "== kernel.pid_max / threads"; cat /proc/sys/kernel/pid_max
+          echo "== ps -eo of own tree"; ps -eo pid,ppid,stat,comm | head -30
+      - name: Four liveness tests
+        continue-on-error: true
+        run: |
+          set +e
+          go test -v -count=1 ./internal/proctree/ -run '^TestOccupantsOfDir_ExcludesATmuxClient$'
+          go test -v -count=1 ./session/ -run '^(TestSweepReapsAProvenOrphanAndSparesForeignSameNameProcesses|TestSweepReportsUnpushedWorkAndRemovesNothing)$'
+          go test -v -count=1 ./session/tmux/ -run '^TestProbeSessionStrictStaysUnknownWhenAnUnsignallableCandidateRemains$'
+          go test -v -count=1 ./daemon/ -run '^TestWaitForShutdownCompletionIgnoresProcessName$'
+          true
