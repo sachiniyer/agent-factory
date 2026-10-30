@@ -16,7 +16,7 @@ import (
 var builtinTemplates embed.FS
 
 // BuiltinTemplates is the default doc set of a new proposal, in display order.
-var BuiltinTemplates = []string{"goals", "technical", "api", "ui", "future"}
+var BuiltinTemplates = []string{"goals", "technical", "api", "ui", "steps", "future"}
 
 func userTemplateDir() (string, error) {
 	dir, err := config.GetConfigDir()
