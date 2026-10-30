@@ -181,7 +181,8 @@ func (b *Backlog) AddBatch(in Batch, now time.Time) (map[string]int, error) {
 
 // placeBatch moves every batch item under its parent. New items (negative in
 // ordered) go to the bottom of their parent; existing items move only when
-// their parent changed. Parents are placed before their children.
+// their parent changed. Parents are placed before their children. It does not
+// check dependency cycles; the caller checks the finished graph.
 func (b *Backlog) placeBatch(ordered, parents []int, now time.Time) error {
 	placed := map[int]bool{}
 	pending := map[int]bool{}
@@ -197,8 +198,12 @@ func (b *Backlog) placeBatch(ordered, parents []int, now time.Time) error {
 			}
 			it := b.Item(id)
 			if o < 0 || it.Parent != p {
-				mv := Move{Into: p, Bottom: p == 0}
-				if err := b.Move(id, mv, now); err != nil {
+				// Root, not Bottom: an existing item whose parent was removed must
+				// leave it (Bottom keeps the current parent). The dependency check
+				// waits for the finished batch (AddBatch), because a valid final
+				// tree can pass through a cyclic intermediate one.
+				mv := Move{Into: p, Root: p == 0}
+				if err := b.move(id, mv, now, false); err != nil {
 					return err
 				}
 			}
