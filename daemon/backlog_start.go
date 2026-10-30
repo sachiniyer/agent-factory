@@ -40,6 +40,10 @@ var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
 	switch {
 	case err == nil && status == session.PromptNotDelivered:
 		return errBacklogPromptNotDelivered
+	case err != nil && errors.Is(err, errTargetLimitReached):
+		// The session hit a usage limit between the caller's check and the send's
+		// fenced one: nothing was sent, and the caller should hold, not fail.
+		return fmt.Errorf("%w: %v", errBacklogTargetLimited, err)
 	case err != nil && isNotAttemptedErr(err):
 		return fmt.Errorf("%w: %v", errBacklogPromptNotDelivered, err)
 	case err != nil:
@@ -51,6 +55,7 @@ var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
 var (
 	errBacklogPromptNotDelivered = errors.New("the agent did not take the prompt")
 	errBacklogDeliveryUncertain  = errors.New("af could not confirm the prompt reached the agent")
+	errBacklogTargetLimited      = errors.New("the session is at a usage limit")
 )
 
 func (s *controlServer) StartBacklogItem(req StartBacklogItemRequest, resp *StartBacklogItemResponse) error {

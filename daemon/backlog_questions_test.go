@@ -471,3 +471,40 @@ func TestOnePendingAnswerGetsOneDeliveryWorker(t *testing.T) {
 		t.Fatal("a released answer can be claimed again")
 	}
 }
+
+// A line the user answers in the pane of an item in review is new work (Codex P2
+// on #6295): the item goes back to running, holds a live answer and has its run
+// armed in the same transaction.
+func TestTerminalAnswerOnAnItemInReviewTracksNewWork(t *testing.T) {
+	m, repoID, inst := askedItem(t)
+	idleItemSession(t, inst)
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Item(1).Status = backlog.StatusReview
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.noteBacklogSubmitted(inst, m.backlogSeenQuestion(inst))
+	m.backgroundMutationWG.Wait()
+	it := loadItem(t, repoID, 1)
+	if it.Status != backlog.StatusRunning || it.LiveAnswers != 1 || !inst.BacklogRunActive() {
+		t.Fatalf("status %s live answers %d armed %v", it.Status, it.LiveAnswers, inst.BacklogRunActive())
+	}
+}
+
+// An answer whose delivery fails after the previous run already went idle replays
+// the completion the pending answer had held back (Codex P2 on #6295).
+func TestFailedAnswerReplaysASkippedCompletion(t *testing.T) {
+	m, repoID, inst := askedItem(t)
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(*Manager, SendPromptRequest) error {
+		idleItemSession(t, inst)
+		return errors.New("pane gone")
+	}
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	answer(t, m, repoID, "Postgres")
+	m.backgroundMutationWG.Wait()
+	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusReview {
+		t.Fatalf("status = %s, want review: the held-back completion was not replayed after the failure", it.Status)
+	}
+}
