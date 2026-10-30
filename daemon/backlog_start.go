@@ -92,7 +92,7 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 	// would fail where listing and adding items with that path succeeded.
 	root := ""
 	if strings.TrimSpace(req.RepoPath) != "" {
-		if root, err = config.ResolveUserPath(strings.TrimSpace(req.RepoPath)); err != nil {
+		if root, err = config.ResolveDaemonHostPath(req.RepoPath); err != nil {
 			return backlog.RunRef{}, err
 		}
 	}
