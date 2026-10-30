@@ -166,9 +166,9 @@ type InstanceData struct {
 	// replacement runtime, so adopting the row as the fire's product would
 	// misreport the interrupted run as started and discharge a prompt that was
 	// never replayed. omitempty + additive: an older record decodes to false —
-	// indistinguishable from a normally-ended run, which is the pre-fix
-	// reading and matches it.
-	TaskRunInterrupted bool `json:"task_run_interrupted,omitempty"`
+	// indistinguishable from a normally-ended run (the pre-fix reading).
+	TaskRunInterrupted   bool      `json:"task_run_interrupted,omitempty"`
+	TaskRunInterruptedAt time.Time `json:"task_run_interrupted_at,omitzero"` // #6223 re-arm window
 	// TaskRunFailurePending records that the run ended failed (initial prompt
 	// proven undelivered, #5278) and the task's errored status has not yet been
 	// acknowledged as written (#5646). omitempty + additive: an older record

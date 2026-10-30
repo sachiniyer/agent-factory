@@ -833,6 +833,7 @@ func (i *Instance) endTaskRunInterruptedLocked() {
 	i.taskRunIdleEdgeHeld = false
 	i.taskRunTurnGateHeld = false
 	i.taskRunInterrupted = true
+	i.taskRunInterruptedAt = time.Now()
 }
 
 // endTaskRunFailedLocked ends an in-flight task run as failed: the run's own

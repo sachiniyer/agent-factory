@@ -171,6 +171,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// run has already spent its active marker, and the interruption is exactly
 	// the fact startup reconcile needs after a restart (#4222 review).
 	data.TaskRunInterrupted = i.taskRunInterrupted
+	data.TaskRunInterruptedAt = i.taskRunInterruptedAt
 	data.TaskRunFailurePending = i.taskRunFailurePending
 	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
 	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
@@ -481,10 +482,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		taskRunActive:       data.TaskRunActive,
-		taskRunInterrupted:  data.TaskRunInterrupted && !data.TaskRunActive,
-		taskRunIdleEdgeHeld: data.TaskRunActive && data.TaskRunIdleEdgeHeld,
-		taskRunTurnGateHeld: data.TaskRunActive && data.TaskRunTurnGateHeld,
+		taskRunActive:        data.TaskRunActive,
+		taskRunInterrupted:   data.TaskRunInterrupted && !data.TaskRunActive,
+		taskRunInterruptedAt: data.TaskRunInterruptedAt,
+		taskRunIdleEdgeHeld:  data.TaskRunActive && data.TaskRunIdleEdgeHeld,
+		taskRunTurnGateHeld:  data.TaskRunActive && data.TaskRunTurnGateHeld,
 		// Gate on the run still being in flight, mirroring the write side and
 		// the held flag: a finished run's stale observation cannot release the
 		// next run's delivery window.

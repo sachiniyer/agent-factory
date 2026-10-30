@@ -193,7 +193,8 @@ type Instance struct {
 	// end is a fact about it that never un-happens. In-memory only — after a
 	// restart the marker is already false, so no poll can ever capture the
 	// active half of the edge again and nothing needs the flag.
-	taskRunInterrupted bool
+	taskRunInterrupted   bool
+	taskRunInterruptedAt time.Time // bounds the re-arm window (#6223); persisted
 	// taskRunInterruptedStamp is the one-shot twin of taskRunInterrupted for
 	// the daemon's status write: set when a restore's ConfirmLive performs the
 	// interrupt, consumed once by noteRuntimeReplaced so the owning task's
