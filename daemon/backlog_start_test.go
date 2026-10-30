@@ -299,3 +299,33 @@ func TestSendBacklogPromptReportsObservedAbsenceAsAnError(t *testing.T) {
 		t.Fatalf("err = %v, want errBacklogPromptNotDelivered", err)
 	}
 }
+
+// A create that succeeds with the initial prompt proven undelivered is a failed
+// start, not a started run (Codex P2 on #6294): the run is disarmed so its first
+// idle edge cannot end it as a completion, and the item goes back.
+func TestStartBacklogItemFailsWhenTheInitialPromptWasNotDelivered(t *testing.T) {
+	m, repoID, repoPath := backlogTestManager(t)
+	prev := createBacklogSession
+	createBacklogSession = func(m *Manager, ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+		data, err := prev(m, ctx, req)
+		data.LastPromptDeliveryStatus = session.PromptNotDelivered
+		return data, err
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoPath: repoPath, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatal(err)
+	}
+	m.backgroundMutationWG.Wait()
+	it := loadItem(t, repoID, 1)
+	if it.Status != backlog.StatusDraft || len(it.Runs) != 1 || it.Runs[0].State != backlog.RunFailed {
+		t.Fatalf("a start whose prompt never reached the agent was recorded as started: %+v", it)
+	}
+	for _, s := range m.itemSessions(repoID) {
+		if s.instance.BacklogRunActive() {
+			t.Fatal("the run marker stayed armed")
+		}
+	}
+	if got := m.backlogSlotsUsed(repoID); got != 0 {
+		t.Fatalf("slot leaked: %d", got)
+	}
+}
