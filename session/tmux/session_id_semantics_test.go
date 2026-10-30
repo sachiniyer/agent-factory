@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -87,20 +88,55 @@ func TestTmuxSessionIDSemanticsTheIncarnationBindingRelies(t *testing.T) {
 	}
 	idB := sessionID(name) // the live replacement
 
-	// 3. Killing the dead id fails, names the id, and kills nothing — the live
-	// session now holds the NAME the dead one had.
-	_, stderr, err := tm("kill-session", "-t", idA)
-	if err == nil {
-		t.Fatalf("kill-session -t %s of a vanished session succeeded", idA)
+	// 3. Every id-addressed command the reap issues, aimed at the dead id — the live
+	// replacement now holds the NAME the dead one had. Each must fail, name the id,
+	// kill nothing, and be recognised as "gone" by the production classifier.
+	//
+	// tmux words a vanished session per COMMAND (measured on the CI runner:
+	// show-environment says "no such session", kill-session "can't find session"),
+	// so the wording is asserted per command: a tmux that changes one fails here,
+	// loudly, instead of silently turning a gone incarnation into an unknown one.
+	t.Logf("tmux version: %s", must("-V"))
+	// An empty entry is a command whose vanished-id wording the first CI run did not
+	// record; the test then only requires the classifier to recognise it and logs
+	// what tmux said, to be pinned in the next commit.
+	wording := map[string]string{
+		"show-environment": "no such session: " + idA,
+		"kill-session":     "can't find session: " + idA,
+		"display-message":  "",
+		"list-panes":       "",
+		"has-session":      "",
 	}
-	if want := "can't find session: " + idA; stderr != want {
-		t.Fatalf("kill-session of a vanished id said %q, want %q", stderr, want)
+	vanished := map[string][]string{
+		"show-environment": {"show-environment", "-t", idA, EnvMarkerInstance},
+		"kill-session":     {"kill-session", "-t", idA},
+		"display-message":  {"display-message", "-p", "-t", idA, "#{pid} #{session_created}"},
+		"list-panes":       {"list-panes", "-s", "-t", idA, "-F", "#{pane_id}"},
+		"has-session":      {"has-session", "-t", idA},
+	}
+	for command, args := range vanished {
+		_, stderr, err := tm(args...)
+		t.Logf("%s on a vanished id: exit error %v, stderr %q", command, err, stderr)
+		if err == nil {
+			t.Fatalf("%s of a vanished id succeeded", command)
+		}
+		if want := wording[command]; want != "" && stderr != want {
+			t.Fatalf("%s of a vanished id said %q, want %q — tmux changed its wording; re-check every classifier on the id path",
+				command, stderr, want)
+		}
+		if !sessionIDProvedAbsent(cmd.MakeExecutor(), err, idA) {
+			t.Fatalf("%s of a vanished id (%q) is not recognised as gone by sessionIDProvedAbsent", command, stderr)
+		}
 	}
 	if !alive(name) || sessionID(name) != idB {
-		t.Fatalf("a kill addressed to the dead id %s touched the replacement %s", idA, idB)
+		t.Fatalf("a command addressed to the dead id %s touched the replacement %s", idA, idB)
 	}
-	if _, stderr, err := tm("show-environment", "-t", idA, EnvMarkerInstance); err == nil || stderr != "can't find session: "+idA {
-		t.Fatalf("show-environment of a vanished id: err=%v stderr=%q", err, stderr)
+
+	// The classifier must NOT call a live session's failure "gone": a command that
+	// fails for an unrelated reason against an id the server still lists is unknown.
+	liveErr := exitOneWith(t, "operation not permitted")
+	if sessionIDProvedAbsent(cmd.MakeExecutor(), liveErr, idB) {
+		t.Fatalf("a failure that does not say the session is gone was read as gone while %s is still listed", idB)
 	}
 
 	// 4. Killing one id leaves the others alone.

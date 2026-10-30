@@ -77,6 +77,9 @@ func ReapProvenIncarnation(cmdExec cmd.Executor, program string, proof Incarnati
 		got, present, err := sessionEnvMarkerAt(cmdExec, gen.sessionID, proof.SessionName, want.marker)
 		switch {
 		case err != nil:
+			if same, known, gerr := t.generationMatches(gen); gerr == nil && known && !same {
+				return IncarnationReap{Why: fmt.Sprintf("session %q was replaced after it was probed", proof.SessionName)}
+			}
 			return IncarnationReap{Why: fmt.Sprintf("could not read %s of session %q: %v", want.marker, proof.SessionName, err)}
 		case !present:
 			return IncarnationReap{Why: fmt.Sprintf("session %q carries no %s, so it cannot be proven to be this fire's", proof.SessionName, want.marker)}

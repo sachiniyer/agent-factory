@@ -130,7 +130,7 @@ func captureSessionProcessTreesAt(cmdExec cmd.Executor, sanitizedName, target st
 		// An id target's absence is named by the id; a name's by the listing.
 		absent := false
 		if strings.HasPrefix(target, "$") {
-			absent = missingTmuxSession(err, target)
+			absent = sessionIDProvedAbsent(cmdExec, err, target)
 		} else {
 			absent = tmuxProvedSessionAbsent(cmdExec, err, sanitizedName)
 		}

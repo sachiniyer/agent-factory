@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -736,17 +735,7 @@ func (t *TmuxSession) generationMatches(gen *tmuxGeneration) (same bool, known b
 // retryable: the bound generation may be alive behind a probe that merely
 // could not run (Codex on #4473).
 func (t *TmuxSession) provedGenerationAbsent(gen *tmuxGeneration, runErr error) bool {
-	if missingTmuxSession(runErr, gen.sessionID) {
-		return true
-	}
-	if _, exitOne := tmuxExitOneDiagnostic(runErr); !exitOne {
-		return false
-	}
-	ids, listErr := listSessionIDs(t.cmdExec)
-	if listErr != nil {
-		return false
-	}
-	return !slices.Contains(ids, gen.sessionID)
+	return sessionIDProvedAbsent(t.cmdExec, runErr, gen.sessionID)
 }
 
 // CaptureVisiblePaneGrid captures the visible pane as a GRID — one output line per

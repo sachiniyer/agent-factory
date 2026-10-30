@@ -37,6 +37,10 @@ type fakeTmuxServer struct {
 	unreadableEnv bool
 	// delay makes every command outlast tmuxCommandTimeout.
 	delay time.Duration
+	// killFails makes kill-session fail with an error that says nothing about the
+	// session being gone, and oddHasSession does the same for has-session: the
+	// shapes of a kill that did not take and a probe that cannot tell.
+	killFails, oddHasSession bool
 }
 
 func exitOneWith(t *testing.T, stderr string) error {
@@ -99,7 +103,15 @@ func (s *fakeTmuxServer) answer(c *exec.Cmd) ([]byte, error) {
 func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
 	target := fakeTargetOf(args)
 	sess := s.find(target)
-	missing := exitOneWith(s.t, "can't find session: "+strings.TrimSuffix(strings.TrimPrefix(target, "="), ":"))
+	// tmux words a vanished session per command: measured on the CI runner,
+	// show-environment says "no such session" where kill-session says "can't find
+	// session". The fake keeps that split so a classifier that learned one wording
+	// cannot pass here.
+	bare := strings.TrimSuffix(strings.TrimPrefix(target, "="), ":")
+	missing := exitOneWith(s.t, "can't find session: "+bare)
+	if args[0] == "show-environment" {
+		missing = exitOneWith(s.t, "no such session: "+bare)
+	}
 	switch args[0] {
 	case "display-message":
 		if sess == nil {
@@ -134,11 +146,17 @@ func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
 		}
 		return nil, nil
 	case "has-session":
+		if s.oddHasSession {
+			return nil, exitOneWith(s.t, "unexpected failure")
+		}
 		if sess == nil {
 			return nil, missing
 		}
 		return nil, nil
 	case "kill-session":
+		if s.killFails {
+			return nil, exitOneWith(s.t, "operation not permitted")
+		}
 		if sess == nil {
 			return nil, missing
 		}
@@ -149,10 +167,16 @@ func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
 			}
 		}
 		return nil, nil
-	case "list-sessions":
+	case "ls":
+		// The server's own listing, which corroborates a failure that names
+		// neither the id nor a missing server.
 		var b strings.Builder
 		for _, other := range s.sessions {
-			b.WriteString("\t" + other.name + "\n")
+			if args[len(args)-1] == "#{session_id}" {
+				b.WriteString(other.id + "\n")
+			} else {
+				b.WriteString(other.name + "\n")
+			}
 		}
 		return []byte(b.String()), nil
 	}
@@ -345,4 +369,47 @@ func TestReapProvenIncarnationRejectsAServerThatReissuedTheId(t *testing.T) {
 	require.False(t, got.Stopped)
 	require.Contains(t, got.Why, "replaced")
 	require.Empty(t, srv.kills())
+}
+
+// A vanished id is recognised by the one classifier whatever command words it:
+// show-environment says "no such session" where kill-session says "can't find
+// session", and the server's id listing corroborates either. Here the id vanishes
+// before the environment read, so the reap reports the incarnation gone and kills
+// nothing.
+func TestReapProvenIncarnationReadsAVanishedIDFromAnyWording(t *testing.T) {
+	srv := newFakeTmuxServer(t, provenEnv())
+	srv.after = map[string]func(*fakeTmuxServer){
+		"display-message -p -t =" + reapName + ": #{session_id} #{pid} #{session_created}": func(s *fakeTmuxServer) {
+			s.sessions = nil
+		},
+	}
+	got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+
+	require.False(t, got.Stopped)
+	require.Contains(t, got.Why, "replaced")
+	require.Empty(t, srv.kills())
+}
+
+// A kill that fails for a reason that does not say the session is gone, followed by a
+// probe that cannot tell, is UNKNOWN: the reap reports it not stopped rather than
+// reading "could not ask" as "gone".
+func TestReapProvenIncarnationTreatsAnUnclassifiableFailureAsUnknown(t *testing.T) {
+	srv := newFakeTmuxServer(t, provenEnv())
+	srv.killFails = true
+	srv.oddHasSession = true
+	got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+
+	require.False(t, got.Stopped, "an unknown outcome must not be reported as stopped")
+	require.NotEmpty(t, got.Why)
+	require.True(t, srv.has(reapName), "the session is still there")
+}
+
+// The same kill failure with a probe that answers "alive" is a refused kill.
+func TestReapProvenIncarnationReportsAKillThatDidNotTake(t *testing.T) {
+	srv := newFakeTmuxServer(t, provenEnv())
+	srv.killFails = true
+	got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+
+	require.False(t, got.Stopped)
+	require.True(t, srv.has(reapName))
 }
