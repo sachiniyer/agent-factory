@@ -6,7 +6,7 @@ All commands print JSON, the same as the other `af` commands.
 
 | Command | Needs a session | What it does |
 |---|---|---|
-| `af proposal start <slug> [--docs goals,technical,api,ui,future]` | yes | Creates the proposal from templates, attaches, and prints the rules. Fails if the slug exists. The default is all five docs. |
+| `af proposal start <slug> [--docs goals,technical,api,ui,steps,future]` | yes | Creates the proposal from templates, attaches, and prints the rules. Fails if the slug exists. The default is all six docs. |
 | `af proposal attach [<slug>]` | yes | Attaches to an existing proposal and prints the rules. With no slug, prints the current proposal and the rules again. |
 | `af proposal detach` | yes | Removes this session's attachment and cursor. |
 | `af proposal list` | no | Lists proposals by last edit: slug, docs, attached sessions, and last edit time. |
