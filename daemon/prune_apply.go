@@ -336,13 +336,8 @@ func (m *Manager) pruneFinish(repoID string, instance *session.Instance, intent 
 	if repoPath == "" {
 		repoPath = data.Path
 	}
-	if err := pruneIntentUnderArchiveRoot(repoID, intent); err != nil {
+	if err := validatePruneIntent(repoID, intent); err != nil {
 		return "intent", err
-	}
-	if intent.TombstonePath != "" {
-		if err := validatePruneTombstonePath(intent); err != nil {
-			return "remove", err
-		}
 	}
 	if err := pruneStep("leaf"); err != nil {
 		return "leaf", err
@@ -436,6 +431,13 @@ func (m *Manager) resumePruneIntent(repoID string, instance *session.Instance) (
 	}
 	if err := m.pruneAbandonedGuard(repoID, instance, intent); err != nil {
 		return inc("intent", err)
+	}
+	// Validate the intent FIRST, on every branch below: an invalid (corrupted or
+	// hand-edited) intent is never cleared, abandoned or completed. It stays on the
+	// row and the row is reported as needing a human; only a valid intent may be
+	// acted on at all.
+	if err := validatePruneIntent(repoID, intent); err != nil {
+		return inc("intent", fmt.Errorf("the recorded prune intent is invalid and was left in place for a human to inspect: %w", err))
 	}
 
 	// Resume acts only on a positive answer: ENOENT is "absent", any other error
@@ -801,6 +803,20 @@ func pruneIntentUnderArchiveRoot(repoID string, intent *session.PruneIntentData)
 		if err := pruneUnderArchiveRoot(repoID, intent.TombstonePath); err != nil {
 			return fmt.Errorf("tombstone path: %w", err)
 		}
+	}
+	return nil
+}
+
+// validatePruneIntent is the single validation of a recorded intent: both paths
+// canonical, absolute, free of . and .. and directly under the repo's archive root,
+// and the tombstone a .prune- sibling of the worktree. Resume runs it before ANY
+// branch (clear, abandon, finish), and the finishing step runs it again.
+func validatePruneIntent(repoID string, intent *session.PruneIntentData) error {
+	if err := pruneIntentUnderArchiveRoot(repoID, intent); err != nil {
+		return err
+	}
+	if intent.TombstonePath != "" {
+		return validatePruneTombstonePath(intent)
 	}
 	return nil
 }

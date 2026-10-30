@@ -755,3 +755,33 @@ func TestPruneApply_ResumeRefusesAnIntentOutsideTheArchiveRoot(t *testing.T) {
 	require.NotNil(t, inc)
 	assert.FileExists(t, filepath.Join(victim, "keep.txt"))
 }
+
+// An invalid intent is surfaced, never silently discarded (Codex on #6186): even in
+// the branch where the original still exists, the tombstone is absent and nothing was
+// renamed — the case resume would otherwise abandon by clearing the intent.
+func TestPruneApply_ResumeLeavesAnInvalidIntentInPlaceEvenWhenTheOriginalExists(t *testing.T) {
+	manager, repoID, _, inst, archived := seedPrunableArchive(t, "invalid-intent-abandon")
+	root := filepath.Dir(archived)
+	for name, intent := range map[string]session.PruneIntentData{
+		"tombstone outside the root":      {WorktreePath: archived, TombstonePath: filepath.Join(t.TempDir(), ".prune-x")},
+		"unclean tombstone":               {WorktreePath: archived, TombstonePath: root + "/sub/../.prune-x"},
+		"tombstone not a .prune- sibling": {WorktreePath: archived, TombstonePath: filepath.Join(root, "not-a-tombstone")},
+		"relative worktree path":          {WorktreePath: "relative/wt", TombstonePath: filepath.Join(root, ".prune-x")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, inst.SetPruneIntent(intent)) // not renamed, tombstone absent, original exists
+			require.NoError(t, manager.persistInstanceErr(repoID, inst))
+			entry, inc := manager.resumePruneIntent(repoID, inst)
+			assert.Nil(t, entry)
+			require.NotNil(t, inc, "the row is reported as needing a human")
+			assert.Contains(t, inc.Reason, "invalid")
+			require.NotNil(t, inst.PruneIntent(), "the invalid intent was NOT discarded")
+			assert.DirExists(t, archived)
+			// And it is still on disk, not only in memory.
+			raw, err := config.LoadRepoInstances(repoID)
+			require.NoError(t, err)
+			assert.Contains(t, string(raw), "prune_intent")
+			inst.ClearPruneIntent()
+		})
+	}
+}
