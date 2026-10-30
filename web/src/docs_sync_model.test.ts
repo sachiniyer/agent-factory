@@ -41,3 +41,12 @@ test("sync engine: failed saves, lost replies and the page closing never lose an
     assert.equal(v, null, `seed ${seed * 15485863}: ${v?.invariant}: ${v?.detail}\n${process.env.AF_TRACE ? v?.trace.join("\n") : ""}`);
   }
 });
+
+test("sync engine: every external event (remote delete, daemon restart, second window, hung and refused saves, head rolled back) keeps every invariant", async () => {
+  for (const [collide, mult] of [[false, 6700417], [true, 67280421310721]] as const) {
+    for (let seed = 1; seed <= SEEDS; seed++) {
+      const v = await runScenario({ seed: Number((BigInt(seed) * BigInt(mult)) % 4294967291n), steps: 140, collide, faults: 0.25, chaos: true, makeSync });
+      assert.equal(v, null, `seed ${seed} (collide ${collide}): ${v?.invariant}: ${v?.detail}\n${process.env.AF_TRACE ? v?.trace.join("\n") : ""}`);
+    }
+  }
+});

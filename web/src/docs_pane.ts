@@ -16,7 +16,8 @@ import {
   statusText,
 } from "./docs_model.js";
 import { PushChip, type PushView } from "./docs_push.js";
-import { DocSync, type Draft, type SyncStatus } from "./docs_sync.js";
+import { DRAFT_HEARTBEAT_MS, DraftStorage, type KV, localStorageKV, windowId } from "./docs_draft_store.js";
+import { DocSync, type SyncStatus } from "./docs_sync.js";
 import { h } from "./dom.js";
 import { icon } from "./icon.js";
 import {
@@ -45,37 +46,52 @@ const lastDoc = new Map<string, string>();
 // user just typed.
 const closing = new Map<string, Set<DocSync>>();
 
+/** The key a doc's closing tabs are tracked under. */
 function draftKey(sessionId: string, slug: string, doc: string): string {
-  return `af.docs.draft\n${sessionId}\n${slug}\n${doc}`;
+  return `${sessionId}\n${slug}\n${doc}`;
 }
 
-/** Per-viewer storage for an unresolved conflict draft. A draft never goes into
- *  the proposal doc; it comes back as a conflict when the doc opens again. */
-function draftStore(key: string): NonNullable<ConstructorParameters<typeof DocSync>[0]["draft"]> {
-  return {
-    load: (): Draft | null => {
+// Unsaved work is kept per window (see docs_draft_store.ts): this window writes and
+// clears only its own entries, and adopts a closed or dead window's.
+const windowDrafts = new Map<string, DraftStorage>();
+let draftsWired = false;
+
+function memoryKV(): KV {
+  const map = new Map<string, string>();
+  return { get: (k) => map.get(k) ?? null, set: (k, v) => void map.set(k, v), remove: (k) => void map.delete(k), keys: () => [...map.keys()] };
+}
+
+let sharedKV: KV | null = null;
+
+function draftStorage(sessionId: string, slug: string): DraftStorage {
+  const scope = `${sessionId}\n${slug}`;
+  let d = windowDrafts.get(scope);
+  if (!d) {
+    if (!sharedKV) {
       try {
-        const raw = window.localStorage.getItem(key);
-        return raw === null ? null : (JSON.parse(raw) as Draft);
+        sharedKV = localStorageKV(window.localStorage);
       } catch {
-        return null;
+        sharedKV = memoryKV(); // storage is blocked: drafts then live only in memory
       }
-    },
-    store: (draft: Draft): void => {
-      try {
-        window.localStorage.setItem(key, JSON.stringify(draft));
-      } catch {
-        // Storage can be unavailable; the draft then lives only in memory.
-      }
-    },
-    clear: (): void => {
-      try {
-        window.localStorage.removeItem(key);
-      } catch {
-        // Nothing stored, nothing to clear.
-      }
-    },
-  };
+    }
+    d = new DraftStorage(sharedKV, windowId(), () => Date.now(), scope);
+    windowDrafts.set(scope, d);
+    if (!draftsWired) {
+      draftsWired = true;
+      // The heartbeat tells other windows this one is alive; closing releases its
+      // entries at once. A bfcache restore refreshes them.
+      window.setInterval(() => d!.touch(), DRAFT_HEARTBEAT_MS);
+      window.addEventListener("pagehide", () => d!.release());
+      window.addEventListener("pageshow", () => d!.touch());
+    }
+  }
+  return d;
+}
+
+/** A doc's draft storage for DocSync. */
+function draftFor(sessionId: string, slug: string, doc: string): NonNullable<ConstructorParameters<typeof DocSync>[0]["draft"]> {
+  const d = draftStorage(sessionId, slug);
+  return { load: () => d.load(doc), store: (x) => d.store(doc, x), clear: () => d.clear(doc) };
 }
 
 const REFRESH_DEBOUNCE_MS = 300;
@@ -126,6 +142,9 @@ export class DocsPane {
   private editor: DocsEditor | null = null;
   private freshBuffer = true;
   private readonly texts = new Map<string, string>();
+  /** Docs deleted under a tab that still holds unsaved work. They stay in the strip,
+   *  marked deleted, until the user restores or discards them. */
+  private readonly goneDocs = new Map<string, ProposalDocRef>();
   private generation = 0;
   private refreshTimer: number | null = null;
   private disposed = false;
@@ -232,7 +251,7 @@ export class DocsPane {
     if (this.sync === sync) this.sync = null;
     const key = draftKey(this.opts.sessionId, this.opts.slug, name);
     sync.dispose();
-    if (forget) draftStore(key).clear();
+    if (forget) draftFor(this.opts.sessionId, this.opts.slug, name).clear();
     const set = closing.get(key) ?? new Set<DocSync>();
     set.add(sync);
     closing.set(key, set);
@@ -260,7 +279,59 @@ export class DocsPane {
     const key = draftKey(this.opts.sessionId, this.opts.slug, name);
     for (const s of suspended) s.abandon(!deleted);
     closing.delete(key);
-    if (deleted) draftStore(key).clear();
+    if (deleted) draftFor(this.opts.sessionId, this.opts.slug, name).clear();
+  }
+
+  /** The agent or another window deleted the doc. A tab with nothing unsaved ends; one
+   *  with unsaved work or an open conflict keeps it (in storage too) and the doc stays
+   *  in the strip, marked deleted, until the work is restored or discarded. */
+  private docDeletedRemotely(name: string): void {
+    const key = draftKey(this.opts.sessionId, this.opts.slug, name);
+    for (const closed of closing.get(key) ?? []) closed.remoteDeleted();
+    const sync = this.syncs.get(name);
+    if (!sync) return;
+    const ref = this.ordered.find((d) => d.name === name) ?? this.goneDocs.get(name) ?? (this.current?.name === name ? this.current : null) ?? { name, file: `${name}.md` };
+    sync.remoteDeleted();
+    if (sync.ended) {
+      this.syncs.delete(name);
+      this.goneDocs.delete(name);
+      if (this.sync === sync) this.sync = null;
+      if (this.current?.name === name) this.current = null;
+      return;
+    }
+    this.goneDocs.set(name, ref);
+  }
+
+  /** The user restores a deleted doc: it is added again, and their kept work goes onto it. */
+  private async restoreGone(): Promise<void> {
+    const name = this.current?.name;
+    const sync = this.sync;
+    if (!name || !sync) return;
+    try {
+      await addDoc(this.opts.sessionId, this.opts.slug, name, this.opts.token);
+    } catch {
+      // It may exist again already (a rename lands as a delete and an add): read it.
+    }
+    await sync.revive();
+    this.goneDocs.delete(name);
+    this.scheduleListRefresh();
+  }
+
+  /** The user gives up the kept work of a deleted doc. */
+  private discardGone(): void {
+    const name = this.current?.name;
+    const sync = this.sync;
+    if (!name || !sync) return;
+    sync.abandon(false);
+    this.syncs.delete(name);
+    this.goneDocs.delete(name);
+    this.sync = null;
+    this.current = null;
+    this.hideBanner();
+    this.renderStrip();
+    const next = this.ordered[0];
+    if (next) void this.openDoc(next);
+    else this.showNotice("This proposal has no docs yet. Add one with +.", null);
   }
 
   /** The event stream reconnected: events may have been missed, so every open
@@ -362,6 +433,16 @@ export class DocsPane {
       }
       return tab;
     });
+    for (const [name, ref] of this.goneDocs) {
+      if (this.ordered.some((d) => d.name === name)) continue;
+      const selected = name === this.current?.name;
+      const tab = h("button", { type: "button", class: "af-docs-tab af-docs-tab-gone", role: "tab" }, `${name} (deleted)`);
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+      tab.tabIndex = selected ? 0 : -1;
+      tab.title = `${ref.file} was deleted; your unsaved changes are kept`;
+      tab.addEventListener("click", () => void this.openDoc(ref));
+      tabs.push(tab);
+    }
     this.strip.replaceChildren(...tabs);
   }
 
@@ -582,9 +663,10 @@ export class DocsPane {
     this.freshBuffer = true;
     const key = draftKey(this.opts.sessionId, this.opts.slug, doc.name);
     const sync = new DocSync({
-      load: async () => {
-        // Wait for every tab that closed on this doc with a save still in flight.
-        const priors = [...(closing.get(key) ?? [])].filter((p) => p !== sync);
+      load: async (initial) => {
+        // A tab's first read waits for every tab that closed on this doc with a save
+        // still in flight (later reads must not: closing tabs would wait on each other).
+        const priors = initial ? [...(closing.get(key) ?? [])].filter((p) => p !== sync) : [];
         await Promise.all(priors.map((p) => p.whenQuiet()));
         return getDoc(this.opts.sessionId, this.opts.slug, doc.name, this.opts.token);
       },
@@ -605,7 +687,7 @@ export class DocsPane {
       onStatus: (status, detail) => {
         if (this.sync === sync) this.setStatus(status, detail);
       },
-      draft: draftStore(key),
+      draft: draftFor(this.opts.sessionId, this.opts.slug, doc.name),
       setTimer: (fn, ms) => window.setTimeout(fn, ms),
       clearTimer: (handle) => window.clearTimeout(handle as number),
     });
@@ -669,12 +751,16 @@ export class DocsPane {
         }
         const current = this.current;
         for (const name of [...this.syncs.keys()]) {
-          // The agent or another window deleted the doc: its syncs end for good.
-          if (!this.ordered.some((d) => d.name === name)) this.finishDelete(name, this.suspendDoc(name), true);
+          if (!this.ordered.some((d) => d.name === name)) this.docDeletedRemotely(name);
         }
-        if (current && !this.ordered.some((d) => d.name === current.name)) {
+        for (const name of [...this.goneDocs.keys()]) {
+          // The doc is back (restored, or added again): its kept work saves onto it.
+          if (this.ordered.some((d) => d.name === name) && this.syncs.get(name)?.currentStatus !== "gone") this.goneDocs.delete(name);
+        }
+        if (current && !this.ordered.some((d) => d.name === current.name) && !this.goneDocs.has(current.name)) {
           this.current = null;
         }
+        this.renderStrip();
         if (!this.current && this.ordered[0]) {
           void this.openDoc(this.ordered[0]);
         } else if (!this.current) {
@@ -784,7 +870,11 @@ export class DocsPane {
     this.status.title = text;
     this.status.hidden = text === "";
     this.status.dataset.state = status;
-    if (status === "conflict") {
+    if (status === "gone" && this.current) {
+      this.goneDocs.set(this.current.name, this.current);
+      this.showGoneBanner();
+      this.renderStrip();
+    } else if (status === "conflict") {
       this.showBanner();
     } else if (!this.banner.hidden) {
       this.hideBanner();
@@ -816,6 +906,29 @@ export class DocsPane {
       action("Take theirs", () => sync.takeTheirs()),
       sep(),
       action("Show both", () => sync.showBoth()),
+    );
+    this.banner.hidden = false;
+  }
+
+  private showGoneBanner(): void {
+    const action = (label: string, run: () => void | Promise<void>): HTMLButtonElement => {
+      const btn = h("button", { type: "button", class: "af-ghost af-docs-banner-action" }, label);
+      btn.addEventListener("click", () => {
+        btn.disabled = true;
+        void Promise.resolve(run()).catch((e: unknown) => {
+          btn.disabled = false;
+          this.statusText.textContent = `Not restored · ${errorText(e)}`;
+        });
+      });
+      return btn;
+    };
+    const sep = (): HTMLElement => h("span", { class: "af-docs-sep", ariaHidden: "true" }, " · ");
+    this.banner.replaceChildren(
+      h("span", { class: "af-docs-banner-text" }, "This doc was deleted. Your unsaved changes are kept"),
+      sep(),
+      action("Restore doc", () => this.restoreGone()),
+      sep(),
+      action("Discard", () => this.discardGone()),
     );
     this.banner.hidden = false;
   }

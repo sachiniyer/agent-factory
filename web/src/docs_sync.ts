@@ -21,10 +21,16 @@ import {
 } from "./docs_sync_model.js";
 
 export { AUTOSAVE_DELAY_MS, SAVE_RETRY_MS };
+
+/** A save with no reply by now has an unknown outcome: it may have landed. */
+export const SAVE_TIMEOUT_MS = 30_000;
 export type { Conflict, Draft, SyncStatus };
 
 export interface DocSyncDeps {
-  load(): Promise<DocText>;
+  /** Reads the doc. `initial` is the first read of a tab: it may wait for tabs that
+   *  closed on this doc to finish their saves; later reads (reload, reconcile) must
+   *  not, or two closing tabs could wait on each other. */
+  load(initial?: boolean): Promise<DocText>;
   /** `final` marks the save that dispose or page unload sends; nobody waits
    *  for its reply. */
   save(text: string, base: string, final?: boolean): Promise<SaveResult>;
@@ -32,8 +38,9 @@ export interface DocSyncDeps {
    *  only while the doc is attached. */
   setBuffer(text: string): void;
   onStatus(status: SyncStatus, detail: string): void;
-  /** Per-viewer storage for an unresolved conflict's draft. A draft never goes
-   *  into the proposal doc. Optional: without it a draft lives only in memory. */
+  /** Per-window storage for unsaved work: an unresolved conflict's draft, or edits
+   *  no save has landed yet. A draft never goes into the proposal doc. Optional:
+   *  without it a draft lives only in memory. */
   draft?: {
     load(): Draft | null;
     store(draft: Draft): void;
@@ -81,13 +88,18 @@ export class DocSync {
     return this.model.loaded;
   }
 
+  /** The sync has ended (its doc was deleted with nothing unsaved): the pane drops it. */
+  get ended(): boolean {
+    return this.model.dead;
+  }
+
   /** Loads the doc. Rejects when the first load fails. */
   start(): Promise<void> {
     const done = new Promise<void>((resolve, reject) => {
       this.starting = { resolve, reject };
     });
     this.emit();
-    this.run({ t: "load", reload: false });
+    this.run({ t: "load", kind: "initial", seq: 0 });
     return done;
   }
 
@@ -133,6 +145,19 @@ export class DocSync {
    *  and goes out against the commit that reply establishes. */
   saveBeforeLeaving(): void {
     this.dispatch({ t: "leave" });
+  }
+
+  /** The daemon no longer has this doc (an agent or another window deleted it, or a
+   *  request said so). A clean doc ends; one with unsaved work keeps it, in storage,
+   *  and shows the "deleted" state until it is restored or discarded. */
+  remoteDeleted(): void {
+    this.dispatch({ t: "gone" });
+  }
+
+  /** The doc was added again: read its head and carry the kept work onto it. */
+  async revive(): Promise<void> {
+    const head = await this.deps.load();
+    this.dispatch({ t: "revive", head });
   }
 
   /** The doc is being deleted. Stops the timers and retries; the unsaved edits stay
@@ -200,16 +225,19 @@ export class DocSync {
   private savedVerdict(): "saved" | "blocked" | null {
     const m = this.model;
     if (!m.loaded) return m.loadFailed !== null ? "blocked" : null;
-    if (m.phase === "conflict") return "blocked";
+    if (m.phase === "conflict" || m.gone || m.fatal) return "blocked";
     if (!isDirty(m)) return m.phase === "saving" ? null : "saved";
-    if (m.phase === "idle" && (hasConflictMarkers(m.buffer) || m.note?.kind === "error")) return "blocked";
+    if (m.phase === "idle" && !m.unknown && (hasConflictMarkers(m.buffer) || m.note?.kind === "error")) return "blocked";
     return null;
   }
 
   /** Starts the save of anything unsaved that is waiting on a timer. */
   private pumpSaved(): void {
     const m = this.model;
-    if (m.phase === "idle" && isDirty(m) && !hasConflictMarkers(m.buffer) && m.note?.kind !== "error" && !m.closed) {
+    if (
+      m.phase === "idle" && isDirty(m) && !hasConflictMarkers(m.buffer) && m.note?.kind !== "error" &&
+      !m.closed && !m.unknown && !m.gone && !m.fatal && !m.suspended && m.loaded
+    ) {
       this.dispatch({ t: "flush" });
     }
   }
@@ -222,8 +250,18 @@ export class DocSync {
     return new Promise((resolve) => this.quietWaiters.push(resolve));
   }
 
+  get debugModel(): string {
+    const { phase, loaded, flight, unknown, backoff, leaving, closed, gone, fatal, timer, stale, suspended, dead } = this.model;
+    return JSON.stringify({ phase, loaded, flight: flight ? flight.seq : null, unknown, backoff, leaving, closed, gone, fatal, timer, stale, suspended, dead });
+  }
+
+  /** Whether no save is in flight or queued (see whenQuiet). */
+  get isQuiet(): boolean {
+    return this.quiet();
+  }
+
   private quiet(): boolean {
-    return this.model.phase !== "saving" && !this.model.leaving;
+    return this.model.dead || (this.model.phase !== "saving" && !this.model.leaving);
   }
 
   private dispatch(e: Event): void {
@@ -258,35 +296,65 @@ export class DocSync {
   private run(fx: Effect): void {
     switch (fx.t) {
       case "load": {
-        const reload = fx.reload;
-        this.deps.load().then(
+        const { kind, seq } = fx;
+        this.deps.load(kind === "initial").then(
           (doc) => {
-            if (reload) {
-              this.dispatch({ t: "reload_ok", doc });
-              return;
+            if (kind === "initial") {
+              this.dispatch({ t: "load_ok", doc });
+              const draft = this.deps.draft?.load() ?? null;
+              this.storedKey = draft ? JSON.stringify(draft) : null;
+              this.dispatch({ t: "draft_read", draft });
+              this.starting?.resolve();
+            } else if (kind === "reload") {
+              this.dispatch({ t: "reload_ok", seq, doc });
+            } else {
+              this.dispatch({ t: "reconcile_ok", seq, doc });
             }
-            this.dispatch({ t: "load_ok", doc });
-            const draft = this.deps.draft?.load() ?? null;
-            this.storedKey = draft ? JSON.stringify(draft) : null;
-            this.dispatch({ t: "draft_read", draft });
-            this.starting?.resolve();
           },
           (e: unknown) => {
-            this.dispatch(reload ? { t: "reload_fail", error: errorMessage(e) } : { t: "load_fail", error: errorMessage(e) });
-            if (!reload) this.starting?.reject(e);
+            if (kind !== "initial" && statusOf404(e)) {
+              this.dispatch({ t: "gone" });
+              return;
+            }
+            const error = errorMessage(e);
+            if (kind === "initial") {
+              this.dispatch({ t: "load_fail", error });
+              this.starting?.reject(e);
+            } else if (kind === "reload") {
+              this.dispatch({ t: "reload_fail", seq, error });
+            } else {
+              this.dispatch({ t: "reconcile_fail", seq, error });
+            }
           },
         );
         return;
       }
       case "save": {
-        const sent = this.deps.save(fx.text, fx.base, fx.final);
-        if (!fx.track) {
-          sent.catch(() => undefined);
-          return;
-        }
-        sent.then(
-          (result) => this.dispatch(result.kind === "conflict" ? { t: "save_conflict", result } : { t: "save_ok", result }),
-          (e: unknown) => this.dispatch({ t: "save_fail", error: errorMessage(e) }),
+        const { seq } = fx;
+        let settled = false;
+        // A save with no reply is not a failed save: it may have landed. After the
+        // timeout its outcome is unknown, and a reply that comes later is ignored
+        // (its request id no longer matches).
+        const timeout = this.deps.setTimer(() => {
+          if (settled) return;
+          settled = true;
+          this.dispatch({ t: "save_fail", seq, error: "the daemon did not answer in time" });
+        }, SAVE_TIMEOUT_MS);
+        this.deps.save(fx.text, fx.base, fx.final).then(
+          (result) => {
+            if (settled) return;
+            settled = true;
+            this.deps.clearTimer(timeout);
+            this.dispatch(result.kind === "conflict" ? { t: "save_conflict", seq, result } : { t: "save_ok", seq, result });
+          },
+          (e: unknown) => {
+            if (settled) return;
+            settled = true;
+            this.deps.clearTimer(timeout);
+            if (statusOf404(e)) this.dispatch({ t: "gone" });
+            else if (refused(e)) this.dispatch({ t: "save_fatal", seq, error: errorMessage(e) });
+            else this.dispatch({ t: "save_fail", seq, error: errorMessage(e) });
+          },
         );
         return;
       }
@@ -337,4 +405,20 @@ export class DocSync {
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** An error that carries an HTTP status (ApiError). */
+function httpStatus(e: unknown): number | null {
+  const status = (e as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : null;
+}
+
+function statusOf404(e: unknown): boolean {
+  return httpStatus(e) === 404;
+}
+
+/** A 4xx other than a timeout or a rate limit: the daemon refused, and did not apply, the save. */
+function refused(e: unknown): boolean {
+  const status = httpStatus(e);
+  return status !== null && status >= 400 && status < 500 && status !== 408 && status !== 429;
 }

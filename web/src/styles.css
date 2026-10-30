@@ -4357,3 +4357,9 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
     padding: var(--af-space-2);
   }
 }
+
+/* A doc deleted under unsaved work stays in the strip, marked, until it is restored or discarded. */
+.af-docs-tab-gone {
+  font-style: italic;
+  color: var(--af-ink-muted);
+}

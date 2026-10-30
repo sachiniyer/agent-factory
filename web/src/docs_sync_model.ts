@@ -4,11 +4,14 @@
 // state-and-event pair can be tested, including by random interleavings
 // (docs_sync_model.test.ts).
 //
-// The design is in the #6292 thread. In short: a document is in one `phase`; a
-// save in flight, a reload in flight and a conflict are part of the state, not
-// side flags; a remote change that cannot be applied yet is remembered in `stale`
-// and `settle` drains it whenever the document is idle and clean; and a final
-// save at leave time is queued behind a save already in flight.
+// The design and its full transition table are in the #6292 thread. In short: a
+// document is in one `phase`; a save in flight, a reload, a reconcile and a conflict
+// are part of the state, not side flags; every request carries an id so a late,
+// duplicate or out-of-order reply is ignored; a remote change that cannot be applied
+// yet is remembered in `stale` and `settle` drains it whenever the document is idle
+// and clean; a save whose outcome is unknown (timeout, network error, 5xx) is
+// reconciled against the daemon's head before anything else is sent or loaded; and
+// unsaved work is mirrored into per-window storage so closing the page cannot lose it.
 
 import type { DocText, SaveResult } from "./proposal_api.js";
 import { hasConflictMarkers, mergeWithMarkers } from "./text_diff.js";
@@ -25,7 +28,7 @@ export type SyncStatus =
   | "conflict"
   | "markers"
   | "recovered"
-  | "recovered"
+  | "gone"
   | "error";
 
 export interface Conflict {
@@ -37,11 +40,13 @@ export interface Conflict {
 }
 
 /** "restoring" sits between the first load and "idle": the load has returned and
- *  per-viewer storage is being read. Nothing is drained, armed or stored in it, so
- *  a stored draft is always restored before any reload can start. */
-export type Phase = "loading" | "restoring" | "idle" | "saving" | "reloading" | "conflict";
+ *  per-window storage is being read. Nothing is drained, armed or stored in it, so
+ *  a stored draft is always restored before any reload can start. "reconciling" is
+ *  the read of the daemon's head after a save whose outcome is unknown. */
+export type Phase = "loading" | "restoring" | "idle" | "saving" | "reloading" | "reconciling" | "conflict";
 
 export interface Flight {
+  seq: number;
   text: string;
   base: string;
   final: boolean;
@@ -56,49 +61,70 @@ export interface Model {
   /** The text at `base`, as far as this tab knows. */
   saved: string;
   base: string;
+  /** The next request id. Replies carry the id of their request. */
+  nextSeq: number;
   /** Set exactly when phase is "saving". */
   flight: Flight | null;
   /** Set exactly when phase is "conflict". */
   conflict: Conflict | null;
   /** The buffer when the reload started; set exactly when phase is "reloading". */
   reloadFrom: string | null;
+  /** The id of the load in flight in phase "reloading" or "reconciling". */
+  readSeq: number | null;
   /** The daemon may be ahead of `base`. Drained by `settle`. */
   stale: boolean;
-  /** A reload failed; no new reload until a timer fires. */
+  /** A read failed; no new one until a timer fires. */
   backoff: boolean;
+  /** A save's outcome is unknown: it may or may not have landed. Nothing is sent
+   *  or reloaded until the daemon's head has been read (phase "reconciling"). */
+  unknown: boolean;
+  /** Texts of saves whose outcome is unknown. */
+  inDoubt: string[];
+  /** The daemon refused a save for good (too large, rejected): no retry until the
+   *  buffer changes. */
+  fatal: boolean;
+  /** The doc was deleted under this tab. Nothing is sent or read; the unsaved work
+   *  stays in storage until the user restores the doc or discards it. */
+  gone: boolean;
   /** A final save is wanted once the current one has replied. */
   leaving: boolean;
   /** The tab is gone: no timers, no reloads, only the final save. */
   closed: boolean;
-  /** The doc is being deleted: no timers, saves or reloads; the draft stays stored. */
+  /** The doc is being deleted by this window: no timers, saves or reads; the draft stays stored. */
   suspended: boolean;
   /** The sync is finished: every event is ignored. */
   dead: boolean;
   timer: "save" | "retry" | null;
   note: { kind: "merged" | "error" | "recovered"; detail: string } | null;
-  /** Texts of saves that failed without a reply: any of them may have landed. A
-   *  conflict whose "theirs" is one of them is our own commit, not the agent's. */
-  maybeLanded: string[];
-  /** What per-viewer storage currently holds for this doc (a JSON key), or null. */
+  /** What per-window storage currently holds for this doc (a JSON key), or null. */
   stashed: string | null;
   loadFailed: string | null;
 }
 
 export type Event =
   | { t: "load_ok"; doc: DocText }
-  /** What per-viewer storage holds for this doc, or null. */
+  /** What per-window storage holds for this doc, or null. */
   | { t: "draft_read"; draft: Draft | null }
   | { t: "load_fail"; error: string }
   | { t: "edit"; text: string }
   | { t: "timer" }
-  | { t: "save_ok"; result: Extract<SaveResult, { kind: "saved" }> }
-  | { t: "save_conflict"; result: Extract<SaveResult, { kind: "conflict" }> }
-  | { t: "save_fail"; error: string }
+  | { t: "save_ok"; seq: number; result: Extract<SaveResult, { kind: "saved" }> }
+  | { t: "save_conflict"; seq: number; result: Extract<SaveResult, { kind: "conflict" }> }
+  /** The outcome is unknown: a timeout, a network error, a 5xx. */
+  | { t: "save_fail"; seq: number; error: string }
+  /** The daemon refused the save outright (4xx): it certainly did not apply. */
+  | { t: "save_fatal"; seq: number; error: string }
   | { t: "remote"; commit: string }
-  | { t: "reload_ok"; doc: DocText }
-  | { t: "reload_fail"; error: string }
+  | { t: "reload_ok"; seq: number; doc: DocText }
+  | { t: "reload_fail"; seq: number; error: string }
+  | { t: "reconcile_ok"; seq: number; doc: DocText }
+  | { t: "reconcile_fail"; seq: number; error: string }
   | { t: "reconnect" }
-  /** The doc is being deleted: stop retrying and arming; the draft stays stored. */
+  /** The doc no longer exists on the daemon (a 404, or the doc list says so). */
+  | { t: "gone" }
+  /** The user restored a deleted doc: `head` is the new doc's state. */
+  | { t: "revive"; head: DocText }
+  /** The doc is being deleted by this window: stop retrying and arming; the draft stays stored. */
   | { t: "suspend" }
   /** The delete landed (or was given up on): the sync is finished. `keepDraft`
    *  leaves the stored draft for the next tab to restore. */
@@ -111,18 +137,17 @@ export type Event =
   | { t: "show_both"; head: DocText };
 
 export type Effect =
-  | { t: "load"; reload: boolean }
-  /** `track` false: nobody waits for the reply (a final save of an open conflict). */
-  | { t: "save"; text: string; base: string; final: boolean; track: boolean }
+  | { t: "load"; kind: "initial" | "reload" | "reconcile"; seq: number }
+  | { t: "save"; seq: number; text: string; base: string; final: boolean }
   | { t: "set_buffer"; text: string }
   | { t: "arm"; kind: "save" | "retry"; ms: number }
   | { t: "disarm" }
-  /** Keeps the conflict draft in per-viewer storage, so it survives closing the
-   *  tab or the page. The proposal doc never receives it. */
+  /** Keeps unsaved work in per-window storage, so it survives closing the tab or
+   *  the page. The proposal doc never receives a conflict draft. */
   | { t: "stash"; draft: Draft }
   | { t: "unstash" };
 
-/** Unsaved work, as stored for this viewer: an unresolved conflict's draft, or
+/** Unsaved work, as stored for this window: an unresolved conflict's draft, or
  *  edits no save has landed yet. */
 export interface Draft {
   buffer: string;
@@ -146,11 +171,17 @@ export function initialModel(): Model {
     buffer: "",
     saved: "",
     base: "",
+    nextSeq: 1,
     flight: null,
     conflict: null,
     reloadFrom: null,
+    readSeq: null,
     stale: false,
     backoff: false,
+    unknown: false,
+    inDoubt: [],
+    fatal: false,
+    gone: false,
     leaving: false,
     closed: false,
     suspended: false,
@@ -158,7 +189,6 @@ export function initialModel(): Model {
     timer: null,
     note: null,
     stashed: null,
-    maybeLanded: [],
     loadFailed: null,
   };
 }
@@ -171,6 +201,7 @@ export function statusOf(m: Model): { status: SyncStatus; detail: string } {
   if (!m.loaded) {
     return m.loadFailed !== null ? { status: "error", detail: m.loadFailed } : { status: "loading", detail: "" };
   }
+  if (m.gone) return { status: "gone", detail: "" };
   if (m.phase === "conflict") return { status: "conflict", detail: "" };
   if (m.phase === "saving") return { status: "saving", detail: "" };
   if (m.note?.kind === "error") return { status: "error", detail: m.note.detail };
@@ -184,7 +215,7 @@ export function statusOf(m: Model): { status: SyncStatus; detail: string } {
 /** Returns the next model and the effects to run. The input is not modified. */
 export function step(prev: Model, e: Event): [Model, Effect[]] {
   if (prev.dead) return [prev, []];
-  const m: Model = { ...prev };
+  const m: Model = { ...prev, inDoubt: [...prev.inDoubt] };
   const fx: Effect[] = [];
   reduce(m, e, fx);
   settle(m, fx);
@@ -204,8 +235,13 @@ function arm(m: Model, fx: Effect[], kind: "save" | "retry", ms: number): void {
   fx.push({ t: "arm", kind, ms });
 }
 
-/** The tab opened with a draft in per-viewer storage: an unresolved conflict from
- *  an earlier tab, or edits whose save never landed. Applied inside load_ok, before
+/** Whether a save may go out now. */
+function canSave(m: Model): boolean {
+  return m.phase === "idle" && m.loaded && !m.suspended && !m.gone && !m.unknown && !m.fatal;
+}
+
+/** The tab opened with a draft in per-window storage: an unresolved conflict from
+ *  an earlier tab, or edits whose save never landed. Applied inside draft_read, before
  *  settle can start a reload that would otherwise let the storage mirror drop it. */
 function restoreDraft(m: Model, fx: Effect[], draft: Draft): void {
   m.stashed = draftKey(draft);
@@ -231,10 +267,10 @@ function draftKey(d: Draft): string {
   return JSON.stringify(d);
 }
 
-/** What per-viewer storage must hold: the conflict draft while a conflict is open,
- *  else any edits not yet saved, else nothing. It is written before a save is
- *  sent and cleared once a save has landed, so closing the page, or a save that
- *  fails, never loses typing. */
+/** What per-window storage must hold: the conflict draft while a conflict is open,
+ *  else any edits not yet saved (or whose save may have landed), else nothing. It is
+ *  written before a save is sent and cleared once the daemon's state is known, so
+ *  closing the page, or a save that fails, never loses typing. */
 function wantedDraft(m: Model): Draft | null {
   if (m.phase === "conflict" && m.conflict) {
     return { buffer: m.buffer, base: m.conflict.base, theirs: m.conflict.theirs, head: m.conflict.head, kind: "conflict" };
@@ -242,7 +278,7 @@ function wantedDraft(m: Model): Draft | null {
   // A save of text other than what is acknowledged may have landed, or may yet
   // land, so a buffer that equals the acknowledged text (the user undid back to
   // it) is still unsaved work as far as the daemon is concerned.
-  const maybe = [...(m.flight ? [m.flight.text] : []), ...m.maybeLanded].filter((t) => t !== m.saved);
+  const maybe = [...(m.flight ? [m.flight.text] : []), ...m.inDoubt].filter((t) => t !== m.saved);
   if (isDirty(m) || maybe.length > 0) {
     const d: Draft = { buffer: m.buffer, base: m.saved, theirs: "", head: "", kind: "unsent" };
     if (maybe.length > 0) d.maybe = [...new Set(maybe)];
@@ -269,10 +305,21 @@ function enterConflict(m: Model, fx: Effect[], conflict: Conflict): void {
 
 function startSave(m: Model, fx: Effect[], final: boolean): void {
   disarm(m, fx);
+  const seq = m.nextSeq++;
   m.phase = "saving";
-  m.flight = { text: m.buffer, base: m.base, final };
+  m.flight = { seq, text: m.buffer, base: m.base, final };
   m.note = null;
-  fx.push({ t: "save", text: m.buffer, base: m.base, final, track: true });
+  fx.push({ t: "save", seq, text: m.buffer, base: m.base, final });
+}
+
+function startRead(m: Model, fx: Effect[], kind: "reload" | "reconcile"): void {
+  disarm(m, fx);
+  const seq = m.nextSeq++;
+  m.phase = kind === "reload" ? "reloading" : "reconciling";
+  m.reloadFrom = kind === "reload" ? m.buffer : null;
+  m.readSeq = seq;
+  m.stale = false;
+  fx.push({ t: "load", kind, seq });
 }
 
 /** Takes the daemon's text as the document, for a reload or "take theirs". */
@@ -283,6 +330,33 @@ function adopt(m: Model, fx: Effect[], doc: DocText): void {
     m.buffer = doc.text;
     fx.push({ t: "set_buffer", text: doc.text });
   }
+}
+
+/** The doc was deleted under this tab. A clean doc simply ends; one with unsaved
+ *  work or an open conflict keeps it, in storage, for the user to restore. */
+function goneEvent(m: Model, fx: Effect[]): void {
+  if (!m.loaded) {
+    m.dead = true;
+    return;
+  }
+  const hasWork = isDirty(m) || m.phase === "conflict" || m.inDoubt.length > 0 || m.flight !== null;
+  if (!hasWork) {
+    m.dead = true;
+    m.closed = true;
+    disarm(m, fx);
+    if (m.stashed !== null) {
+      m.stashed = null;
+      fx.push({ t: "unstash" });
+    }
+    return;
+  }
+  m.gone = true;
+  m.flight = null;
+  if (m.phase === "saving" || m.phase === "reloading" || m.phase === "reconciling") m.phase = "idle";
+  m.readSeq = null;
+  m.reloadFrom = null;
+  m.leaving = false;
+  disarm(m, fx);
 }
 
 function reduce(m: Model, e: Event, fx: Effect[]): void {
@@ -312,8 +386,9 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       // Before the first load the editor is read-only, so there is nothing to keep.
       if (!m.loaded || m.closed || e.text === m.buffer) return;
       m.buffer = e.text;
+      m.fatal = false;
       if (m.note?.kind !== "recovered") m.note = null;
-      if (m.phase === "idle") {
+      if (m.phase === "idle" && !m.gone && !m.unknown) {
         // Debounce: autosave runs a pause after the LAST keystroke.
         if (isDirty(m) && !hasConflictMarkers(m.buffer)) arm(m, fx, "save", AUTOSAVE_DELAY_MS);
         else if (m.timer === "save") disarm(m, fx);
@@ -324,9 +399,8 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       const kind = m.timer;
       m.timer = null;
       m.backoff = false;
-      if (m.suspended) return;
-      if (kind === "save" && m.phase === "idle" && m.loaded && isDirty(m)) {
-        // A closed tab keeps retrying a failed final save while the page lives.
+      if (kind === "save" && canSave(m) && isDirty(m)) {
+        // A closed tab keeps retrying while the page lives.
         if (m.closed) startSave(m, fx, true);
         else if (!hasConflictMarkers(m.buffer)) startSave(m, fx, false);
       }
@@ -334,32 +408,18 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
     }
 
     case "flush":
-      if (m.phase === "idle" && m.loaded && !m.closed && isDirty(m) && !hasConflictMarkers(m.buffer)) {
-        startSave(m, fx, false);
-      }
+      if (canSave(m) && !m.closed && isDirty(m) && !hasConflictMarkers(m.buffer)) startSave(m, fx, false);
       return;
 
     case "save_ok": {
-      if (m.phase !== "saving" || !m.flight) return;
+      if (m.phase !== "saving" || !m.flight || e.seq !== m.flight.seq) return;
       const sent = m.flight.text;
       const r = e.result;
       m.flight = null;
       m.phase = "idle";
       m.note = null;
-      // The daemon merged against a head that is an earlier save of ours whose reply
-      // was lost: it cannot tell that the user has since changed their mind (an undo
-      // back to the old text looks like "no change"), so what it returned is that
-      // earlier save, not an agent's edit. Take it as the base and send ours again.
-      const ownEarlierSave =
-        r.merged &&
-        r.text !== sent &&
-        m.maybeLanded.some((landed) => landed === r.text || mergeWithMarkers(m.saved, sent, landed) === r.text);
-      m.maybeLanded = [];
-      if (ownEarlierSave) {
-        m.base = r.commit;
-        m.saved = r.text;
-        return;
-      }
+      m.inDoubt = [];
+      m.unknown = false;
       const mergedAgentEdits = r.merged && r.text !== sent;
       if (!mergedAgentEdits) {
         // The commit holds exactly what was sent, so it is the new base; typing
@@ -393,18 +453,11 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
     }
 
     case "save_conflict": {
-      if (m.phase !== "saving" || !m.flight) return;
+      if (m.phase !== "saving" || !m.flight || e.seq !== m.flight.seq) return;
       m.flight = null;
+      m.inDoubt = [];
+      m.unknown = false;
       const r = e.result;
-      if (m.maybeLanded.includes(r.theirs)) {
-        // The head is a save of ours whose reply was lost, not an agent edit:
-        // adopt it as the base and send what we have on top.
-        m.phase = "idle";
-        m.base = r.head;
-        m.saved = r.theirs;
-        m.maybeLanded = [];
-        return;
-      }
       if (m.buffer === r.theirs) {
         // Both sides hold the same text: there is nothing to choose between.
         m.phase = "idle";
@@ -412,27 +465,55 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
         m.saved = r.theirs;
         return;
       }
-      // Even when the tab is leaving, the draft goes to per-viewer storage, not
+      // Even when the tab is leaving, the draft goes to per-window storage, not
       // into the proposal doc.
       enterConflict(m, fx, { ours: r.ours, theirs: r.theirs, base: r.base, head: r.head });
       return;
     }
 
-    case "save_fail":
-      if (m.phase !== "saving") return;
-      m.maybeLanded = [...m.maybeLanded, m.flight!.text];
+    case "save_fail": {
+      if (m.phase !== "saving" || !m.flight || e.seq !== m.flight.seq) return;
+      // The outcome is unknown, not "failed": the save may have landed. Remember its
+      // text, and read the daemon's head (settle) before sending or loading anything.
+      m.inDoubt = [...m.inDoubt, m.flight.text];
       m.flight = null;
       m.phase = "idle";
+      m.unknown = true;
+      m.backoff = false;
       m.note = { kind: "error", detail: e.error };
-      // Retry while the page is alive, closed tab or not: the edits stay in
-      // per-viewer storage (see syncStash) until a save lands.
-      if (!m.suspended) arm(m, fx, "save", SAVE_RETRY_MS);
+      return;
+    }
+
+    case "save_fatal":
+      if (m.phase !== "saving" || !m.flight || e.seq !== m.flight.seq) return;
+      m.flight = null;
+      m.phase = "idle";
+      m.fatal = true;
+      m.note = { kind: "error", detail: e.error };
       return;
 
     case "remote":
-      if (m.closed) return;
+      if (m.closed || m.gone) return;
       if (e.commit !== "" && e.commit === m.base && m.phase !== "loading" && m.phase !== "restoring") return;
       m.stale = true;
+      return;
+
+    case "gone":
+      goneEvent(m, fx);
+      return;
+
+    case "revive":
+      if (!m.gone) return;
+      m.gone = false;
+      m.suspended = false;
+      m.conflict = null;
+      if (m.phase === "conflict") m.phase = "idle";
+      m.unknown = false;
+      m.inDoubt = [];
+      m.fatal = false;
+      m.base = e.head.commit;
+      m.saved = e.head.text;
+      m.note = null;
       return;
 
     case "suspend":
@@ -455,16 +536,17 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
 
     case "reconnect":
       // Missed events are not replayed: assume the daemon moved.
-      if (m.closed) return;
+      if (m.closed || m.gone) return;
       m.stale = true;
       m.backoff = false;
       return;
 
     case "reload_ok": {
-      if (m.phase !== "reloading") return;
+      if (m.phase !== "reloading" || e.seq !== m.readSeq) return;
       const from = m.reloadFrom;
       m.phase = "idle";
       m.reloadFrom = null;
+      m.readSeq = null;
       if (m.buffer !== from) {
         // The user typed while the reload was in flight: keep the typing; the
         // next save merges the agent's change. Stay stale until clean.
@@ -476,12 +558,55 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
     }
 
     case "reload_fail":
-      if (m.phase !== "reloading") return;
+      if (m.phase !== "reloading" || e.seq !== m.readSeq) return;
       m.phase = "idle";
       m.reloadFrom = null;
+      m.readSeq = null;
       m.stale = true;
       m.backoff = true;
       if (m.timer === null && !m.closed) arm(m, fx, "retry", SAVE_RETRY_MS);
+      return;
+
+    case "reconcile_ok": {
+      if (m.phase !== "reconciling" || e.seq !== m.readSeq) return;
+      const head = e.doc;
+      m.phase = "idle";
+      m.readSeq = null;
+      m.unknown = false;
+      m.note = null;
+      // An unknown save landed if the daemon's head already contains its edits:
+      // merging them onto the head changes nothing.
+      const landed = [...m.inDoubt].reverse().find((s) => s !== m.saved && mergeWithMarkers(m.saved, s, head.text) === head.text);
+      const baseText = landed ?? m.saved;
+      m.inDoubt = [];
+      if (head.text === m.buffer) {
+        m.base = head.commit;
+        m.saved = head.text;
+        return;
+      }
+      if (head.commit === m.base && head.text === m.saved) return; // nothing landed, nothing moved
+      const merged = mergeWithMarkers(baseText, m.buffer, head.text);
+      if (hasConflictMarkers(merged) || hasConflictMarkers(m.buffer)) {
+        enterConflict(m, fx, { ours: m.buffer, theirs: head.text, base: baseText, head: head.commit });
+        return;
+      }
+      m.base = head.commit;
+      m.saved = head.text;
+      if (merged !== m.buffer) {
+        m.buffer = merged;
+        fx.push({ t: "set_buffer", text: merged });
+        m.note = { kind: "merged", detail: "" };
+      }
+      return;
+    }
+
+    case "reconcile_fail":
+      if (m.phase !== "reconciling" || e.seq !== m.readSeq) return;
+      m.phase = "idle";
+      m.readSeq = null;
+      m.backoff = true;
+      m.note = { kind: "error", detail: e.error };
+      if (m.timer === null) arm(m, fx, "retry", SAVE_RETRY_MS);
       return;
 
     case "leave":
@@ -490,17 +615,19 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
         m.closed = true;
         disarm(m, fx);
       }
-      if (!m.loaded) return;
+      if (!m.loaded || m.gone) return;
       if (m.phase === "conflict") {
-        // Nothing goes to the daemon. The draft is already in per-viewer storage.
+        // Nothing goes to the daemon. The draft is already in per-window storage.
         return;
       }
-      if (m.phase === "idle") {
+      if (m.phase === "idle" && !m.unknown && !m.fatal) {
         if (isDirty(m)) startSave(m, fx, true);
         return;
       }
-      // A save or a reload is in flight: send the final save when it replies,
-      // against the base that reply establishes.
+      if (m.phase === "idle" && m.fatal) return;
+      // A save, a reload or a reconcile is in flight, or a save's outcome is
+      // unknown: send the final save once the daemon's state is known, against the
+      // base that establishes.
       m.leaving = true;
       return;
     }
@@ -512,7 +639,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.base = e.head.commit;
       m.saved = e.head.text;
       m.note = null;
-      if (isDirty(m) && !hasConflictMarkers(m.buffer)) startSave(m, fx, false);
+      if (canSave(m) && isDirty(m) && !hasConflictMarkers(m.buffer)) startSave(m, fx, false);
       return;
 
     case "take_theirs":
@@ -538,27 +665,34 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
   }
 }
 
-/** The drain rule. After every transition: a queued final save goes out; an idle,
- *  clean, stale document reloads; an idle, dirty one without markers arms autosave. */
+/** The drain rule. After every transition: unsaved work is mirrored to storage; an
+ *  unknown save outcome is reconciled with the daemon's head before anything else; a
+ *  queued final save goes out; an idle, clean, stale document reloads; an idle,
+ *  dirty one without markers arms autosave. */
 function settle(m: Model, fx: Effect[]): void {
   syncStash(m, fx);
-  if (m.phase !== "idle" || !m.loaded || m.suspended) return;
-  if (m.leaving) {
-    m.leaving = false;
-    if (isDirty(m)) startSave(m, fx, true);
+  if (m.phase !== "idle" || !m.loaded || m.suspended || m.gone) return;
+  // A read is waiting out a backoff: something must wake it. Whatever cancelled the
+  // retry timer (a close, a new autosave timer), it is armed again here.
+  if (m.backoff && m.timer === null) arm(m, fx, "retry", SAVE_RETRY_MS);
+  if (m.unknown) {
+    // Reconcile first: never reload over, or resend, a save that may have landed.
+    if (!m.backoff) startRead(m, fx, "reconcile");
     return;
   }
-  if (m.closed) return;
+  if (m.leaving || m.closed) {
+    // A closed tab keeps sending until its edits have landed (it reaches here again
+    // after each reply), and a queued final save goes out now.
+    m.leaving = false;
+    if (isDirty(m) && !m.fatal) startSave(m, fx, true);
+    return;
+  }
   const dirty = isDirty(m);
   if (!dirty && m.stale && !m.backoff) {
-    m.phase = "reloading";
-    m.reloadFrom = m.buffer;
-    m.stale = false;
-    disarm(m, fx);
-    fx.push({ t: "load", reload: true });
+    startRead(m, fx, "reload");
     return;
   }
-  if (dirty && !hasConflictMarkers(m.buffer)) {
+  if (dirty && !m.fatal && !hasConflictMarkers(m.buffer)) {
     if (m.timer === null) arm(m, fx, "save", AUTOSAVE_DELAY_MS);
   } else if (m.timer === "save") {
     disarm(m, fx);

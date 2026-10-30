@@ -6,12 +6,20 @@
 // DocSync surface, so it can run against any engine with that surface.
 
 import type { DocText, SaveResult } from "./proposal_api.js";
+import { DraftStorage, type KV } from "./docs_draft_store.js";
 import { CONFLICT_MINE, CONFLICT_SPLIT, CONFLICT_THEIRS, hasConflictMarkers } from "./text_diff.js";
 
 export interface SyncLike {
   readonly text: string;
   readonly currentStatus: string;
+  readonly ended?: boolean;
+  readonly isQuiet?: boolean;
+  readonly debugModel?: string;
   whenQuiet?(): Promise<void>;
+  /** The daemon no longer has the doc (a remote delete, or a 404). */
+  remoteDeleted?(): void;
+  /** The doc was added again: carry the kept work onto it. */
+  revive?(): Promise<void>;
   /** The doc is being deleted: stop retrying and timers, keep the draft. */
   suspend?(): void;
   /** The delete landed: drop the sync and its draft. `keepDraft` when it failed. */
@@ -43,7 +51,7 @@ export interface Draft {
 }
 
 export interface SyncDepsLike {
-  load(): Promise<DocText>;
+  load(initial?: boolean): Promise<DocText>;
   save(text: string, base: string, final?: boolean): Promise<SaveResult>;
   setBuffer(text: string): void;
   onStatus(status: string, detail: string): void;
@@ -72,6 +80,8 @@ export function rng(seed: number): () => number {
 class Daemon {
   deleted = false;
   private readonly texts = new Map<string, string>();
+  /** The daemon is restarting: requests are refused. */
+  down = 0;
   head = "";
   private n = 0;
   readonly commits: string[] = [];
@@ -95,6 +105,14 @@ class Daemon {
   read(): DocText {
     if (this.deleted) throw new Error("404 doc not found");
     return { text: this.text, commit: this.head };
+  }
+  /** The daemon's head goes back to the commit before it (a restore from a backup). */
+  rollback(): string | null {
+    if (this.commits.length < 2) return null;
+    const prev = this.commits[this.commits.length - 2]!;
+    this.commits.push(prev);
+    this.head = prev;
+    return prev;
   }
   /** The doc is added again from its template: a new commit with the original text. */
   readd(initial: string): void {
@@ -129,7 +147,11 @@ class Daemon {
 }
 
 interface Pending {
+  /** The window that made the request: a closing window takes only its own with it. */
+  owner: "a" | "g";
   stage: "sent" | "processed";
+  /** The reply never arrives (the client times out). */
+  hang?: boolean;
   run(): unknown;
   result?: { ok: true; value: unknown } | { ok: false; error: Error };
   resolve(v: unknown): void;
@@ -144,6 +166,9 @@ export interface ScenarioOptions {
   /** Probability that a save fails: dropped before the daemon sees it, or applied
    *  with the reply lost. The page may also close with saves in flight. */
   faults?: number;
+  /** Also exercises every external event: remote delete and re-add, daemon restarts,
+   *  a second window on the same doc, a head that goes backwards, refusals. */
+  chaos?: boolean;
   makeSync: MakeSync;
 }
 
@@ -160,13 +185,34 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)]!;
   const names = ["goals", "api"];
   const daemons = new Map(names.map((n) => [n, new Daemon(Array.from({ length: LINES }, (_, i) => `${n}${i}`).join("\n"))]));
-  const stash = new Map<string, Draft>();
+  const kvMap = new Map<string, string>();
+  const kv: KV = {
+    get: (k) => kvMap.get(k) ?? null,
+    set: (k, v) => {
+      if (process.env.AF_KVLOG && v.includes(process.env.AF_KVLOG)) console.log("KV set", k.split("\n").slice(-2).join("/"), v.slice(0, 160).replace(/\n/g, "|"));
+      kvMap.set(k, v);
+    },
+    remove: (k) => {
+      if (process.env.AF_KVLOG && (kvMap.get(k) ?? "").includes(process.env.AF_KVLOG)) console.log("KV remove", k.split("\n").slice(-2).join("/"));
+      kvMap.delete(k);
+    },
+    keys: () => [...kvMap.keys()],
+  };
+  let winSeq = 0;
+  let storageA = new DraftStorage(kv, `wA${winSeq}`, () => now, "s\nplan");
+  const ghostStorage = new DraftStorage(kv, "wGhost", () => now, "s\nplan");
+  const storageOf = new Map<SyncLike, DraftStorage>();
+  /** Every unsaved buffer held in storage for `doc`, whichever window owns it. */
+  const stashedBuffers = (doc: string): string[] =>
+    [...kvMap.entries()]
+      .filter(([k]) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`))
+      .map(([, v]) => (JSON.parse(v) as { draft: Draft }).draft.buffer);
   const initialText = (n: string): string => Array.from({ length: LINES }, (_, i) => `${n}${i}`).join("\n");
   // The values each line had before the user typed over it, for undo.
   const lineStack = new Map<string, Map<number, string[]>>(names.map((n) => [n, new Map()]));
   const net: Pending[] = [];
   let now = 0;
-  const timers: { at: number; fn: () => void; live: boolean }[] = [];
+  const timers: { at: number; fn: () => void; live: boolean; owner: "a" | "g" }[] = [];
   const saves: { doc: string; text: string; bufferHadMarkers: boolean }[] = [];
   let seq = 0;
   let violation: Violation | null = null;
@@ -187,41 +233,67 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const events: { doc: string; commit: string }[] = [];
   let outage = false;
 
-  const call = <T>(run: () => T): Promise<T> =>
+  const call = <T>(run: () => T | Promise<T>, owner: "a" | "g" = "a"): Promise<T> =>
     new Promise<T>((resolve, reject) => {
-      net.push({ stage: "sent", run, resolve: resolve as (v: unknown) => void, reject });
+      net.push({ owner, stage: "sent", run, resolve: resolve as (v: unknown) => void, reject });
     });
 
-  function newSync(doc: string): SyncLike {
+  const httpErr = (status: number, message: string): Error => Object.assign(new Error(message), { status });
+
+  function newSync(doc: string, storage: () => DraftStorage = () => storageA, register = true): SyncLike {
+    const isGhost = !register;
+    const owner: "a" | "g" = isGhost ? "g" : "a";
     const d = daemons.get(doc)!;
     let self: SyncLike | null = null; // the sync these deps belong to, not whatever is current for the doc
     const deps: SyncDepsLike = {
-      load: async () => {
+      load: async (initial) => {
         // A reopened tab loads only after the closing tab's final save has landed.
-        const priors = [...(closing.get(doc) ?? [])].filter((p) => p !== self);
+        const priors = initial ? [...(closing.get(doc) ?? [])].filter((p) => p !== self) : [];
         await Promise.all(priors.map((p) => p.whenQuiet?.()));
-        return call(() => d.read());
+        return call(() => {
+          if (d.down > 0) {
+            d.down--;
+            throw new Error("connect ECONNREFUSED");
+          }
+          if (d.deleted) throw httpErr(404, "404 doc not found");
+          return d.read();
+        }, owner);
       },
       save: (text, base, final) => {
         saves.push({ doc, text, bufferHadMarkers: self ? hasConflictMarkers(self.text) : false });
         void final;
-        if (process.env.AF_STASHLOG) console.log("SAVE", doc, JSON.stringify(text), base, "final=" + final);
-        const fault = rand() < (o.faults ?? 0) ? (rand() < 0.5 ? "drop" : "lose-reply") : null;
-        return call(() => {
-          if (fault === "drop") throw new Error("503 service unavailable");
+        // I10: a sync that knows its doc is gone sends nothing.
+        if (self && self.currentStatus === "gone") fail("saved-while-gone", `${doc}: a deleted doc's sync sent a save`);
+        if (process.env.AF_STASHLOG || (process.env.AF_KVLOG && text.includes(process.env.AF_KVLOG))) console.log("SAVE", isGhost ? "ghost" : "A", doc, JSON.stringify(text), base, "final=" + final);
+        const faulty = rand() < (o.faults ?? 0);
+        const kinds = o.chaos ? (["drop", "lose-reply", "refuse", "hang-applied", "hang-lost"] as const) : (["drop", "lose-reply"] as const);
+        const fault = nextSaveFault ?? (faulty ? pick(kinds) : null);
+        nextSaveFault = null;
+        const pending = call(() => {
+          if (d.down > 0) {
+            d.down--;
+            throw new Error("connect ECONNREFUSED");
+          }
+          if (fault === "drop") throw httpErr(503, "503 service unavailable");
+          if (fault === "refuse") throw httpErr(413, "413 doc is larger than the limit");
+          if (fault === "hang-lost") return new Promise<never>(() => undefined);
           const result = d.save(text, base);
           if (fault === "lose-reply") throw new Error("network error: reply lost");
+          if (fault === "hang-applied") return new Promise<never>(() => undefined);
           return result;
-        });
+        }, owner);
+        return pending;
       },
       setBuffer: (text) => {
-        if (attached === doc) {
+        if (isGhost) {
+          if (ghostBox.cur) ghostBox.cur.text = text;
+        } else if (attached === doc) {
           editor.text = text;
         }
       },
       onStatus: () => undefined,
       setTimer: (fn, ms) => {
-        const t = { at: now + ms, fn, live: true };
+        const t = { at: now + ms, fn, live: true, owner };
         timers.push(t);
         return t;
       },
@@ -229,20 +301,15 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         (h as { live: boolean }).live = false;
       },
       draft: {
-        load: () => stash.get(doc) ?? null,
-        store: (x) => {
-          if (process.env.AF_STASHLOG) console.log("STASH store", doc, JSON.stringify(x));
-          stash.set(doc, x);
-        },
-        clear: () => {
-          if (process.env.AF_STASHLOG) console.log("STASH clear", doc);
-          stash.delete(doc);
-        },
+        load: () => storage().load(doc),
+        store: (x) => storage().store(doc, x),
+        clear: () => storage().clear(doc),
       },
     };
     const s = o.makeSync(deps);
     self = s;
-    syncs.set(doc, s);
+    storageOf.set(s, storage());
+    if (register) syncs.set(doc, s);
     return s;
   }
 
@@ -272,29 +339,34 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const lineSets = o.collide ? [0, 1, 2, 3, 4] : [0, 1];
   const agentLines = o.collide ? [0, 1, 2, 3, 4] : [3, 4];
 
-  function userEdit(): void {
+  /** Forces the next save to fail in a given way (for scripted events). */
+  let nextSaveFault: "lose-reply" | "hang-applied" | null = null;
+
+  function userEdit(forced?: number): number | null {
     const s = syncs.get(attached);
-    if (!s || !isLoaded(s)) return;
-    const line = pick(lineSets);
+    if (!s || !isLoaded(s) || s.ended) return null; // an ended tab is dropped by the pane
+    const line = forced ?? pick(lineSets);
     const token = `u${++seq}`;
     const lines = editor.text.split("\n");
-    if (lines.length !== LINES) return; // the buffer holds conflict markers: leave it to the resolver
+    if (lines.length !== LINES) return null; // the buffer holds conflict markers: leave it to the resolver
     const stackFor = lineStack.get(attached)!;
     stackFor.set(line, [...(stackFor.get(line) ?? []), lines[line]!]);
     lines[line] = token;
     editor.text = lines.join("\n");
     typed.get(attached)!.set(line, token);
     s.edit(editor.text);
+    if (s.text !== editor.text) fail("edit-ignored", `${attached}: the editor shows ${JSON.stringify(editor.text)} but the sync holds ${JSON.stringify(s.text)} (status ${s.currentStatus}, ${s.debugModel})`);
+    return line;
   }
 
   /** The user undoes a line back to what it was before they typed over it. */
-  function userUndo(): void {
+  function userUndo(forced?: number): void {
     const s = syncs.get(attached);
-    if (!s || !isLoaded(s)) return;
+    if (!s || !isLoaded(s) || s.ended) return;
     const stackFor = lineStack.get(attached)!;
     const candidates = [...stackFor.entries()].filter(([, v]) => v.length > 0).map(([k]) => k);
     if (!candidates.length) return;
-    const line = pick(candidates);
+    const line = forced !== undefined && candidates.includes(forced) ? forced : pick(candidates);
     const prev = stackFor.get(line)!.pop()!;
     const lines = editor.text.split("\n");
     if (lines.length !== LINES) return;
@@ -328,7 +400,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
     typed.get(doc)!.clear();
     lineStack.get(doc)!.clear();
-    stash.delete(doc);
+    storageA.clear(doc);
     const savesAfterDelete = saves.length;
     d.readd(initialText(doc));
     await advance(30_000);
@@ -354,6 +426,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
 
   async function advance(ms: number): Promise<void> {
     now += ms;
+    // Windows that are alive refresh their drafts (the heartbeat).
+    storageA.touch();
+    if (ghostBox.cur) ghostStorage.touch();
     for (;;) {
       const due = timers.filter((t) => t.live && t.at <= now).sort((a, b) => a.at - b.at)[0];
       if (!due) break;
@@ -368,36 +443,42 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     const processed = net.filter((p) => p.stage === "processed");
     if (sent.length && (rand() < 0.5 || !processed.length)) {
       const p = pick(sent);
-      p.stage = "processed";
-      try {
-        p.result = { ok: true, value: p.run() };
-      } catch (e) {
-        p.result = { ok: false, error: e as Error };
-      }
+      runPending(p);
     } else if (processed.length) {
       const p = pick(processed);
-      net.splice(net.indexOf(p), 1);
-      if (p.result!.ok) p.resolve(p.result!.value);
-      else p.reject(p.result!.error);
+      deliver(p);
     }
     await tick();
   }
 
+  /** The daemon handles a request. A reply that never comes marks it hung. */
+  function runPending(p: Pending): void {
+    p.stage = "processed";
+    try {
+      const v = p.run();
+      if (v instanceof Promise) {
+        p.hang = true;
+        p.result = { ok: true, value: undefined };
+      } else {
+        p.result = { ok: true, value: v };
+      }
+    } catch (e) {
+      p.result = { ok: false, error: e as Error };
+    }
+  }
+
+  /** The reply reaches the client. A hung request stays outstanding until the page closes. */
+  function deliver(p: Pending): void {
+    if (p.hang) return;
+    net.splice(net.indexOf(p), 1);
+    if (p.result!.ok) p.resolve(p.result!.value);
+    else p.reject(p.result!.error);
+  }
+
   async function drain(): Promise<void> {
-    for (let i = 0; i < 400 && net.length; i++) {
-      for (const p of net.filter((x) => x.stage === "sent")) {
-        p.stage = "processed";
-        try {
-          p.result = { ok: true, value: p.run() };
-        } catch (e) {
-          p.result = { ok: false, error: e as Error };
-        }
-      }
-      for (const p of net.filter((x) => x.stage === "processed")) {
-        net.splice(net.indexOf(p), 1);
-        if (p.result!.ok) p.resolve(p.result!.value);
-        else p.reject(p.result!.error);
-      }
+    for (let i = 0; i < 400 && net.some((x) => !x.hang || x.stage === "sent"); i++) {
+      for (const p of net.filter((x) => x.stage === "sent")) runPending(p);
+      for (const p of net.filter((x) => x.stage === "processed")) deliver(p);
       await tick();
     }
   }
@@ -411,7 +492,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     if (!doc) return;
     for (const s of syncs.values()) s.saveBeforeLeaving();
     await tick();
-    for (const p of net.filter((x) => x.stage === "sent")) {
+    for (const p of net.filter((x) => x.stage === "sent" && x.owner === "a")) {
       if (rand() < 0.5) {
         try {
           p.run();
@@ -420,23 +501,28 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         }
       }
     }
-    net.length = 0;
-    for (const t of timers) t.live = false;
+    for (const p of net.filter((x) => x.owner === "a")) net.splice(net.indexOf(p), 1);
+    for (const t of timers) if (t.owner === "a") t.live = false;
     events.length = 0;
     for (const s of syncs.values()) s.dispose();
     syncs.clear();
     closing.clear();
     attached = "";
     editor.text = "";
+    // The window is gone: it releases its drafts; the page that opens next is a new
+    // window with a new id, and adopts them.
+    if (ghostBox.cur) pageWorkTransferred = true;
+    storageA.release();
+    storageA = new DraftStorage(kv, `wA${++winSeq}`, () => now, "s\nplan");
     const unsaved = [...typed.get(doc)!.values()].filter((tok) => !daemons.get(doc)!.everHad(tok) && !excused.has(tok));
     await open(doc);
     await drain();
     const back = syncs.get(doc)!;
     // I6: unsaved edits that survive only in storage come back, and say so.
-    if (unsaved.length && !["recovered", "conflict", "saving", "saved", "merged"].includes(back.currentStatus)) {
+    if (unsaved.length && isLoaded(back) && !["recovered", "conflict", "saving", "saved", "merged"].includes(back.currentStatus)) {
       fail("recovered-draft-not-shown", `${doc}: reopened as ${back.currentStatus} with unsaved ${unsaved.join(",")}`);
     }
-    if (unsaved.length && back.currentStatus === "pending") {
+    if (unsaved.length && isLoaded(back) && back.currentStatus === "pending") {
       fail("recovered-draft-not-shown", `${doc}: reopened as pending, not recovered`);
     }
     for (let i = 0; i < 3; i++) {
@@ -453,6 +539,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     );
     const live = [...syncs.entries()];
     const check = (doc: string): void => {
+      if (o.chaos) return; // other windows and deletes also write; the property is checked without them
       const d = daemons.get(doc)!;
       for (const tok of want.get(doc) ?? []) {
         if (excused.has(tok)) continue;
@@ -472,10 +559,202 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
   }
 
+  // --- the events only a chaotic daemon and a second window produce -----------
+
+  /** A second window on `goals`: its own sync, editor and draft storage, sharing the
+   *  daemon and localStorage. */
+  const ghostBox: { cur: { sync: SyncLike; text: string } | null } = { cur: null };
+  const ghostTyped = new Map<number, string>();
+  const ghostTokens = new Set<string>();
+  /** The second window closed with unsaved work: any window may now adopt and change it. */
+  let ghostWorkTransferred = false;
+  /** The page closed while the second window was open: it may have adopted the page's
+   *  released draft of `goals`, and that window's user is free to change it. */
+  let pageWorkTransferred = false;
+
+  const ghostText = (): string => (ghostBox.cur ? ghostBox.cur.sync.text : "");
+
+  function ghostOpen(): void {
+    if (ghostBox.cur) return;
+    if (process.env.AF_STASHLOG) console.log("GHOSTOPEN now=" + now);
+    const sync = newSync("goals", () => ghostStorage, false);
+    ghostBox.cur = { sync, text: "" };
+    void sync.start().then(() => {
+      if (ghostBox.cur && ghostBox.cur.sync === sync) ghostBox.cur.text = sync.text;
+      if (process.env.AF_STASHLOG) console.log("GHOST LOADED");
+    }).catch((e) => { if (process.env.AF_STASHLOG) console.log("GHOST LOAD FAILED", String(e)); });
+  }
+
+  function ghostEdit(): void {
+    const g = ghostBox.cur;
+    // (The second window's user does not type over work it just recovered: that is a
+    // choice, and would make the work that window adopted untraceable.)
+    if (!g || g.sync.text === "" || g.sync.ended || g.sync.currentStatus === "recovered" || g.sync.currentStatus === "conflict") return;
+    const lines = g.sync.text.split("\n");
+    if (lines.length !== LINES) return;
+    const line = pick([0, 1, 2, 3, 4]);
+    const token = `g${++seq}`;
+    lines[line] = token;
+    ghostTyped.set(line, token);
+    ghostTokens.add(token);
+    g.sync.edit(lines.join("\n"));
+  }
+
+  async function ghostClose(): Promise<void> {
+    const g = ghostBox.cur;
+    if (!g) return;
+    const wasConflict = g.sync.currentStatus === "conflict";
+    if (g.sync.currentStatus !== "saved" && g.sync.currentStatus !== "merged") ghostWorkTransferred = true;
+    const before = g.sync.text;
+    g.sync.dispose();
+    ghostStorage.release();
+    ghostBox.cur = null;
+    await tick();
+    if (wasConflict) {
+      // The ghostBox.cur's draft is its own: window A cannot have cleared it.
+      const kept = stashedBuffers("goals").includes(before) || ghostStorage.load("goals")?.buffer === before;
+      if (!kept && before !== daemons.get("goals")!.text) fail("window-draft-cleared-by-another-window", `ghostBox.cur conflict draft ${JSON.stringify(before)} is gone`);
+    }
+  }
+
+  async function ghostResolve(): Promise<void> {
+    const g = ghostBox.cur;
+    if (!g || g.sync.currentStatus !== "conflict") return;
+    await (pick([0, 1]) === 0 ? g.sync.keepMine() : g.sync.showBoth());
+  }
+
+  function remoteDelete(): void {
+    const doc = pick(names);
+    const d = daemons.get(doc)!;
+    if (d.deleted) return;
+    d.deleted = true;
+    // What was already saved goes with the deleted doc; only unsaved work is owed.
+    for (const tok of typed.get(doc)!.values()) if (d.everHad(tok)) excused.add(tok);
+    // Sometimes the tab is told (the doc list refresh); sometimes it learns from a 404.
+    if (rand() < 0.5) {
+      syncs.get(doc)?.remoteDeleted?.();
+      if (doc === "goals") ghostBox.cur?.sync.remoteDeleted?.();
+    }
+  }
+
+  function remoteReadd(): void {
+    for (const doc of names) {
+      const d = daemons.get(doc)!;
+      if (!d.deleted) continue;
+      d.readd(initialText(doc));
+      return;
+    }
+  }
+
+  async function reviveGone(): Promise<void> {
+    for (const doc of names) {
+      const d = daemons.get(doc)!;
+      const all: SyncLike[] = [...(syncs.has(doc) ? [syncs.get(doc)!] : []), ...(doc === "goals" && ghostBox.cur ? [ghostBox.cur.sync] : [])];
+      for (const s of all) {
+        if (s.currentStatus !== "gone") continue;
+        if (d.deleted) d.readd(initialText(doc));
+        void s.revive?.().catch(() => undefined); // its read needs the network: drained by the caller
+      }
+    }
+  }
+
+  function daemonRestart(): void {
+    // Requests in flight are lost with the daemon; for a while it refuses new ones.
+    for (const p of net) {
+      if (p.stage === "sent" && rand() < 0.5) runPending(p);
+    }
+    for (const p of net.splice(0)) {
+      if (p.stage === "processed" && !p.hang) p.reject(new Error("connect ECONNRESET"));
+      else p.reject(new Error("connect ECONNRESET"));
+    }
+    for (const d of daemons.values()) d.down = 2 + Math.floor(rand() * 4);
+  }
+
+  function rollbackHead(): void {
+    const doc = pick(names);
+    const d = daemons.get(doc)!;
+    if (d.deleted) return;
+    const c = d.rollback();
+    if (c && !outage) events.push({ doc, commit: c });
+  }
+
+  /** The user types, the save lands but its reply is lost, and the user changes their
+   *  mind (undoes the line) before the tab has found out what happened. */
+  async function ambiguousUndo(): Promise<void> {
+    const s = syncs.get(attached);
+    if (!s || !isLoaded(s) || s.ended) return;
+    const line = userEdit();
+    if (line === null) return;
+    nextSaveFault = "lose-reply";
+    s.flush();
+    await tick();
+    // The save reaches the daemon and the reply is lost; the tab's read of the head is
+    // not answered yet. Now the user undoes.
+    for (const p of net.filter((x) => x.stage === "sent" && x.owner === "a")) {
+      runPending(p);
+      break;
+    }
+    for (const p of net.filter((x) => x.stage === "processed" && !x.hang && x.owner === "a")) {
+      deliver(p);
+      break;
+    }
+    await tick();
+    userUndo(line);
+    const want = typed.get(attached)!.get(line);
+    await drain();
+    for (let i = 0; i < 2; i++) {
+      await advance(6000);
+      await drain();
+    }
+    // I9: the undo is not replaced by the save that may have landed. (Only checked
+    // where nobody else writes: no collisions, no second window.)
+    const after = syncs.get(attached);
+    if (!o.collide && !ghostBox.cur && after && !after.ended && ["saved", "pending", "merged", "recovered", "saving"].includes(after.currentStatus)) {
+      const got = after.text.split("\n")[line];
+      if (got !== want) fail("ambiguous-save-overwrote-undo", `${attached} line ${line}: expected ${want}, the tab shows ${got} (status ${after.currentStatus})`);
+    }
+  }
+
+  /** The user types and the doc is deleted in the same breath, before any save. */
+  async function deleteWhileTyping(): Promise<void> {
+    const line = userEdit();
+    if (line === null) return;
+    const doc = attached;
+    const d = daemons.get(doc)!;
+    if (d.deleted) return;
+    const owed = typed.get(doc)!.get(line)!;
+    d.deleted = true;
+    for (const tok of typed.get(doc)!.values()) if (d.everHad(tok)) excused.add(tok);
+    if (rand() < 0.5) syncs.get(doc)?.remoteDeleted?.();
+    // The deleting side re-adds the doc (a rename lands as a delete and an add), and the
+    // user restores their work onto it. Nothing else happens meanwhile.
+    for (let i = 0; i < 2; i++) {
+      await advance(6000);
+      await drain();
+    }
+    d.readd(initialText(doc));
+    await reviveGone();
+    for (let i = 0; i < 4; i++) {
+      await drain();
+      await advance(6000);
+    }
+    await drain();
+    // I11: work that was unsaved when its doc was deleted is not lost, and reaches the new doc.
+    const s = syncs.get(doc);
+    if (s && !s.ended && !excused.has(owed)) {
+      const have = [d.text, s.text, ...stashedBuffers(doc)].join("\n").split("\n").includes(owed);
+      if (!have) fail("work-lost-with-deleted-doc", `${doc}: ${owed} typed before the delete is nowhere (daemon ${JSON.stringify(d.text)}, pane ${JSON.stringify(s.text)}, status ${s.currentStatus})`);
+    } else if (!s || s.ended) {
+      const have = [d.text, ...stashedBuffers(doc)].join("\n").split("\n").includes(owed);
+      if (!have && !excused.has(owed)) fail("work-lost-with-deleted-doc", `${doc}: ${owed} typed before the delete is nowhere and its tab ended`);
+    }
+  }
+
   function deliverEvent(): void {
     if (!events.length) return;
     const e = events.splice(Math.floor(rand() * events.length), 1)[0]!;
     syncs.get(e.doc)?.remoteChanged(e.commit);
+    if (e.doc === "goals") ghostBox.cur?.sync.remoteChanged(e.commit);
   }
 
   function mineOf(text: string): string {
@@ -527,13 +806,13 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     if (!s || !isLoaded(s) || hasConflictMarkers(editor.text)) return;
     const lines = editor.text.split("\n");
     if (lines.length !== LINES) return;
-    if (!o.collide) {
+    if (!o.collide && !o.chaos) {
       // I2: with no collisions, the editor always shows the latest keystroke of
       // every line the user typed, never an older version of it.
       for (const [line, tok] of typed.get(attached)!) {
         if (excused.has(tok)) continue; // the user chose "take theirs"
         if (lines[line] !== tok) {
-          fail("editor-older-than-typed", `${attached} line ${line}: editor has ${lines[line]}, last typed ${tok} (status ${s.currentStatus}, sync text ${JSON.stringify(s.text)}, stash ${JSON.stringify([...stash])})`);
+          fail("editor-older-than-typed", `${attached} line ${line}: editor has ${lines[line]}, last typed ${tok} (status ${s.currentStatus}, sync text ${JSON.stringify(s.text)}, stash ${JSON.stringify(stashedBuffers(attached))})`);
         }
       }
     }
@@ -604,7 +883,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         const back = syncs.get(doc)!;
         // A draft equal to what the daemon holds is no conflict: nothing is lost.
         const vacuous = draft === daemons.get(doc)!.text;
-        if (wasConflict && !vacuous && (back.currentStatus !== "conflict" || back.text !== draft)) {
+        // (A tab whose load failed has not restored yet; the draft must still be stored.)
+        const notBack = isLoaded(back) ? back.currentStatus !== "conflict" || back.text !== draft : !stashedBuffers(doc).includes(draft);
+        if (wasConflict && !vacuous && notBack) {
           fail("conflict-draft-lost-on-close", `${doc}: reopened as ${back.currentStatus}, draft ${JSON.stringify(draft)}, now ${JSON.stringify(back.text)}, daemon ${JSON.stringify(daemons.get(doc)!.text)}`);
         }
       }
@@ -616,7 +897,20 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       userUndo();
     } else if (r < 0.875 && (o.faults ?? 0) > 0) {
       await deleteAndReadd(attached);
-    } else if (r < 0.86) outage = !outage;
+    } else if (o.chaos && r >= 0.93 && r < 0.9375) await deleteWhileTyping();
+    else if (o.chaos && r >= 0.9375 && r < 0.945) await ambiguousUndo();
+    else if (o.chaos && r >= 0.945 && r < 0.95) remoteDelete();
+    else if (o.chaos && r >= 0.95 && r < 0.955) remoteReadd();
+    else if (o.chaos && r >= 0.955 && r < 0.96) await reviveGone();
+    else if (o.chaos && r >= 0.96 && r < 0.966) daemonRestart();
+    else if (o.chaos && o.collide && r >= 0.966 && r < 0.97) rollbackHead();
+    else if (o.chaos && r >= 0.97 && r < 0.98) {
+      if (!ghostBox.cur) ghostOpen();
+      else if (rand() < 0.5) ghostEdit();
+      else await ghostResolve();
+    } else if (o.chaos && r >= 0.98 && r < 0.99) ghostEdit();
+    else if (o.chaos && r >= 0.99) await ghostClose();
+    else if (r < 0.86) outage = !outage;
     else if (r < 0.89) {
       if (outage) outage = false;
       for (const s of syncs.values()) s.reconnect?.();
@@ -628,7 +922,48 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   // Quiesce: no more outages, deliver everything, resolve conflicts and markers,
   // reconnect, and let every timer and reload run to completion.
   outage = false;
+  for (const d of daemons.values()) d.down = 0;
   for (let round = 0; round < 12 && !violation; round++) {
+    if (o.chaos) {
+      // Deleted docs are added again, and the kept work is carried onto them.
+      remoteReadd();
+      remoteReadd();
+      await reviveGone();
+      if (ghostBox.cur && ghostBox.cur.sync.currentStatus === "conflict") await ghostResolve();
+      if (ghostBox.cur && hasConflictMarkers(ghostBox.cur.sync.text)) ghostBox.cur.sync.edit(mineOf(ghostBox.cur.sync.text));
+      ghostBox.cur?.sync.reconnect?.();
+      // A tab whose first load failed shows "Retry"; the user presses it.
+      for (const [doc, s] of [...syncs]) {
+        if (s.text !== "" && !s.ended) continue; // (a tab whose doc is gone ends; the pane drops it and the doc list reopens)
+        s.dispose();
+        syncs.delete(doc);
+        const wasAttached = attached === doc;
+        if (wasAttached) attached = "";
+        await open(doc);
+        if (!wasAttached) {
+          const only = syncs.get(doc);
+          if (only?.detach) only.detach();
+        }
+      }
+      // A refused save is retried by editing again.
+      for (const [doc, s] of syncs) {
+        if (s.currentStatus !== "error") continue;
+        const t = s.text;
+        s.edit(`${t} `);
+        s.edit(t);
+        if (attached === doc) editor.text = t;
+      }
+      if (ghostBox.cur && (ghostBox.cur.sync.text === "" || ghostBox.cur.sync.ended)) {
+        ghostBox.cur.sync.dispose();
+        ghostBox.cur = null;
+        ghostOpen();
+      }
+      if (ghostBox.cur && ghostBox.cur.sync.currentStatus === "error") {
+        const t = ghostBox.cur.sync.text;
+        ghostBox.cur.sync.edit(`${t} `);
+        ghostBox.cur.sync.edit(t);
+      }
+    }
     await drain();
     while (events.length) deliverEvent();
     await advance(6000);
@@ -661,18 +996,40 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       if (!s) continue;
       if (s.currentStatus === "conflict" || hasConflictMarkers(s.text)) continue; // unresolved by an engine that cannot
       const shown = attached === doc ? editor.text : s.text;
-      const surfaces = [d.text, shown, s.text, stash.get(doc)?.buffer ?? ""].join("\n");
+      const surfaces = [d.text, shown, s.text, ...stashedBuffers(doc), ghostText()].join("\n");
       // I1: no user keystroke is ever lost.
       for (const tok of typed.get(doc)!.values()) {
         if (excused.has(tok)) continue;
-        const kept = surfaces.split("\n").includes(tok) || (o.collide && d.everHad(tok));
+        if (pageWorkTransferred && doc === "goals") continue; // another window adopted this page's draft
+        const kept = surfaces.split("\n").includes(tok) || ((o.collide || o.chaos) && d.everHad(tok));
         if (!kept) {
           fail("keystroke-lost", `${doc}: ${tok} is nowhere (daemon ${JSON.stringify(d.text)}, editor ${JSON.stringify(shown)})`);
         }
       }
       // I4: after a reconnect the pane matches the daemon.
       if (shown !== d.text && s.text !== d.text) {
-        fail("pane-differs-from-daemon", `${doc}: pane ${JSON.stringify(s.text)} vs daemon ${JSON.stringify(d.text)}`);
+        fail("pane-differs-from-daemon", `${doc}: pane ${JSON.stringify(s.text)} (status ${s.currentStatus}, closing ${[...(closing.get(doc) ?? [])].map((c) => `${c.currentStatus}/${String(c.isQuiet)}/${c.debugModel}`).join("|")}, net ${net.length}, deleted ${d.deleted}, down ${d.down}) vs daemon ${JSON.stringify(d.text)}`);
+      }
+    }
+    if (o.chaos) {
+      // I8: an unresolved conflict's draft is in storage, in its own window's entry.
+      const open: { doc: string; s: SyncLike }[] = [...syncs].map(([doc, s]) => ({ doc, s }));
+      if (ghostBox.cur) open.push({ doc: "goals", s: ghostBox.cur.sync });
+      for (const { doc, s } of open) {
+        if (s.currentStatus === "conflict" && !stashedBuffers(doc).includes(s.text)) {
+          fail("conflict-draft-not-in-storage", `${doc}: an open conflict has no stored draft`);
+        }
+      }
+      // The second window's keystrokes are not lost either, and it matches the daemon.
+      if (ghostBox.cur && !ghostWorkTransferred && ghostBox.cur.sync.currentStatus !== "conflict" && ghostBox.cur.sync.currentStatus !== "gone") {
+        const d = daemons.get("goals")!;
+        const surfaces = [d.text, ghostBox.cur.sync.text, ...stashedBuffers("goals"), syncs.get("goals")?.text ?? ""].join("\n").split("\n");
+        for (const tok of ghostTyped.values()) {
+          if (!surfaces.includes(tok) && !d.everHad(tok)) fail("ghost-keystroke-lost", `goals: ${tok} typed in the second window is nowhere`);
+        }
+        if (ghostBox.cur.sync.text !== d.text && !hasConflictMarkers(ghostBox.cur.sync.text)) {
+          fail("ghost-pane-differs-from-daemon", `second window (status ${ghostBox.cur.sync.currentStatus}, ended ${String(ghostBox.cur.sync.ended)}, net ${net.length}, closing ${[...(closing.get("goals") ?? [])].map((c) => c.currentStatus).join("|")}) ${JSON.stringify(ghostBox.cur.sync.text)} vs daemon ${JSON.stringify(d.text)}`);
+        }
       }
     }
     // I5: no save carried conflict markers that the user's own buffer did not hold.
@@ -683,5 +1040,6 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
   }
   for (const s of syncs.values()) s.dispose();
+  ghostBox.cur?.sync.dispose();
   return violation;
 }

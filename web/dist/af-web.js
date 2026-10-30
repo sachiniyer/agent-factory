@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/@xterm/addon-fit/lib/addon-fit.js
+// node_modules/@xterm/addon-fit/lib/addon-fit.js
 var require_addon_fit = __commonJS({
-  "../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module) {
+  "node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module) {
     !(function(e, t) {
       "object" == typeof exports && "object" == typeof module ? module.exports = t() : "function" == typeof define && define.amd ? define([], t) : "object" == typeof exports ? exports.FitAddon = t() : e.FitAddon = t();
     })(self, (() => (() => {
@@ -60,9 +60,9 @@ var require_addon_fit = __commonJS({
   }
 });
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/@xterm/xterm/lib/xterm.js
+// node_modules/@xterm/xterm/lib/xterm.js
 var require_xterm = __commonJS({
-  "../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/@xterm/xterm/lib/xterm.js"(exports, module) {
+  "node_modules/@xterm/xterm/lib/xterm.js"(exports, module) {
     !(function(e, t) {
       if ("object" == typeof exports && "object" == typeof module) module.exports = t();
       else if ("function" == typeof define && define.amd) define([], t);
@@ -7529,7 +7529,7 @@ function decideKey(key, ctx, mods = {}) {
   return next ? { kind: "select", id: next } : { kind: "none" };
 }
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/archive-restore.mjs
+// node_modules/lucide/dist/esm/icons/archive-restore.mjs
 var ArchiveRestore = [
   ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
   ["path", { d: "M4 8v11a2 2 0 0 0 2 2h2" }],
@@ -7538,20 +7538,20 @@ var ArchiveRestore = [
   ["path", { d: "M12 12v9" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/archive.mjs
+// node_modules/lucide/dist/esm/icons/archive.mjs
 var Archive = [
   ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
   ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
   ["path", { d: "M10 12h4" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/arrow-right.mjs
+// node_modules/lucide/dist/esm/icons/arrow-right.mjs
 var ArrowRight = [
   ["path", { d: "M5 12h14" }],
   ["path", { d: "m12 5 7 7-7 7" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/bot.mjs
+// node_modules/lucide/dist/esm/icons/bot.mjs
 var Bot = [
   ["path", { d: "M12 8V4H8" }],
   ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2" }],
@@ -7561,13 +7561,13 @@ var Bot = [
   ["path", { d: "M9 13v2" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/check.mjs
+// node_modules/lucide/dist/esm/icons/check.mjs
 var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/chevron-down.mjs
+// node_modules/lucide/dist/esm/icons/chevron-down.mjs
 var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/circle-dashed.mjs
+// node_modules/lucide/dist/esm/icons/circle-dashed.mjs
 var CircleDashed = [
   ["path", { d: "M10.1 2.182a10 10 0 0 1 3.8 0" }],
   ["path", { d: "M13.9 21.818a10 10 0 0 1-3.8 0" }],
@@ -7579,17 +7579,17 @@ var CircleDashed = [
   ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
+// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
 var CircleQuestionMark = [
   ["circle", { cx: "12", cy: "12", r: "10" }],
   ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
   ["path", { d: "M12 17h.01" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/circle.mjs
+// node_modules/lucide/dist/esm/icons/circle.mjs
 var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/diamond.mjs
+// node_modules/lucide/dist/esm/icons/diamond.mjs
 var Diamond = [
   [
     "path",
@@ -7599,21 +7599,21 @@ var Diamond = [
   ]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/ellipsis.mjs
+// node_modules/lucide/dist/esm/icons/ellipsis.mjs
 var Ellipsis = [
   ["circle", { cx: "12", cy: "12", r: "1" }],
   ["circle", { cx: "19", cy: "12", r: "1" }],
   ["circle", { cx: "5", cy: "12", r: "1" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/external-link.mjs
+// node_modules/lucide/dist/esm/icons/external-link.mjs
 var ExternalLink = [
   ["path", { d: "M15 3h6v6" }],
   ["path", { d: "M10 14 21 3" }],
   ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/file-text.mjs
+// node_modules/lucide/dist/esm/icons/file-text.mjs
 var FileText = [
   [
     "path",
@@ -7627,7 +7627,7 @@ var FileText = [
   ["path", { d: "M16 17H8" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/folder-git-2.mjs
+// node_modules/lucide/dist/esm/icons/folder-git-2.mjs
 var FolderGit2 = [
   ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
   [
@@ -7640,7 +7640,7 @@ var FolderGit2 = [
   ["circle", { cx: "20", cy: "19", r: "2" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/folder.mjs
+// node_modules/lucide/dist/esm/icons/folder.mjs
 var Folder = [
   [
     "path",
@@ -7650,7 +7650,7 @@ var Folder = [
   ]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/funnel.mjs
+// node_modules/lucide/dist/esm/icons/funnel.mjs
 var Funnel = [
   [
     "path",
@@ -7660,30 +7660,30 @@ var Funnel = [
   ]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/git-branch.mjs
+// node_modules/lucide/dist/esm/icons/git-branch.mjs
 var GitBranch = [
   ["path", { d: "M15 6a9 9 0 0 0-9 9V3" }],
   ["circle", { cx: "18", cy: "6", r: "3" }],
   ["circle", { cx: "6", cy: "18", r: "3" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/link.mjs
+// node_modules/lucide/dist/esm/icons/link.mjs
 var Link = [
   ["path", { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }],
   ["path", { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/loader-circle.mjs
+// node_modules/lucide/dist/esm/icons/loader-circle.mjs
 var LoaderCircle = [["path", { d: "M21 12a9 9 0 1 1-6.219-8.56" }]];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/menu.mjs
+// node_modules/lucide/dist/esm/icons/menu.mjs
 var Menu = [
   ["path", { d: "M4 5h16" }],
   ["path", { d: "M4 12h16" }],
   ["path", { d: "M4 19h16" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/octagon-x.mjs
+// node_modules/lucide/dist/esm/icons/octagon-x.mjs
 var OctagonX = [
   ["path", { d: "m15 9-6 6" }],
   [
@@ -7695,14 +7695,14 @@ var OctagonX = [
   ["path", { d: "m9 9 6 6" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/panels-top-left.mjs
+// node_modules/lucide/dist/esm/icons/panels-top-left.mjs
 var PanelsTopLeft = [
   ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
   ["path", { d: "M3 9h18" }],
   ["path", { d: "M9 21V9" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/pencil.mjs
+// node_modules/lucide/dist/esm/icons/pencil.mjs
 var Pencil = [
   [
     "path",
@@ -7713,7 +7713,7 @@ var Pencil = [
   ["path", { d: "m15 5 4 4" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/play.mjs
+// node_modules/lucide/dist/esm/icons/play.mjs
 var Play = [
   [
     "path",
@@ -7721,13 +7721,13 @@ var Play = [
   ]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/plus.mjs
+// node_modules/lucide/dist/esm/icons/plus.mjs
 var Plus = [
   ["path", { d: "M5 12h14" }],
   ["path", { d: "M12 5v14" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/refresh-cw.mjs
+// node_modules/lucide/dist/esm/icons/refresh-cw.mjs
 var RefreshCw = [
   ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }],
   ["path", { d: "M21 3v5h-5" }],
@@ -7735,22 +7735,22 @@ var RefreshCw = [
   ["path", { d: "M8 16H3v5" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/square-check-big.mjs
+// node_modules/lucide/dist/esm/icons/square-check-big.mjs
 var SquareCheckBig = [
   ["path", { d: "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" }],
   ["path", { d: "m9 11 3 3L22 4" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/square.mjs
+// node_modules/lucide/dist/esm/icons/square.mjs
 var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/terminal.mjs
+// node_modules/lucide/dist/esm/icons/terminal.mjs
 var Terminal = [
   ["path", { d: "M12 19h8" }],
   ["path", { d: "m4 17 6-6-6-6" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/trash-2.mjs
+// node_modules/lucide/dist/esm/icons/trash-2.mjs
 var Trash2 = [
   ["path", { d: "M10 11v6" }],
   ["path", { d: "M14 11v6" }],
@@ -7759,14 +7759,14 @@ var Trash2 = [
   ["path", { d: "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/triangle-alert.mjs
+// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
 var TriangleAlert = [
   ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
   ["path", { d: "M12 9v4" }],
   ["path", { d: "M12 17h.01" }]
 ];
 
-// ../../../../home/siyer/Desktop/claude-squad-rebase-own-prs/web/node_modules/lucide/dist/esm/icons/x.mjs
+// node_modules/lucide/dist/esm/icons/x.mjs
 var X = [
   ["path", { d: "M18 6 6 18" }],
   ["path", { d: "m6 6 12 12" }]
