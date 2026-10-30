@@ -8534,6 +8534,8 @@ var ConfigPane = class {
     const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
     const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
     const saveFocusedKey = active instanceof HTMLButtonElement && active.closest(".af-config-list") !== null && active.classList.contains("af-config-save") ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null : null;
+    const accountsLoginFocusedKey = active instanceof HTMLButtonElement && active.classList.contains("af-accounts-login") ? active.closest("[data-account]")?.getAttribute("data-account") ?? null : null;
+    const accountsAddFocusedAgent = active instanceof HTMLButtonElement && active.classList.contains("af-accounts-add") ? active.closest(".af-accounts-register")?.querySelector(`input[${ACCOUNT_INPUT_ATTR}]`)?.getAttribute(ACCOUNT_INPUT_ATTR) ?? null : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -8572,6 +8574,12 @@ var ConfigPane = class {
       if (field2 && accountCaret?.start != null) {
         field2.setSelectionRange(accountCaret.start, accountCaret.end ?? accountCaret.start);
       }
+    } else if (accountsLoginFocusedKey !== null) {
+      this.el.querySelector(
+        `.af-accounts-row[data-account="${CSS.escape(accountsLoginFocusedKey)}"] .af-accounts-login`
+      )?.focus({ preventScroll: true });
+    } else if (accountsAddFocusedAgent !== null) {
+      this.accountInput(accountsAddFocusedAgent)?.closest(".af-accounts-register")?.querySelector(".af-accounts-add")?.focus({ preventScroll: true });
     }
   }
   /** Every register field's current text, keyed by agent. */
