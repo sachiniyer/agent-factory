@@ -262,6 +262,11 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       save: (text, base, final) => {
         saves.push({ doc, text, bufferHadMarkers: self ? hasConflictMarkers(self.text) : false });
         void final;
+        // I12: once a newer tab has loaded the doc, a tab that closed on it writes no more.
+        const current = syncs.get(doc);
+        if (!isGhost && self && current && current !== self && current.text !== "" && closing.get(doc)?.has(self)) {
+          fail("closed-tab-wrote-after-reopen", `${doc}: a closed tab sent a save after the doc was reopened and loaded`);
+        }
         // I10: a sync that knows its doc is gone sends nothing.
         if (self && self.currentStatus === "gone") fail("saved-while-gone", `${doc}: a deleted doc's sync sent a save`);
         if (process.env.AF_STASHLOG || (process.env.AF_KVLOG && text.includes(process.env.AF_KVLOG))) console.log("SAVE", isGhost ? "ghost" : "A", doc, JSON.stringify(text), base, "final=" + final);
@@ -333,7 +338,14 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     s = newSync(doc);
     editor.doc = doc;
     editor.text = "";
-    void s.start().catch(() => undefined);
+    const fresh = s;
+    void s.start().then(() => {
+      // The pane's rule: once the new tab has loaded and restored the stored draft, the
+      // tabs that closed on this doc are redundant writers and are abandoned (draft kept).
+      if (process.env.AF_NO_ABANDON) return; // (the pane before it abandoned them, for the failing run)
+      for (const old of closing.get(doc) ?? []) if (old !== fresh) old.abandon?.(true);
+      closing.delete(doc);
+    }).catch(() => undefined);
   }
 
   const lineSets = o.collide ? [0, 1, 2, 3, 4] : [0, 1];

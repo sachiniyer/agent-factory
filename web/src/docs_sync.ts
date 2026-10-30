@@ -261,7 +261,14 @@ export class DocSync {
   }
 
   private quiet(): boolean {
-    return this.model.dead || (this.model.phase !== "saving" && !this.model.leaving);
+    const m = this.model;
+    if (m.dead) return true;
+    if (m.phase === "saving" || m.leaving) return false;
+    // A closed tab that is still retrying (unsent edits, a save whose outcome is
+    // unknown, a read in flight) is not quiet: a tab that reopens the doc must not
+    // load, or write, while the old one can still write.
+    if (m.closed && !m.gone && !m.fatal && (m.unknown || m.phase === "reconciling" || (m.phase === "idle" && isDirty(m)))) return false;
+    return true;
   }
 
   private dispatch(e: Event): void {
