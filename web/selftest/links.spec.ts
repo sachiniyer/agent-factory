@@ -33,9 +33,16 @@ test("project switcher: rows are links; a plain click switches in place, a modif
   await expect.poll(() => new URL(popup.url()).hash).toBe("");
   await expect(page.locator(".af-project-switch-name")).toHaveText(before);
 
-  // Plain click: switches in place, no new tab, and the hash stays clean.
+  // A modified click leaves the menu open (the browser opens the tab; the menu stays up
+  // behind it, which is what keeps the phone panel open).
+  await expect(other).toBeVisible();
+  // Plain click, from a menu that is open by this step's own doing: close it, check it
+  // is closed, open it fresh, then click the row.
+  await switcher.click();
+  await expect(other).toBeHidden();
   const pagesBefore = context.pages().length;
   await switcher.click();
+  await expect(other).toBeVisible();
   await other.click();
   await expect(page.locator(".af-project-switch-name")).toHaveText(name);
   expect(context.pages().length).toBe(pagesBefore);
