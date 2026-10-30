@@ -670,3 +670,35 @@ func TestWalkPhysicalAppliesDotDotToTheResolvedPrefix(t *testing.T) {
 	_, _, err = walkPhysical("relative/path", nil)
 	assert.Error(t, err)
 }
+
+// Every path read while computing the dependency set is walked, not only the stores
+// an alternates file lists (Codex on #6186): the alternates FILE itself can be
+// reached through a symlink inside the registration leaf. Deleting the leaf deletes
+// the file the link points to, and the repository silently loses the store it lists.
+func TestAlternatesFileReachedThroughASymlinkInsideTheLeafIsRefused(t *testing.T) {
+	repo, wt := pruneWorktree(t)
+	leaf, err := registrationLeaf(wt)
+	require.NoError(t, err)
+
+	// The real store lives outside both roots and is listed by an alternates file ...
+	outside := filepath.Join(t.TempDir(), "real-objects")
+	objects := filepath.Join(repo, ".git", "objects")
+	require.NoError(t, os.Rename(objects, outside))
+	// ... that sits INSIDE the leaf, reached through objects/info -> leaf/info-real.
+	infoReal := filepath.Join(leaf, "info-real")
+	require.NoError(t, os.MkdirAll(infoReal, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(infoReal, "alternates"), []byte(outside+"\n"), 0o644))
+	require.NoError(t, os.MkdirAll(objects, 0o755))
+	require.NoError(t, os.Symlink(infoReal, filepath.Join(objects, "info")))
+	gitIn(t, wt, "status", "--porcelain") // premise: git follows it and works
+
+	deps, err := objectStoresInsideDeletedRoots(wt)
+	require.NoError(t, err)
+	require.NotEmpty(t, deps, "the alternates file's lookup path goes through the leaf")
+	joined := strings.Join(deps, " ")
+	assert.Contains(t, joined, "alternates")
+	assert.Contains(t, joined, "info")
+	reasons, err := WorktreeUnrecoverableContent(wt)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(reasons, " "), "object store")
+}

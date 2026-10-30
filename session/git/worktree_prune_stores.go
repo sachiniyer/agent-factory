@@ -51,6 +51,25 @@ func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
 	}
 	objects := strings.TrimSpace(string(out))
 
+	// ONE helper, called for EVERY path read while computing the dependency set —
+	// each objects directory, each objects/info/alternates file, each listed entry,
+	// at every level of the chain: walk it component by component and record the
+	// first prefix or hop that lies inside a deletion root. It returns the resolved
+	// location to read from.
+	seen := map[string]bool{}
+	var inside []string
+	lookup := func(path string) (string, error) {
+		resolved, hit, err := walkPhysical(path, roots)
+		if err != nil {
+			return "", err
+		}
+		if hit != "" && !seen[path] {
+			seen[path] = true
+			inside = append(inside, fmt.Sprintf("%s, through %s", path, hit))
+		}
+		return resolved, nil
+	}
+
 	// Source 1: git's own listing.
 	stores := []string{objects}
 	listing, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks", "-c", "core.quotePath=false", "count-objects", "-v")
@@ -79,7 +98,7 @@ func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
 		if depth > maxAlternatesDepth {
 			return fmt.Errorf("the alternates chain of %s is deeper than %d stores", worktreePath, maxAlternatesDepth)
 		}
-		real, _, err := walkPhysical(store, roots)
+		real, err := lookup(store)
 		if err != nil {
 			return err
 		}
@@ -87,7 +106,13 @@ func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
 			return nil
 		}
 		visited[real] = true
-		raw, err := boundedReadFile(filepath.Join(real, "info", "alternates"))
+		// The alternates FILE is a path read like any other: it can be reached
+		// through a symlink inside a root even when the store it sits in is not.
+		file, err := lookup(store + string(filepath.Separator) + filepath.Join("info", "alternates"))
+		if err != nil {
+			return err
+		}
+		raw, err := boundedReadFile(file)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -117,16 +142,9 @@ func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
 		return nil, err
 	}
 
-	seen := map[string]bool{}
-	var inside []string
 	for _, store := range stores {
-		_, hit, err := walkPhysical(store, roots)
-		if err != nil {
+		if _, err := lookup(store); err != nil {
 			return nil, err
-		}
-		if hit != "" && !seen[store] {
-			seen[store] = true
-			inside = append(inside, fmt.Sprintf("%s, through %s", store, hit))
 		}
 	}
 	return inside, nil
