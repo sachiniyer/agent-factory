@@ -28,6 +28,7 @@ import {
   createVSCodeTab,
   deleteProject,
   registerProject,
+  registerProjectURL,
   rebindProject,
   setProjectColor,
   type RegisteredProject,
@@ -42,6 +43,7 @@ import {
   getConfig,
   isMutationCommittedError,
   isMutationOutcomeUncertain,
+  looksLikeGitURL,
   isProjectReboundError,
   handoffSession,
   listBackends,
@@ -1342,6 +1344,14 @@ function openDeleteProject(root: string, label: string): void {
  *  login-framed describeError) and the modal stays open to correct; on success the
  *  modal closes.
  *
+ *  A GIT URL instead takes the RegisterProject url half (W9.10, mirrors
+ *  `af projects add <url>` and the TUI's add prompt): the daemon clones it on
+ *  its own host inside the request, which can run for minutes, so the modal
+ *  closes and the outcome is reported the way a session create's is — a
+ *  definite refusal remounts the form with the daemon's message and the typed
+ *  URL intact, an outcome that never arrived is reported unknown, and a
+ *  success is already visible through the echoed projects.changed.
+ *
  *  The registered repo appears in the switcher and is selectable in the New session
  *  picker IMMEDIATELY — no session required (the #2456 union: projectSummaries /
  *  pickerProjects ∪ the daemon's registry, listProjects). The write closes the modal;
@@ -1349,6 +1359,7 @@ function openDeleteProject(root: string, label: string): void {
  *  refetches the registry and surfaces the new project — so the add is observable
  *  without a reload. */
 function openAddProject(): void {
+  const invoker = captureModalInvoker();
   openModal(
     addProjectModal({
       // #2788: the picker's daemon read. The token is resolved PER CALL, not
@@ -1364,15 +1375,57 @@ function openAddProject(): void {
       // The daemon's own message ("cannot read /x: permission denied"), never the
       // login-framed describeError — a refused directory is not an auth failure.
       errorText,
-      onSubmit: (path: string) => {
+      onSubmit: (value: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
         if (tok === null || !modal) {
           return;
         }
         const m = modal;
+        if (looksLikeGitURL(value)) {
+          // A URL is cloned by the daemon on ITS host (W9.10), inside the
+          // request — a large repo can run for minutes, far past anything a
+          // held-busy modal should wait on. Latch the detached form, close the
+          // modal, and report like a create: the picker said "the project
+          // appears when the registration lands", and projects.changed keeps
+          // that promise without any row pretending to know the clone's state.
+          m.setBusy(true);
+          closeModal();
+          showTransientNotice(`Cloning ${value} on the daemon host — the project appears in the switcher when it lands.`);
+          void registerProjectURL(value, tok)
+            .then(() => {
+              refreshRegisteredProjects();
+            })
+            .catch((e) => {
+              if (isMutationOutcomeUncertain(e)) {
+                // A clone may still have landed (or still be running): re-read
+                // the registry rather than assume either way, and say so.
+                refreshRegisteredProjects();
+                surfaceMutationError(
+                  new Error(`The registration of ${value} could not be confirmed. ${errorText(e)}`),
+                  "uncertain",
+                );
+                return;
+              }
+              // A definite daemon refusal (the URL failed validation, or the
+              // clone itself failed): remount the form with its message inline
+              // and the typed URL still there to correct — the shape the create
+              // modal's reverted row returns to. If another overlay has taken
+              // the slot or the credential moved on, the outcome notice is the
+              // path — openModal would reap a live assistant/login overlay.
+              m.setBusy(false);
+              m.setError(errorText(e));
+              if (!modal && !configAssistant && !accountLogin && token === tok) {
+                openModal(m, true, invoker);
+                m.el.querySelector<HTMLElement>(".af-modal-card input")?.focus({ preventScroll: true });
+              } else {
+                surfaceMutationError(e);
+              }
+            });
+          return;
+        }
         m.setBusy(true);
-        void registerProject(path, tok)
+        void registerProject(value, tok)
           .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
             m.setBusy(false);

@@ -523,8 +523,9 @@ export interface Actions {
    *  index.ts calls DeleteProject, which removes the project registration and
    *  archives each restorable live session. */
   deleteProject(root: string, label: string): void;
-  /** Opens the add-project modal (#2456): register a git checkout by path via
-   *  RegisterProject so it appears as an empty project you can create into. */
+  /** Opens the add-project modal (#2456): register a git checkout by path or
+   *  git URL via RegisterProject so it appears as an empty project you can
+   *  create into. */
   addProject(): void;
   /** Opens the rebind-project modal (`af projects rebind`): repoint a registered
    *  project's stable identity at the checkout it should track now — the repair
@@ -2085,7 +2086,7 @@ export class AppShell {
 
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
     add.dataset.projectFocus = "add";
-    add.setAttribute("title", "Register a git checkout by path as a project");
+    add.setAttribute("title", "Register a git checkout by path or git URL as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();

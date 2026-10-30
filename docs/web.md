@@ -40,8 +40,12 @@ prompt; its **×** dismisses the offer. See [Install it as an app](#install-it-a
 If the project list is empty, choose **+ Add project** in the switcher. Browse the
 filesystem on the daemon's host: click directories to descend, **Up** for the
 parent, and **Home** for its home directory. **Use** on a git checkout fills
-**Repository path**; you can also type an absolute or `~`-prefixed path. Click
-**Add project** to register it. **Cancel** leaves it unchanged. The switcher's
+**Repository path or git URL**; you can also type an absolute or `~`-prefixed
+path on the daemon host, or a git URL (`https://host/owner/repo`,
+`ssh://host/owner/repo`, or `git@host:owner/repo`) for the daemon to clone and
+register — a clone can take a while, so the dialog closes and the project
+appears when it finishes. Click **Add project** to register it. **Cancel**
+leaves it unchanged. The switcher's
 **Delete project** asks for confirmation, then archives ordinary live sessions
 (restorable) and tears down in-place or external-worktree sessions, including
 the root agent, removing their session records (not restorable). Those in-place

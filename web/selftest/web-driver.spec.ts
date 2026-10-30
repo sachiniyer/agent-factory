@@ -7871,7 +7871,7 @@ test("add + delete a registered empty project (#2456): appears while another is 
   await add.click();
   const addModal = page.locator(".af-modal-card");
   await expect(addModal.locator(".af-modal-title")).toHaveText("Add project");
-  const pathInput = addModal.locator('input[aria-label="Repository path"]');
+  const pathInput = addModal.locator('input[aria-label="Repository path or git URL"]');
   await pathInput.fill("/work/definitely-not-a-git-repo");
   await addModal.locator("button.af-primary").click();
   await expect(addModal.locator(".af-modal-error")).toBeVisible();
@@ -8060,7 +8060,7 @@ test("add-project directory picker (#2788): descend, ascend, pick a repo — and
 
   // Picking fills the free-text field — the escape hatch stays the single input
   // the submit reads, so what gets registered is always what is on screen.
-  const pathInput = addModal.locator('input[aria-label="Repository path"]');
+  const pathInput = addModal.locator('input[aria-label="Repository path or git URL"]');
   await dirRow(browseRepo).locator(".af-dirpicker-use").click();
   await expect(pathInput).toHaveValue(`${browseRoot}/${level1}/${level2}/${browseRepo}`);
 
@@ -8149,7 +8149,7 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   await expect(add).toBeVisible();
   await add.click();
   const addModal = page.locator(".af-modal-card");
-  await addModal.locator('input[aria-label="Repository path"]').fill(emptyRepo!);
+  await addModal.locator('input[aria-label="Repository path or git URL"]').fill(emptyRepo!);
   await addModal.locator("button.af-primary").click();
   await expect(addModal).toBeHidden();
   await page.locator(".af-project-switch").click();
