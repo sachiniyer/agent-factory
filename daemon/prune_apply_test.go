@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/sachiniyer/agent-factory/config"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -533,4 +535,72 @@ func TestPruneApply_TitleReuseRefusesWhileAPruneIsPendingThenSucceedsAfterResume
 	manager.mu.Unlock()
 	require.NoError(t, rerr)
 	require.NotNil(t, renamed)
+}
+
+// Lock order (Codex on #6186): a create takes the repository start lock before
+// worktree admission. Prune must too — it must never hold admission while waiting
+// for the start lock, or a prune overlapping a create deadlocks.
+func TestPruneApply_TakesLocksInTheCreatesOrder(t *testing.T) {
+	manager, repoID, _, inst, _ := seedPrunableArchive(t, "lock-order")
+	c := planOf(t, manager, repoID)
+
+	start := manager.startLockForRepo(repoID)
+	start.Lock() // a create in this repository holds the start lock ...
+	pruned := make(chan PruneSessionsResponse, 1)
+	go func() {
+		resp, _ := manager.PruneSessions(applyReq(repoID, c.ID))
+		pruned <- resp
+	}()
+	time.Sleep(300 * time.Millisecond) // prune is now queued behind the start lock
+
+	// ... and then takes worktree admission, as CreateSession does.
+	admission := manager.worktreeAdmissionLockForRepo(repoID)
+	got := make(chan struct{})
+	go func() { admission.Lock(); close(got) }()
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlock: prune holds worktree admission while waiting for the start lock")
+	}
+	admission.Unlock()
+	start.Unlock()
+
+	select {
+	case resp := <-pruned:
+		assert.Len(t, resp.Pruned, 1, "skipped=%+v incomplete=%+v", resp.Skipped, resp.Incomplete)
+		assert.True(t, inst.IsPruned())
+	case <-time.After(30 * time.Second):
+		t.Fatal("prune did not complete once the create released its locks")
+	}
+}
+
+// A row with an abandoned (timed-out) filesystem mutation is not acted on again
+// until that mutation has finished.
+func TestPruneApply_RefusesARowWithAnAbandonedMutationUntilItFinishes(t *testing.T) {
+	manager, repoID, _, inst, archived := seedPrunableArchive(t, "abandoned-mutation")
+	c := planOf(t, manager, repoID)
+
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	err := sessiongit.BoundedMutationWithin(50*time.Millisecond, "renaming the archive", []string{archived}, func() error {
+		<-release
+		close(finished)
+		return nil
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	resp, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	assert.Empty(t, resp.Pruned)
+	require.NotEmpty(t, resp.Skipped)
+	assert.Contains(t, resp.Skipped[0].Reason, "may still be running")
+	assert.DirExists(t, archived)
+	assert.Nil(t, inst.PruneIntent())
+
+	close(release)
+	<-finished
+	require.Eventually(t, func() bool {
+		r, _ := manager.PruneSessions(applyReq(repoID, c.ID))
+		return len(r.Pruned) == 1
+	}, 10*time.Second, 50*time.Millisecond, "after the abandoned mutation finished the prune proceeds")
 }

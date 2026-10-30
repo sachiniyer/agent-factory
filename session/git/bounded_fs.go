@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -66,11 +67,78 @@ func boundedReadHead(path string, n int) ([]byte, error) {
 	})
 }
 
-// BoundedRename renames within one directory, bounded. A timeout is ambiguous (the
-// rename may still complete), which the caller must treat as unknown.
+// A bounded MUTATION that times out has an UNKNOWN outcome, not a failed one: the
+// abandoned goroutine can still finish after the caller gave up. BoundedMutation
+// therefore records every abandoned mutation under the paths it touches, and
+// MutationInFlight lets the caller refuse to act on those paths again until the
+// abandoned operation has provably finished (or the process restarts and state is
+// re-derived from disk).
+var abandonedMutations = struct {
+	sync.Mutex
+	byKey map[string]<-chan struct{}
+}{byKey: map[string]<-chan struct{}{}}
+
+// LeafMutationKey names a registration leaf in the abandoned-mutation registry.
+func LeafMutationKey(repoRoot, leafName string) string {
+	return "leaf\x00" + repoRoot + "\x00" + leafName
+}
+
+// MutationInFlight returns an error naming the first key that has an abandoned
+// mutation still running. A key whose abandoned mutation has finished is forgotten.
+func MutationInFlight(keys ...string) error {
+	abandonedMutations.Lock()
+	defer abandonedMutations.Unlock()
+	for _, k := range keys {
+		ch, ok := abandonedMutations.byKey[k]
+		if !ok {
+			continue
+		}
+		select {
+		case <-ch:
+			delete(abandonedMutations.byKey, k)
+		default:
+			return fmt.Errorf("an earlier filesystem operation on %q timed out and may still be running; its outcome is unknown, so nothing acts on it again until it finishes (or the daemon restarts)", k)
+		}
+	}
+	return nil
+}
+
+// BoundedMutationWithin runs a mutating op and waits at most timeout. On a timeout
+// the op is left running, registered under keys, and DeadlineExceeded is returned.
+// It refuses to start while an earlier abandoned mutation on any key still runs.
+func BoundedMutationWithin(timeout time.Duration, what string, keys []string, op func() error) error {
+	if err := MutationInFlight(keys...); err != nil {
+		return err
+	}
+	settled := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		err := op()
+		close(settled)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		abandonedMutations.Lock()
+		for _, k := range keys {
+			abandonedMutations.byKey[k] = settled
+		}
+		abandonedMutations.Unlock()
+		return fmt.Errorf("%s did not finish within %s — its outcome is unknown: %w", what, timeout, context.DeadlineExceeded)
+	}
+}
+
+// BoundedMutation is BoundedMutationWithin at the standard filesystem bound.
+func BoundedMutation(what string, keys []string, op func() error) error {
+	return BoundedMutationWithin(pruneFSOpTimeout, what, keys, op)
+}
+
+// BoundedRename renames within one directory. A timeout is ambiguous (the rename
+// may still complete); it is registered under both paths.
 func BoundedRename(from, to string) error {
-	_, err := BoundedFSOp("renaming "+from, func() (struct{}, error) { return struct{}{}, os.Rename(from, to) })
-	return err
+	return BoundedMutation("renaming "+from, []string{from, to}, func() error { return os.Rename(from, to) })
 }
 
 // BoundedFreeSpace is a Statfs-and-Stat probe, bounded.

@@ -42,8 +42,8 @@ func StampArchiveNonce(worktreePath string) (string, error) {
 		return "", err
 	}
 	nonce := hex.EncodeToString(raw[:])
-	if _, err := BoundedFSOp("stamping "+leaf, func() (struct{}, error) {
-		return struct{}{}, os.WriteFile(filepath.Join(leaf, archiveNonceFile), []byte(nonce+"\n"), 0o600)
+	if err := BoundedMutation("stamping "+leaf, []string{leaf}, func() error {
+		return os.WriteFile(filepath.Join(leaf, archiveNonceFile), []byte(nonce+"\n"), 0o600)
 	}); err != nil {
 		return "", fmt.Errorf("could not stamp the archive occupant nonce: %w", err)
 	}
@@ -250,16 +250,16 @@ func StampPruneNonce(worktreePath string) (leafName, nonce string, err error) {
 		return "", "", fmt.Errorf("could not stat worktree registration %s: %w", leaf, err)
 	}
 	stamp := filepath.Join(leaf, pruneNonceFile)
-	if _, err := BoundedFSOp("stamping "+leaf, func() (struct{}, error) {
+	if err := BoundedMutation("stamping "+leaf, []string{leaf, worktreePath}, func() error {
 		if err := os.WriteFile(stamp, []byte(nonce+"\n"), 0o600); err != nil {
-			return struct{}{}, fmt.Errorf("could not stamp the prune nonce: %w", err)
+			return fmt.Errorf("could not stamp the prune nonce: %w", err)
 		}
 		if err := os.Chtimes(leaf, st.ModTime(), st.ModTime()); err != nil {
 			_ = os.Remove(stamp)
 			_ = os.Chtimes(leaf, st.ModTime(), st.ModTime())
-			return struct{}{}, fmt.Errorf("could not preserve the registration's timestamp while stamping: %w", err)
+			return fmt.Errorf("could not preserve the registration's timestamp while stamping: %w", err)
 		}
-		return struct{}{}, nil
+		return nil
 	}); err != nil {
 		return "", "", err
 	}
@@ -301,8 +301,8 @@ func RemoveArchivedRegistrationLeaf(repoRoot, leafName, nonce string) error {
 	if locked {
 		return fmt.Errorf("registration %s is locked — refusing to remove it", leaf)
 	}
-	_, err = BoundedFSOp("removing "+leaf, func() (struct{}, error) { return struct{}{}, os.RemoveAll(leaf) })
-	return err
+	return BoundedMutationWithin(10*pruneFSOpTimeout, "removing "+leaf,
+		[]string{leaf, LeafMutationKey(repoRoot, leafName)}, func() error { return os.RemoveAll(leaf) })
 }
 
 func sampleList(sample []string, total int) string {

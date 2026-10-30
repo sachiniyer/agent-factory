@@ -78,12 +78,10 @@ var pruneTombstonePersist = func(_ *Manager, repoID string, data session.Instanc
 // write and the in-memory commit, to interleave a competing writer there.
 var pruneBetweenTombstoneSteps func()
 
-// commitPruneTombstone writes the tombstone and then commits it in memory, both
-// under the repository's ordering lock.
+// commitPruneTombstone writes the tombstone and then commits it in memory. The
+// caller holds the repository start lock (lockForPrune), so the write and the
+// commit are one critical section against every other writer.
 func (m *Manager) commitPruneTombstone(repoID string, instance *session.Instance, at time.Time) error {
-	lock := m.startLockForRepo(repoID)
-	lock.Lock()
-	defer lock.Unlock()
 	tomb := instance.ToInstanceData()
 	tomb.PrunedAt, tomb.PruneIntent = at, nil
 	if err := pruneTombstonePersist(m, repoID, tomb); err != nil {
@@ -236,21 +234,14 @@ func (m *Manager) pruneApplyOne(c PruneCandidate, cutoff time.Time) (*PrunedEntr
 		return skip("session changed before it could be pruned")
 	}
 
-	deleteSeq := m.projectDeleteSeqNow()
-	opLock, waited, err := m.lockSessionOperationWithin(key, "prune", c.Title)
+	release, err := m.lockForPrune(c.RepoID, key, c.Title, "prune", instance, true)
 	if err != nil {
 		return skip(err.Error())
 	}
-	defer opLock.Unlock()
-	admission, err := m.lockLocalWorktreeAdmissionWithin(c.RepoID, c.Title, "prune", instance)
-	if err != nil {
+	defer release()
+	if err := m.pruneAbandonedGuard(c.RepoID, instance, nil); err != nil {
 		return skip(err.Error())
 	}
-	defer unlockWorktreeAdmission(admission)
-	if err := m.claimPruneOperation(c.RepoID, key, c.Title, waited, deleteSeq); err != nil {
-		return skip(err.Error())
-	}
-	defer m.releasePruneOperation(key)
 
 	// The second judgment IS the first: the same verdict, under the claim.
 	fresh, verdictSkip, _ := m.pruneVerdict(c.RepoID, instance, cutoff, true)
@@ -286,7 +277,7 @@ func (m *Manager) pruneApplyOne(c PruneCandidate, cutoff time.Time) (*PrunedEntr
 	if err := instance.SetPruneIntent(intent); err != nil {
 		return skip(err.Error())
 	}
-	if err := m.persistInstanceErr(c.RepoID, instance); err != nil {
+	if err := m.persistPruneRow(c.RepoID, instance); err != nil {
 		instance.ClearPruneIntent()
 		return skip(fmt.Sprintf("could not record the prune intent, so nothing was touched: %v", err))
 	}
@@ -303,13 +294,13 @@ func (m *Manager) pruneApplyOne(c PruneCandidate, cutoff time.Time) (*PrunedEntr
 				return nil, nil, &PruneIncompleteEntry{ID: c.ID, Title: c.Title, RepoID: c.RepoID, Step: "rename", Reason: err.Error()}
 			}
 			instance.ClearPruneIntent()
-			if perr := m.persistInstanceErr(c.RepoID, instance); perr != nil {
+			if perr := m.persistPruneRow(c.RepoID, instance); perr != nil {
 				m.warn().Printf("prune %q: could not clear the intent after a failed rename: %v", c.Title, perr)
 			}
 			return skip(fmt.Sprintf("could not move the worktree aside, so nothing was deleted: %v", err))
 		}
 		_ = instance.MarkPruneRenamed()
-		_ = m.persistInstanceErr(c.RepoID, instance) // best effort: the filesystem is the authority on resume
+		_ = m.persistPruneRow(c.RepoID, instance) // best effort: the filesystem is the authority on resume
 	}
 	step, ferr := m.pruneFinish(c.RepoID, instance, instance.PruneIntent())
 	if ferr != nil {
@@ -394,17 +385,12 @@ func pruneRemoveTree(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is not a plain directory; refusing to delete it", path)
 	}
-	done := make(chan error, 1)
-	go func() { done <- os.RemoveAll(path) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			return fmt.Errorf("deleting %s: %w", path, err)
-		}
-		return nil
-	case <-time.After(pruneRemoveTimeout):
-		return fmt.Errorf("deleting %s is still running after %s; re-run to continue", path, pruneRemoveTimeout)
+	// A removal that times out is still running with an UNKNOWN outcome; it is
+	// registered, and nothing acts on this path again until it finishes.
+	if err := sessiongit.BoundedMutationWithin(pruneRemoveTimeout, "deleting "+path, []string{path}, func() error { return os.RemoveAll(path) }); err != nil {
+		return fmt.Errorf("deleting %s: %w", path, err)
 	}
+	return nil
 }
 
 // resumePruneIntent finishes (or cleanly abandons) a deletion an earlier run
@@ -419,19 +405,17 @@ func (m *Manager) resumePruneIntent(repoID string, instance *session.Instance) (
 		return nil, nil
 	}
 	key := daemonInstanceKey(repoID, data.Title)
-	deleteSeq := m.projectDeleteSeqNow()
-	opLock, waited, err := m.lockSessionOperationWithin(key, "prune resume", data.Title)
+	release, err := m.lockForPrune(repoID, key, data.Title, "prune resume", instance, false)
 	if err != nil {
 		return inc("intent", err)
 	}
-	defer opLock.Unlock()
-	if err := m.claimPruneOperation(repoID, key, data.Title, waited, deleteSeq); err != nil {
-		return inc("intent", err)
-	}
-	defer m.releasePruneOperation(key)
+	defer release()
 	intent = instance.PruneIntent() // re-read under the claim
 	if intent == nil {
 		return nil, nil
+	}
+	if err := m.pruneAbandonedGuard(repoID, instance, intent); err != nil {
+		return inc("intent", err)
 	}
 
 	// Resume acts only on a positive answer: ENOENT is "absent", any other error
@@ -449,7 +433,7 @@ func (m *Manager) resumePruneIntent(repoID string, instance *session.Instance) (
 	// ordinary archive again and the next verdict judges it from scratch.
 	if intent.TombstonePath != "" && !tombExists && origExists && !intent.Renamed {
 		instance.ClearPruneIntent()
-		if err := m.persistInstanceErr(repoID, instance); err != nil {
+		if err := m.persistPruneRow(repoID, instance); err != nil {
 			return inc("intent", fmt.Errorf("could not clear the abandoned prune intent: %w", err))
 		}
 		return nil, nil
@@ -604,4 +588,74 @@ func pruneExists(path string) (bool, error) {
 		return false, nil
 	}
 	return sessiongit.BoundedPathExists(path)
+}
+
+// lockForPrune takes everything one prune step on a row needs, in the daemon's
+// global lock order (see startLockForRepo): the session operation lock, then the
+// repository start lock, then worktree admission (apply only), then the claim. A
+// create takes the start lock before admission, so prune must too — taking them in
+// the opposite order deadlocks a prune overlapping a create in the same repository.
+// Every wait is bounded. While the start lock is held, persist ONLY with the
+// lock-free persistPruneRow (persistInstanceErr would take it again).
+func (m *Manager) lockForPrune(repoID, key, title, operation string, instance *session.Instance, withAdmission bool) (func(), error) {
+	deleteSeq := m.projectDeleteSeqNow()
+	opLock, waited, err := m.lockSessionOperationWithin(key, operation, title)
+	if err != nil {
+		return nil, err
+	}
+	var unlocks []func()
+	release := func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+		opLock.Unlock()
+	}
+	startLock := m.startLockForRepo(repoID)
+	if ok, w := lockWithin(startLock, opLockTimeout); !ok {
+		release()
+		return nil, fmt.Errorf("%s of session %q timed out after %s waiting for another operation in this repository (a create or a persist); the requested %s did not start and made no changes — retry", operation, title, w, operation)
+	}
+	unlocks = append(unlocks, startLock.Unlock)
+	if withAdmission {
+		admission, err := m.lockLocalWorktreeAdmissionWithin(repoID, title, operation, instance)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		if admission != nil {
+			unlocks = append(unlocks, func() { unlockWorktreeAdmission(admission) })
+		}
+	}
+	if err := m.claimPruneOperation(repoID, key, title, waited, deleteSeq); err != nil {
+		release()
+		return nil, err
+	}
+	unlocks = append(unlocks, func() { m.releasePruneOperation(key) })
+	return release, nil
+}
+
+// persistPruneRow persists the row without taking the repository start lock, which
+// the caller already holds (lockForPrune). It is persistInstanceErr minus the lock.
+func (m *Manager) persistPruneRow(repoID string, instance *session.Instance) error {
+	return persistInstanceData(repoID, instance.ToInstanceData())
+}
+
+// pruneAbandonedGuard refuses to act on a row while a bounded filesystem mutation
+// of an earlier step has timed out and may still be running: its outcome is
+// unknown, and acting on the row again (a retry that clears the intent, say) could
+// be followed by the late mutation. intent is nil for a fresh apply.
+func (m *Manager) pruneAbandonedGuard(repoID string, instance *session.Instance, intent *session.PruneIntentData) error {
+	data := instance.ToInstanceData()
+	repoPath := data.Worktree.RepoPath
+	if repoPath == "" {
+		repoPath = data.Path
+	}
+	keys := []string{data.Worktree.WorktreePath}
+	if intent != nil {
+		keys = append(keys, intent.WorktreePath, intent.TombstonePath)
+		if intent.LeafName != "" {
+			keys = append(keys, sessiongit.LeafMutationKey(repoPath, intent.LeafName))
+		}
+	}
+	return sessiongit.MutationInFlight(keys...)
 }

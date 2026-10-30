@@ -57,3 +57,28 @@ func TestBoundedFSOpTimesOutAsUnknown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 7, v)
 }
+
+// A bounded mutation that times out has an UNKNOWN outcome: it keeps running, and
+// nothing acts on the same paths again until it provably finished (Codex on #6186).
+func TestTimedOutMutationBlocksActingAgainUntilItFinishes(t *testing.T) {
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	err := BoundedMutationWithin(50*time.Millisecond, "renaming a", []string{"/p/a", "/p/b"}, func() error {
+		<-release
+		close(finished)
+		return nil
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	for _, key := range []string{"/p/a", "/p/b"} {
+		require.Error(t, MutationInFlight(key), "still running: the outcome is unknown")
+	}
+	require.NoError(t, MutationInFlight("/p/unrelated"))
+	require.Error(t, BoundedMutationWithin(time.Second, "second", []string{"/p/a"}, func() error { return nil }),
+		"a new mutation on the same path refuses while the abandoned one runs")
+
+	close(release)
+	<-finished
+	require.Eventually(t, func() bool { return MutationInFlight("/p/a", "/p/b") == nil }, time.Second, 5*time.Millisecond,
+		"once it provably finished, the paths are free again")
+}
