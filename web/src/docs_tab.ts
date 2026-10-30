@@ -43,6 +43,19 @@ export function publishProposalPush(status: PushStatus): void {
   for (const fn of pushListeners) fn(status);
 }
 
+const resyncListeners = new Set<() => void>();
+
+/** Tells every open Docs tab the event stream reconnected, so it refreshes what
+ *  it may have missed. */
+export function publishProposalResync(): void {
+  for (const fn of resyncListeners) fn();
+}
+
+function subscribeResync(fn: () => void): () => void {
+  resyncListeners.add(fn);
+  return () => resyncListeners.delete(fn);
+}
+
 function subscribePush(fn: (status: PushStatus) => void): () => void {
   pushListeners.add(fn);
   return () => pushListeners.delete(fn);
@@ -82,7 +95,7 @@ export function mountDocsTab(host: HTMLElement, opts: DocsTabOptions): () => voi
     notice("Loading editor…", false);
     loadDocsModule().then(
       (mod) => {
-        if (!disposed) pane = new mod.DocsPane(host, { ...opts, subscribe, subscribePush });
+        if (!disposed) pane = new mod.DocsPane(host, { ...opts, subscribe, subscribePush, subscribeResync });
       },
       (e: unknown) => {
         if (!disposed) notice(`Could not load the editor: ${errorText(e)}`, true);

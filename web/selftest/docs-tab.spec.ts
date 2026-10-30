@@ -130,3 +130,37 @@ test("docs tab: right-click Delete removes a doc", async ({ page, request }) => 
   await expect.poll(() => existsSync(join(started.path, "goals.md"))).toBe(false);
   expect(existsSync(join(started.path, "api.md"))).toBe(true);
 });
+
+// Switching docs mid-edit keeps the keystrokes: the unsaved text is saved on the
+// switch and the doc comes back with it, not with the daemon's older text.
+test("docs tab: switching docs mid-edit keeps what was typed", async ({ page, request }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const af = (...args: string[]): string =>
+    execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+  const title = "docs-switch-probe";
+  const slug = "docs-switch-plan";
+  af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
+  const started = JSON.parse(af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title,
+    "--docs", "goals,api")) as { path: string; tab_error?: string };
+  expect(started.tab_error ?? "").toBe("");
+  const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
+  await page.goto(`/#/session/${session.id}`);
+  await page.locator(".af-tab", { hasText: "Docs" }).click();
+  const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
+  await expect(pane.locator(".cm-content")).toBeVisible();
+
+  const marker = `typed just before switching ${Date.now()}`;
+  await pane.locator(".cm-content").click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.type(`\n\n${marker}\n`);
+  await pane.locator(".af-docs-tab", { hasText: "api" }).click();
+  await expect(pane.locator('.af-docs-tab[aria-selected="true"]')).toHaveText("api");
+  await expect(pane.locator(".cm-content")).not.toContainText(marker);
+  await pane.locator(".af-docs-tab", { hasText: "goals" }).click();
+  await expect(pane.locator(".cm-content")).toContainText(marker);
+  await expect.poll(() => readFileSync(join(started.path, "goals.md"), "utf8")).toContain(marker);
+});

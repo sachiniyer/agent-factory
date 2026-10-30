@@ -141,3 +141,14 @@ test("push routes post the session and parse the status", async () => {
   recordFetch(200, { data: {}, error: null });
   await assert.rejects(sendChanges("s1", ""), /push status/);
 });
+
+test("putDoc sends keepalive only when the serialized body fits the browser's 64 KiB cap", async () => {
+  const calls = recordFetch(200, { data: { text: "x", commit: "c2", merged: false } });
+  // 40,000 quotes are 40,000 bytes of text but more than 80,000 once JSON-escaped.
+  await putDoc("s1", "auth", "api", '"'.repeat(40_000), "c1", "", true);
+  assert.equal(calls[0]!.init.keepalive, false, "an escaped body over the cap is sent without keepalive");
+  await putDoc("s1", "auth", "api", "short", "c1", "", true);
+  assert.equal(calls[1]!.init.keepalive, true);
+  await putDoc("s1", "auth", "api", "short", "c1", "", false);
+  assert.equal(calls[2]!.init.keepalive, false, "an ordinary save is not keepalive");
+});

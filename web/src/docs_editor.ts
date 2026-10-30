@@ -1,7 +1,7 @@
 // The Docs tab's editor: CodeMirror 6 with markdown live preview. It is part of
 // the lazy Docs bundle (see docs_pane.ts and build.mjs), never the main bundle.
 
-import { Annotation, EditorState, type Extension, Transaction } from "@codemirror/state";
+import { Annotation, Compartment, EditorState, type Extension, Transaction } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { Language, LanguageSupport, defineLanguageFacet, languageDataProp } from "@codemirror/language";
@@ -28,7 +28,12 @@ export interface DocsEditor {
   applyRemote(changes: readonly TextChange[]): void;
   /** Moves the cursor to the next `> [!question]` callout after the cursor, or,
    *  with `wrap`, to the first one. False if there is none to go to. */
-  goToNextQuestion(wrap: boolean): boolean;
+  goToNextQuestion(wrap: boolean, from?: number): boolean;
+  /** Moves the cursor to the first question callout of the doc. False if none. */
+  goToFirstQuestion(): boolean;
+  /** Whether the user can type. Off while a doc is loading, so no keystroke lands
+   *  in the previous doc's text or is dropped when the load completes. */
+  setEditable(editable: boolean): void;
   focus(): void;
   destroy(): void;
 }
@@ -59,11 +64,14 @@ export function editorExtensions(): Extension[] {
 }
 
 export function createDocsEditor(parent: HTMLElement, opts: DocsEditorOptions): DocsEditor {
+  const editable = new Compartment();
+  let isEditable = true;
   const makeState = (text: string): EditorState =>
     EditorState.create({
       doc: text,
       extensions: [
         ...editorExtensions(),
+        editable.of([EditorView.editable.of(isEditable), EditorState.readOnly.of(!isEditable)]),
         EditorView.contentAttributes.of({ "aria-label": opts.label, spellcheck: "true" }),
         EditorView.updateListener.of((u) => {
           if (u.docChanged && !u.transactions.some((tr) => tr.annotation(remote))) {
@@ -87,9 +95,16 @@ export function createDocsEditor(parent: HTMLElement, opts: DocsEditorOptions): 
         annotations: [remote.of(true), Transaction.addToHistory.of(false)],
       });
     },
-    goToNextQuestion(wrap) {
+    setEditable(next) {
+      isEditable = next;
+      view.dispatch({ effects: editable.reconfigure([EditorView.editable.of(next), EditorState.readOnly.of(!next)]) });
+    },
+    goToFirstQuestion() {
+      return this.goToNextQuestion(true, -1);
+    },
+    goToNextQuestion(wrap, from) {
       const text = view.state.doc.toString();
-      const pos = nextQuestionOffset(text, view.state.selection.main.head, wrap);
+      const pos = nextQuestionOffset(text, from ?? view.state.selection.main.head, wrap);
       if (pos === null) return false;
       view.dispatch({
         selection: { anchor: pos },

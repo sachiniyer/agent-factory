@@ -97,10 +97,10 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1133570.000 | 1133570.000–1133570.000 | 0.000 | 1190248.500 |
+| raw_bytes | 1134872.000 | 1134872.000–1134872.000 | 0.000 | 1191615.600 |
 | gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
-| lazy_raw_bytes | 345274.000 | 345274.000–345274.000 | 0.000 | 362537.700 |
-| lazy_gzip_bytes | 112426.000 | 112426.000–112426.000 | 0.000 | 118047.300 |
+| lazy_raw_bytes | 351213.000 | 351213.000–351213.000 | 0.000 | 368773.650 |
+| lazy_gzip_bytes | 114241.000 | 114241.000–114241.000 | 0.000 | 119953.050 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -134,7 +134,7 @@ only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
 `lazy_*` entries measure it on its own, with the same 5% margin. Both lazy values
 were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
 `report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
-so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,133,570 raw and 256,552 gzip bytes over `web/dist` without `lazy/`. Master's committed shell was 1,117,448 raw against an unmoved raw baseline of 1,067,070, so the raw entry is re-recorded (1,067,070 → 1,133,570); the gzip entry stays inside its budget. Lazy bundle: 345,274 raw / 112,426 gzip.
+so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,134,872 raw and 256,552 gzip bytes over `web/dist` without `lazy/`. Master's committed shell was 1,117,448 raw against an unmoved raw baseline of 1,067,070, so the raw entry is re-recorded (1,067,070 → 1,134,872); the gzip entry stays inside its budget. Lazy bundle: 351,213 raw / 114,241 gzip.
 
 ### Bundle refresh provenance (#6212)
 

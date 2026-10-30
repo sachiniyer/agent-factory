@@ -16,7 +16,7 @@ import {
   statusText,
 } from "./docs_model.js";
 import { PushChip, type PushView } from "./docs_push.js";
-import { DocSync, type SyncStatus } from "./docs_sync.js";
+import { DocSync, type Draft, type SyncStatus } from "./docs_sync.js";
 import { h } from "./dom.js";
 import { icon } from "./icon.js";
 import {
@@ -40,8 +40,45 @@ import { diffText } from "./text_diff.js";
 // The doc each proposal last showed, so a rebuilt pane opens where it was.
 const lastDoc = new Map<string, string>();
 
+// Tabs that closed with a save still in flight, per doc. A tab that reopens the
+// doc waits for it, so its first load does not return text older than what the
+// user just typed.
+const closing = new Map<string, DocSync>();
+
+function draftKey(sessionId: string, slug: string, doc: string): string {
+  return `af.docs.draft\n${sessionId}\n${slug}\n${doc}`;
+}
+
+/** Per-viewer storage for an unresolved conflict draft. A draft never goes into
+ *  the proposal doc; it comes back as a conflict when the doc opens again. */
+function draftStore(key: string): NonNullable<ConstructorParameters<typeof DocSync>[0]["draft"]> {
+  return {
+    load: (): Draft | null => {
+      try {
+        const raw = window.localStorage.getItem(key);
+        return raw === null ? null : (JSON.parse(raw) as Draft);
+      } catch {
+        return null;
+      }
+    },
+    store: (draft: Draft): void => {
+      try {
+        window.localStorage.setItem(key, JSON.stringify(draft));
+      } catch {
+        // Storage can be unavailable; the draft then lives only in memory.
+      }
+    },
+    clear: (): void => {
+      try {
+        window.localStorage.removeItem(key);
+      } catch {
+        // Nothing stored, nothing to clear.
+      }
+    },
+  };
+}
+
 const REFRESH_DEBOUNCE_MS = 300;
-const KEEPALIVE_LIMIT = 60_000;
 
 export interface DocsPaneOptions {
   sessionId: string;
@@ -51,6 +88,8 @@ export interface DocsPaneOptions {
   subscribe(fn: (change: ProposalChange) => void): () => void;
   /** Registers for proposal.push events; returns the unsubscribe. */
   subscribePush(fn: (status: PushStatus) => void): () => void;
+  /** Registers for event-stream reconnects; returns the unsubscribe. */
+  subscribeResync(fn: () => void): () => void;
 }
 
 export class DocsPane {
@@ -79,7 +118,11 @@ export class DocsPane {
   private info: ProposalInfo | null = null;
   private ordered: ProposalDocRef[] = [];
   private current: ProposalDocRef | null = null;
+  /** The sync of the doc being shown; it is also in `syncs`. */
   private sync: DocSync | null = null;
+  /** One sync per doc this pane opened. A doc that is not shown keeps its state,
+   *  an unresolved conflict draft included. */
+  private readonly syncs = new Map<string, DocSync>();
   private editor: DocsEditor | null = null;
   private freshBuffer = true;
   private readonly texts = new Map<string, string>();
@@ -88,7 +131,10 @@ export class DocsPane {
   private disposed = false;
   private readonly unsubscribe: () => void;
   private readonly unsubscribePush: () => void;
-  private readonly onPageHide = (): void => this.sync?.saveBeforeLeaving();
+  private readonly unsubscribeResync: () => void;
+  private readonly onPageHide = (): void => {
+    for (const s of this.syncs.values()) s.saveBeforeLeaving();
+  };
   private readonly onDocMouseDown = (e: MouseEvent): void => {
     if (!this.menu.hidden && !this.menu.contains(e.target as Node) && e.target !== this.addButton &&
       !this.addButton.contains(e.target as Node)) {
@@ -154,6 +200,7 @@ export class DocsPane {
       if (this.disposed || status.sessionId !== opts.sessionId || status.slug !== opts.slug) return;
       this.applyPush(status);
     });
+    this.unsubscribeResync = opts.subscribeResync(() => this.resync());
     document.addEventListener("mousedown", this.onDocMouseDown, true);
     window.addEventListener("pagehide", this.onPageHide);
     this.setStatus("loading");
@@ -164,15 +211,43 @@ export class DocsPane {
     this.disposed = true;
     this.unsubscribe();
     this.unsubscribePush();
+    this.unsubscribeResync();
     this.chip.dispose();
     document.removeEventListener("mousedown", this.onDocMouseDown, true);
     window.removeEventListener("pagehide", this.onPageHide);
     this.cancelLongPress();
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
-    this.sync?.dispose();
+    for (const name of [...this.syncs.keys()]) this.closeSync(name, false);
     this.sync = null;
     this.editor?.destroy();
     this.editor = null;
+  }
+
+  /** Closes the doc's sync: its unsaved edits are sent, and a conflict draft stays
+   *  in storage unless `forget` says the doc is gone. */
+  private closeSync(name: string, forget: boolean): void {
+    const sync = this.syncs.get(name);
+    if (!sync) return;
+    this.syncs.delete(name);
+    if (this.sync === sync) this.sync = null;
+    const key = draftKey(this.opts.sessionId, this.opts.slug, name);
+    sync.dispose();
+    if (forget) draftStore(key).clear();
+    closing.set(key, sync);
+    void sync.whenQuiet().then(() => {
+      if (closing.get(key) === sync) closing.delete(key);
+    });
+  }
+
+  /** The event stream reconnected: events may have been missed, so every open
+   *  doc and the doc list are refreshed. Unsaved edits are kept and merge on save. */
+  resync(): void {
+    if (this.disposed) return;
+    for (const sync of this.syncs.values()) sync.reconnect();
+    this.scheduleListRefresh();
+    for (const doc of this.ordered) {
+      if (!this.syncs.has(doc.name)) void this.refreshText(doc);
+    }
   }
 
   private memoryKey(): string {
@@ -322,10 +397,7 @@ export class DocsPane {
 
   private async removeDoc(doc: ProposalDocRef): Promise<void> {
     const wasOpen = this.current?.name === doc.name;
-    if (wasOpen) {
-      this.sync?.dispose();
-      this.sync = null;
-    }
+    this.closeSync(doc.name, false);
     try {
       await removeDoc(this.opts.sessionId, this.opts.slug, doc.name, this.opts.token);
     } catch (e) {
@@ -333,6 +405,7 @@ export class DocsPane {
       throw e;
     }
     if (this.disposed) return;
+    draftStore(draftKey(this.opts.sessionId, this.opts.slug, doc.name)).clear();
     this.texts.delete(doc.name);
     if (wasOpen) {
       this.current = null;
@@ -449,29 +522,54 @@ export class DocsPane {
 
   private async openDoc(doc: ProposalDocRef, toQuestion = false, force = false): Promise<void> {
     if (!force && this.current?.name === doc.name && this.sync) {
-      if (toQuestion) this.editor?.goToNextQuestion(true);
+      if (toQuestion) this.editor?.goToFirstQuestion();
       return;
     }
-    this.sync?.dispose();
+    // Leaving a doc keeps its sync: unsaved edits are saved, and an unresolved
+    // conflict draft stays until the doc is shown again.
+    this.sync?.detach();
     this.sync = null;
+    if (force) this.closeSync(doc.name, false);
     this.hideBanner();
     this.current = doc;
     lastDoc.set(this.memoryKey(), doc.name);
     this.renderStrip();
-    this.setStatus("loading");
     const editor = this.ensureEditor();
     this.hideNotice();
+    const kept = this.syncs.get(doc.name);
+    if (kept?.loaded) {
+      this.sync = kept;
+      this.freshBuffer = false;
+      const shown = kept.attach();
+      editor.setText(shown.text);
+      editor.setEditable(true);
+      this.texts.set(doc.name, shown.text);
+      this.renderQuestions();
+      if (toQuestion) editor.goToFirstQuestion();
+      return;
+    }
+    this.closeSync(doc.name, false);
+    this.setStatus("loading");
+    // Nothing can be typed until this doc's text has arrived: the editor shows
+    // nothing of the previous doc and takes no keystrokes.
+    editor.setText("");
+    editor.setEditable(false);
     this.freshBuffer = true;
+    const key = draftKey(this.opts.sessionId, this.opts.slug, doc.name);
     const sync = new DocSync({
-      load: () => getDoc(this.opts.sessionId, this.opts.slug, doc.name, this.opts.token),
-      // A keepalive request outlives page unload, but browsers cap its body at 64 KiB.
+      load: async () => {
+        const prior = closing.get(key);
+        if (prior && prior !== this.syncs.get(doc.name)) await prior.whenQuiet();
+        return getDoc(this.opts.sessionId, this.opts.slug, doc.name, this.opts.token);
+      },
       save: (text, base, final) => putDoc(this.opts.sessionId, this.opts.slug, doc.name, text, base,
-        this.opts.token, final === true && new TextEncoder().encode(text).length < KEEPALIVE_LIMIT),
+        this.opts.token, final === true),
       setBuffer: (text) => {
         if (this.sync !== sync || !this.editor) return;
         if (this.freshBuffer) {
           this.freshBuffer = false;
           this.editor.setText(text);
+          this.editor.setEditable(true);
         } else {
           this.editor.applyRemote(diffText(this.editor.getText(), text));
         }
@@ -481,9 +579,11 @@ export class DocsPane {
       onStatus: (status, detail) => {
         if (this.sync === sync) this.setStatus(status, detail);
       },
+      draft: draftStore(key),
       setTimer: (fn, ms) => window.setTimeout(fn, ms),
       clearTimer: (handle) => window.clearTimeout(handle as number),
     });
+    this.syncs.set(doc.name, sync);
     this.sync = sync;
     try {
       await sync.start();
@@ -492,7 +592,7 @@ export class DocsPane {
       this.showNotice(`Could not load ${doc.file}: ${errorText(e)}`, () => void this.openDoc(doc, toQuestion, true));
       return;
     }
-    if (toQuestion && this.sync === sync) editor.goToNextQuestion(true);
+    if (toQuestion && this.sync === sync) editor.goToFirstQuestion();
   }
 
   private async refreshText(doc: ProposalDocRef): Promise<void> {
@@ -516,7 +616,11 @@ export class DocsPane {
         break;
       case "other-doc": {
         const doc = this.ordered.find((d) => changeNamesDoc(change, d));
-        if (doc) void this.refreshText(doc);
+        if (doc) {
+          // A doc that is not shown keeps its sync, so it still learns of the change.
+          this.syncs.get(doc.name)?.remoteChanged(change.commit);
+          void this.refreshText(doc);
+        }
         break;
       }
       case "doc-list":
@@ -538,9 +642,10 @@ export class DocsPane {
           if (!known.has(doc.name)) void this.refreshText(doc);
         }
         const current = this.current;
+        for (const name of [...this.syncs.keys()]) {
+          if (!this.ordered.some((d) => d.name === name)) this.closeSync(name, true);
+        }
         if (current && !this.ordered.some((d) => d.name === current.name)) {
-          this.sync?.dispose();
-          this.sync = null;
           this.current = null;
         }
         if (!this.current && this.ordered[0]) {

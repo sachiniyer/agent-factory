@@ -172,8 +172,19 @@ export async function getDoc(sessionId: string, slug: string, doc: string, token
   return parseDocText(await af<unknown>("ReadProposalDoc", { session_id: sessionId, slug, doc }, token));
 }
 
+/** Browsers cap the body of a keepalive request at 64 KiB. */
+export const KEEPALIVE_BODY_LIMIT = 60_000;
+
+/** Whether a request body of `body` can ride a keepalive fetch. The limit applies
+ *  to the serialized JSON, which escaping makes longer than the text it holds. */
+export function fitsKeepalive(body: string): boolean {
+  return new TextEncoder().encode(body).length < KEEPALIVE_BODY_LIMIT;
+}
+
 /** Saves a doc. A 409 is a result, not an error: it carries both sides of the
- *  conflict, which af() would drop, so this call reads the envelope itself. */
+ *  conflict, which af() would drop, so this call reads the envelope itself.
+ *  `keepalive` asks for a request that outlives the page; it is dropped when the
+ *  serialized body is too large for one, so the save is still sent. */
 export async function putDoc(
   sessionId: string,
   slug: string,
@@ -188,12 +199,13 @@ export async function putDoc(
     headers.Authorization = `Bearer ${token}`;
   }
   let resp: Response;
+  const payload = JSON.stringify({ session_id: sessionId, slug, doc, text, base });
   try {
     resp = await fetch("/v1/SaveProposalDoc", {
       method: "POST",
       headers,
-      body: JSON.stringify({ session_id: sessionId, slug, doc, text, base }),
-      keepalive,
+      body: payload,
+      keepalive: keepalive && fitsKeepalive(payload),
     });
   } catch (e) {
     throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);

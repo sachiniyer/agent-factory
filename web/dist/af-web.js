@@ -14162,6 +14162,17 @@ function subscribe(fn) {
   return () => listeners2.delete(fn);
 }
 var pushListeners = /* @__PURE__ */ new Set();
+function publishProposalPush(status) {
+  for (const fn of pushListeners) fn(status);
+}
+var resyncListeners = /* @__PURE__ */ new Set();
+function publishProposalResync() {
+  for (const fn of resyncListeners) fn();
+}
+function subscribeResync(fn) {
+  resyncListeners.add(fn);
+  return () => resyncListeners.delete(fn);
+}
 function subscribePush(fn) {
   pushListeners.add(fn);
   return () => pushListeners.delete(fn);
@@ -14193,7 +14204,7 @@ function mountDocsTab(host, opts) {
     notice("Loading editor\u2026", false);
     loadDocsModule().then(
       (mod) => {
-        if (!disposed) pane = new mod.DocsPane(host, { ...opts, subscribe, subscribePush });
+        if (!disposed) pane = new mod.DocsPane(host, { ...opts, subscribe, subscribePush, subscribeResync });
       },
       (e) => {
         if (!disposed) notice(`Could not load the editor: ${errorText(e)}`, true);
@@ -19926,6 +19937,28 @@ function isRecord(v) {
 function str(v) {
   return typeof v === "string" ? v : "";
 }
+var PUSH_STATES = ["idle", "countdown", "waiting_agent", "held", "sent"];
+function parsePushStatus(d) {
+  if (!isRecord(d) || typeof d.state !== "string" || !PUSH_STATES.includes(d.state)) {
+    return null;
+  }
+  const due = typeof d.due_in_ms === "number" && Number.isFinite(d.due_in_ms) ? Math.max(0, d.due_in_ms) : null;
+  return {
+    sessionId: str(d.session_id),
+    slug: str(d.slug),
+    mode: d.mode === "manual" ? "manual" : "auto",
+    state: d.state,
+    dueInMs: due,
+    unsent: typeof d.unsent === "number" && d.unsent > 0 ? d.unsent : 0
+  };
+}
+function parseProposalPush(ev) {
+  if (!isRecord(ev) || ev.type !== "proposal.push") {
+    return null;
+  }
+  const status = parsePushStatus(ev.data);
+  return status && status.sessionId !== "" && status.slug !== "" ? status : null;
+}
 function parseProposalChange(ev) {
   if (!isRecord(ev) || ev.type !== "proposal.changed" || !isRecord(ev.data)) {
     return null;
@@ -21802,6 +21835,7 @@ function startStream(tok) {
     onResync: () => {
       markArchiveDirty();
       requestResync();
+      publishProposalResync();
     },
     onStatus: (s) => {
       if (s !== "open") markArchiveDirty();
@@ -21850,6 +21884,11 @@ function onEvent(ev) {
   if (ev.type === "proposal.changed") {
     const change = parseProposalChange(ev);
     if (change) publishProposalChange(change);
+    return;
+  }
+  if (ev.type === "proposal.push") {
+    const status = parseProposalPush(ev);
+    if (status) publishProposalPush(status);
     return;
   }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
