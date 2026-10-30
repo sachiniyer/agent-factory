@@ -191,3 +191,40 @@ func TestBacklogAskOutsideItemSession(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// An agent that reports before the start record exists is resolved from its own
+// item id while its run is still starting (Codex P2 on #6294).
+func TestBacklogSelfResolvesAStillStartingRun(t *testing.T) {
+	stubBacklogDaemon(t)
+	if out, err := runBacklogCmd(t, "add", "work"); err != nil {
+		t.Fatal(out, err)
+	}
+	p, err := backlogProject()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backlog.Update(p.repoID, func(b *backlog.Backlog) error {
+		it := b.Item(1)
+		it.Status = backlog.StatusRunning
+		it.Runs = []backlog.RunRef{{State: backlog.RunStarting, StartedAt: time.Now()}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	backlogSelfSession = func() (*session.InstanceData, error) {
+		return &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 1}, nil
+	}
+	// The client resolves the item from the session's own item id; the daemon
+	// links the run when the report arrives (adoptStartingRun, daemon tests).
+	id, it, err := p.selfItem()
+	if err != nil || id != "s1" || it.ID != 1 {
+		t.Fatalf("a quick report before the start record: %q %v %v", id, it, err)
+	}
+	// A session with no item at all is still refused.
+	backlogSelfSession = func() (*session.InstanceData, error) {
+		return &session.InstanceData{ID: "s2", Title: "plain"}, nil
+	}
+	if _, _, err := p.selfItem(); err == nil {
+		t.Fatal("a non-item session reported")
+	}
+}

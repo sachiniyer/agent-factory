@@ -244,7 +244,7 @@ func TestBacklogRedeliversPendingAnswer(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m.recoverBacklog(repoID)
+	m.recoverBacklog(repoID, nil)
 	m.backgroundMutationWG.Wait()
 	it := loadItem(t, repoID, 1)
 	if len(sent.reqs) != 1 || sent.reqs[0].ID != inst.ID || it.Status != backlog.StatusRunning {

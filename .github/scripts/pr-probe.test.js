@@ -69,6 +69,7 @@ test("a normal PR reports exactly the check names it reported before probe mode"
     [
       "Lint",
       "Test",
+      "Test (Ubuntu 26.04, report-only)",
       "Registry-free image build",
       "Test (systemd, ${{ matrix.os }})",
       "Web",

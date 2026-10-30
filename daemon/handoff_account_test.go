@@ -3,13 +3,14 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
-	"github.com/sachiniyer/agent-factory/session"
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/stretchr/testify/require"
 )

@@ -162,7 +162,8 @@ func TestDroppedNeverArchives(t *testing.T) {
 
 func TestBacklogArchiveGuard(t *testing.T) {
 	_, _, inst := startedItem(t)
-	guard := backlogArchiveGuard(inst.ID)
+	var fenced *session.Instance
+	guard := backlogArchiveGuard(inst.ID, func(cur *session.Instance) { fenced = cur })
 	if guard(inst) == nil {
 		t.Fatal("guard passed mid-run")
 	}
@@ -170,12 +171,25 @@ func TestBacklogArchiveGuard(t *testing.T) {
 	if err := guard(inst); err != nil {
 		t.Fatalf("idle session refused: %v", err)
 	}
-	if backlogArchiveGuard("other")(inst) == nil {
+	// The fence is shut while the archive runs (Codex P2 on #6294): input that
+	// arrives after the check is refused instead of starting work the archive
+	// interrupts. The caller reopens it when the archive is over.
+	if fenced != inst {
+		t.Fatal("the guard did not report the instance it fenced")
+	}
+	if err := inst.NoteAdoptionDelivery(); err == nil {
+		t.Fatal("a delivery was accepted after the guard passed")
+	}
+	inst.ReopenAdoptionFence()
+	if backlogArchiveGuard("other", func(*session.Instance) {})(inst) == nil {
 		t.Fatal("guard passed for another session")
 	}
 	inst.ArmBacklogRun(time.Now())
 	if guard(inst) == nil {
 		t.Fatal("guard passed with a new run")
+	}
+	if err := inst.NoteAdoptionDelivery(); err != nil {
+		t.Fatalf("a refusal must reopen the fence: %v", err)
 	}
 }
 
@@ -191,7 +205,7 @@ func TestRecoverySkipsCurrentDaemonStarts(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m.recoverBacklog(repoID)
+	m.recoverBacklog(repoID, nil)
 	if r := loadItem(t, repoID, 1).Runs[0]; r.State != backlog.RunStarting {
 		t.Fatalf("a start of this daemon was recovered: %+v", r)
 	}
@@ -203,6 +217,11 @@ func TestRecoverySkipsCurrentDaemonStarts(t *testing.T) {
 func TestRecoveryEndsAnIdleRunAfterRepairingItsSessionLink(t *testing.T) {
 	m, repoID, inst := startedItem(t)
 	inst.DisarmBacklogRun()
+	// The session went idle while no daemon watched: recovery counts only a live,
+	// Ready session whose marker is clear.
+	if err := inst.Transition(session.ObserveLiveness(session.LiveReady)); err != nil {
+		t.Fatal(err)
+	}
 	prevStart := daemonProcessStart
 	t.Cleanup(func() { daemonProcessStart = prevStart })
 	daemonProcessStart = inst.CreatedAt.Add(time.Hour)
@@ -213,7 +232,7 @@ func TestRecoveryEndsAnIdleRunAfterRepairingItsSessionLink(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !m.recoverBacklog(repoID) {
+	if !m.recoverBacklog(repoID, nil) {
 		t.Fatal("recovery did not settle the project")
 	}
 	it := loadItem(t, repoID, 1)
@@ -244,7 +263,7 @@ func TestRecoverySkipsSkippedRepos(t *testing.T) {
 	if !m.backlog.beginRecovery() {
 		t.Fatal("begin")
 	}
-	m.recoverBacklogStarts()
+	m.recoverBacklogStarts(nil)
 	if r := loadItem(t, repoID, 1).Runs[0]; r.State != backlog.RunStarting || m.backlog.isRecovered(repoID) {
 		t.Fatalf("skipped repo was recovered: %+v", r)
 	}
@@ -288,5 +307,106 @@ func TestStaleCompletionDoesNotFinishALaterContinue(t *testing.T) {
 		if msg.Text == backlog.RunEndNote {
 			t.Fatalf("a stopped-agent note was added for a run that is working: %+v", it.Thread)
 		}
+	}
+}
+
+// An idle edge observed before the session's start record is committed has no
+// item to land on: it is held and replayed when the link is recorded, so the item
+// is not left running (Codex P2 on #6294).
+func TestCompletionBeforeTheStartRecordIsHeldAndReplayed(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	gen := inst.BacklogRunGeneration()
+	inst.DisarmBacklogRun()
+	// Unlink the run, as if finishBacklogStart had not committed yet.
+	var run backlog.RunRef
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		r := &b.Item(1).Runs[0]
+		run = *r
+		r.State, r.SessionID, r.Title = backlog.RunStarting, "", ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.settleRunEnd(repoID, inst.ID, gen, nil)
+	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusRunning {
+		t.Fatalf("an unlinked session's completion was applied: %s", it.Status)
+	}
+	// finishBacklogStart commits the link and replays the held edge.
+	m.backlog.reserve(repoID)
+	m.finishBacklogStart(backlog.ProjectRef{ID: repoID}, 1, run.StartedAt,
+		session.InstanceData{ID: inst.ID, Title: inst.Title}, nil, nil)
+	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusReview {
+		t.Fatalf("status = %s, want review: the held completion was lost", it.Status)
+	}
+}
+
+// A busy backlog does not drop a completion (Codex P2 on #6294): it is retried.
+func TestCompletionIsRetriedWhileTheBacklogIsBusy(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	gen := inst.BacklogRunGeneration()
+	inst.DisarmBacklogRun()
+	prevApply, prevBackoff := applyBacklog, finishStartBackoff
+	finishStartBackoff = time.Millisecond
+	busy := 3
+	applyBacklog = func(svc *backlog.Service, ref backlog.ProjectRef, fn func(*backlog.Backlog) ([]int, error)) (*backlog.Backlog, error) {
+		if busy > 0 {
+			busy--
+			return nil, backlog.ErrBusy
+		}
+		return prevApply(svc, ref, fn)
+	}
+	t.Cleanup(func() { applyBacklog, finishStartBackoff = prevApply, prevBackoff })
+	m.settleRunEnd(repoID, inst.ID, gen, nil)
+	if busy != 0 {
+		t.Fatalf("the completion gave up with %d busy answers left", busy)
+	}
+	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusReview {
+		t.Fatalf("status = %s, want review", it.Status)
+	}
+}
+
+// An item the user marked done during its run, whose session went idle while no
+// daemon watched (a crash between the marker clearing and the completion), still
+// gets its on_done archive from restart recovery (Codex P2 on #6294).
+func TestRecoveryArchivesADoneItemWhoseRunEndedUnobserved(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	setOnDoneArchive(t, m, repoID)
+	archived := stubBacklogArchive(t)
+	if _, err := m.backlogService().SetItemStatus(backlog.SetItemStatusRequest{RepoID: repoID, ID: 1, Status: backlog.StatusDone}); err != nil {
+		t.Fatal(err)
+	}
+	idleItemSession(t, inst) // the marker cleared and the session settled; nobody saw the edge
+	if !m.recoverBacklog(repoID, nil) {
+		t.Fatal("recovery did not settle the project")
+	}
+	m.backgroundMutationWG.Wait()
+	if len(*archived) != 1 || (*archived)[0] != inst.ID {
+		t.Fatalf("archived %v, want the done item's session", *archived)
+	}
+}
+
+// A session that reports on its item before finishBacklogStart commits the link
+// is adopted by the report (Codex P2 on #6294); the late start record is a no-op.
+func TestSelfReportBeforeTheStartRecordLinksTheRun(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	var run backlog.RunRef
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		r := &b.Item(1).Runs[0]
+		run = *r
+		r.State, r.SessionID, r.Title = backlog.RunStarting, "", ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.adoptStartingRun(repoID, "", inst.ID)
+	it := loadItem(t, repoID, 1)
+	if it.Runs[0].State != backlog.RunStarted || it.Runs[0].SessionID != inst.ID {
+		t.Fatalf("the report did not link the run: %+v", it.Runs[0])
+	}
+	m.backlog.reserve(repoID)
+	m.finishBacklogStart(backlog.ProjectRef{ID: repoID}, 1, run.StartedAt,
+		session.InstanceData{ID: inst.ID, Title: it.Runs[0].Title}, nil, nil)
+	if loadItem(t, repoID, 1).Runs[0].SessionID != inst.ID {
+		t.Fatal("the late start record changed the linked run")
 	}
 }

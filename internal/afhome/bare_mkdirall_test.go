@@ -60,6 +60,14 @@ var allowedBareMkdirAll = map[string]struct {
 			"scripts/ci-test-exec.sh. It is never at or inside the AF home, and this runs in " +
 			"a test binary's signal handler, where the guarded helper's latch has no meaning " +
 			"(#5766)."},
+	"internal/testguard/sleeper/sleeper.go:Path": {1,
+		"Creates the content-addressed test-sleeper cache directory directly under os.TempDir() " +
+			"(af-testsleeper-<uid>-<hash>). Nothing in it derives from HOME or AGENT_FACTORY_HOME; it is a " +
+			"build cache for test binaries and is never at or inside the AF home (#6281)."},
+	"internal/testguard/sleeper/sleeper.go:Named": {1,
+		"Creates the parent of a path the calling test chose, always under t.TempDir() or another " +
+			"test-owned temp dir (a fake tmux or agent-server location). It never takes an AF-home path " +
+			"and is test-only (#6281)."},
 	"daemon/singleton_lock.go:acquireHomeLock": {1,
 		"The one deliberate pre-arm creator, and creating the home is its job. Its " +
 			"only production caller is RunDaemon (daemon/daemon.go:129), which arms " +

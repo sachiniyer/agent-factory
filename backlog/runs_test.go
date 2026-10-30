@@ -294,3 +294,35 @@ func TestLatestSessions(t *testing.T) {
 		t.Fatalf("latest run %+v", r)
 	}
 }
+
+// A session that reports on its item before the start record is committed is
+// linked from its own item id and creation time (Codex P2 on #6294), and the
+// start record that arrives afterwards is a no-op for that run.
+func TestAdoptStartingLinksAnUnrecordedSession(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	plan, err := b.BeginStart(it.ID, StartedByUser, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := plan.Run.StartedAt
+	if b.AdoptStarting(it.ID, "s1", "B-1 A", started.Add(-time.Second), now) {
+		t.Fatal("a session created before the run began was adopted")
+	}
+	if b.AdoptStarting(it.ID+1, "s1", "x", started, now) {
+		t.Fatal("an unknown item adopted a session")
+	}
+	if !b.AdoptStarting(it.ID, "s1", "B-1 A", started.Add(time.Second), now) {
+		t.Fatal("the starting run was not adopted")
+	}
+	if b.ItemForSession("s1") == nil || b.LatestRun(it.ID).State != RunStarted {
+		t.Fatalf("not linked: %+v", b.Item(it.ID).Runs)
+	}
+	if b.AdoptStarting(it.ID, "s2", "x", started.Add(time.Second), now) {
+		t.Fatal("a second session adopted a run that is already linked")
+	}
+	if err := b.FinishStart(it.ID, started, "s1", "B-1 A", nil, now); err != nil {
+		t.Fatalf("the late start record must be a no-op for an adopted run: %v", err)
+	}
+}

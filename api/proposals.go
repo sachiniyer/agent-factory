@@ -176,6 +176,28 @@ var proposalAddDocCmd = &cobra.Command{
 	},
 }
 
+var proposalRemoveDocCmd = &cobra.Command{
+	Use:   "remove-doc <slug> <doc>",
+	Short: "Remove a doc from a proposal; it stays in the proposal's history",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runProposal(func() (any, error) {
+			c, err := optionalProposalSession()
+			if err != nil {
+				return nil, err
+			}
+			var resp daemon.RemoveProposalDocResponse
+			if err := callProposalRoute("RemoveProposalDoc", daemon.RemoveProposalDocRequest{
+				SessionID: c.sessionID, RepoID: c.repoID, RepoPath: c.repoPath,
+				Slug: args[0], Doc: args[1], Author: string(c.author()),
+			}, &resp); err != nil {
+				return nil, err
+			}
+			return map[string]string{"slug": resp.Slug, "doc": resp.Doc, "path": resp.Path}, nil
+		})
+	},
+}
+
 var proposalChangesCmd = &cobra.Command{
 	Use:   "changes",
 	Short: "Print what others changed since this session's cursor, then move the cursor",
@@ -279,9 +301,9 @@ func init() {
 	ProposalCmd.PersistentFlags().BoolVar(&envelopeOutput, "json", false, "Wrap output in the {data,error} JSON envelope (default: bare payload)")
 
 	proposalStartCmd.Flags().StringSliceVar(&proposalStartDocsFlag, "docs", append([]string(nil), proposal.BuiltinTemplates...), "Docs to create, comma-separated")
-	for _, c := range []*cobra.Command{proposalStartCmd, proposalAttachCmd, proposalDetachCmd, proposalChangesCmd, proposalCheckpointCmd, proposalAddDocCmd, proposalWriteCmd} {
+	for _, c := range []*cobra.Command{proposalStartCmd, proposalAttachCmd, proposalDetachCmd, proposalChangesCmd, proposalCheckpointCmd, proposalAddDocCmd, proposalRemoveDocCmd, proposalWriteCmd} {
 		c.Flags().StringVar(&proposalSessionFlag, "session", "", "Act for the session with this `title` instead of the calling session")
 	}
 	ProposalCmd.AddCommand(proposalStartCmd, proposalAttachCmd, proposalDetachCmd, proposalListCmd,
-		proposalPathCmd, proposalAddDocCmd, proposalChangesCmd, proposalCheckpointCmd, proposalCatCmd, proposalWriteCmd)
+		proposalPathCmd, proposalAddDocCmd, proposalRemoveDocCmd, proposalChangesCmd, proposalCheckpointCmd, proposalCatCmd, proposalWriteCmd)
 }

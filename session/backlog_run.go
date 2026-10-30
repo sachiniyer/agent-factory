@@ -62,6 +62,11 @@ func (i *Instance) ArmBacklogRun(at time.Time) bool {
 	if i.BacklogItem == 0 || i.taskRunActive {
 		return false
 	}
+	if !i.backlogRunActive {
+		// Kept so a rollback restores the previous run's completion evidence
+		// (the archive guard compares pane churn against it).
+		i.backlogRunEndedAtBeforeArm = i.backlogRunEndedAt
+	}
 	i.backlogRunActive = true
 	i.backlogRunGen++
 	i.backlogRunEndedAt = time.Time{}
@@ -82,6 +87,10 @@ func (i *Instance) DisarmBacklogRun() bool {
 		return false
 	}
 	i.backlogRunActive = false
+	// A run that never started leaves the previous run's end as it was: arming
+	// cleared it, and without it any pane churn since reads as "the session
+	// changed after its run ended" and blocks the on_done archive for good.
+	i.backlogRunEndedAt = i.backlogRunEndedAtBeforeArm
 	i.taskRunPromptAttemptAt = time.Time{}
 	i.taskRunTurnObservedAt = time.Time{}
 	i.taskRunIdleEdgeHeld = false

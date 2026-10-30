@@ -84,3 +84,25 @@ func TestLockSymlinkIsNotFollowed(t *testing.T) {
 	}
 	assertAbsent(t, target)
 }
+
+func TestRemoveDocRefusesASymlinkedDoc(t *testing.T) {
+	s, _ := newTestStore(t)
+	startAttached(t, s, "p", sessA)
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("top secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc := filepath.Join(s.SlugPath("p"), "goals.md")
+	if err := os.Remove(doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.RemoveDoc("p", "goals", agent(sessA)); err == nil {
+		t.Fatal("RemoveDoc succeeded on a symlinked doc")
+	}
+	if data, _ := os.ReadFile(secret); string(data) != "top secret\n" {
+		t.Fatalf("secret changed to %q", data)
+	}
+}
