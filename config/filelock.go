@@ -163,7 +163,25 @@ func (t lockedTarget) confirmSiblingDir(siblingPath string) error {
 	if err := unix.Stat(siblingPath, &want); err != nil {
 		if os.IsNotExist(err) {
 			// The vanished-sibling case is readSibling's to answer (defaults),
-			// not a freshly introduced symlink race.
+			// not a freshly introduced symlink race — but only when the
+			// directory siblingPath reaches is the one the lock covers. A
+			// config.json removed after LoadConfig read it while another
+			// process installs config.toml as a symlink to a different
+			// directory leaves dirFD pointing at that target dir, where
+			// readSibling would open an unrelated config.json and the rename
+			// would move it aside. Confirm the parent identity the same way
+			// the present-sibling and pinned-ENOENT branches below do, and
+			// refuse the same one-shot symlink race up front when the
+			// directories differ; let the pinned read handle absence only
+			// when the legacy path's parent is the pinned directory.
+			same, dErr := t.reachesPinnedDir(siblingPath)
+			if dErr != nil {
+				return dErr
+			}
+			if !same {
+				return fmt.Errorf("cannot convert %s under the lock on %s: the legacy config.json is not in the directory the lock covers (%s) — a freshly introduced config.toml symlink points elsewhere than the home holding it; re-run once config.toml is not a symlink out of its home",
+					siblingPath, t.link, t.dirResolved)
+			}
 			return nil
 		}
 		return fmt.Errorf("failed to inspect the legacy %s: %w", siblingPath, err)
