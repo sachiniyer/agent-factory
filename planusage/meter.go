@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -54,6 +55,74 @@ type MeterState struct {
 	// RunBuckets holds, per item session, its cost per BucketSpan keyed by
 	// the bucket's start in epoch seconds, for the last 5-hour window.
 	RunBuckets map[string]map[int64]float64 `json:"run_buckets,omitempty"`
+	// RunDirs holds, per item session, the transcript directories seen for it.
+	// Claude files a conversation under the directory it was launched in, and a
+	// local session's worktree moves when it is archived, so the directory
+	// derived from the worktree later is not where the transcripts are.
+	RunDirs map[string][]string `json:"run_dirs,omitempty"`
+}
+
+// RememberRunDirs adds dirs to the session's remembered transcript directories
+// and returns the union.
+func (s *MeterState) RememberRunDirs(sessionID string, dirs []string) []string {
+	if s.RunDirs == nil {
+		s.RunDirs = map[string][]string{}
+	}
+	have := s.RunDirs[sessionID]
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		found := false
+		for _, h := range have {
+			if h == d {
+				found = true
+				break
+			}
+		}
+		if !found {
+			have = append(have, d)
+		}
+	}
+	s.RunDirs[sessionID] = have
+	return have
+}
+
+// RunSnapshot is a session's run metering state, to put back when the cost it
+// produced could not be committed.
+type RunSnapshot struct {
+	Seen    map[string]int64
+	Buckets map[int64]float64
+}
+
+// SnapshotRun copies the session's counted-message keys and window buckets.
+func (s *MeterState) SnapshotRun(sessionID string) RunSnapshot {
+	snap := RunSnapshot{Seen: map[string]int64{}, Buckets: map[int64]float64{}}
+	for k, v := range s.RunSeen[sessionID] {
+		snap.Seen[k] = v
+	}
+	for k, v := range s.RunBuckets[sessionID] {
+		snap.Buckets[k] = v
+	}
+	return snap
+}
+
+// RestoreRun puts a snapshot back: the dedupe keys must not advance past the
+// offsets and costs that were actually stored, or the next pass skips messages
+// whose cost was never recorded.
+func (s *MeterState) RestoreRun(sessionID string, snap RunSnapshot) {
+	if s.RunSeen == nil {
+		s.RunSeen = map[string]map[string]int64{}
+	}
+	s.RunSeen[sessionID] = snap.Seen
+	if len(snap.Buckets) == 0 {
+		delete(s.RunBuckets, sessionID)
+		return
+	}
+	if s.RunBuckets == nil {
+		s.RunBuckets = map[string]map[int64]float64{}
+	}
+	s.RunBuckets[sessionID] = snap.Buckets
 }
 
 // AddRunEntries buckets a run's newly metered messages.
@@ -128,6 +197,11 @@ func (s *MeterState) KeepRunSeen(keep map[string]bool) {
 	for id := range s.RunBuckets {
 		if !keep[id] {
 			delete(s.RunBuckets, id)
+		}
+	}
+	for id := range s.RunDirs {
+		if !keep[id] {
+			delete(s.RunDirs, id)
 		}
 	}
 }
@@ -207,42 +281,91 @@ func (s *MeterState) account(name string) *AccountMeter {
 	return a
 }
 
-// Scan meters every Claude Code transcript under configDir for account. A
-// file under one of backlogDirs also counts as backlog cost. A file untouched
-// for longer than the weekly window is not read and keeps no mark, and a file
-// whose size and modification time match its mark is not opened. It returns
-// whether anything changed.
+// Scan meters the transcripts of one account; see ScanAll.
 func (s *MeterState) Scan(account, configDir string, backlogDirs []string, overrides map[string]Price, now time.Time) bool {
-	a := s.account(account)
-	projects, _ := filepath.Glob(filepath.Join(configDir, "projects", "*"))
-	files := TranscriptFiles(projects)
-	present := make(map[string]bool, len(files))
-	changed := false
-	unpriced := map[string]bool{}
-	for _, m := range a.Unpriced {
-		unpriced[m] = true
+	return s.ScanAll(map[string][]string{account: {configDir}}, backlogDirs, overrides, now)
+}
+
+// ScanAll meters every Claude Code transcript under each account's config dirs.
+// A file under one of backlogDirs also counts as backlog cost. A file untouched
+// for longer than the weekly window is not read and keeps no mark, and a file
+// whose size and modification time match its mark is not opened.
+//
+// Files are read oldest first across ALL accounts, and a message already counted
+// for another account is not counted again: an account handoff copies the
+// conversation into the destination's config dir, and the source's (older)
+// transcript is the one that consumed the source's plan. A file that skipped a
+// model with no price is read again from the start once that model has a price.
+// It returns whether anything changed.
+func (s *MeterState) ScanAll(sources map[string][]string, backlogDirs []string, overrides map[string]Price, now time.Time) bool {
+	type candidate struct {
+		account, path string
+		info          os.FileInfo
 	}
-	for _, f := range files {
-		info, err := os.Stat(f)
-		if err != nil || now.Sub(info.ModTime()) > keepFor {
+	var files []candidate
+	present := map[string]map[string]bool{}
+	for account, dirs := range sources {
+		s.account(account)
+		present[account] = map[string]bool{}
+		for _, configDir := range dirs {
+			if configDir == "" {
+				continue
+			}
+			projects, _ := filepath.Glob(filepath.Join(configDir, "projects", "*"))
+			for _, f := range TranscriptFiles(projects) {
+				info, err := os.Stat(f)
+				if err != nil || now.Sub(info.ModTime()) > keepFor {
+					continue
+				}
+				present[account][f] = true
+				files = append(files, candidate{account, f, info})
+			}
+		}
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		if !files[i].info.ModTime().Equal(files[j].info.ModTime()) {
+			return files[i].info.ModTime().Before(files[j].info.ModTime())
+		}
+		if files[i].account != files[j].account {
+			return files[i].account < files[j].account
+		}
+		return files[i].path < files[j].path
+	})
+	changed := false
+	for _, c := range files {
+		a := s.Accounts[c.account]
+		mark, known := a.Files[c.path]
+		if known && mark.Skipped != "" && anyPriced(mark.Skipped, overrides) {
+			mark, known = FileMark{}, false // price the messages that were read past
+		}
+		if known && c.info.Size() >= mark.Offset && (c.info.Size() == mark.Offset || c.info.ModTime().UnixNano() == mark.ModTime) {
 			continue
 		}
-		present[f] = true
-		mark, known := a.Files[f]
-		if known && info.Size() >= mark.Offset && (info.Size() == mark.Offset || info.ModTime().UnixNano() == mark.ModTime) {
-			continue
+		foreign := func(key string) bool {
+			for name, other := range s.Accounts {
+				if name == c.account {
+					continue
+				}
+				if _, ok := other.Seen[key]; ok {
+					return true
+				}
+			}
+			return false
 		}
-		res, err := ReadTranscript(f, mark, ReadOptions{Overrides: overrides, SkipBad: true, SkipUnpriced: true, Seen: a.Seen})
+		res, err := ReadTranscript(c.path, mark, ReadOptions{Overrides: overrides, SkipBad: true, SkipUnpriced: true, Seen: a.Seen, Foreign: foreign})
 		if err != nil && res.Mark == mark {
 			continue
 		}
+		unpriced := map[string]bool{}
+		for _, m := range a.Unpriced {
+			unpriced[m] = true
+		}
 		for _, m := range res.Skipped {
 			if !unpriced[m] {
-				unpriced[m] = true
 				a.Unpriced = append(a.Unpriced, m)
 			}
 		}
-		backlog := underAny(f, backlogDirs)
+		backlog := underAny(c.path, backlogDirs)
 		for _, e := range res.Entries {
 			if now.Sub(e.At) > keepFor {
 				continue
@@ -255,28 +378,44 @@ func (s *MeterState) Scan(account, configDir string, backlogDirs []string, overr
 			}
 			a.Buckets[key] = b
 		}
-		if res.Mark != mark || !known {
-			a.Files[f] = res.Mark
-			changed = true
-		}
-	}
-	for f := range a.Files {
-		if !present[f] {
-			delete(a.Files, f)
+		if res.Mark != a.Files[c.path] || !known {
+			a.Files[c.path] = res.Mark
 			changed = true
 		}
 	}
 	cutoff := now.Add(-keepFor).Unix()
-	for k := range a.Buckets {
-		if k < cutoff {
-			delete(a.Buckets, k)
+	for account := range sources {
+		a := s.Accounts[account]
+		for f := range a.Files {
+			if !present[account][f] {
+				delete(a.Files, f)
+				changed = true
+			}
+		}
+		for k := range a.Buckets {
+			if k < cutoff {
+				delete(a.Buckets, k)
+				changed = true
+			}
+		}
+		if PruneSeen(a.Seen, now) {
 			changed = true
 		}
 	}
-	if PruneSeen(a.Seen, now) {
-		changed = true
-	}
 	return changed
+}
+
+// anyPriced reports whether any of the comma-joined models now has a price.
+func anyPriced(models string, overrides map[string]Price) bool {
+	for _, m := range strings.Split(models, ",") {
+		if m == "" {
+			continue
+		}
+		if _, ok := PriceFor(m, overrides); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func underAny(path string, dirs []string) bool {
