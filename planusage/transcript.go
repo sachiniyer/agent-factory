@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -126,7 +127,9 @@ var usageKey = []byte(`"usage"`)
 // read starts there again. A file shorter than the mark was rewritten and is
 // read from the start; Seen keeps its messages from counting twice.
 func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, error) {
-	f, err := os.Open(path)
+	// O_NOFOLLOW: a transcript that is a symlink is never read, so a link planted
+	// in a Claude project directory cannot make the meter open another file.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return ReadResult{Mark: mark}, err
 	}
@@ -226,7 +229,8 @@ func TranscriptFiles(projectDirs []string) []string {
 		for _, pattern := range []string{"*.jsonl", filepath.Join("*", "subagents", "*.jsonl")} {
 			matches, _ := filepath.Glob(filepath.Join(dir, pattern))
 			for _, m := range matches {
-				if info, err := os.Stat(m); err == nil && info.Mode().IsRegular() {
+				// Lstat, not Stat: a symlink is skipped, not followed.
+				if info, err := os.Lstat(m); err == nil && info.Mode().IsRegular() {
 					out = append(out, m)
 				}
 			}

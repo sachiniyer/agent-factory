@@ -77,7 +77,7 @@ func WriteReading(account string, r Reading) error {
 	if err != nil {
 		return err
 	}
-	return config.AtomicWriteFile(path, append(data, '\n'), 0o644)
+	return config.AtomicWriteFile(path, append(data, '\n'), 0o600)
 }
 
 // LoadReading returns the account's newest reading, or nil when there is none.

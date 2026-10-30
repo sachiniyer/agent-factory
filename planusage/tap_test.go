@@ -13,7 +13,7 @@ const statusLine = `{"cwd":"%s","workspace":{"project_dir":"%s"},"rate_limits":{
 
 func env(home, userHome string, vars map[string]string) TapEnv {
 	return TapEnv{Home: home, UserHome: userHome, Now: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
-		Getenv: func(k string) string { return vars[k] }}
+		Getenv: func(k string) string { return vars[k] }, Record: true}
 }
 
 func input(project string) string {
@@ -43,7 +43,7 @@ func TestTapWritesReadingAndRunsUserStatusLine(t *testing.T) {
 	}
 }
 
-func TestTapAccountAndProjectSettings(t *testing.T) {
+func TestTapRunsOnlyTheUserLevelStatusLine(t *testing.T) {
 	h := home(t)
 	accountDir := filepath.Join(h, "accounts", "claude", "work")
 	write(t, filepath.Join(accountDir, "settings.json"), `{"statusLine":{"command":"echo account"}}`)
@@ -60,11 +60,29 @@ func TestTapAccountAndProjectSettings(t *testing.T) {
 		t.Fatal("reading went to the default account")
 	}
 
-	write(t, filepath.Join(project, ".claude", "settings.local.json"), `{"statusLine":{"command":"echo project"}}`)
+	// A project's own status line is NOT run (Claude runs it only after the user
+	// trusts the workspace, which the tap cannot see): the user-level one still is.
+	for _, f := range []string{"settings.local.json", "settings.json"} {
+		write(t, filepath.Join(project, ".claude", f), `{"statusLine":{"command":"echo project > `+filepath.Join(project, "ran")+`; echo project"}}`)
+	}
 	out.Reset()
 	Tap(strings.NewReader(input(project)), &out, env(h, t.TempDir(), map[string]string{"CLAUDE_CONFIG_DIR": accountDir}))
-	if out.String() != "project\n" {
+	if out.String() != "account\n" {
 		t.Fatalf("output %q", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(project, "ran")); err == nil {
+		t.Fatal("the tap ran a project-level status line")
+	}
+
+	// With no user-level status line at all, a project one still does not run.
+	bare := filepath.Join(h, "accounts", "claude", "bare")
+	out.Reset()
+	Tap(strings.NewReader(input(project)), &out, env(h, t.TempDir(), map[string]string{"CLAUDE_CONFIG_DIR": bare}))
+	if out.String() != "" {
+		t.Fatalf("output %q", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(project, "ran")); err == nil {
+		t.Fatal("the tap ran a project-level status line with no user one")
 	}
 }
 
@@ -152,5 +170,23 @@ func TestTapKillsTheUsersWholeProcessGroupOnTimeout(t *testing.T) {
 		if fields := strings.Fields(string(stat)); len(fields) > 2 && fields[2] != "Z" {
 			t.Fatalf("the user's grandchild outlived the timeout: %s", stat)
 		}
+	}
+}
+
+// A tap that outlives the opt-in being turned off records nothing, and the
+// user's own status line still renders.
+func TestTapRecordsNothingWhenPlanUsageIsOff(t *testing.T) {
+	h := home(t)
+	userHome := t.TempDir()
+	write(t, filepath.Join(userHome, ".claude", "settings.json"), `{"statusLine":{"command":"echo mine"}}`)
+	e := env(h, userHome, nil)
+	e.Record = false
+	var out bytes.Buffer
+	Tap(strings.NewReader(input(t.TempDir())), &out, e)
+	if out.String() != "mine\n" {
+		t.Fatalf("output %q", out.String())
+	}
+	if r, _ := LoadReading(DefaultAccount); r != nil {
+		t.Fatalf("a reading was stored while plan usage is off: %+v", r)
 	}
 }

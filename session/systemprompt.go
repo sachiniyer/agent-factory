@@ -306,10 +306,14 @@ func injectSystemPromptWithEnv(resolved string, target skillTarget, caps guidanc
 		// and claude's --plugin-dir is repeatable, so one in a user's
 		// program_overrides is additive rather than a conflict.
 		out := resolved + " --plugin-dir " + shellQuote(pluginDir)
-		if hasSettingsFlag(resolved) {
-			log.WarningLog.Printf("plan usage: the claude command already passes --settings, so af does not add its status line tap")
-		} else if settings := planTapSettings(target.root); settings != "" {
-			out += " --settings " + shellQuote(settings)
+		// Opt-in plan-usage tap ([backlog] plan_usage): nothing is added, and
+		// nothing logged, unless the user turned it on.
+		if planUsageEnabled() {
+			if hasSettingsFlag(resolved) {
+				log.WarningLog.Printf("plan usage: the claude command already passes --settings, so af does not add its status line tap")
+			} else if settings := planTapSettings(target.root); settings != "" {
+				out += " --settings " + shellQuote(settings)
+			}
 		}
 		return out
 	case tmux.ProgramCodex:

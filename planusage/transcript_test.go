@@ -185,3 +185,32 @@ func TestPruneSeen(t *testing.T) {
 		t.Fatal(seen)
 	}
 }
+
+// The meter reads only regular transcript files: a symlink in a project
+// directory is neither listed nor opened, so it cannot be used to make af read
+// some other file.
+func TestMeterNeverFollowsASymlinkedTranscript(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(t.TempDir(), "secret.jsonl")
+	line := `{"type":"assistant","timestamp":"2026-10-30T00:00:00Z","message":{"id":"m1","model":"claude-opus-4-5","usage":{"input_tokens":10,"output_tokens":10}}}` + "\n"
+	if err := os.WriteFile(other, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.jsonl")
+	if err := os.Symlink(other, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := TranscriptFiles([]string{dir}); len(got) != 0 {
+		t.Fatalf("a symlinked transcript was listed: %v", got)
+	}
+	if _, err := ReadTranscript(link, FileMark{}, ReadOptions{}); err == nil {
+		t.Fatal("a symlinked transcript was opened")
+	}
+	real := filepath.Join(dir, "real.jsonl")
+	if err := os.WriteFile(real, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := TranscriptFiles([]string{dir}); len(got) != 1 || got[0] != real {
+		t.Fatalf("files = %v", got)
+	}
+}

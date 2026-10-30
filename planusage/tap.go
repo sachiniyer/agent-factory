@@ -30,6 +30,11 @@ type TapEnv struct {
 	Now       time.Time
 	UserHome  string
 	WriteFunc func(account string, r Reading) error
+	// Record says whether to store the plan reading. It is the opt-in
+	// ([backlog] plan_usage) re-read by the tap itself, so a Claude session that
+	// was launched with the tap and outlives the key being turned off stops
+	// recording; the user's own status line still renders.
+	Record bool
 }
 
 // Tap is af's status line command: it stores the plan usage in stdin, then
@@ -45,10 +50,10 @@ func Tap(stdin io.Reader, stdout io.Writer, env TapEnv) {
 	if write == nil {
 		write = WriteReading
 	}
-	if r, ok := ParseStatusLine(data, env.Now); ok {
+	if r, ok := ParseStatusLine(data, env.Now); ok && env.Record {
 		_ = write(AccountForConfigDir(env.Home, env.Getenv("CLAUDE_CONFIG_DIR")), r)
 	}
-	command := userStatusLine(data, env)
+	command := userStatusLine(env)
 	if command == "" {
 		return
 	}
@@ -69,50 +74,32 @@ func Tap(stdin io.Reader, stdout io.Writer, env TapEnv) {
 	_ = cmd.Run()
 }
 
-// userStatusLine finds the status line command the user's own Claude settings
-// define, in Claude's precedence order: the project's local and shared
-// settings, then the user settings in the config dir.
-func userStatusLine(data []byte, env TapEnv) string {
-	var in struct {
-		CWD       string `json:"cwd"`
-		Workspace struct {
-			ProjectDir string `json:"project_dir"`
-			CurrentDir string `json:"current_dir"`
-		} `json:"workspace"`
-	}
-	_ = json.Unmarshal(data, &in)
-	var files []string
-	project := in.Workspace.ProjectDir
-	if project == "" {
-		project = in.Workspace.CurrentDir
-	}
-	if project == "" {
-		project = in.CWD
-	}
-	if project != "" {
-		files = append(files,
-			filepath.Join(project, ".claude", "settings.local.json"),
-			filepath.Join(project, ".claude", "settings.json"))
-	}
+// userStatusLine finds the status line command in the USER's own Claude
+// settings: the settings.json in the account's Claude config dir. It never reads
+// a project's .claude/settings*.json. Claude Code runs a project's status line
+// only after the user accepted that workspace's trust dialog; the tap cannot see
+// that decision, so running a repository-chosen command here would make af run a
+// program the user's agent would not have run (af must not be that confused
+// deputy). A project status line is therefore not rendered while the tap is
+// active; see docs/configuration.md (Backlog plan usage, [backlog]
+// plan_usage).
+func userStatusLine(env TapEnv) string {
 	configDir := strings.TrimSpace(env.Getenv("CLAUDE_CONFIG_DIR"))
 	if configDir == "" && env.UserHome != "" {
 		configDir = filepath.Join(env.UserHome, ".claude")
 	}
-	if configDir != "" {
-		files = append(files, filepath.Join(configDir, "settings.json"))
+	if configDir == "" {
+		return ""
 	}
-	for _, f := range files {
-		sl, ok := ReadStatusLine(f)
-		if !ok {
-			continue
-		}
-		cmd := strings.TrimSpace(sl.Command)
-		if (sl.Type != "" && sl.Type != "command") || cmd == "" || strings.Contains(cmd, TapCommandArgs) {
-			return ""
-		}
-		return cmd
+	sl, ok := ReadStatusLine(filepath.Join(configDir, "settings.json"))
+	if !ok {
+		return ""
 	}
-	return ""
+	cmd := strings.TrimSpace(sl.Command)
+	if (sl.Type != "" && sl.Type != "command") || cmd == "" || strings.Contains(cmd, TapCommandArgs) {
+		return ""
+	}
+	return cmd
 }
 
 // StatusLine is the statusLine object of a Claude Code settings file.

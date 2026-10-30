@@ -58,6 +58,10 @@ func AccountUsageOf(r *Reading, a *AccountMeter, overrides map[string]Price, now
 
 // Usage is what the meter knows now.
 type Usage struct {
+	// Disabled is set when plan usage is off ([backlog] plan_usage, the
+	// default): af injects no status line tap, reads no transcripts, and has no
+	// plan windows, so nothing can be gated on the plan budget.
+	Disabled bool `json:"disabled,omitempty"`
 	// Metering is set until the first metering pass has finished; the windows
 	// are empty until then.
 	Metering bool `json:"metering,omitempty"`

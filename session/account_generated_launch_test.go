@@ -21,6 +21,8 @@ import (
 // internal/sessionenv would be exactly the simplified shape the bar rules out.
 func TestAccountScopesAfsRealGeneratedClaudeLaunch(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// The opt-in plan-usage tap is part of the generated words this test pins.
+	pinTapBinary(t, "/opt/af")
 
 	const base = "claude"
 	withConversation, conversation := planLaunchConversation("11111111-2222-3333-4444-555555555555", base)

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/planusage"
 )
@@ -25,7 +26,16 @@ var (
 		"/Library/Application Support/ClaudeCode/managed-settings.json",
 	}
 	managedStatusLineOnce sync.Once
+
+	// planUsageEnabled is the opt-in: [backlog] plan_usage in the GLOBAL config,
+	// false unless the user turned it on. A var so tests can pin it.
+	planUsageEnabled = defaultPlanUsageEnabled
 )
+
+func defaultPlanUsageEnabled() bool {
+	cfg, err := config.LoadConfig()
+	return err == nil && cfg != nil && cfg.Backlog.PlanUsage
+}
 
 const defaultTapRefresh = 60
 
@@ -64,6 +74,9 @@ func tapBinary() (string, error) {
 // account's Claude config dir, or "" for the ambient one. "" when af cannot
 // name its own binary.
 func planTapSettings(configRoot string) string {
+	if !planUsageEnabled() {
+		return ""
+	}
 	exe, err := tapBinary()
 	if err != nil || exe == "" {
 		log.WarningLog.Printf("plan usage: cannot locate the af binary for the status line tap: %v", err)

@@ -24,8 +24,10 @@ var planTapCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, _ []string) {
 		home, _ := config.GetConfigDir()
 		userHome, _ := os.UserHomeDir()
+		cfg, err := config.LoadConfig()
 		planusage.Tap(os.Stdin, os.Stdout, planusage.TapEnv{
 			Home: home, Getenv: os.Getenv, Now: time.Now(), UserHome: userHome,
+			Record: err == nil && cfg != nil && cfg.Backlog.PlanUsage,
 		})
 	},
 }

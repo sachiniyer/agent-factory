@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/planusage"
 
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,7 @@ import (
 
 func TestGetBudgetMetersAndPublishesSpend(t *testing.T) {
 	cs, _ := newBacklogTestServer(t)
+	cs.manager.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
 	claudeDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
 	now := time.Now().UTC()
@@ -79,4 +81,37 @@ func TestGetBudgetMetersAndPublishesSpend(t *testing.T) {
 			t.Fatal("no backlog.spend event")
 		}
 	}
+}
+
+// Plan usage is opt-in ([backlog] plan_usage, off by default): with it off, a
+// metering pass opens no transcript and loads no reading, GetBudget says
+// disabled, and nothing is written to the meter (owner decision on #6284).
+func TestPlanUsageOffReadsNothing(t *testing.T) {
+	cs, _ := newBacklogTestServer(t) // no config: plan_usage is off
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now := time.Now().UTC()
+	line := `{"type":"assistant","timestamp":"` + now.Add(-time.Minute).Format(time.RFC3339) +
+		`","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
+	transcript := filepath.Join(claudeDir, "projects", "-home-me-x", "s.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(transcript), 0o755))
+	require.NoError(t, os.WriteFile(transcript, []byte(line), 0o644))
+
+	cs.manager.MeterBacklog()
+	st := &cs.manager.backlog.meter
+	st.mu.Lock()
+	cs.manager.meterPassLocked(time.Now())
+	st.mu.Unlock()
+
+	code, env := postProposalRoute(t, cs, "GetBudget", GetBudgetRequest{})
+	require.Equal(t, http.StatusOK, code, env)
+	data := env["data"].(map[string]any)
+	require.Equal(t, true, data["disabled"])
+	require.Nil(t, data["metering"], "a disabled meter is not 'still metering'")
+	require.Nil(t, data["accounts"])
+
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, statErr := os.Stat(filepath.Join(home, "plan"))
+	require.True(t, os.IsNotExist(statErr), "nothing is stored under $AF_HOME/plan while plan usage is off")
 }

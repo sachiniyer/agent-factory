@@ -186,7 +186,7 @@ func (s *MeterState) Save() error {
 	if err != nil {
 		return err
 	}
-	return config.AtomicWriteFile(path, append(data, '\n'), 0o644)
+	return config.AtomicWriteFile(path, append(data, '\n'), 0o600)
 }
 
 func (s *MeterState) account(name string) *AccountMeter {

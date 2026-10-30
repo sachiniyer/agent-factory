@@ -54,8 +54,18 @@ func (s *meterState) due(now time.Time) bool {
 	return true
 }
 
+// planUsageOn is the opt-in: [backlog] plan_usage in the loaded global config.
+// Every read of a Claude transcript and every plan reading goes through it.
+func (m *Manager) planUsageOn() bool {
+	cfg := m.Config()
+	return cfg != nil && cfg.Backlog.PlanUsage
+}
+
 // MeterBacklog starts a metering pass on its own goroutine when one is due.
 func (m *Manager) MeterBacklog() {
+	if !m.planUsageOn() {
+		return
+	}
 	if m.backlog.meter.due(time.Now()) {
 		m.startMeterPass()
 	}
@@ -64,6 +74,9 @@ func (m *Manager) MeterBacklog() {
 // startMeterPass runs a metering pass on its own goroutine unless one is
 // already running.
 func (m *Manager) startMeterPass() {
+	if !m.planUsageOn() {
+		return
+	}
 	st := &m.backlog.meter
 	if !st.inFlight.CompareAndSwap(false, true) {
 		return
@@ -83,6 +96,9 @@ func (m *Manager) startMeterPass() {
 // it is still metering. A request never reads transcripts itself: the first
 // pass can read a week of them.
 func (m *Manager) backlogUsage() planusage.Usage {
+	if !m.planUsageOn() {
+		return planusage.Usage{Disabled: true, Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+	}
 	st := &m.backlog.meter
 	usage, fresh := st.last(time.Now())
 	if !fresh {
@@ -143,6 +159,9 @@ func (m *Manager) startedItemRuns(home string) []itemRun {
 // meterPassLocked meters every item run and every Claude transcript, stores
 // offsets and window totals, and publishes backlog.spend when it changed.
 func (m *Manager) meterPassLocked(now time.Time) {
+	if !m.planUsageOn() {
+		return // off: no transcript is opened and no reading is loaded
+	}
 	st := &m.backlog.meter
 	home, err := config.GetConfigDir()
 	if err != nil {
