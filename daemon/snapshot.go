@@ -672,13 +672,17 @@ func onlyOwnedBySandbox(instances []session.InstanceData, owner string) []sessio
 // session name — anything about other sessions, and the conversation/prompt
 // payloads a sandbox already has locally and does not need served back.
 //
-// Host IS here even though it names a host: it is the listed-host NAME the sandbox
-// itself supplied via --host, not a path or a tmux name the daemon chose, and the
-// sandbox scope advertises HostPick support (SnapshotCapabilities.HostPick), so the
-// create's post-create guard (api/sessions.go) can audit what came BACK against the
-// pick it sent. Withholding it made every successful sandbox create report a false
-// "daemon did not record host" skew failure. Returning it does not expose daemon-host
-// layout the way Path/Worktree/TmuxName do.
+// Host is deliberately NOT here. This projection is shared by the Snapshot path
+// (projectRowsForSandbox), which projects EVERY session in the owner's project,
+// not only the one just created: a sibling session's Host is an operator-chosen
+// listed-host alias that this sandbox did not supply, so returning it here would
+// leak operator host picks across sessions and would contradict the classCaller
+// rationale (caller text is what THIS sandbox sent). The picked host is preserved
+// ONLY by the create-specific projection (projectSandboxCreateResponse), where the
+// row is the session the sandbox itself just started with --host, and the create's
+// post-create guard (api/sessions.go) audits what came BACK against that pick.
+// Withholding it from ordinary snapshots does not reintroduce the version-skew
+// failure, because the guard reads the create response, not Snapshot.
 //
 // Program is deliberately NOT here: it is text the sandbox itself supplied (a full
 // command, possibly naming a path), the sandbox does not need it served back, and
@@ -696,7 +700,6 @@ func sandboxSafeInstanceData(d session.InstanceData) session.InstanceData {
 		LifecycleAction:          d.LifecycleAction,
 		CurrentAgent:             d.CurrentAgent,
 		BackendType:              d.BackendType,
-		Host:                     d.Host,
 		TaskRunActive:            d.TaskRunActive,
 		LimitResetAt:             d.LimitResetAt,
 		IdleReason:               d.IdleReason,

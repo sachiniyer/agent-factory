@@ -184,7 +184,7 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	allowed := map[string]bool{
 		"ID": true, "TaskID": true, "Title": true, "Branch": true, "Status": true,
 		"Liveness": true, "InFlightOp": true, "LifecycleAction": true,
-		"CurrentAgent": true, "BackendType": true, "Host": true,
+		"CurrentAgent": true, "BackendType": true,
 		"TaskRunActive": true, "LimitResetAt": true, "CreatedAt": true, "UpdatedAt": true,
 		"IdleReason": true, "LastPromptAttemptAt": true,
 		"LastPromptDeliveryStatus": true, "LastPaneChurnAt": true,
@@ -239,7 +239,7 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	assert.Equal(t, "mine", got.Title)
 	assert.Equal(t, "af/mine", got.Branch)
 	assert.Equal(t, session.Ready, got.Status)
-	assert.Equal(t, "box1", got.Host, "Host is the sandbox's own --host pick; the CLI guard audits it against the pick, so it must survive the projection")
+	assert.Empty(t, got.Host, "Host is withheld from the shared snapshot projection: a sibling session's operator-chosen host must not leak across sessions; the create-specific projection (projectSandboxCreateResponse) preserves the caller's own --host pick")
 	assert.Equal(t, session.IdleReasonDeliveryUnconfirmed, got.IdleReason)
 	assert.Equal(t, time.Unix(100, 0).UTC(), got.LastPromptAttemptAt)
 	assert.Equal(t, session.PromptCouldNotConfirm, got.LastPromptDeliveryStatus)

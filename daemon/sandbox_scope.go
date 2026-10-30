@@ -273,8 +273,19 @@ func (s *controlServer) createSessionScoped(ctx context.Context, req CreateSessi
 
 // projectSandboxCreateResponse narrows a create response to what a sandbox may
 // learn about the session it just started (#5888).
+//
+// Host is the one field this preserves that sandboxSafeInstanceData withholds.
+// The shared snapshot projection (projectRowsForSandbox) projects every session in
+// the owner's project, so returning Host there would leak operator-chosen host
+// aliases from sibling sessions this sandbox did not create. Here the row is the
+// session the sandbox itself just started with --host, so the host is the caller's
+// own pick, and the create's post-create guard (api/sessions.go) audits what came
+// BACK against it — withholding it here would report a false "daemon did not record
+// host" skew failure for every sandbox-credentialed create.
 func projectSandboxCreateResponse(resp *CreateSessionResponse) {
+	host := resp.Instance.Host
 	resp.Instance = sandboxSafeInstanceData(resp.Instance)
+	resp.Instance.Host = host
 }
 
 // checkSandboxCreate is the create-shape rule for a sandbox caller.
