@@ -612,8 +612,8 @@ type Manager struct {
 	// relayTransports caches one workspace-loopback transport per off-box session
 	// (W5.3); see relayTransport.
 	relayTransports sync.Map
-	// proposals runs the proposal routes and the poll-time doc scan.
-	proposals proposalState
+	// routeServices runs the proposal and backlog routes.
+	routeServices
 	// configAgents owns the bare tmux sessions spawned for config agents. They
 	// have no Instance and so appear in no roster; this is the only thing that
 	// knows they exist, which is why its Stop() is wired into daemon teardown.
