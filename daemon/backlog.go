@@ -42,6 +42,10 @@ type backlogState struct {
 	answering map[string]bool
 	// restoring serializes the restoration of an archived item session.
 	restoring sync.Map
+	// asked is the question text each item session was last shown (session id ->
+	// reason), kept apart from the attention display so dismissing the chip does not
+	// make a terminal answer invisible to the backlog.
+	asked sync.Map
 	// recovered, recovering and recoveryDone track restart recovery.
 	recovered    map[string]bool
 	recovering   bool
