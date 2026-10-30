@@ -400,3 +400,22 @@ func TestSendBacklogPromptClassifiesDeliveryErrors(t *testing.T) {
 		t.Fatalf("a refusal before any byte was sent is proven not delivered, got %v", err)
 	}
 }
+
+// A continuation refused as undelivered must not swallow the previous run's
+// completion (Codex P2 on #6294): arming bumped the generation, so the queued
+// edge for the run that had ended fails its fence; the rollback settles the
+// session's current idle state instead.
+func TestFailedContinueSettlesThePreviousRunsEnd(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	idleItemSession(t, inst) // the run ended; its completion has not been applied yet
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(*Manager, SendPromptRequest) error { return errBacklogPromptNotDelivered }
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err == nil {
+		t.Fatal("a proven non-delivery was reported as a started continue")
+	}
+	m.backgroundMutationWG.Wait()
+	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusReview {
+		t.Fatalf("status = %s, want review: the previous run's end was lost", it.Status)
+	}
+}
