@@ -76,20 +76,11 @@ func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not list the object stores of %s: %w", worktreePath, err)
 	}
-	for _, line := range strings.Split(strings.TrimRight(string(listing), "\n"), "\n") {
-		key, value, ok := strings.Cut(line, ": ")
-		if !ok || !countObjectsKeys[key] {
-			return nil, fmt.Errorf("git count-objects reported something unexpected for %s: %q", worktreePath, line)
-		}
-		if key != "alternate" {
-			continue
-		}
-		path, err := unquoteGitPath(value)
-		if err != nil {
-			return nil, fmt.Errorf("cannot decode an alternate object store of %s (%q): %w", worktreePath, value, err)
-		}
-		stores = append(stores, path)
+	listed, err := parseCountObjectsAlternates(string(listing))
+	if err != nil {
+		return nil, fmt.Errorf("cannot decode an alternate object store of %s: %w", worktreePath, err)
 	}
+	stores = append(stores, listed...)
 
 	// Source 2: the alternates files as written.
 	visited := map[string]bool{}
@@ -119,15 +110,11 @@ func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
 			}
 			return fmt.Errorf("could not read the alternates of %s: %w", real, err)
 		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			entry, err := unquoteGitPath(line)
-			if err != nil {
-				return fmt.Errorf("cannot decode an alternates entry of %s (%q): %w", real, line, err)
-			}
+		entries, err := parseAlternatesFile(string(raw))
+		if err != nil {
+			return fmt.Errorf("cannot decode the alternates of %s: %w", real, err)
+		}
+		for _, entry := range entries {
 			if !filepath.IsAbs(entry) {
 				entry = store + string(filepath.Separator) + entry // as written; ".." applies physically
 			}
@@ -223,10 +210,45 @@ func walkPhysical(path string, roots []string) (resolved, hit string, err error)
 
 func splitPath(p string) []string { return strings.Split(p, string(filepath.Separator)) }
 
-// countObjectsKeys are the keys `git count-objects -v` prints.
-var countObjectsKeys = map[string]bool{
-	"count": true, "size": true, "in-pack": true, "packs": true, "size-pack": true,
-	"prune-packable": true, "garbage": true, "size-garbage": true, "alternate": true,
+// parseCountObjectsAlternates reads `git count-objects -v` the way git writes it:
+// ONLY lines starting with exactly "alternate: " matter; the prefix is stripped and
+// the rest of the line is the path, verbatim (no trimming: an unquoted path may end
+// in a space) unless it starts with a double quote, in which case it is C-quoted.
+// Every other line — whatever keys this git version prints, and any warning — is
+// ignored. A quoted value that does not decode is an error (refuses).
+func parseCountObjectsAlternates(out string) ([]string, error) {
+	const prefix = "alternate: "
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		value, ok := strings.CutPrefix(line, prefix)
+		if !ok {
+			continue
+		}
+		path, err := unquoteGitPath(value)
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", value, err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+// parseAlternatesFile reads an objects/info/alternates file as git does: one entry
+// per line, empty lines and lines starting with '#' skipped, nothing trimmed, a
+// leading double quote means C-quoted. An entry that does not decode is an error.
+func parseAlternatesFile(raw string) ([]string, error) {
+	var entries []string
+	for _, line := range strings.Split(raw, "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		entry, err := unquoteGitPath(line)
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", line, err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }
 
 // unquoteGitPath decodes a path as git prints it: literal unless it starts with a

@@ -702,3 +702,92 @@ func TestAlternatesFileReachedThroughASymlinkInsideTheLeafIsRefused(t *testing.T
 	require.NoError(t, err)
 	assert.Contains(t, strings.Join(reasons, " "), "object store")
 }
+
+// The discovery is proven against REAL git, not a model of its output: ordinary
+// repos (no alternates) must pass, and the alternate shapes git itself accepts —
+// plain, C-quoted with spaces and an escape, and an unquoted path ending in a
+// space — must be read exactly (Codex on #6186; the parser had rules of its own and
+// rejected every repo whose git printed a key it did not know).
+func TestObjectStoreDiscoveryAgainstRealGit(t *testing.T) {
+	withAlternate := func(t *testing.T, entryFor func(store string) string, storeName string) (wt, store string) {
+		t.Helper()
+		repo, wt := pruneWorktree(t)
+		store = filepath.Join(t.TempDir(), storeName)
+		objects := filepath.Join(repo, ".git", "objects")
+		require.NoError(t, os.Rename(objects, store))
+		require.NoError(t, os.MkdirAll(filepath.Join(objects, "info"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(objects, "info", "alternates"), []byte(entryFor(store)+"\n"), 0o644))
+		gitIn(t, wt, "status", "--porcelain")         // git itself reads the alternate and works
+		gitIn(t, wt, "rev-parse", "--verify", "HEAD") // and can resolve an object through it
+		return wt, store
+	}
+	discover := func(t *testing.T, wt string) []string {
+		t.Helper()
+		deps, err := objectStoresInsideDeletedRoots(wt)
+		require.NoError(t, err, "discovery must accept what real git produces")
+		reasons, err := WorktreeUnrecoverableContent(wt)
+		require.NoError(t, err)
+		assert.NotContains(t, strings.Join(reasons, " "), "object store")
+		return deps
+	}
+
+	t.Run("no alternates at all", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		assert.Empty(t, discover(t, wt))
+	})
+	t.Run("a plain alternate outside both roots", func(t *testing.T) {
+		wt, _ := withAlternate(t, func(s string) string { return s }, "shared-objects")
+		assert.Empty(t, discover(t, wt))
+	})
+	t.Run("a quoted alternate with spaces and an escape", func(t *testing.T) {
+		wt, _ := withAlternate(t, func(s string) string {
+			// "<dir>/my store\040two": spaces, and \040 for one of them.
+			return `"` + filepath.Dir(s) + `/my\040store two"`
+		}, "my store two")
+		assert.Empty(t, discover(t, wt))
+	})
+	t.Run("an unquoted alternate ending in a space", func(t *testing.T) {
+		wt, store := withAlternate(t, func(s string) string { return s }, "trailing ")
+		require.True(t, strings.HasSuffix(store, " "))
+		assert.Empty(t, discover(t, wt))
+	})
+	t.Run("the same shapes INSIDE the leaf are refused", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		leaf, err := registrationLeaf(wt)
+		require.NoError(t, err)
+		store := filepath.Join(leaf, "in leaf ")
+		objects := filepath.Join(repo, ".git", "objects")
+		require.NoError(t, os.Rename(objects, store))
+		require.NoError(t, os.MkdirAll(filepath.Join(objects, "info"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(objects, "info", "alternates"), []byte(store+"\n"), 0o644))
+		gitIn(t, wt, "status", "--porcelain")
+		deps, err := objectStoresInsideDeletedRoots(wt)
+		require.NoError(t, err)
+		assert.NotEmpty(t, deps)
+	})
+}
+
+func TestParseGitAlternateListings(t *testing.T) {
+	// count-objects -v: only exact "alternate: " lines matter; every other line (any
+	// key a git version prints, any warning) is ignored; values are verbatim.
+	out := "count: 0\nsize: 0\nin-pack: 3\npacks: 1\nsize-pack: 1\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0\n" +
+		"some-future-key: 7\nwarning: something odd\n" +
+		"alternate: /plain/path\nalternate: /ends/with/space \nalternate: \"/quoted/a\\040b\"\nnotalternate: /x\n"
+	got, err := parseCountObjectsAlternates(out)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/plain/path", "/ends/with/space ", "/quoted/a b"}, got)
+
+	none, err := parseCountObjectsAlternates("count: 0\nsize: 0\n")
+	require.NoError(t, err)
+	assert.Empty(t, none, "a repo with no alternates passes")
+
+	_, err = parseCountObjectsAlternates("alternate: \"/unterminated\n")
+	assert.Error(t, err, "a quoted value that does not decode refuses")
+
+	// An alternates file: skip blank and # lines, trim nothing.
+	entries, err := parseAlternatesFile("# comment\n\n/a/b \n\"/q uoted\"\n  /leading/spaces\n")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/a/b ", "/q uoted", "  /leading/spaces"}, entries)
+	_, err = parseAlternatesFile("\"/bad\\q\"\n")
+	assert.Error(t, err)
+}
