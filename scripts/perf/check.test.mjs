@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { keys, summarize, regressions } from "./check.mjs";
+import { keys, summarize, regressions, bundleBytes } from "./check.mjs";
 const row = value => Object.fromEntries(keys.map(k => [k, value]));
 const budgets = () => Object.fromEntries(keys.map(k => [k, { baseline: 10, margin: 2 }]));
 test("mean at budget passes; one metric above budget fails", () => {
@@ -20,4 +20,10 @@ test("partial, corrupt and absent observations cannot silently turn green", () =
   assert.throws(() => regressions(summarize([row(1), row(1), row(1)]), {}));
   const b = budgets(); b.echo_ms.margin = -1;
   assert.throws(() => regressions(summarize([row(1), row(1), row(1)]), b));
+});
+test("lazy bundles are measured apart from the shell", () => {
+  const sum = bundleBytes([["af-web.js", Buffer.from("aaaa")], ["lazy/docs-editor.js", Buffer.from("bb")], ["icons/x.css", Buffer.from("c")]]);
+  assert.equal(sum.raw_bytes, 5);
+  assert.equal(sum.lazy_raw_bytes, 2);
+  assert.ok(sum.gzip_bytes > 0 && sum.lazy_gzip_bytes > 0);
 });

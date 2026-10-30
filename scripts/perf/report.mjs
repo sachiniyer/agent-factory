@@ -1,16 +1,12 @@
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
-import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
-import { keys, summarize, budgetFor, regressions } from "./check.mjs";
+import { keys, summarize, budgetFor, regressions, bundleBytes } from "./check.mjs";
 const root = "/work/web/test-results";
 const web = JSON.parse(readFileSync(`${root}/web-runs.json`));
 const tui = JSON.parse(readFileSync(`${root}/tui-runs.json`));
 const files = readdirSync("/work/web/dist", { recursive: true }).filter(f => /\.(js|css)$/.test(f));
 assert(files.length > 0);
-const bundle = () => files.reduce((sum, file) => {
-  const bytes = readFileSync(`/work/web/dist/${file}`);
-  return { raw_bytes: sum.raw_bytes + bytes.length, gzip_bytes: sum.gzip_bytes + gzipSync(bytes, { level: 9 }).length };
-}, { raw_bytes: 0, gzip_bytes: 0 });
+const bundle = () => bundleBytes(files.map(file => [file, readFileSync(`/work/web/dist/${file}`)]));
 assert.equal(web.length, 3); assert.equal(tui.length, 3);
 const runs = web.map((row, i) => ({ ...row, ...tui[i], ...bundle() }));
 const metrics = summarize(runs);

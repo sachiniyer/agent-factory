@@ -44,7 +44,8 @@ monitor scanout. The observer and driver add overhead; comparisons keep it fixed
 
 | Metric | Start → observable completion |
 | --- | --- |
-| raw/gzip bytes | Sum of every shipped JS and CSS file under `web/dist`; each file gzip level 9 independently, excluding maps and images; recomputed three times |
+| raw/gzip bytes | Sum of every shipped JS and CSS file under `web/dist` except `web/dist/lazy/`; each file gzip level 9 independently, excluding maps and images; recomputed three times |
+| lazy raw/gzip bytes | The same sum for `web/dist/lazy/`: bundles the shell loads on demand (the Docs tab's editor), so they do not count against the shell's budget |
 | first terminal | Navigation time origin → first nonblank PTY glyph painted; select `add-json-export` as soon as the 1,000-row rail is available |
 | keystroke echo | Browser keydown → that previously absent ASCII character appears in the terminal DOM and crosses a paint opportunity; actual PTY echo, no mocked socket |
 | rail render | First Snapshot JSON decoded → all 1,000 rail rows present and a paint opportunity; includes row construction, layout and scheduling, excludes HTTP transfer |
@@ -96,8 +97,10 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1067070.000 | 1067070.000–1067070.000 | 0.000 | 1120423.500 |
+| raw_bytes | 1133090.000 | 1133090.000–1133090.000 | 0.000 | 1189744.500 |
 | gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
+| lazy_raw_bytes | 345212.000 | 345212.000–345212.000 | 0.000 | 362472.600 |
+| lazy_gzip_bytes | 112391.000 | 112391.000–112391.000 | 0.000 | 118010.550 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -122,6 +125,16 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Lazy bundle provenance (proposal Docs tab)
+
+The Docs tab (proposal mode, step 2) ships its CodeMirror editor as
+`web/dist/lazy/docs-editor.js`, a separate esbuild build that `af-web.js` imports
+only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
+`lazy_*` entries measure it on its own, with the same 5% margin. Both lazy values
+were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
+`report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
+so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,133,090 raw and 256,419 gzip bytes over `web/dist` without `lazy/`. Master's committed shell was 1,117,448 raw against an unmoved raw baseline of 1,067,070, so the raw entry is re-recorded (1,067,070 → 1,133,090); the gzip entry stays inside its budget. Lazy bundle: 345,212 raw / 112,391 gzip.
 
 ### Bundle refresh provenance (#6212)
 

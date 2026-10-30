@@ -56,6 +56,7 @@ import {
 } from "./layout.js";
 import { fetchEditorPortOrigin, fetchPreviewOrigin, pauseStatusPoll, probeWebTab } from "./api.js";
 import type { HoldAction } from "./delivery_hold.js";
+import { mountDocsTab } from "./docs_tab.js";
 import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
 // iframeIsProxied, which also answers it for a vscode tab (always proxied, and with no
@@ -934,7 +935,31 @@ export class SplitView {
       const moved = pane.tab !== leaf.tab;
       const staleAddress =
         pane.identity !== identity || (moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId));
-      if (spec !== null) {
+      const docsSlug = this.docsSlugAt(leaf.tab);
+      if (docsSlug !== null) {
+        // A Docs tab is addressed by its proposal, not by an ordinal, so a moved
+        // tab is followed rather than rebuilt; a rebuild would drop the editor's
+        // cursor and undo history.
+        const docsIdentity = `docs:${docsSlug}`;
+        if (pane.term || pane.webUrl !== docsIdentity || pane.identity !== identity) {
+          if (this.focusedId === leaf.id) {
+            focusedRebuilt = true;
+          }
+          pane.term?.dispose();
+          pane.term = null;
+          pane.webDispose?.();
+          pane.host.replaceChildren();
+          pane.tab = leaf.tab;
+          pane.identity = identity;
+          pane.webUrl = docsIdentity;
+          pane.webArchived = this.archived;
+          pane.webDispose = mountDocsTab(pane.host, { sessionId: this.sessionId, slug: docsSlug, token: this.token });
+          pane.status = "open";
+          this.onPaneStatus(leaf.id, "open");
+        } else if (moved) {
+          pane.tab = leaf.tab;
+        }
+      } else if (spec !== null) {
         // A web/vscode tab: mount an iframe instead of an xterm. Rebuilding reloads
         // the frame and drops the dev server's in-page state — or a VS Code pane's
         // unsaved buffers — so it happens only on a real change: a different tab
@@ -1130,6 +1155,15 @@ export class SplitView {
    *  A vscode tab deliberately carries NO target: its editor is a daemon-managed
    *  per-session code-server on an ephemeral port, so the only address is the
    *  daemon proxy path, which is derived from the session + tab, not stored. */
+  /** The proposal slug of the Docs tab at `idx`, or null for any other kind.
+   *  syncSplit passes a Docs tab's slug in the target list. */
+  private docsSlugAt(idx: number): string | null {
+    if (idx < 0 || idx >= this.tabIds.length || this.tabKinds[idx] !== TabKind.Docs) {
+      return null;
+    }
+    return this.tabTargets[idx] ?? "";
+  }
+
   private iframeSpecAt(idx: number): IframeSpec | null {
     if (idx < 0 || idx >= this.tabIds.length) {
       return null;

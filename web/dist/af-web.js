@@ -7598,6 +7598,20 @@ var ExternalLink = [
   ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/file-text.mjs
+var FileText = [
+  [
+    "path",
+    {
+      d: "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"
+    }
+  ],
+  ["path", { d: "M14 2v5a1 1 0 0 0 1 1h5" }],
+  ["path", { d: "M10 9H8" }],
+  ["path", { d: "M16 13H8" }],
+  ["path", { d: "M16 17H8" }]
+];
+
 // node_modules/lucide/dist/esm/icons/folder-git-2.mjs
 var FolderGit2 = [
   ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
@@ -7754,6 +7768,7 @@ var ICONS = {
   diamond: Diamond,
   ellipsis: Ellipsis,
   "external-link": ExternalLink,
+  "file-text": FileText,
   folder: Folder,
   "folder-git": FolderGit2,
   funnel: Funnel,
@@ -13386,7 +13401,7 @@ function confirmDeleteTabModal(opts) {
     confirmClass: "af-danger",
     onCancel: opts.onCancel
   });
-  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
+  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : opts.kind === TabKind.Docs ? "This removes the Proposal tab. The proposal and its docs stay. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
   asForm(handle.el.firstElementChild, opts.onConfirm);
   queueMicrotask(() => cancelBtn.focus());
   return handle;
@@ -14122,6 +14137,72 @@ function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
   return tab;
 }
 
+// src/docs_tab.ts
+var docsModule = null;
+function loadDocsModule() {
+  if (!docsModule) {
+    const url = new URL("./lazy/docs-editor.js", import.meta.url).href;
+    docsModule = import(url).catch((e) => {
+      docsModule = null;
+      throw e;
+    });
+  }
+  return docsModule;
+}
+var listeners2 = /* @__PURE__ */ new Set();
+function publishProposalChange(change) {
+  for (const fn of listeners2) fn(change);
+}
+function subscribe(fn) {
+  listeners2.add(fn);
+  return () => listeners2.delete(fn);
+}
+var pushListeners = /* @__PURE__ */ new Set();
+function subscribePush(fn) {
+  pushListeners.add(fn);
+  return () => pushListeners.delete(fn);
+}
+function mountDocsTab(host, opts) {
+  let disposed = false;
+  let pane = null;
+  const notice = (text, retry) => {
+    const box = document.createElement("div");
+    box.className = "af-docs-notice";
+    const p = document.createElement("p");
+    p.className = "af-docs-notice-text";
+    p.textContent = text;
+    box.append(p);
+    if (retry) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "af-ghost";
+      btn.textContent = "Retry";
+      btn.addEventListener("click", load);
+      box.append(btn);
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "af-docs";
+    wrap.append(box);
+    host.replaceChildren(wrap);
+  };
+  function load() {
+    notice("Loading editor\u2026", false);
+    loadDocsModule().then(
+      (mod) => {
+        if (!disposed) pane = new mod.DocsPane(host, { ...opts, subscribe, subscribePush });
+      },
+      (e) => {
+        if (!disposed) notice(`Could not load the editor: ${errorText(e)}`, true);
+      }
+    );
+  }
+  load();
+  return () => {
+    disposed = true;
+    pane?.dispose();
+  };
+}
+
 // src/tabaddr.ts
 function iframeIsProxied(spec) {
   if (spec.kind === TabKind.VSCode) {
@@ -14247,6 +14328,8 @@ function tabIcon(kind) {
     case TabKind.Web:
     case TabKind.VSCode:
       return "panels";
+    case TabKind.Docs:
+      return "file-text";
     default:
       return "terminal";
   }
@@ -14262,7 +14345,7 @@ function tabLabel(tab) {
     case TabKind.VSCode:
       return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     case TabKind.Docs:
-      return tab.name && tab.name !== "docs" ? tab.name : "Docs";
+      return tab.name && tab.name !== "docs" ? tab.name : "Proposal";
     default:
       return tab.name || "Tab";
   }
@@ -14811,7 +14894,28 @@ var SplitView = class {
       const realId = this.tabRealIds[leaf.tab] ?? "";
       const moved = pane.tab !== leaf.tab;
       const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId);
-      if (spec !== null) {
+      const docsSlug = this.docsSlugAt(leaf.tab);
+      if (docsSlug !== null) {
+        const docsIdentity = `docs:${docsSlug}`;
+        if (pane.term || pane.webUrl !== docsIdentity || pane.identity !== identity) {
+          if (this.focusedId === leaf.id) {
+            focusedRebuilt = true;
+          }
+          pane.term?.dispose();
+          pane.term = null;
+          pane.webDispose?.();
+          pane.host.replaceChildren();
+          pane.tab = leaf.tab;
+          pane.identity = identity;
+          pane.webUrl = docsIdentity;
+          pane.webArchived = this.archived;
+          pane.webDispose = mountDocsTab(pane.host, { sessionId: this.sessionId, slug: docsSlug, token: this.token });
+          pane.status = "open";
+          this.onPaneStatus(leaf.id, "open");
+        } else if (moved) {
+          pane.tab = leaf.tab;
+        }
+      } else if (spec !== null) {
         if (pane.term || pane.webUrl !== iframeIdentity(spec) || pane.iframeProxied !== ((this.tabRealIds[leaf.tab] ?? "") !== "" && iframeIsProxied(spec)) || staleAddress || pane.webArchived !== this.archived) {
           if (this.focusedId === leaf.id) {
             focusedRebuilt = true;
@@ -14958,6 +15062,14 @@ var SplitView = class {
    *  A vscode tab deliberately carries NO target: its editor is a daemon-managed
    *  per-session code-server on an ephemeral port, so the only address is the
    *  daemon proxy path, which is derived from the session + tab, not stored. */
+  /** The proposal slug of the Docs tab at `idx`, or null for any other kind.
+   *  syncSplit passes a Docs tab's slug in the target list. */
+  docsSlugAt(idx) {
+    if (idx < 0 || idx >= this.tabIds.length || this.tabKinds[idx] !== TabKind.Docs) {
+      return null;
+    }
+    return this.tabTargets[idx] ?? "";
+  }
   iframeSpecAt(idx) {
     if (idx < 0 || idx >= this.tabIds.length) {
       return null;
@@ -19803,6 +19915,25 @@ function captureTabDeleteTarget(target) {
   return (tabs) => tabs.findIndex((tab) => tabIdentity(tab) === identity && (!legacy || tab === target));
 }
 
+// src/proposal_api.ts
+function isRecord(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function str(v) {
+  return typeof v === "string" ? v : "";
+}
+function parseProposalChange(ev) {
+  if (!isRecord(ev) || ev.type !== "proposal.changed" || !isRecord(ev.data)) {
+    return null;
+  }
+  const d = ev.data;
+  const slug = str(d.slug);
+  if (slug === "") {
+    return null;
+  }
+  return { repoId: str(d.repo_id), slug, doc: str(d.doc), commit: str(d.commit), author: str(d.author) };
+}
+
 // src/index.ts
 var initialThemeChoice = bootStampTheme();
 registerServiceWorker();
@@ -21639,7 +21770,7 @@ function syncSplit(state) {
   const runtimeSessionId = runtimeSelected ? selId : null;
   const tabIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabIdentity) : ["0:"];
   const tabRealIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabRealId) : [""];
-  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.url) : [];
+  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind === TabKind.Docs ? t.proposal : t.url) : [];
   const tabKinds = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind) : [];
   const tabNames = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.name) : [];
   const archived = runtimeSelected ? isArchived(runtimeSelected) : false;
@@ -21712,6 +21843,11 @@ function stopStream() {
   }
 }
 function onEvent(ev) {
+  if (ev.type === "proposal.changed") {
+    const change = parseProposalChange(ev);
+    if (change) publishProposalChange(change);
+    return;
+  }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
     requestTaskResync();
     return;
@@ -21932,7 +22068,7 @@ function isNativeControl(el2) {
   if (!el2) {
     return false;
   }
-  return el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
+  return el2.isContentEditable || el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
 }
 function onKeydown(e) {
   if (tabShortcutRepeat.swallow(e)) {
@@ -21945,7 +22081,7 @@ function onKeydown(e) {
     return;
   }
   const target = e.target;
-  const inTerminal = target ? termHost.contains(target) : false;
+  const inTerminal = target ? termHost.contains(target) && !target.isContentEditable : false;
   const isTerminalTextarea = inTerminal && target?.tagName === "TEXTAREA";
   if (!isTerminalTextarea && e.key !== "Escape" && isNativeControl(target)) {
     return;
@@ -22055,6 +22191,7 @@ lucide/dist/esm/icons/circle.mjs:
 lucide/dist/esm/icons/diamond.mjs:
 lucide/dist/esm/icons/ellipsis.mjs:
 lucide/dist/esm/icons/external-link.mjs:
+lucide/dist/esm/icons/file-text.mjs:
 lucide/dist/esm/icons/folder-git-2.mjs:
 lucide/dist/esm/icons/folder.mjs:
 lucide/dist/esm/icons/funnel.mjs:

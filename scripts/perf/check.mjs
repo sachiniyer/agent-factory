@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-export const keys = ["raw_bytes", "gzip_bytes", "first_terminal_ms", "echo_ms", "rail_ms", "load_shift", "snapshot_shift", "frame_ms", "key_render_ms"];
+import { gzipSync } from "node:zlib";
+export const keys = ["raw_bytes", "gzip_bytes", "lazy_raw_bytes", "lazy_gzip_bytes", "first_terminal_ms", "echo_ms", "rail_ms", "load_shift", "snapshot_shift", "frame_ms", "key_render_ms"];
 
 export function summarize(runs) {
   assert.equal(runs.length, 3, "exactly three runs required");
@@ -23,4 +24,16 @@ export function regressions(metrics, budgets) {
     assert(Number.isFinite(metrics[key]?.mean), `missing metric ${key}`);
     return metrics[key].mean > budgetFor(budgets, key);
   });
+}
+
+// Files under lazy/ load on demand (the Docs tab), not with the shell, so they
+// get their own budget instead of hiding inside the shell's.
+export function bundleBytes(files) {
+  const sum = { raw_bytes: 0, gzip_bytes: 0, lazy_raw_bytes: 0, lazy_gzip_bytes: 0 };
+  for (const [path, bytes] of files) {
+    const prefix = path.split(/[\\/]/)[0] === "lazy" ? "lazy_" : "";
+    sum[`${prefix}raw_bytes`] += bytes.length;
+    sum[`${prefix}gzip_bytes`] += gzipSync(bytes, { level: 9 }).length;
+  }
+  return sum;
 }

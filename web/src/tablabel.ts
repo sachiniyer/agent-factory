@@ -49,6 +49,8 @@ export function tabIcon(kind: number): IconName {
     case TabKind.Web:
     case TabKind.VSCode:
       return "panels";
+    case TabKind.Docs:
+      return "file-text";
     default:
       return "terminal";
   }
@@ -74,7 +76,7 @@ export function tabLabel(tab: NamedTab): string {
     case TabKind.VSCode:
       return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     case TabKind.Docs:
-      return tab.name && tab.name !== "docs" ? tab.name : "Docs";
+      return tab.name && tab.name !== "docs" ? tab.name : "Proposal";
     default:
       return tab.name || "Tab";
   }

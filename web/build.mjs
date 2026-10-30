@@ -40,6 +40,25 @@ await build({
   logLevel: "info",
 });
 
+// The Docs tab (docs_pane.ts and the CodeMirror editor) is its own build, loaded
+// by docs_tab.ts with a dynamic import the first time a Docs tab opens. A separate build rather than
+// esbuild code splitting: splitting would move any module the two share into a
+// chunk that af-web.js imports at startup, outside the service worker's shell set.
+// Minified because it is almost all vendored CodeMirror, which nobody reads in the
+// committed diff.
+await build({
+  entryPoints: ["src/docs_pane.ts"],
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "es2022",
+  outfile: "dist/lazy/docs-editor.js",
+  sourcemap: false,
+  minify: true,
+  legalComments: "none",
+  logLevel: "info",
+});
+
 // The HTML shell is not an esbuild input (it references the bundle by URL), so
 // copy it into the embed root alongside the built JS/CSS.
 await copyFile("src/index.html", "dist/index.html");
