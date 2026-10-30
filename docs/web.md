@@ -91,7 +91,7 @@ non-default filter. If it hides everything, the empty state reports hidden rows.
 On a phone, selecting a terminal gives it the screen: one compact row holds
 **Toggle sessions**, the truncating session title, the
 **Terminal** and **VS Code** icon buttons, and **…**. The menu contains project
-choices, Sessions · Tasks · Config, session actions and tabs. Escape closes it and returns focus.
+choices, Sessions · Backlog · Tasks · Config, session actions and tabs. Escape closes it and returns focus.
 **Toggle sessions** opens the rail drawer; selecting a session or tapping its
 backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
@@ -405,7 +405,7 @@ through to the agent unless a modal or menu handles them.
 | `1`–`9` | Select a tab in navigation mode |
 | `t` · `T` | Open a terminal tab · a VS Code tab, when the session supports that kind |
 | `w` | Ask to delete the active tab; confirm with Delete tab, or cancel; never the Agent tab |
-| `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
+| `[` · `]` | Cycle Sessions · Backlog · Tasks · Config in navigation mode |
 | `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |
 | `Alt+w` | Close the focused pane in Sessions |
 

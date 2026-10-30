@@ -250,6 +250,12 @@ func TestServiceAgentReview(t *testing.T) {
 	if _, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 1, Status: StatusDone, SessionID: "s1"}); err == nil {
 		t.Error("agent done accepted")
 	}
+	for _, pr := range []string{"javascript:alert(1)", "data:text/html,x", "/pull/1", "https://"} {
+		if _, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 1, Status: StatusReview, SessionID: "s1", PR: pr}); err == nil ||
+			!strings.Contains(err.Error(), "not an http or https URL") {
+			t.Errorf("pr %q: %v", pr, err)
+		}
+	}
 	out, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 1, Status: StatusReview, SessionID: "s1", PR: "https://x/pull/1"})
 	if err != nil || out.Item.Status != StatusReview || out.Item.PR != "https://x/pull/1" {
 		t.Fatal(out, err)

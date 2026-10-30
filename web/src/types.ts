@@ -538,7 +538,10 @@ export type EventType =
   | "projects.changed"
   | "task.created"
   | "task.updated"
-  | "task.removed";
+  | "task.removed"
+  | "backlog.changed"
+  | "backlog.spend"
+  | "backlog.runner";
 
 /**
  * agentproto.Event (agentproto/message.go): one message on the /v1/events plane.

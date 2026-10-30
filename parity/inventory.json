@@ -1818,16 +1818,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/backlog_pane.ts BacklogPane, web/src/backlog_panel.ts ItemPanel → web/src/backlog_api.ts getBacklog/addItem/updateItem/moveItem/deleteItem/addNote"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog.go backlogListCmd/backlogShowCmd/backlogAddCmd/backlogEditCmd/backlogMoveCmd, api/backlog_status.go backlogDeleteCmd, api/backlog_self.go backlogNoteCmd (note <id> and note --self) → POST /v1/GetBacklog, AddBacklogItems, UpdateBacklogItem, MoveBacklogItem, DeleteBacklogItem, PostBacklogMessage (daemon/backlog.go)"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Backlog PR 2 adds the daemon routes and the CLI. PR 3 adds the web Backlog view (list, reorder, item panel, waits-on picker, notes). The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "verdict": "deliberate",
+      "notes": "Backlog PR 2 adds the daemon routes and the CLI; PR 3 adds the web Backlog view (list, reorder, item panel, waits-on picker, notes). The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.status",
@@ -1837,16 +1836,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/backlog_panel.ts ItemPanel actionsRow → web/src/backlog_api.ts setItemStatus"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_status.go backlogStatusCmd (queue, draft, review, reopen, drop), api/backlog_self.go backlogDoneCmd (done <id> and the agent's done --self --pr) → POST /v1/SetBacklogItemStatus (daemon/backlog.go)"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Backlog PR 3 adds the item panel actions on the web. The agent's done --self (session_id, pr) is CLI-only by design: it runs inside an item session. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "verdict": "deliberate",
+      "notes": "The web item panel offers Queue, Back to draft, Mark done, Drop, Reopen and Delete; Send to review arrives in backlog PR 8. The agent's done --self (session_id, pr) is CLI-only by design: it runs inside an item session. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.sessions",
@@ -1894,8 +1892,8 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "partial",
+        "pointer": "web/src/backlog_pane.ts runnerBar (read only) → web/src/backlog_api.ts getBacklog/getBudget"
       },
       "cli": {
         "status": "yes",
@@ -2152,6 +2150,14 @@
       "up": "tui.navigation"
     },
     "web_rpcs": {
+      "GetBacklog": "backlog.items",
+      "AddBacklogItems": "backlog.items",
+      "UpdateBacklogItem": "backlog.items",
+      "MoveBacklogItem": "backlog.items",
+      "DeleteBacklogItem": "backlog.items",
+      "PostBacklogMessage": "backlog.items",
+      "SetBacklogItemStatus": "backlog.status",
+      "GetBudget": "backlog.runner",
       "SetAttention": "session.attention",
       "AccountLogin": "session.account-login",
       "ListAccounts": "session.accounts",
@@ -3068,6 +3074,65 @@
       "PruneSessionsRequest": {}
     },
     "web_rpcs": {
+      "GetBacklog": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        }
+      },
+      "AddBacklogItems": {
+        "before": {
+          "ok": "The New item row and Add child append at the bottom; the user then places the item by drag, Alt+arrows or Move…."
+        },
+        "after": {
+          "ok": "The New item row and Add child append at the bottom; the user then places the item by drag, Alt+arrows or Move…."
+        },
+        "proposal": {
+          "ok": "Items keyed by a proposal come from the agent attached to it (af backlog add --file); the web adds single drafts."
+        },
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        }
+      },
+      "UpdateBacklogItem": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        },
+        "program": {
+          "ok": "Program choice matters only when an item starts a session; the web gains it with Start now in backlog PR 8."
+        }
+      },
+      "MoveBacklogItem": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        }
+      },
+      "DeleteBacklogItem": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        }
+      },
+      "PostBacklogMessage": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        },
+        "session_id": {
+          "ok": "Set only for an agent's question (af backlog ask --self), which arrives with backlog PR 5."
+        },
+        "question_id": {
+          "ok": "Names the question an answer closes; the web answer box arrives in backlog PR 8."
+        }
+      },
+      "SetBacklogItemStatus": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        },
+        "session_id": {
+          "ok": "Set only by the agent's af backlog done --self, which arrives with item sessions in backlog PR 4."
+        },
+        "pr": {
+          "ok": "Set only by the agent's af backlog done --self --pr, which arrives with item sessions in backlog PR 4."
+        }
+      },
       "SetAttention": {
         "reason": {
           "ok": "The web only clears a request (clear: true). A reason belongs to setting one, which agents do with `af sessions attention --self`."
