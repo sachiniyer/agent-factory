@@ -37,6 +37,7 @@ import { type ArchiveState, archiveHasMore, archivedCount, railKindCounts } from
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
+import { serializeProjectRoute } from "./route.js";
 import { applyProjectColor, applyProjectFavicon, projectColor, projectColorRow } from "./project_color.js";
 import {
   archiveWarningText,
@@ -2191,16 +2192,46 @@ export class AppShell {
         ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` · ${projectMeta(p)}`]
         : [projectMeta(p)]),
     );
-    const item = h("button", { type: "button", class: cls }, check, label, meta);
+    // An anchor, not a button, so the browser's link affordances work: right-click
+    // "Open in new tab", middle-click, and Ctrl/Cmd-click open the project in a new
+    // tab via its #/project/ route. A plain left click still switches in place.
+    const item = h("a", { class: cls, href: serializeProjectRoute({ project: p.root }) }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
-    item.addEventListener("click", (e) => {
+    const activate = (e: Event): void => {
+      e.preventDefault();
       e.stopPropagation();
       this.closeProjectMenu();
       this.appControls.dismiss();
       this.actions.switchProject(p.root);
+    };
+    // Ctrl/Cmd/Shift-click keep the browser's new tab/window. Alt-click is NOT
+    // let through: browsers treat it as "download link", which would save the page.
+    item.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) {
+        // Let the browser open the tab, but keep the phone panel open behind it.
+        e.stopPropagation();
+        return;
+      }
+      activate(e);
     });
+    // A button activated on Space and a listbox option is chosen with it; an anchor
+    // only answers Enter, so restore Space here. Like a button, act on release:
+    // acting on press lets held-key repeats land on the switcher button that takes
+    // focus after the menu closes, and reopen the menu.
+    let spaceArmed = false;
+    item.addEventListener("keydown", (e) => {
+      if (e.key !== " " || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault(); // no page scroll
+      if (!e.repeat) spaceArmed = true;
+    });
+    item.addEventListener("keyup", (e) => {
+      if (e.key !== " " || !spaceArmed) return;
+      spaceArmed = false;
+      activate(e);
+    });
+    item.addEventListener("blur", () => { spaceArmed = false; });
     return item;
   }
 
