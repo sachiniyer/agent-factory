@@ -100,18 +100,27 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 		m.backlogAnswerFailed(repoID, a, "the session is gone", stop)
 		return
 	}
-	if backlogNeedsRestore(s) {
+	// Restoration is serialized per session and rechecked under the lock: two
+	// answers to one archived session (recovery launches them together) must not
+	// both restore it, the second would be refused as already live and its answer
+	// failed although the agent is there (Codex P2 on #6295).
+	restoreMu := m.backlog.restoreLock(a.SessionID)
+	restoreMu.Lock()
+	if s, ok = m.itemSessions(repoID)[a.SessionID]; ok && backlogNeedsRestore(s) {
 		restored, err := restoreBacklogSession(m, RestoreSessionRequest{ID: a.SessionID, RepoID: repoID})
 		if err != nil {
+			restoreMu.Unlock()
 			m.backlogAnswerFailed(repoID, a, "af could not restore the session: "+err.Error(), stop)
 			return
 		}
 		m.publishEvent(agentproto.EventSessionRestored, restored)
-		if s, ok = m.itemSessions(repoID)[a.SessionID]; !ok {
-			m.backlogAnswerFailed(repoID, a, "the session is gone", stop)
-			return
-		}
 		m.syncBacklogAttention(repoID, a)
+		s, ok = m.itemSessions(repoID)[a.SessionID]
+	}
+	restoreMu.Unlock()
+	if !ok {
+		m.backlogAnswerFailed(repoID, a, "the session is gone", stop)
+		return
 	}
 	inst := s.instance
 	if inst.TaskRunActive() {
@@ -174,6 +183,9 @@ func (m *Manager) sendBacklogAnswer(repoID string, inst *session.Instance, promp
 		if !wasActive {
 			m.disarmBacklogRun(repoID, inst)
 		}
+		if errors.Is(err, errBacklogTargetLimited) {
+			return errBacklogAnswerHeld // a limit published since the check: hold the answer
+		}
 		return err
 	}
 	return nil
@@ -207,12 +219,8 @@ func (m *Manager) backlogAnswerDelivered(repoID string, a backlog.PendingAnswer,
 	}
 	// A pending answer holds back the run's end (RunEnded), so an agent that
 	// finished the answer before this write landed had its idle edge dropped and
-	// no later edge will come: settle it now if the session is idle with the
-	// marker clear. Fenced by the generation, like every completion.
-	if s, ok := m.itemSessions(repoID)[a.SessionID]; ok && !s.instance.BacklogRunActive() &&
-		s.view.Liveness == session.LiveReady {
-		m.settleRunEnd(repoID, a.SessionID, s.gen, stop)
-	}
+	// no later edge will come: settle it now.
+	m.reconcileIdleRun(repoID, a.SessionID, stop)
 }
 
 func (m *Manager) backlogAnswerFailed(repoID string, a backlog.PendingAnswer, reason string, stop <-chan struct{}) {
@@ -221,6 +229,19 @@ func (m *Manager) backlogAnswerFailed(repoID string, a backlog.PendingAnswer, re
 		return []int{a.ID}, b.AnswerFailed(a.ID, a.AnswerID, reason, svc.Now())
 	}); err != nil {
 		m.warn().Printf("record undelivered answer on %s: %v", backlog.FormatID(a.ID), err)
+		return
+	}
+	m.reconcileIdleRun(repoID, a.SessionID, stop)
+}
+
+// reconcileIdleRun settles the session's run end when it is idle with the marker
+// clear: a pending answer held the previous run's end back (RunEnded), and the
+// answer's outcome (delivered or failed) is what releases it. Generation-fenced
+// like every completion.
+func (m *Manager) reconcileIdleRun(repoID, sessionID string, stop <-chan struct{}) {
+	if s, ok := m.itemSessions(repoID)[sessionID]; ok && !s.instance.BacklogRunActive() &&
+		s.view.Liveness == session.LiveReady {
+		m.settleRunEnd(repoID, sessionID, s.gen, stop)
 	}
 }
 
@@ -260,8 +281,15 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionText 
 				return []int{}, nil
 			}
 			backlogHost{m: m}.SetAttention(repoID, sessionID, b.OpenQuestionText(id))
-			if b.Item(id).Status == backlog.StatusRunning && !instance.BacklogRunActive() {
-				armed = instance.ArmBacklogRun(time.Now())
+			// The answer typed in the pane is new work: an item in review (the agent
+			// asked after finishing) goes back to running, counts as a live answer
+			// for rollbacks of other pending ones, and gets its run armed here, in
+			// the same transaction (Codex P2 on #6295).
+			if it := b.Item(id); (it.Status == backlog.StatusRunning || it.Status == backlog.StatusReview) && !instance.BacklogRunActive() {
+				if armed = instance.ArmBacklogRun(time.Now()); armed {
+					it.Status = backlog.StatusRunning
+					it.LiveAnswers++
+				}
 			}
 			return []int{id}, nil
 		})
