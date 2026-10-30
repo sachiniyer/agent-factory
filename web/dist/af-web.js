@@ -18142,6 +18142,8 @@ var AppShell = class {
   update(state, prioritizeTerminal = false) {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
+    const archiveChanged = archiveRepaintNeeded(this.lastArchive, state);
+    this.lastArchive = state.archive;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
@@ -18220,7 +18222,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -18505,6 +18507,7 @@ var AppShell = class {
    *  time, so the rail says how many older sessions are still on the daemon and
    *  offers the next page, reports a read in flight, or names a failed one and
    *  offers the retry. Null while the archived group is hidden or fully loaded. */
+  lastArchive;
   archiveFooter(state) {
     const a = state.archive;
     if (!a.lazy || !state.statusFilter.archived) return null;
@@ -19538,6 +19541,9 @@ function inertRowReason(s) {
     cause = "account swap in progress";
   }
   return cause === "" ? "cannot be opened" : `cannot be opened \xB7 ${cause}`;
+}
+function archiveRepaintNeeded(last, state) {
+  return last !== state.archive;
 }
 function archiveFooterSignature(state) {
   const a = state.archive;
