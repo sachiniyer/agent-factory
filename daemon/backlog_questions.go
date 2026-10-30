@@ -195,6 +195,15 @@ func (m *Manager) backlogAnswerDelivered(repoID string, a backlog.PendingAnswer,
 		return []int{a.ID}, b.AnswerDelivered(a.ID, a.AnswerID, svc.Now())
 	}); err != nil {
 		m.warn().Printf("record delivered answer on %s: %v", backlog.FormatID(a.ID), err)
+		return
+	}
+	// A pending answer holds back the run's end (RunEnded), so an agent that
+	// finished the answer before this write landed had its idle edge dropped and
+	// no later edge will come: settle it now if the session is idle with the
+	// marker clear. Fenced by the generation, like every completion.
+	if s, ok := m.itemSessions(repoID)[a.SessionID]; ok && !s.instance.BacklogRunActive() &&
+		s.view.Liveness == session.LiveReady {
+		m.settleRunEnd(repoID, a.SessionID, s.gen, stop)
 	}
 }
 

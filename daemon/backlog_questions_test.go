@@ -436,3 +436,21 @@ func TestAnswerWithAnUncertainDeliveryKeepsTheRunAndIsNotResent(t *testing.T) {
 		t.Fatalf("no note about the unconfirmed delivery: %+v", n)
 	}
 }
+
+// If the answered run goes idle before the delivered-outcome write lands, the
+// pending answer held its end back; recording the delivery settles it (Codex P2
+// on #6295), so the item is not left running with nothing to end it.
+func TestAnswerDeliveredReplaysACompletionItSuppressed(t *testing.T) {
+	m, repoID, inst := askedItem(t)
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(*Manager, SendPromptRequest) error {
+		idleItemSession(t, inst) // the agent finished before the outcome is recorded
+		return nil
+	}
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	answer(t, m, repoID, "Postgres")
+	m.backgroundMutationWG.Wait()
+	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusReview {
+		t.Fatalf("status = %s, want review: the suppressed completion was never replayed", it.Status)
+	}
+}
