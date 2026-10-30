@@ -270,6 +270,14 @@ func backlogArchiveCheck(sessionID string, current *session.Instance, deliveries
 	case current.LastPaneChurnAt().After(current.BacklogRunEndedAt()):
 		return errors.New("the session changed after its run ended")
 	}
+	// The delivery counter above is memory-only, so after a daemon restart it says
+	// nothing. The persisted prompt attempt does: a prompt that reached (or may
+	// have reached) the session after the run ended is work the archive would
+	// interrupt. A proven non-delivery is not.
+	if d := current.ToInstanceData(); d.LastPromptAttemptAt.After(current.BacklogRunEndedAt()) &&
+		d.LastPromptDeliveryStatus != session.PromptNotDelivered {
+		return errors.New("a prompt was sent to the session after its run ended")
+	}
 	return nil
 }
 
