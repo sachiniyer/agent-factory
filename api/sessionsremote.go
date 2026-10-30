@@ -47,16 +47,17 @@ func remoteMutationError(verb string, err error) error {
 		verb, apiclient.RemoteTargetURL(), apiclient.RemoteTargetURL(), err)
 }
 
-func routedKillSession(req daemon.KillSessionRequest) error {
+func routedKillSession(req daemon.KillSessionRequest) (session.KeptBranch, error) {
 	if !apiclient.IsRemoteTarget() {
-		return daemon.KillSession(req)
+		return daemon.KillSessionKept(req)
 	}
 	c, err := remoteSessionClient()
 	if err != nil {
-		return err
+		return session.KeptBranch{}, err
 	}
 	defer c.CloseIdleConnections()
-	return remoteMutationError("kill", c.KillSession(context.Background(), req))
+	kept, err := c.KillSessionKept(context.Background(), req)
+	return kept, remoteMutationError("kill", err)
 }
 
 func routedArchiveSession(req daemon.ArchiveSessionRequest) (string, error) {

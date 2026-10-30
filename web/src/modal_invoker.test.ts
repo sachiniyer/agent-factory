@@ -65,6 +65,7 @@ for (const operation of ["kill", "archive"]) {
         doc.activeElement = doc.body;
       },
       killSession: () => Promise.reject(new Error("Rejected")),
+      fetchKeptBranch: () => Promise.resolve({}),
       archiveSession: () => Promise.reject(new Error("Rejected")),
       isMutationCommittedError: () => false, isMutationOutcomeUncertain: () => false,
       requestResync() {}, errorText: (error: Error) => error.message,
@@ -76,6 +77,8 @@ for (const operation of ["kill", "archive"]) {
     runInNewContext(code, context);
     const app = context as typeof context & { openConfirm(action: string, target: typeof session): void; closeModal(): void };
     app.openConfirm(operation, session);
+    // A delete reads the worktree's HEAD before it mounts (#6233).
+    await new Promise(resolve => setImmediate(resolve));
     confirms!.onConfirm();
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(projectionCount, 2, "optimistic hide followed by definitive rollback");

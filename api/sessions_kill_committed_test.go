@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,9 +48,9 @@ func TestSessionsKillReportsCommittedTeardownAsSuccess(t *testing.T) {
 	setupRepoForCmd(t)
 
 	prev := killSessionViaDaemon
-	killSessionViaDaemon = func(daemon.KillSessionRequest) error {
+	killSessionViaDaemon = withoutKept(func(daemon.KillSessionRequest) error {
 		return committedKillWarningTestError{}
-	}
+	})
 	defer func() { killSessionViaDaemon = prev }()
 
 	out, err := runCmdCaptureStdout(t, sessionsKillCmd, []string{"worker"})
@@ -72,13 +73,43 @@ func TestSessionsKill_StillHardFailsOnCleanError(t *testing.T) {
 	setupRepoForCmd(t)
 
 	prev := killSessionViaDaemon
-	killSessionViaDaemon = func(daemon.KillSessionRequest) error {
+	killSessionViaDaemon = withoutKept(func(daemon.KillSessionRequest) error {
 		return &plainKillError{msg: "instance not found: worker"}
-	}
+	})
 	defer func() { killSessionViaDaemon = prev }()
 
 	_, err := runCmdCaptureStdout(t, sessionsKillCmd, []string{"worker"})
 	require.Error(t, err, "a clean (non-committed) failure must remain a hard failure with a non-zero exit")
 	assert.True(t, strings.Contains(err.Error(), "instance not found"),
 		"the daemon's clean failure message must be surfaced, got: %v", err)
+}
+
+// withoutKept adapts an error-only kill stub to the seam, which also reports the
+// branch a kill left in place (#6233).
+func withoutKept(f func(daemon.KillSessionRequest) error) func(daemon.KillSessionRequest) (session.KeptBranch, error) {
+	return func(req daemon.KillSessionRequest) (session.KeptBranch, error) { return session.KeptBranch{}, f(req) }
+}
+
+// #6233: the kill result names a branch af left in place, so a stray ref is
+// never unexplained; a kill with nothing kept reports no such field.
+func TestSessionsKillReportsTheBranchItLeftInPlace(t *testing.T) {
+	setupRepoForCmd(t)
+	prev := killSessionViaDaemon
+	killSessionViaDaemon = func(daemon.KillSessionRequest) (session.KeptBranch, error) {
+		return session.KeptBranch{Name: "feature/done-flag"}, nil
+	}
+	defer func() { killSessionViaDaemon = prev }()
+	out, err := runCmdCaptureStdout(t, sessionsKillCmd, []string{"worker"})
+	require.NoError(t, err)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, "feature/done-flag", parsed["kept_branch"])
+	assert.Contains(t, parsed["note"], "kept in the repo")
+
+	killSessionViaDaemon = func(daemon.KillSessionRequest) (session.KeptBranch, error) { return session.KeptBranch{}, nil }
+	out, err = runCmdCaptureStdout(t, sessionsKillCmd, []string{"worker"})
+	require.NoError(t, err)
+	parsed = nil
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.NotContains(t, parsed, "kept_branch")
 }

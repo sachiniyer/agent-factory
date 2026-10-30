@@ -64,6 +64,7 @@ import {
   restoreSession,
   resumeFromLimit,
   confirmHandoffDelivery,
+  fetchKeptBranch,
   shouldForgetToken,
   storeToken,
   triggerTask,
@@ -89,6 +90,7 @@ import {
   confirmDeleteProjectModal,
   confirmModal,
   handoffModal,
+  type KeptBranch,
   markDeliveredModal,
   type ModalHandle,
   newSessionModal,
@@ -1239,8 +1241,10 @@ function openConfirm(
       } else showRefusal();
     });
   };
+  const mountWith = (keptBranch?: KeptBranch): void => {
   mountConfirmation(
     confirmModal({
+      keptBranch,
       action,
       sessionTitle: target.title,
       immediateRestore,
@@ -1254,6 +1258,14 @@ function openConfirm(
     }),
   );
   if (immediateRestore) onConfirm();
+  };
+  // The delete copy names a branch the delete leaves in the repo, so read the
+  // worktree's HEAD now, before the user is asked (#6233).
+  if (action === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
+    void fetchKeptBranch(target.id, target.title, token ?? "").then(mountWith);
+  } else {
+    mountWith();
+  }
 }
 
 /** Opens the delete-project confirm for a project row (#1735). On confirm it

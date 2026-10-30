@@ -23,6 +23,9 @@ type WorkspaceFactsResponse struct {
 	Measured bool                   `json:"measured"`
 	Reason   string                 `json:"reason,omitempty"`
 	Facts    session.WorkspaceFacts `json:"facts"`
+	// KeptBranch is what a delete of a local worktree session leaves in the repo,
+	// read from the worktree's HEAD now (#6233). Set independently of Measured.
+	KeptBranch session.KeptBranch `json:"kept_branch,omitempty"`
 }
 
 // workspaceFactsTarget picks the lookup namespace. An explicit stable ID is
@@ -49,6 +52,7 @@ func (s *controlServer) WorkspaceFacts(req WorkspaceFactsRequest, resp *Workspac
 	if err != nil {
 		return err
 	}
+	resp.KeptBranch = instance.KeptBranchAtDelete()
 	facts, err := instance.WorkspaceFacts()
 	if err != nil {
 		if errors.Is(err, session.ErrWorkspaceFactsUnsupported) {

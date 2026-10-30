@@ -46,3 +46,20 @@ test("archived local deletion still respects af-created branch ownership", () =>
   assert.match(copy, /Restore instead/);
   assert.doesNotMatch(copy, /branch.*stay|Archive to keep/);
 });
+
+// #6233: the delete confirm names a branch af does not own that survives the
+// delete, and says it and its commits are kept; an unreadable HEAD is said, not guessed.
+test("deletion copy names a user branch that survives", () => {
+  const base = { archived: false, offBox: false, externalWorktree: false, branchCreatedByUs: true };
+  const copy = deletionConfirmationBody({ ...base, keptBranch: { name: "feature/done-flag" } });
+  assert.match(copy, /Branch 'feature\/done-flag' is checked out in the worktree and af does not own it/);
+  assert.match(copy, /the branch and its commits are kept in the repo\./);
+  assert.doesNotMatch(deletionConfirmationBody(base), /kept in the repo/);
+  assert.match(deletionConfirmationBody({ ...base, keptBranch: { unreadable: true } }), /Could not read the worktree's current branch/);
+});
+
+test("kept-branch copy is only for local worktrees af removes", () => {
+  const kept = { name: "feature/done-flag" };
+  assert.doesNotMatch(deletionConfirmationBody({ archived: false, offBox: true, externalWorktree: false, branchCreatedByUs: true, keptBranch: kept }), /feature\/done-flag/);
+  assert.doesNotMatch(deletionConfirmationBody({ archived: false, offBox: false, externalWorktree: true, branchCreatedByUs: true, keptBranch: kept }), /feature\/done-flag/);
+});

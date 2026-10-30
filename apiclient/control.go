@@ -45,7 +45,16 @@ func (c *Client) CreateSession(req daemon.CreateSessionRequest) (*session.Instan
 // request and never answers strands the row in `Deleting` permanently. See
 // callCtx for why the local socket has no deadline of its own.
 func (c *Client) KillSession(ctx context.Context, req daemon.KillSessionRequest) error {
-	return c.callCtx(ctx, "KillSession", req, &daemon.KillSessionResponse{})
+	_, err := c.KillSessionKept(ctx, req)
+	return err
+}
+
+// KillSessionKept is KillSession that also returns the branch the kill left in
+// place in the repo (#6233).
+func (c *Client) KillSessionKept(ctx context.Context, req daemon.KillSessionRequest) (session.KeptBranch, error) {
+	var resp daemon.KillSessionResponse
+	err := c.callCtx(ctx, "KillSession", req, &resp)
+	return resp.KeptBranch, err
 }
 
 // WorkspaceFacts asks the daemon to measure an off-box session's workspace for

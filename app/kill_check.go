@@ -58,6 +58,11 @@ func assessKillLoss(impact session.WorktreeCleanupImpact) killLossAssessment {
 	if w := killConfirmationWarning(wt); w != "" {
 		loss.warnings = append(loss.warnings, w)
 	}
+	// The delete never removes a branch af does not own: say what survives, from
+	// the HEAD the worktree has right now (#6233).
+	if kept := session.KeptBranchAt(wt, impact.Branch); kept.Any() {
+		loss.warnings = append(loss.warnings, kept.Note())
+	}
 	if line, severe := unmergedCommitWarning(wt, impact.Branch, impact.BaseCommitSHA, impact.DeleteBranch); line != "" {
 		if severe {
 			loss.severe = line

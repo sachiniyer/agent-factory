@@ -45,7 +45,8 @@ func TestRoutedLifecycleVerbsReachRemoteTarget(t *testing.T) {
 	t.Cleanup(func() { apiclient.FlagDaemonURL, apiclient.FlagDaemonToken = oldURL, oldTok })
 	t.Setenv("AF_HOME", t.TempDir())
 
-	require.NoError(t, routedKillSession(daemon.KillSessionRequest{Title: "a"}))
+	_, killErr := routedKillSession(daemon.KillSessionRequest{Title: "a"})
+	require.NoError(t, killErr)
 	p, err := routedArchiveSession(daemon.ArchiveSessionRequest{Title: "a"})
 	require.NoError(t, err)
 	require.Equal(t, "/srv/box/arch", p)

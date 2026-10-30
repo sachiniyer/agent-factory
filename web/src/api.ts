@@ -571,6 +571,18 @@ export async function killSession(id: string, title: string, token: string): Pro
   }
 }
 
+/** Reads, at confirm time, the branch a delete would leave in the repo: the HEAD
+ *  of the session's worktree, not its recorded branch (#6233). A failed read is
+ *  reported as unreadable rather than guessed. */
+export async function fetchKeptBranch(id: string, title: string, token: string): Promise<{ name?: string; unreadable?: boolean }> {
+  try {
+    const r = await af<{ kept_branch?: { name?: string; unreadable?: boolean } }>("WorkspaceFacts", { id, title, repo_id: "" }, token);
+    return r.kept_branch ?? {};
+  } catch {
+    return { unreadable: true };
+  }
+}
+
 /** Archives a session (mirrors `af sessions archive`) — non-destructive, keeps it
  *  restorable. The session.archived event triggers a rail resync. */
 export async function archiveSession(id: string, title: string, token: string): Promise<void> {

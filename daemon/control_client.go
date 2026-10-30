@@ -693,12 +693,19 @@ func PreviewSessionSnapshot(req PreviewRequest) (PreviewResponse, error) {
 // the way ArchiveSession preserves its committed error for the same outcome
 // class (#3252).
 func KillSession(req KillSessionRequest) error {
+	_, err := KillSessionKept(req)
+	return err
+}
+
+// KillSessionKept is KillSession that also reports the branch the kill left in
+// place in the repo (#6233), kept on the committed path too.
+func KillSessionKept(req KillSessionRequest) (session.KeptBranch, error) {
 	var resp KillSessionResponse
 	err := callDaemon("KillSession", req, &resp)
 	if err != nil && !isMutationCommitted(err) {
-		return err // clean failure → caller hard-fails
+		return session.KeptBranch{}, err // clean failure → caller hard-fails
 	}
-	return err // success (nil) OR committed path → caller classifies via IsMutationCommitted
+	return resp.KeptBranch, err // success (nil) OR committed path → caller classifies via IsMutationCommitted
 }
 
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the
