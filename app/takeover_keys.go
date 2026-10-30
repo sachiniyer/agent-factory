@@ -35,8 +35,12 @@ import (
 //     routes the prefix away from the detach key: the prefix is C-b, unless the
 //     configured key IS C-b, in which case the prefix is disabled and the detach
 //     key wins. prefix2 is always disabled. There is no collision left to refuse.
-//   - destroy-unattached: the private session dies with its client, so a crash
-//     leaves nothing selectable behind.
+//   - teardown is explicit, never tmux's destroy-unattached: the reaper that
+//     option arms killed the whole tmux server intermittently on tmux 3.3a when it
+//     destroyed a grouped session whose source was being killed (#6193). The
+//     client's exit runs the cleanup below, and the daemon kills a source
+//     session's group mates with it (session/tmux/group.go), so a crash leaves a
+//     private session that dies with its source.
 //
 // The configured detach key therefore always detaches the client that was
 // advertised it, whichever value of detach_keys is in force.
@@ -81,9 +85,8 @@ func (r takeoverRoute) attachArgs() []string {
 	// a login that exited between the daemon's answer and this start: `new-session
 	// -t` accepts a missing target and would create an unrelated shell, where
 	// `attach-session -t` failed, so a vanished session is an error again. The
-	// private session is created detached, and destroy-unattached is set last,
-	// immediately before the attach, so the server does not reap it while it is
-	// still being routed.
+	// private session is created detached. It is NOT given destroy-unattached: that
+	// reaper intermittently took the whole tmux server down (#6193).
 	return []string{
 		"has-session", "-t", "=" + r.session, ";",
 		"new-session", "-d", "-t", r.session, "-s", r.group, ";",
@@ -94,7 +97,6 @@ func (r takeoverRoute) attachArgs() []string {
 		"set-option", "-t", r.group, "key-table", r.table, ";",
 		"bind-key", "-T", r.table, r.key, "detach-client", ";",
 		"set-option", "-t", r.group, "status-right", r.display + " leaves", ";",
-		"set-option", "-t", r.group, "destroy-unattached", "on", ";",
 		"attach-session", "-t", r.group,
 	}
 }
@@ -120,7 +122,7 @@ func (r takeoverRoute) mirrorRootScript() string {
 // gone in the takeover pane, and with the global mouse option off the pane loses
 // scrolling and selection. `show-options` prints only options set on that session,
 // in a form `source-file` accepts. It runs BEFORE the routing options below, so
-// the takeover's own prefix, key-table, status hint and destroy-unattached win
+// the takeover's own prefix, key-table, and status hint win
 // over a copied value. A failed copy must not abort the takeover.
 func (r takeoverRoute) mirrorSessionOptionsScript() string {
 	return "tmux show-options -t " + shellQuote("="+r.session) + " | sed -E 's/^/set-option -t " + r.group + " /' | tmux source-file - || true"
@@ -152,8 +154,9 @@ func registerTakeoverRoute(cmd *exec.Cmd, socket string, r takeoverRoute) {
 }
 
 // bareAttachCleanup retires the routing the takeover command installed, once its
-// client is gone. Best-effort: a crash skips it, which is harmless — the private
-// session was destroy-unattached and its table is reachable only through it.
+// client is gone. Best-effort: a crash skips it, which is harmless — the table is
+// reachable only through the private session, and the daemon kills that session
+// with its source.
 func bareAttachCleanup(cmd *exec.Cmd) {
 	v, ok := takeoverRoutes.LoadAndDelete(cmd)
 	if !ok {

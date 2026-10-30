@@ -287,7 +287,9 @@ func TestTakeoverConfiguresBeforeItAttaches(t *testing.T) {
 	joined := strings.Join(args, " ")
 	assert.Contains(t, joined, "status-right ctrl+w leaves")
 	assert.Less(t, strings.Index(joined, "bind-key"), strings.Index(joined, "attach-session"))
-	assert.Less(t, strings.Index(joined, "destroy-unattached on"), strings.Index(joined, "attach-session"))
+	// #6193: tmux's destroy-unattached reaper took the whole server down
+	// intermittently; teardown is the explicit cleanup, never the option.
+	assert.NotContains(t, joined, "destroy-unattached")
 }
 
 // #6073: a takeover pane keeps every binding the session's normal pane has —
