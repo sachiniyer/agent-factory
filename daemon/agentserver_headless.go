@@ -588,6 +588,9 @@ var agentServerWireFeatures = []string{
 	// "account-swap": POST /v1/agent/swap-account — rotate the staged account
 	// scope in and relaunch the agent on it (#5571 W7.6).
 	session.AccountSwapFeature,
+	// "tab-restore": a restart adoption's Launch carries the roster; survivors
+	// are rebound, never re-run (W1.4, #6162).
+	session.TabRestoreFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version
@@ -621,6 +624,8 @@ type agentLifecycleRequest struct {
 	RestartAdoption bool `json:"restart_adoption,omitempty"`
 	// SiblingTabs: non-agent tabs the daemon's row records (restart adoption).
 	SiblingTabs int `json:"sibling_tabs,omitempty"`
+	// Tabs: the surviving-tab roster (feature tab-restore).
+	Tabs []session.TabData `json:"tabs,omitempty"`
 	// Conversation is the daemon's recorded conversation for this launch to
 	// resume (#5571 W7.2); honored only where this host's provider store holds it.
 	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
@@ -632,6 +637,9 @@ type agentOKResponse struct {
 	// Conversation is the conversation a launch came up on (#5571 W7.2); the
 	// daemon records it as it does for a local session.
 	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
+	// TabsRestored / TabsGone answer a restart adoption's Tabs.
+	TabsRestored []string `json:"tabs_restored,omitempty"`
+	TabsGone     []string `json:"tabs_gone,omitempty"`
 }
 
 func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResponse) error {

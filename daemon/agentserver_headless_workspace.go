@@ -101,5 +101,10 @@ func (hs *headlessServer) launchAdopted(req agentLifecycleRequest, resp *agentOK
 	if conv := hs.inst.AgentConversation(); conv.HasID() {
 		resp.Conversation = &conv
 	}
+	if req.RestartAdoption && len(req.Tabs) > 0 {
+		// Rebind the surviving shell/process tabs (W1.4, #6162); nothing re-runs.
+		rep := hs.inst.RestoreSurvivingTabs(req.Tabs)
+		resp.TabsRestored, resp.TabsGone = rep.Restored, rep.Gone
+	}
 	return nil
 }
