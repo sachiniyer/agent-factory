@@ -246,7 +246,11 @@ export function attentionChip(onDismiss: () => void) {
   const patch = (on: boolean, reason: string) => {
     el.hidden = !on;
     const title = reason ? `Needs attention: ${reason}` : "Needs attention";
-    if (el.title !== title) el.title = title;
+    if (el.title !== title) {
+      el.title = title;
+      // The phone app bar shows the bell and × only, so the words live here.
+      el.setAttribute("aria-label", title);
+    }
   };
   return { el, dismiss, patch };
 }
