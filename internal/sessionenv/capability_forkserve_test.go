@@ -87,13 +87,33 @@ func TestCapability_ForkThenExecResponderIsRefused(t *testing.T) {
 	// Own process group: the forked responder is not a child of the test, so
 	// killing the group is the only way to be sure none outlives it.
 	parent.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Make this process the subreaper so the responder, orphaned when the parent
+	// dies, is adopted by the test and not by PID 1. A container PID 1 that never
+	// reaps would otherwise leave it a zombie, and "gone" would depend on it.
+	const prSetChildSubreaper = 36
+	_, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, prSetChildSubreaper, 1, 0)
+	require.Zero(t, errno, "PR_SET_CHILD_SUBREAPER")
 	require.NoError(t, parent.Start())
 	pgid := parent.Process.Pid
 	t.Cleanup(func() {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		_, _ = parent.Process.Wait()
-		require.Eventually(t, func() bool { return syscall.Kill(-pgid, 0) == syscall.ESRCH },
-			5*time.Second, 20*time.Millisecond, "a process of the attack group is still running")
+		// Reap the parent first: its death reparents the responder to this
+		// process. Then reap every remaining child of the group until ECHILD, so
+		// the assertion below is made on a reaped state.
+		var ws syscall.WaitStatus
+		_, err := syscall.Wait4(pgid, &ws, 0, nil)
+		require.NoError(t, err, "reap the attack parent")
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			_, err := syscall.Wait4(-pgid, &ws, syscall.WNOHANG, nil)
+			if err == syscall.ECHILD {
+				break
+			}
+			require.True(t, err == nil, "reap the forked responder: %v", err)
+			require.True(t, time.Now().Before(deadline), "a process of the attack group is still running")
+			time.Sleep(10 * time.Millisecond)
+		}
+		require.Equal(t, syscall.ESRCH, syscall.Kill(-pgid, 0), "a process of the attack group survived its reaping")
 	})
 	require.Eventually(t, func() bool { _, err := os.Stat(sock); return err == nil }, 5*time.Second, 20*time.Millisecond)
 	time.Sleep(300 * time.Millisecond) // the parent has exec'd the real binary by now
