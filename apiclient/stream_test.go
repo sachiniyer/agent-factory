@@ -236,3 +236,96 @@ func TestDialStream_StableIDDialsIDOnly(t *testing.T) {
 		t.Fatalf("tab_id = %q, want tab-9", got)
 	}
 }
+
+// TestDialStream_SurfacesDaemonErrorBodyOnNon101Handshake pins the bug fix for
+// "CLI: Attaching to archived sessions fails with opaque WebSocket 500 instead of
+// restore guidance". The daemon's /stream route refuses a non-live target BEFORE
+// websocket.Accept, answering the dial with a non-101 status whose body is the
+// failure envelope writeHTTPError wrote. coder/websocket's dial error carries
+// only the mismatched status ("expected 101 ... but got 404"), so DialStream must
+// read that body and append the daemon's message — otherwise the actionable
+// refusal (here the Archived restore off-ramp) is dropped and the user sees an
+// opaque transport fault. This stands up the daemon's exact refusal shape (a 404
+// carrying the apiproto failure envelope, no WS upgrade) and asserts the message
+// reaches the caller.
+func TestDialStream_SurfacesDaemonErrorBodyOnNon101Handshake(t *testing.T) {
+	const wantMessage = `target session "archived" is Archived; prompt not delivered; restore it first (af sessions restore -- archived)`
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sessions/{id}/stream", func(w http.ResponseWriter, _ *http.Request) {
+		// Mirror daemon.httpserver.writeHTTPEnvelope: marshal the envelope, set
+		// Content-Length, then WriteHeader + body, so the refusal shape matches
+		// what the daemon actually sends on the liveness gate.
+		body, mErr := apiproto.MarshalIndented(apiproto.Failure(wantMessage))
+		if mErr != nil {
+			t.Fatalf("marshal envelope: %v", mErr)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write(body)
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	c := NewWithSocket(sockPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = c.DialStream(ctx, StreamSession{Title: "archived", RepoID: "repo-x"}, "", 0, 0)
+	if err == nil {
+		t.Fatal("DialStream against a non-101 refusal returned nil error; want the daemon's refusal")
+	}
+	if !strings.Contains(err.Error(), wantMessage) {
+		t.Fatalf("DialStream dropped the daemon's error body on the non-101 handshake; error must surface the actionable refusal\nerr: %v", err)
+	}
+	// The mismatched status is still present — the body augments it, it does not
+	// replace the transport context — so a failure that is NOT the daemon's
+	// refusal (e.g. a proxy 500) still names the status that broke the handshake.
+	if !strings.Contains(err.Error(), "404") {
+		t.Fatalf("DialStream error lost the handshake status; the daemon message must augment, not replace it\nerr: %v", err)
+	}
+	// The access-token redaction path still wraps the composed error: the dial
+	// is a TransportError so the existing classification (warm-up retry, etc.) is
+	// unchanged — only the message gained the daemon's body.
+	if !IsTransportError(err) {
+		t.Fatalf("a non-101 dial must stay a TransportError so callers' classification is unchanged; got %T: %v", err, err)
+	}
+}
+
+// TestDialStream_Non101WithEmptyBodyKeepsHandshakeStatus proves the body-surfacing
+// path does not add noise when there is nothing to surface: a non-101 with an empty
+// body (a transport fault, not the daemon's refusal) reports the handshake status
+// alone, unchanged from before the body-surfacing fix.
+func TestDialStream_Non101WithEmptyBodyKeepsHandshakeStatus(t *testing.T) {
+	sockPath := testguard.SocketPath(t, "daemon-http.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sessions/{id}/stream", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	c := NewWithSocket(sockPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = c.DialStream(ctx, StreamSession{Title: "warming"}, "", 0, 0)
+	if err == nil {
+		t.Fatal("DialStream against a non-101 empty-body refusal returned nil error")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Fatalf("DialStream error lost the handshake status for an empty body\nerr: %v", err)
+	}
+	if strings.Contains(err.Error(), "empty response body") {
+		t.Fatalf("DialStream appended body-snippet noise for an empty non-101 body; the status alone is the answer\nerr: %v", err)
+	}
+}

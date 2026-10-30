@@ -601,7 +601,22 @@ func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentS
 	return m.agentServerForStreamTarget(authoritativeStreamTarget(idOrTitle, repoID))
 }
 
+// agentServerForStreamTarget resolves a target to its agent-server without any
+// liveness gate: Preview and WorkspaceFacts measure rows an attach would refuse
+// (an Archived session's preview, a remote row whose endpoint recovered before
+// the next status reconciliation), so they must keep resolving them.
 func (m *Manager) agentServerForStreamTarget(target streamTarget) (session.AgentServer, *session.Instance, error) {
+	return m.resolveAgentServerForTarget(target, false)
+}
+
+// agentServerForAttachTarget is agentServerForStreamTarget for the attach paths
+// only (/stream and /stream-info): it additionally refuses a non-live target
+// before the WS upgrade, with the restore off-ramp.
+func (m *Manager) agentServerForAttachTarget(target streamTarget) (session.AgentServer, *session.Instance, error) {
+	return m.resolveAgentServerForTarget(target, true)
+}
+
+func (m *Manager) resolveAgentServerForTarget(target streamTarget, attach bool) (session.AgentServer, *session.Instance, error) {
 	instance, resolvedRepoID, title, err := m.resolveStreamTarget(target)
 	if err != nil {
 		return nil, nil, err
@@ -612,6 +627,18 @@ func (m *Manager) agentServerForStreamTarget(target streamTarget) (session.Agent
 			name = target.stableID
 		}
 		return nil, nil, fmt.Errorf("session %q not found", name)
+	}
+	// Attach only: refuse a non-live target with the same actionable off-ramp
+	// SendPrompt's promptTargetLivenessError returns (#1529). The stream path
+	// resolves any title-matching row with no liveness filter, so an Archived (or
+	// Lost/Dead) session would upgrade the WS and then fail deep at broker
+	// subscribe with a generic 500 whose body the client discards. Refusing here
+	// keeps the failure BEFORE websocket.Accept. streamTargetLivenessError keeps
+	// the refusal inside the 1 KiB the WS dial client reads.
+	if attach {
+		if err := streamTargetLivenessError(title, instance.GetLiveness()); err != nil {
+			return nil, nil, err
+		}
 	}
 	// Reject a new subscription while a kill is in flight for this session, the
 	// same killsInFlight gate SendPrompt checks (#1632). Streaming previously
