@@ -66,11 +66,14 @@ type Move struct {
 	Into   int
 	Top    bool
 	Bottom bool
+	// Root makes the item the last top-level item, whatever its parent was.
+	// Bottom, by contrast, keeps the item under its current parent.
+	Root bool
 }
 
 func (m Move) count() int {
 	n := 0
-	for _, set := range []bool{m.Before != 0, m.After != 0, m.Into != 0, m.Top, m.Bottom} {
+	for _, set := range []bool{m.Before != 0, m.After != 0, m.Into != 0, m.Top, m.Bottom, m.Root} {
 		if set {
 			n++
 		}
@@ -80,6 +83,12 @@ func (m Move) count() int {
 
 // Move reorders the backlog. On error b is unchanged.
 func (b *Backlog) Move(id int, to Move, now time.Time) error {
+	return b.move(id, to, now, true)
+}
+
+// move is Move; checkCycles false leaves the dependency check to the caller,
+// for a batch that applies many moves and validates the finished graph once.
+func (b *Backlog) move(id int, to Move, now time.Time, checkCycles bool) error {
 	if to.count() != 1 {
 		return errors.New("move needs exactly one of --before, --after, --top, --bottom, --into")
 	}
@@ -100,6 +109,8 @@ func (b *Backlog) Move(id int, to Move, now time.Time) error {
 	case to.Into != 0:
 		anchor = to.Into
 		parent = to.Into
+	case to.Root:
+		parent = 0
 	}
 	if anchor == id || (anchor != 0 && b.IsAncestor(id, anchor)) {
 		return fmt.Errorf("%s cannot move relative to itself or an item inside it", FormatID(id))
@@ -128,7 +139,7 @@ func (b *Backlog) Move(id int, to Move, now time.Time) error {
 		at = c.index(to.Before)
 	case to.After != 0:
 		at = c.subtreeEnd(c.index(to.After))
-	case to.Into != 0, to.Bottom:
+	case to.Into != 0, to.Bottom, to.Root:
 		at = c.bottomOf(parent)
 	case to.Top:
 		at = c.topOf(parent)
@@ -140,8 +151,10 @@ func (b *Backlog) Move(id int, to Move, now time.Time) error {
 			p.UpdatedAt = now
 		}
 	}
-	if err := c.checkCycles(); err != nil {
-		return err
+	if checkCycles {
+		if err := c.checkCycles(); err != nil {
+			return err
+		}
 	}
 	*b = *c
 	return nil

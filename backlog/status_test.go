@@ -2,6 +2,7 @@ package backlog
 
 import (
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -172,5 +173,36 @@ func TestSetStatusParent(t *testing.T) {
 	b = mk(t, Item{ID: 1}, Item{ID: 2, Parent: 1, Status: StatusQueued})
 	if _, err := b.SetStatus(1, StatusQueued, ActorUser, nil, t0); err == nil || !strings.Contains(err.Error(), "no children to queue") {
 		t.Fatal(err)
+	}
+}
+
+// Dropping a parent closes the open questions on the parent and on every
+// intermediate parent, not only on the leaves (Codex P2 on #6286): otherwise the
+// derived state stays needs_you and a retry fails with "no children to drop".
+func TestDropAParentClosesItsOwnAndIntermediateQuestions(t *testing.T) {
+	q := []Message{{ID: 1, Kind: KindQuestion, Text: "?"}}
+	b := mk(t,
+		Item{ID: 1, Thread: q},
+		Item{ID: 2, Parent: 1, Thread: q},
+		Item{ID: 3, Parent: 2},
+	)
+	changed, err := b.SetStatus(1, StatusDropped, ActorUser, nil, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int{1, 2} {
+		if b.Item(id).OpenQuestion() != nil {
+			t.Fatalf("%s still has an open question", FormatID(id))
+		}
+		if got := b.Item(id).Thread[0].Closed; got != ClosedDropped {
+			t.Fatalf("%s question closed as %q", FormatID(id), got)
+		}
+	}
+	sort.Ints(changed)
+	if !reflect.DeepEqual(changed, []int{1, 2, 3}) {
+		t.Fatalf("changed = %v, want the leaf and the two parents whose questions closed", changed)
+	}
+	if st := b.Derive(1, nil).State; st != StateDropped {
+		t.Fatalf("parent derives %q, want dropped", st)
 	}
 }

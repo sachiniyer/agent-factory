@@ -17,7 +17,14 @@ type Ref struct {
 
 func (r Ref) IsZero() bool { return r.Key == "" && r.ID == 0 }
 
+// MarshalJSON writes a zero reference as null, which UnmarshalJSON accepts and
+// AddBatch ignores, so a batch the daemon accepts survives being re-serialized
+// (a remote af backlog add --file sends it over HTTP). Writing 0 would be
+// refused as "item id 0 must be positive".
 func (r Ref) MarshalJSON() ([]byte, error) {
+	if r.IsZero() {
+		return []byte("null"), nil
+	}
 	if r.Key != "" {
 		return json.Marshal(r.Key)
 	}
@@ -179,35 +186,67 @@ func (b *Backlog) AddBatch(in Batch, now time.Time) (map[string]int, error) {
 	return ids, nil
 }
 
-// placeBatch moves every batch item under its parent. New items (negative in
-// ordered) go to the bottom of their parent; existing items move only when
-// their parent changed. Parents are placed before their children.
+// placeBatch moves every batch item under its requested parent. New items
+// (negative in ordered) go to the bottom of their parent; existing items move
+// only when their parent changed.
+//
+// It works from the FINAL tree: it first checks that the parent links that
+// result (the batch's for its items, the current ones for everything else) have
+// no loop, then applies moves in passes, each pass taking every move that is
+// legal in the tree as it stands (an item cannot move into its own subtree, and
+// an intermediate parent the batch leaves alone may still sit below an item the
+// batch is about to move). Because the final tree is acyclic, some pending move
+// is always legal, so the passes finish whatever the input order. It does not
+// check dependency cycles; the caller checks the finished graph.
 func (b *Backlog) placeBatch(ordered, parents []int, now time.Time) error {
-	placed := map[int]bool{}
-	pending := map[int]bool{}
-	for _, o := range ordered {
-		pending[abs(o)] = true
+	want := map[int]int{}
+	for i, o := range ordered {
+		want[abs(o)] = parents[i]
 	}
-	for progress := true; progress; {
-		progress = false
-		for i, o := range ordered {
-			id, p := abs(o), parents[i]
-			if placed[id] || (p != 0 && pending[p] && !placed[p]) {
-				continue
+	for _, it := range b.Items {
+		for cur, steps := it.ID, 0; cur != 0; steps++ {
+			if steps > len(b.Items) {
+				return errors.New("the batch's parent links form a loop")
 			}
-			it := b.Item(id)
-			if o < 0 || it.Parent != p {
-				mv := Move{Into: p, Bottom: p == 0}
-				if err := b.Move(id, mv, now); err != nil {
-					return err
-				}
+			if p, inBatch := want[cur]; inBatch {
+				cur = p
+			} else {
+				cur = b.Item(cur).Parent
 			}
-			placed[id] = true
-			progress = true
 		}
 	}
-	if len(placed) != len(pending) {
-		return errors.New("the batch's parent links form a loop")
+	pending := map[int]int{}
+	for i, o := range ordered {
+		pending[i] = o
+	}
+	for len(pending) > 0 {
+		progress := false
+		for i, o := range ordered {
+			if _, ok := pending[i]; !ok {
+				continue
+			}
+			id, p := abs(o), parents[i]
+			if o >= 0 && b.Item(id).Parent == p {
+				delete(pending, i)
+				progress = true
+				continue
+			}
+			if p != 0 && (p == id || b.IsAncestor(id, p)) {
+				continue // legal once the batch relocates id's descendant p
+			}
+			// Root, not Bottom: an existing item whose parent was removed must
+			// leave it (Bottom keeps the current parent). The dependency check
+			// waits for the finished batch (AddBatch), because a valid final
+			// tree can pass through a cyclic intermediate one.
+			if err := b.move(id, Move{Into: p, Root: p == 0}, now, false); err != nil {
+				return err
+			}
+			delete(pending, i)
+			progress = true
+		}
+		if !progress {
+			return errors.New("the batch's parent links form a loop")
+		}
 	}
 	return nil
 }

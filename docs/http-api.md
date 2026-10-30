@@ -395,7 +395,7 @@ clients are unaffected.
 
 Ten POST routes serve a project's backlog (the `af backlog` CLI calls them): `GetBacklog`, `AddBacklogItems`, `UpdateBacklogItem`, `MoveBacklogItem`, `SetBacklogItemStatus`, `DeleteBacklogItem`, `PostBacklogMessage`, `SetBacklogSettings`, `GetBudget` and `SetBudget`. The per-route fields are in [the generated reference](reference/api.md). A project request names its project with exactly one of `repo_id` or `repo_path` (a path on the daemon host). None of these routes accepts the scoped sandbox credential.
 
-Every write publishes a `backlog.changed` event on `GET /v1/events` with `{repo_id, ids}`: the ids the write touched, including items whose waits-on link was removed by a delete and both parents of a move. Refusals are ordinary `500` envelopes with the reason in `error.message`; an invalid budget amount (non-finite, negative or out of range) is refused before anything is written.
+Every write publishes a `backlog.changed` event on `GET /v1/events` with `{repo_id, ids}`: the ids the write touched, including items whose waits-on link was removed by a delete and both parents of a move. The frame names the project and the ids the write touched, not the new rows or their derived state, and a write that changes a parent's roll-up (queueing or finishing a child) does not name the parent; re-read `GetBacklog` on any frame. An empty `ids` means a project-level change (the runner settings): refresh the project. The global budget publishes no event. Refusals are ordinary `500` envelopes with the reason in `error.message`; an invalid budget amount (non-finite, negative or out of range) is refused before anything is written.
 
 ### Session state names
 
