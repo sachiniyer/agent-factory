@@ -213,15 +213,8 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 		usage = m.meterUsageWithin(meterFreshFor)
 		p = plan()
 	}
-	p.Start = m.withOpenContinuations(repoID, b, states, p, *budget, usage, now)
+	p.Start = m.selectStarts(repoID, b, states, p, *budget, usage, now)
 	for _, id := range p.Start {
-		// A continuation spends its own session's account, whatever the project's
-		// default is now: that account's gates decide (Codex P2 on #6300).
-		if acct := m.continuationAccount(repoID, b, id); acct != "" {
-			if g := m.backlogGateFor(acct, *budget, usage, now); !g.Open() {
-				continue
-			}
-		}
 		_, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: id}, backlog.StartedByRunner)
 		if errors.Is(err, errSlotsFull) || errors.Is(err, errRunnerOff) {
 			break
@@ -329,40 +322,51 @@ func (s *controlServer) RunBacklog(req RunBacklogRequest, resp *RunBacklogRespon
 	return nil
 }
 
-// withOpenContinuations adds the continuations whose OWN session's account has
-// open gates when the project's default-account gate is closed: a queued item
-// with a live session under account A is not blocked by account B (the project's
-// current default) being out of budget, since the work goes to A's session
-// (Codex P2 on #6300). New sessions still use the default's gates, so a closed
-// default gate adds nothing for them. The per-start check in the pass loop
-// applies the continuation's gate again.
-func (m *Manager) withOpenContinuations(repoID string, b *backlog.Backlog, states map[int]backlog.Derived, p backlog.RunnerPlan, budget backlog.Budget, usage planusage.Usage, now time.Time) []int {
-	if !b.Settings.Runner || len(p.Start) > 0 || p.View.Gate == "" || p.View.Gate == backlog.GatePlanUsageOff {
+// selectStarts picks the items this pass starts, each judged against the account
+// it would actually spend: a continuation spends its live session's account, a new
+// session the project's default. The runner plan above gates and paces on the
+// default alone, so its choice is only used when a gate holds regardless of the
+// account (plan usage off, no meter); otherwise the whole queue is scanned, so an
+// item whose account is closed or stale never hides one whose account is open
+// (Codex P2s on #6300). Pacing is per account and counts this pass's picks.
+func (m *Manager) selectStarts(repoID string, b *backlog.Backlog, states map[int]backlog.Derived, p backlog.RunnerPlan, budget backlog.Budget, usage planusage.Usage, now time.Time) []int {
+	if !b.Settings.Runner || p.View.Gate == backlog.GatePlanUsageOff || p.View.Gate == backlog.GateMeterUnavailable {
 		return p.Start
 	}
 	free := backlog.FreeSlots(b.Settings.MaxRunning, m.backlogSlotsUsed(repoID))
 	if free <= 0 {
-		return p.Start
+		return nil
 	}
-	// Scan the WHOLE queue: a new-session item at the front (rejected by the
-	// default's closed gate) must not hide a continuation behind it. Each
-	// continuation is paced by its own account's reading, like the normal path.
-	out := p.Start
-	started := 0
-	for _, id := range b.Runnable(states, len(b.Items), m.backlog.runner.backingOff(repoID, now)) {
-		if started >= free {
+	defAcct, defErr := m.itemAccount(repoID)
+	rs := &m.backlog.runner
+	var out []int
+	picked := map[string]int{}
+	gates := map[string]backlog.Gate{}
+	for _, id := range b.Runnable(states, len(b.Items), rs.backingOff(repoID, now)) {
+		if len(out) >= free {
 			break
 		}
 		acct := m.continuationAccount(repoID, b, id)
-		if acct == "" || !m.backlogGateFor(acct, budget, usage, now).Open() {
+		if acct == "" {
+			if defErr != nil {
+				continue // a new session needs a resolvable account
+			}
+			acct = defAcct
+		}
+		g, ok := gates[acct]
+		if !ok {
+			g = m.backlogGateFor(acct, budget, usage, now)
+			gates[acct] = g
+		}
+		if !g.Open() {
 			continue
 		}
-		limit := m.backlog.runner.startLimit(func(pc *backlog.StartPacer) int { return pc.Limit(usageFor(usage, acct), now) })
-		if limit >= 0 && started >= limit {
+		limit := rs.startLimit(func(pc *backlog.StartPacer) int { return pc.Limit(usageFor(usage, acct), now) })
+		if limit >= 0 && picked[acct] >= limit {
 			continue
 		}
+		picked[acct]++
 		out = append(out, id)
-		started++
 	}
 	return out
 }

@@ -562,3 +562,21 @@ func TestContinuationAccountIsTheLiveSessionsAccount(t *testing.T) {
 		t.Fatalf("an item with no run starts a new session on the default: %q", got)
 	}
 }
+
+// A daemon that inherited a registered account's config dir runs its sessions as
+// that account, so the runner's gate identity for "no selection" is that account,
+// not the ambient key (Codex P2 on #6300).
+func TestPlanAccountFollowsTheInheritedConfigDir(t *testing.T) {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "accounts", "claude", "work"))
+	if got := planAccount(""); got != "work" {
+		t.Fatalf("planAccount(\"\") = %q, want work", got)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "elsewhere"))
+	if got := planAccount(""); got != planusage.DefaultAccount {
+		t.Fatalf("an unregistered dir = %q, want the ambient key", got)
+	}
+}

@@ -248,11 +248,17 @@ func activeLimit(obs []session.AccountLimitObservationData, agent, account strin
 	return limited, until
 }
 
-// planAccount names an af account the way plan readings do: the ambient
-// identity is "default".
+// planAccount names an af account the way plan readings do. An empty name is the
+// identity the daemon's own environment gives a session: the ambient config dir's
+// account (a daemon that inherited CLAUDE_CONFIG_DIR=$AF_HOME/accounts/claude/work
+// runs its sessions as "work", and the tap files their readings there), else the
+// ambient key.
 func planAccount(name string) string {
-	if name = strings.TrimSpace(name); name == "" {
-		return planusage.DefaultAccount
+	if name = strings.TrimSpace(name); name != "" {
+		return name
 	}
-	return name
+	if home, err := config.GetConfigDir(); err == nil {
+		return accountOfRun(home, ambientClaudeConfigDir())
+	}
+	return planusage.DefaultAccount
 }
