@@ -191,7 +191,7 @@ func TestRecoverySkipsCurrentDaemonStarts(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m.recoverBacklog(repoID)
+	m.recoverBacklog(repoID, nil)
 	if r := loadItem(t, repoID, 1).Runs[0]; r.State != backlog.RunStarting {
 		t.Fatalf("a start of this daemon was recovered: %+v", r)
 	}
@@ -218,7 +218,7 @@ func TestRecoveryEndsAnIdleRunAfterRepairingItsSessionLink(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !m.recoverBacklog(repoID) {
+	if !m.recoverBacklog(repoID, nil) {
 		t.Fatal("recovery did not settle the project")
 	}
 	it := loadItem(t, repoID, 1)
@@ -249,7 +249,7 @@ func TestRecoverySkipsSkippedRepos(t *testing.T) {
 	if !m.backlog.beginRecovery() {
 		t.Fatal("begin")
 	}
-	m.recoverBacklogStarts()
+	m.recoverBacklogStarts(nil)
 	if r := loadItem(t, repoID, 1).Runs[0]; r.State != backlog.RunStarting || m.backlog.isRecovered(repoID) {
 		t.Fatalf("skipped repo was recovered: %+v", r)
 	}
@@ -362,11 +362,37 @@ func TestRecoveryArchivesADoneItemWhoseRunEndedUnobserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	idleItemSession(t, inst) // the marker cleared and the session settled; nobody saw the edge
-	if !m.recoverBacklog(repoID) {
+	if !m.recoverBacklog(repoID, nil) {
 		t.Fatal("recovery did not settle the project")
 	}
 	m.backgroundMutationWG.Wait()
 	if len(*archived) != 1 || (*archived)[0] != inst.ID {
 		t.Fatalf("archived %v, want the done item's session", *archived)
+	}
+}
+
+// A session that reports on its item before finishBacklogStart commits the link
+// is adopted by the report (Codex P2 on #6294); the late start record is a no-op.
+func TestSelfReportBeforeTheStartRecordLinksTheRun(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	var run backlog.RunRef
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		r := &b.Item(1).Runs[0]
+		run = *r
+		r.State, r.SessionID, r.Title = backlog.RunStarting, "", ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.adoptStartingRun(repoID, "", inst.ID)
+	it := loadItem(t, repoID, 1)
+	if it.Runs[0].State != backlog.RunStarted || it.Runs[0].SessionID != inst.ID {
+		t.Fatalf("the report did not link the run: %+v", it.Runs[0])
+	}
+	m.backlog.reserve(repoID)
+	m.finishBacklogStart(backlog.ProjectRef{ID: repoID}, 1, run.StartedAt,
+		session.InstanceData{ID: inst.ID, Title: it.Runs[0].Title}, nil, nil)
+	if loadItem(t, repoID, 1).Runs[0].SessionID != inst.ID {
+		t.Fatal("the late start record changed the linked run")
 	}
 }

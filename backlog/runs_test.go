@@ -294,3 +294,56 @@ func TestLatestSessions(t *testing.T) {
 		t.Fatalf("latest run %+v", r)
 	}
 }
+
+// A session that reports on its item before the start record is committed is
+// linked from its own item id and creation time (Codex P2 on #6294), and the
+// start record that arrives afterwards is a no-op for that run.
+func TestAdoptStartingLinksAnUnrecordedSession(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	plan, err := b.BeginStart(it.ID, StartedByUser, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := plan.Run.StartedAt
+	if b.AdoptStarting(it.ID, "s1", "B-1 A", started.Add(-time.Second), now) {
+		t.Fatal("a session created before the run began was adopted")
+	}
+	if b.AdoptStarting(it.ID+1, "s1", "x", started, now) {
+		t.Fatal("an unknown item adopted a session")
+	}
+	if !b.AdoptStarting(it.ID, "s1", "B-1 A", started.Add(time.Second), now) {
+		t.Fatal("the starting run was not adopted")
+	}
+	if b.ItemForSession("s1") == nil || b.LatestRun(it.ID).State != RunStarted {
+		t.Fatalf("not linked: %+v", b.Item(it.ID).Runs)
+	}
+	if b.AdoptStarting(it.ID, "s2", "x", started.Add(time.Second), now) {
+		t.Fatal("a second session adopted a run that is already linked")
+	}
+	if err := b.FinishStart(it.ID, started, "s1", "B-1 A", nil, now); err != nil {
+		t.Fatalf("the late start record must be a no-op for an adopted run: %v", err)
+	}
+}
+
+// A run's end does not move the item to review while an answer is on its way
+// (Codex P2 on #6295): delivery arms the next run, which ends on its own edge.
+func TestRunEndedWaitsForAPendingAnswer(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusRunning
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+	it.Thread = []Message{
+		{ID: 1, Kind: KindQuestion, Text: "?", Closed: ClosedAnswered},
+		{ID: 2, Kind: KindAnswer, Answers: 1, Delivery: DeliveryPending},
+	}
+	if end := b.RunEnded("s1", now); end.Changed || b.Item(1).Status != StatusRunning {
+		t.Fatalf("the old run's end finished an item with an answer pending: %+v %s", end, b.Item(1).Status)
+	}
+	b.Item(1).Thread[1].Delivery = DeliveryDelivered
+	if end := b.RunEnded("s1", now); !end.Changed || b.Item(1).Status != StatusReview {
+		t.Fatalf("with nothing pending the end moves to review: %+v %s", end, b.Item(1).Status)
+	}
+}

@@ -68,7 +68,7 @@ func (h backlogHost) DeliverAnswer(repoID string, a backlog.PendingAnswer) {
 	})
 	if !launched {
 		m.backlog.release(repoID)
-		m.backlogAnswerFailed(repoID, a, "af is shutting down")
+		m.backlogAnswerFailed(repoID, a, "af is shutting down", nil)
 	}
 }
 
@@ -89,44 +89,44 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 	defer release()
 	s, ok := m.itemSessions(repoID)[a.SessionID]
 	if !ok || s.view.UserKilled || s.view.InFlightOp == session.OpKilling {
-		m.backlogAnswerFailed(repoID, a, "the session is gone")
+		m.backlogAnswerFailed(repoID, a, "the session is gone", stop)
 		return
 	}
 	if backlogNeedsRestore(s) {
 		restored, err := restoreBacklogSession(m, RestoreSessionRequest{ID: a.SessionID, RepoID: repoID})
 		if err != nil {
-			m.backlogAnswerFailed(repoID, a, "af could not restore the session: "+err.Error())
+			m.backlogAnswerFailed(repoID, a, "af could not restore the session: "+err.Error(), stop)
 			return
 		}
 		m.publishEvent(agentproto.EventSessionRestored, restored)
 		if s, ok = m.itemSessions(repoID)[a.SessionID]; !ok {
-			m.backlogAnswerFailed(repoID, a, "the session is gone")
+			m.backlogAnswerFailed(repoID, a, "the session is gone", stop)
 			return
 		}
 		m.syncBacklogAttention(repoID, a)
 	}
 	inst := s.instance
 	if inst.TaskRunActive() {
-		m.backlogAnswerFailed(repoID, a, "the session is running a task")
+		m.backlogAnswerFailed(repoID, a, "the session is running a task", stop)
 		return
 	}
 	for {
 		err := m.sendBacklogAnswer(repoID, inst, a.Prompt)
 		if err == nil {
 			release() // the armed run marker holds the slot from here
-			m.backlogAnswerDelivered(repoID, a)
+			m.backlogAnswerDelivered(repoID, a, stop)
 			return
 		}
 		if !errors.Is(err, errBacklogAnswerHeld) {
-			m.backlogAnswerFailed(repoID, a, err.Error())
+			m.backlogAnswerFailed(repoID, a, err.Error(), stop)
 			return
 		}
 		if !backlogAnswerWait(stop) {
-			m.backlogAnswerFailed(repoID, a, "af stopped while the answer was held")
+			m.backlogAnswerFailed(repoID, a, "af stopped while the answer was held", stop)
 			return
 		}
 		if _, ok := m.itemSessions(repoID)[a.SessionID]; !ok {
-			m.backlogAnswerFailed(repoID, a, "the session is gone")
+			m.backlogAnswerFailed(repoID, a, "the session is gone", stop)
 			return
 		}
 	}
@@ -169,21 +169,43 @@ func (m *Manager) syncBacklogAttention(repoID string, a backlog.PendingAnswer) {
 	}
 }
 
-func (m *Manager) backlogAnswerDelivered(repoID string, a backlog.PendingAnswer) {
+// backlogAnswerDelivered records that the prompt reached the agent. The write is
+// retried while the backlog is busy (like finishBacklogStart and settleRunEnd):
+// left pending, the answer would be sent again by the next restart's
+// redelivery and restart work the agent already did. A closed stop gives up.
+func (m *Manager) backlogAnswerDelivered(repoID string, a backlog.PendingAnswer, stop <-chan struct{}) {
 	svc := m.backlogService()
-	if _, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+	if err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
 		return []int{a.ID}, b.AnswerDelivered(a.ID, a.AnswerID, svc.Now())
 	}); err != nil {
 		m.warn().Printf("record delivered answer on %s: %v", backlog.FormatID(a.ID), err)
 	}
 }
 
-func (m *Manager) backlogAnswerFailed(repoID string, a backlog.PendingAnswer, reason string) {
+func (m *Manager) backlogAnswerFailed(repoID string, a backlog.PendingAnswer, reason string, stop <-chan struct{}) {
 	svc := m.backlogService()
-	if _, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+	if err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
 		return []int{a.ID}, b.AnswerFailed(a.ID, a.AnswerID, reason, svc.Now())
 	}); err != nil {
 		m.warn().Printf("record undelivered answer on %s: %v", backlog.FormatID(a.ID), err)
+	}
+}
+
+// applyRetrying runs a backlog transaction, retrying a busy backlog with backoff
+// until it lands or stop closes (a nil stop retries until it lands).
+func (m *Manager) applyRetrying(repoID string, stop <-chan struct{}, fn func(*backlog.Backlog) ([]int, error)) error {
+	delay := finishStartBackoff
+	for {
+		_, err := applyBacklog(m.backlogService(), backlog.ProjectRef{ID: repoID}, fn)
+		if !errors.Is(err, backlog.ErrBusy) {
+			return err
+		}
+		select {
+		case <-stop:
+			return err
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, 5*time.Second)
 	}
 }
 

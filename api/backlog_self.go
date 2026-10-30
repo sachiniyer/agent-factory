@@ -27,6 +27,17 @@ func (t *backlogTarget) selfItem() (string, *backlog.Item, error) {
 		return "", nil, err
 	}
 	it := v.Backlog.ItemForSession(s.ID)
+	if it == nil && s.BacklogItem != 0 {
+		// The start record links the session after its first prompt was delivered,
+		// so a quick report can arrive before it exists. The session's own item id
+		// stands for it while its run is still starting; the daemon links the run
+		// when the report arrives.
+		if cand := v.Backlog.Item(s.BacklogItem); cand != nil {
+			if r := v.Backlog.LatestRun(cand.ID); r != nil && r.State == backlog.RunStarting && r.SessionID == "" {
+				return s.ID, cand, nil
+			}
+		}
+	}
 	if it == nil {
 		return "", nil, fmt.Errorf("--self needs an item session; this session (%s) was not started from the backlog", s.Title)
 	}
