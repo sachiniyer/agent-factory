@@ -288,12 +288,12 @@ func (m *Manager) RecoverBacklogStarts() {
 	if !m.backlog.beginRecovery() {
 		return
 	}
-	if !m.launchBackgroundMutation(func(<-chan struct{}) { m.recoverBacklogStarts() }) {
+	if !m.launchBackgroundMutation(func(stop <-chan struct{}) { m.recoverBacklogStarts(stop) }) {
 		m.backlog.endRecovery(true)
 	}
 }
 
-func (m *Manager) recoverBacklogStarts() {
+func (m *Manager) recoverBacklogStarts(stop <-chan struct{}) {
 	pending := false
 	defer func() { m.backlog.endRecovery(pending) }()
 	home, err := config.GetConfigDir()
@@ -317,7 +317,7 @@ func (m *Manager) recoverBacklogStarts() {
 			pending = true
 			continue
 		}
-		if m.recoverBacklog(repoID) {
+		if m.recoverBacklog(repoID, stop) {
 			m.backlog.markRecovered(repoID)
 		} else {
 			pending = true
@@ -326,7 +326,7 @@ func (m *Manager) recoverBacklogStarts() {
 }
 
 // recoverBacklog reports whether the project's backlog was read and settled.
-func (m *Manager) recoverBacklog(repoID string) bool {
+func (m *Manager) recoverBacklog(repoID string, stop <-chan struct{}) bool {
 	b, err := backlog.Load(repoID)
 	if err != nil {
 		m.warn().Printf("backlog recovery for project %s: %v", repoID, err)
@@ -365,7 +365,7 @@ func (m *Manager) recoverBacklog(repoID string) bool {
 	for _, sessionID := range idleRunEnds(b, sessions) {
 		// The generation observed in the snapshot: a continue accepted since is
 		// not finished by this stale observation.
-		m.backlogRunEndedGen(repoID, sessionID, sessions[sessionID].gen)
+		m.settleRunEnd(repoID, sessionID, sessions[sessionID].gen, stop)
 	}
 	return true
 }
