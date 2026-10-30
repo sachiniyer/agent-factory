@@ -184,7 +184,7 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	allowed := map[string]bool{
 		"ID": true, "TaskID": true, "Title": true, "Branch": true, "Status": true,
 		"Liveness": true, "InFlightOp": true, "LifecycleAction": true,
-		"CurrentAgent": true, "BackendType": true,
+		"CurrentAgent": true, "BackendType": true, "Host": true,
 		"TaskRunActive": true, "LimitResetAt": true, "CreatedAt": true, "UpdatedAt": true,
 		"IdleReason": true, "LastPromptAttemptAt": true,
 		"LastPromptDeliveryStatus": true, "LastPaneChurnAt": true,
@@ -196,7 +196,7 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	full := session.InstanceData{
 		ID: "sess-a", TaskID: "task-1", Title: "mine", Branch: "af/mine",
 		Status: session.Ready, CurrentAgent: "claude", Program: "claude",
-		BackendType: "ssh", TaskRunActive: true, CanKill: true, CanHandoff: true,
+		BackendType: "ssh", Host: "box1", TaskRunActive: true, CanKill: true, CanHandoff: true,
 		IsRoot: true, UserKilled: true, StartupStateUnknown: true,
 		Height: 40, Width: 120,
 		IdleReason:               session.IdleReasonDeliveryUnconfirmed,
@@ -239,6 +239,7 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	assert.Equal(t, "mine", got.Title)
 	assert.Equal(t, "af/mine", got.Branch)
 	assert.Equal(t, session.Ready, got.Status)
+	assert.Equal(t, "box1", got.Host, "Host is the sandbox's own --host pick; the CLI guard audits it against the pick, so it must survive the projection")
 	assert.Equal(t, session.IdleReasonDeliveryUnconfirmed, got.IdleReason)
 	assert.Equal(t, time.Unix(100, 0).UTC(), got.LastPromptAttemptAt)
 	assert.Equal(t, session.PromptCouldNotConfirm, got.LastPromptDeliveryStatus)

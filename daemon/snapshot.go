@@ -667,9 +667,18 @@ func onlyOwnedBySandbox(instances []session.InstanceData, owner string) []sessio
 // reflectively so a newly populated field has to be an explicit decision.
 //
 // What is included is the agent's own operational state: who it is, what it is
-// running, what state it is in. What is excluded is anything describing the HOST,
-// anything about other sessions, and the conversation/prompt payloads a sandbox
-// already has locally and does not need served back.
+// running, what state it is in. What is excluded is anything describing the
+// daemon HOST'S LAYOUT — the absolute repository path, the worktree, the tmux
+// session name — anything about other sessions, and the conversation/prompt
+// payloads a sandbox already has locally and does not need served back.
+//
+// Host IS here even though it names a host: it is the listed-host NAME the sandbox
+// itself supplied via --host, not a path or a tmux name the daemon chose, and the
+// sandbox scope advertises HostPick support (SnapshotCapabilities.HostPick), so the
+// create's post-create guard (api/sessions.go) can audit what came BACK against the
+// pick it sent. Withholding it made every successful sandbox create report a false
+// "daemon did not record host" skew failure. Returning it does not expose daemon-host
+// layout the way Path/Worktree/TmuxName do.
 //
 // Program is deliberately NOT here: it is text the sandbox itself supplied (a full
 // command, possibly naming a path), the sandbox does not need it served back, and
@@ -687,6 +696,7 @@ func sandboxSafeInstanceData(d session.InstanceData) session.InstanceData {
 		LifecycleAction:          d.LifecycleAction,
 		CurrentAgent:             d.CurrentAgent,
 		BackendType:              d.BackendType,
+		Host:                     d.Host,
 		TaskRunActive:            d.TaskRunActive,
 		LimitResetAt:             d.LimitResetAt,
 		IdleReason:               d.IdleReason,
