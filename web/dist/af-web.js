@@ -15585,6 +15585,59 @@ function settleLookup(lookups, ticket, id, rows, effects) {
   return "found";
 }
 
+// src/archive_window.ts
+var REREAD_BATCH = 500;
+var DISCOVERY_PAGE = 200;
+var DISCOVERY_MAX_PAGES = 200;
+async function rereadHeld(ids, fetchById) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += REREAD_BATCH) {
+    out.push(...await fetchById(ids.slice(i, i + REREAD_BATCH)));
+  }
+  return out;
+}
+function aheadOfCursor(row, cursor) {
+  const a = Date.parse(row.created_at ?? "");
+  const b = Date.parse(cursor.created_at);
+  if (Number.isNaN(a) || Number.isNaN(b)) return true;
+  if (a !== b) return a > b;
+  return (row.id ?? "") > cursor.id;
+}
+async function discoverHead(cursor, fetchPage) {
+  const out = [];
+  let before = null;
+  for (let page = 0; page < DISCOVERY_MAX_PAGES; page++) {
+    const got = await fetchPage(before, DISCOVERY_PAGE);
+    out.push(...got.sessions);
+    if (got.next === null || got.sessions.length === 0) break;
+    const last = got.sessions[got.sessions.length - 1];
+    if (cursor !== null && !aheadOfCursor(last, cursor)) break;
+    before = got.next;
+  }
+  return out;
+}
+function discoveryNeeded(dirty, previous, next) {
+  if (dirty || previous.total !== next.total) return true;
+  const keys = /* @__PURE__ */ new Set([...Object.keys(previous.byProject), ...Object.keys(next.byProject)]);
+  for (const k of keys) if ((previous.byProject[k] ?? 0) !== (next.byProject[k] ?? 0)) return true;
+  return false;
+}
+async function reconcileWindow(i) {
+  const byId = new Map(i.held.map((s) => [s.id ?? "", s]));
+  if (!discoveryNeeded(i.dirty, i.archive, i.summary)) return [...byId.values()];
+  byId.clear();
+  const keep = (row) => {
+    if (i.isArchived(row) && !i.live.has(row.id)) byId.set(row.id ?? "", row);
+  };
+  for (const row of await rereadHeld(i.held.flatMap((s) => s.id ? [s.id] : []), i.fetchById)) keep(row);
+  for (const [key, cursor] of Object.entries(i.archive.cursors)) {
+    if (cursor === void 0) continue;
+    const project = key === "" ? null : key;
+    for (const row of await discoverHead(cursor, (before, limit) => i.fetchPage(project, before, limit))) keep(row);
+  }
+  return [...byId.values()];
+}
+
 // src/pending_restores.ts
 var RESTORE_ADMISSION_MARGIN_MS = 1e3;
 var RESTORE_RECONCILE_RETRY_MIN_MS = 2e3;
@@ -15838,12 +15891,23 @@ var OptimisticSessions = class {
   snapshotFence() {
     return this.revision;
   }
-  /** Adds rows the live-only snapshot left out (an archived page, a deep-linked
-   *  archived session). Not an event and not a snapshot: it bumps no revision, so
-   *  a fetch already in flight is not discarded for it, and it records no pending
-   *  feedback. A row already known is replaced in place. */
-  adopt(rows) {
-    for (const row of rows) this.authoritative = upsertSession(this.authoritative, row);
+  /** The one door for archive rows read outside a snapshot (an archived page, a
+   *  deep-linked session, #6206-#6209). `fence` is `snapshotFence()` captured BEFORE
+   *  the read. A row is adopted only if no session event for it is newer than the
+   *  fence: a deletion or kill that arrived while the read was in flight beats the
+   *  stale row, in either arrival order. Adopting anything advances the revision, so
+   *  a snapshot fetched before the adopt fails its own fence and is re-requested
+   *  rather than overwriting the rows. A row already known is replaced in place.
+   *  Returns the rows actually adopted. */
+  adopt(rows, fence) {
+    const taken = rows.filter((row) => {
+      const seen = this.sessionEvents.get(sessionKey(row));
+      return !seen || seen.revision <= fence;
+    });
+    if (taken.length === 0) return taken;
+    for (const row of taken) this.authoritative = upsertSession(this.authoritative, row);
+    this.revision++;
+    return taken;
   }
   /** `leftLiveSet`: the snapshot was live-only, so a row ABSENT from it may have
    *  been archived rather than killed (#6178); an archive request is then settled by
@@ -20031,6 +20095,7 @@ function resolveRoute() {
 async function resolveArchivedRoute(id, ticket) {
   const tok = token;
   const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
   let rows = [];
   try {
     if (tok !== null) rows = await fetchSessionsById(tok, [id]);
@@ -20041,19 +20106,23 @@ async function resolveArchivedRoute(id, ticket) {
     }
   }
   if (token !== tok || connectionGeneration !== generation) return;
+  const missing = () => {
+    store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+    showTransientNotice("No session with that id in this daemon");
+    replaceRoute(null);
+  };
   settleLookup(routeLookups, ticket, id, rows, {
+    // A session killed while the read was in flight is not found: the adopt fence
+    // refuses the stale row (#6209).
     found: (row) => {
-      optimisticSessions.adopt([row]);
+      if (optimisticSessions.adopt([row], fence).length === 0) {
+        missing();
+        return;
+      }
       applySessions(optimisticSessions.project());
       resolveRoute();
     },
-    // The one terminal state of an unknown id: the empty pane (the previous
-    // selection must not linger), one toast, and the URL reset to /.
-    missing: () => {
-      store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
-      showTransientNotice("No session with that id in this daemon");
-      replaceRoute(null);
-    }
+    missing
   });
 }
 function moveSelection(id) {
@@ -21535,9 +21604,13 @@ function startStream(tok) {
   stream = new EventStream(tok, {
     onEvent,
     onResync: () => {
+      markArchiveDirty();
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s }),
+    onStatus: (s) => {
+      if (s !== "open") markArchiveDirty();
+      store.set({ live: s });
+    },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
     // Not /v1/auth-info, which says whether a token is required, not whether
@@ -21627,19 +21700,31 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
     restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive"
   })), evidence);
 }
-var ARCHIVE_WINDOW_REREAD_MAX = 500;
+var archiveDirtyEpoch = 1;
+var archiveCleanEpoch = 0;
+function markArchiveDirty() {
+  archiveDirtyEpoch++;
+}
+function clearArchiveDirty(epoch) {
+  if (epoch > archiveCleanEpoch) archiveCleanEpoch = epoch;
+}
 async function fetchSnapshotWithArchiveWindow(tok) {
+  const epoch = archiveDirtyEpoch;
   const snapshot = await fetchSessionSnapshot(tok);
-  if (!snapshot.archived) return snapshot;
+  if (!snapshot.archived) return { ...snapshot, archiveEpoch: epoch };
   const live = new Set(snapshot.sessions.map((s) => s.id));
-  const window2 = optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id));
-  if (window2.length === 0) return snapshot;
-  let kept = window2;
-  if (window2.length <= ARCHIVE_WINDOW_REREAD_MAX) {
-    const ids = window2.flatMap((s) => s.id ? [s.id] : []);
-    kept = (await fetchSessionsById(tok, ids)).filter((s) => isArchived(s) && !live.has(s.id));
-  }
-  return { ...snapshot, sessions: [...snapshot.sessions, ...kept] };
+  const archive = store.get().archive;
+  const kept = await reconcileWindow({
+    held: optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id)),
+    live,
+    archive,
+    summary: snapshot.archived,
+    dirty: epoch > archiveCleanEpoch,
+    isArchived,
+    fetchById: (ids) => fetchSessionsById(tok, ids),
+    fetchPage: (project, before, limit) => fetchArchivedPage(tok, { project, before, limit })
+  });
+  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: epoch };
 }
 async function loadArchivedPage() {
   const tok = token;
@@ -21652,14 +21737,10 @@ async function loadArchivedPage() {
   const before = start.cursors[key] ?? null;
   store.set({ archive: { ...start, loading: true, error: void 0 } });
   try {
-    let page;
-    for (let attempt = 0; ; attempt++) {
-      const eventsBefore = sessionEventGeneration;
-      page = await fetchArchivedPage(tok, { project, before });
-      if (eventsBefore === sessionEventGeneration || attempt >= 2) break;
-    }
+    const fence = optimisticSessions.snapshotFence();
+    const page = await fetchArchivedPage(tok, { project, before });
     if (token !== tok || connectionGeneration !== generation) return;
-    optimisticSessions.adopt(page.sessions);
+    optimisticSessions.adopt(page.sessions, fence);
     applySessions(optimisticSessions.project());
     const archive = store.get().archive;
     store.set({ archive: { ...archive, loading: false, cursors: { ...archive.cursors, [key]: page.next } } });
@@ -21689,6 +21770,7 @@ async function fetchProjectedSnapshot(tok) {
     let daemonBootId;
     let skippedRepos;
     let archived;
+    let archiveEpoch = 0;
     const sessions = await optimisticSessions.refresh(async () => {
       generation = pendingRestores.beginSnapshot();
       const snapshot = await fetchSnapshotWithArchiveWindow(tok);
@@ -21698,8 +21780,10 @@ async function fetchProjectedSnapshot(tok) {
       daemonBootId = snapshot.daemonBootId;
       skippedRepos = snapshot.skippedRepos;
       archived = snapshot.archived;
+      archiveEpoch = snapshot.archiveEpoch;
       return authoritative;
     }, () => archived !== void 0);
+    if (sessions !== null) clearArchiveDirty(archiveEpoch);
     return sessions === null ? null : {
       sessions,
       authoritative,
@@ -21752,6 +21836,7 @@ function requestResync() {
         skippedRepos: snapshot.skippedRepos,
         archived: snapshot.archived
       }, sessions);
+      clearArchiveDirty(snapshot.archiveEpoch);
       root?.setAttribute("data-af-resync-settled", "");
       resolveResyncCompletions();
     }).catch((error) => {

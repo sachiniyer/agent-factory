@@ -114,6 +114,7 @@ import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
 import { archiveKey, archiveFromSnapshot, archiveNeedsFirstPage, emptyArchive } from "./archive.js";
 import { RouteLookups, settleLookup } from "./route_lookup.js";
+import { reconcileWindow } from "./archive_window.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
@@ -661,6 +662,7 @@ function resolveRoute(): void {
 async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
   const tok = token;
   const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
   let rows: SessionData[] = [];
   try {
     if (tok !== null) rows = await fetchSessionsById(tok, [id]);
@@ -671,19 +673,25 @@ async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
     }
   }
   if (token !== tok || connectionGeneration !== generation) return;
+  // The one terminal state of an unknown id: the empty pane (the previous
+  // selection must not linger), one toast, and the URL reset to /.
+  const missing = (): void => {
+    store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+    showTransientNotice("No session with that id in this daemon");
+    replaceRoute(null);
+  };
   settleLookup(routeLookups, ticket, id, rows, {
+    // A session killed while the read was in flight is not found: the adopt fence
+    // refuses the stale row (#6209).
     found: (row) => {
-      optimisticSessions.adopt([row]);
+      if (optimisticSessions.adopt([row], fence).length === 0) {
+        missing();
+        return;
+      }
       applySessions(optimisticSessions.project());
       resolveRoute();
     },
-    // The one terminal state of an unknown id: the empty pane (the previous
-    // selection must not linger), one toast, and the URL reset to /.
-    missing: () => {
-      store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
-      showTransientNotice("No session with that id in this daemon");
-      replaceRoute(null);
-    },
+    missing,
   });
 }
 
@@ -3135,9 +3143,13 @@ function startStream(tok: string): void {
   stream = new EventStream(tok, {
     onEvent,
     onResync: () => {
+      markArchiveDirty();
       requestResync();
     },
-    onStatus: (s: EventStreamStatus) => store.set({ live: s }),
+    onStatus: (s: EventStreamStatus) => {
+      if (s !== "open") markArchiveDirty();
+      store.set({ live: s });
+    },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
     // Not /v1/auth-info, which says whether a token is required, not whether
@@ -3291,19 +3303,29 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
  *  rows on every resync and the archive would empty itself. They are re-read by id
  *  rather than kept as they were: a session deleted while this client missed the
  *  event must not linger, and one restored since is already in the live rows. */
-const ARCHIVE_WINDOW_REREAD_MAX = 500;
-async function fetchSnapshotWithArchiveWindow(tok: string): Promise<SessionSnapshot> {
+// Set whenever the stream was not live (or asked for a resync): rows may have been
+// archived or deleted unseen. A reconcile clears it only when its snapshot is applied
+// (clearArchiveDirty), so a response discarded by a fence retries the discovery.
+let archiveDirtyEpoch = 1;
+let archiveCleanEpoch = 0;
+function markArchiveDirty(): void { archiveDirtyEpoch++; }
+function clearArchiveDirty(epoch: number): void { if (epoch > archiveCleanEpoch) archiveCleanEpoch = epoch; }
+
+async function fetchSnapshotWithArchiveWindow(tok: string): Promise<SessionSnapshot & { archiveEpoch: number }> {
+  const epoch = archiveDirtyEpoch;
   const snapshot = await fetchSessionSnapshot(tok);
-  if (!snapshot.archived) return snapshot;
+  if (!snapshot.archived) return { ...snapshot, archiveEpoch: epoch };
   const live = new Set(snapshot.sessions.map((s) => s.id));
-  const window = optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id));
-  if (window.length === 0) return snapshot;
-  let kept: SessionData[] = window;
-  if (window.length <= ARCHIVE_WINDOW_REREAD_MAX) {
-    const ids = window.flatMap((s) => (s.id ? [s.id] : []));
-    kept = (await fetchSessionsById(tok, ids)).filter((s) => isArchived(s) && !live.has(s.id));
-  }
-  return { ...snapshot, sessions: [...snapshot.sessions, ...kept] };
+  const archive = store.get().archive;
+  // Reads nothing while the stream stayed live and the counts did not move: a
+  // deletion elsewhere then arrived as an event (adopt fence + event path).
+  const kept = await reconcileWindow({
+    held: optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id)),
+    live, archive, summary: snapshot.archived, dirty: epoch > archiveCleanEpoch, isArchived,
+    fetchById: (ids) => fetchSessionsById(tok, ids),
+    fetchPage: (project, before, limit) => fetchArchivedPage(tok, { project, before, limit }),
+  });
+  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: epoch };
 }
 
 /** Reads the next page of the selected project's archive, newest first, into the
@@ -3320,16 +3342,12 @@ async function loadArchivedPage(): Promise<void> {
   const before = start.cursors[key] ?? null;
   store.set({ archive: { ...start, loading: true, error: undefined } });
   try {
-    // A page read across an event may carry a row that event just removed or
-    // restored; adopting it would resurrect that row. Read again, bounded.
-    let page: Awaited<ReturnType<typeof fetchArchivedPage>>;
-    for (let attempt = 0; ; attempt++) {
-      const eventsBefore = sessionEventGeneration;
-      page = await fetchArchivedPage(tok, { project, before });
-      if (eventsBefore === sessionEventGeneration || attempt >= 2) break;
-    }
+    // A row an event removed or restored while the read was in flight is refused by
+    // the adopt fence, so no re-read is needed (#6209).
+    const fence = optimisticSessions.snapshotFence();
+    const page = await fetchArchivedPage(tok, { project, before });
     if (token !== tok || connectionGeneration !== generation) return;
-    optimisticSessions.adopt(page.sessions);
+    optimisticSessions.adopt(page.sessions, fence);
     applySessions(optimisticSessions.project());
     const archive = store.get().archive;
     store.set({ archive: { ...archive, loading: false, cursors: { ...archive.cursors, [key]: page.next } } });
@@ -3376,6 +3394,7 @@ async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnaps
     let daemonBootId: string | undefined;
     let skippedRepos: SkippedRepo[] | undefined;
     let archived: ArchivedSummary | undefined;
+    let archiveEpoch = 0;
     const sessions = await optimisticSessions.refresh(async () => {
       // refresh may retry after an intervening event. Carry the issuance stamp
       // and raw rows from the accepted attempt together to the commit site.
@@ -3387,8 +3406,10 @@ async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnaps
       daemonBootId = snapshot.daemonBootId;
       skippedRepos = snapshot.skippedRepos;
       archived = snapshot.archived;
+      archiveEpoch = snapshot.archiveEpoch;
       return authoritative;
     }, () => archived !== undefined);
+    if (sessions !== null) clearArchiveDirty(archiveEpoch);
     return sessions === null ? null : {
       sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos, archived,
     };
@@ -3449,6 +3470,7 @@ function requestResync(): void {
           skippedRepos: snapshot.skippedRepos,
           archived: snapshot.archived,
         }, sessions);
+        clearArchiveDirty(snapshot.archiveEpoch);
         // A successful HTTP response is not necessarily authoritative: either fence
         // above can discard it and schedule a replacement. Stamp the stable app root
         // only after the winning response reaches the store, giving black-box clients
