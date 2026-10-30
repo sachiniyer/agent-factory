@@ -407,7 +407,13 @@ func applyCORSPolicy(w http.ResponseWriter, r *http.Request, allowedOrigins []st
 	// escape hatch from an assistant left running. Harmless for the same-origin SPA
 	// default (which does no preflight), which is why nothing else surfaced it.
 	h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	// X-AF-Client-Version is non-safelisted, so a cross-origin SPA's af() POST
+	// (web/src/api.ts) preflights it; without advertising it here the browser blocks
+	// the request before it reaches the daemon, breaking the documented
+	// cross-origin web-client flow. Same-origin (the default, no preflight) is
+	// unaffected. The header's PRESENCE is what opts the body into the daemon's
+	// tolerant decoder (agentproto.ClientVersionHeader), so CORS must let it through.
+	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+agentproto.ClientVersionHeader)
 }
 
 // originAllowed reports whether origin exactly matches an allow-list entry. No
