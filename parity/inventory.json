@@ -2390,22 +2390,64 @@
       },
       "SnapshotRequest": {
         "cli": {
+          "before": {
+            "ok": "Not a list flag: archived paging is the web's lazy-archive read (#6178). `af sessions list` reads the whole filtered list."
+          },
+          "before.created_at": {
+            "ok": "Not a list flag: archived paging is the web's lazy-archive read (#6178)."
+          },
+          "before.id": {
+            "ok": "Not a list flag: archived paging is the web's lazy-archive read (#6178)."
+          },
           "created_after": {
             "ok": "Reached by sessionsListCmd after Cobra parses --max-age (api/sessions.go assigns req.CreatedAfter). The CLI AST derivation recognizes composite-literal fields but not this conditional field assignment, so it conservatively reports the field as absent."
           },
+          "ids": {
+            "ok": "Not a list flag: the web reads one deep-linked archived session by id; the CLI addresses sessions by title or id through get (#6178)."
+          },
+          "lazy_archive": {
+            "ok": "Web-only: leaves archived rows out and reports their count. The CLI list shows what it is asked for with --live/--status."
+          },
           "limit": {
             "ok": "Reached by sessionsListCmd after Cobra parses --limit (api/sessions.go assigns req.Limit). The CLI AST derivation recognizes composite-literal fields but not this conditional field assignment, so it conservatively reports the field as absent."
+          },
+          "newest_first": {
+            "ok": "Web-only ordering for archived paging (#6178)."
+          },
+          "project_path": {
+            "ok": "Web-only archived paging scope; the CLI scopes with --repo."
           }
         },
         "tui": {
+          "before": {
+            "ok": "Deliberate: archived paging is the web's lazy-archive read (#6178); the TUI loads the full snapshot at startup."
+          },
+          "before.created_at": {
+            "ok": "Deliberate: archived paging is the web's lazy-archive read (#6178)."
+          },
+          "before.id": {
+            "ok": "Deliberate: archived paging is the web's lazy-archive read (#6178)."
+          },
           "created_after": {
             "ok": "Deliberate: the TUI snapshot is the authoritative navigation rail. An age-filtered snapshot would make older sessions look deleted and remove their archive/restore/kill controls; bounded history is a CLI/public-API query, not rail state."
+          },
+          "ids": {
+            "ok": "Deliberate: a deep-linked row is a web concern (#6178)."
+          },
+          "lazy_archive": {
+            "ok": "Deliberate: the TUI loads the full snapshot at startup; making that lazy is a separate change (#6178)."
           },
           "limit": {
             "ok": "Deliberate: the TUI must reconcile every session in its authoritative rail. Truncating the snapshot would make the omitted tail look deleted and strand those sessions from interactive management."
           },
           "live": {
             "ok": "Deliberate: archived sessions remain visible in the TUI so users can restore or permanently remove them. The TUI cannot request only live rows without removing those lifecycle controls."
+          },
+          "newest_first": {
+            "ok": "Deliberate: archived paging is the web's lazy-archive read (#6178)."
+          },
+          "project_path": {
+            "ok": "Deliberate: archived paging is the web's lazy-archive read (#6178)."
           },
           "statuses": {
             "ok": "Deliberate: the TUI rail is an authoritative all-state projection, not a query result. Server-side status filtering would make sessions disappear from management when their lifecycle changes."
@@ -2867,17 +2909,23 @@
         }
       },
       "Snapshot": {
+        "before": {
+          "ok": "Passed whole from a previous page's next_before (below): the archive is read a page at a time, newest first (#6178)."
+        },
+        "before.created_at": {
+          "ok": "Part of the cursor the daemon issued; the web passes next_before back untouched, never builds one."
+        },
+        "before.id": {
+          "ok": "Part of the cursor the daemon issued; the web passes next_before back untouched, never builds one."
+        },
         "created_after": {
           "ok": "Deliberate: the web snapshot is the authoritative navigation rail. An age-filtered snapshot would make older sessions look deleted and remove their interactive lifecycle controls."
         },
-        "limit": {
-          "ok": "Deliberate: the web must reconcile every session in its authoritative rail. Truncating the snapshot would make the omitted tail look deleted and strand those sessions from interactive management."
-        },
         "live": {
-          "ok": "Deliberate: archived sessions stay in the web rail so users can restore or permanently remove them; requesting only live rows would remove those controls."
+          "ok": "Deliberate: the web asks for lazy_archive, which leaves the archived rows out AND reports how many it left (archived_total), so it can never mistake a live-only list for the whole one. Plain live carries no such count."
         },
-        "statuses": {
-          "ok": "Deliberate: the web rail is an authoritative all-state projection, not a query result. Server-side status filtering would make sessions disappear from management when their lifecycle changes."
+        "project_path": {
+          "ok": "Sent on archived pages only when a project is selected (fetchArchivedPage); the derivation does not see the conditional."
         }
       },
       "CreateSession": {

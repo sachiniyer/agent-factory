@@ -332,6 +332,20 @@ export interface SnapshotResponse {
 	 *  (omitempty on the Go side) when no repo was skipped, which is every healthy
 	 *  startup, so the rail renders nothing extra in the steady state. */
 	skipped_repos?: SkippedRepo[];
+	/** Archived rows in the request's repo scope, present only when the request set
+	 *  `lazy_archive` AND the daemon understands it (#6178). Its absence on such a
+	 *  request means the daemon predates the shape and `instances` is the whole list. */
+	archived_total?: number;
+	/** Those archived rows per worktree repo path (the key projects are grouped by). */
+	archived_by_project?: Record<string, number>;
+	/** Resume position after a `limit`-bounded newest-first listing; absent on the last page. */
+	next_before?: SnapshotCursor;
+}
+
+/** A position in a newest-first listing (daemon SnapshotCursor). */
+export interface SnapshotCursor {
+	created_at: string;
+	id: string;
 }
 
 /** One repo the daemon could not load sessions for at startup
