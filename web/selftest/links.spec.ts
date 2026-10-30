@@ -7,7 +7,7 @@ import { encode, ptyOutFrame } from "../src/frame.js";
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 
-test("project switcher: rows are links; a plain click switches in place, a modified click opens a new tab", async ({ page, context }) => {
+test("project switcher: rows are links; a plain click switches in place, a modified click opens a new tab", async ({ page, context }, info) => {
   await page.goto("/");
   await expect(page.locator(".af-app")).toBeVisible();
   const switcher = page.locator(".af-project-switch");
@@ -15,6 +15,7 @@ test("project switcher: rows are links; a plain click switches in place, a modif
   const rows = page.locator(".af-project-menu a.af-project-item");
   await expect.poll(() => rows.count()).toBeGreaterThan(1);
   const other = rows.filter({ hasNot: page.locator(".af-project-check svg") }).first();
+  await page.screenshot({ path: info.outputPath("project-menu.png") });
   const href = await other.getAttribute("href");
   expect(href).toMatch(/^#\/project\/.+/);
   const name = (await other.locator(".af-project-item-name").textContent())!.trim();
@@ -58,7 +59,7 @@ test("a #/project/ link for an unknown project shows a notice and stays on the d
   await expect.poll(() => new URL(page.url()).hash).toBe("");
 });
 
-test("terminal links open http(s) in a new tab with no confirm() and no opener; other schemes open nothing", async ({ page, context }) => {
+test("terminal links open http(s) in a new tab with no confirm() and no opener; other schemes open nothing", async ({ page, context }, info) => {
   let stream!: WebSocketRoute;
   await page.routeWebSocket((url) => url.pathname.endsWith("/stream"), (socket) => { stream = socket; });
   const dialogs: string[] = [];
@@ -80,6 +81,7 @@ test("terminal links open http(s) in a new tab with no confirm() and no opener; 
   await surface.getByText("good-link").hover();
   await expect(page.locator('[title="https://links.example.test/pr/1"]')).toHaveCount(1);
 
+  await page.screenshot({ path: info.outputPath("terminal-link-hover.png") });
   const [popup] = await Promise.all([page.waitForEvent("popup"), surface.getByText("good-link").click()]);
   await popup.waitForLoadState();
   expect(popup.url()).toBe("https://links.example.test/pr/1");
