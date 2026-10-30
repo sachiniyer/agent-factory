@@ -107,8 +107,16 @@ func TestRestoreSurvivingTabsRebindsSurvivorsAndNeverRecreatesTheDead(t *testing
 	assert.False(t, ok)
 
 	// A second adoption of the same roster is idempotent.
-	again := inst.RestoreSurvivingTabs([]TabData{{ID: "t-build", Name: "build", Kind: TabKindProcess, TmuxName: "srv__build"}})
-	assert.Empty(t, again.Restored)
+	// A retry after a lost launch response reports the already-rebound tab as
+	// restored (not silence the daemon reads as unavailable), binds nothing twice,
+	// and does not claim another incarnation or session under the id.
+	again := inst.RestoreSurvivingTabs([]TabData{
+		{ID: "t-build", Gen: "g2", Name: "build", Kind: TabKindProcess, TmuxName: "srv__build"},
+		{ID: "t-build", Gen: "other", Name: "build", Kind: TabKindProcess, TmuxName: "srv__build"},
+		{ID: "t-build", Gen: "g2", Name: "build", Kind: TabKindProcess, TmuxName: "srv__elsewhere"},
+	})
+	assert.Equal(t, []string{"t-build"}, again.Restored)
+	assert.Len(t, again.Unresolved, 2)
 	assert.Equal(t, 2, inst.TabCount(), "agent tab and the one remaining survivor")
 }
 
@@ -213,4 +221,39 @@ func TestRestartAdoptionAgainstAnOldServerLeavesTheTabsUnavailableAndHonest(t *t
 	rs2.idNative()
 	require.NoError(t, rs2.Launch(false))
 	assert.NotContains(t, (*launches2)[0], `"tabs"`)
+}
+
+// The daemon restarts too: the production caller is ReattachSandbox over a
+// RELOADED instance, so the binding and its row must survive persistence and be
+// handed to the restarted server (#6229 review).
+func TestSandboxTabBindingSurvivesADaemonRestartAndReachesTheRoster(t *testing.T) {
+	rc, _ := restoreWire(t, []string{tabAPIFeature, tabRestoreFeature}, map[string]any{"ok": true})
+	before := offBoxInstanceWithSurvivors(rc)
+	data := before.ToInstanceData()
+	raw, err := json.Marshal(data)
+	require.NoError(t, err)
+	var reloaded InstanceData
+	require.NoError(t, json.Unmarshal(raw, &reloaded))
+	reloaded.BackendType = "docker"
+	reloaded.Liveness = LiveRunning
+
+	inst, err := FromInstanceData(reloaded)
+	require.NoError(t, err)
+	require.Empty(t, inst.GetTabs(), "nothing is bound until the reattach reaches the sandbox")
+
+	inst.materializeRestorableTabs()
+	rows := inst.restoreRosterForRestart(true)
+	var names []string
+	for _, r := range rows {
+		names = append(names, r.ID+"="+r.TmuxName)
+	}
+	assert.ElementsMatch(t, []string{"t-shell=srv__shell", "t-dead=srv__build"}, names,
+		"the reloaded roster carries each recorded session, so a restarted server can rebind it")
+	for _, tab := range inst.GetTabs() {
+		if tab.ID == "t-old" {
+			t.Fatal("a row with no recorded session cannot be handed back and is not retained")
+		}
+	}
+	inst.materializeRestorableTabs()
+	assert.Len(t, inst.GetTabs(), 3, "agent plus the two restorable rows; a retried reattach adds nothing")
 }

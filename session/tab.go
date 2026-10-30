@@ -313,7 +313,7 @@ type Tab struct {
 	// sandboxTmux is the tmux session the sandbox spawned for this off-box tab,
 	// as the sandbox reported it at create. The daemon holds no tmux binding for
 	// such a tab (tmux stays nil); the name is what a restarted agent-server is
-	// handed to rebind the survivor (W1.4, #6162). Not persisted.
+	// handed to rebind the survivor (W1.4, #6162). Persisted as TabData.SandboxTmux.
 	sandboxTmux string
 	// restoreUnavailable marks an off-box tab a restarted agent-server could not
 	// be given back (an older server, or no recorded session). Its row stays — its
@@ -735,6 +735,9 @@ func (i *Instance) appendPendingMetadataTabsLocked() {
 	pending := i.pendingMetadataTabs
 	i.pendingMetadataTabs = nil
 	for _, td := range pending {
+		if isRestorableRow(td) {
+			continue // a dead sandbox's terminal: only a reattach hands it back (#6162)
+		}
 		id := td.ID
 		if id == "" {
 			// Rollforward, as restoreLocalTabs does: a row persisted before #1738 has

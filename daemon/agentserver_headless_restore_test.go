@@ -37,3 +37,39 @@ func TestHeadlessAdvertisesTabRestoreAndSpeaksItsWireShape(t *testing.T) {
 		t.Fatalf("response shape drifted: %s", out)
 	}
 }
+
+type launchStub struct {
+	session.AgentServer
+	launched int
+}
+
+func (s *launchStub) Launch(bool) error { s.launched++; return nil }
+
+// The roster is processed on EVERY restart launch: a sandbox created normally
+// restarts through its persisted launch script with no --adopt-worktree, so
+// hs.adopted is false there (#6229 review).
+func TestLaunchRebindsSurvivingTabsOnTheOrdinaryRestartPathToo(t *testing.T) {
+	orig := restoreSurvivingTabs
+	t.Cleanup(func() { restoreSurvivingTabs = orig })
+	var got [][]session.TabData
+	restoreSurvivingTabs = func(_ *session.Instance, rows []session.TabData) session.TabRestoreReport {
+		got = append(got, rows)
+		return session.TabRestoreReport{Restored: []string{"t1"}, Gone: []string{"t2"}}
+	}
+	rows := []session.TabData{{ID: "t1", TmuxName: "a"}, {ID: "t2", TmuxName: "b"}}
+
+	hs := &headlessServer{as: &launchStub{}, inst: &session.Instance{}}
+	var resp agentOKResponse
+	if err := hs.Launch(agentLifecycleRequest{RestartAdoption: true, Tabs: rows}, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || len(resp.TabsRestored) != 1 || len(resp.TabsGone) != 1 {
+		t.Fatalf("ordinary restart launch did not rebind: calls=%d resp=%+v", len(got), resp)
+	}
+
+	got = nil
+	hs = &headlessServer{as: &launchStub{}, inst: &session.Instance{}}
+	if err := hs.Launch(agentLifecycleRequest{Tabs: rows}, &agentOKResponse{}); err != nil || len(got) != 0 {
+		t.Fatalf("a launch that is not a restart adoption must not rebind (err=%v calls=%d)", err, len(got))
+	}
+}

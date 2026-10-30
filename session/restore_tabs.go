@@ -33,6 +33,40 @@ type TabRestoreReport struct {
 	Unresolved []string // no usable record, or tmux gave no answer
 }
 
+// isRestorableRow is a staged off-box shell/process row carrying its sandbox
+// session: the only PTY rows a reload keeps (see metadataTabsFrom).
+func isRestorableRow(td TabData) bool {
+	k := tabKindForData(td.Kind)
+	return (k == TabKindShell || k == TabKindProcess) && td.SandboxTmux != "" && td.ID != ""
+}
+
+// materializeRestorableTabs moves the staged restorable rows onto the roster,
+// behind the agent tab, as off-box tabs with no daemon-side binding. A reload
+// stages them because the sandbox was not yet reached; the reattach is the one
+// place that reaches it. Rows whose id is already on the roster are left alone,
+// so a retried reattach adds nothing twice.
+func (i *Instance) materializeRestorableTabs() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	var keep []TabData
+	for _, td := range i.pendingMetadataTabs {
+		if !isRestorableRow(td) {
+			keep = append(keep, td)
+			continue
+		}
+		if len(i.Tabs) == 0 {
+			i.Tabs = []*Tab{newRemoteAgentTab()}
+		}
+		if _, have := i.tabIndexByIDLocked(td.ID); have {
+			continue
+		}
+		i.Tabs = append(i.Tabs, &Tab{ID: td.ID, Name: td.Name, Kind: tabKindForData(td.Kind), Command: td.Command,
+			Exit: tabExitFromData(td.Exit), gen: td.Gen, sandboxTmux: td.SandboxTmux})
+		i.touchLocked()
+	}
+	i.pendingMetadataTabs = keep
+}
+
 // restoreRosterLocked is the roster a restarted server is handed: the off-box
 // shell/process rows with the sandbox's own tmux name, plus the ids that have
 // none (created before the daemon recorded it) and so cannot be rebound. Caller
@@ -114,6 +148,10 @@ func (i *Instance) RestoreSurvivingTabs(rows []TabData) TabRestoreReport {
 		_, have := i.tabIndexByIDLocked(row.ID)
 		i.mu.RUnlock()
 		if have {
+			// A retry after a lost launch response: the tab is already rebound on
+			// this server. Report its true state rather than skip it, or the daemon
+			// would read the silence as unavailable (#6229 review).
+			i.reportRebound(&rep, row)
 			continue
 		}
 		ts := agentTmux.NewSiblingSession(row.TmuxName, defaultShell())
@@ -169,5 +207,34 @@ func (i *Instance) applyRestoreOutcome(sent []TabData, restored, gone []string) 
 		if idx, ok := i.tabIndexByIDLocked(row.ID); ok {
 			i.Tabs[idx].restoreUnavailable = true
 		}
+	}
+}
+
+// reportRebound answers a row whose id this server already holds. The same
+// incarnation on the same session is restored (or gone, if tmux now says so); a
+// different incarnation or session under the id is unresolved, never claimed.
+func (i *Instance) reportRebound(rep *TabRestoreReport, row TabData) {
+	i.mu.RLock()
+	idx, _ := i.tabIndexByIDLocked(row.ID)
+	if idx >= len(i.Tabs) {
+		i.mu.RUnlock()
+		rep.Unresolved = append(rep.Unresolved, row.ID)
+		return
+	}
+	tab := i.Tabs[idx]
+	ts := tab.tmux
+	same := ts != nil && ts.SanitizedName() == row.TmuxName && (row.Gen == "" || tab.gen == "" || row.Gen == tab.gen)
+	i.mu.RUnlock()
+	if !same {
+		rep.Unresolved = append(rep.Unresolved, row.ID)
+		return
+	}
+	switch exists, known, err := ts.ProbeSessionStrict(); {
+	case err != nil || !known:
+		rep.Unresolved = append(rep.Unresolved, row.ID)
+	case !exists:
+		rep.Gone = append(rep.Gone, row.ID)
+	default:
+		rep.Restored = append(rep.Restored, row.ID)
 	}
 }

@@ -139,6 +139,9 @@ func (i *Instance) ReattachSandbox() error {
 		}
 		adopt = true
 	}
+	// Staged shell/process rows (a daemon restart leaves only these) join the
+	// roster the restarted server is handed; idempotent, so a retry is a no-op.
+	i.materializeRestorableTabs()
 	if adopt {
 		// The surviving workspace is adopted through the ordinary restore path
 		// (firstTimeSetup=false): Provision re-derives and proves the worktree

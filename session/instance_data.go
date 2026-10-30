@@ -219,7 +219,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		if len(data.Tabs) == 0 {
 			data.Tabs = append(data.Tabs, TabData{Name: "agent", Kind: TabKindAgent})
 		}
-		data.Tabs = append(data.Tabs, i.pendingMetadataTabs...)
+		for _, td := range i.pendingMetadataTabs {
+			if !isRestorableRow(td) {
+				data.Tabs = append(data.Tabs, td)
+			}
+		}
 	}
 
 	// Cleanup handles for tabs whose roster removal is durable but whose tmux

@@ -653,7 +653,7 @@ func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResp
 	return nil
 }
 
-func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKResponse) error {
+func (hs *headlessServer) launchWorkspace(req agentLifecycleRequest, resp *agentOKResponse) error {
 	// A restore-launch that carries the recorded conversation must not respawn a
 	// vanished agent onto a guessed one (#4797): see RefuseGuessedRespawn.
 	if req.RestartAdoption && !req.FirstTimeSetup && req.Conversation != nil && hs.inst != nil {
