@@ -84,6 +84,9 @@ func (m *Manager) opLockFor(key string) *sync.Mutex {
 // its final fence check through its write, so either it sees the restore's fence
 // and cedes, or the restore's write queues behind it and lands newer.
 func (m *Manager) rowWriteLockForRepo(repoID string) *sync.Mutex {
+	if m != nil { // MUTATION PROBE (#6219): serialization disabled; reverted in the next commit.
+		return &sync.Mutex{}
+	}
 	if v, ok := m.repoRowLocks.Load(repoID); ok {
 		return v.(*sync.Mutex)
 	}
