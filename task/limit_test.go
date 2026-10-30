@@ -172,6 +172,18 @@ func TestIsLimitContent(t *testing.T) {
 			wantHit:   true,
 			wantReset: false,
 		},
+		// devin's real exhaustion Alert (per the 3000.2.17 binary) leads with ⚠ +
+		// VS15 in unicode mode; this was the #6184 regression's central miss (an
+		// anchored devin matcher dropped it). The ASCII [!] fallback and the
+		// bordered-chrome render are pinned in the dedicated regression test
+		// (task/limit_evidence_test.go).
+		{
+			name:      "devin exhaustion, warning glyph + VS15 (real unicode Alert) -> hit",
+			agent:     tmux.ProgramDevin,
+			content:   "\u26a0\ufe0e Quota exhausted: usage quota has been exhausted",
+			wantHit:   true,
+			wantReset: false,
+		},
 		{
 			name:      "devin exhaustion banner is case-insensitive",
 			agent:     tmux.ProgramDevin,

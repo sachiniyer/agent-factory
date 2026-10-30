@@ -53,8 +53,12 @@ func TestLimitBannerNeedsToOpenItsRow(t *testing.T) {
 			"  └ " + codexBannerLine1 + "\n    " + codexBannerLine2 + "\n\n› "},
 		{"codex: diff line", tmux.ProgramCodex,
 			"+ " + codexBannerLine1 + "\n\n› "},
-		{"devin: prose", tmux.ProgramDevin,
-			"I read that devin prints Quota exhausted when the plan runs out.\n\n> "},
+		// devin is intentionally NOT row-anchored (see limit.go's matcher table): its
+		// render was never captured live, so the lead-glyph allow-list is
+		// unverifiable and the #4721 mid-row false positive is the accepted tradeoff
+		// for not silently missing the only limit signal af has. See
+		// TestDevinLimitMatcherIsUnanchoredForTheInferredRender for the tradeoff and
+		// the real-banner true positives.
 	}
 	for _, tc := range falsePositives {
 		t.Run("not a limit/"+tc.name, func(t *testing.T) {
@@ -77,6 +81,10 @@ func TestLimitBannerNeedsToOpenItsRow(t *testing.T) {
 			"\x1b[31m■\x1b[0m " + codexBannerLine1 + "\n" + codexBannerLine2 + "\n\n› Ask Codex to do anything",
 			time.Date(2026, 9, 20, 9, 16, 0, 0, time.UTC)},
 		{"devin: line start", tmux.ProgramDevin, "Quota exhausted: usage quota has been exhausted\n\n> ", time.Time{}},
+		// devin's real exhaustion renders (⚠ + VS15 / [!] / bordered chrome,
+		// per the 3000.2.17 binary) are pinned in the dedicated
+		// TestDevinLimitMatcherIsUnanchoredForTheInferredRender below; devin is
+		// no longer anchored, so the anchoring in this test does not gate it.
 	}
 	for _, tc := range truePositives {
 		t.Run("limit/"+tc.name, func(t *testing.T) {
@@ -139,5 +147,75 @@ func TestLimitParkErrorIgnoresAQuotedBanner(t *testing.T) {
 	}
 	if err := limitParkError(det, "  ⎿  "+claudeBanner+"\n❯ ", tmux.ProgramClaude); err == nil {
 		t.Fatal("a real banner did not park a starting session")
+	}
+}
+
+// TestDevinLimitMatcherIsUnanchoredForTheInferredRender pins the #6184 fix.
+// devin is detect-only and its exhausted-state render was INFERRED from the
+// binary, never captured live, so row anchoring (#4721 / #6184) is NOT applied
+// to it: the lead-glyph allow-list in bannerLeadMarkers has no verified entry
+// for devin's real Alert prefix (⚠ + VS15, or the ASCII fallback [!]), and an
+// anchored devin matcher silently dropped every real exhaustion banner — the
+// whole limit surface (badge, parking, manual `c` retry, auto-resume) vanishing
+// with no log. This test pins both halves of the tradeoff:
+//
+//  1. The real renders the binary implies ARE detected (these were the misses).
+//  2. The #4721 mid-row false positive IS now a hit — by design, not by
+//     accident: devin has only this one signal, so a silent miss of it is
+//     strictly worse than a quoted-word false positive. This is the same
+//     deferral the detect-only posture rests on ("When a real exhausted-state
+//     banner is captured, add a parseReset": capture the real lead shape, pin
+//     it, and flip lineAnchored to true to get the anchor back — not before).
+//
+// claude and codex keep lineAnchored: true because their banners WERE captured
+// (verbatim / recorded fixture); they are asserted here as the contrast.
+func TestDevinLimitMatcherIsUnanchoredForTheInferredRender(t *testing.T) {
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	det := NewLimitDetector(nil) // built-in matchers
+
+	// Half 1: the renders the devin binary implies — and that an anchored
+	// matcher dropped — are all hits. These were the silent misses.
+	realRenders := []struct {
+		name, pane string
+	}{
+		{"bare line start", "Quota exhausted: usage quota has been exhausted\n\n> "},
+		{"warning glyph ⚠ + VS15 (unicode Alert)", "\u26a0\ufe0e Quota exhausted: usage quota has been exhausted\n\n> "},
+		{"ASCII fallback [!] (legacy Alert)", "  [!] Quota exhausted: usage quota has been exhausted\n\n> "},
+		{"bordered chrome with warning glyph", "\u2502 \u26a0\ufe0e Quota exhausted \u2502\n\n> "},
+		{"mid-row (under a box-draw branch)", "  └ Quota exhausted: usage quota has been exhausted\n\n> "},
+	}
+	for _, tc := range realRenders {
+		t.Run("limit/"+tc.name, func(t *testing.T) {
+			if hit, _, _ := det.Check(tc.pane, tmux.ProgramDevin, now); !hit {
+				t.Fatalf("a real devin exhaustion render was missed (the #6184 regression):\n%s", tc.pane)
+			}
+		})
+	}
+
+	// Half 2: the #4721 mid-row false positive IS detected for devin. This is
+	// the accepted tradeoff, asserted here so it cannot regress into a silent
+	// miss again without a conscious decision. The pane quotes "Quota
+	// exhausted" in prose; a healthy devin pane never contains that exact
+	// phrase (its healthy quota-status line uses "N% remaining" / "resets in"
+	// / "Quota used:" / "Quota resets"), so this is the narrow #4721 class and
+	// not a broad false-positive risk. If a future change re-anchors devin
+	// (after capturing the real lead shape), update this half to expect a miss.
+	if hit, _, _ := det.Check("I read that devin prints Quota exhausted when the plan runs out.\n\n> ", tmux.ProgramDevin, now); !hit {
+		t.Fatal("devin must be unanchored: the #4721 mid-row false positive is the accepted tradeoff for not silently missing the only limit signal — if devin is re-anchored, capture the real lead shape first and update this assertion")
+	}
+
+	// Contrast: claude and codex ARE anchored, so their mid-row false positives
+	// stay misses. This guards against the inverse mistake of unanchoring them.
+	for _, tc := range []struct{ name, agent, pane string }{
+		{"claude mid-row quote stays anchored", tmux.ProgramClaude,
+			"● " + claudeBanner + " is the wording #4721 is about.\n\n❯ "},
+		{"codex mid-row quote stays anchored", tmux.ProgramCodex,
+			"• " + codexBannerLine1 + "\n  " + codexBannerLine2 + "\n\n› "},
+	} {
+		t.Run("not a limit/"+tc.name, func(t *testing.T) {
+			if hit, _, _ := det.Check(tc.pane, tc.agent, now); hit {
+				t.Fatalf("a mid-row quote parked a %s session that row-anchoring must exclude (#4721):\n%s", tc.agent, tc.pane)
+			}
+		})
 	}
 }

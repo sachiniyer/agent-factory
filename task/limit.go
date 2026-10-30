@@ -119,7 +119,23 @@ func builtinLimitMatchers() map[string]agentLimitMatcher {
 		// devin is DETECT-ONLY (#2411): its exhaustion banner is inferred from the
 		// binary (not captured live) and its reset format is uncharacterized — so no
 		// parseReset and no auto-resume. See devinLimitDetect.
-		tmux.ProgramDevin: {detect: devinLimitDetect, parseReset: nil, lineAnchored: true},
+		//
+		// Row anchoring is NOT applied to devin. Its exhausted render was INFERRED
+		// from the binary and never captured live, so the lead-glyph allow-list in
+		// anchoredMatches (bannerLeadMarkers) is unverifiable for it. devin's Alert
+		// prefixes the banner with ⚠ + VS15 (U+26A0 U+FE0E) in unicode mode or the
+		// ASCII fallback [!] in ASCII mode — NEITHER of which bannerLeadMarkers
+		// accepts (the set has the bare ⚠ rune but not the trailing VS15, and no
+		// bracketed pair) — so an anchored devin matcher silently drops EVERY real
+		// exhaustion banner and surfaces no limit at all (#6184 regression). Devin is
+		// detect-only: this matcher is the ONLY signal af ever gets that a devin
+		// session hit its quota wall, so a silent miss is strictly worse than the
+		// false positive the anchor exists to stop. Leaving devin unanchored (its
+		// posture before #6184) trades the #4721 mid-row false positive for the #4721
+		// silent miss of the only signal — the same deferral the detect-only posture
+		// itself rests on ("When a real exhausted-state banner is captured, add a
+		// parseReset": pin the real lead shape and set lineAnchored: true then).
+		tmux.ProgramDevin: {detect: devinLimitDetect, parseReset: nil, lineAnchored: false},
 	}
 }
 
