@@ -69,10 +69,11 @@ func listTmuxSessions(ctx *scanContext) ([]string, error) {
 type recordedSocketKind int
 
 const (
-	// recordedSocketAbsent: no tmux-server-state.json record exists (this home
-	// never ran the Linux daemon that writes one). The ambient listing is the
-	// only evidence available; preserve the historical behavior of arming kills
-	// from it.
+	// recordedSocketAbsent: no tmux-server-state.json record exists AND no
+	// daemon is currently serving this home — the only reading under which
+	// "no record" actually means "this home never ran the Linux daemon that
+	// writes one". The ambient listing is the only evidence available, so
+	// preserve the historical behavior of arming kills from it.
 	recordedSocketAbsent recordedSocketKind = iota
 	// recordedSocketPinned: a record named a socket, and the listing is run
 	// against it with `tmux -S <socket> ls`. A name absent from THAT listing is
@@ -109,6 +110,20 @@ func (c *scanContext) recordedSocket() (string, recordedSocketKind) {
 	case err != nil:
 		return "", recordedSocketUnconfirmed
 	case !ok:
+		// No record exists. The historical reading is "this home never ran
+		// the Linux daemon that writes one," and the ambient listing is the
+		// only evidence — preserve the arming-from-ambient behavior for that
+		// case. But absence is not proof the daemon never ran: recordServerState
+		// silently ignores write failures, and the file may have been deleted
+		// while a daemon remains live. When a daemon IS serving this home it
+		// should have written a record, so its absence means doctor cannot prove
+		// the ambient server is the one the daemon hosts sessions on — a live
+		// session on the daemon's (unrecorded) socket would read dead here
+		// exactly as it does for an unreadable record. Treat that as
+		// unconfirmed rather than arming kills from the ambient listing.
+		if len(activeHomeDaemons(c)) > 0 {
+			return "", recordedSocketUnconfirmed
+		}
 		return "", recordedSocketAbsent
 	case state.Socket != "":
 		return state.Socket, recordedSocketPinned
@@ -129,11 +144,13 @@ func (c *scanContext) recordedSocket() (string, recordedSocketKind) {
 // It is true when the listing was pinned to the daemon's recorded socket (the
 // server that actually hosts this home's sessions) — a name absent from THAT
 // listing is absent from the server — and also when no daemon record exists at
-// all, in which case the ambient listing is the only evidence and the check
-// preserves its historical behavior. It is false only when a daemon record
-// exists but doctor cannot pin the listing to the socket it names, so a
-// successful listing of whatever server doctor's own $TMUX/$TMUX_TMPDIR reaches
-// is not proof of death: a live session on the daemon's (unreadable) socket
+// all AND no daemon is currently serving this home, in which case the ambient
+// listing is the only evidence and the check preserves its historical behavior.
+// It is false when a daemon record exists but doctor cannot pin the listing to
+// the socket it names, OR when no record exists yet a daemon IS serving this
+// home (a write failure or a deleted file): in both cases a successful listing
+// of whatever server doctor's own $TMUX/$TMUX_TMPDIR reaches is not proof of
+// death — a live session on the daemon's (unreadable or unrecorded) socket
 // would be absent from that listing and read as a verified orphan. The kill
 // stays report-only in that state.
 func (c *scanContext) sessionDeathCorroborated() bool {
