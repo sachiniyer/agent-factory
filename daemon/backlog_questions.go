@@ -255,7 +255,7 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionText 
 		svc := m.backlogService()
 		armed := false
 		err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
-			id := b.AnsweredInSessionText(sessionID, questionText, svc.Now())
+			id := b.AnsweredInSessionText(sessionID, questionText, session.NormalizeAttentionReason, svc.Now())
 			if id == 0 {
 				return []int{}, nil
 			}
