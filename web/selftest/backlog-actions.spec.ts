@@ -93,6 +93,9 @@ for (const width of [1280, 390]) {
 
     // Done.
     await panel.getByRole("button", { name: "Mark done", exact: true }).click();
+    // Done items leave the list until "Show done" is on.
+    await expect(row(page, child)).toHaveCount(0);
+    await page.getByRole("button", { name: "Show done", exact: true }).click();
     await expect(row(page, child).locator(".af-backlog-chip")).toContainText("Done");
     await shot("7-done");
   });
