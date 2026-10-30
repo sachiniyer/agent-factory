@@ -50,15 +50,7 @@ func (b *Backlog) AddNote(id int, author, text string, now time.Time) (*Message,
 	if text == "" {
 		return nil, errors.New("a note needs text")
 	}
-	next := 1
-	for _, m := range it.Thread {
-		if m.ID >= next {
-			next = m.ID + 1
-		}
-	}
-	it.Thread = append(it.Thread, Message{ID: next, Kind: KindNote, Author: author, Text: text, At: now})
-	it.UpdatedAt = now
-	return &it.Thread[len(it.Thread)-1], nil
+	return it.appendMessage(Message{Kind: KindNote, Author: author, Text: text}, now), nil
 }
 
 // SettingsChange sets the fields that are not nil.

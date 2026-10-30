@@ -16,6 +16,21 @@ type testHost struct {
 	lookups int
 	slots   int
 	facts   Facts
+	// attention is each session's mirrored attention reason.
+	attention map[string]string
+	target    AnswerTarget
+	delivered []PendingAnswer
+}
+
+func (h *testHost) SetAttention(_, sessionID, reason string) {
+	if h.attention == nil {
+		h.attention = map[string]string{}
+	}
+	h.attention[sessionID] = reason
+}
+func (h *testHost) AnswerTarget(string, string) AnswerTarget { return h.target }
+func (h *testHost) DeliverAnswer(_ string, a PendingAnswer) {
+	h.delivered = append(h.delivered, a)
 }
 
 func (h *testHost) Facts(string) Facts          { return h.facts }

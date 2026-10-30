@@ -213,7 +213,7 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 	sendErr := fmt.Errorf("session %q is not an item session", inst.Title)
 	if inst.ArmBacklogRun(time.Now()) {
 		m.persistAndPublishInstance(ref.ID, inst)
-		sendErr = sendBacklogPrompt(m, SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt})
+		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt})
 		if sendErr != nil {
 			m.disarmBacklogRun(ref.ID, inst)
 			sendErr = fmt.Errorf("send continue to session %q: %w", inst.Title, sendErr)
@@ -229,6 +229,14 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 	}
 	runs := out.Item(id).Runs
 	return runs[len(runs)-1], nil
+}
+
+// sendBacklogPromptLocked sends under the per-target lock task deliveries
+// take, so backlog prompts never interleave with them.
+func (m *Manager) sendBacklogPromptLocked(req SendPromptRequest) error {
+	unlock := m.lockTarget(req.RepoID, req.Title)
+	defer unlock()
+	return sendBacklogPrompt(m, req)
 }
 
 func (m *Manager) disarmBacklogRun(repoID string, inst *session.Instance) {
