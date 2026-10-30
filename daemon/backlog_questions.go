@@ -225,9 +225,8 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance) {
 
 // backlogSubmitBinding reports a line the user submits in an item session's
 // agent pane, so an open question there closes as answered in session. The fork
-// hung this on its attention-clearing binding; master has no such binding (the
-// attention port is theme A), so the wrapper stands alone and the two can be
-// combined when that lands.
+// hung this on its attention-clearing binding; here it wraps that binding (#5581)
+// and shares its isSubmittedInput.
 type backlogSubmitBinding struct {
 	ptyTabBinding
 	submitted func()
@@ -239,21 +238,6 @@ func (b backlogSubmitBinding) input(p []byte) error {
 		b.submitted()
 	}
 	return err
-}
-
-// isSubmittedInput reports whether a typed frame ends a line: the user sent
-// what they typed. A frame that starts with ESC is a terminal's own reply to a
-// focus, cursor or device query, not the user answering.
-func isSubmittedInput(p []byte) bool {
-	if len(p) == 0 || p[0] == 0x1b {
-		return false
-	}
-	for _, c := range p {
-		if c == '\r' || c == '\n' {
-			return true
-		}
-	}
-	return false
 }
 
 // redeliverBacklogAnswers finishes the answers a daemon restart left pending.

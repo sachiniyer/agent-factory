@@ -70,6 +70,7 @@ func (m *Manager) reattachRestoredRuntimes() {
 					return m.persistInstanceErr(repoID, i)
 				})
 				err := inst.ReattachSandbox()
+				inst.SettleAttentionAfterReattach()
 				// An adopted restart may have respawned the agent: the session
 				// already ended an in-flight task run (before observations
 				// resumed); the owning task's status is stamped here.

@@ -90,4 +90,5 @@ var sandboxConstrainedRoutes = map[string]string{
 	"/v1/ListTasks":      "tasks of the caller's own project only",
 	"/v1/AddTask":        "cron tasks only, delivering to an off-box session in the caller's project; no watch_cmd, host or spawn",
 	"/v1/RemoveTask":     "non-watch tasks of the caller's own project only",
+	"/v1/SetAttention":   "targets ONLY the caller's own session: the owner id replaces every selector in the request",
 }

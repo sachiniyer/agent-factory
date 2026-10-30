@@ -29,13 +29,14 @@ export type StatusFilter = Record<OperatorKind, boolean>;
 /** The filter menu's display order: live states first (the ones you act on), then
  *  the degraded ones, then the archive last — mirroring the rail's own live-then-
  *  archived partition (status.ts compareSessionsForRail). */
-export const FILTER_KINDS: readonly OperatorKind[] = ["needs-you", "working", "waiting-limit", "broken", "archived"];
+export const FILTER_KINDS: readonly OperatorKind[] = ["attention", "needs-you", "working", "waiting-limit", "broken", "archived"];
 
 /** The default: every state EXCEPT archived. Archived sessions are history — they
  *  accumulate without bound (a long-lived project carries hundreds) and burying the
  *  handful of live rows under them is what this feature exists to fix. Every other
  *  state is a session you might still act on, so it stays visible. */
 const DEFAULTS: StatusFilter = {
+  attention: true,
   "needs-you": true,
   working: true,
   "waiting-limit": true,
@@ -72,6 +73,7 @@ export function withKind(filter: StatusFilter, kind: OperatorKind, on: boolean):
  *  rows rather than shuffling as sessions come and go. */
 export function kindCounts(list: SessionData[]): Record<OperatorKind, number> {
   const counts: Record<OperatorKind, number> = {
+    attention: 0,
     "needs-you": 0,
     working: 0,
     "waiting-limit": 0,

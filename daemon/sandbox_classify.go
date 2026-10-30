@@ -97,6 +97,10 @@ var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 	reflect.TypeFor[RenameTabResponse]():             {"name": callerText},
 	reflect.TypeFor[ReorderTabResponse]():            {"name": callerText},
 	reflect.TypeFor[SendPromptResponse]():            {"status": closedVocab("delivery status enum")},
+	// SetAttention answers with the one session the owner id resolved to: its id and
+	// its title, which the sandbox itself supplied. The reason a caller sets is never
+	// echoed, and the projected row drops attention entirely.
+	reflect.TypeFor[SetAttentionResponse](): {"id": closedVocab("session id"), "title": callerText},
 }
 
 // sandboxRunStatusHeads is the closed vocabulary of a task run status's head (the
@@ -124,6 +128,7 @@ func sandboxRunStatusHead(status string) string {
 var sandboxResponseTypes = map[string]reflect.Type{
 	"/v1/Snapshot":       reflect.TypeFor[SnapshotResponse](),
 	"/v1/SendPrompt":     reflect.TypeFor[SendPromptResponse](),
+	"/v1/SetAttention":   reflect.TypeFor[SetAttentionResponse](),
 	"/v1/ArchiveSession": reflect.TypeFor[ArchiveSessionResponse](),
 	"/v1/CreateSession":  reflect.TypeFor[CreateSessionResponse](),
 	"/v1/CreateTab":      reflect.TypeFor[CreateTabResponse](),
