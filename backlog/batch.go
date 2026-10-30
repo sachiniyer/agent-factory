@@ -17,7 +17,14 @@ type Ref struct {
 
 func (r Ref) IsZero() bool { return r.Key == "" && r.ID == 0 }
 
+// MarshalJSON writes a zero reference as null, which UnmarshalJSON accepts and
+// AddBatch ignores, so a batch the daemon accepts survives being re-serialized
+// (a remote af backlog add --file sends it over HTTP). Writing 0 would be
+// refused as "item id 0 must be positive".
 func (r Ref) MarshalJSON() ([]byte, error) {
+	if r.IsZero() {
+		return []byte("null"), nil
+	}
 	if r.Key != "" {
 		return json.Marshal(r.Key)
 	}

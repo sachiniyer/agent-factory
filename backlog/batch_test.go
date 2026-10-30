@@ -358,3 +358,21 @@ func TestAddBatchReachesTheRequestedTreeInAnyOrder(t *testing.T) {
 		}
 	}
 }
+
+// A batch with a null reference survives a marshal/unmarshal round trip (Codex
+// P2 on #6288): the CLI re-serializes the file it read before sending it to a
+// remote daemon.
+func TestBatchWithANullReferenceRoundTrips(t *testing.T) {
+	in := parseBatch(t, `{"items":[{"key":"a","title":"a","waits_on":[null,"b"]},{"key":"b","title":"b","parent":null}]}`)
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out Batch
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("the re-serialized batch is refused: %v\n%s", err, data)
+	}
+	if !reflect.DeepEqual(in, out) {
+		t.Fatalf("round trip changed the batch:\n%+v\n%+v", in, out)
+	}
+}
