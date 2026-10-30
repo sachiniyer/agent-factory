@@ -250,7 +250,7 @@ func TestBacklogRedeliversPendingAnswer(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m.recoverBacklog(repoID)
+	m.recoverBacklog(repoID, nil)
 	m.backgroundMutationWG.Wait()
 	it := loadItem(t, repoID, 1)
 	if len(sent.reqs) != 1 || sent.reqs[0].ID != inst.ID || it.Status != backlog.StatusRunning {
@@ -356,5 +356,35 @@ func TestBacklogSendKeepsTheNextQuestionsAttention(t *testing.T) {
 				t.Fatalf("attention kept = %v, want %v", inst.HasAttention(), tc.wantKept)
 			}
 		})
+	}
+}
+
+// The write that records a delivered answer is retried while the backlog is busy
+// (Codex P2 on #6295): left pending, the answer would be sent again after a
+// restart and restart work the agent already did.
+func TestAnswerDeliveredWriteIsRetriedWhileTheBacklogIsBusy(t *testing.T) {
+	m, repoID, inst := askedItem(t)
+	stubBacklogSend(t, m, repoID)
+	prevApply, prevBackoff := applyBacklog, finishStartBackoff
+	finishStartBackoff = time.Millisecond
+	busy := 3
+	applyBacklog = func(svc *backlog.Service, ref backlog.ProjectRef, fn func(*backlog.Backlog) ([]int, error)) (*backlog.Backlog, error) {
+		if busy > 0 {
+			busy--
+			return nil, backlog.ErrBusy
+		}
+		return prevApply(svc, ref, fn)
+	}
+	t.Cleanup(func() { applyBacklog, finishStartBackoff = prevApply, prevBackoff })
+	msg := answer(t, m, repoID, "Postgres")
+	m.backgroundMutationWG.Wait()
+	_ = inst
+	if busy != 0 {
+		t.Fatalf("the outcome write gave up with %d busy answers left", busy)
+	}
+	for _, x := range loadItem(t, repoID, 1).Thread {
+		if x.ID == msg.ID && x.Delivery != backlog.DeliveryDelivered {
+			t.Fatalf("answer %+v is still %q: a restart would send it again", x, x.Delivery)
+		}
 	}
 }

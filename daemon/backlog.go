@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -250,6 +251,7 @@ func (s *controlServer) SetBacklogItemStatus(req SetBacklogItemStatusRequest, re
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	s.manager.adoptStartingRun(req.RepoID, req.RepoPath, req.SessionID)
 	out, err := s.manager.backlogService().SetItemStatus(req)
 	if err != nil {
 		return err
@@ -274,6 +276,7 @@ func (s *controlServer) PostBacklogMessage(req PostBacklogMessageRequest, resp *
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	s.manager.adoptStartingRun(req.RepoID, req.RepoPath, req.SessionID)
 	out, err := s.manager.backlogService().PostMessage(req)
 	if err != nil {
 		return err
@@ -316,4 +319,39 @@ func (s *controlServer) SetBudget(req SetBudgetRequest, resp *SetBudgetResponse)
 	}
 	*resp = *out
 	return nil
+}
+
+// adoptStartingRun links a session's still-starting run to it when the session
+// reports on its item (done, note, ask) before the start record is committed.
+// The start record is written after the session's initial prompt was delivered,
+// so a fast agent, or a busy backlog, can make the report arrive first; without
+// this the report fails and its pull request link or question is lost. The
+// session vouches for itself: its own item id (set at creation) and creation
+// time must match the run (Backlog.AdoptStarting). finishBacklogStart is then a
+// no-op for that run.
+func (m *Manager) adoptStartingRun(repoID, repoPath, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	ref, err := m.backlogService().Resolve(repoID, repoPath)
+	if err != nil {
+		return
+	}
+	s, ok := m.itemSessions(ref.ID)[sessionID]
+	if !ok {
+		return
+	}
+	svc := m.backlogService()
+	_, err = svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
+		if b.ItemForSession(sessionID) != nil {
+			return nil, errBacklogNoChange
+		}
+		if !b.AdoptStarting(s.instance.BacklogItem, sessionID, s.instance.Title, s.instance.CreatedAt, svc.Now()) {
+			return nil, errBacklogNoChange
+		}
+		return []int{s.instance.BacklogItem}, nil
+	})
+	if err != nil && !errors.Is(err, errBacklogNoChange) {
+		m.warn().Printf("adopt the starting run of session %s: %v", sessionID, err)
+	}
 }
