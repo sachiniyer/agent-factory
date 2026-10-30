@@ -699,13 +699,18 @@ func TestPruneUnderArchiveRoot(t *testing.T) {
 	require.NoError(t, pruneUnderArchiveRoot(repoID, archived), "a direct child")
 	require.NoError(t, pruneUnderArchiveRoot(repoID, filepath.Join(root, ".prune-abc-123")), "a tombstone sibling, even before it exists")
 	for name, p := range map[string]string{
-		"grandchild":              filepath.Join(archived, "inner"),
-		"the root itself":         root,
-		"a sibling repo's root":   filepath.Join(filepath.Dir(root), "other-repo", "wt"),
-		"anywhere else":           filepath.Join(outside, ".prune-x"),
-		"through a symlinked dir": filepath.Join(root, "escape", ".prune-x"),
-		"relative":                ".prune-x",
-		"empty":                   "",
+		"grandchild":                   filepath.Join(archived, "inner"),
+		"the root itself":              root,
+		"a sibling repo's root":        filepath.Join(filepath.Dir(root), "other-repo", "wt"),
+		"anywhere else":                filepath.Join(outside, ".prune-x"),
+		"through a symlinked dir":      filepath.Join(root, "escape", ".prune-x"),
+		"relative":                     ".prune-x",
+		"dotdot that cleans to inside": root + "/sub/../.prune-x",
+		"dotdot that escapes":          root + "/../" + filepath.Base(outside) + "/.prune-x",
+		"duplicate separators":         root + "//.prune-x",
+		"trailing slash":               root + "/.prune-x/",
+		"dot element":                  root + "/./.prune-x",
+		"empty":                        "",
 	} {
 		assert.Error(t, pruneUnderArchiveRoot(repoID, p), name)
 	}
@@ -722,6 +727,9 @@ func TestPruneApply_ResumeRefusesAnIntentOutsideTheArchiveRoot(t *testing.T) {
 		"worktree and tombstone outside": {WorktreePath: filepath.Join(outside, "wt"), TombstonePath: victim},
 		"only the worktree outside":      {WorktreePath: filepath.Join(outside, "wt"), TombstonePath: filepath.Join(filepath.Dir(archived), ".prune-ok")},
 		"only the tombstone outside":     {WorktreePath: archived, TombstonePath: victim},
+		// Cleans to the victim outside the root, while looking like a child of it as written.
+		"a dotdot tombstone escaping after cleaning": {WorktreePath: archived,
+			TombstonePath: filepath.Dir(archived) + "/../../../.." + victim},
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.NoError(t, inst.SetPruneIntent(intent))

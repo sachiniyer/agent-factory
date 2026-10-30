@@ -381,7 +381,7 @@ func (m *Manager) pruneFinish(repoID string, instance *session.Instance, intent 
 // ".prune-" sibling of the worktree: a hand-edited record cannot point the
 // deletion anywhere else.
 func validatePruneTombstonePath(intent *session.PruneIntentData) error {
-	tomb, wt := filepath.Clean(intent.TombstonePath), filepath.Clean(intent.WorktreePath)
+	tomb, wt := intent.TombstonePath, intent.WorktreePath // exact strings, as acted on
 	if filepath.Dir(tomb) != filepath.Dir(wt) || !strings.HasPrefix(filepath.Base(tomb), ".prune-") || tomb == wt {
 		return fmt.Errorf("prune tombstone %q is not a .prune- sibling of %q; refusing to delete it", intent.TombstonePath, intent.WorktreePath)
 	}
@@ -746,10 +746,22 @@ func pruneArchiveRoot(repoID string) (string, error) {
 // refuses. An absent parent (the tree was deleted out of band along with its
 // directory) is judged lexically, since there is nothing to resolve.
 func pruneUnderArchiveRoot(repoID, path string) error {
+	// The string validated here is byte-for-byte the string the rename and the
+	// removal act on, so it must already be in canonical form: absolute, equal to its
+	// own Clean (no duplicate or trailing separators, no "." or ".." elements). A path
+	// that only looks contained after cleaning would name a different target when
+	// handed to the OS as written.
 	if path == "" || !filepath.IsAbs(path) {
 		return fmt.Errorf("%q is not an absolute path", path)
 	}
-	path = filepath.Clean(path)
+	if filepath.Clean(path) != path {
+		return fmt.Errorf("%q is not in canonical form (duplicate or trailing separators, or . / .. elements); refusing to act on it", path)
+	}
+	for _, elem := range strings.Split(path, string(filepath.Separator)) {
+		if elem == ".." || elem == "." {
+			return fmt.Errorf("%q contains a %q element; refusing to act on it", path, elem)
+		}
+	}
 	root, err := pruneArchiveRoot(repoID)
 	if err != nil {
 		return err
