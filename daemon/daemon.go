@@ -141,7 +141,6 @@ var chdirToNeutralHomeFn = chdirToNeutralHome
 func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	log.InfoLog.Printf("starting daemon")
 	daemonBootTime = time.Now() // latch boot as the fire-reconcile upper bound (see daemonBootTime)
-
 	// #2212 R1: on an ordinary daemon start (not the transaction's own probation
 	// daemon, which carries a non-empty transaction id), defer to a genuinely
 	// in-progress FORWARD upgrade instead of serving a rival, and exit cleanly so
