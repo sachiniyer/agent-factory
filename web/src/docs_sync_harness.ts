@@ -12,6 +12,9 @@ export interface SyncLike {
   readonly text: string;
   readonly currentStatus: string;
   whenQuiet?(): Promise<void>;
+  /** Flushes unsaved edits and resolves when they have landed ("saved") or cannot
+   *  ("blocked": a conflict, markers, or a failed save). */
+  whenSaved?(): Promise<"saved" | "blocked">;
   start(): Promise<void>;
   edit(text: string): void;
   remoteChanged(commit: string): void;
@@ -176,6 +179,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
 
   function newSync(doc: string): SyncLike {
     const d = daemons.get(doc)!;
+    let self: SyncLike | null = null; // the sync these deps belong to, not whatever is current for the doc
     const deps: SyncDepsLike = {
       load: async () => {
         // A reopened tab loads only after the closing tab's final save has landed.
@@ -184,8 +188,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         return call(() => d.read());
       },
       save: (text, base, final) => {
-        const sync = syncs.get(doc);
-        saves.push({ doc, text, bufferHadMarkers: sync ? hasConflictMarkers(sync.text) : false });
+        saves.push({ doc, text, bufferHadMarkers: self ? hasConflictMarkers(self.text) : false });
         void final;
         const fault = rand() < (o.faults ?? 0) ? (rand() < 0.5 ? "drop" : "lose-reply") : null;
         return call(() => {
@@ -216,6 +219,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       },
     };
     const s = o.makeSync(deps);
+    self = s;
     syncs.set(doc, s);
     return s;
   }
@@ -358,6 +362,33 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
   }
 
+  /** Manual mode's "Send now": it must not go out while a newer edit is unsaved.
+   *  The pane flushes every doc and sends only when all have landed. */
+  function sendNow(): void {
+    const want = new Map<string, string[]>(
+      names.map((n) => [n, [...typed.get(n)!.values()]]),
+    );
+    const live = [...syncs.entries()];
+    const check = (doc: string): void => {
+      const d = daemons.get(doc)!;
+      for (const tok of want.get(doc) ?? []) {
+        if (excused.has(tok)) continue;
+        // A later keystroke on the same line supersedes it: that one is not owed.
+        if (![...typed.get(doc)!.values()].includes(tok)) continue;
+        if (!d.everHad(tok)) fail("send-now-sent-unsaved-edit", `${doc}: ${tok} was typed before Send now but is not in the daemon (daemon ${JSON.stringify(d.text)}, pane ${JSON.stringify(syncs.get(doc)?.text)}, status ${syncs.get(doc)?.currentStatus}, verdict-path ${syncs.get(doc)?.whenSaved ? "whenSaved" : "none"})`);
+      }
+    };
+    for (const [doc, sync] of live) {
+      if (!sync.whenSaved) {
+        check(doc); // an engine that cannot flush sends at once
+        continue;
+      }
+      void sync.whenSaved().then((verdict) => {
+        if (verdict === "saved") check(doc);
+      });
+    }
+  }
+
   function deliverEvent(): void {
     if (!events.length) return;
     const e = events.splice(Math.floor(rand() * events.length), 1)[0]!;
@@ -476,6 +507,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         }
         attached = "";
         await open(doc);
+        // The tab reopens on a stored draft while the first load is still in
+        // flight: a reconnect or a remote change arrives before the load returns.
+        if (rand() < 0.6) syncs.get(doc)?.reconnect?.();
+        if (rand() < 0.4) syncs.get(doc)?.remoteChanged("");
         await drain();
         const back = syncs.get(doc)!;
         if (wasConflict && (back.currentStatus !== "conflict" || back.text !== draft)) {
@@ -484,6 +519,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       }
     } else if (r < 0.845 && (o.faults ?? 0) > 0) {
       await pageClose();
+    } else if (r < 0.855) {
+      sendNow();
     } else if (r < 0.86) outage = !outage;
     else if (r < 0.89) {
       if (outage) outage = false;

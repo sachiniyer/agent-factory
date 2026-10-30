@@ -99,8 +99,8 @@ under the `perf-baselines` artifact.
 | --- | ---: | ---: | ---: | ---: |
 | raw_bytes | 1134872.000 | 1134872.000–1134872.000 | 0.000 | 1191615.600 |
 | gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
-| lazy_raw_bytes | 352076.000 | 352076.000–352076.000 | 0.000 | 369679.800 |
-| lazy_gzip_bytes | 114537.000 | 114537.000–114537.000 | 0.000 | 120263.850 |
+| lazy_raw_bytes | 353009.000 | 353009.000–353009.000 | 0.000 | 370659.450 |
+| lazy_gzip_bytes | 114809.000 | 114809.000–114809.000 | 0.000 | 120549.450 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -134,7 +134,7 @@ only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
 `lazy_*` entries measure it on its own, with the same 5% margin. Both lazy values
 were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
 `report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
-so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,134,872 raw and 256,552 gzip bytes over `web/dist` without `lazy/`. Master's committed shell was 1,117,448 raw against an unmoved raw baseline of 1,067,070, so the raw entry is re-recorded (1,067,070 → 1,134,872); the gzip entry stays inside its budget. Lazy bundle: 352,076 raw / 114,537 gzip.
+so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,134,872 raw and 256,552 gzip bytes over `web/dist` without `lazy/`. Master's committed shell was 1,117,448 raw against an unmoved raw baseline of 1,067,070, so the raw entry is re-recorded (1,067,070 → 1,134,872); the gzip entry stays inside its budget. Lazy bundle: 353,009 raw / 114,809 gzip.
 
 ### Bundle refresh provenance (#6212)
 
