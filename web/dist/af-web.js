@@ -18152,6 +18152,8 @@ var BodyEditor = class {
   // is set is older than the edit and must not replace it. It survives a failed save,
   // so the edit is kept (and the next change saves it again).
   draft = null;
+  saving = false;
+  queued = false;
   disposed = false;
   /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. */
   setText(text) {
@@ -18174,14 +18176,34 @@ var BodyEditor = class {
     if (this.timer === null) return;
     clearTimeout(this.timer);
     this.timer = null;
+    this.send();
+  }
+  /** One save at a time: an older request must not commit after a newer one and
+   *  overwrite it, so an edit made while a save is in flight waits for it and
+   *  then goes out as the latest text. */
+  send() {
+    if (this.saving) {
+      this.queued = true;
+      return;
+    }
     const text = this.text;
     const done2 = this.save(text);
     const acknowledge = (ok) => {
       if (ok && this.draft === text) this.draft = null;
     };
-    if (done2) done2.then(acknowledge, () => {
-    });
-    else acknowledge(true);
+    if (!done2) {
+      acknowledge(true);
+      return;
+    }
+    this.saving = true;
+    const finish = (ok) => {
+      this.saving = false;
+      acknowledge(ok);
+      if (!this.queued) return;
+      this.queued = false;
+      if (this.draft !== null && this.draft !== text) this.send();
+    };
+    done2.then(finish, () => finish(false));
   }
   dispose() {
     this.flush();
