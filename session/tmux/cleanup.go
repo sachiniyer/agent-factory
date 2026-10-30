@@ -165,29 +165,6 @@ func probeSessionContext(ctx context.Context, cmdExec cmd.Executor, name string)
 	return false, true
 }
 
-// probeTarget is the existence probe for a pinned "$N" session id, as the
-// (exists, known) tri-state. It is STRICT, unlike probeSession's lossy form: a
-// failure counts as absence only when sessionIDProvedAbsent proves it, because a
-// pinned teardown that mistook "could not ask" for "gone" would report a session
-// dead that may still be running (#6258). An id is addressed as-is, not with
-// has-session's `-t=name` exact-match form.
-func probeTarget(cmdExec cmd.Executor, target string) (exists bool, known bool) {
-	ctx, cancel := tmuxTimeoutContext()
-	err := runTmuxBoundedWith(ctx, cmdExec, "has-session", "-t", target)
-	timedOut := ctx.Err() != nil
-	cancel()
-	if err == nil {
-		return true, true
-	}
-	if timedOut {
-		return false, false
-	}
-	if sessionIDProvedAbsent(cmdExec, err, target) {
-		return false, true
-	}
-	return false, false
-}
-
 // recoveryWindowObserver is notified when a vanished-session recovery's bounded
 // GRACE WAIT opens and closes. Production leaves it nil, so this costs one nil
 // check per wait.

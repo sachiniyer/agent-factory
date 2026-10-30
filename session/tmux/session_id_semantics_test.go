@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -97,36 +98,76 @@ func TestTmuxSessionIDSemanticsTheIncarnationBindingRelies(t *testing.T) {
 	// so the wording is asserted per command: a tmux that changes one fails here,
 	// loudly, instead of silently turning a gone incarnation into an unknown one.
 	t.Logf("tmux version: %s", must("-V"))
-	// An empty entry is a command whose vanished-id wording the first CI run did not
-	// record; the test then only requires the classifier to recognise it and logs
-	// what tmux said, to be pinned in the next commit.
-	wording := map[string]string{
-		"show-environment": "no such session: " + idA,
-		"kill-session":     "can't find session: " + idA,
-		"display-message":  "",
-		"list-panes":       "",
-		"has-session":      "",
+
+	// What each command does when aimed at a vanished id — exit code, stdout, stderr —
+	// observed and pinned. They DIFFER: display-message succeeds with empty output,
+	// the others fail with their own wording. A change in any of them fails here,
+	// loudly, instead of silently turning a gone incarnation into an unknown one.
+	type behaviour struct {
+		exit           int
+		stdout, stderr string
 	}
-	vanished := map[string][]string{
-		"show-environment": {"show-environment", "-t", idA, EnvMarkerInstance},
-		"kill-session":     {"kill-session", "-t", idA},
-		"display-message":  {"display-message", "-p", "-t", idA, "#{pid} #{session_created}"},
-		"list-panes":       {"list-panes", "-s", "-t", idA, "-F", "#{pane_id}"},
-		"has-session":      {"has-session", "-t", idA},
+	observe := func(args ...string) behaviour {
+		out, runErr := exec.Command("tmux", args...).Output()
+		b := behaviour{stdout: strings.TrimSpace(string(out))}
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			b.exit = exitErr.ExitCode()
+			b.stderr = strings.TrimSpace(string(exitErr.Stderr))
+		} else if runErr != nil {
+			t.Fatalf("tmux %v: %v", args, runErr)
+		}
+		return b
 	}
-	for command, args := range vanished {
-		_, stderr, err := tm(args...)
-		t.Logf("%s on a vanished id: exit error %v, stderr %q", command, err, stderr)
-		if err == nil {
-			t.Fatalf("%s of a vanished id succeeded", command)
+	// The format every identity read uses: the answer must carry #{session_id}.
+	identity := "#{session_id} #{pid} #{session_created}"
+	observed := map[string]behaviour{
+		"display-message":  observe("display-message", "-p", "-t", idA, identity),
+		"show-environment": observe("show-environment", "-t", idA, EnvMarkerInstance),
+		"kill-session":     observe("kill-session", "-t", idA),
+		"list-panes":       observe("list-panes", "-s", "-t", idA, "-F", "#{session_id}|#{pid}|#{session_created}"),
+		"has-session":      observe("has-session", "-t", idA),
+		"if-shell":         observe("if-shell", "-F", "-t", idA, "#{==:#{session_id},"+idA+"}", "display-message -p af-branch-true", "display-message -p af-branch-false"),
+	}
+	for command, got := range observed {
+		t.Logf("%s on a vanished id: exit %d, stdout %q, stderr %q", command, got.exit, got.stdout, got.stderr)
+	}
+	pinned := map[string]behaviour{
+		"display-message":  {exit: 0, stdout: "", stderr: ""},
+		"show-environment": {exit: 1, stderr: "no such session: " + idA},
+		"kill-session":     {exit: 1, stderr: "can't find session: " + idA},
+	}
+	for command, want := range pinned {
+		if got := observed[command]; got != want {
+			t.Errorf("%s on a vanished id = %+v, want %+v — tmux changed; re-check every classifier on the id path", command, got, want)
 		}
-		if want := wording[command]; want != "" && stderr != want {
-			t.Fatalf("%s of a vanished id said %q, want %q — tmux changed its wording; re-check every classifier on the id path",
-				command, stderr, want)
+	}
+	// Every command that fails must be recognised as gone by the production classifier.
+	for _, command := range []string{"show-environment", "kill-session", "list-panes", "has-session", "if-shell"} {
+		got := observed[command]
+		if got.exit == 0 {
+			continue
 		}
-		if !sessionIDProvedAbsent(cmd.MakeExecutor(), err, idA) {
-			t.Fatalf("%s of a vanished id (%q) is not recognised as gone by sessionIDProvedAbsent", command, stderr)
+		_, runErr := exec.Command("tmux", map[string][]string{
+			"show-environment": {"show-environment", "-t", idA, EnvMarkerInstance},
+			"kill-session":     {"kill-session", "-t", idA},
+			"list-panes":       {"list-panes", "-s", "-t", idA},
+			"has-session":      {"has-session", "-t", idA},
+			"if-shell":         {"if-shell", "-F", "-t", idA, "1", "display-message -p x", "display-message -p y"},
+		}[command]...).Output()
+		if !sessionIDProvedAbsent(cmd.MakeExecutor(), runErr, idA) {
+			t.Errorf("%s of a vanished id (%+v) is not recognised as gone by sessionIDProvedAbsent", command, got)
 		}
+	}
+	// An id read that succeeds on a vanished id proves nothing: its answer must be
+	// required to carry the id, and here it carries nothing.
+	if got := observed["display-message"]; strings.Contains(got.stdout, idA) {
+		t.Errorf("display-message on a vanished id printed the id: %+v", got)
+	}
+	// The guard cannot be true for a vanished id because it compares #{session_id}:
+	// whatever -t resolves to (nothing, an error, or some other session), the
+	// true branch must not run for $idA.
+	if got := observed["if-shell"]; got.stdout == "af-branch-true" {
+		t.Errorf("an if-shell -F conditioned on #{session_id}==%s took the TRUE branch for the vanished id: %+v", idA, got)
 	}
 	if !alive(name) || sessionID(name) != idB {
 		t.Fatalf("a command addressed to the dead id %s touched the replacement %s", idA, idB)
@@ -137,6 +178,57 @@ func TestTmuxSessionIDSemanticsTheIncarnationBindingRelies(t *testing.T) {
 	liveErr := exitOneWith(t, "operation not permitted")
 	if sessionIDProvedAbsent(cmd.MakeExecutor(), liveErr, idB) {
 		t.Fatalf("a failure that does not say the session is gone was read as gone while %s is still listed", idB)
+	}
+
+	// 5. The guarded kill (#6258): the check and the act are ONE server-side
+	// command. Verified here against the runner's tmux (the version is logged
+	// above): the #{==:} and #{&&:} format operators, if-shell -F with a session-id
+	// target, the branch commands, and a pane listing stamped with the server's
+	// own pid and creation stamp.
+	const guard = "af_id_semantics_guard"
+	newSession(guard, "inst-guard")
+	gid := sessionID(guard)
+	pid := must("display-message", "-p", "-t", gid, "#{pid}")
+	created := must("display-message", "-p", "-t", gid, "#{session_created}")
+	condFor := func(p, c string) string {
+		return fmt.Sprintf("#{&&:#{==:#{session_id},%s},#{&&:#{==:#{pid},%s},#{==:#{session_created},%s}}}", gid, p, c)
+	}
+	if got := must("display-message", "-p", "-t", gid, condFor(pid, created)); got != "1" {
+		t.Fatalf("the verified pid and creation stamp must evaluate true, got %q", got)
+	}
+	for name, cond := range map[string]string{
+		"a different server pid":     condFor(pid+"1", created),
+		"a different creation stamp": condFor(pid, created+"1"),
+		"a different session id":     strings.Replace(condFor(pid, created), gid, "$999999", 1),
+	} {
+		if got := must("display-message", "-p", "-t", gid, cond); got != "0" {
+			t.Fatalf("%s must evaluate false, got %q", name, got)
+		}
+	}
+	rows := must("list-panes", "-s", "-t", gid, "-F", "#{session_id}|#{pid}|#{session_created}|#{pane_pid}")
+	if !strings.HasPrefix(rows, gid+"|"+pid+"|"+created+"|") {
+		t.Fatalf("a pane row must carry the server pid and creation stamp, got %q", rows)
+	}
+	guarded := func(cond string) string {
+		t.Helper()
+		return must("if-shell", "-F", "-t", gid, cond,
+			"display-message -p -t '"+gid+"' af-reap-fired ; kill-session -t '"+gid+"'",
+			"display-message -p -t '"+gid+"' af-reap-skipped")
+	}
+	for name, cond := range map[string]string{
+		"a different server pid":     condFor(pid+"1", created),
+		"a different creation stamp": condFor(pid, created+"1"),
+		"a different session id":     strings.Replace(condFor(pid, created), gid, "$999999", 1),
+	} {
+		if got := guarded(cond); got != "af-reap-skipped" || !alive(guard) {
+			t.Fatalf("the guard with %s must take the false branch and kill nothing; printed %q, alive=%v", name, got, alive(guard))
+		}
+	}
+	if got := guarded(condFor(pid, created)); got != "af-reap-fired" {
+		t.Fatalf("the verified guard must take the true branch and print its marker, printed %q", got)
+	}
+	if alive(guard) {
+		t.Fatal("the true branch printed its marker but the session is still alive")
 	}
 
 	// 4. Killing one id leaves the others alone.

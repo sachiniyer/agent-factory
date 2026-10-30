@@ -3,6 +3,7 @@ package tmux
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
 // fakeIncarnation is one tmux session as a server holds it.
@@ -41,6 +43,10 @@ type fakeTmuxServer struct {
 	// session being gone, and oddHasSession does the same for has-session: the
 	// shapes of a kill that did not take and a probe that cannot tell.
 	killFails, oddHasSession bool
+	// executedKills are the kill-session commands the server actually RAN, whether
+	// sent directly or as the branch of a guarded if-shell. A guarded kill whose
+	// condition failed is not in here — that is the whole point of the guard.
+	executedKills []string
 }
 
 func exitOneWith(t *testing.T, stderr string) error {
@@ -115,9 +121,14 @@ func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
 	switch args[0] {
 	case "display-message":
 		if sess == nil {
-			return nil, missing
+			// Measured on tmux 3.4: aimed at a session that does not exist,
+			// display-message succeeds with EMPTY output rather than failing.
+			return nil, nil
 		}
 		format := args[len(args)-1]
+		if strings.HasPrefix(format, "af-reap-") {
+			return []byte(format + "\n"), nil
+		}
 		switch format {
 		case "#{session_id} #{pid} #{session_created}":
 			return []byte(sess.id + " " + sess.pid + " " + sess.created + "\n"), nil
@@ -144,7 +155,9 @@ func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
 		if sess == nil {
 			return nil, missing
 		}
-		return nil, nil
+		// One pane row, prefixed with the pid and creation stamp the server
+		// evaluates while answering — exactly what the real format does.
+		return []byte(sess.id + "|" + sess.pid + "|" + sess.created + "|5555|0|||||\n"), nil
 	case "has-session":
 		if s.oddHasSession {
 			return nil, exitOneWith(s.t, "unexpected failure")
@@ -160,6 +173,7 @@ func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
 		if sess == nil {
 			return nil, missing
 		}
+		s.executedKills = append(s.executedKills, "kill-session -t "+target)
 		for i, other := range s.sessions {
 			if other == sess {
 				s.sessions = append(s.sessions[:i], s.sessions[i+1:]...)
@@ -167,6 +181,31 @@ func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
 			}
 		}
 		return nil, nil
+	case "if-shell":
+		// if-shell -F -t T COND TRUE FALSE: the server evaluates COND against the
+		// target and runs exactly one branch, as one command.
+		if sess == nil {
+			return nil, missing
+		}
+		cond, trueBranch, falseBranch := args[4], args[5], args[6]
+		m := regexp.MustCompile(`^#\{&&:#\{==:#\{session_id\},(\$\d+)\},#\{&&:#\{==:#\{pid\},(\d+)\},#\{==:#\{session_created\},(\d+)\}\}\}$`).FindStringSubmatch(cond)
+		if m == nil {
+			return nil, fmt.Errorf("fake tmux: unexpected if-shell condition %q", cond)
+		}
+		branch := falseBranch
+		if m[1] == sess.id && m[2] == sess.pid && m[3] == sess.created {
+			branch = trueBranch
+		}
+		var out []byte
+		for _, command := range strings.Split(branch, " ; ") {
+			words := strings.Fields(strings.ReplaceAll(command, "'", ""))
+			part, err := s.answerLocked(words)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, part...)
+		}
+		return out, nil
 	case "ls":
 		// The server's own listing, which corroborates a failure that names
 		// neither the id nor a missing server.
@@ -193,12 +232,20 @@ func (s *fakeTmuxServer) executor() cmd_test.MockCmdExec {
 	}
 }
 
+// kills are the kill-session commands the server executed.
 func (s *fakeTmuxServer) kills() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.executedKills...)
+}
+
+// guardedKills are the if-shell commands sent: every kill goes through one.
+func (s *fakeTmuxServer) guardedKills() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []string
 	for _, c := range s.commands {
-		if strings.HasPrefix(c, "kill-session") {
+		if strings.HasPrefix(c, "if-shell") {
 			out = append(out, c)
 		}
 	}
@@ -236,17 +283,86 @@ func reapProof() IncarnationProof {
 	return IncarnationProof{SessionName: reapName, Home: reapHome, InstanceID: reapInstance}
 }
 
+// stubIncarnationProcesses replaces the two seams that need a real tmux server and
+// real processes: the pane-row parse returns one fake captured process, and the
+// reap records what it was asked to signal and how many kills had executed by then.
+type reapRecord struct {
+	pids          []int
+	killsAtReap   int
+	reapCallCount int
+}
+
+func stubIncarnationProcesses(t *testing.T, srv *fakeTmuxServer) *reapRecord {
+	t.Helper()
+	rec := &reapRecord{}
+	prevParse, prevReap := incarnationPaneProcesses, incarnationReapProcesses
+	incarnationPaneProcesses = func(rows, name string) ([]proctree.Process, error) {
+		return []proctree.Process{{PID: 777001}}, nil
+	}
+	incarnationReapProcesses = func(_ reapReason, _ string, procs []proctree.Process, _, _ time.Duration) []proctree.Process {
+		rec.reapCallCount++
+		rec.killsAtReap = len(srv.kills())
+		for _, p := range procs {
+			rec.pids = append(rec.pids, p.PID)
+		}
+		return nil
+	}
+	t.Cleanup(func() { incarnationPaneProcesses, incarnationReapProcesses = prevParse, prevReap })
+	return rec
+}
+
 // #6258: a session whose own environment carries this fire's instance id is
-// stopped, and the kill addresses the probed incarnation by its tmux id, never
-// by the name.
+// stopped by ONE guarded server-side command that re-checks the server pid and
+// creation stamp, and the processes captured from that incarnation are reaped only
+// after the kill ran.
 func TestReapProvenIncarnationKillsTheProbedIdOnAMatch(t *testing.T) {
 	srv := newFakeTmuxServer(t, provenEnv())
+	rec := stubIncarnationProcesses(t, srv)
 	got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
 
 	require.True(t, got.Stopped, "why: %s", got.Why)
 	require.Equal(t, []string{"kill-session -t $7"}, srv.kills(),
 		"the kill must target the probed incarnation id, and nothing else")
+	guarded := srv.guardedKills()
+	require.Len(t, guarded, 1, "the kill must be exactly one guarded server-side command")
+	require.Contains(t, guarded[0], "if-shell -F -t $7 #{&&:#{==:#{session_id},$7},#{&&:#{==:#{pid},4242},#{==:#{session_created},1700000000}}}",
+		"the guard must compare the session id, server pid and creation stamp in the server")
 	require.False(t, srv.has(reapName))
+	require.Equal(t, 1, rec.reapCallCount)
+	require.Equal(t, []int{777001}, rec.pids)
+	require.Equal(t, 1, rec.killsAtReap, "the captured processes are reaped only after the kill fired")
+}
+
+// The property of #6260's review: the destructive operation runs only if, when the
+// SERVER executes it, the target is still the verified incarnation. A server that
+// is replaced between the client's last check and the kill — and reissues "$7" —
+// is not killed, and nothing captured is reaped.
+func TestReapProvenIncarnationDoesNothingWhenTheServerChangesBeforeTheKill(t *testing.T) {
+	replaceServer := func(s *fakeTmuxServer) {
+		s.sessions[0].pid = "9999"
+		s.sessions[0].created = "1700000555"
+	}
+	cases := map[string]string{
+		// After the client's re-confirmation: only the guard can catch it.
+		"after the re-confirmation": "display-message -p -t $7 #{session_id} #{pid} #{session_created}",
+		// After the pane capture, immediately before the kill.
+		"after the pane capture": "list-panes -s -t $7",
+	}
+	for name, trigger := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := newFakeTmuxServer(t, provenEnv())
+			rec := stubIncarnationProcesses(t, srv)
+			srv.after = map[string]func(*fakeTmuxServer){trigger: replaceServer}
+			got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+
+			require.False(t, got.Stopped)
+			require.Contains(t, got.Why, "replaced")
+			require.Empty(t, srv.kills(), "the guard must stop the kill on a replaced server")
+			require.True(t, srv.has(reapName), "the session at the reissued id survives")
+			require.Zero(t, rec.reapCallCount, "nothing captured may be reaped when the kill did not fire")
+			require.Len(t, srv.guardedKills(), 1, "the guard itself was evaluated by the server")
+		})
+	}
 }
 
 // Each of these leaves the session ALONE, asserted on the recorded argv: no
@@ -338,7 +454,7 @@ func TestReapProvenIncarnationNeverKillsASessionRecreatedUnderTheName(t *testing
 		// After the environment is read: the re-confirmation finds the id gone.
 		"after the environment read": "show-environment -t $7 AF_SESSION",
 		// After the re-confirmation: the kill itself finds the id gone.
-		"after the re-confirmation": "display-message -p -t $7 #{pid} #{session_created}",
+		"after the re-confirmation": "display-message -p -t $7 #{session_id} #{pid} #{session_created}",
 	}
 	for name, trigger := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -347,9 +463,7 @@ func TestReapProvenIncarnationNeverKillsASessionRecreatedUnderTheName(t *testing
 			ReapProvenIncarnation(srv.executor(), "claude", reapProof())
 
 			require.True(t, srv.has(reapName), "the session re-created under the name must survive")
-			for _, kill := range srv.kills() {
-				require.Equal(t, "kill-session -t $7", kill, "only the probed incarnation id may ever be targeted")
-			}
+			require.Empty(t, srv.kills(), "nothing may be killed once the probed id is gone")
 		})
 	}
 }
@@ -371,12 +485,11 @@ func TestReapProvenIncarnationRejectsAServerThatReissuedTheId(t *testing.T) {
 	require.Empty(t, srv.kills())
 }
 
-// A vanished id is recognised by the one classifier whatever command words it:
-// show-environment says "no such session" where kill-session says "can't find
-// session", and the server's id listing corroborates either. Here the id vanishes
-// before the environment read, so the reap reports the incarnation gone and kills
-// nothing.
-func TestReapProvenIncarnationReadsAVanishedIDFromAnyWording(t *testing.T) {
+// A vanished id never reads as a match. tmux's display-message does not fail for it —
+// it succeeds with EMPTY output — so the identity probe demands #{session_id} in the
+// answer and treats an empty reply as unknown. Here the id vanishes before the
+// environment read; nothing is killed.
+func TestReapProvenIncarnationNeverReadsAnEmptyAnswerAsAMatch(t *testing.T) {
 	srv := newFakeTmuxServer(t, provenEnv())
 	srv.after = map[string]func(*fakeTmuxServer){
 		"display-message -p -t =" + reapName + ": #{session_id} #{pid} #{session_created}": func(s *fakeTmuxServer) {
@@ -386,7 +499,7 @@ func TestReapProvenIncarnationReadsAVanishedIDFromAnyWording(t *testing.T) {
 	got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
 
 	require.False(t, got.Stopped)
-	require.Contains(t, got.Why, "replaced")
+	require.NotEmpty(t, got.Why)
 	require.Empty(t, srv.kills())
 }
 

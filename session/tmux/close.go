@@ -82,20 +82,6 @@ const (
 type closeRun struct {
 	t       *TmuxSession
 	unknown bool
-	// pin, when set, is the "$N" id of ONE probed incarnation. Every tmux command
-	// of this run then targets that id instead of the session name, so a session
-	// re-created under the same name after the probe is neither listed, killed nor
-	// probed: tmux answers "can't find session" for the old id (#6258).
-	pin string
-}
-
-// target is the tmux target this run addresses: the pinned incarnation id, or the
-// exact session name.
-func (r *closeRun) target() string {
-	if r.pin != "" {
-		return r.pin
-	}
-	return exactTarget(r.t.sanitizedName)
 }
 
 // closeProcessOutcome carries the process-tree half of teardown separately from
@@ -120,16 +106,24 @@ func (r *closeRun) tmux(args ...string) error {
 	return err
 }
 
+// output is tmux for a command whose stdout matters (the guarded kill prints
+// which branch ran): the same bounded run, recording a tripped deadline.
+func (r *closeRun) output(args ...string) ([]byte, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := r.t.outputTmuxBounded(ctx, args...)
+	if err != nil && ctx.Err() != nil {
+		r.unknown = true
+		return nil, fmt.Errorf("%w: %s after %s", ErrTmuxTimeout, args[0], tmuxCommandTimeout)
+	}
+	return out, err
+}
+
 // probe asks whether the session still exists. A timed-out probe marks the run
 // unknown via the shared probe helper and reports ok=false, so "could not ask" is
 // never read as "not there".
 func (r *closeRun) probe() (exists bool, ok bool) {
-	var known bool
-	if r.pin != "" {
-		exists, known = probeTarget(r.t.cmdExec, r.pin)
-	} else {
-		exists, known = probeSession(r.t.cmdExec, r.t.sanitizedName)
-	}
+	exists, known := probeSession(r.t.cmdExec, r.t.sanitizedName)
 	if !known {
 		r.unknown = true
 	}
@@ -152,12 +146,6 @@ func (t *TmuxSession) Close() (PaneState, error) {
 // false for interactive teardown (the captured-tree reaper remains asynchronous)
 // and true only when a caller will mutate the worktree immediately afterward.
 func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProcessOutcome) {
-	return t.closeTarget(waitForProcesses, "")
-}
-
-// closeTarget is close against an optional pinned incarnation id (see closeRun.pin).
-// An empty pin is the ordinary name-addressed teardown.
-func (t *TmuxSession) closeTarget(waitForProcesses bool, pin string) (PaneState, error, closeProcessOutcome) {
 	// Every af-initiated teardown of a tracked session routes here, so marking
 	// before kill-session runs is what lets the status monitor tell "af asked"
 	// from "vanished on its own" (#4472). A capture already in flight during
@@ -170,7 +158,7 @@ func (t *TmuxSession) closeTarget(waitForProcesses bool, pin string) (PaneState,
 	markedMon, probeAnswered := t.markTeardownInitiated()
 	defer t.settleTeardown(markedMon)
 	var errs []error
-	r := &closeRun{t: t, pin: pin}
+	r := &closeRun{t: t}
 	if !probeAnswered {
 		// The mark's identity probe already spent a full tmuxCommandTimeout
 		// without an answer — the server is wedged, so list-panes and
@@ -187,7 +175,7 @@ func (t *TmuxSession) closeTarget(waitForProcesses bool, pin string) (PaneState,
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
 	// (#1104).
-	leaked, captureErr := captureSessionProcessTreesAt(t.cmdExec, t.sanitizedName, r.target())
+	leaked, captureErr := CaptureSessionProcessTrees(t.cmdExec, t.sanitizedName)
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks
@@ -203,7 +191,7 @@ func (t *TmuxSession) closeTarget(waitForProcesses bool, pin string) (PaneState,
 	// would spend another full deadline against the same wedged server, which is
 	// exactly what the rest of this path refuses to do. The loop stops at the first
 	// mate kill that trips it for the same reason.
-	if pin == "" && !r.unknown && !errors.Is(captureErr, ErrTmuxTimeout) {
+	if !r.unknown && !errors.Is(captureErr, ErrTmuxTimeout) {
 		for _, mate := range t.groupMateSessions() {
 			if r.unknown {
 				break
@@ -211,7 +199,7 @@ func (t *TmuxSession) closeTarget(waitForProcesses bool, pin string) (PaneState,
 			_ = r.tmux("kill-session", "-t", exactTarget(mate))
 		}
 	}
-	if err := r.tmux("kill-session", "-t", r.target()); err != nil {
+	if err := r.tmux("kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
 		switch {
 		case r.unknown:
 			// r.tmux already wrapped this as ErrTmuxTimeout.
