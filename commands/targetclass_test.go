@@ -48,6 +48,8 @@ var verbTargetClass = map[string]string{
 
 	// The backlog verbs talk to the daemon the client targets (api/backlog.go).
 	"af backlog add":    classRouted,
+	"af backlog answer": classRouted,
+	"af backlog ask":    classRouted,
 	"af backlog budget": classRouted,
 	"af backlog delete": classRouted,
 	"af backlog done":   classRouted,
