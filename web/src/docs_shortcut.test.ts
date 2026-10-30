@@ -85,7 +85,7 @@ function phoneRules(selector: string): string {
       i++;
     }
     const body = css.slice(start, i - 1);
-    const rule = body.match(new RegExp(`(?:^|\\})\\s*${selector.replace(/[.[\]():]/g, "\\$&")}\\s*\\{([^}]*)\\}`));
+    const rule = body.match(new RegExp(`(?:^|\\})\\s*${selector.replace(/[\\.[\]():]/g, "\\$&")}\\s*\\{([^}]*)\\}`));
     if (rule) return rule[1];
   }
   return "";

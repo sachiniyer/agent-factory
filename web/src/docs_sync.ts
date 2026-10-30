@@ -4,6 +4,7 @@
 // the pane wires it to the editor.
 
 import type { DocText, SaveResult } from "./proposal_api.js";
+import { hasConflictMarkers } from "./text_diff.js";
 import {
   AUTOSAVE_DELAY_MS,
   SAVE_RETRY_MS,
@@ -49,6 +50,7 @@ export class DocSync {
   private shown: { status: SyncStatus; detail: string } | null = null;
   private starting: { resolve(): void; reject(e: unknown): void } | null = null;
   private quietWaiters: (() => void)[] = [];
+  private savedWaiters: ((v: "saved" | "blocked") => void)[] = [];
   /** The draft this sync last wrote to (or read from) per-viewer storage, as JSON. */
   private storedKey: string | null = null;
   private closed = false;
@@ -171,6 +173,33 @@ export class DocSync {
     return this.model.closed ? null : head;
   }
 
+  /** Saves what is unsaved and resolves "saved" once it has landed, or "blocked"
+   *  when it cannot (an open conflict, conflict markers, a failed save). Send now
+   *  waits on this, so it never goes out ahead of a newer edit. */
+  whenSaved(): Promise<"saved" | "blocked"> {
+    this.pumpSaved();
+    const now = this.savedVerdict();
+    if (now) return Promise.resolve(now);
+    return new Promise((resolve) => this.savedWaiters.push(resolve));
+  }
+
+  private savedVerdict(): "saved" | "blocked" | null {
+    const m = this.model;
+    if (!m.loaded) return m.loadFailed !== null ? "blocked" : null;
+    if (m.phase === "conflict") return "blocked";
+    if (!isDirty(m)) return m.phase === "saving" ? null : "saved";
+    if (m.phase === "idle" && (hasConflictMarkers(m.buffer) || m.note?.kind === "error")) return "blocked";
+    return null;
+  }
+
+  /** Starts the save of anything unsaved that is waiting on a timer. */
+  private pumpSaved(): void {
+    const m = this.model;
+    if (m.phase === "idle" && isDirty(m) && !hasConflictMarkers(m.buffer) && m.note?.kind !== "error" && !m.closed) {
+      this.dispatch({ t: "flush" });
+    }
+  }
+
   /** Resolves when no save is in flight and none is queued. A tab that reopens
    *  a doc waits for the closing tab's final save, so its first load does not
    *  return text older than what the user just typed. */
@@ -188,6 +217,15 @@ export class DocSync {
     this.model = next;
     for (const fx of effects) this.run(fx);
     this.emit();
+    if (this.savedWaiters.length) {
+      this.pumpSaved();
+      const v = this.savedVerdict();
+      if (v) {
+        const waiters = this.savedWaiters;
+        this.savedWaiters = [];
+        for (const w of waiters) w(v);
+      }
+    }
     if (this.quiet() && this.quietWaiters.length) {
       const waiters = this.quietWaiters;
       this.quietWaiters = [];
@@ -213,9 +251,10 @@ export class DocSync {
               this.dispatch({ t: "reload_ok", doc });
               return;
             }
+            this.dispatch({ t: "load_ok", doc });
             const draft = this.deps.draft?.load() ?? null;
             this.storedKey = draft ? JSON.stringify(draft) : null;
-            this.dispatch({ t: "load_ok", doc, draft });
+            this.dispatch({ t: "draft_read", draft });
             this.starting?.resolve();
           },
           (e: unknown) => {

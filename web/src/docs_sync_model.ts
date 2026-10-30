@@ -36,7 +36,10 @@ export interface Conflict {
   head: string;
 }
 
-export type Phase = "loading" | "idle" | "saving" | "reloading" | "conflict";
+/** "restoring" sits between the first load and "idle": the load has returned and
+ *  per-viewer storage is being read. Nothing is drained, armed or stored in it, so
+ *  a stored draft is always restored before any reload can start. */
+export type Phase = "loading" | "restoring" | "idle" | "saving" | "reloading" | "conflict";
 
 export interface Flight {
   text: string;
@@ -78,8 +81,9 @@ export interface Model {
 }
 
 export type Event =
-  /** `draft` is what per-viewer storage held for this doc, read before the load. */
-  | { t: "load_ok"; doc: DocText; draft: Draft | null }
+  | { t: "load_ok"; doc: DocText }
+  /** What per-viewer storage holds for this doc, or null. */
+  | { t: "draft_read"; draft: Draft | null }
   | { t: "load_fail"; error: string }
   | { t: "edit"; text: string }
   | { t: "timer" }
@@ -259,13 +263,18 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
   switch (e.t) {
     case "load_ok":
       if (m.phase !== "loading") return;
-      m.phase = "idle";
-      m.loaded = true;
+      m.phase = "restoring";
       m.loadFailed = null;
       m.buffer = e.doc.text;
       m.saved = e.doc.text;
       m.base = e.doc.commit;
       fx.push({ t: "set_buffer", text: e.doc.text });
+      return;
+
+    case "draft_read":
+      if (m.phase !== "restoring") return;
+      m.phase = "idle";
+      m.loaded = true;
       if (e.draft) restoreDraft(m, fx, e.draft);
       return;
 
@@ -374,8 +383,8 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       return;
 
     case "remote":
-      if (m.closed || (!m.loaded && m.phase !== "loading")) return;
-      if (e.commit !== "" && e.commit === m.base) return;
+      if (m.closed) return;
+      if (e.commit !== "" && e.commit === m.base && m.phase !== "loading" && m.phase !== "restoring") return;
       m.stale = true;
       return;
 

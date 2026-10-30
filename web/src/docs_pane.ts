@@ -689,7 +689,16 @@ export class DocsPane {
     if (status.state === "countdown" && status.mode === "auto") {
       this.runPush("hold", () => holdPush(this.opts.sessionId, this.opts.token));
     } else {
-      this.runPush("send", () => sendChanges(this.opts.sessionId, this.opts.token));
+      this.runPush("send", async () => {
+        // The daemon builds the prompt from committed edits, so every open doc is
+        // flushed and its save awaited first: Send now never goes out ahead of a
+        // newer edit.
+        const verdicts = await Promise.all([...this.syncs.values()].map((s) => s.whenSaved()));
+        if (verdicts.includes("blocked")) {
+          throw new Error("some edits are not saved yet; resolve them first");
+        }
+        return sendChanges(this.opts.sessionId, this.opts.token);
+      });
     }
   }
 
