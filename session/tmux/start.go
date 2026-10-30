@@ -171,7 +171,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: prepare filtered session environment: %w", ErrSessionNotStarted, envErr)
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
-	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
+	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration(), t.launchInstanceID())...)
 	for _, entry := range sessionEnv {
 		args = append(args, "-e", entry)
 	}

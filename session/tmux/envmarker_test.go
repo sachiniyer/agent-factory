@@ -58,7 +58,7 @@ func TestSessionEnvFlagsIncludeMarkers(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	t.Setenv(envMarkerTestguardRun, "test-run-1")
 
-	flags := sessionEnvFlags("af_abc_mysession", "generation-1")
+	flags := sessionEnvFlags("af_abc_mysession", "generation-1", "")
 	require.Equal(t, []string{
 		"-e", "AF_SESSION=af_abc_mysession",
 		"-e", "AF_SESSION_GEN=generation-1",
@@ -67,9 +67,64 @@ func TestSessionEnvFlagsIncludeMarkers(t *testing.T) {
 	}, flags)
 }
 
+// #6258: the create attempt's instance id rides next to the other markers, so a
+// later probe of the live session can prove which attempt spawned it. It is
+// omitted when the session is not an instance's agent.
+func TestSessionEnvFlagsCarryTheInstanceID(t *testing.T) {
+	forceNewSessionEnvMarkers(t, true)
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv(envMarkerTestguardRun, "test-run-1")
+
+	require.Equal(t, []string{
+		"-e", "AF_SESSION=af_abc_mysession",
+		"-e", "AF_SESSION_GEN=generation-1",
+		"-e", "AF_HOME=" + home,
+		"-e", "AF_INSTANCE_ID=inst-1",
+		"-e", "AF_TESTGUARD_RUN=test-run-1",
+	}, sessionEnvFlags("af_abc_mysession", "generation-1", "inst-1"))
+	require.NotContains(t, sessionEnvFlags("af_abc_mysession", "generation-1", ""), "AF_INSTANCE_ID=",
+		"a session with no instance id stamps none")
+}
+
+// #6258: SetInstanceID reaches the actual new-session command line.
+func TestStartStampsTheInstanceID(t *testing.T) {
+	forceNewSessionEnvMarkers(t, true)
+	forceSessionEnvExecutable(t, "/test/af")
+	forceAgentOnSearchPath(t, "claude")
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	oldNewSessionGeneration := newSessionGeneration
+	newSessionGeneration = func() string { return "generation-1" }
+	t.Cleanup(func() { newSessionGeneration = oldNewSessionGeneration })
+
+	ptyFactory := NewMockPtyFactory(t)
+	created := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "has-session") && !created {
+				created = true
+				return fmt.Errorf("session not found")
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if len(cmd.Args) >= 2 && cmd.Args[1] == "show-options" {
+				return nil, fmt.Errorf("no server running")
+			}
+			return []byte("output"), nil
+		},
+	}
+
+	session := newTmuxSession(toTmuxName("stamped", ""), "claude", ptyFactory, cmdExec)
+	session.SetInstanceID("inst-from-launch-options")
+	require.NoError(t, session.Start(t.TempDir()))
+	require.NotEmpty(t, ptyFactory.cmds)
+	require.Contains(t, strings.Join(ptyFactory.cmds[0].Args, " "), " -e AF_INSTANCE_ID=inst-from-launch-options ")
+}
+
 func TestSessionEnvFlagsEmptyWhenUnsupported(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
-	require.Nil(t, sessionEnvFlags("af_abc_mysession", "generation-1"))
+	require.Nil(t, sessionEnvFlags("af_abc_mysession", "generation-1", ""))
 }
 
 // TestStartInjectsEnvMarkers verifies the markers reach the actual
