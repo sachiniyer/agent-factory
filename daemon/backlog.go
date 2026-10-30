@@ -37,12 +37,41 @@ type backlogState struct {
 	// observed before the session's start record was committed: the completion
 	// has no item to land on yet, and is replayed by finishBacklogStart.
 	pendingEnds map[string]int
+	// answering holds the answers with a delivery worker outstanding, by
+	// project/item/answer id.
+	answering map[string]bool
 	// recovered, recovering and recoveryDone track restart recovery.
 	recovered    map[string]bool
 	recovering   bool
 	recoveryDone bool
 	meter        meterState
 	runner       runnerState
+}
+
+func answerKey(repoID string, a backlog.PendingAnswer) string {
+	return fmt.Sprintf("%s\x00%d\x00%d", repoID, a.ID, a.AnswerID)
+}
+
+// claimAnswer reports whether the caller may start a delivery worker for a;
+// false when one is outstanding.
+func (s *backlogState) claimAnswer(repoID string, a backlog.PendingAnswer) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := answerKey(repoID, a)
+	if s.answering[k] {
+		return false
+	}
+	if s.answering == nil {
+		s.answering = map[string]bool{}
+	}
+	s.answering[k] = true
+	return true
+}
+
+func (s *backlogState) releaseAnswer(repoID string, a backlog.PendingAnswer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.answering, answerKey(repoID, a))
 }
 
 func (s *backlogState) holdEnd(sessionID string, gen int) {

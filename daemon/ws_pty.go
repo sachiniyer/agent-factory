@@ -165,8 +165,8 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		if instance.BacklogItem != 0 {
 			binding = backlogSubmitBinding{ptyTabBinding: binding,
 				submit:       &submitDetector{},
-				openQuestion: func() int { return cs.manager.backlogOpenQuestion(instance) },
-				submitted:    func(q int) { cs.manager.noteBacklogSubmitted(instance, q) }}
+				openQuestion: func() string { return cs.manager.backlogSeenQuestion(instance) },
+				submitted:    func(q string) { cs.manager.noteBacklogSubmitted(instance, q) }}
 		}
 	}
 	servePTYStream(binding, sub, conn)

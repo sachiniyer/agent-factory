@@ -62,11 +62,19 @@ var backlogNeedsRestore = func(s itemSession) bool {
 
 func (h backlogHost) DeliverAnswer(repoID string, a backlog.PendingAnswer) {
 	m := h.m
+	// One worker per answer: recovery can offer the same pending answer again on
+	// every retry (an answer held behind an attached client stays pending), and
+	// each worker would send it once the client detaches (Codex P2 on #6295).
+	if !m.backlog.claimAnswer(repoID, a) {
+		return
+	}
 	m.backlog.reserve(repoID)
 	launched := m.launchBackgroundMutation(func(stop <-chan struct{}) {
+		defer m.backlog.releaseAnswer(repoID, a)
 		m.deliverBacklogAnswer(stop, repoID, a)
 	})
 	if !launched {
+		m.backlog.releaseAnswer(repoID, a)
 		m.backlog.release(repoID)
 		m.backlogAnswerFailed(repoID, a, "af is shutting down", nil)
 	}
@@ -216,29 +224,26 @@ func (m *Manager) backlogAnswerFailed(repoID string, a backlog.PendingAnswer, re
 	}
 }
 
-// backlogOpenQuestion is the id of the open question a line submitted now would
-// answer (0 when none); read BEFORE the line is forwarded.
-func (m *Manager) backlogOpenQuestion(instance *session.Instance) int {
+// backlogSeenQuestion is the text of the question a line submitted now would
+// answer: what the session's attention shows. It is read from memory, never from
+// backlog.json, so the terminal's input path cannot stall behind the backlog
+// lock; the question is then closed on a worker (noteBacklogSubmitted).
+func (m *Manager) backlogSeenQuestion(instance *session.Instance) string {
 	if instance == nil || instance.BacklogItem == 0 {
-		return 0
+		return ""
 	}
-	repoID, ok := m.repoIDForInstance(instance)
-	if !ok {
-		return 0
+	if a := instance.Attention(); a != nil {
+		return a.Reason
 	}
-	b, err := backlog.Load(repoID)
-	if err != nil {
-		return 0
-	}
-	return b.OpenQuestionID(instance.ID)
+	return ""
 }
 
-// noteBacklogSubmitted closes question questionID as answered in session when
-// the user submitted a line in the agent pane while it was open, and arms the
-// run if the item is running without one. questionID was captured before the
-// line was forwarded (backlogOpenQuestion).
-func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionID int) {
-	if instance == nil || instance.BacklogItem == 0 || questionID == 0 {
+// noteBacklogSubmitted closes the question the user saw (questionText, captured
+// before the line was forwarded) as answered in session, and arms the run if the
+// item is running without one, in the same transaction so an old completion
+// cannot observe the gap.
+func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionText string) {
+	if instance == nil || instance.BacklogItem == 0 || questionText == "" {
 		return
 	}
 	repoID, ok := m.repoIDForInstance(instance)
@@ -246,23 +251,28 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionID in
 		return
 	}
 	sessionID := instance.ID
-	m.launchBackgroundMutation(func(<-chan struct{}) {
+	m.launchBackgroundMutation(func(stop <-chan struct{}) {
 		svc := m.backlogService()
-		running := false
-		_, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
-			id := b.AnsweredInSession(sessionID, questionID, svc.Now())
+		armed := false
+		err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
+			id := b.AnsweredInSessionText(sessionID, questionText, svc.Now())
 			if id == 0 {
 				return []int{}, nil
 			}
-			running = b.Item(id).Status == backlog.StatusRunning
 			backlogHost{m: m}.SetAttention(repoID, sessionID, b.OpenQuestionText(id))
+			if b.Item(id).Status == backlog.StatusRunning && !instance.BacklogRunActive() {
+				armed = instance.ArmBacklogRun(time.Now())
+			}
 			return []int{id}, nil
 		})
 		if err != nil {
+			if armed {
+				m.disarmBacklogRun(repoID, instance)
+			}
 			m.warn().Printf("close question answered in session %s: %v", sessionID, err)
 			return
 		}
-		if running && !instance.BacklogRunActive() && instance.ArmBacklogRun(time.Now()) {
+		if armed {
 			m.persistAndPublishInstance(repoID, instance)
 		}
 	})
@@ -277,21 +287,21 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionID in
 // isSubmittedInput.
 type backlogSubmitBinding struct {
 	ptyTabBinding
-	openQuestion func() int
-	submitted    func(questionID int)
+	openQuestion func() string
+	submitted    func(questionText string)
 	// submit carries bracketed-paste state across the connection's frames.
 	submit *submitDetector
 }
 
 func (b backlogSubmitBinding) input(p []byte) error {
 	submit := b.submit.Submitted(p) // every frame, so paste state stays current
-	questionID := 0
+	seen := ""
 	if submit {
-		questionID = b.openQuestion()
+		seen = b.openQuestion()
 	}
 	err := b.ptyTabBinding.input(p)
-	if err == nil && submit && questionID != 0 {
-		b.submitted(questionID)
+	if err == nil && submit && seen != "" {
+		b.submitted(seen)
 	}
 	return err
 }

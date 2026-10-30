@@ -92,7 +92,7 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 	// would fail where listing and adding items with that path succeeded.
 	root := ""
 	if strings.TrimSpace(req.RepoPath) != "" {
-		if root, err = config.ResolveUserPath(strings.TrimSpace(req.RepoPath)); err != nil {
+		if root, err = config.ResolveDaemonHostPath(req.RepoPath); err != nil {
 			return backlog.RunRef{}, err
 		}
 	}
@@ -108,7 +108,10 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 	var create CreateSessionRequest
 	m.backlog.reserve(ref.ID)
 	_, err = svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
-		p, err := b.BeginStart(req.ID, by, facts, svc.Now())
+		// Fresh facts INSIDE the transaction: a concurrent start may have linked an
+		// active session since the snapshot above, and a stale view would append a
+		// second run for the same item (Codex P2 on #6294).
+		p, err := b.BeginStart(req.ID, by, backlogHost{m: m}.Facts(ref.ID), svc.Now())
 		if err != nil {
 			return nil, err
 		}
@@ -243,14 +246,13 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 		return backlog.RunRef{}, fmt.Errorf("the session for %s is gone; retry \"af backlog start %d\" to start a new one", backlog.FormatID(id), id)
 	}
 	inst := s.instance
-	facts := backlogHost{m: m}.Facts(ref.ID)
 	var (
 		prev   backlog.Status
 		prompt string
 		armed  bool
 	)
 	out, err := svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
-		p, err := b.BeginStart(id, by, facts, svc.Now())
+		p, err := b.BeginStart(id, by, backlogHost{m: m}.Facts(ref.ID), svc.Now())
 		if err != nil {
 			return nil, err
 		}
@@ -299,6 +301,14 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 			return []int{id}, b.ContinueFailed(id, prev, sendErr, svc.Now())
 		}); err != nil {
 			m.warn().Printf("restore %s after a failed continue: %v", backlog.FormatID(id), err)
+		}
+		// Arming bumped the run generation, so an idle edge queued for the run that
+		// ended before this continue now fails its fence, and nothing will see that
+		// edge again. The rollback put the item back; settle the session's current
+		// state (idle, marker clear) so it is not left running with no run.
+		if inst.GetLiveness() == session.LiveReady && !inst.BacklogRunActive() {
+			gen := inst.BacklogRunGeneration()
+			m.launchBackgroundMutation(func(stop <-chan struct{}) { m.settleRunEnd(ref.ID, inst.ID, gen, stop) })
 		}
 		return backlog.RunRef{}, sendErr
 	}

@@ -450,3 +450,15 @@ func TestServiceRunnerView(t *testing.T) {
 		t.Fatalf("%+v", v.Runner)
 	}
 }
+
+// The backlog RPCs resolve repo_path like the other daemon routes: a relative
+// path is refused instead of resolved against the daemon's working directory
+// (Codex P2 on #6295).
+func TestResolveRefusesARelativeRepoPath(t *testing.T) {
+	s := NewService(&testHost{})
+	for _, rel := range []string{".", "repo", "../x"} {
+		if _, err := s.Resolve("", rel); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+			t.Errorf("Resolve(%q) = %v, want a refusal", rel, err)
+		}
+	}
+}
