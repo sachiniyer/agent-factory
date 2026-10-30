@@ -165,3 +165,62 @@ func TestRefJSON(t *testing.T) {
 		t.Fatalf("empty parent serialized: %s", in)
 	}
 }
+
+// A proposal update that removes an item's parent makes it top-level, instead of
+// leaving it under the old parent (Codex P2 on #6286).
+func TestAddBatchDetachesAnExistingChildWhenTheParentIsRemoved(t *testing.T) {
+	b := New()
+	if _, err := b.AddBatch(Batch{Proposal: "x", Items: []ItemInput{
+		{Key: "parent", Title: "parent"},
+		{Key: "child", Title: "child", Parent: Ref{Key: "parent"}},
+	}}, t0); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := b.AddBatch(Batch{Proposal: "x", Items: []ItemInput{{Key: "child", Title: "child"}}}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Item(ids["child"]).Parent; got != 0 {
+		t.Fatalf("child still has parent %d after the update removed it", got)
+	}
+}
+
+// The dependency check runs on the finished batch, not after each move: a valid
+// final tree may pass through a cyclic one (Codex P2 on #6286). A waits on B and
+// both sit under P; the update makes P sequential and moves P and B under Q, so
+// P is moved while it still holds both A and B in sequence.
+func TestAddBatchChecksDependenciesOnTheFinishedTree(t *testing.T) {
+	src := func(key string) *Source { return &Source{Proposal: "x", Key: key} }
+	b := mk(t,
+		Item{ID: 1, Source: src("q")},
+		Item{ID: 2, Source: src("p")},
+		Item{ID: 3, Parent: 2},
+		Item{ID: 4, Parent: 2, Source: src("b")},
+	)
+	if err := b.setWaits(3, []int{4}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.AddBatch(Batch{Proposal: "x", Items: []ItemInput{
+		{Key: "q", Title: "q"},
+		{Key: "p", Title: "p", Parent: Ref{Key: "q"}, Sequential: true},
+		{Key: "b", Title: "b", Parent: Ref{Key: "q"}},
+	}}, t0)
+	if err != nil {
+		t.Fatalf("a valid final tree was refused: %v", err)
+	}
+	if b.Item(4).Parent != 1 || b.Item(3).Parent != 2 || b.Item(2).Parent != 1 {
+		t.Fatalf("wrong final tree: %+v", b.Items)
+	}
+}
+
+// A batch whose FINAL tree has a cycle is still refused, and b is unchanged.
+func TestAddBatchStillRefusesAFinalCycle(t *testing.T) {
+	b := New()
+	_, err := b.AddBatch(Batch{Items: []ItemInput{
+		{Key: "a", Title: "a", WaitsOn: []Ref{{Key: "b"}}},
+		{Key: "b", Title: "b", WaitsOn: []Ref{{Key: "a"}}},
+	}}, t0)
+	if err == nil || len(b.Items) != 0 {
+		t.Fatalf("err = %v, items = %d", err, len(b.Items))
+	}
+}
