@@ -143,6 +143,10 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		m.info().Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
 		return resolved, nil
 	}
+	// The pending-prune fence is asked HERE, inside the claim and the op lock (#5189).
+	if err := m.killPruneFence(repoID, title, instance); err != nil {
+		return session.InstanceData{}, err
+	}
 	// The caller's own precondition, asked here and nowhere earlier: this line
 	// sits inside both the killsInFlight claim (registered above, before the
 	// op-lock acquire) and the op-lock, which together are the fence every

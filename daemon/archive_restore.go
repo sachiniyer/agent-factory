@@ -98,6 +98,14 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, session.I
 // one body avoids a second title lookup between those sibling paths.
 func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, title string) (string, error) {
 	req := RestoreArchivedRequest{ID: instance.ID, Title: title, RepoID: repoID}
+	// A prune tombstone has no worktree to move back (#5189): refuse by naming the
+	// branch the work was kept on, instead of failing later on a missing path.
+	if at := instance.PrunedAt(); !at.IsZero() {
+		return "", session.PrunedRestoreError(title, instance.KeptBranch(), at)
+	}
+	if err := m.pruneRowFence(repoID, instance); err != nil {
+		return "", fmt.Errorf("cannot restore session %q: %w", title, err)
+	}
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
@@ -174,6 +182,14 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	m.mu.Unlock()
 	if current != instance {
 		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
+	}
+	// Prune holds this same operation lock for its whole run, so a tombstone (or an
+	// interrupted prune) is visible here even if it landed during the wait (#5189).
+	if at := instance.PrunedAt(); !at.IsZero() {
+		return "", session.PrunedRestoreError(title, instance.KeptBranch(), at)
+	}
+	if err := m.pruneRowFence(repoID, instance); err != nil {
+		return "", fmt.Errorf("cannot restore session %q: %w", title, err)
 	}
 	// Re-run the shared runtime-entry guard under the operation lock, before the
 	// worktree move. A durable kill tombstone is terminal intent: restoring

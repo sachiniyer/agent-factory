@@ -73,7 +73,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
-- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
+- [`af sessions prune`](#af-sessions-prune) — List (or with --apply, delete) old archived worktrees
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -2202,7 +2202,7 @@ af sessions
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
-- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
+- [`af sessions prune`](#af-sessions-prune) — List (or with --apply, delete) old archived worktrees
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -2618,15 +2618,24 @@ af sessions preview <title> [flags]
 
 ## af sessions prune
 
-List disk reclaimable from old archived sessions (dry run)
+List (or with --apply, delete) old archived worktrees
 
 Report archived sessions older than --older-than, measured from each
 session's archive time.
 
-This is a dry run: it lists each archived session a reclaim would remove
-(title, archive time, allocated bytes) plus a total, and the reasons every
-other session was skipped. af writes nothing — no deletion, no record
-update, no git mutation — so it is safe to run at any time.
+Without --apply this is a dry run: it lists each archived session a reclaim
+would remove (title, archive time, allocated bytes) plus a total, and the
+reasons every other session was skipped. af writes nothing — no deletion, no
+record update, no git mutation — so it is safe to run at any time.
+
+With --apply, af prints that plan, asks you to confirm it (or pass --yes; a
+non-interactive run requires it), and then deletes exactly the worktrees the
+plan listed — the SAME judgment as the dry run, re-made under each session's
+lock just before it deletes. The branch is always kept and the session row
+stays, marked pruned, naming the branch; restore refuses a pruned session and
+tells you where the work is. A refusal names the first offending paths so you
+can clean up and re-run. Nothing outside the archived worktree is touched:
+provider transcripts and other sessions' registrations are left alone.
 
 Only archived sessions are eligible; live, lost, dead or in-flight sessions,
 archives whose move is incomplete, and worktrees still holding uncommitted or
@@ -2645,7 +2654,7 @@ one — a read must not write even a socket or a log. With no daemon up it
 refuses with guidance; pass --daemon-url or start af first.
 
 ```
-af sessions prune --older-than <duration> [--repo <path> | --all] [flags]
+af sessions prune --older-than <duration> [--repo <path> | --all] [--apply [--yes]] [flags]
 ```
 
 **Flags**
@@ -2653,7 +2662,9 @@ af sessions prune --older-than <duration> [--repo <path> | --all] [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--all` |  | Span every project instead of only the current/--repo one |
+| `--apply` |  | Delete the archived worktrees the dry run lists (the branch is kept; the row stays as a pruned tombstone) |
 | `--older-than` | `string` | Report sessions archived longer than this duration ago (required, for example 720h for thirty days) |
+| `--yes` |  | With --apply: skip the confirmation prompt (required when stdin is not a terminal) |
 
 **Global flags**
 

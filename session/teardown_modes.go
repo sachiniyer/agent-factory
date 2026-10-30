@@ -497,7 +497,18 @@ func (teardownArchive) clearsStarted() bool { return false }
 // live tabs already get.
 func (teardownArchive) reapsPendingTabCleanup() bool { return true }
 
-func (teardownArchive) finalize(i *Instance, _ []closedTab, _ *git.GitWorktree) {
+func (teardownArchive) finalize(i *Instance, _ []closedTab, gw *git.GitWorktree) {
+	// Stamp the occupant nonce prune later requires (#5189). Best effort: a row
+	// without one is judged by the stricter legacy predate rule instead, so a
+	// failed stamp can only make prune refuse more, never delete wrongly.
+	i.prune.nonce = ""
+	if gw != nil {
+		if nonce, err := git.StampArchiveNonce(gw.GetWorktreePath()); err != nil {
+			log.WarningLog.Printf("archive %q: %v (prune will judge it by the legacy predate rule)", i.Title, err)
+		} else {
+			i.prune.nonce = nonce
+		}
+	}
 	// Reduce to the tabs an un-archive can actually bring back: the agent tab
 	// (i.Tabs[0]) and every web tab. The agent's tmux binding is KEPT (the
 	// server-side session is gone, but the name-holder lets a rollback Recover

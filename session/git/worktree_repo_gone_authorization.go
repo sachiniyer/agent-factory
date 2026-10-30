@@ -608,6 +608,7 @@ func VerifyRegisteredWorktreeOccupant(worktreePath, repoPath string) error {
 // finally returns and unpublishes itself — is the containment.
 type pointerCheckFlight struct {
 	done     chan struct{}
+	value    string // the check's result, shared with every caller that joins
 	err      error
 	timedOut bool
 }
@@ -618,12 +619,21 @@ var pointerCheckFlights = struct {
 }{byKey: map[string]*pointerCheckFlight{}}
 
 func boundedPointerCheck(kind, worktreePath string, check func(string) error) error {
+	_, err := boundedPointerCheckValue(kind, worktreePath, func(path string) (string, error) { return "", check(path) })
+	return err
+}
+
+// boundedPointerCheckValue is boundedPointerCheck for a check that also produces
+// a result (the resolved registration leaf). The result is part of the flight, so a
+// caller that joins one in progress receives it along with the error instead of an
+// empty value beside a nil error.
+func boundedPointerCheckValue(kind, worktreePath string, check func(string) (string, error)) (string, error) {
 	key := kind + "\x00" + worktreePath
 	pointerCheckFlights.Lock()
 	if active := pointerCheckFlights.byKey[key]; active != nil {
 		if active.timedOut {
 			pointerCheckFlights.Unlock()
-			return fmt.Errorf(
+			return "", fmt.Errorf(
 				"worktree pointer check under %s is still running after an earlier deadline: %w",
 				worktreePath, context.DeadlineExceeded,
 			)
@@ -635,7 +645,7 @@ func boundedPointerCheck(kind, worktreePath string, check func(string) error) er
 	pointerCheckFlights.byKey[key] = flight
 	pointerCheckFlights.Unlock()
 	go func() {
-		flight.err = check(worktreePath)
+		flight.value, flight.err = check(worktreePath)
 		pointerCheckFlights.Lock()
 		if pointerCheckFlights.byKey[key] == flight {
 			delete(pointerCheckFlights.byKey, key)
@@ -646,25 +656,25 @@ func boundedPointerCheck(kind, worktreePath string, check func(string) error) er
 	return waitForPointerCheckFlight(key, worktreePath, flight)
 }
 
-func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFlight) error {
+func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFlight) (string, error) {
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
 	select {
 	case <-flight.done:
-		return flight.err
+		return flight.value, flight.err
 	case <-timer.C:
 		pointerCheckFlights.Lock()
 		if pointerCheckFlights.byKey[key] == flight {
 			flight.timedOut = true
 			pointerCheckFlights.Unlock()
-			return fmt.Errorf(
+			return "", fmt.Errorf(
 				"timed out after %s while verifying worktree pointer under %s: %w",
 				relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
 			)
 		}
 		pointerCheckFlights.Unlock()
 		<-flight.done
-		return flight.err
+		return flight.value, flight.err
 	}
 }
 
