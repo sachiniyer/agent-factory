@@ -183,7 +183,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	// affirmatively failed delivery never binds it at all: the pane provably
 	// took nothing, so the boundary stays the last send that could have
 	// delivered.
-	if i.taskRunActive && status != PromptNotDelivered &&
+	if i.runGateActiveLocked() && status != PromptNotDelivered &&
 		(i.taskRunPromptAttemptAt.IsZero() ||
 			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
 		i.taskRunPromptAttemptAt = attemptedAt
@@ -282,7 +282,7 @@ func (i *Instance) RecordTaskRunTurn(observedAt time.Time) bool {
 //
 // Caller holds i.mu.
 func (i *Instance) recordTaskRunTurnLocked(observedAt time.Time) bool {
-	if !i.taskRunActive || i.taskRunPromptAttemptAt.IsZero() ||
+	if !i.runGateActiveLocked() || i.taskRunPromptAttemptAt.IsZero() ||
 		!observedAt.After(i.taskRunTurnObservedAt) ||
 		i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) {
 		return false
@@ -526,10 +526,11 @@ func (i *Instance) TaskRunInterrupted() bool {
 const taskRunResumeWindow = 15 * time.Minute
 
 // TaskRunObservable reports whether the daemon must observe this session's
-// task run: in flight, or interrupted and still resumable (#6230). Every gate
-// that decides whether to watch a run asks this, never TaskRunActive alone.
+// run: a task run or a backlog run in flight (both use the task run's completion
+// gate), or a task run interrupted and still resumable (#6230). Every gate that
+// decides whether to watch a run asks this, never TaskRunActive alone.
 func (i *Instance) TaskRunObservable(now time.Time) bool {
-	if i.TaskRunActive() {
+	if i.RunGateActive() {
 		return true
 	}
 	_, ok := i.TaskRunResumableSince(now)
@@ -669,7 +670,7 @@ func (i *Instance) ReconcileTaskRunState(active, missionHeld, turnGateHeld bool)
 // still being in flight, mirroring ToInstanceData's write-side gate: a finished
 // run's stale timestamp is not evidence for its successor's delivery window.
 func taskRunTurnObservedAtFromData(data InstanceData) time.Time {
-	if !data.TaskRunActive {
+	if !runGateActiveInData(data) {
 		return time.Time{}
 	}
 	return data.TaskRunTurnObservedAt
@@ -686,7 +687,7 @@ func taskRunTurnObservedAtFromData(data InstanceData) time.Time {
 // restart must not resurrect one — the same Ready tick that would end the
 // un-restarted run must end this one too, not wedge it until fallback.
 func taskRunPromptAttemptAtFromData(data InstanceData) time.Time {
-	if !data.TaskRunActive {
+	if !runGateActiveInData(data) {
 		return time.Time{}
 	}
 	if data.TaskRunPromptAttemptAt.IsZero() {

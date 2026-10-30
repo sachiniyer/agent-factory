@@ -90,6 +90,13 @@ func TestSandboxScope_NoResponseCarriesTheDaemonHostLayout(t *testing.T) {
 			`{"prompt":"hi","title":"peer"}`, `{"prompt":"hi","title":"foreign"}`, `{"prompt":"hi","title":"does-not-exist"}`,
 			`{"prompt":"hi","title":"local-one"}`, `{"prompt":"hi","id":"` + f.other.ID + `"}`, `{"prompt":"hi","repo_id":"` + f.repoB + `","title":"peer"}`,
 		},
+		// The owner id replaces every selector, so a peer's, another project's and
+		// an unknown name all answer about the caller's own session.
+		"/v1/SetAttention": {
+			`{"title":"peer","reason":"r"}`, `{"title":"foreign","reason":"r"}`, `{"title":"does-not-exist"}`,
+			`{"id":"` + f.other.ID + `","reason":"r"}`, `{"repo_id":"` + f.repoB + `","title":"peer","clear":true}`,
+			`{"reason":"` + otherPath + `"}`,
+		},
 		"/v1/ArchiveSession": {`{"title":"peer"}`, `{"title":"foreign"}`, `{"title":"does-not-exist"}`, `{"id":"` + f.other.ID + `"}`},
 		"/v1/CreateSession": {
 			`{"title":"x","prompt":"p","host":"h1"}`, `{"title":"x","prompt":"p"}`, `{"title":"x","host":"h1","backend":"local"}`,
@@ -239,6 +246,7 @@ func scrubWatch(t *testing.T) func() []string {
 var requestTypes = map[string]reflect.Type{
 	"/v1/Snapshot":       reflect.TypeFor[SnapshotRequest](),
 	"/v1/SendPrompt":     reflect.TypeFor[SendPromptRequest](),
+	"/v1/SetAttention":   reflect.TypeFor[SetAttentionRequest](),
 	"/v1/ArchiveSession": reflect.TypeFor[ArchiveSessionRequest](),
 	"/v1/CreateSession":  reflect.TypeFor[CreateSessionRequest](),
 	"/v1/CreateTab":      reflect.TypeFor[CreateTabRequest](),
@@ -321,6 +329,7 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 	bases := map[string][]baseShape{
 		"/v1/Snapshot":       {{"empty", map[string]any{}}},
 		"/v1/SendPrompt":     {{"to a peer", map[string]any{"prompt": "hi", "title": "peer"}}},
+		"/v1/SetAttention":   {{"own session", map[string]any{"id": f.me.ID, "reason": "r"}}},
 		"/v1/ArchiveSession": {{"unknown", map[string]any{"title": "nope"}}},
 		"/v1/CreateTab":      {{"own session", map[string]any{"id": f.me.ID, "command": "x"}}},
 		"/v1/CloseTab":       {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope"}}},

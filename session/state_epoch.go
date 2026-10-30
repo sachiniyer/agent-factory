@@ -73,5 +73,8 @@ func (i *Instance) noteStateChangeLocked(lv Liveness, op InFlightOp, resetAt tim
 	}
 	i.stateEpoch++
 	i.runtimeEvidenceGeneration.Add(1)
+	if i.liveness != lv {
+		i.noteAttentionLivenessLocked()
+	}
 	i.touchLocked()
 }

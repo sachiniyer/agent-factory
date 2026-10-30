@@ -180,7 +180,8 @@ function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: 
         return Math.max(1, Math.min(limit, left));
       };
       const observe = () => page.evaluate(() => ({
-        states: [...document.querySelectorAll(".af-rail-list .af-operator-state")].map(el => el.textContent),
+        states: [...document.querySelectorAll(".af-rail-list .af-row")].map(el =>
+          el.classList.contains("af-row-operator-needs-you") ? "needs-you" : el.className),
         project: document.querySelector(".af-project-item-current .af-project-item-meta")?.textContent ?? null,
         filter: [...document.querySelectorAll(".af-filter-item-count")].map(el => el.textContent),
       }));
@@ -191,18 +192,19 @@ function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: 
           // A new single-image capture must recheck readiness, including hidden
           // rail/menu summaries. Login/unavailable scenes have no app to settle.
           if (await page.locator(".af-app").count()) {
-            const states = page.locator(".af-rail-list .af-operator-state");
+            const states = page.locator(".af-rail-list .af-row");
             const message = `${name}${suffix}: all seeded sessions must report Needs you before capture`;
             if (seededRows !== undefined) await expect(states, message).toHaveCount(seededRows, { timeout: remaining(1_000) });
             else await expect(states, message).not.toHaveCount(0, { timeout: remaining(1_000) });
             const count = seededRows ?? await states.count();
-            await expect(states, message).toHaveText(Array(count).fill("Needs you"), { timeout: remaining(1_000) });
+            await expect(page.locator(".af-rail-list .af-row-operator-needs-you"), message)
+              .toHaveCount(count, { timeout: remaining(1_000) });
             // projectMeta's settled golden is "4 sessions", without a working
             // suffix or an invented waiting label. Assert it even when hidden.
             await expect(page.locator(".af-project-item-current .af-project-item-meta"), message)
               .toHaveText(`${count} session${count === 1 ? "" : "s"}`, { timeout: remaining(1_000) });
             await expect(page.locator(".af-filter-item-count"), message)
-              .toHaveText([String(count), "0", "0", "0", "0"], { timeout: remaining(1_000) });
+              .toHaveText(["0", String(count), "0", "0", "0", "0"], { timeout: remaining(1_000) });
           }
           // toHaveScreenshot retries internally without rechecking readiness.
           // Capture exactly one image instead; only this outer bounded retry
@@ -210,7 +212,7 @@ function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: 
           // PTY input can update operator state while Chromium takes the image.
           // Validate both sides so update mode cannot bless a transient Working row.
           const ready = await observe();
-          expect(ready.states.every(state => state === "Needs you")).toBe(true);
+          expect(ready.states.every(state => state === "needs-you")).toBe(true);
           const pixels = await withManifestSizeFrozen(page, () => page.screenshot({
             animations: "disabled", caret: "hide", style: visualStyle,
             timeout: remaining(5_000),
@@ -436,7 +438,7 @@ async function assertPhoneHeader(page: Page): Promise<void> {
   }
   await expect(header.locator(".af-term-new-shell")).toBeVisible();
   const controls = menu.locator("button:visible:not(:disabled), a:visible[href]");
-  const states = page.locator(".af-rail-list .af-operator-state");
+  const states = page.locator(".af-rail-list .af-row");
   const seededRows = await states.count();
   const settledSummary = `${seededRows} session${seededRows === 1 ? "" : "s"}`;
   // PTY input in the preceding phone pass briefly marks its session Working.
@@ -445,11 +447,11 @@ async function assertPhoneHeader(page: Page): Promise<void> {
   let settledSamples = 0;
   await expect.poll(async () => {
     const [operatorStates, summary] = await Promise.all([
-      states.allTextContents(),
+      states.evaluateAll(rows => rows.map(el => el.classList.contains("af-row-operator-needs-you") ? "needs-you" : el.className)),
       menu.locator(".af-project-item-current .af-project-item-meta").textContent(),
     ]);
     const settled = operatorStates.length === seededRows &&
-      operatorStates.every((state) => state === "Needs you") && summary?.trim() === settledSummary;
+      operatorStates.every((state) => state === "needs-you") && summary?.trim() === settledSummary;
     settledSamples = settled ? settledSamples + 1 : 0;
     return settledSamples;
   }, {

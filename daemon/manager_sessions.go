@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -524,6 +523,11 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		releaseObservationFence()
 		return session.PromptCouldNotConfirm, notAttempted(livenessErr)
 	}
+	// A successful send is the user's answer to an attention request. Capture the
+	// request BEFORE transport: an agent that raises a new one while the prompt
+	// is in flight is asking a question the user never saw, and the keyed clear
+	// must leave it alone.
+	answered := instance.Attention()
 	// Liveness cannot express "owed a stale-pane teardown": a committed retry
 	// restores LiveRunning/LiveReady for its owner, and the pane this would
 	// reach may still be bound to the deleted inode. The durable flag is the
@@ -560,38 +564,14 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
+	if !req.TaskOrigin && answered != nil && status != session.PromptNotDelivered {
+		// A delivered prompt is the user's answer, same as a keystroke into the
+		// pane — and the only answer a client with no PTY input can send. Task
+		// deliveries are automation, not the user, and PromptNotDelivered (which
+		// returns nil) means the answer never arrived.
+		m.queueAttentionClear(instance, answered.SetAt)
+	}
 	return status, nil
-}
-
-func promptTargetLivenessError(title string, liveness session.Liveness) error {
-	switch liveness {
-	case session.LiveLost:
-		return fmt.Errorf("target session %q is Lost; prompt not delivered; recover it first", title)
-	case session.LiveDead:
-		return fmt.Errorf("target session %q is Dead; prompt not delivered; recover it first", title)
-	case session.LiveArchived:
-		// Archived sessions have no live tmux to deliver into (#1529): without
-		// this case the prompt falls through to a confusing backend error. Point
-		// at the off-ramp, mirroring the TUI's interactiveGuard message. The
-		// restore command embeds the title, so it goes through shellsuggest — a title
-		// with spaces or shell metacharacters must not turn a copy-pasted
-		// `af sessions restore ...` into the wrong target or a second command, and a
-		// title beginning with "-" must not be parsed as a flag by af itself (#3432).
-		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (%s)", title, shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, title))
-	}
-	return nil
-}
-
-// taskPromptTargetLivenessError extends the ordinary target guard only for an
-// automated task delivery. LiveLimitReached is intentionally allowed by the
-// manual helper above: typing into a limit or credits picker can be the only way
-// for an operator to recover the lane. A scheduler has no such intent, and its
-// keystrokes can cancel an agent's own timed auto-continue.
-func taskPromptTargetLivenessError(title string, liveness session.Liveness, taskOrigin bool) error {
-	if taskOrigin && liveness == session.LiveLimitReached {
-		return fmt.Errorf("%w: target session %q is at a usage limit; prompt not delivered", errTargetLimitReached, title)
-	}
-	return promptTargetLivenessError(title, liveness)
 }
 
 // agentServerForStream resolves the /v1/sessions/{id}/stream target to its cached

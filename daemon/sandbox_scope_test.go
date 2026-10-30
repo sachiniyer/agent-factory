@@ -28,7 +28,7 @@ import (
 func TestSandboxScopeTableIsPinned(t *testing.T) {
 	want := []string{
 		"/v1/AddTask", "/v1/ArchiveSession", "/v1/CloseTab", "/v1/CreateSession", "/v1/CreateTab",
-		"/v1/ListTasks", "/v1/RemoveTask", "/v1/RenameTab", "/v1/ReorderTab", "/v1/SendPrompt", "/v1/Snapshot",
+		"/v1/ListTasks", "/v1/RemoveTask", "/v1/RenameTab", "/v1/ReorderTab", "/v1/SendPrompt", "/v1/SetAttention", "/v1/Snapshot",
 	}
 	var got []string
 	for path := range sandboxAllowedPaths {

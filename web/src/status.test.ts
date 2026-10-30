@@ -1,8 +1,7 @@
-// Parity tests for the status-dot + title mapping (#1592 Phase 5 PR3). They pin
-// web/src/status.ts to ui/tree/render.go: every Liveness value and every in-flight
-// op maps to the SAME dot color-bucket and the SAME [lost]/[deleting]/[limit]/
-// [remote] title prefix the TUI paints. If the Go renderer's mapping changes, these
-// must change with it — the two clients cannot diverge in status semantics (§3).
+// Tests for the status-dot + title mapping (#1592 Phase 5 PR3). Every Liveness value
+// and every in-flight op maps to the same state bucket and the same [lost]/
+// [deleting]/[limit]/[remote] title prefix as ui/tree/render.go; only the glyphs
+// differ (see status.ts).
 
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -11,6 +10,7 @@ import assert from "node:assert/strict";
 import type { IconName } from "./icon.js";
 import {
   archiveWarningText,
+  attentionReason,
   callbackUnavailableText,
   canHandoff,
   type DotKind,
@@ -25,6 +25,7 @@ import {
   isWorking,
   type OperatorKind,
   operatorKind,
+  rowDot,
   rowStatus,
   rowTitle,
   unreachableDetail,
@@ -109,17 +110,15 @@ test("an in-flight operation wins over stale idle evidence", () => {
   );
 });
 
-test("liveness → dot kind mirrors render.go's TOTAL switch", () => {
-  // Working (LiveRunning / the Unset sentinel) shows NO dot (#1766): null kind and
-  // icon. Ready is the only positive/green dot; error states keep static shapes.
-  const cases: Array<[number, DotKind | null, IconName | null]> = [
-    [Liveness.Ready, "ready", "circle"],
+test("liveness → dot kind follows render.go's TOTAL switch", () => {
+  const cases: Array<[number, DotKind, IconName | null]> = [
+    [Liveness.Ready, "ready", null],
     [Liveness.Lost, "lost", "circle-dashed"],
     [Liveness.Dead, "dead", "circle"],
     [Liveness.Archived, "archived", "archive"],
     [Liveness.LimitReached, "limit", "diamond"],
-    [Liveness.Running, null, null],
-    [Liveness.Unset, null, null], // stray zero renders like Running (render.go:297)
+    [Liveness.Running, "working", "circle"],
+    [Liveness.Unset, "working", "circle"], // stray zero renders like Running (render.go:297)
   ];
   for (const [lv, kind, icon] of cases) {
     const st = rowStatus(sess({ liveness: lv }));
@@ -128,23 +127,46 @@ test("liveness → dot kind mirrors render.go's TOTAL switch", () => {
   }
 });
 
-test("a working row has no dot; Ready/error states do (#1766)", () => {
-  const running = rowStatus(sess({ liveness: Liveness.Running }));
-  assert.equal(running.kind, null, "Running is working → no dot");
-  assert.equal(running.icon, null, "a working row draws no icon");
+test("an idle Ready row is blank; a working row draws a circle", () => {
   assert.equal(isWorking(sess({ liveness: Liveness.Running })), true);
   assert.equal(isWorking(sess({ liveness: Liveness.Unset })), true);
   assert.equal(isWorking(sess({ liveness: Liveness.Ready })), false);
   assert.equal(isWorking(sess({ liveness: Liveness.Lost })), false);
-  assert.notEqual(rowStatus(sess({ liveness: Liveness.Ready })).kind, null, "Ready keeps its dot");
+  assert.equal(rowDot(sess({ liveness: Liveness.Ready })), null);
+  assert.deepEqual(rowDot(sess({ liveness: Liveness.Running })), { icon: "circle", kind: "working" });
 });
 
-test("any in-flight op overlays the liveness and reads as working (no dot)", () => {
+test("a Ready row whose idle reason is Broken or a limit keeps a glyph", () => {
+  assert.deepEqual(rowDot(sess({ liveness: Liveness.Ready, idle_reason: "prompt-not-delivered" })), {
+    icon: "circle",
+    kind: "dead",
+  });
+  assert.deepEqual(rowDot(sess({ liveness: Liveness.Ready, idle_reason: "usage-limit" })), {
+    icon: "diamond",
+    kind: "limit",
+  });
+  assert.equal(rowDot(sess({ liveness: Liveness.Ready, idle_reason: "settled-after-pane-change" })), null);
+});
+
+test("an attention request draws the attention dot over working and idle rows only", () => {
+  const attention = { reason: " pick A or B ", set_at: "2026-10-20T12:00:00Z" };
+  for (const liveness of [Liveness.Running, Liveness.Ready]) {
+    const s = sess({ liveness, attention });
+    assert.deepEqual(rowDot(s), { icon: "circle", kind: "attention" });
+    assert.equal(operatorKind(s), "attention");
+    assert.equal(attentionReason(s), "pick A or B");
+  }
+  const lost = sess({ liveness: Liveness.Lost, attention });
+  assert.equal(rowDot(lost)?.kind, "lost", "a stale request never hides a broken row");
+  assert.equal(operatorKind(lost), "broken");
+  assert.equal(attentionReason(lost), "");
+});
+
+test("any in-flight op overlays the liveness and reads as working", () => {
   for (const op of [InFlightOp.Creating, InFlightOp.Killing, InFlightOp.Archiving, InFlightOp.Restoring]) {
     // Even a Ready liveness reads as working while an op is in flight (render.go:280).
     const st = rowStatus(sess({ liveness: Liveness.Ready, in_flight_op: op }));
-    assert.equal(st.kind, null, `op ${op} → working (no dot)`);
-    assert.equal(st.icon, null, `op ${op} draws no icon`);
+    assert.equal(st.kind, "working", `op ${op} → working`);
     assert.equal(isWorking(sess({ liveness: Liveness.Ready, in_flight_op: op })), true);
   }
 });
@@ -162,7 +184,7 @@ test("liveness absent falls back to the legacy status int", () => {
   assert.equal(rowStatus(sess({ status: Status.Lost })).kind, "lost");
   assert.equal(rowStatus(sess({ status: Status.Dead })).kind, "dead");
   assert.equal(rowStatus(sess({ status: Status.Archived })).kind, "archived");
-  assert.equal(rowStatus(sess({ status: Status.Running })).kind, null);
+  assert.equal(rowStatus(sess({ status: Status.Running })).kind, "working");
 });
 
 test("title prefixes match render.go precedence", () => {

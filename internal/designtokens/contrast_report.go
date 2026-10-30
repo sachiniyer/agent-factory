@@ -17,7 +17,7 @@ func contrastReport(t Tokens) string {
 	b.WriteString(contrastStart + "\n\n")
 	b.WriteString("| Role | Light | Dark | Light on surface | Dark on surface | Light on raised | Dark on raised |\n")
 	b.WriteString("| --- | --- | --- | ---: | ---: | ---: | ---: |\n")
-	for _, role := range []string{"surface", "surface-raised", "ink", "ink-muted", "border", "accent", "running", "ready", "lost", "dead", "archived", "limit-reached"} {
+	for _, role := range []string{"surface", "surface-raised", "ink", "ink-muted", "border", "accent", "running", "ready", "lost", "dead", "archived", "limit-reached", "attention"} {
 		c := t.Colors[role]
 		fmt.Fprintf(&b, "| %s | `%s` | `%s` | %.3f:1 | %.3f:1 | %.3f:1 | %.3f:1 |\n", role, c.Light, c.Dark,
 			contrast(c.Light, t.Colors["surface"].Light), contrast(c.Dark, t.Colors["surface"].Dark),

@@ -571,8 +571,15 @@ export async function killSession(id: string, title: string, token: string): Pro
   }
 }
 
+/** Clears a session's attention request (`af sessions attention --clear`), but
+ *  only while it is still the request set at `setAt`. */
+export async function clearAttention(id: string, setAt: string, token: string): Promise<void> {
+  await af<unknown>("SetAttention", { id, clear: true, set_at: setAt }, token);
+}
+
 /** Archives a session (mirrors `af sessions archive`) — non-destructive, keeps it
  *  restorable. The session.archived event triggers a rail resync. */
+
 export async function archiveSession(id: string, title: string, token: string): Promise<void> {
   const result = await af<{ warning?: string }>("ArchiveSession", { id, title, repo_id: "" }, token);
   if (result.warning) {

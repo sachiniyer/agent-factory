@@ -165,6 +165,13 @@ const (
 	// EventProposalPush signals that a session's proposal push status changed.
 	// Its Data is a marshaled proposal.PushStatus.
 	EventProposalPush EventType = "proposal.push"
+	// EventBacklogChanged signals that items of a project's backlog changed. Its
+	// Data is a marshaled backlog.ChangedEvent.
+	EventBacklogChanged EventType = "backlog.changed"
+	// EventBacklogSpend signals a metered spend update for a project's runs.
+	EventBacklogSpend EventType = "backlog.spend"
+	// EventBacklogRunner signals that a project's runner state changed.
+	EventBacklogRunner EventType = "backlog.runner"
 )
 
 // Event is one message on the events plane. Data carries the same projection the

@@ -1,5 +1,5 @@
 // Package backlog holds the ordered tree of work items for one project and the
-// global spend budget the runner draws from.
+// global budget, the share of the Claude plan the runner may use.
 package backlog
 
 import (
@@ -50,6 +50,10 @@ const (
 	ClosedSentToReview      = "sent to review"
 	ClosedDone              = "done"
 	ClosedDropped           = "dropped"
+
+	DeliveryPending   = "pending"
+	DeliveryDelivered = "delivered"
+	DeliveryFailed    = "failed"
 
 	OnDoneKeep    = "keep"
 	OnDoneArchive = "archive"
@@ -111,6 +115,11 @@ type Message struct {
 	Answers int       `json:"answers,omitempty"`
 	Closed  string    `json:"closed,omitempty"`
 	At      time.Time `json:"at"`
+	// Delivery tracks an answer on its way to the item's session, so a daemon
+	// restart can finish it. PrevStatus is the item status the answer replaced,
+	// put back if the delivery fails.
+	Delivery   string `json:"delivery,omitempty"`
+	PrevStatus Status `json:"prev_status,omitempty"`
 }
 
 type Settings struct {

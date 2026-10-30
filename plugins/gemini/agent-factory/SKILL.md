@@ -18,6 +18,7 @@ Sessions (one agent per isolated worktree):
   af sessions kill <title>                             Delete a session; work in af-owned workspaces can be lost
   af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
   af sessions archive --self                            Archive your OWN session (resolved via whoami); no title needed
+  af sessions attention --self [--reason <text>]        Tell the user you need them (a blinking dot on your row in the web UI); clears when they reply
   af sessions handoff <title> [--to <agent>] [--account <name>]  Continue under another agent, account, or both
   af sessions retry-limit <title>                      Retry a usage-limit resume or an inspected, unconfirmed handoff
   af sessions retry-limit <title> --delivered           Mark an inspected handoff mission delivered (no resend); only after confirming it landed
@@ -51,6 +52,6 @@ Root-agent configuration is frozen at daemon start. An already-running root sess
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
 
-Finishing up: the sessions you create keep running after this conversation ends — they are separate agents in their own worktrees, not part of this one. When work in a session is done and reviewed, archive it with "af sessions archive <title>": non-destructive, the worktree is moved out, nothing is deleted, and it comes back with "af sessions restore <title>". Prefer archiving over "af sessions kill <title>", which permanently removes af-owned workspaces; uncommitted changes and unpushed commits there can be lost. "af sessions whoami" and "af sessions archive --self" resolve the CALLING session, so they only work from inside a session af launched — from here, always name the session.
+Finishing up: the sessions you create keep running after this conversation ends — they are separate agents in their own worktrees, not part of this one. When work in a session is done and reviewed, archive it with "af sessions archive <title>": non-destructive, the worktree is moved out, nothing is deleted, and it comes back with "af sessions restore <title>". Prefer archiving over "af sessions kill <title>", which permanently removes af-owned workspaces; uncommitted changes and unpushed commits there can be lost. "af sessions whoami", "af sessions archive --self", and "af sessions attention --self" resolve the CALLING session, so they only work from inside a session af launched — from here, always name the session.
 
 Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes ALL linked worktrees and their branches across repos.
