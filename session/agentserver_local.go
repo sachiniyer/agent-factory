@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"fmt"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"sync"
 )
 
@@ -26,6 +28,9 @@ import (
 type localAgentServer struct {
 	inst *Instance
 
+	// acctSwap records how the last account swap ended (W7.6).
+	acctSwap accountSwapRecorder
+
 	mu sync.Mutex
 	// afterTabResolve is a deterministic race-test seam. Production leaves it
 	// nil; tests use it to pause between tab resolution and broker-map locking.
@@ -45,6 +50,11 @@ type localAgentServer struct {
 	// capture goroutine on a session that is already being torn down and never gets
 	// closed — the #1632 leak). ensureBroker refuses once closed.
 	closed bool
+	// relaunch collapses overlapping Relaunch requests onto one attempt (W7.1).
+	relaunch relaunchFlight
+	// agentOpMu serializes the operations that replace the agent process — a
+	// relaunch and an agent swap — so two of them never interleave (W7.1/W7.5).
+	agentOpMu sync.Mutex
 }
 
 // AgentServer returns the cached agent-server for this instance's runtime (#1592
@@ -98,7 +108,7 @@ func (i *Instance) agentServerLocked() AgentServer {
 			// out-of-process case (no sandbox to reap), set for a docker session.
 			i.agentSrv = &remoteAgentServer{rc: i.remoteClient, inst: i, teardown: i.runtimeTeardown}
 		case backendIsRemoteWorkspace(i.backend):
-			// A remote-workspace backend (docker/ssh/hook) with NO live client:
+			// A remote-workspace backend (docker/ssh/sandbox/hook) with NO live client:
 			// remoteClient is nil because the runtime wiring was torn down — a
 			// sandbox session loaded inert from disk, or one left Lost by a FAILED
 			// lost-recovery (reprovisionRemote succeeded, Start failed, then
@@ -120,12 +130,29 @@ func (i *Instance) agentServerLocked() AgentServer {
 }
 
 // backendIsRemoteWorkspace reports whether b drives an off-box workspace
-// (docker/ssh/hook) — the backends whose data-plane methods delegate back to
+// (docker/ssh/sandbox/hook) — the backends whose data-plane methods delegate back to
 // i.AgentServer() (they embed remoteAgentBackend), and which therefore must never
 // be wrapped in a localAgentServer (#2005). A nil backend is treated as local
 // (the not-yet-initialised default, matching Instance.Capabilities).
 func backendIsRemoteWorkspace(b Backend) bool {
 	return b != nil && b.Capabilities().Workspace == WorkspaceRemote
+}
+
+// RemoteRuntimeUnbound reports whether this is a remote-workspace row whose
+// agent-server transport is not currently bound — the deadRemoteAgentServer
+// shape, where AgentServer() returns a stateless refusal because remoteClient
+// is nil (#2005). A reloaded ssh/sandbox row the startup reattach has not yet
+// re-bound lands here (#5571 W1.5), as does a row left client-less by a failed
+// lost recovery. In this state there is no agent-server to poll: the readiness
+// wait would burn its full budget against a sentinel and then latch the terminal
+// startup-unknown marker, so the daemon's handoff recovery refuses to retry a
+// mission on an unbound row rather than wedging a runtime reattach was about to
+// bind — the row keeps its fence and pending mission and stays eligible for the
+// reattach/restore that owns it.
+func (i *Instance) RemoteRuntimeUnbound() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.remoteClient == nil && backendIsRemoteWorkspace(i.backend)
 }
 
 var _ AgentServer = (*localAgentServer)(nil)
@@ -198,6 +225,23 @@ func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) 
 		return s.inst.PreviewTabSnapshot(tab, full)
 	}
 	b := s.inst.currentBackend()
+	// A tmux-backed agent tab measures the lines above its visible capture (#3169)
+	// in the same command as the content, so a remote client can tell a complete
+	// capture from a partial one (#5571 W4.2). Fall through to the backend path
+	// on any miss; the count is an enhancement, never a requirement.
+	if !full {
+		s.inst.mu.RLock()
+		ts := s.inst.tmuxLocked()
+		started := s.inst.started
+		s.inst.mu.RUnlock()
+		if ts != nil && started {
+			if content, above, known, cerr := captureVisibleWithCount(ts); cerr == nil {
+				snap := previewSnapshotWithModes(content, ts)
+				snap.LinesAbove, snap.LinesAboveKnown = above, known
+				return snap, nil
+			}
+		}
+	}
 	var (
 		content string
 		err     error
@@ -214,6 +258,48 @@ func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) 
 	ts := s.inst.tmuxLocked()
 	s.inst.mu.RUnlock()
 	return previewSnapshotWithModes(content, ts), nil
+}
+
+// PreviewGrid captures tab `tab`'s pane through the same code the local
+// clientless channel repaints from, so a remote subscriber gets the exact grid,
+// cursor, modes and size a local one does (#5571 W4.2). A tab with no tmux pane
+// has no grid to give.
+func (s *localAgentServer) PreviewGrid(tab int) (PaneSnapshot, error) {
+	s.inst.mu.RLock()
+	var ts *tmux.TmuxSession
+	if tab == 0 {
+		ts = s.inst.tmuxLocked()
+	} else {
+		ts = s.inst.tabTmuxAtLocked(tab)
+	}
+	s.inst.mu.RUnlock()
+	if ts == nil {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab %d: no tmux pane to capture a grid from", s.inst.Title, tab)
+	}
+	return tmuxPaneSnapshot(ts)
+}
+
+// PreviewGridByID is PreviewGrid bound to one stable tab identity: the pane is
+// selected under the roster lock, so no ordinal crosses it (#2200).
+func (s *localAgentServer) PreviewGridByID(tabID string) (PaneSnapshot, error) {
+	s.inst.mu.RLock()
+	idx, ok := s.inst.tabIndexByIDLocked(tabID)
+	var ts *tmux.TmuxSession
+	if ok {
+		if idx == 0 {
+			ts = s.inst.tmuxLocked()
+		} else {
+			ts = s.inst.Tabs[idx].tmux
+		}
+	}
+	s.inst.mu.RUnlock()
+	if !ok {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: %w", s.inst.Title, tabID, ErrTabGone)
+	}
+	if ts == nil {
+		return PaneSnapshot{}, fmt.Errorf("session %q tab id %q: no tmux pane to capture a grid from", s.inst.Title, tabID)
+	}
+	return tmuxPaneSnapshot(ts)
 }
 
 // PreviewByID binds directly to the tmux/backend target selected under the
@@ -264,6 +350,9 @@ func (s *localAgentServer) SendPrompt(prompt string) error {
 func (s *localAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
 	// Adoption, counted before the write (#3865). SendPrompt above routes through
 	// here, so this is the one bump for both.
+	if err := s.inst.refuseInputWhileRebuildTeardownPending(); err != nil {
+		return PromptNotDelivered, err
+	}
 	if err := s.inst.NoteAdoptionDelivery(); err != nil {
 		return PromptNotDelivered, err
 	}
@@ -438,6 +527,9 @@ func (s *localAgentServer) InputTab(tabID string, b []byte) error {
 	// The browser terminal's path (daemon/ws_pty.go idTabBinding.input), which
 	// takes no manager lock — so this bump, and the fence it consults, are the
 	// whole of its serialization against a teardown (#3865).
+	if err := s.inst.refuseInputWhileRebuildTeardownPending(); err != nil {
+		return err
+	}
 	if err := s.inst.NoteAdoptionDelivery(); err != nil {
 		return err
 	}
@@ -466,6 +558,9 @@ func (s *localAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error
 
 func (s *localAgentServer) Input(tab int, b []byte) error {
 	// The legacy ordinal PTY path, same reason as InputTab (#3865).
+	if err := s.inst.refuseInputWhileRebuildTeardownPending(); err != nil {
+		return err
+	}
 	if err := s.inst.NoteAdoptionDelivery(); err != nil {
 		return err
 	}
@@ -494,6 +589,21 @@ func (s *localAgentServer) Archive() (string, error) {
 }
 
 // trustLiveGeneration is threaded straight to Backend.Kill (#3413).
+// StopPreservingWorkspace stops the agent and every tab and leaves the workspace
+// in place (#5571 W8.5): the same data-plane teardown as Kill, then a tab
+// teardown that keeps the worktree.
+func (s *localAgentServer) StopPreservingWorkspace() error {
+	s.mu.Lock()
+	s.closed = true
+	brokers := s.brokers
+	s.brokers = nil
+	s.mu.Unlock()
+	for _, br := range brokers {
+		br.close()
+	}
+	return s.inst.teardownTabs(teardownKill{keepWorkspace: true})
+}
+
 func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	// Tear every tab's data plane down first so the clientless captures stop and
 	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.

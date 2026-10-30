@@ -586,6 +586,18 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	if ev.kind == tkBeginArchive && i.pendingAccountSwap != nil {
 		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before archiving", i.Title)
 	}
+	if ev.kind == tkObserveLiveness && ev.lv != LiveLost && i.rebuildTeardownPending {
+		// A committed worktree rebuild whose stale-pane teardown has not been
+		// confirmed means a live answer can still come from a pane bound to the
+		// DELETED inode — the observation cannot distinguish that survivor from
+		// a fresh pane, so it must not lift the row out of Lost. Leaving it Lost
+		// is what keeps the restore loop retrying the teardown instead of
+		// exposing the stale-cwd pane as healthy again (#5371 review). The flag
+		// is cleared only after every bound name is confirmed gone, so a
+		// positive claim before then is held as Lost; a LiveLost observation
+		// passes through untouched.
+		ev.lv = LiveLost
+	}
 	from := stateAxes{i.liveness, i.inFlightOp}
 	spec, ok := transitionTable[ev.kind]
 	if !ok {
@@ -739,7 +751,14 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		}
 	}
 	prevResetAt := i.limitResetAt
-	i.liveness = to.liveness
+	// Only an edge that MOVES liveness goes through the coerce-to-Lost guard. An
+	// operation-only edge (ClearOp releasing a fence, BeginRespawn, …) leaves the
+	// liveness it found, which may be a disposition the transaction owner
+	// deliberately restored while a rebuild teardown is owed — re-assigning it
+	// would coerce that back to Lost and strand the row (#5371 review).
+	if to.liveness != from.liveness {
+		i.assignLivenessLocked(to.liveness)
+	}
 	i.inFlightOp = to.op
 	switch spec.limitReset {
 	case limitResetClear:
@@ -794,6 +813,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	// own commit above.
 	if from.liveness == LiveArchived && to.liveness != LiveArchived {
 		i.archivedAt = time.Time{}
+		i.prune.nonce = ""
 	}
 	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
 		close(i.archiveSettled)
@@ -813,6 +833,11 @@ func (i *Instance) endTaskRunInterruptedLocked() {
 	i.taskRunIdleEdgeHeld = false
 	i.taskRunTurnGateHeld = false
 	i.taskRunInterrupted = true
+	i.taskRunInterruptedAt = time.Now()
+	if at := i.agentReplacedAt; !at.IsZero() && at.Before(i.taskRunInterruptedAt) &&
+		i.taskRunInterruptedAt.Sub(at) <= taskRunResumeWindow {
+		i.taskRunInterruptedAt = at // the launch, not the settle (#6231)
+	}
 }
 
 // endTaskRunFailedLocked ends an in-flight task run as failed: the run's own

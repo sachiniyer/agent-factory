@@ -23,6 +23,43 @@ import (
 // targeted cron occurrences skip, while targeted watch events queue for replay.
 const TaskStatusLimitParked = "parked: usage limit"
 
+// The "sent" run status carries the delivery verdict the daemon itself reached
+// (#6224). Plain "sent" means the pane evidence PROVED the prompt landed; the two
+// values below are the sends that were made but not proven, so an operator
+// reading af tasks list/get can tell "the agent got it" from "staged in the
+// composer, possibly forever". Neither is "errored:"-prefixed: the keystrokes
+// were accepted, so nothing here is a failed run, and no surface counts them as
+// one. They are their own heads (no ':'), so a closed-vocabulary consumer needs
+// them listed (sandboxRunStatusHeads).
+const (
+	// TaskStatusSentUnverified: tmux accepted the paste and Enter, but the pane
+	// never showed proof the prompt was received — a collapsed-paste placeholder
+	// that stayed staged, a withheld remedy Enter, or a withheld redelivery.
+	TaskStatusSentUnverified = "sent-unverified"
+	// TaskStatusSentUnconfirmed: the pane could not be observed at all, so the
+	// daemon has no verdict either way.
+	TaskStatusSentUnconfirmed = "sent-unconfirmed"
+)
+
+// taskSendStatus is the run status for a send into an existing target session:
+// "sent" only when delivery was proven, otherwise the matching unproven value.
+// A verdict the daemon does not recognise (an older or newer peer) is not
+// evidence of delivery and reads as unconfirmed.
+func taskSendStatus(deliveryStatus session.PromptDeliveryStatus) string {
+	switch deliveryStatus {
+	case session.PromptDelivered:
+		return "sent"
+	case session.PromptSentUnverified:
+		return TaskStatusSentUnverified
+	case session.PromptNotDelivered:
+		// A send that returns without an error cannot also have provably failed;
+		// if one does, record the failure rather than a send.
+		return taskStatusErroredPromptUndelivered
+	default:
+		return TaskStatusSentUnconfirmed
+	}
+}
+
 // Indirected so delivery tests can observe the daemon RPCs without dialing —
 // or spawning — a real daemon. Both helpers loop back through the daemon's
 // own control socket when called from inside the daemon process.
@@ -59,6 +96,14 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 // public run status: whether a newly parked session already retained this exact
 // prompt for resume. Such a prompt must not also enter the watch replay queue.
 func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bool) (string, bool, error) {
+	var run task.RunKey
+	return deliverTaskPromptRun(t, prompt, deferWhileAttached, &run)
+}
+
+// deliverTaskPromptRun is deliverTaskPromptOutcome that also reports the run's
+// identity through run when the delivery created a session (zero for a send
+// into a target session): the key its status write must carry (#5661).
+func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, run *task.RunKey) (string, bool, error) {
 	_, err := config.LoadConfig()
 	if err != nil {
 		// Pre-flight: this returns before any create or send, so the watch paths
@@ -77,11 +122,17 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 	// A nonempty target survives byte-identical, so the lookup below is unchanged:
 	// only an all-whitespace value moves, and it moves to "no target session".
 	target := task.CanonicalTargetSession(t.TargetSession)
+	if target == "" && t.SandboxOwner != "" {
+		// A sandbox-created task never spawns a session: that would run on the
+		// daemon host. Skip the run with a recorded reason, never fall back.
+		return "", false, notAttempted(sandboxRefusal("a sandbox-created task has no target session; it never starts one"))
+	}
 	if target == "" {
 		data, err := createSessionForTask(CreateSessionRequest{
 			TitleBase:  task.TaskRunBaseTitle(*t),
 			RepoPath:   t.ProjectPath,
 			Program:    t.Program,
+			Host:       t.Host,
 			Prompt:     prompt,
 			TaskRepoID: t.RepoID,
 			TaskOrigin: true,
@@ -108,6 +159,7 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 			}
 			return "", false, wrapped
 		}
+		*run = task.RunKey{ID: data.ID, StartedAt: data.CreatedAt}
 		// The freshly created session hit a usage-limit wall during startup and
 		// was parked, not failed (#1146 PR4). Record the parked status so the run
 		// is NOT counted as a failure; the resume machinery re-delivers the
@@ -116,8 +168,15 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 			log.InfoLog.Print(taskParkedLogMessage(t.ID, data.Title))
 			return TaskStatusLimitParked, true, nil
 		}
+		// A create whose prompt send PROVED it never landed carries the verdict
+		// home on the session record (#5278): report the failed outcome here,
+		// at the status write's owner, rather than "started".
+		if data.LastPromptDeliveryStatus == session.PromptNotDelivered {
+			log.InfoLog.Printf("task %s started instance %q but its prompt provably did not land", t.ID, data.Title)
+			return taskStatusErroredPromptUndelivered, false, nil
+		}
 		log.InfoLog.Print(taskStartedLogMessage(t.ID, data.Title))
-		return "started", false, nil
+		return task.RunStartedStatus, false, nil
 	}
 
 	// Route through the daemon's serialized create-or-send path. When several
@@ -132,15 +191,30 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 		Title:      target,
 		RepoPath:   t.ProjectPath,
 		Program:    t.Program,
+		Host:       t.Host,
 		Prompt:     prompt,
 		TaskRepoID: t.RepoID,
 		TaskOrigin: true,
+		// Re-checked at the daemon boundary on EVERY firing, and a missing target
+		// is never created (#5571 W3.5).
+		SandboxOwner: t.SandboxOwner,
 		// An automated delivery (cron fire or watch event): hold it while a TUI is
 		// attached to the target so it never pastes into and submits the user's
 		// in-progress input (#1586). The caller decides how a hold is handled.
 		DeferWhileAttached: deferWhileAttached,
 	})
 	if err != nil {
+		// A committed auto-create is a durable mutation, not a clean delivery
+		// failure the daemon may freely re-fire: the absent-target branch
+		// provisioned a sandbox but could not confirm its teardown/startup, so
+		// the recorded-for-inspection row still owns the title (#3357). Surface
+		// the committed marker verbatim — without the generic delivery-failure
+		// wrap below — so RunTask's caller (the scheduler, `af tasks trigger`)
+		// can branch on isMutationCommitted and a re-fire does not treat the
+		// durable row as retryable.
+		if isMutationCommitted(err) {
+			return "", false, err
+		}
 		wrapped := fmt.Errorf("failed to deliver prompt to target session %q: %w", target, err)
 		// deliverPromptForTask reached the manager over net/rpc, which flattened
 		// any pre-flight notAttempted tag to a plain string. Re-mint the in-process
@@ -157,6 +231,9 @@ func deliverTaskPromptOutcome(t *task.Task, prompt string, deferWhileAttached bo
 	if status == TaskStatusLimitParked {
 		log.InfoLog.Printf("task %s parked delivery to target session %q at a usage limit; prompt not sent", t.ID, target)
 		return status, result.promptRetained, nil
+	}
+	if status == "sent" {
+		status = taskSendStatus(result.deliveryStatus)
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
 	return status, false, nil
@@ -189,8 +266,15 @@ func taskParkedLogMessage(taskID, title string) string {
 // crashed/stale client can never wedge the delivery — it lands on the next poll
 // once the lease lapses.
 func deliverCronTaskPrompt(t *task.Task, prompt string) (string, error) {
+	var run task.RunKey
+	return deliverCronTaskPromptRun(t, prompt, &run)
+}
+
+// deliverCronTaskPromptRun is deliverCronTaskPrompt that also reports the run's
+// identity (see deliverTaskPromptRun).
+func deliverCronTaskPromptRun(t *task.Task, prompt string, run *task.RunKey) (string, error) {
 	for {
-		status, err := deliverTaskPrompt(t, prompt, true)
+		status, _, err := deliverTaskPromptRun(t, prompt, true, run)
 		if err != nil || status != StatusDeferredAttached {
 			return status, err
 		}
@@ -447,8 +531,8 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 		}
 	}
 
-	deliveryStart := time.Now()
-	status, err := deliverCronTaskPrompt(t, t.Prompt)
+	var run task.RunKey
+	status, err := deliverCronTaskPromptRun(t, t.Prompt, &run)
 	if err != nil {
 		return err
 	}
@@ -457,15 +541,11 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 	// — the task already ran via deliverTaskPrompt, and the stored Program
 	// value may predate current enum validation (see #664).
 	//
-	// Compare-and-set (#5645): a run whose prompt was proven undelivered may
-	// have had its failure stamped by the status sweep after the session was
-	// registered but before this write. That outcome is newer than this
-	// delivery's start and strictly more informative than "started".
+	// Run-keyed (#5645, #5661): the write goes through the one run-status state
+	// machine, so a failure stamped for this run during its delivery is not
+	// overwritten by "started", and a stale writer cannot claim a newer run.
 	now := time.Now()
-	if _, _, err := task.UpdateTaskStatusIf(taskID, &now, status, func(cur task.Task) bool {
-		return !(cur.LastRunStatus == taskStatusErroredPromptUndelivered &&
-			cur.LastRunAt != nil && !cur.LastRunAt.Before(deliveryStart))
-	}); err != nil {
+	if _, _, err := task.RecordRunStatus(taskID, run, &now, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	// The delivery completed — the occurrence is consumed whether or not the

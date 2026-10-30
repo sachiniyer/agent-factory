@@ -171,8 +171,19 @@ fallback):
 
 | Flag | Env var | Meaning |
 |---|---|---|
-| `--daemon-url` | `AF_DAEMON_URL` | The daemon's URL: `http://host:port` or `ws://host:port` (the two are equivalent). A `wss://`/`https://` URL is rejected with an HTTP-only error — af serves no TLS; terminate it at a proxy and point af at the proxy's plaintext backend, or use a private network. |
+| `--daemon-url` | `AF_DAEMON_URL` | The daemon's URL: `http://host:port` or `ws://host:port` (the two are equivalent). `https://host` / `wss://host` are accepted too (the same pair) for a daemon behind a TLS front such as `tailscale serve` or a reverse proxy; the certificate is verified against the system CAs and there is no option to skip verification. The daemon itself serves plaintext HTTP. |
 | `--token` | `AF_DAEMON_TOKEN` | The bearer token from `af token show`. |
+
+### Save the target once
+
+`af target set <url> [--token-stdin]` stores the URL (and, read from stdin so it
+never reaches argv, the token) in this machine's af home with `0600`
+permissions. Precedence is `--daemon-url`/`--token`, then `AF_DAEMON_URL`/
+`AF_DAEMON_TOKEN`, then the saved target. The saved token is only ever sent to
+the saved URL, never to a host named by a flag or env var. `af target show`
+prints which target an invocation uses and why (never the token); `af target
+clear` forgets it. A saved file that is unreadable, malformed or readable by
+other users is refused rather than falling back to the local daemon.
 
 Flags take precedence over the environment. When `--daemon-url` (or
 `AF_DAEMON_URL`) is unset, `af` uses the local Unix socket exactly as before —
@@ -221,12 +232,14 @@ falling back to a local disk scan (there is no local disk on the other end).
 ### Migrating from the old TLS listener
 
 Earlier versions served this listener over TLS and pinned a self-signed
-certificate. TLS was **removed** — af is HTTP-only now. If you have a stale
+certificate. TLS was **removed** — the daemon itself is HTTP-only now; a TLS front is reached with `https://`. If you have a stale
 config:
 
-- **`wss://` / `https://` daemon URLs** → change them to `http://` (or `ws://`).
-  A TLS-scheme `--daemon-url` fails fast with a clear message pointing you at
-  `http://`, rather than mysteriously hanging.
+- **`wss://` / `https://` daemon URLs** → fine when something in front of the
+  daemon serves a certificate your system trusts (`tailscale serve`, a reverse
+  proxy). They are verified against the system CAs; a pinned self-signed
+  certificate no longer works — use `http://` over a private network, or a TLS
+  front with a real certificate.
 - **`--tls-fingerprint` / `AF_DAEMON_TLS_FINGERPRINT`** → **removed.** Drop them;
   there is no certificate to pin.
 - **`tls_cert` / `tls_key` config keys** → **removed.** An old config that still
@@ -525,10 +538,10 @@ build, so it only protects what this build runs. A daemon binary that predates
 it still binds and serves the tokenless network posture its config asks for —
 the *running* daemon is the one that decides. If `af daemon status` shows a
 listener `bound` on a network address, take that at face value and restart the
-daemon (`af daemon restart`) so the refusing build owns the socket. Guarding a
-newer CLI's writes to an *older* remote daemon, the upgrade supervisor's
-listener expectations, and live-vs-disk drift reporting in `af daemon status`
-and `af doctor` are tracked as follow-ups (#5183, #5184, #5185).
+daemon on its host (`ssh box 'af upgrade && af daemon restart'`) so the
+refusing build owns the socket. Guarding a newer CLI's writes to an *older*
+remote daemon and live-vs-disk drift reporting
+in `af daemon status` and `af doctor` are tracked as follow-ups (#5184, #5185).
 
 On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
 a tokenless listener may feel reasonable, and `network.allow_unauthenticated_network = true`
@@ -537,6 +550,18 @@ port at all, bind loopback and reach it over the tailnet with SSH
 port-forwarding (Option 1), or set the token.
 
 ---
+
+## Which verbs follow the target
+
+With `--daemon-url`, `AF_DAEMON_URL` or a saved target (`af target set`), every `af` verb does one of three things, and none of them answers about the wrong machine without saying so:
+
+| Verbs | With a remote target |
+|---|---|
+| `af` (the TUI), `sessions`, `tasks`, `projects`, `proposal`, `quota`, `daemon status`, global `config set` / `config unset` | **Follow the target.** They read and write that daemon over its API and never fall back to this machine. `af daemon status` reports the target's health route (version, phase, boot id), not this machine's sockets or autostart unit. |
+| `token show` / `token rotate`, `daemon restart` / `install` / `uninstall` / `adopt`, `doctor`, `reset`, `config get` / `list` / `validate` / `migrate`, `config set` / `unset --project`, `accounts`, `hosts` | **Refuse**, naming the daemon they declined to act on, because they read or change a file, process or unit that exists only on the machine they run on and no daemon API stands in for it. Run them on the daemon host (for example over ssh). |
+| `target`, `upgrade`, `bug-report`, `version`, `keys`, `debug`, `api`, `sessions whoami` | **Act on this client** by design: its binary, its saved target, its terminal or tmux pane, or this build's static catalogs. |
+
+A skew error against a remote daemon names that daemon and a remedy you can run from the client: `the daemon at http://box:8443 is out of date … ssh box 'af upgrade && af daemon restart'`. A new verb has to pick one of the three: `commands/targetclass_test.go` fails the build for a verb with no class.
 
 ## Rotating the token
 

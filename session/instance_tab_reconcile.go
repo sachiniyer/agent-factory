@@ -22,8 +22,8 @@ import (
 // session). The agent tab (index 0) is never added or dropped: it is the
 // instance's own session and is always present. Returns whether the local list
 // changed. A no-op for a not-started instance, one without an agent session, or
-// a remote instance (callers skip backends without TabManagement — remote tabs
-// come from hook config, not the snapshot). Per-tab reconnect failures are collected into the
+// a remote instance (callers skip backends without TabManagement — a remote
+// roster belongs to its runtime's agent-server, not the snapshot). Per-tab reconnect failures are collected into the
 // returned error after every other change is applied, so one bad tab can't wedge
 // the reconcile.
 func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
@@ -34,6 +34,11 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 	program := i.Program
 	i.mu.RUnlock()
 
+	if gw == nil && agentTmux == nil && i.Capabilities().Workspace == WorkspaceRemote {
+		// An off-box row has no tmux or worktree on this side: its roster is
+		// only a projection of the daemon's (W4.6).
+		return i.reconcileProjectedTabs(target), nil
+	}
 	if !started || agentTmux == nil || gw == nil {
 		return false, nil
 	}
@@ -350,4 +355,81 @@ func tabExitEqual(a, b *TabExit) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// TabRosterMutable reports whether the daemon admits close, rename and reorder
+// on this row's roster. It mirrors tabMutationTarget, which refuses only an
+// archived session: a metadata-only tab is editable on any backend, so the
+// TUI must not gate those verbs on Capabilities.TabManagement (which governs
+// spawning a process tab only).
+func (i *Instance) TabRosterMutable() bool {
+	return !i.IsArchived()
+}
+
+// reconcileProjectedTabs mirrors the daemon's roster onto an off-box row that
+// owns no tmux sessions: every tab is a tmux-less projection addressed by its
+// stable id. Existing rows are reused by id (or by name for an id-less legacy
+// row) so open panes keep their pointer; the list takes the daemon's order. An
+// empty target leaves the roster alone — the daemon only publishes the
+// persisted roster once it has one, and an absent one is not a deletion.
+func (i *Instance) reconcileProjectedTabs(target []TabData) bool {
+	if len(target) == 0 {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	next := make([]*Tab, 0, len(target))
+	changed := len(i.Tabs) != len(target)
+	// A byte-identical id-less row cannot tell "unchanged" from close +
+	// recreate under the same name, so any id-less non-agent row invalidates
+	// destructive consent on every snapshot (same rule as the local path).
+	legacySnapshot := false
+	for idx, td := range target {
+		kind := tabKindForData(td.Kind)
+		if kind != TabKindAgent && td.ID == "" {
+			legacySnapshot = true
+		}
+		var cur *Tab
+		for _, t := range i.Tabs {
+			if t.ID == td.ID && (td.ID != "" || t.Name == td.Name) {
+				cur = t
+				break
+			}
+		}
+		exit := tabExitFromData(td.Exit)
+		// An id-less legacy row stays id-less: the daemon resolves it through its
+		// name/ordinal fallback, and refuses an id it never issued.
+		fresh := &Tab{ID: td.ID, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL,
+			Proposal: td.Proposal, PushMode: td.PushMode, Exit: exit, gen: td.Gen, accountScope: td.AccountScope}
+		if cur == nil {
+			changed = true
+			next = append(next, fresh)
+			continue
+		}
+		if cur.Name == td.Name && cur.Kind == kind && cur.URL == td.URL && cur.Command == td.Command &&
+			cur.Proposal == td.Proposal && cur.PushMode == td.PushMode &&
+			cur.accountScope == td.AccountScope && tabExitEqual(cur.Exit, exit) {
+			// Unchanged: keep the pointer, readers may hold it (copy-on-write).
+			if idx >= len(i.Tabs) || i.Tabs[idx] != cur {
+				changed = true
+			}
+			next = append(next, cur)
+			continue
+		}
+		changed = true
+		cp := *cur
+		cp.Name, cp.Kind, cp.Command, cp.URL = td.Name, kind, td.Command, td.URL
+		cp.Proposal, cp.PushMode, cp.Exit, cp.accountScope = td.Proposal, td.PushMode, exit, td.AccountScope
+		next = append(next, &cp)
+	}
+	if !changed {
+		if legacySnapshot {
+			i.tabRosterGeneration++
+		}
+		return false
+	}
+	i.Tabs = next
+	i.tabRosterGeneration++
+	i.touchLocked()
+	return true
 }

@@ -217,6 +217,21 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		// is what marks the obligation now — including on a startup-unknown row
 		// whose probe answered above.
 		if op == session.OpReplacing || explicit {
+			// That gate is real only when a runtime is bound to poll. A
+			// reloaded remote row the startup reattach (#5571 W1.5) has not yet
+			// re-bound has no client: AgentServer() returns the stateless
+			// deadRemoteAgentServer, whose Preview error the readiness wait
+			// treats as transient — so the wait would burn the full readiness
+			// budget polling a sentinel and then latch the terminal
+			// MarkStartupStateUnknown marker (#5634), wedging a runtime reattach
+			// was about to bind moments later. Refuse instead: keep the fence
+			// and the pending mission so the reattach (or restore) that owns the
+			// row can still reach it. The explicit arm cannot land here today
+			// (its admission refuses a Lost row), but the same burn would be
+			// nonsensical against an unbound runtime, so it is gated too.
+			if entry.instance.RemoteRuntimeUnbound() {
+				return false, nil
+			}
 			break
 		}
 		return false, nil
@@ -268,8 +283,15 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		// A startup-unknown row whose probe answered is in the same position: the
 		// probe proved only that the pane exists, readiness then failed, so the
 		// row goes back to unknown rather than keeping a binding nothing proved.
+		// A client-less remote row's burn was against the deadRemoteAgentServer
+		// sentinel rather than a real runtime, so the marker would wedge a row
+		// reattach can still bind — refuse to latch it and leave the row
+		// recoverable. (The bypass above keeps this unreachable for unbound rows
+		// today; this is the safety net for any future path that admits one.)
 		if (op == session.OpReplacing || wasUnknown) && errors.Is(err, task.ErrAgentReadiness) {
-			entry.instance.MarkStartupStateUnknown()
+			if !entry.instance.RemoteRuntimeUnbound() {
+				entry.instance.MarkStartupStateUnknown()
+			}
 			m.persistAndPublishInstance(entry.repoID, entry.instance)
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 		}

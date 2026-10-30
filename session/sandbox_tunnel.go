@@ -232,8 +232,8 @@ func newTunnelChild(cmd *exec.Cmd, ll *tunnelLifeline) *tunnelChild {
 // stop can reach. The caller owns registration: registerSandboxTunnel before
 // this, stopTunnel via reap on every failure after.
 //
-// The spawn composes p.forward plus p.reverseFwds — W3.4's -R slot, empty for
-// this slice — so every re-dial re-establishes the same endpoint contract.
+// The spawn composes p.forward plus p.reverseFwds — W3.4's -R slot, empty when no
+// callback was granted — so every re-dial re-establishes the same endpoint contract.
 func (p *sandboxProvisioner) provisionTunnelChild() (*tunnelChild, error) {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
@@ -317,7 +317,7 @@ func killTunnel(t *tunnelChild) {
 // `reverse` is W3.4's slot for -R forwards (the in-sandbox callback): each
 // element is composed as `-R "$N"` after the -L spec, so it gets the same
 // ExitOnForwardFailure fatality, the same process-group teardown, and the same
-// supervision on every re-dial. Empty today.
+// supervision on every re-dial.
 func (p *sandboxProvisioner) spawnTunnel(forward string, reverse ...string) (*exec.Cmd, *tunnelLifeline, error) {
 	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`
 	args := []string{forward}
@@ -696,6 +696,7 @@ func (p *sandboxProvisioner) superviseTunnel() {
 				timer.Stop()
 				return
 			}
+			p.clearStaleCallbackSocket()
 			next, err := p.provisionTunnelChild()
 			switch {
 			case errors.Is(err, errTunnelOwnerStopped):
@@ -756,4 +757,19 @@ func (p *sandboxProvisioner) superviseTunnel() {
 			m.noteEvent(err)
 		}
 	}
+}
+
+// clearStaleCallbackSocket removes the callback carrier left on the sandbox by a
+// connection that died without sshd unlinking it, so the re-dial binds the SAME
+// path (the in-sandbox client's URL never changes). Best-effort: if the host
+// cannot be reached the re-dial fails too and the loop comes back around. The
+// path is the session's own, inside its 0700 directory.
+func (p *sandboxProvisioner) clearStaleCallbackSocket() {
+	p.reapMu.Lock()
+	sock := p.callbackSocket
+	p.reapMu.Unlock()
+	if sock == "" {
+		return
+	}
+	_, _ = p.Run(sshShortStepTimeout, "rm -f -- "+shellQuote(sock), nil, true)
 }

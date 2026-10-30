@@ -46,13 +46,13 @@ func boundedMarkHookProgressFinished(path string) error {
 	}
 	hookProgressFinishedFlights.Unlock()
 
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
 		return flight.err
 	case <-timer.C:
-		return fmt.Errorf("timed out after %s while writing hook terminal marker %s: %w", relocationIdentityTimeout, path, context.DeadlineExceeded)
+		return fmt.Errorf("timed out after %s while writing hook terminal marker %s: %w", relocationIdentityTimeout.Load(), path, context.DeadlineExceeded)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,10 +20,14 @@ import (
 )
 
 type controlServer struct {
-	manager    *Manager
-	scheduler  *taskScheduler
-	watchers   *watcherSupervisor
-	shutdownCh chan struct{}
+	// createSessionFn replaces createSession in the sandbox-scoped CreateSession
+	// handler. Nil in production; a test sets it to exercise the response boundary
+	// on a successful create without provisioning a host.
+	createSessionFn func(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error
+	manager         *Manager
+	scheduler       *taskScheduler
+	watchers        *watcherSupervisor
+	shutdownCh      chan struct{}
 	// shutdownOnce is shared by every per-connection controlServer
 	// startControlServer builds: one Shutdown must fire once for the whole
 	// listener, not once per connection. It is nil on servers that cannot shut
@@ -61,6 +66,10 @@ const (
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
+	resp.HostPick = true
+	resp.DeliverHostPick = true
+	resp.TaskHost = true
+	resp.ConfigHostsEdit = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -283,7 +292,7 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	result, wroteDigest, err := config.SetGlobalConfigValueWithDigest(req.Key, req.Value)
+	result, wroteDigest, err := writeGlobalConfig(req)
 	if err != nil {
 		return err
 	}
@@ -446,6 +455,22 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if err := validateCreateProgram(req.Program); err != nil {
 		return err
 	}
+	// A remote client sends the project path as typed; expand ~ against this
+	// daemon's home before anything resolves it.
+	// A still-relative path would resolve against the DAEMON's working directory
+	// and could silently pick a different checkout, so it is refused (#5743).
+	if strings.TrimSpace(req.RepoPath) != "" {
+		resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
+		if err != nil {
+			return err
+		}
+		req.RepoPath = resolved
+	}
+	if req.ValidateFirst {
+		if err := validateCreateFirst(req); err != nil {
+			return err
+		}
+	}
 	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
@@ -593,29 +618,6 @@ func (s *controlServer) ArchiveSession(req *ArchiveSessionRequest, resp *Archive
 	return s.archiveSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) archiveSession(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	// The `af sessions archive --self` caller this issue is about (#5182):
-	// register the kernel-verified requester before its own pane tree is
-	// reaped, and unregister when the reply is on the wire.
-	defer s.trackTeardownRequester(ctx, req)()
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
-	// commits it, and publishes the full projection inside its operation lock. That
-	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, _, err := s.manager.ArchiveSession(*req)
-	if !resp.record(err) {
-		return err
-	}
-	resp.OK = true
-	resp.ArchivedPath = archivedPath
-	return nil
-}
-
 func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *RestoreArchivedResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
@@ -681,22 +683,6 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 	return nil
 }
 
-func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	status, err := s.manager.SendPromptWithStatus(req)
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	resp.Status = status
-	return nil
-}
-
 // validateRPCRepoID enforces the RepoID shape for RPC requests that allow an
 // empty value to mean "search all repos". A non-empty RepoID must satisfy
 // config.ValidateRepoID so it cannot escape the per-repo file scope through
@@ -724,7 +710,12 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	}
 	managerDelegated = true
 	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
-	if err != nil {
+	// A committed retained auto-create (#3357) — the absent-target branch
+	// routed through Manager.CreateSession, which provisioned a sandbox but
+	// could not confirm its teardown/startup — lands in the envelope so the
+	// marker survives the net/rpc hop that would otherwise flatten it to a
+	// plain rpc.ServerError string. A genuine failure returns unchanged.
+	if !resp.record(err) {
 		return err
 	}
 	resp.Status = status

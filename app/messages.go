@@ -72,6 +72,9 @@ type projectDeletedMsg struct {
 type projectAddedMsg struct {
 	root string
 	err  error
+	// byURL marks a git-URL registration (W9.10): its failure is reported to the
+	// user, since no optimistic switch already happened.
+	byURL bool
 }
 
 // projectReboundMsg reports completion of an async rebind-project (the picker's
@@ -93,6 +96,21 @@ type projectReboundMsg struct {
 	name            string
 	root            string
 	err             error
+}
+
+// rebindConflictSnapshotMsg carries the cross-repo session snapshot fetched
+// OFF the event loop after a "rebound elsewhere" refusal (#4888 review): local
+// API calls carry no response deadline, so a stalled one must not freeze Update
+// while the refused rebind waits to re-arm. token and projectID re-check reply
+// ownership at apply time — the picker that asked may be gone or replaced —
+// and refusal carries the daemon's own text for the re-arm when the fresh list
+// no longer names the record.
+type rebindConflictSnapshotMsg struct {
+	token     uint64
+	projectID string
+	refusal   error
+	data      []session.InstanceData
+	fetchErr  error
 }
 
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async

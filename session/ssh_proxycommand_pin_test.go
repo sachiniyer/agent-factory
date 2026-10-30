@@ -42,13 +42,13 @@ import (
 func TestPinnedSSHDialAddressKeepsEveryStepOnOneMachine(t *testing.T) {
 	machineA, machineB, port := twoMachinesBehindOneName(t)
 	const name = "pinned-multi.test"
-	useRotatingResolver(t, "127.0.0.1", "127.0.0.2")
+	resolver := newRotatingResolver(t, "127.0.0.1", "127.0.0.2")
 
 	// THE CONTROL, and it is not decoration: it proves the fixture reproduces the
 	// bug. Without it, "every pinned dial landed on one machine" would be equally
 	// true of a fixture where only one machine was ever reachable, and the test
 	// would assert nothing at all.
-	hosts, err := net.LookupHost(name)
+	hosts, err := resolver.LookupHost(context.Background(), name)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"127.0.0.1", "127.0.0.2"}, hosts,
 		"the target must GENUINELY resolve to two addresses — that is the condition #3086 is about")
@@ -60,7 +60,7 @@ func TestPinnedSSHDialAddressKeepsEveryStepOnOneMachine(t *testing.T) {
 		// land after the reset() below and be miscounted as a pinned one. The
 		// greeting is written after the increment, so receiving it orders the two.
 		// Measured: without this the test failed 7 times in 25.
-		require.NoError(t, greetingFrom(net.JoinHostPort(name, strconv.Itoa(port))),
+		require.NoError(t, greetingFrom(net.JoinHostPort(name, strconv.Itoa(port)), resolver),
 			"both stand-in machines must be reachable by name")
 	}
 	require.NotZero(t, machineA.count(), "fixture is vacuous: machine A never saw a name-based dial")
@@ -69,7 +69,7 @@ func TestPinnedSSHDialAddressKeepsEveryStepOnOneMachine(t *testing.T) {
 		"or this test proves nothing")
 
 	// Resolve ONCE, the way provisioning does.
-	pinned := resolvePinnedSSHDialAddress(name, port)
+	pinned := resolvePinnedSSHDialAddressWith(name, port, resolver)
 	require.Contains(t, []string{"127.0.0.1", "127.0.0.2"}, pinned,
 		"the pin must be one of the addresses the name actually answers with")
 	chosen, other := machineA, machineB
@@ -86,7 +86,7 @@ func TestPinnedSSHDialAddressKeepsEveryStepOnOneMachine(t *testing.T) {
 	// received was accepted after everything already queued: receiving one from each
 	// machine proves both loops are past the probe.
 	for _, m := range []*standInMachine{machineA, machineB} {
-		require.NoError(t, greetingFrom(net.JoinHostPort(m.addr, strconv.Itoa(port))))
+		require.NoError(t, greetingFrom(net.JoinHostPort(m.addr, strconv.Itoa(port)), resolver))
 	}
 	machineA.reset()
 	machineB.reset()
@@ -581,10 +581,10 @@ func TestTheDialProbeIsBounded(t *testing.T) {
 	// cannot reach. Without a deadline Go's own resolver still gives up eventually
 	// (~2 attempts x 5s), which is why the assertion is "promptly", not "at all".
 	t.Run("a stalled resolver", func(t *testing.T) {
-		useStallingResolver(t)
+		resolver := newStallingResolver(t)
 		start := time.Now()
 		assert.Empty(t, mustReturnWithin(t, 60*time.Second, func() string {
-			return resolvePinnedSSHDialAddress("stalled.test", 22)
+			return resolvePinnedSSHDialAddressWith("stalled.test", 22, resolver)
 		}))
 		assert.Less(t, time.Since(start), 3*time.Second,
 			"the probe must give up on ITS OWN deadline; without one it waits out the resolver's retries")
@@ -634,10 +634,16 @@ func mustReturnWithin(t *testing.T, limit time.Duration, fn func() string) strin
 	}
 }
 
-// useStallingResolver points the process resolver at a DNS server that reads every
+// newStallingResolver returns a resolver backed by a DNS server that reads every
 // query and answers none — the "stalled resolver" half of the probe's deadline,
 // which no choice of address can exercise.
-func useStallingResolver(t *testing.T) {
+//
+// It is handed to the probe (resolvePinnedSSHDialAddressWith) and NEVER installed
+// as net.DefaultResolver: the bounded probe abandons its lookup at the deadline,
+// and that goroutine keeps reading the resolver after the test returns, so a
+// swapped global restored in cleanup is a data race with it. The stalling server's
+// socket is closed at cleanup, which also lets the abandoned lookup end.
+func newStallingResolver(t *testing.T) *net.Resolver {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -650,19 +656,16 @@ func useStallingResolver(t *testing.T) {
 			// Deliberately no reply.
 		}
 	}()
-
-	prevResolver := net.DefaultResolver
-	net.DefaultResolver = &net.Resolver{
+	t.Cleanup(func() { _ = pc.Close() })
+	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
+			// An explicit resolver: a zero Dialer reads net.DefaultResolver, and this
+			// closure runs on lookups an earlier probe abandoned.
+			d := net.Dialer{Resolver: &net.Resolver{}}
 			return d.DialContext(ctx, "udp", pc.LocalAddr().String())
 		},
 	}
-	t.Cleanup(func() {
-		net.DefaultResolver = prevResolver
-		_ = pc.Close()
-	})
 }
 
 // proxyCommandValue extracts the ProxyCommand value from a composed command as
@@ -699,8 +702,9 @@ func relayOnce(host string, port int) error {
 // greetingFrom opens a plain connection and waits for the stand-in machine to
 // announce itself, which is the point at which that machine has certainly counted
 // the connection.
-func greetingFrom(addr string) error {
-	conn, err := net.Dial("tcp", addr)
+func greetingFrom(addr string, resolver *net.Resolver) error {
+	d := net.Dialer{Resolver: resolver}
+	conn, err := d.Dial("tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -781,7 +785,7 @@ func twoMachinesBehindOneName(t *testing.T) (*standInMachine, *standInMachine, i
 	return nil, nil, 0
 }
 
-// useRotatingResolver points the process resolver at an in-process DNS server
+// newRotatingResolver returns a resolver backed by an in-process DNS server
 // that answers with the given addresses in a DIFFERENT ORDER each time.
 //
 // Rotation is the point, not a flourish: a name whose answers are stable would
@@ -793,7 +797,7 @@ func twoMachinesBehindOneName(t *testing.T) (*standInMachine, *standInMachine, i
 // `localhost` is deliberately NOT used for this: on Debian and Ubuntu it maps to
 // 127.0.0.1 alone (::1 is ip6-localhost), so a localhost-based fixture would be
 // single-address and this test would pass while proving nothing.
-func useRotatingResolver(t *testing.T, addrs ...string) {
+func newRotatingResolver(t *testing.T, addrs ...string) *net.Resolver {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -827,18 +831,17 @@ func useRotatingResolver(t *testing.T, addrs ...string) {
 		}
 	}()
 
-	prev := net.DefaultResolver
-	net.DefaultResolver = &net.Resolver{
+	t.Cleanup(func() { _ = pc.Close() })
+	// Handed to each dial, never installed as net.DefaultResolver: a swapped global
+	// races with any lookup an earlier probe abandoned.
+	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
+			// An explicit resolver: a zero Dialer reads net.DefaultResolver.
+			d := net.Dialer{Resolver: &net.Resolver{}}
 			return d.DialContext(ctx, "udp", pc.LocalAddr().String())
 		},
 	}
-	t.Cleanup(func() {
-		net.DefaultResolver = prev
-		_ = pc.Close()
-	})
 }
 
 // dnsMinHeader is the fixed-size prefix of a DNS message: id, flags, and the four

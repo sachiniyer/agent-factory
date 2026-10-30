@@ -149,6 +149,12 @@ func TestWarnedShellValueKeys_EachOneActuallyWarns(t *testing.T) {
 			require.NoError(t, err)
 			return warnings.String()
 		},
+		"move_cmd": func(t *testing.T) string {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("move_cmd = \"exec -- ./move.sh\"\n"), "global.toml")
+			require.NoError(t, err)
+			return warnings.String()
+		},
 		"sandbox.ssh": func(t *testing.T) string {
 			warnings := captureLog(t, &aflog.WarningLog)
 			_, err := parseConfigTOML([]byte("[sandbox]\nssh = \"exec -- ssh host\"\n"), "global.toml")

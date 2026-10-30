@@ -198,7 +198,7 @@ func boundedHookProgressOwners() (hookProgressOwnerSnapshot, error) {
 }
 
 func waitForHookProgressOwners(home string, flight *hookProgressOwnerFlight) (hookProgressOwnerSnapshot, error) {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -208,7 +208,7 @@ func waitForHookProgressOwners(home string, flight *hookProgressOwnerFlight) (ho
 		if hookProgressOwnerFlights.byHome[home] == flight {
 			flight.timedOut = true
 			hookProgressOwnerFlights.Unlock()
-			return hookProgressOwnerSnapshot{}, fmt.Errorf("timed out after %s while loading hook progress owners under %s: %w", relocationIdentityTimeout, home, context.DeadlineExceeded)
+			return hookProgressOwnerSnapshot{}, fmt.Errorf("timed out after %s while loading hook progress owners under %s: %w", relocationIdentityTimeout.Load(), home, context.DeadlineExceeded)
 		}
 		hookProgressOwnerFlights.Unlock()
 		<-flight.done

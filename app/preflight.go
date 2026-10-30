@@ -52,6 +52,7 @@ func (m *home) preflightSessionCreate() error {
 	//
 	local, _ := localPrereqsRequired(session.InstanceOptions{
 		Backend: session.BackendKind(m.pendingBackend),
+		Host:    m.pendingHost,
 	}, m.repoRoot)
 	if !local {
 		return nil

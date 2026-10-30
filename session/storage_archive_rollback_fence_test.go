@@ -2,9 +2,11 @@ package session
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -292,4 +294,186 @@ func TestForStorageArchiveRollbackFenceSurvivesJSONRoundTrip(t *testing.T) {
 		"the corrected fence must be durable across JSON marshal/unmarshal")
 	// An empty ArchiveReport is never produced from a non-empty one.
 	require.False(t, reloaded.ArchiveReport.Empty())
+}
+
+// TestForStorageRebuildTeardownFenceProjectsInertForRollbackReaders is the
+// rollback door on the rebuild-teardown obligation (#5371 review): a row
+// persisted while RebuildTeardownPending is set must project through a field
+// the PREVIOUS release already honors. Without the fence a rolled-back daemon
+// ignores the unknown key, sees Lost + an existing worktree, skips the rebuild
+// branch, reattaches the pane bound to the deleted inode, and marks it Running
+// — the #5370 defect again. The previous release's StartupStateUnknown load is
+// inert: no Start, started=false, invisible to the poll and the restore loop,
+// so the stale pane sits unclaimed until a current reader finishes the job.
+func TestForStorageRebuildTeardownFenceProjectsInertForRollbackReaders(t *testing.T) {
+	worktreePath := filepath.Join(t.TempDir(), "rebuilt-checkout")
+	branchCreatedByUs := true
+	data := InstanceData{
+		ID:      "rebuild-pending-id",
+		Title:   "rebuild-pending",
+		Program: "claude",
+		Status:  Lost, Liveness: LiveLost,
+		StartupStateUnknown:    false,
+		RebuildTeardownPending: true,
+		Tabs: []TabData{
+			{Name: agentTabName, Kind: TabKindAgent, TmuxName: "af_rebuildpending"},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:          t.TempDir(),
+			WorktreePath:      worktreePath,
+			SessionName:       "rebuild-pending",
+			BranchName:        "af/rebuild-pending",
+			BranchCreatedByUs: &branchCreatedByUs,
+		},
+	}
+
+	stored := data.ForStorage()
+	assert.True(t, stored.StartupStateUnknown,
+		"an older reader must see the inert fence it already understands")
+	assert.True(t, stored.RebuildTeardownPending)
+
+	// Wire shape: the fence key old readers honor, plus the preserved original.
+	payload, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(payload, &wire))
+	assert.Equal(t, true, wire["startup_state_unknown"])
+	assert.Equal(t, false, wire["rebuild_teardown_original_startup_state_unknown"],
+		"the row's real startup verdict is preserved for the current reader")
+
+	// The previous release ignores the additive keys — drop them to model its
+	// view of the same file.
+	delete(wire, "rebuild_teardown_pending")
+	delete(wire, "rebuild_teardown_original_startup_state_unknown")
+	previousPayload, err := json.Marshal(wire)
+	require.NoError(t, err)
+	var previousView InstanceData
+	require.NoError(t, json.Unmarshal(previousPayload, &previousView))
+	previous, err := FromInstanceData(previousView)
+	require.NoError(t, err)
+	assert.True(t, previous.StartupStateUnknown(),
+		"the rolled-back reader must load the row inert")
+	assert.False(t, previous.Started(),
+		"inert load means the poll and the restore loop both pass the row by — the stale pane is never bound as Running")
+
+	// The current reader removes the projection before interpreting the row:
+	// the real startup verdict comes back and the obligation stays armed.
+	reloaded := data.ForStorage()
+	reloadedPayload, err := json.Marshal(reloaded)
+	require.NoError(t, err)
+	var currentView InstanceData
+	require.NoError(t, json.Unmarshal(reloadedPayload, &currentView))
+
+	var newSessions int
+	var spawns []string
+	exec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	current, err := FromInstanceData(currentView)
+	require.NoError(t, err)
+	assert.True(t, current.RebuildTeardownPending(),
+		"the obligation itself survives the fence round-trip")
+	assert.False(t, current.StartupStateUnknown(),
+		"the current reader must recover the real startup verdict, not the projected fence")
+
+	// And disk-fallback clients see the real lifecycle, not the old-reader fence.
+	clientView := reloaded.ForClientRead()
+	assert.False(t, clientView.StartupStateUnknown)
+	clientPayload, err := json.Marshal(clientView)
+	require.NoError(t, err)
+	var clientWire map[string]any
+	require.NoError(t, json.Unmarshal(clientPayload, &clientWire))
+	_, hasFence := clientWire["rebuild_teardown_original_startup_state_unknown"]
+	assert.False(t, hasFence, "clients must not see the storage-only rollback fence")
+}
+
+// TestFromInstanceData_StackedRollbackFencesRestoreTrueStartupState pins the
+// unwind order: ForStorage projects account-swap, then handoff, then
+// rebuild-teardown — each overwriting StartupStateUnknown and stashing the
+// previous value in its own slot — so restores must run in reverse. A row
+// carrying RebuildTeardownPending AND another pending fence restores the
+// LAST-projected slot first; if the rebuild fence is restored last it writes
+// the projected `true` over the real `false` and the row stays inert for good
+// (#5371 review). Each combination keeps the real verdict false.
+func TestFromInstanceData_StackedRollbackFencesRestoreTrueStartupState(t *testing.T) {
+	worktreePath := filepath.Join(t.TempDir(), "stacked-rebuilt")
+	base := func() InstanceData {
+		branchCreatedByUs := true
+		return InstanceData{
+			ID:      "stacked-fence-id",
+			Title:   "stacked-fence",
+			Program: "claude",
+			Status:  Lost, Liveness: LiveLost,
+			StartupStateUnknown:    false,
+			RebuildTeardownPending: true,
+			Tabs: []TabData{
+				{Name: agentTabName, Kind: TabKindAgent, TmuxName: "af_stackedfence"},
+			},
+			Worktree: GitWorktreeData{
+				RepoPath:          t.TempDir(),
+				WorktreePath:      worktreePath,
+				SessionName:       "stacked-fence",
+				BranchName:        "af/stacked-fence",
+				BranchCreatedByUs: &branchCreatedByUs,
+			},
+		}
+	}
+	pendingSwap := &AccountSwapData{
+		Manual: true, From: "work", To: "personal",
+		ReplacementPanesStarted: true, MissionDeliveryStatus: PromptCouldNotConfirm,
+	}
+	cases := []struct {
+		name  string
+		apply func(*InstanceData)
+	}{
+		{"swap+rebuild", func(d *InstanceData) { d.PendingAccountSwap = pendingSwap }},
+		{"handoff+rebuild", func(d *InstanceData) {
+			d.PendingHandoffMission = "continue the inherited work"
+			d.HandoffDeliveryStatus = PromptCouldNotConfirm
+		}},
+		{"swap+handoff+rebuild", func(d *InstanceData) {
+			d.PendingAccountSwap = pendingSwap
+			d.PendingHandoffMission = "continue the inherited work"
+			d.HandoffDeliveryStatus = PromptCouldNotConfirm
+		}},
+	}
+
+	var newSessions int
+	var spawns []string
+	exec := deadPaneAwareExec(map[string]bool{},
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := base()
+			tc.apply(&row)
+
+			stored := row.ForStorage()
+			assert.True(t, stored.StartupStateUnknown,
+				"the stacked row must persist behind the inert fence for older readers")
+
+			payload, err := json.Marshal(stored)
+			require.NoError(t, err)
+			var view InstanceData
+			require.NoError(t, json.Unmarshal(payload, &view))
+			current, err := FromInstanceData(view)
+			require.NoError(t, err)
+			assert.False(t, current.StartupStateUnknown(),
+				"the current reader must recover the real startup verdict, not a leftover projected fence")
+			assert.True(t, current.RebuildTeardownPending(),
+				"the teardown obligation itself survives the round-trip")
+		})
+	}
 }

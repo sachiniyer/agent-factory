@@ -64,7 +64,8 @@ func (i *Instance) AgentConversation() AgentConversationData {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if len(i.Tabs) == 0 {
-		return AgentConversationData{}
+		// A reloaded off-box row holds its handle until Launch seeds the agent tab.
+		return i.reportedConversation
 	}
 	return i.Tabs[0].Conversation
 }
@@ -152,6 +153,17 @@ func (i *Instance) setAgentConversationLocked(conv AgentConversationData) bool {
 	return true
 }
 
+// retireConversationsLocked drops every conversation id this instance holds
+// outside the agent tab — the carried request and the remote-reported handle.
+// A provider conversation lives in ONE account's store, so crossing the account
+// boundary must leave no id behind that a later respawn could name against the
+// other account's home (#6189). The caller holds i.mu and clears the agent tab's
+// own conversation itself.
+func (i *Instance) retireConversationsLocked() {
+	i.carriedConversation = AgentConversationData{}
+	i.reportedConversation = AgentConversationData{}
+}
+
 func prepareLaunchConversation(i *Instance, program string) string {
 	rewritten, conversation := planCreateConversation(i, program)
 	if conversation.HasID() {
@@ -222,6 +234,13 @@ func prepareResumeConversation(i *Instance, program string) string {
 
 func prepareExactResumeConversation(i *Instance, program string) (string, bool) {
 	conv := i.AgentConversation()
+	if !conv.HasID() {
+		// A launch pinned to a specific conversation before the agent tab exists
+		// (an adopted workspace's archived one): the same exact id, never a guess.
+		i.mu.RLock()
+		conv = i.carriedConversation
+		i.mu.RUnlock()
+	}
 	if !conv.HasID() {
 		return program, false
 	}

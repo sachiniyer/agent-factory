@@ -324,6 +324,15 @@ func verifySSHRelayBinary() error {
 // So the pin is an IMPROVEMENT over dialling by name, and where it cannot be
 // computed af degrades to what it did before rather than to nothing.
 func resolvePinnedSSHDialAddress(host string, port int) string {
+	return resolvePinnedSSHDialAddressWith(host, port, nil)
+}
+
+// resolvePinnedSSHDialAddressWith is the probe with its resolver passed in. A nil
+// resolver is the process default. The dial's name lookup can outlive the call
+// when the deadline abandons it, so a test that wants a stalled or scripted DNS
+// hands the resolver HERE rather than swapping net.DefaultResolver — a swap would
+// race with the abandoned lookup still reading it.
+func resolvePinnedSSHDialAddressWith(host string, port int, resolver *net.Resolver) string {
 	// BOUNDED, unlike the relay's own dial, and the difference is where each one
 	// runs. The relay is a child in a process group the caller SIGKILLs on its
 	// deadline, so ssh's own no-timeout behaviour is safe there. This probe runs
@@ -332,7 +341,13 @@ func resolvePinnedSSHDialAddress(host string, port int) string {
 	// window (~130s on Linux) where the first ssh step would have failed at its own
 	// 30s deadline. Timing out here just means no pin, which composes the ordinary
 	// name-based command and lets that step report the real error.
-	dialer := net.Dialer{Timeout: sshDialProbeTimeout}
+	//
+	// A NAME is never resolved by a Go resolver that is not the system's (#5750):
+	// the static CGO_ENABLED=0 build cannot see NSS answers ssh would use.
+	if !dialUsesSystemResolver && !pinHostIsIPLiteral(host) {
+		return resolvePinnedViaGetent(host, port)
+	}
+	dialer := net.Dialer{Timeout: sshDialProbeTimeout, Resolver: resolver}
 	conn, err := dialer.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		log.WarningLog.Printf("backend=ssh: could not resolve %q to a single address to pin this session to "+

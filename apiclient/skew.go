@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -49,36 +51,103 @@ type VersionSkewError struct {
 }
 
 func (e *VersionSkewError) Error() string {
+	if IsRemoteTarget() {
+		// `af daemon restart` acts on THIS machine, so recommending it for a
+		// remote daemon sends the operator to restart the wrong host (W9.4).
+		return fmt.Sprintf(
+			"the daemon at %s is out of date and rejected the %q field this client sent — upgrade and restart af on that host (%s), or use an af client that matches it (daemon said: %s)",
+			skewTargetName(), e.Field, remoteRestartRemedy(), e.Detail)
+	}
 	return fmt.Sprintf(
 		"daemon is out of date and rejected the %q field this client sent — restart it with `af daemon restart` (daemon said: %s)",
 		e.Field, e.Detail)
 }
 
-// interpretEnvelopeError converts a daemon envelope message into an error,
+// skewTargetName is the remote target as the operator typed it, falling back to
+// a generic noun when the target is configured but unresolvable.
+func skewTargetName() string {
+	if url := RemoteTargetURL(); url != "" {
+		return url
+	}
+	return "the configured remote target"
+}
+
+// remoteRestartRemedy is a remedy runnable FROM THIS CLIENT: it names the
+// daemon's host (taken from the target URL) so the operator runs the restart
+// there, not here.
+func remoteRestartRemedy() string {
+	if host := remoteTargetHost(); host != "" {
+		return fmt.Sprintf("for example `ssh %s 'af upgrade && af daemon restart'`", host)
+	}
+	return "run `af upgrade && af daemon restart` on the daemon host"
+}
+
+func remoteTargetHost() string {
+	u, err := url.Parse(RemoteTargetURL())
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// interpretEnvelopeError converts a daemon envelope error into a Go error,
 // upgrading a provable version skew into an actionable VersionSkewError and
 // passing everything else through verbatim so existing callers that match on
 // daemon message text are unaffected.
-func interpretEnvelopeError(msg, code string) error {
-	if code == apiproto.ErrorCodeMutationCommitted {
-		return &mutationCommittedError{detail: msg}
+//
+// The two machine-readable outcome codes classify definitively only on a
+// verified daemon answer — the web client's provenance rule (web/src/api.ts
+// isDaemonRejection / isMutationCommittedError): a 502 or 504 is always an
+// intermediary's answer no matter what the body carries, and a refusal code
+// must also bear the daemon_rejected marker. Without those checks a proxy that
+// forwarded the mutation could substitute or replay a project_rebound envelope
+// and this client would report "nothing was written" for a request the daemon
+// may have applied. An unverified outcome code is therefore an
+// UnconfirmedHTTPResponseError — outcome unknown — never a definitive refusal
+// or commit. On the local unix socket the checks are free: the daemon always
+// sets the marker and never emits a gateway status, so a real daemon's answer
+// always verifies.
+func interpretEnvelopeError(route string, status int, envErr *apiproto.EnvelopeError) error {
+	gatewayStatus := status == http.StatusBadGateway || status == http.StatusGatewayTimeout
+	switch envErr.Code {
+	case apiproto.ErrorCodeMutationCommitted:
+		// A committed envelope omits daemon_rejected (daemon/httpserver.go), so
+		// the gateway-status check is the whole provenance rule.
+		if !gatewayStatus {
+			return &mutationCommittedError{detail: envErr.Message, storedID: envErr.StoredID}
+		}
+	case apiproto.ErrorCodeProjectRebound:
+		if envErr.DaemonRejected && !gatewayStatus {
+			return &ProjectReboundError{Detail: envErr.Message}
+		}
+	default:
+		if m := unknownFieldPattern.FindStringSubmatch(envErr.Message); m != nil {
+			return &VersionSkewError{Field: m[1], Detail: envErr.Message}
+		}
+		return fmt.Errorf("%s", envErr.Message)
 	}
-	if m := unknownFieldPattern.FindStringSubmatch(msg); m != nil {
-		return &VersionSkewError{Field: m[1], Detail: msg}
+	detail := envErr.Message
+	if detail == "" {
+		detail = fmt.Sprintf("envelope carried code %q without daemon provenance", envErr.Code)
 	}
-	return fmt.Errorf("%s", msg)
+	return &UnconfirmedHTTPResponseError{Route: route, Status: status, Detail: detail}
 }
 
 // mutationCommittedError tells mutation callers that the daemon durably wrote
 // their change before the reported follow-up failure. Its marker method keeps
 // the classification usable through errors.Join and other wrappers.
 type mutationCommittedError struct {
-	detail string
+	detail   string
+	storedID string
 }
 
 var _ apiproto.MutationCommittedError = (*mutationCommittedError)(nil)
 
 func (e *mutationCommittedError) Error() string           { return e.detail }
 func (e *mutationCommittedError) MutationCommitted() bool { return true }
+func (e *mutationCommittedError) StoredID() string        { return e.storedID }
+
+var _ apiproto.StoredIDCarrier = (*mutationCommittedError)(nil)
 
 // IsMutationCommitted is apiproto.IsMutationCommitted under this package's name,
 // so client callers classify an outcome without importing the wire package. The
@@ -93,7 +162,7 @@ func IsMutationCommitted(err error) bool {
 //
 // The inference is sound rather than a guess, and it is the reason this is a
 // separate type from VersionSkewError. The daemon's rpcHandler answers only 200,
-// 400, 405, 413, 500 and 503; a 404 comes from exactly one place, the mux
+// 400, 405, 409, 413, 500 and 503; a 404 comes from exactly one place, the mux
 // catch-all (daemon/httpserver.go), which is reached only by a path no route
 // registers. So a 404 on /v1/<Method> means the method is not served, never that
 // a handler ran and refused.
@@ -113,6 +182,10 @@ type RouteNotServedError struct {
 }
 
 func (e *RouteNotServedError) Error() string {
+	if IsRemoteTarget() {
+		return fmt.Sprintf("the daemon at %s does not serve %s (it answered 404: %s) — it is older than this client; upgrade and restart af on that host (%s)",
+			skewTargetName(), e.Route, e.Detail, remoteRestartRemedy())
+	}
 	return fmt.Sprintf("daemon does not serve %s (it answered 404: %s)", e.Route, e.Detail)
 }
 

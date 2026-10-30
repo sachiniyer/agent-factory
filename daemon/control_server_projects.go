@@ -75,13 +75,26 @@ func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *Regist
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	// Enforce RegisterProjectRequest's contract here, before the registry is
-	// touched (#4821): config.RegisterProject would resolve a relative path
-	// against THIS process's cwd. The normalized value is the one registered, so
-	// what was checked is exactly what is stored.
-	path, err := config.ResolveDaemonHostPath(req.Path)
-	if err != nil {
-		return fmt.Errorf("project %w", err)
+	var path string
+	var err error
+	if req.URL != "" {
+		// Register by git URL (W9.10): clone on THIS host, with THIS host's
+		// credentials, under projects_root — never anything the caller names.
+		if strings.TrimSpace(req.Path) != "" {
+			return fmt.Errorf("project: give either a path or a git URL, not both")
+		}
+		if path, err = cloneProjectForURL(req.URL); err != nil {
+			return fmt.Errorf("project %w", err)
+		}
+	} else {
+		// Enforce RegisterProjectRequest's contract here, before the registry is
+		// touched (#4821): config.RegisterProject would resolve a relative path
+		// against THIS process's cwd. The normalized value is the one registered, so
+		// what was checked is exactly what is stored.
+		path, err = config.ResolveDaemonHostPath(req.Path)
+		if err != nil {
+			return fmt.Errorf("project %w", err)
+		}
 	}
 	project, err := config.RegisterProject(path)
 	if err != nil {
@@ -119,7 +132,7 @@ func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProj
 	if err != nil {
 		return fmt.Errorf("rebind %w", err)
 	}
-	project, err := config.RebindProject(req.ID, path)
+	project, err := rebindRegisteredProject(req.ID, req.ExpectedRoot, req.ExpectedCheckoutID, path)
 	if err != nil {
 		return err
 	}
@@ -127,6 +140,28 @@ func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProj
 	resp.OK = true
 	resp.Project = project
 	return nil
+}
+
+// RebindProjectGuarded is the guarded-rebind capability made a wire method
+// (#4888 review). The precondition pair is REQUIRED here — a caller that wants
+// last-writer-wins calls RebindProject — and the method's existence is the
+// whole point: a daemon that predates it answers net/rpc's "can't find method"
+// on the socket or the marked catch-all 404 over HTTP, either way a definitive
+// refusal instead of a silently unguarded apply. That makes the capability
+// atomic with the mutation itself: a Ping observed on one daemon can never
+// vouch for the sibling a proxy might route a later request to, so no separate
+// probe can bind capability to the request the way the method name does.
+func (s *controlServer) RebindProjectGuarded(req RebindProjectRequest, resp *RebindProjectResponse) error {
+	// The admission gate runs before the precondition: under upgrade probation
+	// the probation refusal is the answer regardless of request shape, matching
+	// every other mutation (#4888 CI).
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	if req.ExpectedRoot == "" && req.ExpectedCheckoutID == "" {
+		return fmt.Errorf("RebindProjectGuarded requires expected_root or expected_checkout_id — call RebindProject for an unguarded rebind")
+	}
+	return s.RebindProject(req, resp)
 }
 
 // ListProjects returns every durable project in this daemon's #2355 registry
@@ -142,5 +177,21 @@ func (s *controlServer) ListProjects(_ ListProjectsRequest, resp *ListProjectsRe
 		return err
 	}
 	resp.Projects = projects
+	return nil
+}
+
+// SetProjectColor records a registered project's display color and publishes
+// projects.changed so every open client repaints.
+func (s *controlServer) SetProjectColor(req SetProjectColorRequest, resp *SetProjectColorResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	project, err := config.SetProjectColor(req.ID, req.Color)
+	if err != nil {
+		return err
+	}
+	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
+	resp.OK = true
+	resp.Project = project
 	return nil
 }

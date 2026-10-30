@@ -141,7 +141,7 @@ func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]DeliverPromptRe
 			return taskPromptDeliveryResult{}, err
 		}
 		if exists {
-			return taskPromptDeliveryResult{status: "sent"}, nil
+			return taskPromptDeliveryResult{status: "sent", deliveryStatus: session.PromptDelivered}, nil
 		}
 		return taskPromptDeliveryResult{status: "started"}, nil
 	}

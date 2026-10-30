@@ -106,6 +106,21 @@ var shellSiteRegistry = map[string][]classifiedSite{
 			"#3566 is about: an unscoped session never reaches the account boundary, so an `exec --` prefix " +
 			"here dies with exit 127 and no explanation.",
 	}},
+	"move/script.go:RunScript": {{
+		class: operatorConfig, keys: []string{"move_cmd"},
+		note: "the operator's session-move script (W7.9), run as `sh -c <command>` on the daemon box with the " +
+			"session's environment in reach. THE USER CHOOSES IT: move_cmd is a global-only manifest key " +
+			"(sourceGlobalOnly), so an in-repo .agent-factory config that sets it is a load error, never a " +
+			"warning — a repository must not choose a program af runs with the operator's credentials " +
+			"(TestInRepoConfigRejectsMoveCmd, config/inrepo_move_cmd_test.go).",
+	}},
+	"session/archive_sandbox.go:lsRemoteArgs": {{
+		class: notAShell,
+		note: "`git -c <key>=<helper> ls-remote` — git's config flag, not a shell. The value is af's fixed " +
+			"githubEnvironmentCredential helper (variable NAMES only, no URL or branch text interpolated); " +
+			"only the config KEY is scoped by the origin's host, and a key is never shell-evaluated. " +
+			"The origin URL and branch are plain argv after ls-remote",
+	}},
 	"session/git/hooks.go:runPostWorktreeHooks": {{
 		class: operatorConfig, keys: []string{"post_worktree_commands"}, note: "the plain child",
 	}},
@@ -194,16 +209,19 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "groupPinScript, a const in the same file; the spawner pid and its start stamp " +
 			"arrive as $1/$2 positional parameters, never spliced into the script text",
 	}},
-
-	"session/host_program.go:(hostProgramProber).probe": {{
+	"session/backend_docker_account_chown.go:(*dockerProvisioner).prepareNonAccountUser": {
+		{class: afAuthored, note: "af's `id -u:$(id -g)` probe of the image's default user"},
+		{class: afAuthored, note: "af's mkdir/chown script for the default-user HOME and workspace; paths are shellQuote'd"},
+	},
+	"session/backend_docker_account_chown.go:(*dockerProvisioner).readMountTable": {{
 		class: afAuthored,
-		note: "the login-shell program probes (`command -v -- \"$1\"`, `which -- \"$1\"`) — af-authored " +
-			"const scripts; the operator's program name arrives as a POSITIONAL argument, never in the " +
-			"script text, which is the #5571 W2.1 contract",
+		note: "af's mkdir/pwd/mountinfo const script; the HOME and workspace paths arrive as $1/$2 " +
+			"positional parameters, never spliced into the script text",
 	}},
+
 	"session/host_program.go:(hostProgramProber).probePath": {{
 		class: afAuthored,
-		note:  "the PATH-only variant of the same probe — the hostProbePathOnly const, no positional input at all",
+		note:  "the login-shell PATH probe — the hostProbePathOnly / hostProbePathOnlyFish / hostProbePathOnlyCsh consts (one per login-shell family); the program name never reaches a shell (#5571 W2.1, #5768). POSIX/fish carry the nonce as a positional argument under -c; the csh family runs `<shell> -l` reading the script from stdin (BSD csh cannot reach login mode under -c) with the nonce inlined into the script text",
 	}},
 
 	// ---- not a shell at all ----
@@ -224,10 +242,25 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	"session/tmux/resume.go:codexExecOptionHasAttachedValue": {{
 		class: notAShell, note: "the same, in `codex exec`'s own option grammar",
 	}},
-	"session/git/worktree_prune_guard.go:WorktreeDirtyFiles": {{
+	"session/git/worktree_prune_guard.go:WorktreeDirtyEntries": {{
 		class: notAShell,
-		note: "`git -c core.fsmonitor= status …` — git's per-invocation config override, which UNSETS the " +
-			"fsmonitor hook/daemon so a read-only probe cannot spawn it (#5136)",
+		note: "`git -c core.fsmonitor= …` — git's per-invocation config override with an af-FIXED value, which UNSETS the " +
+			"fsmonitor hook/daemon so a read-only probe cannot spawn it (#5136, #5189); no operator or repo value reaches it",
+	}},
+	"session/git/worktree_prune_apply.go:WorktreeUnrecoverableContent": {{
+		class: notAShell,
+		note: "`git -c core.fsmonitor= …` — git's per-invocation config override with an af-FIXED value, which UNSETS the " +
+			"fsmonitor hook/daemon so a read-only probe cannot spawn it (#5136, #5189); no operator or repo value reaches it",
+	}},
+	"session/git/worktree_prune_stores.go:objectStoresInsideDeletedRoots": {{
+		class: notAShell,
+		note: "`git -c core.quotePath=false count-objects -v` — git's per-invocation config override with an af-FIXED value, " +
+			"so the alternate listing prints raw bytes instead of octal escapes; no operator or repo value reaches it (#5189)",
+	}},
+	"session/git/worktree_prune_apply.go:gitlinkPaths": {{
+		class: notAShell,
+		note: "`git -c core.fsmonitor= …` — git's per-invocation config override with an af-FIXED value, which UNSETS the " +
+			"fsmonitor hook/daemon so a read-only probe cannot spawn it (#5136, #5189); no operator or repo value reaches it",
 	}},
 	"session/tmux/session.go:codexCommandConfigValue": {{
 		class: notAShell,

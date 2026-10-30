@@ -15,11 +15,16 @@ import (
 // call. withDaemonHTTP re-sends a request whose reply was lost, which is safe
 // only for a read; a mutation must use withDaemonHTTPMutation (#4820).
 var readWrapperMethods = map[string]bool{
-	"SnapshotWithAlarms": true,
-	"PreviewSnapshot":    true,
-	"ListAccounts":       true,
-	"ListBackends":       true,
-	"ListPrograms":       true,
+	"SnapshotWithAlarms":    true,
+	"SnapshotWithAlarmsCtx": true,
+	"PreviewSnapshot":       true,
+	"ListAccounts":          true,
+	"ListBackends":          true,
+	"ListPrograms":          true,
+	// WorkspaceFacts runs git status / rev-list / for-each-ref over the session's
+	// workspace and counts: no side effects, so a replayed request measures again
+	// (#5571 W8.2).
+	"WorkspaceFacts": true,
 }
 
 // TestReadWrapperCallsOnlyReads parses the package's production source and

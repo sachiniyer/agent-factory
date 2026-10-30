@@ -216,6 +216,12 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 			return err
 		}
 		field.Set(reflect.ValueOf(normalized))
+	case "sandbox_agent_config":
+		normalized, err := NormalizeSandboxAgentConfig(field.Interface().([]string))
+		if err != nil {
+			return err
+		}
+		field.Set(reflect.ValueOf(normalized))
 	case "default_accounts":
 		for agent, name := range field.Interface().(map[string]string) {
 			if err := ValidateDefaultAccountEntry("default_accounts key", agent, name); err != nil {
@@ -229,6 +235,12 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 			}
 			if _, err := regexp.Compile(pattern); err != nil {
 				return fmt.Errorf("limit_patterns.%s is not a valid regular expression: %w", agent, err)
+			}
+		}
+	case "hosts":
+		for name, entry := range field.Interface().(map[string]HostConfig) {
+			if err := ValidateHostEntry(name, entry); err != nil {
+				return err
 			}
 		}
 	case "keys":

@@ -741,7 +741,7 @@ func TestHandleStateNewTitleSeverity(t *testing.T) {
 		}
 		t.Cleanup(func() { withDaemonHTTP = previousHTTP })
 
-		rows, err := allReposSnapshotFetcher()
+		rows, err := allReposSnapshotFetcher(context.Background())
 		require.ErrorIs(t, err, errTestFetcherUnstubbed)
 		require.Nil(t, rows)
 		instance := newSnapshotTestInstance(t, "retained")

@@ -55,6 +55,11 @@ var allowedBareMkdirAll = map[string]struct {
 			"process is already covered (#3845)."},
 	"internal/afhome/afhome.go:MkdirAll": {1,
 		"The guarded helper. This is the os.MkdirAll every other site routes through."},
+	"internal/testguard/stalldump_unix.go:writeStallDump": {1,
+		"AF_STALL_DIR is the CI runner's temp directory (RUNNER_TEMP/stall), set only by " +
+			"scripts/ci-test-exec.sh. It is never at or inside the AF home, and this runs in " +
+			"a test binary's signal handler, where the guarded helper's latch has no meaning " +
+			"(#5766)."},
 	"daemon/singleton_lock.go:acquireHomeLock": {1,
 		"The one deliberate pre-arm creator, and creating the home is its job. Its " +
 			"only production caller is RunDaemon (daemon/daemon.go:129), which arms " +

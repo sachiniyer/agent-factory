@@ -187,6 +187,7 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 		(i.taskRunPromptAttemptAt.IsZero() ||
 			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
 		i.taskRunPromptAttemptAt = attemptedAt
+		i.taskRunPromptBound = true
 	}
 	// A send that affirmatively failed while the run's boundary was still
 	// unbound is the run's INITIAL delivery proven undelivered (#5278): the
@@ -194,7 +195,12 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	// have delivered it. The run ends here, failed — left open, its unarmed
 	// gate lets the first idle edge read as a completion and hand on_complete
 	// a session that never received its prompt.
-	if status == PromptNotDelivered && i.taskRunActive && i.taskRunPromptAttemptAt.IsZero() {
+	//
+	// The boundary must also have NEVER bound (#5644): a replacement mission's
+	// failed send after a handoff lands on a boundary the swap cleared, though
+	// the original prompt provably landed — that run is not this failure.
+	if status == PromptNotDelivered && i.taskRunActive &&
+		i.taskRunPromptAttemptAt.IsZero() && !i.taskRunPromptBound {
 		i.endTaskRunFailedLocked()
 		i.taskRunFailedStamp = true
 		i.taskRunFailurePending = true
@@ -455,6 +461,13 @@ func (i *Instance) markAgentRuntimeReplaced(replaced bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.agentRuntimeReplaced = replaced
+	// Remember WHEN, so an interruption's boundary is the launch, not the later
+	// settle edge: an agent already mid-turn at ConfirmLive started after this (#6231).
+	if replaced {
+		i.agentReplacedAt = time.Now()
+	} else {
+		i.agentReplacedAt = time.Time{}
+	}
 }
 
 // InterruptTaskRunIfRuntimeReplaced ends a still-in-flight task run as
@@ -506,6 +519,59 @@ func (i *Instance) TaskRunInterrupted() bool {
 	return i.taskRunInterrupted
 }
 
+// taskRunResumeWindow bounds how long after an interruption the agent's own
+// in-turn chrome re-arms the run (#6223). A restored agent that resumes its
+// conversation starts its turn within moments; a human prompting the session
+// much later is not the task's run and must not be archived by on_complete.
+const taskRunResumeWindow = 15 * time.Minute
+
+// TaskRunObservable reports whether the daemon must observe this session's
+// task run: in flight, or interrupted and still resumable (#6230). Every gate
+// that decides whether to watch a run asks this, never TaskRunActive alone.
+func (i *Instance) TaskRunObservable(now time.Time) bool {
+	if i.TaskRunActive() {
+		return true
+	}
+	_, ok := i.TaskRunResumableSince(now)
+	return ok
+}
+
+// TaskRunResumableSince reports whether an interrupted run may still be resumed
+// by in-turn evidence, and the boundary that evidence must follow (#6223).
+func (i *Instance) TaskRunResumableSince(now time.Time) (time.Time, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.taskRunActive || !i.taskRunInterrupted || i.taskRunInterruptedAt.IsZero() ||
+		now.Sub(i.taskRunInterruptedAt) > taskRunResumeWindow {
+		return time.Time{}, false
+	}
+	return i.taskRunInterruptedAt, true
+}
+
+// ResumeInterruptedTaskRunAtEpoch re-arms a run that a restore ended as
+// interrupted, on proof that the agent itself is in a turn after the
+// interruption (#6223). #4222 ended the run so a REPLACEMENT'S first idle tick
+// could not read as completion; an agent that resumes its conversation and works
+// is the run continuing, and its next idle edge must complete it, or on_complete
+// is orphaned. The held-edge marker makes any later idle observation end it.
+func (i *Instance) ResumeInterruptedTaskRunAtEpoch(observedAt time.Time, observedEpoch uint64) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stateEpoch != observedEpoch || i.taskRunActive || !i.taskRunInterrupted ||
+		i.taskRunInterruptedAt.IsZero() || !observedAt.After(i.taskRunInterruptedAt) ||
+		observedAt.Sub(i.taskRunInterruptedAt) > taskRunResumeWindow {
+		return false
+	}
+	i.taskRunActive = true
+	i.taskRunInterrupted = false
+	i.taskRunInterruptedAt = time.Time{}
+	i.taskRunIdleEdgeHeld = true
+	i.taskRunPromptAttemptAt = time.Time{}
+	i.taskRunTurnObservedAt = time.Time{}
+	i.touchLocked()
+	return true
+}
+
 // ConsumeTaskRunInterrupted reports once that a restore's ConfirmLive ended an
 // in-flight task run as interrupted (#4222). The daemon calls it at its restore
 // sites to stamp the owning task's run status; in-memory and one-shot, so a
@@ -548,7 +614,13 @@ func (i *Instance) ConsumeTaskRunFailed() bool {
 func (i *Instance) AckTaskRunFailureStamped() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.taskRunFailurePending = false
+	if i.taskRunFailurePending {
+		i.taskRunFailurePending = false
+		// Mark the row dirty so the cleared flag reaches disk with the next
+		// checkpoint (#5662). The task's run-keyed status write is idempotent
+		// against a stale re-arm either way, so this is belt and braces.
+		i.touchLocked()
+	}
 }
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.

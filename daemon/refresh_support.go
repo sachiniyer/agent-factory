@@ -57,6 +57,16 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // swap (SupportsAutomaticAccountSwap gates on backend.Type() == "local"), so this
 // is the one raw arm the term is needed on.
 //
+// RebuildTeardownPending is the same class of projected fence: ForStorage writes
+// StartupStateUnknown=true to fence an older binary from a row whose stale-pane
+// teardown is still owed (session/rebuild_teardown_storage.go), and the row's
+// materialized form HOLDS the slot — a Lost pending row is revived by the
+// lost-restore loop's own retry (canAutoRestoreLostSession admits the owner) and
+// a limit-parked one classifies ActivityPending — so a local ghost that fails to
+// materialize with the obligation armed must stay counted too, or the watcher
+// admits a replacement run over the very teardown this row still owes (#5371
+// review).
+//
 // The handoff projection has the identical no-backend-gate shape. ForStorage runs
 // projectPendingHandoffForPreviousRelease right after the account-swap
 // projection, and it sets StartupStateUnknown=true on ANY row whose
@@ -146,7 +156,7 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 		item.HandoffOriginalStartupStateUnknown != nil &&
 		!*item.HandoffOriginalStartupStateUnknown &&
 		handoffFenceLoadedFormHolds(item)
-	return (!item.StartupStateUnknown || item.PendingAccountSwap != nil || handoffFence) && !item.UserKilled &&
+	return (!item.StartupStateUnknown || item.PendingAccountSwap != nil || item.RebuildTeardownPending || handoffFence) && !item.UserKilled &&
 		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
 }
 
@@ -422,6 +432,9 @@ func (m *Manager) refreshLocked() error {
 	owed := persistLoadRuntimeReplacements(refreshed)
 	m.attachCredentialsToAll(refreshed)
 	m.instances = refreshed
+	// A repo whose instances.json vanished was preserved above; write its live
+	// sessions' records back so the preservation ends (#6048).
+	m.restoreMissingRecordsLocked(refreshed)
 	// Replaced wholesale, never merged: the ghost set is a projection of what is on
 	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
 	// ghost, or its slot would be held twice — once by the ghost and once by the

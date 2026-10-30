@@ -212,7 +212,7 @@ func TestDeliverCronTaskPrompt_CatchesUpOnDetach(t *testing.T) {
 			once.Do(func() { close(firstAttempt) })
 			return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 		}
-		return taskPromptDeliveryResult{status: "sent"}, nil
+		return taskPromptDeliveryResult{status: "sent", deliveryStatus: session.PromptDelivered}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
@@ -299,7 +299,7 @@ func TestRunTask_CronFiresCoalesceDuringDefer(t *testing.T) {
 			return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 		}
 		delivered.Add(1)
-		return taskPromptDeliveryResult{status: "sent"}, nil
+		return taskPromptDeliveryResult{status: "sent", deliveryStatus: session.PromptDelivered}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 
@@ -371,7 +371,7 @@ func TestDeliverCronTaskPrompt_NeverPastesWhileAttached(t *testing.T) {
 			return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 		}
 		pasted.Add(1)
-		return taskPromptDeliveryResult{status: "sent"}, nil
+		return taskPromptDeliveryResult{status: "sent", deliveryStatus: session.PromptDelivered}, nil
 	}
 	t.Cleanup(func() { deliverPromptForTask = origDeliver })
 

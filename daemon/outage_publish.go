@@ -20,8 +20,13 @@ func (m *Manager) refreshInstanceStatusPublishingOutage(repoID string, instance 
 	}
 	before := instance.ToInstanceData().Unreachable
 	m.refreshInstanceStatus(repoID, instance)
+	// Off-box tab bookkeeping rides the same per-instance sweep: pending closes,
+	// uncertain creates and exit evidence all wait on the sandbox answering, and
+	// this is where its reachability is already being probed (#5955, #5957).
+	instance.ReconcileAgentTabID()
+	tabsChanged := instance.ReconcileOffBoxTabs()
 	after := instance.ToInstanceData().Unreachable
-	if unreachableDataEqual(before, after) || instance.GetInFlightOp() != session.OpNone {
+	if (unreachableDataEqual(before, after) && !tabsChanged) || instance.GetInFlightOp() != session.OpNone {
 		return
 	}
 	repoStartLock := m.startLockForRepo(repoID)
@@ -32,6 +37,28 @@ func (m *Manager) refreshInstanceStatusPublishingOutage(repoID string, instance 
 	data := instance.ToInstanceData()
 	if data.InFlightOp != session.OpNone {
 		return
+	}
+	// The refresh above can be what finishes a kill, and a kill can commit while
+	// it runs. A session.updated published after session.killed makes a thin
+	// client upsert the row back from a whole-row payload (#5723). The registry
+	// check and the publish share m.mu, and every kill removes its map entry under
+	// m.mu before it announces session.killed — so either this publish precedes
+	// the removal (and so the killed event) or the check sees the row gone.
+	// publishEvent never blocks and never takes m.mu.
+	key := daemonInstanceKey(repoID, instance.Title)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.instances[key] != instance || instance.UserKilled() {
+		return
+	}
+	if tabsChanged {
+		// A reconciled tab change (an adopted create, a retired close, a recorded
+		// exit) has no other writer: persist it with the publish so a stable
+		// session neither shows stale tabs to event-driven clients nor loses the
+		// change across a restart. Best-effort — the next write carries it too.
+		if err := persistInstanceData(repoID, data); err != nil {
+			m.warn().Printf("off-box tab reconciliation for %q could not be persisted: %v", instance.Title, err)
+		}
 	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 }

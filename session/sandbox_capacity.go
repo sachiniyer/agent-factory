@@ -22,13 +22,22 @@ import (
 // could not run (ssh down, timeout) or that passed yields nil — no invented
 // errnos, so a genuinely broken host cannot wait forever.
 func (p *sandboxProvisioner) remoteCapacityEvidence(provisionErr error) error {
+	// Only a step that WROTE to the remote filesystem could have failed on its
+	// capacity. A local failure (opening the af binary, the tunnel) or a read-only
+	// one (checksum verification, the banner poll) on a coincidentally full host
+	// is a session defect, and joining a capacity errno to it would hand it the
+	// unbounded environmental retry budget (#5687).
+	var writeStep *remoteWriteStepError
+	if !errors.As(provisionErr, &writeStep) {
+		return nil
+	}
 	// ssh's own 255 is a transport failure, not a host verdict, and the probe
 	// would fail the same way — spare the extra round trip.
 	var exitErr *exec.ExitError
 	if errors.As(provisionErr, &exitErr) && exitErr.ExitCode() == sshBinaryExitAmbiguous {
 		return nil
 	}
-	dir := `"$HOME/` + sshSessionRoot + `"`
+	dir := sessionRootDir(p.spec)
 	if p.sessionDir != "" {
 		dir = shellQuote(p.sessionDir)
 	}
@@ -57,4 +66,18 @@ func parseRemoteCapacityProbe(out string) error {
 		}
 	}
 	return nil
+}
+
+// remoteWriteStepError marks a provisioning failure from a step that writes to
+// the remote filesystem — the only failures a full disk, exhausted inodes or an
+// exceeded quota can explain. It changes no message; it is a class tag for
+// remoteCapacityEvidence, the ssh analogue of dockerStepError.
+type remoteWriteStepError struct{ err error }
+
+func (e *remoteWriteStepError) Error() string { return e.err.Error() }
+func (e *remoteWriteStepError) Unwrap() error { return e.err }
+
+// sandboxWriteErr is sandboxErr for a step that writes to the remote.
+func (p *sandboxProvisioner) sandboxWriteErr(err error) error {
+	return p.sandboxErr(&remoteWriteStepError{err: err})
 }

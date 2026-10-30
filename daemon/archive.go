@@ -231,7 +231,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// Phase 4 PR6). Route it to the remote body, which shares this method's guards,
 	// locks, and archive fence.
 	if instance.Capabilities().Workspace == session.WorkspaceRemote {
-		archivedPath, rerr := m.archiveRemoteSession(repoID, instance, req.Title)
+		archivedPath, rerr := m.archiveRemoteSession(repoID, instance, req.Title, req.Push)
 		if rerr != nil && !isMutationCommitted(rerr) {
 			return "", session.InstanceData{}, rerr
 		}
@@ -579,11 +579,18 @@ func (m *Manager) undoCommittedArchive(repoID string, instance *session.Instance
 // archive fence. GitHub holds the durable branch, so unlike the local path there
 // is no worktree to move and no rollback-home on a persist failure: an archived
 // remote record is already recoverable from origin.
-func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance, title string) (string, error) {
+func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance, title string, push bool) (string, error) {
 	// Raise the archive fence (OpArchiving) so the status poll skips this instance
 	// while its sandbox is torn down, exactly as the local path does.
 	if err := instance.Transition(session.BeginArchive()); err != nil {
 		return "", fmt.Errorf("cannot archive session %q: %w", title, err)
+	}
+	// Archive publishes nothing the user did not push (#5571 W8.5): unless push was
+	// asked for, an ssh/sandbox session stops where it is and keeps its workspace.
+	// A backend with no host directory to leave in place (docker, hook) cannot, and
+	// keeps the push.
+	if !push && instance.CanPreserveWorkspace() {
+		return m.archiveRemotePreserving(repoID, instance, title)
 	}
 
 	branch, err := instance.ArchiveSandbox()
@@ -636,7 +643,53 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		return branch, &mutationCommittedError{err: fmt.Errorf("archived remote session %q (branch %q pushed to origin) but its durable record initially failed to write: %w", title, branch, perr)}
 	}
 	m.info().Printf("archived remote session %q (repo %s): branch %q pushed to origin, sandbox reaped", title, repoID, branch)
+	if hookErr := runRemoteArchiveHook(instance, title); hookErr != nil {
+		return branch, archiveCommittedWarning(instance, hookErr)
+	}
 	return branch, nil
+}
+
+// archiveRemotePreserving is the no-push remote archive (#5571 W8.5): the agent
+// stops, the callback credential is revoked, and the workspace stays on its host
+// under the archived row. On a stop failure the fence rolls back to Lost, exactly
+// as a failed push-archive does.
+func (m *Manager) archiveRemotePreserving(repoID string, instance *session.Instance, title string) (string, error) {
+	loc, err := instance.ArchiveSandboxPreserving()
+	if err != nil {
+		_ = instance.Transition(session.AbortArchiveToLost())
+		m.persistInstance(repoID, instance)
+		return "", fmt.Errorf("failed to archive session %q: %w", title, err)
+	}
+	_ = instance.Transition(session.CommitArchive())
+	defer m.sandboxTokens.revoke(instance.ID)
+	where := loc.Dir
+	if loc.Host != "" {
+		where = loc.Host + ":" + loc.Dir
+	}
+	if perr := archivePersist(m, repoID, instance); perr != nil {
+		if retryErr := archivePersist(m, repoID, instance); retryErr != nil {
+			return "", fmt.Errorf("archived remote session %q (workspace preserved at %s) but failed to record it durably: %w", title, where, errors.Join(perr, retryErr))
+		}
+		return where, &mutationCommittedError{err: fmt.Errorf("archived remote session %q (workspace preserved at %s) but its durable record initially failed to write: %w", title, where, perr)}
+	}
+	m.info().Printf("archived remote session %q (repo %s): agent stopped, workspace preserved at %s, nothing pushed", title, repoID, where)
+	if hookErr := runRemoteArchiveHook(instance, title); hookErr != nil {
+		return where, archiveCommittedWarning(instance, hookErr)
+	}
+	return where, nil
+}
+
+// runRemoteArchiveHook runs on_archive_command for an off-box archive (#5571
+// W8.5). The hook has always run for local archives only. A remote session has no
+// checkout on this machine, so it runs the way a missing-worktree archive does: in
+// an empty scratch directory, with AF_SESSION_ID to act on and no worktree path.
+var runRemoteArchiveHook = func(instance *session.Instance, title string) error {
+	return runOnArchiveHook(onArchiveHookContext{
+		sessionID:    instance.ID,
+		title:        title,
+		repoRoot:     instance.Path,
+		worktreeGone: true,
+	})
 }
 
 // archiveExclusiveTabLock serializes a tab spawn against an archive/kill/restore
@@ -688,6 +741,28 @@ func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) 
 	// Snapshot only AFTER serialization. Taking ToInstanceData as an argument to
 	// a locking helper evaluates it before that helper acquires the lock, letting
 	// a stale status write erase a kill tombstone (#1917).
+	return persistInstanceData(repoID, instance.ToInstanceData())
+}
+
+// persistUnderAdmission is persistInstanceErr for code that already holds the
+// repository's worktree admission lock. The documented order is op lock -> start
+// lock -> admission -> m.mu (startLockForRepo), so taking the start lock from
+// under admission is the inversion CreateSession's start -> admission order
+// deadlocks against (#6197). It writes through persistInstanceData instead, which
+// takes only the instances.json file lock and is what actually serializes writers
+// of the row.
+//
+// Safe for the same reason rebuildTeardownNotify is: every caller runs under the
+// session's op-lock and restore/recover fence, the op axis already excludes the
+// poll's whole-row persist (the InFlightOp gate in settleInstancePoll), and every
+// other mutation writer for the row is action-gated while the op is up. The
+// snapshot is still taken inside the write, never passed in.
+func (m *Manager) persistUnderAdmission(repoID string, instance *session.Instance) error {
+	// Snapshot and write inside the row-write lock, so a poll that already passed
+	// its fence check cannot land an older snapshot after this one (#6210).
+	rowLock := m.rowWriteLockForRepo(repoID)
+	rowLock.Lock()
+	defer rowLock.Unlock()
 	return persistInstanceData(repoID, instance.ToInstanceData())
 }
 

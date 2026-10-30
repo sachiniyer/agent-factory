@@ -2,10 +2,15 @@ package session
 
 import (
 	"errors"
+	"io"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/unixurl"
 )
 
 // The credential subscribes to the RUNTIME's lifetime (#3068): provisioning a
@@ -27,6 +32,7 @@ func (f *fakeCreds) Mint() (SandboxCredential, error) {
 	f.lastCred = SandboxCredential{
 		URL:        "http://10.0.0.5:8443",
 		Token:      "secret",
+		Socket:     "/af/sandbox-callback.sock",
 		Revalidate: func() error { return f.invalid },
 	}
 	return f.lastCred, nil
@@ -53,6 +59,7 @@ func TestMintForProvision_OnlyForKindsThatInjectACallback(t *testing.T) {
 	assert.Equal(t, 1, creds.mints)
 	assert.Equal(t, "http://10.0.0.5:8443", spec.CallbackURL)
 	assert.Equal(t, "secret", spec.CallbackToken)
+	assert.Equal(t, "/af/sandbox-callback.sock", spec.CallbackSocket, "the carrier rides the spec with the credential")
 
 	// No minter at all (a local session, a test, the in-sandbox agent-server) is a
 	// no-op rather than an error — but the ABSENCE is still named, so a kind that
@@ -246,4 +253,131 @@ func TestMintForProvision_WiresTheRevalidateHook(t *testing.T) {
 	var spec2 ProvisionSpec
 	mintForProvision(&spec2, BackendSSH, creds2)
 	assert.Nil(t, spec2.CallbackRevalidate)
+}
+
+// The -R spec is built only from af's own values: a unix socket inside the
+// session's 0700 directory, carried to the daemon's endpoint socket. No TCP port
+// exists on the sandbox host for another uid to bind (#5799). Anything unusable
+// clears the grant and says why, so the agent is never handed a URL that nothing
+// answers.
+func TestCallbackReverseForward(t *testing.T) {
+	const sessionDir = "/home/u/.af-sessions/s.AbC123"
+	granted := func(dir, sock string) *sandboxWorkspace {
+		return &sandboxWorkspace{SessionDir: dir, spec: ProvisionSpec{CallbackToken: "secret", CallbackSocket: sock}}
+	}
+
+	w := granted(sessionDir, "/home/d/.agent-factory/sandbox-callback.sock")
+	fwd, lost := w.callbackReverseForward()
+	assert.Equal(t, sessionDir+"/af-callback.sock:/home/d/.agent-factory/sandbox-callback.sock", fwd)
+	assert.Empty(t, lost)
+	assert.Equal(t, "unix://"+sessionDir+"/af-callback.sock", w.spec.CallbackURL,
+		"the in-sandbox client dials the session-dir socket, not a TCP address")
+	assert.NotContains(t, fwd, "127.0.0.1", "no TCP bind address anywhere in the carrier")
+	assert.True(t, strings.HasPrefix(w.CallbackSocketPath(), sessionDir+"/"),
+		"the socket must live inside the session's own directory, which mktemp -d makes 0700")
+	assert.Equal(t, "secret", w.spec.CallbackToken)
+
+	// No credential: no forward and no reason (a local-style spec).
+	fwd, lost = (&sandboxWorkspace{}).callbackReverseForward()
+	assert.Empty(t, fwd)
+	assert.Empty(t, lost)
+
+	for name, c := range map[string]struct{ dir, sock string }{
+		"no session dir":                {"", "/af/cb.sock"},
+		"relative session dir":          {"rel/dir", "/af/cb.sock"},
+		"colon in session dir":          {"/h/a:b", "/af/cb.sock"},
+		"path too long":                 {"/" + strings.Repeat("d", 120), "/af/cb.sock"},
+		"no daemon socket":              {sessionDir, ""},
+		"relative daemon sock":          {sessionDir, "cb.sock"},
+		"colon in daemon sock":          {sessionDir, "/af/a:b/cb.sock"},
+		"doubled slash in session dir":  {"/srv/work//s.AbC123", "/af/cb.sock"},
+		"dot component in session dir":  {"/srv/work/./s.AbC123", "/af/cb.sock"},
+		"trailing slash on session dir": {"/srv/work/s.AbC123/", "/af/cb.sock"},
+	} {
+		w := granted(c.dir, c.sock)
+		fwd, lost := w.callbackReverseForward()
+		assert.Emptyf(t, fwd, "%s: no forward may be built", name)
+		assert.NotEmptyf(t, lost, "%s: the loss must be reported", name)
+		assert.Emptyf(t, w.spec.CallbackToken, "%s: a grant with no carrier must not be committed to the host", name)
+		assert.Emptyf(t, w.spec.CallbackURL, "%s: and no URL either", name)
+	}
+}
+
+// A re-dial removes the stale carrier first so it binds the SAME path (the
+// in-sandbox URL never changes), and only that session's own socket.
+func TestClearStaleCallbackSocket(t *testing.T) {
+	p := &sandboxProvisioner{}
+	var ran []string
+	p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		ran = append(ran, script)
+		return nil, nil
+	}
+	p.clearStaleCallbackSocket()
+	assert.Empty(t, ran, "no carrier, nothing to clear")
+	p.callbackSocket = "/home/u/.af-sessions/s.X/af-callback.sock"
+	p.clearStaleCallbackSocket()
+	assert.Equal(t, []string{"rm -f -- '/home/u/.af-sessions/s.X/af-callback.sock'"}, ran)
+}
+
+// The URL the in-sandbox client receives names EXACTLY the socket the carrier
+// forwards, for a session directory containing characters that are special in a
+// URL (#5870). Before, "#", "?" and "%" silently truncated or rewrote the path
+// while the ssh -R forward targeted the correct socket.
+func TestCallbackURLRoundTripsTheSocketPath(t *testing.T) {
+	for _, dir := range []string{
+		"/home/u/af#work/s.AbC123",
+		"/home/u/af?x/s.AbC123",
+		"/home/u/100%/s.AbC123",
+		"/home/ユーザー/s.AbC123",
+	} {
+		w := &sandboxWorkspace{SessionDir: dir, spec: ProvisionSpec{CallbackToken: "secret", CallbackSocket: "/home/d/cb.sock"}}
+		fwd, lost := w.callbackReverseForward()
+		require.Empty(t, lost, dir)
+		require.NotEmpty(t, fwd, dir)
+		got, ok, err := unixurl.Parse(w.spec.CallbackURL)
+		require.NoError(t, err, dir)
+		require.True(t, ok)
+		assert.Equal(t, w.CallbackSocketPath(), got, "the client dials the socket the provisioner created")
+	}
+}
+
+// The provisioner guard and unixurl.Parse must refuse the SAME non-clean socket
+// paths (#5870). Build accepts any path but Parse rejects anything
+// filepath.Clean(path) != path, so before the guard mirrored that check an
+// unclean spelling reached mktemp via an operator workspace_root, the guard let
+// it through, Build persisted it into AF_DAEMON_URL, and every in-sandbox daemon
+// callback then failed at parse time for the session's lifetime. The guard now
+// refuses the unclean form (degrading to callback-unavailable at provision
+// time) while the clean spelling of the same session still round-trips.
+func TestCallbackReverseForward_RefusesNonCleanSocketPathThatParseRefuses(t *testing.T) {
+	const daemonSock = "/home/d/.agent-factory/sandbox-callback.sock"
+	cases := []struct{ name, uncleanDir, cleanDir string }{
+		{"doubled slash", "/srv/work//s.AbC123", "/srv/work/s.AbC123"},
+		{"dot component", "/srv/work/./s.AbC123", "/srv/work/s.AbC123"},
+		{"trailing slash", "/srv/work/s.AbC123/", "/srv/work/s.AbC123"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := &sandboxWorkspace{SessionDir: c.uncleanDir, spec: ProvisionSpec{CallbackToken: "secret", CallbackSocket: daemonSock}}
+
+			_, ok, err := unixurl.Parse(unixurl.Build(w.CallbackSocketPath()))
+			require.True(t, ok, "a unix URL is recognised; what fails is the clean-path check")
+			require.Error(t, err, "the unclean socket path survives Build but Parse refuses it — the asymmetry the guard must close")
+
+			fwd, lost := w.callbackReverseForward()
+			assert.Empty(t, fwd, "no forward may be built from a socket path Parse would refuse")
+			assert.NotEmpty(t, lost, "an unclean socket path must degrade to callback-unavailable, not be persisted")
+			assert.Empty(t, w.spec.CallbackURL, "the unclean URL must not be written into AF_DAEMON_URL")
+			assert.Empty(t, w.spec.CallbackToken, "a grant with no usable carrier must be cleared before the env file")
+
+			clean := &sandboxWorkspace{SessionDir: c.cleanDir, spec: ProvisionSpec{CallbackToken: "secret", CallbackSocket: daemonSock}}
+			fwd, lost = clean.callbackReverseForward()
+			require.Empty(t, lost, "the cleaned spelling of the same session is usable")
+			require.NotEmpty(t, fwd)
+			got, ok, err := unixurl.Parse(clean.spec.CallbackURL)
+			require.NoError(t, err)
+			require.True(t, ok)
+			assert.Equal(t, clean.CallbackSocketPath(), got, "the clean session's URL round-trips to its socket path — no regression")
+		})
+	}
 }

@@ -12,11 +12,24 @@ import (
 )
 
 func (m *home) handleQuit() (tea.Model, tea.Cmd) {
+	m.quitAttempted = true
 	// Save any dirty task/hooks state. On failure the panes were reloaded to
 	// match disk; abort the quit and surface the error so the user sees the
 	// dropped edit instead of losing it silently on the way out.
 	if err := m.saveContentPaneState(); err != nil {
-		return m, m.handleError(err)
+		// The first refusal aborts the quit and says why. An identical failure on
+		// the very next quit means the user chose to leave: a save that keeps
+		// failing must not make the TUI impossible to exit, so the unsaved edits
+		// are discarded and the quit goes through (#5860).
+		if m.quitSaveFailure != err.Error() {
+			m.quitSaveFailure = err.Error()
+			return m, m.handleError(fmt.Errorf("%w — press the quit key again to discard the unsaved edits and quit", err))
+		}
+		m.discardUnsavedPaneEdits()
+	}
+	m.quitSaveFailure = ""
+	if notice := m.takePendingPaneNotice(); notice != "" {
+		return m, m.showTransientMessage(notice)
 	}
 	// The save may have dropped a draft whose task was deleted (#4798). Its
 	// notice is otherwise raised by the next snapshot poll, which never comes
@@ -57,6 +70,38 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	return m, cleanQuitCmd()
 }
 
+// invalidateQuitConfirmationAfter drops an armed discard confirmation when the
+// input it wraps was anything but another quit attempt. The confirmation is the
+// user's answer to the edits that failed to save, so any input in between — a
+// keystroke that resumes editing, a click — may change that edit set, and a
+// later identical error must warn again instead of discarding edits the user
+// never saw refused (#5898). Dismissing the task-save recovery notice is NOT such
+// input — it leaves the unsaved edit in place, so Update returns for it before
+// this is armed and the confirmation survives to the next quit. Call as `defer m.invalidateQuitConfirmationAfter()()`.
+func (m *home) invalidateQuitConfirmationAfter() func() {
+	if m.quitSaveFailure == "" {
+		return func() {}
+	}
+	m.quitAttempted = false
+	return func() {
+		if !m.quitAttempted {
+			m.quitSaveFailure = ""
+		}
+	}
+}
+
+// beginUserInput is the shared prologue of a key or mouse message. An input
+// that merely dismisses the recovery notice is consumed by it (dismissed) and
+// touches nothing else, the quit confirmation included; any other input runs
+// with the confirmation disarmed afterwards unless it was itself a quit.
+func (m *home) beginUserInput() (dismissed bool, end func()) {
+	if m.recovery != nil {
+		m.recovery = nil
+		return true, func() {}
+	}
+	return false, m.invalidateQuitConfirmationAfter()
+}
+
 // saveContentPaneState persists any changes from the hooks/task panes and
 // returns a non-nil error if any persist operation failed. Both panes'
 // failures are accumulated so neither is dropped when both are dirty at once.
@@ -79,7 +124,14 @@ func (m *home) saveContentPaneState() error {
 	failedEdit := false
 
 	hp := m.hooksPane
-	if hp.IsDirty() {
+	if hp.IsDirty() && isRemoteTarget() {
+		// No save can ever commit this edit (the pane is read-only remotely, so this
+		// is a safety net for one that got dirty anyway). Returning an error would
+		// abort quit and every task action on every attempt (#5860), so discard it,
+		// say so once, and carry on: nothing is lost that could have been kept.
+		hp.Discard()
+		m.pendingPaneNotice = errRemoteHooksSave().Error() + " — the unsaved hook edit was discarded"
+	} else if hp.IsDirty() {
 		// Hook edits are written to the in-repo .agent-factory/config.json —
 		// the canonical location for post_worktree_commands since #800. The
 		// legacy ~/.agent-factory/repos/<id>/config.json stays untouched as a
@@ -154,7 +206,9 @@ func (m *home) saveContentPaneState() error {
 		retargetCandidates = append(retargetCandidates, retargetCandidate{edit.ID, name, *edit.Update.ProjectPath})
 	}
 	for _, edit := range sp.ConsumeDirty() {
-		if err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect); err != nil {
+		err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect)
+		m.noteRemoteUpdate(edit.ID, edit.Update, edit.Expect, err)
+		if err != nil {
 			if updateProvedTaskDeleted(err, edit.ID) {
 				// Another writer deleted the task (`af tasks remove`), so no
 				// retry can ever land this edit; retaining it retried the save
@@ -204,7 +258,9 @@ func (m *home) saveContentPaneState() error {
 		// tsk is the record as the pane displayed it; pin its project binding
 		// so a delete authorized under this project cannot land on a task
 		// another client rebound elsewhere while the pane was open (#3230).
-		if err := removeTaskThroughDaemon(tsk.ID, task.ExpectProject(tsk)); err != nil {
+		err := removeTaskThroughDaemon(tsk.ID, task.ExpectProject(tsk))
+		m.noteRemoteRemove(tsk, err)
+		if err != nil {
 			if apiclient.IsMutationCommitted(err) {
 				// The durable removal landed and the reload below will project
 				// it. Keep the schedule failure visible without telling the user
@@ -239,7 +295,7 @@ func (m *home) saveContentPaneState() error {
 	// retarget that crossed repos is intentionally outside this list and is
 	// surfaced below so the silent drop does not look like a failed save
 	// (#1836, mirroring the cross-repo create path's notice in home_tasks.go).
-	tasks, err := task.LoadTasksForKnownRepo(m.repoRoot, m.repoID)
+	tasks, err := m.activeTasks(m.repoRoot, m.repoID)
 	if err == nil {
 		m.store.SetTasks(tasks)
 		sp.SetTasks(tasks)
@@ -281,7 +337,7 @@ func (m *home) saveContentPaneState() error {
 		// (registry mode) every retarget leaves the pane and is announced,
 		// matching the empty list LoadTasksForKnownRepo returns there.
 		for _, rc := range retargetCandidates {
-			if m.repoID != "" && config.RepoIDForPath(rc.newPath) == m.repoID {
+			if m.repoID != "" && sameScopeAfterSave(m, rc.newPath) {
 				continue
 			}
 			sp.RecordCrossRepoRetarget(rc.name, rc.newPath)
@@ -314,3 +370,13 @@ func updateProvedTaskDeleted(err error, id string) bool {
 // hooks-save failure deterministically — without relying on filesystem
 // permission tricks that a root test runner would bypass (#1001).
 var saveInRepoPostWorktreeCommandsFn = config.SaveInRepoPostWorktreeCommands
+
+// sameScopeAfterSave reports whether a saved task path still belongs to the
+// active project. Remotely the path is on the daemon's host and is compared
+// textually; a local git probe of it would describe the wrong machine.
+func sameScopeAfterSave(m *home, newPath string) bool {
+	if isRemoteTarget() {
+		return newPath == m.repoRoot
+	}
+	return config.RepoIDForPath(newPath) == m.repoID
+}

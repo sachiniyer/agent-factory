@@ -96,6 +96,8 @@ var verbatimInstanceFields = map[string]string{
 
 	"Branch":                 "the username segment collapses via scrub; the branch SUFFIX is deliberately retained — see TestScrubRedactsUsernameEndingInNonWordChar, which asserts \"[user]/fix-login-bug\"",
 	"Worktree.BranchName":    "same branch-name policy as Branch above",
+	"PruneIntent.Branch":     "the kept branch of a pruned session (#5189): same branch-name policy as Branch above",
+	"PruneIntent.Head":       "git object id the prune verdict proved equal to the branch tip, machine-minted",
 	"Worktree.BaseCommitSHA": "git SHA, machine-minted",
 	// Two shapes, both machine-minted: "af-hook-<instance id>", built from the
 	// same minted ID classified above, or "af-hook-wt<16 hex>", the leading half
@@ -120,6 +122,17 @@ var verbatimInstanceFields = map[string]string{
 	"AccountLimitObservations[].Agent": "agent enum name (tmux.SupportedPrograms); the account label beside it is redacted",
 
 	"PendingTabCleanup[].TabID": "minted tab id (#1738) — never derived from user text, and kept for triage; the TmuxName beside it is redacted",
+
+	// Off-box tab lifecycle (#5571, #5996). Every value below is minted by
+	// newTabID (random hex) when a tab or its process incarnation is created; none
+	// is derived from a name, command, path or host. The record they sit in names
+	// no tmux session or command, so there is nothing beside them to redact.
+	"PendingRemoteTabClose[].TabID": "minted tab id (#1738) — random hex, never derived from user text; the stable handle triage needs to see a close stuck",
+	"PendingRemoteTabClose[].Gen":   "minted tab incarnation id (newTabID) — random hex, never derived from user text",
+	"Tabs[].Gen":                    "minted tab incarnation id (newTabID) — random hex, never derived from user text",
+	"PendingTabs[].Gen":             "minted tab incarnation id (newTabID) — random hex, never derived from user text",
+	"Tabs[].RestoreState":           "fixed enum (empty, \"unknown\", \"gone\") — never user text",
+	"PendingTabs[].RestoreState":    "fixed enum (empty, \"unknown\", \"gone\") — never user text",
 
 	"Tabs[].ID":                          "minted tab id (#1738)",
 	"Tabs[].Conversation.Agent":          "agent enum name; the resumable ID beside it is cleared",

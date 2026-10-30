@@ -59,6 +59,14 @@ type Capabilities struct {
 	// InteractiveInput: raw key / prompt injection works — SendKeys/
 	// SendPrompt drive a live PTY rather than returning "not supported".
 	InteractiveInput bool
+	// LoopbackRelay: the daemon can reach a loopback port INSIDE the workspace
+	// through the agent-server's port relay (W5.1, #5571), so a web tab pointing
+	// at 127.0.0.1:N is served from the workspace rather than the daemon host.
+	LoopbackRelay bool
+	// RemoteEditor: the workspace's host can run the editor and relay it to the
+	// daemon (W5.4, #5571), so a vscode tab is served from the workspace rather
+	// than from a daemon-host directory.
+	RemoteEditor bool
 	// Handoff: the session's agent program can be swapped in place, keeping the
 	// same workspace and branch (#2013). Local-worktree only for now — a sandbox
 	// backend would have to re-launch the agent inside the provisioned sandbox
@@ -105,6 +113,15 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		// own endpoint, not the per-tab PTY frame stream, whose lifetime is a
 		// terminal subscription and which a large web response would head-of-line
 		// block.
+		//
+		// A runtime with the agent-server port relay (W5.1) lifts exactly this
+		// blocker: the daemon's proxy dials the workspace's own loopback through
+		// the relay, never its own TCP stack, so a loopback target is admitted as
+		// it is locally. The refusals below are about what a BROWSER can frame and
+		// stay in force.
+		if IsLoopbackWebTarget(target) && c.LoopbackRelay {
+			return nil
+		}
 		if IsLoopbackWebTarget(target) {
 			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, so it would serve the daemon's own %s — see #3062", target, target)
 		}
@@ -137,7 +154,7 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		// across a sandbox restart, so it no longer disappears after a restart.
 		return nil
 	case TabNeedsLocalWorktreeRead:
-		if c.Workspace != WorkspaceLocalWorktree {
+		if c.Workspace != WorkspaceLocalWorktree && !c.RemoteEditor {
 			// Names the missing EDITOR, not the missing worktree path. The path is
 			// how today's implementation happens to fail — the daemon's
 			// code-server is rooted at a daemon-host directory — but it is not
@@ -159,7 +176,7 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 // ErrHandoffUnsupported is returned when an agent handoff (#2013) is requested
 // on a backend that cannot swap its agent in place. It is a typed sentinel so
 // callers can render the restriction rather than match on prose.
-var ErrHandoffUnsupported = errors.New("agent handoff is only supported for local-worktree sessions")
+var ErrHandoffUnsupported = errors.New("agent handoff is only supported for local-worktree sessions and ssh/sandbox sessions whose agent-server supports it")
 
 // Backend abstracts the session lifecycle so instances can be backed by local
 // tmux+git worktrees (the default) or an off-box docker, SSH, or hook runtime.

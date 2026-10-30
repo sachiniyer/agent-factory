@@ -62,13 +62,11 @@ export interface NavContext {
   /** The selected session's active tab index (0 = agent). `w` refuses to close
    *  tab 0, and the 1-9 keys no-op on the already-active tab. */
   activeTab: number;
-  /** Whether the selected session supports user tab management (false for remote
-   *  sessions, whose tabs are fixed by hook config). Gates `t`/`w`. */
-  /** Whether this session may gain a NEW tab of at least one kind — the daemon's
-   *  per-kind answer, not a backend-type guess (#3060). */
-  tabManagement: boolean;
+  /** The tab kinds this session may gain right now — the daemon's per-kind
+   *  answer, not a backend-type guess (#3060). Gates `t` (terminal) and `T` (VS Code). */
+  newTabKinds: readonly string[];
   /** Whether the SELECTED tab can be closed. Deliberately separate from
-   *  tabManagement: CloseTab has no backend gate at all (it refuses only the agent
+   *  newTabKinds: CloseTab has no backend gate at all (it refuses only the agent
    *  tab), so a web tab that already exists on an off-box session is closable even
    *  though that session may create nothing new. Tying the × to the create rule
    *  stranded exactly those tabs — visible in the bar with no way to remove them
@@ -85,7 +83,7 @@ export type NavAction =
   | { kind: "attach" }
   | { kind: "toRail" }
   | { kind: "switchTab"; index: number }
-  | { kind: "newTab" }
+  | { kind: "newTab"; tabKind: "shell" | "vscode" }
   | { kind: "closeTab" }
   | { kind: "switchView"; view: View }
   | { kind: "cyclePane"; delta: 1 | -1 }
@@ -94,12 +92,16 @@ export type NavAction =
 /** Modifier flags the keybinds read. Alt gates the split-pane chords; Ctrl gates
  *  the ctrl+] detach. altGraph is `getModifierState("AltGraph")`: it excludes an
  *  AltGr-produced "]" (an AltGr key on many EU layouts) from the detach chord, since
- *  Chromium on Linux signals AltGr this way rather than via ctrlKey. Shift and Meta
- *  are ignored so the chords never shadow a browser/OS shortcut. */
+ *  Chromium on Linux signals AltGr this way rather than via ctrlKey. Ctrl, Meta and Alt
+ *  keep t/T off browser chords; Shift only picks the t/T tab kind. */
 export interface KeyMods {
   alt?: boolean;
   ctrl?: boolean;
   altGraph?: boolean;
+  /** Picks the t/T tab kind; Caps Lock flips the key's case but not this. */
+  shift?: boolean;
+  /** Only keeps t/T off browser chords such as Cmd+Shift+T. */
+  meta?: boolean;
 }
 
 /** The next selected id after moving `delta` rows, clamped to the ends. From no
@@ -211,10 +213,13 @@ export function decideKey(key: string, ctx: NavContext, mods: KeyMods = {}): Nav
       }
       return { kind: "none" };
     }
-    // t opens the existing kind picker; w closes the active non-agent tab.
+    // t opens a terminal tab, T a VS Code tab; w closes the active non-agent tab.
     // Creation and closure each use their own capability verdict.
-    if (key === "t") {
-      return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
+    if (key === "t" || key === "T") {
+      // Ctrl/Cmd+Shift+T reopens a closed tab; Shift+Alt+T focuses Chrome's toolbar.
+      if (mods.ctrl || mods.meta || mods.alt) return { kind: "none" };
+      const tabKind = (mods.shift ?? key === "T") ? "vscode" : "shell";
+      return ctx.newTabKinds.includes(tabKind) ? { kind: "newTab", tabKind } : { kind: "none" };
     }
     if (key === "w") {
       return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };

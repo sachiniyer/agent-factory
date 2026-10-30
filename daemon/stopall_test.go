@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -40,7 +39,7 @@ func spawnFakeDaemonWithHome(t *testing.T, home string) int {
 	cmd.Env = env
 	testguard.StartGroupProcess(t, cmd)
 	pid := cmd.Process.Pid
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	return pid
 }
 
@@ -61,28 +60,6 @@ func fakeBinDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
-}
-
-// waitForArgv blocks until pid's argv is the one the fake was built to expose,
-// i.e. argv[0] == argv0.
-//
-// Waiting for a merely NON-EMPTY argv is a race that silently inverts these
-// tests. spawnFakeDaemonProc runs `bash -c "exec -a <argv0> bash ..."`, so the
-// outer bash has a perfectly readable argv — ["bash", "-c", ...] — for a
-// moment BEFORE it execs into the crafted one. Classify it in that window and
-// argsAreDaemonBinary sees "bash", returns false, and the daemon is written off
-// as foreign: an assertion that should fail passes, and one that should pass
-// fails, both for a reason that has nothing to do with the code under test.
-func waitForArgv(t *testing.T, pid int, argv0 string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if args := daemonArgs(pid); len(args) > 0 && args[0] == argv0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("fake daemon pid %d never exec'd into argv0 %q (argv=%q)", pid, argv0, daemonArgs(pid))
 }
 
 func TestVerifyScopedDaemon_MatchesOnlyOurHome(t *testing.T) {
@@ -228,7 +205,7 @@ func TestVerifyScopedDaemon_NonDaemonNeverMatches(t *testing.T) {
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "AGENT_FACTORY_HOME=" + home}
 	testguard.StartGroupProcess(t, cmd)
 	pid := cmd.Process.Pid
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 
 	if got := verifyScopedDaemon(pid, uid, want); got != daemonForeign {
 		t.Errorf("non-af binary carrying --daemon classified %v, want daemonForeign", got)

@@ -75,8 +75,16 @@ type DeleteProjectResponse struct {
 // `af projects add` does this (see api/projects.go), and the web only ever
 // supplies daemon-host paths. Registration is idempotent: a known checkout is a
 // no-op success that returns the existing identity.
+//
+// URL is the alternative to Path (W9.10): a git URL the DAEMON clones, on its own
+// host and with its own credentials, under the configured projects_root, and
+// then registers. Exactly one of Path and URL is given. The URL is validated on
+// the daemon (https, ssh and scp-like forms only; never file://, a path, or a
+// value that could be read as an option), because it may come from a remote
+// client.
 type RegisterProjectRequest struct {
 	Path string `json:"path"`
+	URL  string `json:"url,omitempty"`
 }
 
 // RegisterProjectResponse carries the durable identity the registration
@@ -111,6 +119,16 @@ type RegisterProjectResponse struct {
 type RebindProjectRequest struct {
 	ID   string `json:"id"`
 	Path string `json:"path"`
+	// ExpectedRoot, when set, is the root the caller last saw the project bound
+	// to. ExpectedCheckoutID is the checkout marker that row carried — the pair
+	// is the precondition the daemon compares under the registry lock (#4822
+	// spec): a reclone at the same path mints a new marker, so the root
+	// spelling alone cannot see the checkout the caller read being replaced.
+	// Guarded clients always send both; a request carrying only one is still
+	// guarded, and a record that cannot satisfy both halves refuses rather
+	// than applying the half it got.
+	ExpectedRoot       string `json:"expected_root,omitempty"`
+	ExpectedCheckoutID string `json:"expected_checkout_id,omitempty"`
 }
 
 // RebindProjectResponse carries the re-bound durable identity: the same ID,
@@ -139,4 +157,19 @@ type ListProjectsRequest struct{}
 // registered-but-sessionless project is still shown and creatable-into.
 type ListProjectsResponse struct {
 	Projects []config.Project `json:"projects"`
+}
+
+// SetProjectColorRequest sets the display color of a registered project (ID, a
+// prj_… registry id). Color is a hex color such as "#2f5fd8"; an empty Color
+// clears it. Web clients paint the session frame and the favicon with it.
+type SetProjectColorRequest struct {
+	ID    string `json:"id"`
+	Color string `json:"color"`
+}
+
+// SetProjectColorResponse carries the updated project, with its normalized
+// #rrggbb color. OK is always true on a nil error.
+type SetProjectColorResponse struct {
+	OK      bool           `json:"ok"`
+	Project config.Project `json:"project"`
 }

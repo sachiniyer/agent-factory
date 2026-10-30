@@ -127,6 +127,11 @@ retrying the completed mutation. The daemon omits `daemon_rejected` from these
 committed-outcome envelopes. CLI `--json` ordinary errors retain their existing
 shape without the HTTP provenance marker.
 
+`error.code: "project_rebound"` (status `409`, with `daemon_rejected: true`) is
+the refusal both rebind routes give a compare-and-set rebind — see
+[Rebinding a project](#rebinding-a-project). Nothing was written, so it is a
+definitive refusal, not an uncertain outcome.
+
 ## Status codes
 
 | Status | Meaning |
@@ -135,7 +140,8 @@ shape without the HTTP provenance marker.
 | `400 Bad Request` | The request body was not valid JSON, or it carried a field this daemon does not recognize (see [Unknown fields](#unknown-fields)). |
 | `404 Not Found` | Unknown route (e.g. `POST /v1/Nope`). |
 | `405 Method Not Allowed` | Wrong verb — RPC routes are POST-only; `/v1/health` is GET-only. |
-| `409 Conflict` | Only `SaveProposalDoc`: the save conflicts with a newer edit and nothing was committed. `error.code` is `proposal_conflict`, and `data` is not `null` — it holds `{ours, theirs, base, head}` (see `docs/dev/proposals/proposal-mode/api.md`). |
+| `409 Conflict` | `POST /v1/RebindProject` and `POST /v1/RebindProjectGuarded`: part of the request's expected pair no longer matches the project's record — `expected_root` against the recorded root, `expected_checkout_id` against the recorded checkout marker (which a same-path reclone or repair rotates) — because another rebind or re-clone landed first. `error.code` is `project_rebound`. See [Rebinding a project](#rebinding-a-project). |
+| `409 Conflict` | `SaveProposalDoc`: the save conflicts with a newer edit and nothing was committed. `error.code` is `proposal_conflict`, and `data` is not `null` — it holds `{ours, theirs, base, head}` (see `docs/dev/proposals/proposal-mode/api.md`). |
 | `413 Request Entity Too Large` | The body exceeded the 16 MiB cap. The request is **rejected, never truncated-then-processed** — the daemon is never reached. |
 | `500 Internal Server Error` | The handler ran but returned an error (validation failure, not-found session, a disabled task refused by `TriggerTask`, etc.). `error.message` carries the detail. |
 
@@ -212,6 +218,50 @@ fields accepts an empty body (`-d '{}'` or no `-d` at all).
 internal `Ping` RPC) that answers even while the daemon is restoring sessions,
 with response `data` of `{ "ok": true }`.
 
+### Rebinding a project
+
+`POST /v1/RebindProject` moves a registered project's stable `id` to the
+checkout at `path`. It accepts an optional observed pair — `expected_root`,
+the root the caller last saw the project bound to, and `expected_checkout_id`,
+the checkout marker behind it (the `root` and `checkout_id` from
+`POST /v1/ListProjects`):
+
+```bash
+curl --unix-socket ~/.agent-factory/daemon-http.sock \
+    -X POST http://af/v1/RebindProject -d '{"id":"prj_…","path":"/home/me/src/repo","expected_root":"/home/me/old/repo","expected_checkout_id":"chk_…"}'
+```
+
+With either expected field set, the rebind is a compare-and-set on the pair.
+The daemon applies it only if the registry still records that root *and* that
+checkout id when the registry lock is taken — the checkout half is what sees a
+reclone or repair at the same path, which keeps the root spelling but mints a
+new marker — so of two rebinds made from the same observed pair, exactly one
+applies. The other gets `409` with `error.code: "project_rebound"`, and its
+message names the root and checkout the project is bound to now. Re-read the
+registry, show the user the current pair, and retry with it if they still want
+the move. A request whose `path` is already the recorded root and whose
+checkout still matches also succeeds, so a retried request that already landed
+is not refused.
+
+`expected_root` and `expected_checkout_id` are optional. A request that omits
+both is applied whatever the project is bound to, so the last writer wins —
+what clients written before the fields existed send, never refused for the
+omission. The TUI and web client send the pair they displayed. `af projects
+rebind` does not; it rebinds unconditionally, as before.
+
+A daemon that predates the fields treats them like any unknown fields (see
+[Unknown fields](#unknown-fields)). It rejects a hand-authored request with
+`400`. For a request with `X-AF-Client-Version`, such as the TUI's, it ignores
+them and applies the rebind without the check — which is why a guarded client
+sends the pair to `POST /v1/RebindProjectGuarded` instead: that route exists
+only on daemons that implement the precondition, so a daemon that predates it
+answers its marked 404 and the client surfaces an upgrade refusal rather than
+silently downgrading to last writer wins. The route is the capability check —
+atomic with the mutation, where a `GET /v1/health` probe answered by one
+daemon could never vouch for the sibling a proxy might route the mutation to.
+`RebindProjectGuarded` refuses a request that omits both expected fields;
+last-writer-wins stays on `POST /v1/RebindProject`.
+
 **Not in the catalog.** The generated table is `af api`'s discovery surface — the
 client-facing session and task RPCs — so the daemon serves several routes it does
 not list. They fall into three groups:
@@ -227,7 +277,7 @@ not list. They fall into three groups:
   account-login stream `GET /v1/account-login/stream` (bare-session PTY WebSockets
   that serve no Instance); `GET /v1/auth-info`, the tokenless probe that reports
   whether this peer must present a token (see
-  [remote daemon access](remote-http-auth.md)); `GET /v1/preview-auth`; and the
+  [remote daemon access](remote-http-auth.md)); `GET /v1/preview-auth`; `POST /v1/editor-origin`, which mints a session's editor-origin bootstrap URL for a remote viewer (see [Web UI](web.md#per-session-editor-origins-for-remote-viewers)); and the
   web-tab reverse proxy under `/v1/webtab/`.
 - **The profiling endpoint**, `GET /v1/debug/pprof/{profile}`, when it is switched
   on. It is **off by default**, is served on **this socket only** and never on
@@ -273,8 +323,15 @@ returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?
 web/vscode tab that owns no PTY; it normally tracks the name but diverges
 after a rename, so read it from the response rather than re-deriving it);
 `CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `RenameTab` returns `{ "name": "<resolved-tab-name>" }`; `ReorderTab` returns `{ "name": "<resolved-tab-name>", "index": <int> }`; `ListTasks` returns
-`{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`
-(the merged record); the rest return `{ "ok": true }`. The `task` field of
+`{ "tasks": [<task>…] }`; `AddTask` and `UpdateTask` return
+`{ "ok": true, "task": <task> }` (the stored record; an older daemon omits
+`AddTask`'s); the rest return `{ "ok": true }`. `AddTask`'s `task` is the bare
+stored record — the daemon sets it before reloading schedules and, unlike
+`UpdateTask`'s live-enriched record, never attaches the live schedule-health
+fields (`arming`, `next_run_at`) that the next sentence attributes to every
+returned task; and a sandbox-credential `AddTask` receives a narrowed
+projection (`sandboxSafeTask`) that withholds persisted fields such as
+`project_path`, `repo_id`, `host`, and `program`. The request `task` field of
 `AddTask` is a full task object — the CLI/TUI build and validate it, and the
 daemon re-validates and owns the write. `UpdateTask` instead takes a target `id`
 and a FIELD-LEVEL `update` patch carrying only the fields to change (e.g.
@@ -391,7 +448,7 @@ work. The vocabulary is closed:
 | `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
 | `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
 | `restore-gave-up` | The process is gone and automatic Lost-session recovery has stopped — either it exhausted its failed-attempt budget, or it confirmed enough restore-and-die cycles to conclude the agent cannot stay up. See `lost_restore_failure` below for the two verdicts. |
-| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a machine-level resource condition such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
+| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a condition outside the session itself, such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
 | `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
 | `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
 | `delivery-unconfirmed` | The last send ended `sent-unverified` or `could-not-confirm` (uncertainty, not failure — see `SendPrompt` above), and no pane change has been observed since. |

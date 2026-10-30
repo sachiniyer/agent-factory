@@ -264,6 +264,11 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 		return nil, fmt.Errorf("Config issue in %s: session_env_passthrough: %w", prettyConfigPath, err)
 	}
 	config.SessionEnvPassthrough = normalizedSessionEnv
+	normalizedAgentConfig, err := NormalizeSandboxAgentConfig(config.SandboxAgentConfig)
+	if err != nil {
+		return nil, fmt.Errorf("Config issue in %s: sandbox_agent_config: %w", prettyConfigPath, err)
+	}
+	config.SandboxAgentConfig = normalizedAgentConfig
 	normalizedCandidates, err := normalizeLimitAccountCandidates(config.LimitAccountCandidates)
 	if err != nil {
 		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
@@ -271,6 +276,7 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 	config.LimitAccountCandidates = normalizedCandidates
 
 	sanitizeLimitPatterns(config)
+	sanitizeHosts(config)
 	config.Appearance = NormalizeAppearance(config.Appearance)
 	config.Web.TerminalFontSizePhone = sanitizeWebTerminalFontSize(
 		"web.terminal_font_size_phone", config.Web.TerminalFontSizePhone, defaultWebTerminalFontSizePhone, prettyConfigPath)

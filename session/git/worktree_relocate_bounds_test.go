@@ -3,7 +3,6 @@ package git
 import (
 	"context"
 	"fmt"
-	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,9 +59,7 @@ func TestMoveWorktree_SubmodulesUseDesignedFallbackWithoutWarning(t *testing.T) 
 	t.Cleanup(func() { worktreeMoveFast = realFastMove })
 
 	var warnings logtest.Buffer
-	previousWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = previousWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	gw, _, srcPath := archiveTestWorktreeWithSubmodule(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
@@ -224,7 +221,7 @@ func TestRelocate_SourceIdentityProbeIsBounded(t *testing.T) {
 	case err := <-done:
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		assert.True(t, gw.cleanupHasStalled())
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		t.Fatal("the pre-move source identity probe ignored the relocation bound")
 	}
 }

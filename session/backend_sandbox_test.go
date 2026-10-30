@@ -76,8 +76,9 @@ func TestSandboxRunKeepsOperatorQuoting(t *testing.T) {
 //
 // The handoff's rule was "WaitDelay on the tunnel child, NEVER on the copy",
 // because force-closing the pipe mid-copy truncates the stream while ssh still
-// exits 0. That holds only while nothing else catches a short copy — and
-// verifyCopiedBinary now does. Meanwhile a ZERO WaitDelay is not neutral:
+// exits 0. That holds only while nothing else catches a short copy — and the
+// installRemoteBinary sha256 check now does (#5571 W2.2). Meanwhile a ZERO
+// WaitDelay is not neutral:
 // os/exec makes Wait block until every orphaned descriptor-holder closes, which
 // for this backend is exactly the ProxyCommand/wrapper it exists to serve, so
 // the copy's timeout would not bound provisioning at all.
@@ -91,7 +92,7 @@ func TestSandboxRunBoundsEveryChildAfterCancellation(t *testing.T) {
 	streaming := p.buildRunCommand(ctx, "cat > af", strings.NewReader("payload"))
 	assert.Equal(t, sandboxTunnelWaitDelay, streaming.WaitDelay,
 		"a zero WaitDelay lets Wait block on an orphaned ProxyCommand holding the pipe, so the copy "+
-			"timeout would not bound provisioning; truncation is caught by verifyCopiedBinary instead")
+			"timeout would not bound provisioning; truncation is caught by installRemoteBinary's sha256 check instead")
 
 	payloadFree := p.buildRunCommand(ctx, "true", nil)
 	assert.Equal(t, sandboxTunnelWaitDelay, payloadFree.WaitDelay)
@@ -114,34 +115,10 @@ func TestSandboxRunStreamsStdinWhole(t *testing.T) {
 	assert.Equal(t, len(payload), len(got), "the streamed payload must arrive whole — a short write is the truncated-af trap")
 }
 
-// verifyCopiedBinary is the independent check behind TRAP 1: even if a copy is
-// silently short, the byte count on the sandbox must not match and the error
-// must name the copy rather than surfacing later as an exec failure.
-func TestSandboxVerifyCopiedBinaryCatchesATruncatedCopy(t *testing.T) {
-	local := filepath.Join(t.TempDir(), "af")
-	require.NoError(t, os.WriteFile(local, []byte("0123456789"), 0o755)) // 10 bytes
-
-	p := &sandboxProvisioner{afBin: local, sessionDir: "/remote/dir"}
-	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
-		return []byte("4\n"), nil // the sandbox only has 4 of the 10 bytes
-	}
-
-	err := p.verifyCopiedBinary()
-	require.Error(t, err, "a short copy must fail the provision at the copy, not later")
-	assert.Contains(t, err.Error(), "truncated")
-	assert.Contains(t, err.Error(), "/remote/dir/af")
-}
-
-func TestSandboxVerifyCopiedBinaryAcceptsAWholeCopy(t *testing.T) {
-	local := filepath.Join(t.TempDir(), "af")
-	require.NoError(t, os.WriteFile(local, []byte("0123456789"), 0o755))
-
-	p := &sandboxProvisioner{afBin: local, sessionDir: "/remote/dir"}
-	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
-		return []byte("10\n"), nil
-	}
-	assert.NoError(t, p.verifyCopiedBinary())
-}
+// The copy-verification half of TRAP 1 moved with the W2.2 staged-binary work:
+// installRemoteBinary proves the published cache file by sha256 against the
+// daemon's known hash — remote_binary_test.go pins the corrupted-copy,
+// whole-copy, and cache-hit cases end to end.
 
 // TRAP 2. ssh(1) exits 255 for its OWN failures, and a remote command exiting
 // 255 is indistinguishable from it. A reap that saw 255 must report UNDETERMINED
@@ -272,9 +249,11 @@ func TestSandboxReapScriptKillsByIdentityAndGatesTheRemoval(t *testing.T) {
 	assert.NotContains(t, script, expect,
 		"the script must never contain the expected answer — that is what makes it unforgeable")
 
-	// With no PID there is nothing to signal, but the sentinel still gates.
+	// With no recorded PID there is no literal PID to signal: the only kill left is
+	// the identity-gated one over the HOST's launch record, read at run time.
 	noPID, _ := (&sandboxProvisioner{sessionDir: "/remote/af-session"}).reapScript("a1b2c3d4")
-	assert.NotContains(t, noPID, "kill")
+	assert.Contains(t, noPID, `pid="$hp"`)
+	assert.NotContains(t, noPID, "pid='")
 	assert.Contains(t, noPID, "| tr 'a-z' 'A-Z'")
 }
 
@@ -567,7 +546,7 @@ func TestSandboxRunNormalizesErrWaitDelayToNilWhenOrphanHoldsPipe(t *testing.T) 
 // NOT change: a command still running at the deadline is killed (group SIGKILL),
 // producing an *exec.ExitError — never a bare exec.ErrWaitDelay — so the
 // normalize-to-nil does not fire and runCommand still wraps it as a timeout.
-// Non-reap callers (copyAfBinary, etc.) that do not branch on error identity
+// Non-reap callers (installRemoteBinary, etc.) that do not branch on error identity
 // continue to see a correct timeout for a genuine deadline kill.
 func TestSandboxRunGenuineTimeoutWrapsAsDeadlineExceeded(t *testing.T) {
 	ssh := stubSSH(t, "sleep 10")
@@ -787,12 +766,16 @@ func TestSandboxProvisionFailureMirrorsTheRawPIDForTheReap(t *testing.T) {
 	require.NoError(t, os.WriteFile(localBin, []byte("0123456789"), 0o755))
 
 	var reapTransportCalls []string
+	stageBinaryReply := binaryStageReplies(t, localBin)
 	p := &sandboxProvisioner{
 		spec:    ProvisionSpec{Title: "test-session"},
 		afBin:   localBin,
 		program: "",
 	}
 	p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		if out, ok := stageBinaryReply(script); ok {
+			return out, nil
+		}
 		switch {
 		case strings.Contains(script, "mktemp -d"):
 			return []byte("/remote/af-sessions/test.XXXXXX\n"), nil
@@ -894,12 +877,16 @@ func TestSandboxProvisionFailureRefusesAnEmptyRemotePIDAfterLaunch(t *testing.T)
 	require.NoError(t, os.WriteFile(localBin, []byte("0123456789"), 0o755))
 
 	var reapTransportCalls []string
+	stageBinaryReply := binaryStageReplies(t, localBin)
 	p := &sandboxProvisioner{
 		spec:    ProvisionSpec{Title: "test-session"},
 		afBin:   localBin,
 		program: "",
 	}
 	p.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		if out, ok := stageBinaryReply(script); ok {
+			return out, nil
+		}
 		switch {
 		case strings.Contains(script, "mktemp -d"):
 			return []byte("/remote/af-sessions/test.XXXXXX\n"), nil

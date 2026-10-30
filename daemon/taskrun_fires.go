@@ -541,7 +541,7 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 //
 // The tmux identity is compared against the row's tmux identity fields ONLY —
 // TmuxName, each tab's TmuxName, and, for a legacy row that recorded none, the
-// name its TITLE sanitizes to. It is never compared against Worktree.SessionName:
+// UNSCOPED name its title sanitizes to (the one its runtime is rebuilt with). It is never compared against Worktree.SessionName:
 // that field holds the raw session title on ordinary rows and the sanitized
 // name only on this function's own leftover records, so a session merely
 // TITLED like the sanitized name would impersonate the fire's tmux identity and
@@ -551,7 +551,7 @@ func taskFireForeignRowReason(d *session.InstanceData, fire *taskFireMarker, ide
 	if d.Title == fire.Title {
 		return "title"
 	}
-	if sanitized != "" && taskFireRowOwnsTmuxName(d, identityRoot, sanitized) {
+	if sanitized != "" && taskFireRowOwnsTmuxName(d, sanitized) {
 		return "tmux session name"
 	}
 	if wtPath != "" && d.Worktree.WorktreePath == wtPath {
@@ -564,7 +564,7 @@ func taskFireForeignRowReason(d *session.InstanceData, fire *taskFireMarker, ide
 }
 
 // taskFireRowOwnsTmuxName reports whether the row's real tmux identity is name.
-func taskFireRowOwnsTmuxName(d *session.InstanceData, identityRoot, name string) bool {
+func taskFireRowOwnsTmuxName(d *session.InstanceData, name string) bool {
 	if d.TmuxName == name {
 		return true
 	}
@@ -573,8 +573,12 @@ func taskFireRowOwnsTmuxName(d *session.InstanceData, identityRoot, name string)
 			return true
 		}
 	}
+	// A legacy row with no tmux fields is rebuilt by restoreLocalTabs through
+	// the UNSCOPED NewTmuxSession(title, …), so the only name its runtime can
+	// carry is the unscoped one (#5724) — never a repo-scoped name, which is
+	// what a fire derives. Compare against the derivation the runtime uses.
 	return d.TmuxName == "" && len(d.Tabs) == 0 && d.Title != "" &&
-		tmux.SanitizedNameForRepo(d.Title, identityRoot) == name
+		tmux.SanitizedNameForRepo(d.Title, "") == name
 }
 
 // taskFireTmuxEvidence reports whether a live tmux session proves it belongs to

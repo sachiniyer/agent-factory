@@ -514,7 +514,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		// Lost (#1108): the tmux session vanished with no kill on record —
 		// same synchronous-with-the-sidebar treatment as Dead, but the message
 		// says what happened rather than implying a plain corpse.
-		p.setFallbackState("Session lost — its tmux session is gone.")
+		p.setFallbackState(lostSessionCopy(instance))
 		p.mu.Unlock()
 		return nil
 	}
@@ -641,14 +641,14 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		}
 	}
 
-	// Remote instances have no local shell tab. When terminal_cmd is configured
-	// the tab is an interactive-only surface (#843): prompt the user to attach.
-	// Otherwise keep the "not available" fallback and name the config knob.
+	// Remote instances have no local shell tab. When the backend advertises a
+	// terminal surface the tab is interactive-only (#843): prompt the user to
+	// attach. Otherwise keep the "not available" fallback.
 	if caps := instance.Capabilities(); caps.Workspace == session.WorkspaceRemote {
 		if caps.TerminalTab {
 			p.setFallbackState("Enter to open a remote terminal.")
 		} else {
-			p.setFallbackState("Set remote_hooks.terminal_cmd for a remote terminal.\nUse the Agent tab for output.")
+			p.setFallbackState("This tab streams from the sandbox.\nSelect the Agent tab for session output.")
 		}
 		p.mu.Unlock()
 		return nil
@@ -877,7 +877,7 @@ func (p *TabPane) canEnterScrollModeLocked(instance *session.Instance, activeTab
 			p.setFallbackState("Session no longer running.")
 			return false
 		case session.LiveLost:
-			p.setFallbackState("Session lost — its tmux session is gone.")
+			p.setFallbackState(lostSessionCopy(instance))
 			return false
 		}
 	}
@@ -940,7 +940,16 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	case instance.GetLiveness() == session.LiveDead:
 		p.setFallbackState("Session no longer running.")
 	case instance.GetLiveness() == session.LiveLost:
-		p.setFallbackState("Session lost — its tmux session is gone.")
+		p.setFallbackState(lostSessionCopy(instance))
 	}
 	return nil
+}
+
+// lostSessionCopy names what was lost without naming a mechanism the row does
+// not have: a sandbox session has no daemon-side tmux session.
+func lostSessionCopy(instance *session.Instance) string {
+	if instance != nil && instance.Capabilities().Workspace == session.WorkspaceRemote {
+		return "Session lost — its sandbox is not reachable."
+	}
+	return "Session lost — its tmux session is gone."
 }

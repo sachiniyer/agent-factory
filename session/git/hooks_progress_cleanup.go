@@ -37,7 +37,7 @@ func cleanupHookProgressArtifacts(cleanups []hookProgressCleanup) error {
 	for _, cleanup := range cleanups {
 		flights = append(flights, startHookProgressCleanup(cleanup))
 	}
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	var result error
 	for _, flight := range flights {
@@ -45,7 +45,7 @@ func cleanupHookProgressArtifacts(cleanups []hookProgressCleanup) error {
 		case <-flight.done:
 			result = errors.Join(result, flight.err)
 		case <-timer.C:
-			return errors.Join(result, fmt.Errorf("hook receipt cleanup exceeded %s: %w", relocationIdentityTimeout, context.DeadlineExceeded))
+			return errors.Join(result, fmt.Errorf("hook receipt cleanup exceeded %s: %w", relocationIdentityTimeout.Load(), context.DeadlineExceeded))
 		}
 	}
 	return result

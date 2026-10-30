@@ -161,6 +161,7 @@ func changedFields(before, after Task) []string {
 	add(before.MaxConcurrentRuns != after.MaxConcurrentRuns, "max_concurrent_runs")
 	add(CanonicalOnComplete(before.OnComplete) != CanonicalOnComplete(after.OnComplete), "on_complete")
 	add(before.ProjectPath != after.ProjectPath, "project_path")
+	add(before.Host != after.Host, "host")
 	add(before.Program != after.Program, "program")
 	add(before.Enabled != after.Enabled, "enabled")
 	return fields
@@ -204,6 +205,7 @@ func (t *Task) resetStoreOwnedFields(now time.Time) {
 	t.Audit = nil
 	t.LastRunAt = nil
 	t.LastRunStatus = ""
+	t.LastRunID, t.LastRunStartedAt = "", nil
 	t.DroppedEvents = 0
 	if t.CreatedAt.IsZero() || t.CreatedAt.After(now) {
 		t.CreatedAt = now

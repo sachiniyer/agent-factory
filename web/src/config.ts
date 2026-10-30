@@ -33,6 +33,11 @@ import {
   emptyAccountsState,
   renderAccountsSection,
 } from "./accounts.js";
+import {
+  type QuotaState,
+  emptyQuotaState,
+  renderQuotaSection,
+} from "./quota.js";
 import { h } from "./dom.js";
 import type {
   ConfigEntry,
@@ -319,6 +324,9 @@ export class ConfigPane {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   private accounts: AccountsState = emptyAccountsState();
+  /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
+   *  Accounts. Same "not config" rule: see quota.ts. */
+  private quota: QuotaState = emptyQuotaState();
   private theme: ThemeChoice = "system";
   private showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
@@ -349,6 +357,7 @@ export class ConfigPane {
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
   private lastAccounts: AccountsState | null = null;
+  private lastQuota: QuotaState | null = null;
   private lastTheme: ThemeChoice | null = null;
 
   constructor(private readonly actions: ConfigActions) {
@@ -363,10 +372,11 @@ export class ConfigPane {
     path: string,
     status: ConfigStatus | null,
     accounts: AccountsState,
+    quota: QuotaState,
     theme: ThemeChoice = this.theme,
   ): void {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts
-      && this.lastTheme === theme) {
+      && this.lastQuota === quota && this.lastTheme === theme) {
       return;
     }
     // Captured before `lastStatus`/`lastEntries` are overwritten below: the
@@ -384,6 +394,7 @@ export class ConfigPane {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastQuota = quota;
     this.lastTheme = theme;
     this.theme = theme;
     // Retired web appearance keys from older daemons are never editable here.
@@ -391,6 +402,7 @@ export class ConfigPane {
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    this.quota = quota;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -493,6 +505,28 @@ export class ConfigPane {
         && active.type === "text"
         ? { start: active.selectionStart, end: active.selectionEnd }
         : null;
+    // The row's Save button (button.af-config-save) is the primary commit gesture
+    // for a text row — the only row kind that renders a Save button (checkbox and
+    // select rows commit on `change` and return early in renderControl). A click,
+    // or a Tab onto it followed by Enter, leaves the button holding DOM focus, and
+    // its own commit() rebuilds the pane and detaches that focused button. The
+    // captures above do not name it: `wasEditing` gates on `active ===
+    // editingInput` (false here — the button, not the input, holds focus), and
+    // `focusedConfigControlKey` gates on select/checkbox/text INPUT while the
+    // button itself carries no `aria-label`. So a save via the Save button left the
+    // restoration ladder with no matching rung and focus silently fell to <body> —
+    // the exact hazard this method's own header comment warns about (the next
+    // `[`/`]` then cycled the top-level view; other printable keys were swallowed).
+    // Capture the row's key from its input's `aria-label` (set to `e.key` on every
+    // text row) and re-locate the rebuilt row's input after the rebuild, the same
+    // `.af-config-list [aria-label=…]` lookup the `focusedConfigControlKey` branch
+    // uses — restored below as that branch's sibling.
+    const saveFocusedKey =
+      active instanceof HTMLButtonElement
+        && active.closest(".af-config-list") !== null
+        && active.classList.contains("af-config-save")
+        ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null
+        : null;
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
@@ -546,6 +580,21 @@ export class ConfigPane {
           focusedConfigTextCaret.end ?? focusedConfigTextCaret.start,
         );
       }
+    } else if (saveFocusedKey !== null) {
+      // A save committed via the row's Save button rebuilt the pane while the
+      // button held focus; the focused button was detached and, with no matching
+      // restoration rung, focus fell to <body> (the body-focus hazard this method
+      // exists to prevent). Hand focus to the rebuilt row's text input — the
+      // control the user was operating — via its `aria-label`, reusing the
+      // `focusedConfigControlKey` branch's lookup + preventScroll. The just-saved
+      // row's edit is closed (`editing` cleared in update()), so this does not
+      // re-open it; the rebuilt input shows the daemon's re-read value and its Save
+      // button is again disabled via `canCommit`.
+      this.el
+        .querySelector<HTMLElement>(
+          `.af-config-list [aria-label="${CSS.escape(saveFocusedKey)}"]`,
+        )
+        ?.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector<HTMLElement>('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -659,12 +708,13 @@ export class ConfigPane {
               "No settings available. Try Configure with assistant.",
             ),
           ];
-    // Accounts LAST: the config keys are what this view is for, and a credential
-    // section above them would push them below the fold.
+    // Accounts LAST, then Usage (#2983): the config keys are what this view is
+    // for, and daemon-reported sections above them would push them below the fold.
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+      renderQuotaSection(this.quota),
     );
   }
 

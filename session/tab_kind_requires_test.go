@@ -12,6 +12,44 @@ import (
 // remoteAgentBackend declares it.
 func remoteCaps() Capabilities { return (&remoteAgentBackend{}).Capabilities() }
 
+// noRelayRemoteCaps is an off-box runtime WITHOUT the agent-server port relay: the
+// pre-W5.1 shape, whose loopback web tabs the daemon could only have served from
+// its own host. The refusal copy for that case is still the contract for any
+// runtime that has not gained the relay.
+func noRelayRemoteCaps() Capabilities {
+	c := remoteCaps()
+	c.LoopbackRelay = false
+	return c
+}
+
+// A relay-capable off-box runtime admits the same web targets a local session
+// does (W5.3): a loopback target is served from the workspace, not the daemon.
+func TestRefuseTabKindAdmitsLoopbackWebTabsWhereARelayExists(t *testing.T) {
+	require.True(t, remoteCaps().LoopbackRelay, "the off-box agent-server runtimes carry the port relay")
+	for _, target := range []string{"http://localhost:3000", "http://127.0.0.1:5173", "https://example.com/app"} {
+		require.NoError(t, remoteCaps().RefuseTabKind(TabKindWeb, target), target)
+		require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, target), target)
+	}
+	require.Error(t, remoteCaps().RefuseTabKind(TabKindShell, ""), "the relay does not make a process tab servable")
+}
+
+// noEditorRemoteCaps is an off-box runtime whose host cannot run the editor: the
+// pre-W5.4 shape, whose vscode tab stays refused with the #3054 explanation.
+func noEditorRemoteCaps() Capabilities {
+	c := remoteCaps()
+	c.RemoteEditor = false
+	return c
+}
+
+// A host that can run the editor admits a vscode tab (W5.4); one that cannot keeps
+// the refusal.
+func TestRefuseTabKindAdmitsVSCodeTabsWhereTheHostRunsTheEditor(t *testing.T) {
+	require.True(t, remoteCaps().RemoteEditor)
+	require.NoError(t, remoteCaps().RefuseTabKind(TabKindVSCode, ""))
+	require.Error(t, noEditorRemoteCaps().RefuseTabKind(TabKindVSCode, ""))
+	require.Error(t, remoteCaps().RefuseTabKind(TabKindShell, ""), "an editor does not make a shell tab spawnable")
+}
+
 func localCaps() Capabilities { return (&LocalBackend{}).Capabilities() }
 
 // TestTabKindRequiresClassifiesEveryKind pins the classification itself. The
@@ -42,8 +80,8 @@ func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 	require.False(t, remoteCaps().TabManagement,
 		"fixture drifted: the off-box row is supposed to lack TabManagement")
 
-	web := remoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
-	vscode := remoteCaps().RefuseTabKind(TabKindVSCode, "")
+	web := noRelayRemoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
+	vscode := noEditorRemoteCaps().RefuseTabKind(TabKindVSCode, "")
 	shell := remoteCaps().RefuseTabKind(TabKindShell, "")
 	require.Error(t, web, "a web tab cannot be SERVED off-box yet (#3062)")
 	require.Error(t, vscode)
@@ -72,8 +110,8 @@ func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 // not have — the same defect one level down. Both targets are refused, for
 // different and individually true reasons.
 func TestWebRefusalIsPerTargetNotPerKind(t *testing.T) {
-	loopback := remoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
-	external := remoteCaps().RefuseTabKind(TabKindWeb, "https://example.com")
+	loopback := noRelayRemoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
+	external := noRelayRemoteCaps().RefuseTabKind(TabKindWeb, "https://example.com")
 
 	require.Error(t, loopback, "a loopback target is still proxied from the daemon host")
 	require.NoError(t, external,
@@ -129,8 +167,8 @@ func TestRefuseTabKind_OffBoxRejectsUnspecifiedWebTargets(t *testing.T) {
 // backend" cannot be told apart from a kind that could have worked.
 func TestRefuseTabKindNamesTheUnmetRequirement(t *testing.T) {
 	t.Run("vscode names the editor, not a spawn", func(t *testing.T) {
-		err := remoteCaps().RefuseTabKind(TabKindVSCode, "")
-		require.Error(t, err, "an off-box session must still refuse a vscode tab")
+		err := noEditorRemoteCaps().RefuseTabKind(TabKindVSCode, "")
+		require.Error(t, err, "an off-box session whose host runs no editor must refuse a vscode tab")
 		msg := strings.ToLower(err.Error())
 		assert.Contains(t, msg, "editor", "the refusal must name the editor requirement")
 		assert.NotContains(t, msg, "spawn",
@@ -197,7 +235,7 @@ func TestTabSpawnPreconditionIsPerKind(t *testing.T) {
 // make the vscode proxy route reachable off-box: its editor is served by the
 // daemon from a local worktree path, and an off-box session has none.
 func TestOffBoxRefusalsStayClosed(t *testing.T) {
-	require.Error(t, remoteCaps().RefuseTabKind(TabKindVSCode, ""),
+	require.Error(t, noEditorRemoteCaps().RefuseTabKind(TabKindVSCode, ""),
 		"#3054 would be live: an off-box session may not create a vscode tab until the editor is served from inside the workspace")
 	require.NotEqual(t, WorkspaceLocalWorktree, remoteCaps().Workspace,
 		"fixture drifted: the off-box row must not claim a local worktree")

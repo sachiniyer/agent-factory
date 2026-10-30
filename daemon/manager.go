@@ -16,6 +16,11 @@ import (
 
 // Manager owns the daemon's authoritative session mutations.
 type Manager struct {
+	// advisory scopes best-effort background work (host-readiness probes) that
+	// must never delay shutdown: drainDaemon cancels it FIRST, before it closes the
+	// transports or joins anything, so a probe's ssh child is killed rather than
+	// waited on (#5839). Zero-value safe; see advisory.go.
+	advisory advisoryScope
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
 	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and
@@ -59,6 +64,11 @@ type Manager struct {
 	// side to fail on.
 	sandboxTokens sandboxTokenRegistry
 
+	// sandboxEndpointSocket is the live dedicated sandbox callback endpoint's
+	// socket path (#5571 W3.4); nil or empty while it is not listening. The mint
+	// reads it instead of the client listener's address and auth posture.
+	sandboxEndpointSocket atomic.Pointer[string]
+
 	// previewSecret is the HMAC key from which the web-tab PREVIEW listener derives
 	// a PER-TAB credential (#1856 step 3): the origin label for (sessionID, tabID) is
 	// previewTabHostLabel(previewSecret, sid, tid). It is minted once, in memory, at
@@ -96,6 +106,10 @@ type Manager struct {
 	// can invent correctly-shaped hosts without a credential, so the miss path must
 	// not do per-session work (#2743 review).
 	editorLabels *editorLabelIndex
+
+	// editorPorts serves per-session editor origins to remote viewers from the
+	// network.editor_origin_ports pool (W5.2); see editor_port_origin.go.
+	editorPorts *editorPortOrigins
 
 	// limitDetector is the resolved usage-limit matcher set (#1146), built from
 	// cfg.LimitPatterns (it compiles the override regexes) and reused across poll
@@ -271,6 +285,9 @@ type Manager struct {
 	// licence to exceed max_concurrent_runs after every restart.
 	ghostTaskRuns                          map[string]int
 	repoStartLocks, worktreeAdmissionLocks map[string]*sync.Mutex
+	// repoRowLocks is the innermost leaf lock of the row-write order (#6210); see
+	// rowWriteLockForRepo. Zero value is ready: entries are created lazily.
+	repoRowLocks sync.Map
 	// aliveObservations counts POSITIVE liveness observations per session (keyed by
 	// stableSessionKey, so a same-title successor never inherits its predecessor's).
 	// Incremented only where the poll actually gets an answer OUT of a runtime; read
@@ -592,6 +609,9 @@ type Manager struct {
 	// the webtab proxy resolves a vscode tab's target through it. Immutable after
 	// construction; its own mutex keeps spawning (seconds) off m.mu.
 	vscode *vscodeSupervisor
+	// relayTransports caches one workspace-loopback transport per off-box session
+	// (W5.3); see relayTransport.
+	relayTransports sync.Map
 	// proposals runs the proposal routes and the poll-time doc scan.
 	proposals proposalState
 	// configAgents owns the bare tmux sessions spawned for config agents. They
@@ -794,6 +814,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		previewOrigins:            newPreviewOriginRegistry(),
 		editorOriginSecret:        editorSecret,
 		editorLabels:              newEditorLabelIndex(),
+		editorPorts:               newEditorPortOrigins(),
 		pollReloadCh:              make(chan struct{}, 1),
 		ready:                     make(chan struct{}),
 		lifecycle:                 lifecycle,

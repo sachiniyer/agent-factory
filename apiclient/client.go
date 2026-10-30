@@ -24,6 +24,7 @@ package apiclient
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,7 +66,12 @@ type TransportError struct {
 	NotSent bool
 }
 
-func (e *TransportError) Error() string { return e.Err.Error() }
+func (e *TransportError) Error() string {
+	if hint := tlsVerifyHint(e.Err); hint != "" {
+		return e.Err.Error() + " — " + hint
+	}
+	return e.Err.Error()
+}
 func (e *TransportError) Unwrap() error { return e.Err }
 
 // IsTransportError reports whether err (or anything it wraps) is a TransportError
@@ -165,6 +171,11 @@ type Client struct {
 	requestTimeout time.Duration
 }
 
+// isRemote reports whether this client dials a --daemon-url target rather than
+// the local unix socket. A remote target's host-side facts (does this path
+// exist? is it a repository?) are the daemon's to check, not this machine's.
+func (c *Client) isRemote() bool { return c.remoteTransport != nil }
+
 // New returns a Client dialing the daemon HTTP socket resolved from the current
 // config dir (AGENT_FACTORY_HOME), the same path the daemon binds. It does not
 // dial or spawn anything — a daemon need not be running yet; the first call
@@ -244,6 +255,14 @@ func (c *Client) call(method string, req any, resp any) error {
 // no error and no way out. Passing a ctx here cancels the in-flight request for
 // real, so the caller's goroutine unwinds instead of leaking.
 func (c *Client) callCtx(ctx context.Context, method string, req any, resp any) error {
+	return c.callCtxMin(ctx, 0, method, req, resp)
+}
+
+// callCtxMin is callCtx with a floor on the remote overall deadline: the call
+// waits max(requestTimeout, minWait). It is for the few RPCs whose server-side
+// work is bounded by a documented budget longer than the generic REST bound. A
+// client with no overall deadline (the local socket) is unaffected.
+func (c *Client) callCtxMin(ctx context.Context, minWait time.Duration, method string, req any, resp any) error {
 	reqBody, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("apiclient: marshal request: %w", err)
@@ -257,7 +276,7 @@ func (c *Client) callCtx(ctx context.Context, method string, req any, resp any) 
 	// in-memory snapshot as before, unless the caller bounds it explicitly.
 	if c.requestTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.requestTimeout)
+		ctx, cancel = context.WithTimeout(ctx, max(c.requestTimeout, minWait))
 		defer cancel()
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpBase+"/v1/"+method, bytes.NewReader(reqBody))
@@ -341,8 +360,11 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 		// Surface the daemon's message verbatim — byte-identical to what the
 		// net/rpc client would carry, since both transports wrap the same
 		// controlServer error — except where the message is provably a version
-		// skew, which is unactionable in its raw form.
-		return interpretEnvelopeError(env.Error.Message, env.Error.Code)
+		// skew, which is unactionable in its raw form. The definitive outcome
+		// codes first verify the answer is the daemon's own: status and the
+		// daemon_rejected marker both go in, so an intermediary's substituted or
+		// replayed envelope cannot classify a mutation it may have forwarded.
+		return interpretEnvelopeError(httpReq.URL.Path, httpResp.StatusCode, env.Error)
 	}
 	// The daemon pairs every non-200 status with a populated env.Error
 	// (daemon/httpserver.go writeHTTPError). A non-200 status carrying a benign
@@ -389,4 +411,19 @@ func (c *Client) setAuth(h http.Header) {
 	if c.token != "" {
 		h.Set(agentproto.AuthHeader, agentproto.BearerScheme+c.token)
 	}
+}
+
+// tlsVerifyHint names the remedy for a failed certificate check against an
+// https:// or wss:// target (W9.5). The client verifies against the system CAs
+// and offers no way to skip that, so the only fixes are on the certificate side.
+func tlsVerifyHint(err error) string {
+	var unknown x509.UnknownAuthorityError
+	var invalid x509.CertificateInvalidError
+	var host x509.HostnameError
+	if errors.As(err, &unknown) || errors.As(err, &invalid) || errors.As(err, &host) {
+		return "the daemon's TLS certificate is not trusted by this machine's system CAs; " +
+			"point --daemon-url at an endpoint with a certificate this machine trusts " +
+			"(for example the HTTPS name `tailscale serve` prints), or install the CA — af has no option to skip verification"
+	}
+	return ""
 }

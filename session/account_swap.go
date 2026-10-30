@@ -21,8 +21,17 @@ type accountSwapStopper interface {
 }
 
 type accountSwapLaunchPlan struct {
-	account             string
-	base                string
+	account string
+	base    string
+	// runtimeBase is the clean base command this plan launches, frozen at
+	// preflight, for RuntimeProgram: the base without af's injected flags
+	// (base can be the pane's frozen program, which carries them), and never
+	// re-resolved from configuration at the respawn boundary — a
+	// program_overrides edit between preflight and respawn must not make
+	// RuntimeProgram claim a command that never ran (#6049 review). It is the
+	// launched base itself, or that base minus af's declared flags; empty only
+	// when the removal cannot be proven, and nothing is then recorded.
+	runtimeBase         string
 	program             string
 	proof               sessionenv.AccountLaunchProof
 	conversation        AgentConversationData
@@ -64,7 +73,7 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	} else {
 		program = prepareLaunchConversation(i, program)
 	}
-	program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.CallbackUnavailable() != "")
+	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 	return program, accountLaunchProof(declarationBase, program, trustBase, nil, "")
 }
 
@@ -121,10 +130,18 @@ func (i *Instance) PendingAccountSwap() (from, to string, pending bool) {
 }
 
 // SupportsAutomaticAccountSwap reports whether this runtime can replace its
-// credential boundary without changing backend kind.
+// credential boundary without changing backend kind: a local session, or an ssh or
+// sandbox session on a listed host whose agent-server rotates its account scope in
+// place (#5571 W7.6).
 func (i *Instance) SupportsAutomaticAccountSwap() bool {
 	backend := i.currentBackend()
-	return backend != nil && backend.Type() == "local"
+	if backend == nil {
+		return false
+	}
+	if backend.Type() == "local" {
+		return true
+	}
+	return handoffInPlaceBackend(backend.Type()) && i.offBoxAccountSwapAvailable()
 }
 
 // ValidateAccountSwap checks the complete identity boundary before the current
@@ -218,15 +235,15 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	resolution := resolveLaunchProgramForInstance(i)
 	// paneGeneratedArgs seeds the launch proof (accountLaunchProof) with the
 	// pane's still-recorded af-authored argument declaration when the swap base
-	// came from the pane's frozen program. That program already carries af's own
+	// is the pane's frozen program. That program already carries af's own
 	// injected flags (e.g. codex's startup-update-check flag #5433); recomputing
 	// the declaration from that base treats af's words as the user's — an
 	// undeclared argument — so the proof must seed from the recorded declaration
-	// instead. It is populated only for a same-agent pane-fallback base
-	// (RuntimeProgram empty, resolvedProgram matching the pane's frozen
-	// program); cross-agent and built-in override bases either do not carry
-	// af's words or keep the positional-extension shape GeneratedArgsBetween
-	// already describes.
+	// instead. It is populated only for a same-agent swap whose resolved base
+	// matches the pane's frozen program, regardless of whether that base came
+	// from RuntimeProgram or the empty-evidence pane-fallback; cross-agent and
+	// built-in override bases either do not carry af's words or keep the
+	// positional-extension shape GeneratedArgsBetween already describes.
 	var paneGeneratedArgs []string
 	// paneTrustedExecutable is the executable provenance the pane recorded
 	// alongside paneGeneratedArgs. It is empty for an untrusted absolute
@@ -298,23 +315,50 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 				resolution.trustBase = builtInProgramOverride(resolveResolvedConfigForInstance(i), enum, established)
 			}
 		}
-		// When the resolved base IS the pane's frozen program and runtime
-		// evidence was empty, that command already carries af's injected flags
-		// (the pane-fallback state after an unverified reattach, or a record
+		// When the resolved base IS the pane's frozen program, that command
+		// already carries af's injected flags (the pane-fallback state after an
+		// unverified reattach, a launch whose pane query failed, or a record
 		// predating runtime-program evidence): seed the launch proof from the
 		// pane's still-recorded declaration so af's own words are declared
 		// rather than treated as undeclared user arguments (#5433). The string
 		// match scopes the seeding to the base the pane actually recorded a
 		// declaration for — a committed retry whose frozen base matches the
 		// pane, or a fresh pane-fallback — and the proof fails closed when a
-		// caller records no matching declaration.
-		if !runtimeEstablished && resolution.command != "" &&
+		// caller records no matching declaration (a user-supplied argument af
+		// did not author keeps the base suffix from matching the recorded
+		// words, so only af's own declared flags may pass). The seeding fires
+		// whether the base came from RuntimeProgram or the empty-evidence
+		// pane-fallback: a row last respawned by a version that recorded the
+		// flagged pane program as RuntimeProgram (the poison the clean-base
+		// respawn boundary now prevents) still reaches this gate with
+		// runtimeEstablished true yet the same recorded declaration is still
+		// the provenance the boundary already accepts for that base. Requiring
+		// runtimeEstablished to be false (the earlier gate) left af's own flag
+		// undeclared on that next swap and the swap was refused.
+		if resolution.command != "" &&
 			resolution.command == i.ResolvedPaneProgram() {
 			paneGeneratedArgs = i.ResolvedPaneGeneratedArgs()
 			paneTrustedExecutable = i.ResolvedPaneTrustedExecutable()
 		}
 	}
 	resolvedProgram := resolution.command
+	// What RuntimeProgram records for this launch, decided now and carried in the
+	// plan. The launch base is clean unless it is the pane's frozen program with
+	// af's own declared flags (the pane-fallback state). Then the clean base is
+	// DERIVED from the launched command itself: the pane's frozen program minus
+	// exactly the words af's recorded declaration says it authored, accepted only
+	// when that removal is provable. It is never taken from a fresh resolution of
+	// the configuration (an override may have changed before preflight while the
+	// frozen pane command is what launches). A conversation carry's `resume <id>`
+	// is added on top of this base at launch, so it never enters it. If the base
+	// cannot be proven, nothing is recorded rather than false evidence.
+	runtimeBase := resolvedProgram
+	if len(paneGeneratedArgs) > 0 {
+		var proven bool
+		if runtimeBase, proven = sessionenv.StripDeclaredArgs(resolvedProgram, paneGeneratedArgs); !proven {
+			runtimeBase = ""
+		}
+	}
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
 		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap must choose which conversation the replacement opens (the carried one or a fresh one), so remove those arguments and retry", i.Title, name, strings.Join(args, " "))
 	}
@@ -382,8 +426,9 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// The CANDIDATE account and program, not the still-recorded fields: validation
 	// must leave the outgoing identity intact, while the af skill has to land in
 	// the root the replacement pane will actually read.
-	launchProgram = injectSystemPrompt(launchProgram,
-		resolveSkillTargetForAccount(launchProgram, accountNamespace, name), i.CallbackUnavailable() != "")
+	launchProgram = injectSystemPromptWithEnv(launchProgram,
+		resolveSkillTargetForAccount(launchProgram, accountNamespace, name, workDir), i.guidanceCaps(),
+		launchEnvFor(i, workDir))
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
 	// started. Worktree-less projections cannot launch, so they retain the
@@ -489,7 +534,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		return fmt.Errorf("account swap for %q lost the limit-resume fence during launch preflight", i.Title)
 	}
 	i.accountSwapLaunch = &accountSwapLaunchPlan{
-		account: name, base: resolvedProgram, program: launchProgram,
+		account: name, base: resolvedProgram, runtimeBase: runtimeBase, program: launchProgram,
 		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
 		agent: agent, crossAgent: crossAgent, manual: manual,
 		carry: carry, carryFallback: carryFallback,
@@ -580,6 +625,8 @@ func (i *Instance) selectAccountLocked(from, name, accountAgent string, automati
 		previous = i.Tabs[0].Conversation
 		i.setAgentConversationLocked(AgentConversationData{})
 	}
+	// The ids held outside the tab belong to the account being left too (#6189).
+	i.retireConversationsLocked()
 	// Invalidate asynchronous discovery attached to the stopped process before it
 	// can put that process's account-local conversation back into the live slot.
 	i.agentRuntimeGeneration++

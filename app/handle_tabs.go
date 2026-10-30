@@ -196,9 +196,15 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 		return m, m.handleNotice(fmt.Errorf("tab created in %q; it will appear after the next snapshot", selected.Title))
 	}
 	var attachErr error
-	if kind == session.TabKindVSCode {
+	switch {
+	case kind == session.TabKindVSCode:
 		_, attachErr = selected.AttachVSCodeTab(response.Name, response.ID)
-	} else {
+	case selected.Capabilities().Workspace == session.WorkspaceRemote:
+		// The daemon committed the sandbox's shell; this row has no tmux session or
+		// worktree for AttachShellTab to bind, and refusing here would report a
+		// committed create as a failure and invite a retry (#6020).
+		_, attachErr = selected.AttachOffBoxTab(kind, response.Name, response.ID)
+	default:
 		_, attachErr = selected.AttachShellTab(response.Name, response.TmuxName, response.ID)
 	}
 	if attachErr != nil {
@@ -282,8 +288,8 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if idx <= 0 {
 		return m, m.handleNotice(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
 	}
-	if !inst.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("this session's tab list is fixed by its runtime and can't be edited"))
+	if !inst.TabRosterMutable() {
+		return m, m.handleNotice(fmt.Errorf("cannot close tabs on archived session %q; restore it first (af sessions restore)", inst.Title))
 	}
 	tabs := inst.GetTabs()
 	if idx >= len(tabs) {
@@ -307,7 +313,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	}
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		current := m.resolveSessionActionTarget(target)
-		if current == nil || !current.Capabilities().TabManagement {
+		if current == nil || !current.TabRosterMutable() {
 			return m.handleNotice(fmt.Errorf("Tab %q is no longer available to delete", tabLabel))
 		}
 		if current.HasInFlightOp() {
@@ -625,9 +631,6 @@ func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
 		if cur := m.sidebar.GetSelectedInstance(); cur != nil && cur.IsArchived() {
 			return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", cur.Title))
 		}
-	}
-	if !inst.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("only local sessions support tab moves — this session's workspace runs off-box (docker/ssh/remote), so its tab order belongs to the runtime"))
 	}
 	if inst.IsArchived() {
 		return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", inst.Title))

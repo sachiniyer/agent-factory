@@ -557,6 +557,15 @@ func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	return &resp.Instance, err
 }
 
+// PingCapabilities asks the daemon for its Ping reply, ensuring one is running
+// like every other control call. A client reads a capability bit from it before
+// sending a field an older daemon would silently drop (HostPick).
+func PingCapabilities() (PingResponse, error) {
+	var resp PingResponse
+	err := callDaemon("Ping", PingRequest{}, &resp)
+	return resp, err
+}
+
 // ListBackends asks the daemon which runtimes a create against req.RepoPath may
 // select, and which one an unspecified create resolves to. It is the read that
 // makes CreateSession's Backend field choosable rather than guessable, and it
@@ -571,6 +580,17 @@ func ListBackends(req ListBackendsRequest) (ListBackendsResponse, error) {
 	var resp ListBackendsResponse
 	if err := callDaemon("ListBackends", req, &resp); err != nil {
 		return ListBackendsResponse{}, err
+	}
+	return resp, nil
+}
+
+// CheckHost asks the daemon to probe a listed host (empty: every listed host)
+// and record its readiness. It dials the host, so unlike ListBackends it is not
+// free; the daemon refuses a name outside the global host list.
+func CheckHost(req CheckHostRequest) (CheckHostResponse, error) {
+	var resp CheckHostResponse
+	if err := callDaemon("CheckHost", req, &resp); err != nil {
+		return CheckHostResponse{}, err
 	}
 	return resp, nil
 }
@@ -696,8 +716,8 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 }
 
 // PruneSessions asks the daemon to evaluate archived sessions against a
-// prune request (#5136). Slice 1 is strictly read-only — a dry-run listing of
-// the reclaimable sessions; the apply call lands in the follow-up issue.
+// prune request (#5136). Without req.Apply it is a strictly read-only dry-run
+// listing; with it, the daemon deletes what that listing names (#5189).
 //
 // The read must NOT spawn a daemon (#5136 Codex round 6): a launch writes
 // sockets, locks, and logs and runs session recovery — far more side effects
@@ -710,7 +730,14 @@ func PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
 	attempt := callDaemonNoEnsureAttemptUntil("PruneSessions", req, &resp, time.Time{})
 	if attempt.err != nil {
 		if !attempt.requestStarted {
-			return PruneSessionsResponse{}, ErrDaemonUnavailable
+			// Only a daemon that is absent (no socket, connection refused) is
+			// "unavailable". A socket path that cannot be formed or a permission
+			// error is not fixed by starting the daemon, so it keeps its own
+			// words (#5189).
+			if isDaemonAbsentErr(attempt.err) {
+				return PruneSessionsResponse{}, ErrDaemonUnavailable
+			}
+			return PruneSessionsResponse{}, fmt.Errorf("could not reach the daemon's control socket: %w", attempt.err)
 		}
 		return PruneSessionsResponse{}, attempt.err
 	}
@@ -755,13 +782,53 @@ func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// ErrGuardedRebindUnsupported is returned for a guarded rebind sent to a
+// daemon that predates the precondition: that daemon drops expected_root and
+// expected_checkout_id as unknown fields and would apply the rebind
+// unconditionally — exactly the silent last-writer-wins the caller asked a
+// precondition to prevent (#4822 spec). Refusing, with a message that names
+// the upgrade path, beats believing the precondition was honored.
+var ErrGuardedRebindUnsupported = errors.New("this daemon predates guarded rebinds — upgrade it, or rebind from the daemon host")
+
+// callRebindProjectRPC sends a rebind under the method name the caller's guard
+// picked. A var so tests can stand in a pre-guard daemon's "can't find method"
+// answer without a real socket.
+var callRebindProjectRPC = func(method string, req RebindProjectRequest, resp *RebindProjectResponse) error {
+	return callDaemon(method, req, resp)
+}
+
 // RebindProject asks the daemon to move a registered project's stable identity
 // to the checkout at req.Path (`af projects rebind`) — the same single-writer
 // registry path RegisterProject takes, so a running client is told through
 // projects.changed rather than discovering the move on a later read.
+//
+// A request carrying expected_root or expected_checkout_id is guarded (#4822)
+// and goes to RebindProjectGuarded: the METHOD NAME is the capability check,
+// atomic with the mutation. A daemon that lacks the method answers "can't find
+// method" — definitive proof the precondition would be ignored — which this
+// maps to ErrGuardedRebindUnsupported. No Ping probe decides: a probe is never
+// affine with the mutation it predicts (#4888 review). An unguarded request —
+// the explicit CLI form — keeps last-writer-wins on every daemon vintage.
 func RebindProject(req RebindProjectRequest) (config.Project, error) {
+	method := "RebindProject"
+	if req.ExpectedRoot != "" || req.ExpectedCheckoutID != "" {
+		method = "RebindProjectGuarded"
+	}
 	var resp RebindProjectResponse
-	if err := callDaemon("RebindProject", req, &resp); err != nil {
+	if err := callRebindProjectRPC(method, req, &resp); err != nil {
+		if method == "RebindProjectGuarded" && isRPCMethodNotFoundErr(err) {
+			return config.Project{}, ErrGuardedRebindUnsupported
+		}
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
+// SetProjectColor asks the daemon to set or clear a registered project's
+// display color (`af projects color`).
+func SetProjectColor(req SetProjectColorRequest) (config.Project, error) {
+	var resp SetProjectColorResponse
+	if err := callDaemon("SetProjectColor", req, &resp); err != nil {
 		return config.Project{}, err
 	}
 	return resp.Project, nil
@@ -862,6 +929,17 @@ func ListAccounts(req ListAccountsRequest) (ListAccountsResponse, error) {
 	var resp ListAccountsResponse
 	if err := callDaemon("ListAccounts", req, &resp); err != nil {
 		return ListAccountsResponse{}, err
+	}
+	return resp, nil
+}
+
+// QuotaReport reads the daemon host's per-agent usage/quota report (#2983) —
+// the same records→quota.Build read `af quota` makes locally, served so a
+// remote or UI client cannot paint a different answer.
+func QuotaReport(req QuotaReportRequest) (QuotaReportResponse, error) {
+	var resp QuotaReportResponse
+	if err := callDaemon("QuotaReport", req, &resp); err != nil {
+		return QuotaReportResponse{}, err
 	}
 	return resp, nil
 }

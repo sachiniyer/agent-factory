@@ -181,6 +181,14 @@ export function isWorking(s: SessionData): boolean {
   return rowStatus(s).kind === null;
 }
 
+/** True while ANY client-visible op is in flight (create, kill, archive, restore,
+ * replace, respawn). Every one of them either has no live pane yet or is about to
+ * end the current one, so a row carrying one is not a place to open or stay bound
+ * to. One predicate rather than a list, so a new op is fenced by default (#6104). */
+export function hasInFlightOp(s: SessionData): boolean {
+  return (s.in_flight_op ?? InFlightOp.None) !== InFlightOp.None;
+}
+
 /** True only for the daemon-owned create operation. Unlike isWorking (which also
  * includes a running agent and every other in-flight operation), this is used to
  * keep a not-yet-attachable row inert until its completed projection arrives. */
@@ -484,6 +492,24 @@ export function compareSessionsForRail(a: SessionData, b: SessionData): number {
   return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
 }
 
+/** The backend types whose workspace lives off-box (session/archive_sandbox.go
+ *  backendKindForType: docker, ssh, "sandbox", and "remote" — the hook runtime).
+ *  None of them can service tab management: every Add*Tab path needs a
+ *  daemon-side git worktree they do not have, so the daemon's
+ *  Capabilities().TabManagement is false for all four (#1874).
+ *
+ *  This list is the ONE place the web names backend types. It exists only because
+ *  the session envelope carries `backend_type` but not the daemon's capability
+ *  bits — the honest fix is to serialize the capability so no client re-derives
+ *  it (see #1874). Until then, a NEW off-box runtime must be added here, which is
+ *  what ui.test.ts pins. */
+const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
+
+/** The existing backend-type fallback for off-box workspace ownership. */
+export function isOffBoxWorkspace(s: Pick<SessionData, "backend_type">): boolean {
+  return OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+}
+
 /**
  * Builds the row title with the same prefixes the TUI prepends (render.go:400-465),
  * in the same precedence for ordinary status prefixes, with the orthogonal model
@@ -495,7 +521,7 @@ export function rowTitle(s: SessionData): string {
   const lv = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   let title = s.title;
-  if (s.backend_type === "remote") {
+  if (isOffBoxWorkspace(s)) {
     title = "[remote] " + title;
   }
   if (lv === Liveness.Lost) {
@@ -602,4 +628,28 @@ function formatLimitReset(reset: Date, now: Date): string {
   }
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
+/** One word for a narrow rail row: the host's name, else the runtime type; empty
+ *  for a local session or a daemon that projects no placement. Mirrors Go
+ *  PlacementData.Short. */
+export function placementShort(s: SessionData): string {
+  const p = s.placement;
+  if (!p || p.kind !== "remote") return "";
+  return p.host || p.backend || "";
+}
+
+/** The full one-line place for a detail view. Mirrors Go PlacementData.Detail. */
+export function placementDetail(s: SessionData): string {
+  const p = s.placement;
+  if (!p) return "";
+  const parts: string[] = [];
+  if (p.kind === "remote") {
+    parts.push(placementShort(s));
+    if (p.host && p.backend) parts.push(p.backend);
+  } else {
+    parts.push("local");
+  }
+  if (p.location) parts.push(p.location);
+  return parts.filter(Boolean).join(" · ");
 }

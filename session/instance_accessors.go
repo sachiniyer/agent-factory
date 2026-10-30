@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,7 +12,19 @@ import (
 
 func (i *Instance) RepoName() (string, error) {
 	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
-		return "", fmt.Errorf("remote instances do not have a local repo")
+		// An off-box row owns no local worktree, but the daemon records which
+		// project it belongs to; that identity is what a multi-repo rail
+		// disambiguates by (W8.8).
+		i.mu.RLock()
+		repoPath := i.repoIdentityPath
+		if repoPath == "" {
+			repoPath = i.Path
+		}
+		i.mu.RUnlock()
+		if repoPath == "" {
+			return "", fmt.Errorf("remote instance has no recorded repo")
+		}
+		return filepath.Base(filepath.Clean(repoPath)), nil
 	}
 	i.mu.RLock()
 	started := i.started
@@ -160,6 +173,12 @@ func (i *Instance) SetSandboxBranch(branch string) {
 	defer i.mu.Unlock()
 	if i.Branch != branch {
 		i.Branch = branch
+		i.touchLocked()
+	}
+	// The caller learned this name from a push that just landed, so it is a
+	// restore checkpoint now, not just a chosen name (#5972).
+	if branch != "" && i.branchUnpushed {
+		i.branchUnpushed = false
 		i.touchLocked()
 	}
 }
@@ -449,12 +468,12 @@ func (i *Instance) ResolvedPaneProgram() string {
 // ResolvedPaneGeneratedArgs returns the af-authored argument words recorded for
 // the local agent pane's frozen program, or nil when the instance has no local
 // tmux binding. It surfaces TmuxSession.GeneratedArgs through the instance so
-// validateAccountSwapPlan can seed a launch proof whose base came from
-// ResolvedPaneProgram instead of RuntimeProgram: that pane command already
-// carries af's own injected flags, so re-deriving the declaration from that base
-// treats af's words as undeclared user arguments and the swap is refused
-// (#5433). The recorded declaration is the provenance the pane carries beside
-// the command string, and is exactly what the proof needs to trust them.
+// validateAccountSwapPlan can seed a launch proof whose base is the pane's
+// frozen program: that pane command already carries af's own injected flags,
+// so re-deriving the declaration from that base treats af's words as undeclared
+// user arguments and the swap is refused (#5433). The recorded declaration is
+// the provenance the pane carries beside the command string, and is exactly
+// what the proof needs to trust them.
 func (i *Instance) ResolvedPaneGeneratedArgs() []string {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
@@ -677,6 +696,119 @@ func (i *Instance) MarkLoadRuntimeReplacedForTest() {
 	i.markLoadRuntimeReplaced()
 }
 
+// RebuildTeardownPending reports whether a recovery rebuilt the worktree at a
+// new identity without confirming the stale-pane teardown — see the field's
+// comment on Instance for the retry hazard it closes.
+func (i *Instance) RebuildTeardownPending() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.rebuildTeardownPending
+}
+
+// refuseInputWhileRebuildTeardownPending is the input-side twin of the
+// liveness guards: while a rebuild teardown obligation is owed, the pane a
+// client is typing into may still be the STALE one bound to the deleted
+// inode — accepted keystrokes either execute in the void or die with the
+// teardown kill moments later (#5371 review). Liveness alone cannot say this
+// (a committed retry restores LiveRunning/LiveReady for its owner), so the
+// durable flag itself is the fence. The obligation's owner does not type —
+// recover/resume run through their own seams — so nothing legitimate is
+// blocked.
+func (i *Instance) refuseInputWhileRebuildTeardownPending() error {
+	if i.RebuildTeardownPending() {
+		return fmt.Errorf(
+			"session %q still owes the teardown of the runtime its rebuilt worktree replaced; input is refused until its recovery finishes",
+			i.Title)
+	}
+	return nil
+}
+
+// SetRebuildTeardownPending records or clears the stale-pane teardown
+// obligation a worktree rebuild commits. Transitions touch the row so the
+// durable state survives the daemon, not only the attempt that set it.
+//
+// A transition also fires rebuildTeardownNotify — the daemon's synchronous
+// row write — so a restart can never reload the flag a successful attempt
+// already discharged: clearing without that checkpoint would let a daemon
+// exit after the replacements spawned but before the settlement write
+// resurrect `true` and kill the fresh panes on the next startup. On a failed
+// clear-checkpoint the marker is restored and the error returned, so the
+// caller keeps the row Lost instead of spawning on an unrecorded discharge.
+// A failed set-checkpoint likewise keeps the flag set — the rebuild has
+// committed either way — and propagates the error so the attempt reports it.
+// A nil notify is a failed checkpoint too, not a skipped one: every respawn
+// entry point that can rebuild installs the callback, so reaching a
+// transition without it means an entry point was missed (#5371 review).
+func (i *Instance) SetRebuildTeardownPending(pending bool) error {
+	i.mu.Lock()
+	if i.rebuildTeardownPending == pending && !i.rebuildTeardownPendingOwed {
+		i.mu.Unlock()
+		return nil
+	}
+	i.rebuildTeardownPending = pending
+	i.rebuildTeardownPendingOwed = true
+	notify := i.rebuildTeardownNotify
+	i.touchLocked()
+	i.mu.Unlock()
+	if notify == nil {
+		// A transition that cannot checkpoint is a transition that did not
+		// happen durably: a restart reloads the pre-transition value, which for
+		// both directions is "the obligation may exist". Keep the flag set and
+		// refuse, so a respawn entry point that forgot to install the callback
+		// cannot quietly skip the checkpoint it exists to make (#5371 review).
+		i.mu.Lock()
+		i.rebuildTeardownPending = true
+		i.touchLocked()
+		i.mu.Unlock()
+		return fmt.Errorf("rebuild teardown transition has no durable checkpoint: install SetRebuildTeardownNotify before recovering")
+	}
+	if err := notify(i); err != nil {
+		// The transition did not land durably, so the disk record is still the
+		// pre-transition value — for BOTH directions that is "the obligation may
+		// exist": either it was just committed and unrecorded, or its discharge
+		// was refused. Leaving the flag set keeps memory honest with the disk a
+		// restart would reload, and the error tells the caller to stay Lost.
+		// owed stays true, so the next matching call RETRIES the checkpoint
+		// rather than treating the equal in-memory value as durable — the
+		// arm-before-rebuild property is only real if a failed arm is retried
+		// before the rebuild commits (#5371 review).
+		i.mu.Lock()
+		i.rebuildTeardownPending = true
+		i.touchLocked()
+		i.mu.Unlock()
+		return err
+	}
+	i.mu.Lock()
+	i.rebuildTeardownPendingOwed = false
+	i.mu.Unlock()
+	return nil
+}
+
+// SetRebuildTeardownNotify installs the synchronous persist callback a
+// rebuildTeardownPending transition fires. It is in-memory — every recover
+// entry point that can reach the rebuild teardown installs it for the
+// attempt about to run; SetRebuildTeardownPending refuses a transition that
+// has no callback to make it durable.
+func (i *Instance) SetRebuildTeardownNotify(notify func(*Instance) error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.rebuildTeardownNotify = notify
+}
+
+// SetRebuildTeardownRuntimesStop installs the daemon's stop for everything a
+// session owns that no tmux session carries: the supervised VS Code editor
+// (a daemon-owned process rooted at the worktree) plus any runtimes the
+// daemon adds there later. The rebuild teardown calls it after every bound
+// tmux name is closed and BEFORE the occupancy gate — an unstopped one would
+// answer that check as a stranger — and a nil callback fails the teardown
+// closed, the same missed-entry-point contract the persist notify keeps
+// (#5371 review).
+func (i *Instance) SetRebuildTeardownRuntimesStop(stop func(*Instance) error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.rebuildTeardownStopRuntimes = stop
+}
+
 // MarkAgentRuntimeReplacedForTest seeds the replacement verdict a backend
 // stamps on a recovered runtime (#4222). Production sets it only from backend
 // recover/load paths; tests use it to model a respawn vs a verified reattach
@@ -723,6 +855,15 @@ func (i *Instance) AddTabForTest(name string, kind TabKind) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.Tabs = append(i.Tabs, &Tab{Name: name, Kind: kind})
+	i.touchLocked()
+}
+
+// AddTabWithIDForTest is AddTabForTest with a chosen stable id — the identity an
+// off-box tab is streamed by (#5571 W4.8), which a bare AddTabForTest leaves empty.
+func (i *Instance) AddTabWithIDForTest(id, name string, kind TabKind) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Tabs = append(i.Tabs, &Tab{ID: id, Name: name, Kind: kind})
 	i.touchLocked()
 }
 
