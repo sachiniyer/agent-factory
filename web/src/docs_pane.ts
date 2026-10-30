@@ -695,6 +695,10 @@ export class DocsPane {
     this.sync = sync;
     try {
       await sync.start();
+      // This tab has loaded and restored the doc's stored draft: the tabs that closed
+      // on it are redundant writers now, and must not save over what the user does next.
+      for (const old of closing.get(key) ?? []) if (old !== sync) old.abandon(true);
+      closing.delete(key);
     } catch (e) {
       if (this.sync !== sync) return;
       this.showNotice(`Could not load ${doc.file}: ${errorText(e)}`, () => void this.openDoc(doc, toQuestion, true));
