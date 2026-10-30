@@ -290,6 +290,7 @@ button:disabled,
   font: inherit;
   font-size: var(--af-type-body);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 }
 .af-project-item:hover {
