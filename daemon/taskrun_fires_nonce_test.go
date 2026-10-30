@@ -38,7 +38,7 @@ type fakeReapTmux struct {
 // server and cannot touch a real one.
 func installFakeReapTmux(t *testing.T, sanitized string, spec fakeReapTmux) (logPath string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	logPath = filepath.Join(dir, "tmux.log")
 	instanceBranch := `echo "unknown variable: AF_INSTANCE_ID" >&2; exit 1`
 	if spec.instance != "" {
@@ -243,7 +243,7 @@ func TestTaskFireLeftover_AWorktreeLeftoverIsQuarantinedAndItsSessionKept(t *tes
 		t.Fatalf("LoadConfig: %v", err)
 	}
 	branch := git.BranchForTitle(cfg.BranchPrefix, title)
-	wtPath := filepath.Join(t.TempDir(), "leftover-wt")
+	wtPath := filepath.Join(resolvedTempDir(t), "leftover-wt")
 	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
 		t.Fatalf("seed leftover worktree: %v: %s", err, out)
 	}

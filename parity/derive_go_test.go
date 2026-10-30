@@ -74,6 +74,7 @@ var auditedRequests = map[string]reflect.Type{
 	"ListProposalsRequest":          reflect.TypeOf(daemon.ListProposalsRequest{}),
 	"GetProposalRequest":            reflect.TypeOf(daemon.GetProposalRequest{}),
 	"AddProposalDocRequest":         reflect.TypeOf(daemon.AddProposalDocRequest{}),
+	"RemoveProposalDocRequest":      reflect.TypeOf(daemon.RemoveProposalDocRequest{}),
 	"PullProposalChangesRequest":    reflect.TypeOf(daemon.PullProposalChangesRequest{}),
 	"CheckpointProposalRequest":     reflect.TypeOf(daemon.CheckpointProposalRequest{}),
 	"ReadProposalDocRequest":        reflect.TypeOf(daemon.ReadProposalDocRequest{}),

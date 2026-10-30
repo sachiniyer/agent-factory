@@ -80,8 +80,8 @@ func TestCreateFromBuiltinTemplates(t *testing.T) {
 	if !slices.Equal(docs, want) {
 		t.Fatalf("docs = %v, want %v", docs, want)
 	}
-	if !slices.Equal(BuiltinTemplates, []string{"goals", "technical", "api", "ui", "future"}) {
-		t.Fatalf("BuiltinTemplates = %v, want goals, technical, api, ui, future", BuiltinTemplates)
+	if !slices.Equal(BuiltinTemplates, []string{"goals", "technical", "api", "ui", "steps", "future"}) {
+		t.Fatalf("BuiltinTemplates = %v, want goals, technical, api, ui, steps, future", BuiltinTemplates)
 	}
 	future, _, err := s.Read("auth-rework", "future")
 	if err != nil || !strings.HasPrefix(future, "# auth rework: future") {
@@ -343,6 +343,34 @@ func TestDetach(t *testing.T) {
 	}
 	if _, err := s.Checkpoint(sessA); err != ErrNotAttached {
 		t.Fatalf("Checkpoint after detach = %v, want ErrNotAttached", err)
+	}
+}
+
+func TestRemoveDoc(t *testing.T) {
+	s, _ := newTestStore(t)
+	startAttached(t, s, "p", sessA, "goals", "api")
+	if err := os.WriteFile(filepath.Join(s.SlugPath("p"), "goals.md"), []byte("unsaved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, commit, err := s.RemoveDoc("p", "api", Committer{Author: AuthorHuman})
+	if err != nil || file != "api.md" || commit == "" {
+		t.Fatalf("RemoveDoc = %q, %q, %v", file, commit, err)
+	}
+	if docs, _ := s.Docs("p"); !slices.Equal(docs, []string{"goals.md"}) {
+		t.Fatalf("docs after remove = %v", docs)
+	}
+	if _, _, err := s.RemoveDoc("p", "api", Committer{Author: AuthorHuman}); err == nil {
+		t.Fatal("removing a missing doc must fail")
+	}
+	if text, err := s.git(nil, "show", commit+"^:p/api.md"); err != nil || text == "" {
+		t.Fatalf("the removed doc must stay in history: %q, %v", text, err)
+	}
+	if text, err := s.git(nil, "show", commit+":p/goals.md"); err != nil || text != "unsaved\n" {
+		t.Fatalf("uncommitted edits to other docs must be snapshotted first: %q, %v", text, err)
+	}
+	c := mustChanges(t, s, sessA)
+	if len(c.Edits) != 2 {
+		t.Fatalf("want the snapshot and the removal as 2 edits, got %+v", c.Edits)
 	}
 }
 
