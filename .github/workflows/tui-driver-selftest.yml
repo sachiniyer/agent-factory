@@ -53,7 +53,8 @@ permissions:
 jobs:
   selftest:
     name: TUI driver selftest
-    runs-on: ubuntu-latest
+    # Pinned to 24.04 until #6281 (26.04 compatibility) lands.
+    runs-on: ubuntu-24.04
     # A cold image build must fit, but a wedged TUI must not consume the runner's
     # six-hour default. The step wall leaves three minutes to upload its transcript.
     timeout-minutes: 15

@@ -15,7 +15,7 @@ import (
 // it from being bypassed (#3774).
 //
 // The bug: `apt-get update` exits 100 when ANY configured source fails, so a
-// 403 from packages.microsoft.com — a repository the ubuntu-latest image ships
+// 403 from packages.microsoft.com — a repository the ubuntu-24.04 image ships
 // and this project never installs from — short-circuited the `&&` in six
 // workflow steps and reddened master's Build, the required Test check, and both
 // release preflights.
