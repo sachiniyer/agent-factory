@@ -601,19 +601,6 @@ func (d InstanceData) ForClientRead() InstanceData {
 	return d
 }
 
-func archiveWarningOperation(liveness Liveness) string {
-	switch liveness {
-	case LiveArchived:
-		return "archive"
-	case LiveLost:
-		// A report can be installed before registration repair succeeds. Until
-		// recovery settles, neither archive nor restore is known to have completed.
-		return ""
-	default:
-		return "restore"
-	}
-}
-
 // Storage handles saving and loading instances using the state interface.
 // When repoID is set (TUI mode), operations are scoped to that repo.
 // When repoID is empty (daemon mode), operations span all repos.
