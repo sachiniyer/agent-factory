@@ -2,6 +2,8 @@ package backlog
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/rand"
 	"reflect"
 	"strings"
 	"testing"
@@ -222,5 +224,137 @@ func TestAddBatchStillRefusesAFinalCycle(t *testing.T) {
 	}}, t0)
 	if err == nil || len(b.Items) != 0 {
 		t.Fatalf("err = %v, items = %d", err, len(b.Items))
+	}
+}
+
+// The final parent of an input can be an item the batch leaves alone whose own
+// ancestor the batch is about to relocate (Codex P2 on #6286, round 3): with the
+// tree A > C > B, listing A under B and then C at the top level is valid
+// (C > B > A) in either input order.
+func TestAddBatchOrdersMovesThroughUnchangedIntermediateParents(t *testing.T) {
+	build := func() *Backlog {
+		src := func(key string) *Source { return &Source{Proposal: "x", Key: key} }
+		return mk(t,
+			Item{ID: 1, Source: src("a")},
+			Item{ID: 2, Parent: 1, Source: src("c")},
+			Item{ID: 3, Parent: 2},
+		)
+	}
+	forward := []ItemInput{
+		{Key: "a", Title: "a", Parent: Ref{ID: 3}},
+		{Key: "c", Title: "c"},
+	}
+	reversed := []ItemInput{forward[1], forward[0]}
+	for name, items := range map[string][]ItemInput{"listed in file order": forward, "reversed": reversed} {
+		t.Run(name, func(t *testing.T) {
+			b := build()
+			if _, err := b.AddBatch(Batch{Proposal: "x", Items: items}, t0); err != nil {
+				t.Fatalf("a valid final tree was refused: %v", err)
+			}
+			if b.Item(2).Parent != 0 || b.Item(3).Parent != 2 || b.Item(1).Parent != 3 {
+				t.Fatalf("want C > B > A, got %+v", b.Items)
+			}
+		})
+	}
+}
+
+// A final tree whose parent links loop is refused whatever the input order, and
+// leaves the backlog unchanged.
+func TestAddBatchRefusesAFinalParentLoop(t *testing.T) {
+	b := New()
+	_, err := b.AddBatch(Batch{Items: []ItemInput{
+		{Key: "a", Title: "a", Parent: Ref{Key: "b"}},
+		{Key: "b", Title: "b", Parent: Ref{Key: "a"}},
+	}}, t0)
+	if err == nil || len(b.Items) != 0 {
+		t.Fatalf("err = %v, items = %d", err, len(b.Items))
+	}
+}
+
+// Property: for any starting forest and any acyclic requested parent assignment,
+// in any input order, AddBatch succeeds and the finished tree has exactly the
+// requested parents. Two review rounds on #6286 found input-order bugs one at a
+// time; this checks the whole class.
+func TestAddBatchReachesTheRequestedTreeInAnyOrder(t *testing.T) {
+	rng := rand.New(rand.NewSource(6286))
+	const n = 6
+	for trial := 0; trial < 400; trial++ {
+		items := make([]Item, n)
+		for i := range items {
+			items[i] = Item{ID: i + 1, Source: &Source{Proposal: "x", Key: fmt.Sprint(i + 1)}}
+		}
+		// A random starting forest: ranks give an acyclic parent choice.
+		start := rng.Perm(n)
+		for rank, id := range start {
+			if rank > 0 && rng.Intn(4) > 0 {
+				items[id].Parent = start[rng.Intn(rank)] + 1
+			}
+		}
+		b := New()
+		for _, it := range items {
+			it.Status, it.Title = StatusDraft, FormatID(it.ID)
+			b.Items = append(b.Items, it)
+		}
+		if b.normalize() != nil {
+			t.Fatalf("trial %d: generator built an invalid start", trial)
+		}
+		// Request new parents for a random subset; the rest keep theirs. Skip
+		// the draws whose finished tree would loop (AddBatch must refuse those).
+		want := map[int]int{}
+		pos := rng.Perm(n)
+		for rank, id := range pos {
+			if rng.Intn(2) == 0 {
+				continue
+			}
+			if rank > 0 && rng.Intn(3) > 0 {
+				want[id+1] = pos[rng.Intn(rank)] + 1
+			} else {
+				want[id+1] = 0
+			}
+		}
+		if len(want) == 0 {
+			continue
+		}
+		final := map[int]int{}
+		for _, it := range items {
+			final[it.ID] = it.Parent
+		}
+		for id, p := range want {
+			final[id] = p
+		}
+		loops := false
+		for id := range final {
+			for cur, steps := id, 0; cur != 0; steps++ {
+				if steps > n {
+					loops = true
+					break
+				}
+				cur = final[cur]
+			}
+		}
+		if loops {
+			continue
+		}
+		var in []ItemInput
+		for _, idx := range rng.Perm(n) {
+			id := idx + 1
+			p, listed := want[id]
+			if !listed {
+				continue
+			}
+			x := ItemInput{Key: fmt.Sprint(id), Title: FormatID(id)}
+			if p != 0 {
+				x.Parent = Ref{ID: p}
+			}
+			in = append(in, x)
+		}
+		if _, err := b.AddBatch(Batch{Proposal: "x", Items: in}, t0); err != nil {
+			t.Fatalf("trial %d: a valid final tree was refused: %v\nstart %+v\nwant %v", trial, err, items, want)
+		}
+		for id, p := range final {
+			if b.Item(id).Parent != p {
+				t.Fatalf("trial %d: %s has parent %d, want %d", trial, FormatID(id), b.Item(id).Parent, p)
+			}
+		}
 	}
 }

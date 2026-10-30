@@ -150,6 +150,20 @@ func (b *Backlog) SetStatus(id int, to Status, by Actor, runActive func(*Item) b
 	if len(changed) == 0 {
 		return nil, fmt.Errorf("%s has no children to %s", FormatID(id), verb(to))
 	}
+	if to == StatusDropped {
+		// A dropped subtree has nothing left to ask: close the questions on the
+		// target and on every intermediate parent too, or its roll-up keeps
+		// reading needs_you and a retry finds no leaf left to drop.
+		for i := range c.Items {
+			parent := &c.Items[i]
+			if (parent.ID != id && !c.IsAncestor(id, parent.ID)) || !c.IsParent(parent.ID) || parent.OpenQuestion() == nil {
+				continue
+			}
+			parent.closeOpenQuestions(ClosedDropped)
+			parent.UpdatedAt = now
+			changed = append(changed, parent.ID)
+		}
+	}
 	*b = *c
 	return changed, nil
 }
