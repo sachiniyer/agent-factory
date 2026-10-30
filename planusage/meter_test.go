@@ -152,21 +152,21 @@ func TestScanSkipsUnchangedFilesWithoutOpeningThem(t *testing.T) {
 func TestRunWindowCost(t *testing.T) {
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	s := NewMeterState()
-	s.AddRunEntries("s1", []Entry{
+	s.AddRunEntries("s1", "acct", []Entry{
 		{At: now.Add(-time.Hour), Cost: 2},
 		{At: now.Add(-time.Hour + time.Minute), Cost: 1},
 		{At: now.Add(-7 * time.Hour), Cost: 50},
 	})
 	reset := now.Add(2 * time.Hour)
 	w := PlanWindow{Plan: 10, ResetsAt: &reset}
-	if got := s.RunWindowCost("s1", w); !near(got, 3) {
+	if got := s.RunWindowCost("s1", "acct", w); !near(got, 3) {
 		t.Fatalf("window cost %v, want 3", got)
 	}
-	if got := s.RunWindowCost("s1", PlanWindow{}); got != 0 {
+	if got := s.RunWindowCost("s1", "acct", PlanWindow{}); got != 0 {
 		t.Fatalf("no window: %v", got)
 	}
 	s.PruneRunBuckets(now)
-	if len(s.RunBuckets["s1"]) != 1 {
+	if len(s.RunBuckets["s1|acct"]) != 1 {
 		t.Fatalf("old buckets kept: %v", s.RunBuckets)
 	}
 	s.KeepRunSeen(map[string]bool{})
@@ -251,16 +251,16 @@ func TestRunSnapshotRestoreAndRememberedDirs(t *testing.T) {
 	s := NewMeterState()
 	seen := s.RunSeenFor("s1")
 	seen["a"] = 1
-	s.AddRunEntries("s1", []Entry{{At: time.Date(2026, 10, 20, 10, 1, 0, 0, time.UTC), Cost: 3}})
+	s.AddRunEntries("s1", "acct", []Entry{{At: time.Date(2026, 10, 20, 10, 1, 0, 0, time.UTC), Cost: 3}})
 	snap := s.SnapshotRun("s1")
 	s.RunSeenFor("s1")["b"] = 2
-	s.AddRunEntries("s1", []Entry{{At: time.Date(2026, 10, 20, 10, 2, 0, 0, time.UTC), Cost: 5}})
+	s.AddRunEntries("s1", "acct", []Entry{{At: time.Date(2026, 10, 20, 10, 2, 0, 0, time.UTC), Cost: 5}})
 	s.RestoreRun("s1", snap)
-	if len(s.RunSeen["s1"]) != 1 || !near(s.RunBuckets["s1"][time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC).Unix()], 3) {
-		t.Fatalf("not restored: %+v %+v", s.RunSeen["s1"], s.RunBuckets["s1"])
+	if len(s.RunSeen["s1"]) != 1 || !near(s.RunBuckets["s1|acct"][time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC).Unix()], 3) {
+		t.Fatalf("not restored: %+v %+v", s.RunSeen["s1"], s.RunBuckets["s1|acct"])
 	}
-	s.RestoreRun("none", RunSnapshot{Seen: map[string]int64{}, Buckets: map[int64]float64{}})
-	if _, ok := s.RunBuckets["none"]; ok {
+	s.RestoreRun("none", RunSnapshot{Seen: map[string]int64{}, Buckets: map[string]map[int64]float64{}})
+	if _, ok := s.RunBuckets["none|x"]; ok {
 		t.Fatal("an empty snapshot left an empty bucket map behind")
 	}
 	if dirs := s.RememberRunDirs("s1", []string{"/a", "/b"}); len(dirs) != 2 {
@@ -272,5 +272,32 @@ func TestRunSnapshotRestoreAndRememberedDirs(t *testing.T) {
 	s.KeepRunSeen(map[string]bool{})
 	if len(s.RunDirs) != 0 {
 		t.Fatal("dirs outlived the session")
+	}
+}
+
+// A session handed from one account to another keeps each account's spend apart,
+// so a window sums only what was spent under its own account (Codex P2 on #6299).
+func TestRunWindowCostPartitionsByAccount(t *testing.T) {
+	s := NewMeterState()
+	at := time.Date(2026, 10, 20, 10, 1, 0, 0, time.UTC)
+	s.AddRunEntries("s1", "source", []Entry{{At: at, Cost: 5}})
+	s.AddRunEntries("s1", "dest", []Entry{{At: at.Add(time.Minute), Cost: 2}})
+	reset := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	w := PlanWindow{ResetsAt: &reset}
+	if got := s.RunWindowCost("s1", "dest", w); !near(got, 2) {
+		t.Fatalf("destination window = %v, want only its own 2", got)
+	}
+	if got := s.RunWindowCost("s1", "source", w); !near(got, 5) {
+		t.Fatalf("source window = %v", got)
+	}
+	snap := s.SnapshotRun("s1")
+	s.AddRunEntries("s1", "dest", []Entry{{At: at, Cost: 9}})
+	s.RestoreRun("s1", snap)
+	if got := s.RunWindowCost("s1", "dest", w); !near(got, 2) {
+		t.Fatalf("restored destination window = %v", got)
+	}
+	s.KeepRunSeen(map[string]bool{})
+	if len(s.RunBuckets) != 0 {
+		t.Fatal("buckets outlived the session")
 	}
 }

@@ -211,6 +211,7 @@ func TestContinueBacklogItemSendFails(t *testing.T) {
 	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err == nil {
 		t.Fatal("start succeeded with a failed send")
 	}
+	m.backgroundMutationWG.Wait() // the rollback runs on a tracked worker
 	it := loadItem(t, repoID, 1)
 	if inst.BacklogRunActive() || it.Status != backlog.StatusReview {
 		t.Fatal("a failed send must leave the item and session as they were")
@@ -417,5 +418,44 @@ func TestFailedContinueSettlesThePreviousRunsEnd(t *testing.T) {
 	m.backgroundMutationWG.Wait()
 	if it := loadItem(t, repoID, 1); it.Status != backlog.StatusReview {
 		t.Fatalf("status = %s, want review: the previous run's end was lost", it.Status)
+	}
+}
+
+// A proven-undelivered continue's rollback is retried while the backlog is busy,
+// and the previous run's end is settled only after it commits (Codex P2 on
+// #6294): the failure note must land and the item must end in review.
+func TestFailedContinueRollbackRetriesABusyBacklog(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	idleItemSession(t, inst)
+	prevSend := sendBacklogPrompt
+	sendBacklogPrompt = func(*Manager, SendPromptRequest) error { return errBacklogPromptNotDelivered }
+	prevApply, prevBackoff := applyBacklog, finishStartBackoff
+	finishStartBackoff = time.Millisecond
+	t.Cleanup(func() { sendBacklogPrompt, applyBacklog, finishStartBackoff = prevSend, prevApply, prevBackoff })
+	busy := 3
+	applyBacklog = func(svc *backlog.Service, ref backlog.ProjectRef, fn func(*backlog.Backlog) ([]int, error)) (*backlog.Backlog, error) {
+		if busy > 0 {
+			busy--
+			return nil, backlog.ErrBusy
+		}
+		return prevApply(svc, ref, fn)
+	}
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err == nil {
+		t.Fatal("a proven non-delivery was reported as a started continue")
+	}
+	m.backgroundMutationWG.Wait()
+	if busy != 0 {
+		t.Fatalf("the rollback gave up with %d busy answers left", busy)
+	}
+	it := loadItem(t, repoID, 1)
+	if it.Status != backlog.StatusReview {
+		t.Fatalf("status = %s, want review", it.Status)
+	}
+	found := false
+	for _, x := range it.Thread {
+		found = found || strings.Contains(x.Text, "did not take the prompt")
+	}
+	if !found {
+		t.Fatalf("the failure note was lost to a busy backlog: %+v", it.Thread)
 	}
 }

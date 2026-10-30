@@ -212,6 +212,15 @@ func (m *Manager) rememberItemRunDirs(repoID, sessionID string) {
 	}
 }
 
+// accountOfRun is the account key a run's cost is incurred under: the account of
+// its config dir, or the ambient key when the dir is unknown (a killed session).
+func accountOfRun(home, configDir string) string {
+	if configDir == "" {
+		return planusage.DefaultAccount
+	}
+	return planusage.AccountForConfigDir(home, configDir)
+}
+
 // itemRun is one started run of an item, with its session when it still exists.
 type itemRun struct {
 	repoID string
@@ -330,10 +339,13 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		metered[r.run.SessionID] = true
 		runSnaps[r.run.SessionID] = state.SnapshotRun(r.run.SessionID)
 		seen := state.RunSeenFor(r.run.SessionID)
-		planusage.PruneSeen(seen, now)
+		// The counted-message keys live as long as the run's stored costs: pruning
+		// them on the account window's schedule would let a resumed or forked
+		// transcript re-add old history to a run continued after more than a week
+		// (Codex P2 on #6299).
 		rm := backlog.MeterRun(r.item.ID, r.run, planusage.TranscriptFiles(dirs), seen, overrides, now)
 		usage.Runs[r.run.SessionID] = rm.Cost()
-		state.AddRunEntries(r.run.SessionID, rm.Entries)
+		state.AddRunEntries(r.run.SessionID, accountOfRun(home, configDir), rm.Entries)
 		if configDir != "" {
 			account := planusage.AccountForConfigDir(home, configDir)
 			runAccount[r.run.SessionID] = account
@@ -353,7 +365,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	state.PruneRunBuckets(now)
 	m.meterAccounts(home, state, backlogDirs, runConfigs, overrides, now, &usage)
 	for sessionID, account := range runAccount {
-		usage.RunWindow[sessionID] = state.RunWindowCost(sessionID, usage.Accounts[account].Windows.FiveHour)
+		usage.RunWindow[sessionID] = state.RunWindowCost(sessionID, account, usage.Accounts[account].Windows.FiveHour)
 	}
 	// Save the dedupe keys and buckets BEFORE the offsets and costs that depend
 	// on them advance in backlog.json: the other order leaves a failed save with
