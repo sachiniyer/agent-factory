@@ -82,3 +82,43 @@ func TestTimedOutMutationBlocksActingAgainUntilItFinishes(t *testing.T) {
 	require.Eventually(t, func() bool { return MutationInFlight("/p/a", "/p/b") == nil }, time.Second, 5*time.Millisecond,
 		"once it provably finished, the paths are free again")
 }
+
+// Under the start-up resume budget every bounded operation uses min(its own bound,
+// what remains), and once the budget is spent an operation does not even start
+// (Codex on #6186): one stalled row cannot overrun the budget.
+func TestOperationBudgetCapsEveryBoundedOperation(t *testing.T) {
+	prev := pruneFSOpTimeout
+	pruneFSOpTimeout = 10 * time.Second
+	t.Cleanup(func() { pruneFSOpTimeout = prev })
+
+	t.Run("a spent budget refuses to start the operation", func(t *testing.T) {
+		clear := SetOperationBudget(time.Now().Add(-time.Second))
+		defer clear()
+		ran := false
+		_, err := BoundedFSOp("op", func() (int, error) { ran = true; return 1, nil })
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.False(t, ran, "the operation was not started")
+		err = BoundedMutationWithin(time.Minute, "mutation", []string{"/b/spent"}, func() error { ran = true; return nil })
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.False(t, ran)
+		_, err = BoundedPathExists(t.TempDir())
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+
+	t.Run("the remaining budget caps a longer own bound", func(t *testing.T) {
+		clear := SetOperationBudget(time.Now().Add(150 * time.Millisecond))
+		defer clear()
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		start := time.Now()
+		_, err := BoundedFSOp("stalled", func() (int, error) { <-release; return 1, nil })
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Less(t, time.Since(start), 2*time.Second, "capped at the remaining budget, not the 10s own bound")
+	})
+
+	t.Run("no budget leaves the own bound alone", func(t *testing.T) {
+		d, spent := RemainingBudget(7 * time.Second)
+		assert.False(t, spent)
+		assert.Equal(t, 7*time.Second, d)
+	})
+}

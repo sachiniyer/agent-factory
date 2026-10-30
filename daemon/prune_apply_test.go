@@ -785,3 +785,76 @@ func TestPruneApply_ResumeLeavesAnInvalidIntentInPlaceEvenWhenTheOriginalExists(
 		})
 	}
 }
+
+// Lock order against restore (Codex on #6186): restore takes worktree admission and
+// then persists (the start lock); create takes the start lock and then admission.
+// Prune takes NO admission, so a prune overlapping a restore-order holder cannot
+// form a cycle with it. Under a deadline: the holder acquires admission then the
+// start lock, exactly as restore does, while a prune is queued.
+func TestPruneApply_DoesNotFormALockCycleWithRestoreOrder(t *testing.T) {
+	manager, repoID, _, inst, _ := seedPrunableArchive(t, "restore-order")
+	c := planOf(t, manager, repoID)
+
+	admission := manager.worktreeAdmissionLockForRepo(repoID)
+	admission.Lock() // restore holds admission ...
+	pruned := make(chan PruneSessionsResponse, 1)
+	go func() {
+		resp, _ := manager.PruneSessions(applyReq(repoID, c.ID))
+		pruned <- resp
+	}()
+	persisted := make(chan error, 1)
+	go func() { // ... and then persists, which takes the start lock
+		time.Sleep(200 * time.Millisecond)
+		persisted <- manager.persistInstanceErr(repoID, inst)
+	}()
+
+	deadline := time.After(15 * time.Second)
+	var resp PruneSessionsResponse
+	for got := 0; got < 2; got++ {
+		select {
+		case resp = <-pruned:
+		case <-persisted:
+		case <-deadline:
+			t.Fatal("deadlock: prune and a restore-order holder wait on each other")
+		}
+	}
+	admission.Unlock()
+	assert.Len(t, resp.Pruned, 1, "skipped=%+v incomplete=%+v", resp.Skipped, resp.Incomplete)
+}
+
+// The start-up resume shares ONE budget: when it is spent the pass stops cleanly,
+// leaving the intent and the renamed tree in place, and a later pass with budget
+// finishes it. It runs off the readiness path, so daemon start never waits on it.
+func TestPruneApply_StartupResumeStopsCleanlyWhenItsBudgetIsSpent(t *testing.T) {
+	manager, repoID, _, inst, archived := seedPrunableArchive(t, "budget-spent")
+	c := planOf(t, manager, repoID)
+	pruneStepHook = func(step string) error {
+		if step == "remove" {
+			return errPruneCrash
+		}
+		return nil
+	}
+	t.Cleanup(func() { pruneStepHook = nil })
+	_, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	pruneStepHook = nil
+	require.Len(t, tombstones(t, archived), 1)
+
+	prev := pruneResumeBudget
+	pruneResumeBudget = time.Nanosecond // already spent when the pass starts
+	t.Cleanup(func() { pruneResumeBudget = prev })
+	var wg sync.WaitGroup
+	start := time.Now()
+	launchPruneIntentResume(manager, make(chan struct{}), &wg)
+	assert.Less(t, time.Since(start), 2*time.Second, "launching never blocks the caller (daemon readiness)")
+	wg.Wait()
+	assert.NotNil(t, inst.PruneIntent(), "the intent is left in place")
+	assert.False(t, inst.IsPruned())
+	assert.Len(t, tombstones(t, archived), 1, "and so is the renamed tree")
+
+	pruneResumeBudget = prev
+	launchPruneIntentResume(manager, make(chan struct{}), &wg)
+	wg.Wait()
+	assert.True(t, inst.IsPruned(), "a pass with budget finishes it")
+	assert.Empty(t, tombstones(t, archived))
+}

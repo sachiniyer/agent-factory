@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,6 +22,38 @@ import (
 // swapping it cannot race an abandoned goroutine.
 var pruneFSOpTimeout = 10 * time.Second
 
+// The start-up resume of interrupted prunes runs under ONE time budget that every
+// bounded operation inside it shares: each uses min(its own bound, what remains),
+// and once the budget is spent an operation does not start at all and reports
+// DeadlineExceeded (unknown), so the resume stops cleanly with its intents left in
+// place. The budget is process-wide while the resume runs; a concurrent prune in
+// that window sees the same shortened bounds, which can only make it refuse sooner.
+var operationBudget atomic.Pointer[time.Time]
+
+// SetOperationBudget installs a deadline for every bounded prune operation until
+// the returned function is called.
+func SetOperationBudget(deadline time.Time) (clear func()) {
+	operationBudget.Store(&deadline)
+	return func() { operationBudget.CompareAndSwap(&deadline, nil) }
+}
+
+// RemainingBudget returns min(own, what remains of the installed budget) and
+// whether the budget is spent. With no budget installed it returns own.
+func RemainingBudget(own time.Duration) (time.Duration, bool) {
+	p := operationBudget.Load()
+	if p == nil {
+		return own, false
+	}
+	rem := time.Until(*p)
+	if rem <= 0 {
+		return 0, true
+	}
+	if rem < own {
+		return rem, false
+	}
+	return own, false
+}
+
 // BoundedFSOp runs op and returns its result, or a DeadlineExceeded error when it
 // has not finished within the bound.
 func BoundedFSOp[T any](what string, op func() (T, error)) (T, error) {
@@ -28,7 +61,11 @@ func BoundedFSOp[T any](what string, op func() (T, error)) (T, error) {
 		v   T
 		err error
 	}
-	timeout := pruneFSOpTimeout
+	timeout, spent := RemainingBudget(pruneFSOpTimeout)
+	if spent {
+		var zero T
+		return zero, fmt.Errorf("%s was not started: the start-up resume budget is spent: %w", what, context.DeadlineExceeded)
+	}
 	done := make(chan result, 1)
 	go func() {
 		v, err := op()
@@ -111,6 +148,10 @@ func BoundedMutationWithin(timeout time.Duration, what string, keys []string, op
 	if err := MutationInFlight(keys...); err != nil {
 		return err
 	}
+	timeout, spent := RemainingBudget(timeout)
+	if spent {
+		return fmt.Errorf("%s was not started: the start-up resume budget is spent: %w", what, context.DeadlineExceeded)
+	}
 	settled := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -144,7 +185,7 @@ func BoundedRename(from, to string) error {
 
 // BoundedFreeSpace is a Statfs-and-Stat probe, bounded.
 func BoundedPathExists(path string) (bool, error) {
-	_, err := BoundedLstat(path)
+	_, err := BoundedFSOp("inspecting "+path, func() (os.FileInfo, error) { return BoundedLstat(path) })
 	switch {
 	case err == nil:
 		return true, nil

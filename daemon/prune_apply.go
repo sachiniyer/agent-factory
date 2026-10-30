@@ -235,7 +235,7 @@ func (m *Manager) pruneApplyOne(c PruneCandidate, cutoff time.Time) (*PrunedEntr
 		return skip("session changed before it could be pruned")
 	}
 
-	release, err := m.lockForPrune(c.RepoID, key, c.Title, "prune", instance, true)
+	release, err := m.lockForPrune(c.RepoID, key, c.Title, "prune", instance)
 	if err != nil {
 		return skip(err.Error())
 	}
@@ -390,7 +390,7 @@ func validatePruneTombstonePath(intent *session.PruneIntentData) error {
 // partway is simply re-run. (The registration leaf, which does carry a nonce, is
 // removed identity-last: see sessiongit.RemoveArchivedRegistrationLeaf.)
 func pruneRemoveTree(path string) error {
-	info, err := sessiongit.BoundedLstat(path)
+	info, err := sessiongit.BoundedFSOp("inspecting "+path, func() (os.FileInfo, error) { return sessiongit.BoundedLstat(path) })
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -420,7 +420,7 @@ func (m *Manager) resumePruneIntent(repoID string, instance *session.Instance) (
 		return nil, nil
 	}
 	key := daemonInstanceKey(repoID, data.Title)
-	release, err := m.lockForPrune(repoID, key, data.Title, "prune resume", instance, false)
+	release, err := m.lockForPrune(repoID, key, data.Title, "prune resume", instance)
 	if err != nil {
 		return inc("intent", err)
 	}
@@ -484,8 +484,10 @@ func randomSuffix() string {
 	return hex.EncodeToString(b[:])
 }
 
-// pruneResumeBudget bounds the whole start-up resume pass.
-const pruneResumeBudget = 2 * time.Minute
+// pruneResumeBudget bounds the whole start-up resume pass: every bounded operation
+// in it uses min(its own bound, what remains), so one row on a stalled filesystem
+// cannot overrun it. A var for tests.
+var pruneResumeBudget = 2 * time.Minute
 
 // launchPruneIntentResume finishes prune deletions a previous daemon began. It runs
 // on its own goroutine AFTER readiness, is bounded as a whole, logs each intent it
@@ -507,16 +509,20 @@ func launchPruneIntentResume(m *Manager, stopCh <-chan struct{}, wg interface {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		deadline := time.NewTimer(pruneResumeBudget)
-		defer deadline.Stop()
+		// ONE budget for the whole pass, shared by every bounded operation inside it
+		// (each uses min(its own bound, what remains)); once it is spent an operation
+		// does not start, so the pass stops cleanly with the intents left in place.
+		deadline := time.Now().Add(pruneResumeBudget)
+		defer sessiongit.SetOperationBudget(deadline)()
 		for _, r := range pending {
 			select {
 			case <-stopCh:
 				return
-			case <-deadline.C:
+			default:
+			}
+			if !time.Now().Before(deadline) {
 				m.warn().Printf("prune resume: budget of %s spent; remaining intents are finished by the next `af sessions prune --apply`", pruneResumeBudget)
 				return
-			default:
 			}
 			id := r.instance.ID
 			intent := r.instance.PruneIntent()
@@ -614,16 +620,24 @@ func pruneExists(path string) (bool, error) {
 
 // lockForPrune takes everything one prune step on a row needs, in the daemon's
 // global lock order (see startLockForRepo): the session operation lock, then the
-// repository start lock, then worktree admission (apply only), then the claim. A
-// create takes the start lock before admission, so prune must too — taking them in
-// the opposite order deadlocks a prune overlapping a create in the same repository.
-// Every wait is bounded. While the start lock is held, persist ONLY with the
+// repository start lock, then the claim. It deliberately takes NO worktree
+// admission: admission serializes branch/path SELECTION for create and restore,
+// which prune never does (it removes an archive; it selects nothing), and holding it
+// would put prune in the same lock cycle as the restore path, which takes admission
+// BEFORE the start lock (via its persists) while create takes them the other way.
+// Every wait is bounded, and also by what remains of the start-up resume budget
+// when one is running. While the start lock is held, persist ONLY with the
 // lock-free persistPruneRow (persistInstanceErr would take it again).
-func (m *Manager) lockForPrune(repoID, key, title, operation string, instance *session.Instance, withAdmission bool) (func(), error) {
+func (m *Manager) lockForPrune(repoID, key, title, operation string, _ *session.Instance) (func(), error) {
 	deleteSeq := m.projectDeleteSeqNow()
-	opLock, waited, err := m.lockSessionOperationWithin(key, operation, title)
-	if err != nil {
-		return nil, err
+	wait, spent := sessiongit.RemainingBudget(opLockTimeout)
+	if spent {
+		return nil, fmt.Errorf("%s of session %q was not started: the start-up resume budget is spent", operation, title)
+	}
+	opLock := m.opLockFor(key)
+	acquired, waited := lockWithin(opLock, wait)
+	if !acquired {
+		return nil, fmt.Errorf("%s of session %q timed out after %s waiting for another operation on it to finish; the requested %s did not start and made no changes — retry", operation, title, waited, operation)
 	}
 	var unlocks []func()
 	release := func() {
@@ -633,21 +647,16 @@ func (m *Manager) lockForPrune(repoID, key, title, operation string, instance *s
 		opLock.Unlock()
 	}
 	startLock := m.startLockForRepo(repoID)
-	if ok, w := lockWithin(startLock, opLockTimeout); !ok {
+	wait, spent = sessiongit.RemainingBudget(opLockTimeout)
+	if spent {
+		release()
+		return nil, fmt.Errorf("%s of session %q was not started: the start-up resume budget is spent", operation, title)
+	}
+	if ok, w := lockWithin(startLock, wait); !ok {
 		release()
 		return nil, fmt.Errorf("%s of session %q timed out after %s waiting for another operation in this repository (a create or a persist); the requested %s did not start and made no changes — retry", operation, title, w, operation)
 	}
 	unlocks = append(unlocks, startLock.Unlock)
-	if withAdmission {
-		admission, err := m.lockLocalWorktreeAdmissionWithin(repoID, title, operation, instance)
-		if err != nil {
-			release()
-			return nil, err
-		}
-		if admission != nil {
-			unlocks = append(unlocks, func() { unlockWorktreeAdmission(admission) })
-		}
-	}
 	if err := m.claimPruneOperation(repoID, key, title, waited, deleteSeq); err != nil {
 		release()
 		return nil, err

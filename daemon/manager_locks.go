@@ -17,17 +17,32 @@ import "sync"
 // lock across its body and takes m.mu under it), so the reverse closes an ABBA
 // cycle — the #2006 lock-inversion class.
 //
-// GLOBAL LOCK ORDER for session lifecycle work (take left to right, release in
-// reverse; never take one to the LEFT of a lock already held):
+// GLOBAL LOCK ORDER for session lifecycle work. Take left to right, release in
+// reverse, and never take a lock to the LEFT of one already held; a wait on a lock
+// to the right must be bounded:
 //
 //	per-session operation lock (opLockFor)
 //	  -> repository start lock (this lock)
 //	    -> repository worktree admission lock (worktreeAdmissionLockForRepo)
-//	      -> m.mu
+//	      -> m.mu (never held while waiting for any lock to its left)
 //
-// CreateSession takes start -> admission -> m.mu; kill and prune take op -> start;
-// prune therefore takes op -> start -> admission (lockForPrune), never admission
-// before start (#5189: that inversion deadlocks a prune against a create).
+// Audit, path by path (the order each actually takes; (!) = deviates):
+//
+//	CreateSession        start -> admission (bounded) -> m.mu
+//	kill                 claim -> op -> start (persists)
+//	archive              op -> start (persists)
+//	prune apply, resume  op -> start -> claim; takes NO admission (it selects no
+//	                     branch or path), every wait bounded
+//	title reuse/rename   inside CreateSession: start -> m.mu
+//	archived restore (!) op -> admission (bounded) -> claim; its body then persists
+//	                     (start) while still holding admission: admission -> start
+//	automatic Lost restore (!) try-admission (non-blocking) -> persists (start)
+//
+// The two (!) paths predate prune and invert admission/start against CreateSession;
+// the cycle is broken today only because CreateSession's admission wait is bounded.
+// Prune is outside that cycle by construction (no admission). Giving restore the
+// canonical order means holding the start lock across its body and persisting
+// lock-free — a change to that path's contract, tracked separately (#6197).
 func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
