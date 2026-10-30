@@ -203,6 +203,11 @@ func TestRecoverySkipsCurrentDaemonStarts(t *testing.T) {
 func TestRecoveryEndsAnIdleRunAfterRepairingItsSessionLink(t *testing.T) {
 	m, repoID, inst := startedItem(t)
 	inst.DisarmBacklogRun()
+	// The session went idle while no daemon watched: recovery counts only a live,
+	// Ready session whose marker is clear.
+	if err := inst.Transition(session.ObserveLiveness(session.LiveReady)); err != nil {
+		t.Fatal(err)
+	}
 	prevStart := daemonProcessStart
 	t.Cleanup(func() { daemonProcessStart = prevStart })
 	daemonProcessStart = inst.CreatedAt.Add(time.Hour)
