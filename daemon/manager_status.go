@@ -632,7 +632,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// observeTaskRunWhilePaused for why it can end a run but never conclude
 		// death, and taskRunPollBackstop for why this is not a return to per-tick
 		// probing.
-		if instance.TaskRunActive() && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
+		if instance.TaskRunObservable(nowFunc()) && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
 			m.observeTaskRunWhilePaused(repoID, key, instance)
 			return
 		}

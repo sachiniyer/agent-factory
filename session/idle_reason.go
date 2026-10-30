@@ -461,6 +461,13 @@ func (i *Instance) markAgentRuntimeReplaced(replaced bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.agentRuntimeReplaced = replaced
+	// Remember WHEN, so an interruption's boundary is the launch, not the later
+	// settle edge: an agent already mid-turn at ConfirmLive started after this (#6231).
+	if replaced {
+		i.agentReplacedAt = time.Now()
+	} else {
+		i.agentReplacedAt = time.Time{}
+	}
 }
 
 // InterruptTaskRunIfRuntimeReplaced ends a still-in-flight task run as
@@ -517,6 +524,17 @@ func (i *Instance) TaskRunInterrupted() bool {
 // conversation starts its turn within moments; a human prompting the session
 // much later is not the task's run and must not be archived by on_complete.
 const taskRunResumeWindow = 15 * time.Minute
+
+// TaskRunObservable reports whether the daemon must observe this session's
+// task run: in flight, or interrupted and still resumable (#6230). Every gate
+// that decides whether to watch a run asks this, never TaskRunActive alone.
+func (i *Instance) TaskRunObservable(now time.Time) bool {
+	if i.TaskRunActive() {
+		return true
+	}
+	_, ok := i.TaskRunResumableSince(now)
+	return ok
+}
 
 // TaskRunResumableSince reports whether an interrupted run may still be resumed
 // by in-turn evidence, and the boundary that evidence must follow (#6223).

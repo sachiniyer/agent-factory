@@ -94,7 +94,7 @@ func (m *Manager) sweepTaskRunTurnWatches() {
 	m.mu.Lock()
 	live := make(map[string]struct{}, size)
 	for key, inst := range m.instances {
-		if _, resumable := inst.TaskRunResumableSince(nowFunc()); inst.TaskRunActive() || resumable {
+		if inst.TaskRunObservable(nowFunc()) {
 			repoID, _ := splitDaemonInstanceKey(key)
 			live[stableSessionKey(repoID, inst)] = struct{}{}
 		}
