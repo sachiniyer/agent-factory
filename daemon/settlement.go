@@ -82,8 +82,13 @@ func (m *Manager) persistSettlementUnderAdmission(repoID, key string, instance *
 // settlement. The caller owns the ordering: the start lock for persistSettlement,
 // the op fence under admission for persistSettlementUnderAdmission.
 func (m *Manager) writeSettlement(repoID, key string, instance *session.Instance) error {
+	// Snapshot and write in the row-write lock, so this snapshot orders against
+	// the admission writers whichever path reached it (#6210).
+	rowLock := m.rowWriteLockForRepo(repoID)
+	rowLock.Lock()
 	data := instance.ToInstanceData()
 	err := persistInstanceData(repoID, data)
+	rowLock.Unlock()
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	m.recordSettlementWrite(repoID, key, instance, err)
 	return err
