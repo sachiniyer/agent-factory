@@ -714,9 +714,10 @@ session against a containerized sshd host through its own RPCs (create, prompt,
 preview, tab, archive, restore, kill, and a task-fired create).
 `TestSandboxDisruptionsE2E` then hits one live session: a daemon restart (same
 agent-server process, roster and conversation, no re-provision) and a killed ssh
-connection (reconnects with no operator action). A third case, a host restart
-that recovers the committed work, is a skipped subtest until W1.6 and W8.5/W8.6
-land. `make backend-sandbox-e2e` runs both tests by hand; it is not a routine
+connection (reconnects with no operator action). A third case archives the
+session, restarts the host container and the daemon, restores, and compares a
+stdout-only fingerprint (HEAD, a staged file, an unstaged edit, an untracked file
+and an ignored one) taken before the archive with one taken after the restore. `make backend-sandbox-e2e` runs both tests by hand; it is not a routine
 local gate.
 
 `make backend-ssh-roundtrip` runs the real end-to-end SSH round-trips on a host

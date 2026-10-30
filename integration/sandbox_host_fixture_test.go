@@ -122,7 +122,8 @@ func (h *sandboxHost) exec(t *testing.T, script string) string {
 // test on any nonzero exit, returning stdout only. exec above discards the exit
 // status and interleaves stderr into its result, which is right for polling but
 // wrong for fixture setup and for fingerprints: a setup step that silently failed
-// leaves the assertion built on it testing nothing (#5947).
+// leaves the assertion built on it testing nothing (#5947). Leading whitespace is
+// preserved (hostStdout).
 func (h *sandboxHost) execOK(t *testing.T, script string) string {
 	t.Helper()
 	cmd := exec.Command("docker", "exec", h.container, "sh", "-c", "set -e; "+script)
@@ -132,8 +133,14 @@ func (h *sandboxHost) execOK(t *testing.T, script string) string {
 	if err != nil {
 		t.Fatalf("host command failed: %v\nscript: %s\nstdout: %s\nstderr: %s", err, script, out, stderr.String())
 	}
-	return strings.TrimSpace(string(out))
+	return hostStdout(out)
 }
+
+// hostStdout drops only the trailing newline(s). A leading TrimSpace would eat the
+// first column of `git status --porcelain`, where ' M f' (unstaged) and 'M  f'
+// (staged) differ only by position, so a fingerprint taken that way cannot tell a
+// restore that staged someone's edit from one that left it alone.
+func hostStdout(out []byte) string { return strings.TrimRight(string(out), "\r\n") }
 
 // waitFor polls cond until it holds or the deadline passes.
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {

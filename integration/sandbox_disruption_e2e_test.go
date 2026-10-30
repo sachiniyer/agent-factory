@@ -27,9 +27,10 @@ import (
 //  2. The daemon-to-sandbox ssh connection is killed. The session reconnects with
 //     no operator action, the agent-server is still the same process, and a new
 //     prompt round-trips.
-//  3. The host restarts, which kills every process on it, and the work committed
-//     in the sandbox's workspace is recovered. SKIPPED until that recovery exists
-//     (W1.6, W8.5/W8.6); the subtest keeps the scenario and names its blockers.
+//  3. The session is archived (the workspace is preserved), the host and the
+//     daemon restart, and restore hands back the SAME workspace byte for byte:
+//     HEAD, a staged file, an unstaged edit, an untracked file and an ignored
+//     one (W8.5/W8.6).
 //
 // CI only (.github/workflows/sandbox-e2e.yml); SKIPS cleanly without docker.
 func TestSandboxDisruptionsE2E(t *testing.T) {
@@ -202,26 +203,69 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 		t.Fatalf("tunnel loss re-provisioned the session: dirs %q -> %q", dirs, got)
 	}
 
-	// --- 3. the host restarts ----------------------------------------------------
-	// Skipped until master implements it. A host restart kills the agent-server
-	// and nothing on the host starts it again: superviseTunnel restores only ssh
-	// forwarding, the daemon keeps the last-known liveness through the transport
-	// failures rather than marking the row Lost, and a Lost row's recovery is
-	// refused while the host's state is unknown. Recovering the existing workspace
-	// is W1.6 (replacement with proof) plus W8.5/W8.6 (archive/restore resume the
-	// workspace). Enable this the day those land; asserting it earlier is a red
-	// assertion, not a regression net.
-	t.Run("host restart recovers the work", func(t *testing.T) {
-		t.Skip("host-restart recovery is not implemented yet: depends on W1.6 (replacement with proof) and W8.5/W8.6 (restore resumes the workspace), #5571")
-		host.restart(t)
-		waitFor(t, "the session to be recovered after the host restart", 240*time.Second, func() bool {
-			return live() && agentPIDs() != ""
-		})
-		if got := host.exec(t, "cat "+workspace()+"/e2e-disrupt.txt"); got != "survives" {
-			t.Fatalf("the sandbox's work was lost across the host restart; e2e-disrupt.txt = %q", got)
+	// --- 3. archive-preserve, restart the host and the daemon, restore ----------
+	// A host restart kills every process on it (the agent-server included) but the
+	// container filesystem survives, so the preserved workspace is still there.
+	// Archive keeps it (W8.5) and restore reattaches it (W8.6, #5947) instead of
+	// re-cloning, so the work comes back byte for byte: committed HEAD, a staged
+	// file, an unstaged edit, an untracked file and an ignored one.
+	ws := workspace()
+	// Every setup step must succeed, and the fingerprint is stdout only under
+	// set -e (execOK): a failed step or a missing file would otherwise read as an
+	// identical absence before and after. The exclude file is resolved with
+	// --git-path because a linked worktree's info/exclude lives in the common dir.
+	host.execOK(t, "cd "+ws+" && echo staged > staged.txt && git add staged.txt && echo edited >> e2e-disrupt.txt && echo loose > untracked.txt && "+
+		"ex=$(git rev-parse --git-path info/exclude) && mkdir -p \"$(dirname \"$ex\")\" && echo '*.ign' >> \"$ex\" && echo ignored > keep.ign")
+	treeState := func() string {
+		return host.execOK(t, "cd "+ws+" && git status --porcelain --ignored && git rev-parse HEAD && cat e2e-disrupt.txt staged.txt untracked.txt keep.ign")
+	}
+	stateAtArchive := treeState()
+	for _, want := range []string{"A  staged.txt", " M e2e-disrupt.txt", "?? untracked.txt", "!! keep.ign"} {
+		if !strings.Contains(stateAtArchive, want) {
+			t.Fatalf("the fixture does not hold %q, so the fingerprint would not cover it:\n%s", want, stateAtArchive)
 		}
-		prompt("after-host-restart-marker")
+	}
+	originHasWork := func() bool {
+		return strings.Contains(host.exec(t, "git -c safe.directory='*' -C /repo.git log --all --format=%s 2>&1"), "sbx-disrupt-work")
+	}
+
+	var archived daemon.ArchiveSessionResponse
+	post("/v1/ArchiveSession", daemon.ArchiveSessionRequest{Title: title, RepoID: repoID}, &archived)
+	waitFor(t, "the archived session's agent-server to stop", 30*time.Second, func() bool { return agentPIDs() == "" })
+	if loc := archived.ArchivedWorkspace; loc == nil || loc.Pushed || loc.Dir == "" {
+		t.Fatalf("archive response archived_workspace = %+v, want an unpushed preserved dir", loc)
+	}
+	if got := treeState(); got != stateAtArchive {
+		t.Fatalf("archiving changed the workspace:\nbefore:\n%s\nafter:\n%s", stateAtArchive, got)
+	}
+
+	host.restart(t)
+	if got := treeState(); got != stateAtArchive {
+		t.Fatalf("the host restart changed the preserved workspace:\nbefore:\n%s\nafter:\n%s", stateAtArchive, got)
+	}
+	stopDaemons(t, afBin, home)
+	h.startDaemon()
+	if r := find(); r == nil || r.Liveness != session.LiveArchived || r.ArchivedWorkspace == nil {
+		t.Fatalf("after the host and daemon restarts the row is %+v, want the archived row still reporting its preserved workspace", r)
+	}
+
+	post("/v1/RestoreArchived", daemon.RestoreArchivedRequest{Title: title, RepoID: repoID}, &daemon.RestoreArchivedResponse{})
+	waitFor(t, "the preserved session to be live again after the host restart", 240*time.Second, func() bool {
+		return live() && agentPIDs() != ""
 	})
+	if got := treeState(); got != stateAtArchive {
+		t.Fatalf("restore did not hand back the workspace exactly as archived:\nbefore:\n%s\nafter:\n%s", stateAtArchive, got)
+	}
+	if got := workspace(); got != ws {
+		t.Fatalf("restore moved the workspace: %q -> %q (it must reattach, not re-clone)", ws, got)
+	}
+	if originHasWork() {
+		t.Fatalf("restoring a preserved workspace published its commit to origin")
+	}
+	if r := find(); r == nil || r.ArchivedWorkspace != nil {
+		t.Fatalf("a restored row must no longer report a preserved workspace: %+v", r)
+	}
+	prompt("after-host-restart-marker")
 
 	post("/v1/KillSession", daemon.KillSessionRequest{Title: title, RepoID: repoID}, &daemon.KillSessionResponse{})
 	waitFor(t, "the host to be clean after kill", 60*time.Second, func() bool {
