@@ -24,6 +24,9 @@ const (
 // errSlotsFull refuses a capped start when the project's slots are all in use.
 var errSlotsFull = errors.New("slots full")
 
+// errRunnerOff refuses an automatic start after the runner switch went off.
+var errRunnerOff = errors.New("the runner is off")
+
 // runnerState paces runner passes, holds what the runner remembers between
 // passes, and remembers the state each project's runner last published.
 type runnerState struct {
@@ -57,7 +60,11 @@ type backoff struct {
 }
 
 type capInterrupt struct {
-	repoID  string
+	repoID string
+	// gen is the run generation that exceeded the cap: a retry applies only
+	// while that run is still the session's latest (an answer that authorized
+	// the continuation arms a new one).
+	gen     int
 	passes  int
 	retried bool
 }
@@ -203,7 +210,7 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 	}
 	for _, id := range p.Start {
 		_, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: id}, backlog.StartedByRunner)
-		if errors.Is(err, errSlotsFull) {
+		if errors.Is(err, errSlotsFull) || errors.Is(err, errRunnerOff) {
 			break
 		}
 		if err != nil {
@@ -235,6 +242,12 @@ func (m *Manager) startBacklogItemCapped(req backlog.StartRequest, by string) (b
 	b, err := backlog.Load(ref.ID)
 	if err != nil {
 		return backlog.RunRef{}, err
+	}
+	// The pass chose this item before waiting for the lock; the user may have
+	// turned the runner off since. Explicit user starts bypass the switch on
+	// purpose, an automatic one must honour it at the admission boundary.
+	if by == backlog.StartedByRunner && !b.Settings.Runner {
+		return backlog.RunRef{}, errRunnerOff
 	}
 	if m.backlogSlotsUsed(ref.ID) >= b.Settings.MaxRunning {
 		return backlog.RunRef{}, errSlotsFull

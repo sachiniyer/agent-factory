@@ -83,7 +83,7 @@ func (m *Manager) capBacklogRuns(repoID string, b *backlog.Backlog, states map[i
 		if rs.interrupts == nil {
 			rs.interrupts = map[string]*capInterrupt{}
 		}
-		rs.interrupts[c.SessionID] = &capInterrupt{repoID: repoID}
+		rs.interrupts[c.SessionID] = &capInterrupt{repoID: repoID, gen: s.instance.BacklogRunGeneration()}
 		rs.mu.Unlock()
 	}
 }
@@ -100,7 +100,9 @@ func (m *Manager) retryCapInterrupts(repoID string) {
 			continue
 		}
 		s, ok := sessions[id]
-		if !ok || !s.instance.BacklogRunActive() {
+		// Gone, inactive, or re-armed since (an answer authorized the
+		// continuation): the retry belongs to the run that exceeded the cap.
+		if !ok || !s.instance.BacklogRunActive() || s.instance.BacklogRunGeneration() != ci.gen {
 			delete(rs.interrupts, id)
 			continue
 		}
@@ -156,7 +158,14 @@ func (m *Manager) itemAccount(repoID string) (string, error) {
 		return "", fmt.Errorf("af cannot tell which account this project's sessions use: the project is not registered; open it in af")
 	}
 	project, global := config.DefaultAccountLayersFor(m.Config(), root, tmux.ProgramClaude)
-	return planAccount(agentaccount.Resolve("", project.Name, global.Name)), nil
+	name := strings.TrimSpace(agentaccount.Resolve("", project.Name, global.Name))
+	if name == planusage.DefaultAccount {
+		// "default" is the key of the ambient identity (plan/default.json and the
+		// ambient config dir); a registered account of that name would share its
+		// readings and costs, so the budget would be judged on the wrong spend.
+		return "", fmt.Errorf("af cannot meter a registered Claude account named %q (that name is the ambient identity's): rename the account", planusage.DefaultAccount)
+	}
+	return planAccount(name), nil
 }
 
 // usageFor is usage seen from one account: that account's plan windows and

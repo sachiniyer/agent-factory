@@ -291,6 +291,8 @@ func TestRunnerBacksOffARefusedStart(t *testing.T) {
 
 func capUsage(t *testing.T, m *Manager, sessionID string, cost float64) {
 	t.Helper()
+	// The cap needs the plan budget, which needs plan usage on.
+	m.Config().Backlog.PlanUsage = true
 	reset := time.Now().Add(time.Hour)
 	m.backlog.meter.usageMu.Lock()
 	w := planusage.Windows{FiveHour: planusage.PlanWindow{Plan: 40, ResetsAt: &reset, All: 10}}
@@ -455,5 +457,60 @@ func TestRunnerStaysClosedWhenPlanUsageIsOff(t *testing.T) {
 	}
 	if v.Runner.Gate != backlog.GatePlanUsageOff || !strings.Contains(v.Runner.Reason, "backlog.plan_usage") {
 		t.Fatalf("runner view %+v", v.Runner)
+	}
+}
+
+// A pass that chose an item before the user turned the runner off must not start
+// it after the start lock frees (Codex P2 on #6300); an explicit user start still
+// ignores the switch.
+func TestAutomaticStartHonoursTheRunnerSwitchAtAdmission(t *testing.T) {
+	m, repoID := runnerTestManager(t)
+	queueItem(t, m, repoID, 1)
+	setRunner(t, m, repoID, false, 1)
+	if _, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByRunner); !errors.Is(err, errRunnerOff) {
+		t.Fatalf("an automatic start with the runner off: %v", err)
+	}
+	if it := loadItem(t, repoID, 1); len(it.Runs) != 0 {
+		t.Fatalf("a session was started: %+v", it)
+	}
+	if _, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatalf("an explicit start must ignore the switch: %v", err)
+	}
+}
+
+// A retry of the cap interrupt belongs to the run that exceeded the cap: a
+// continuation the user authorized re-arms the session under a new generation.
+func TestCapInterruptRetryStopsAfterTheRunIsRearmed(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	m.Config().Backlog.PlanUsage = true
+	interrupted := stubInterrupt(t)
+	rs := &m.backlog.runner
+	rs.mu.Lock()
+	rs.interrupts = map[string]*capInterrupt{inst.ID: {repoID: repoID, gen: inst.BacklogRunGeneration() - 1, passes: capInterruptRetryPasses}}
+	rs.mu.Unlock()
+	m.retryCapInterrupts(repoID)
+	if len(*interrupted) != 0 {
+		t.Fatalf("an old run's cap interrupt was retried on the new run: %v", *interrupted)
+	}
+	rs.mu.Lock()
+	_, kept := rs.interrupts[inst.ID]
+	rs.mu.Unlock()
+	if kept {
+		t.Fatal("the stale interrupt entry was kept")
+	}
+}
+
+// A registered account named "default" shares its key with the ambient identity,
+// so its budget cannot be judged on its own spend (Codex P2 on #6300): the runner
+// stays closed with a reason that says to rename it.
+func TestItemAccountRefusesARegisteredAccountNamedDefault(t *testing.T) {
+	m, repoID := runnerTestManager(t)
+	m.Config().DefaultAccounts = map[string]string{"claude": "default"}
+	if _, err := m.itemAccount(repoID); err == nil || !strings.Contains(err.Error(), "rename the account") {
+		t.Fatalf("err = %v", err)
+	}
+	m.Config().DefaultAccounts = map[string]string{"claude": "work"}
+	if acct, err := m.itemAccount(repoID); err != nil || acct != "work" {
+		t.Fatalf("a normally named account: %q %v", acct, err)
 	}
 }
