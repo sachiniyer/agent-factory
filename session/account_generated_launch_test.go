@@ -35,6 +35,7 @@ func TestAccountScopesAfsRealGeneratedClaudeLaunch(t *testing.T) {
 		"af's generators appended nothing, so this proves nothing about the account path that actually runs")
 	require.Contains(t, command, "--session-id "+conversation.ID)
 	require.Contains(t, command, "--plugin-dir ")
+	require.Contains(t, command, "--settings ")
 
 	generated, ok := sessionenv.GeneratedArgsBetween(base, command)
 	require.True(t, ok, "the launcher must be able to describe its own rewrite")

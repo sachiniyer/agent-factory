@@ -120,6 +120,10 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// on its own goroutine, so it never holds this loop.
 			manager.pushProposals()
 
+			// Meter Claude transcripts for backlog spend every 30 s. The pass
+			// runs on its own goroutine.
+			manager.MeterBacklog()
+
 			// Handle stop before ticker.
 			select {
 			case <-stopCh:

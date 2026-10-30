@@ -473,6 +473,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "backlog",
+		Type:       "table",
+		Default:    "none · the built-in prices are used",
+		Purpose:    "API prices for metering backlog runs · [backlog.prices.\"<model>\"] takes input, cache_write_5m, cache_write_1h, cache_read and output in US dollars per million tokens.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "limit_auto_resume",
 		Type:       "bool",
 		Default:    "false",

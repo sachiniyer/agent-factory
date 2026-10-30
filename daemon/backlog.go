@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/backlog"
+	"github.com/sachiniyer/agent-factory/planusage"
 )
 
 // routeServices holds the services behind the proposal and backlog routes;
@@ -35,6 +36,7 @@ type backlogState struct {
 	recovered    map[string]bool
 	recovering   bool
 	recoveryDone bool
+	meter        meterState
 }
 
 func (s *backlogState) reserve(repoID string) {
@@ -154,6 +156,8 @@ func (h backlogHost) Facts(repoID string) backlog.Facts {
 }
 
 func (h backlogHost) SlotsUsed(repoID string) int { return h.m.backlogSlotsUsed(repoID) }
+
+func (h backlogHost) Usage() planusage.Usage { return h.m.backlogUsage() }
 
 func (h backlogHost) ProjectName(repoID string) string {
 	if root, err := registeredProjectRootForRepoID(repoID); err == nil && root != "" {

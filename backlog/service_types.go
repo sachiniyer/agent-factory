@@ -1,5 +1,7 @@
 package backlog
 
+import "github.com/sachiniyer/agent-factory/planusage"
+
 // The backlog routes. Each project request names its project with exactly one
 // of RepoID or RepoPath; RepoPath is a path on the daemon host.
 
@@ -123,10 +125,11 @@ type SetBudgetRequest struct {
 	USDLimit  *float64 `json:"usd_limit,omitempty"`
 }
 
-// BudgetResponse is the budget settings. The plan windows and reading time
-// that api.md also lists arrive with plan readings.
+// BudgetResponse is the budget with the plan windows: plan % and the part the
+// backlog used, per window.
 type BudgetResponse struct {
 	Budget Budget `json:"budget"`
+	planusage.Usage
 }
 
 // ChangedEvent is the payload of a backlog.changed event.

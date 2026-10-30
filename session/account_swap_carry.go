@@ -226,16 +226,8 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 	if err != nil || !launch.WorkingDirKnown() {
 		return "af could not resolve the directory Claude files this conversation under"
 	}
-	// Claude names a project after the directory it was launched in. Try the
-	// path as recorded and, where it differs, as the kernel reports it, since a
-	// symlinked worktree parent yields a different project name.
-	candidates := []string{launch.WorkingDir}
-	if resolved, err := filepath.EvalSymlinks(launch.WorkingDir); err == nil && resolved != launch.WorkingDir {
-		candidates = append(candidates, resolved)
-	}
 	var refused string
-	for _, dir := range candidates {
-		project := filepath.Join("projects", claudeProjectName(dir))
+	for _, project := range claudeProjectCandidates(launch.WorkingDir) {
 		transcript := filepath.Join(project, c.id+".jsonl")
 		roots := []carryRoot{c.srcRoot}
 		if c.committed {

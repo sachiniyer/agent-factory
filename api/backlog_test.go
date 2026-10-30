@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/planusage"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -28,6 +30,11 @@ func (backlogTestHost) AnswerTarget(_, _ string) backlog.AnswerTarget {
 	return backlog.TargetLive
 }
 func (backlogTestHost) DeliverAnswer(string, backlog.PendingAnswer) {}
+func (backlogTestHost) Usage() planusage.Usage {
+	at := backlogTestNow.Add(-90 * time.Second)
+	return planusage.Usage{Account: planusage.DefaultAccount, ReadingAt: &at,
+		Windows: planusage.Windows{SevenDay: planusage.PlanWindow{Plan: 40, Backlog: 10, ResetsAt: &at}}}
+}
 func backlogRoute[Req, Resp any](call func(Req) (Resp, error)) func([]byte) (any, error) {
 	return func(raw []byte) (any, error) {
 		r, err := decodeInto[Req](raw)
@@ -323,8 +330,13 @@ func TestBacklogAddFile(t *testing.T) {
 	}
 }
 
+var backlogTestNow = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+
 func TestBacklogRunnerAndBudget(t *testing.T) {
 	stubBacklogDaemon(t)
+	prevNow := backlogNow
+	backlogNow = func() time.Time { return backlogTestNow }
+	t.Cleanup(func() { backlogNow = prevNow })
 	out, err := runBacklogCmd(t, "runner")
 	if err != nil {
 		t.Fatal(err)
@@ -355,7 +367,8 @@ func TestBacklogRunnerAndBudget(t *testing.T) {
 		{[]string{"budget", "--usd-limit", "$12.50"}, func(b backlog.Budget) bool { return b.USDLimit == 12.5 }},
 	} {
 		out, err := runBacklogCmd(t, step.args...)
-		if err != nil || !step.want(decodeOut[backlog.Budget](t, out)) {
+		v := decodeOut[backlogBudgetView](t, out)
+		if err != nil || !step.want(v.Budget) || v.Windows.SevenDay.Backlog != 10 || v.ReadingAge != "1m30s" {
 			t.Fatalf("%v: %s %v", step.args, out, err)
 		}
 	}
@@ -374,6 +387,9 @@ func TestBacklogRunnerAndBudget(t *testing.T) {
 		if _, err := runBacklogCmd(t, c.args...); err == nil || err.Error() != c.want {
 			t.Errorf("%v: %v", c.args, err)
 		}
+	}
+	if _, err := runBacklogCmd(t, "budget", "--share", "101"); err == nil || err.Error() != "--share must be between 0 and 100" {
+		t.Fatal(err)
 	}
 	if out, _ := runBacklogCmd(t, "runner"); decodeOut[backlogRunnerView](t, out).State != backlog.RunnerIdle {
 		t.Fatal(out)

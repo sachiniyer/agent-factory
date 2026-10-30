@@ -238,7 +238,8 @@ var settableKeySpecs = map[string]settableKeySpec{
 		"terminal_font_size_phone":   {kind: cfgFloat, validate: validateWebTerminalFontSize},
 		"terminal_font_size_desktop": {kind: cfgFloat, validate: validateWebTerminalFontSize},
 	}},
-	"keys": {structured: true},
+	"keys":    {structured: true},
+	"backlog": {structured: true},
 }
 
 func requirePositiveInt(name, v string) error {

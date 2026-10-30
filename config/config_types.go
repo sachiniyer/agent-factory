@@ -389,6 +389,9 @@ type Config struct {
 	// without a release. Empty keeps every built-in default. See
 	// sanitizeLimitPatterns in limit_patterns.go for validation and semantics.
 	LimitPatterns map[string]string `json:"limit_patterns,omitempty" toml:"limit_patterns,omitempty"`
+	// Backlog holds backlog metering settings: [backlog.prices."<model>"]
+	// adds or replaces a Claude model's API price.
+	Backlog BacklogConfig `json:"backlog,omitempty" toml:"backlog,omitempty"`
 	// LimitAutoResume opts a machine into the daemon's usage-limit auto-resume
 	// scheduler (#1146 PR3): when true, the daemon re-prompts a session parked at
 	// a usage-limit wall on its own once the limit window has elapsed (its parsed
