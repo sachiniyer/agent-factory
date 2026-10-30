@@ -70,7 +70,7 @@ test("add, nest, queue and note an item through the UI", async ({ page }, info) 
   await expect(row(page, epic).locator(".af-backlog-chip")).toContainText("Queued");
 
   // A note lands on the thread.
-  await panel.locator("textarea.af-backlog-note").fill("a note from the walkthrough");
+  await panel.getByRole("textbox", { name: "Note", exact: true }).fill("a note from the walkthrough");
   await panel.getByRole("button", { name: "Add note", exact: true }).click();
   await expect(panel.locator(".af-backlog-msg-text", { hasText: "a note from the walkthrough" })).toBeVisible();
   await page.screenshot({ path: info.outputPath("queued-noted.png") });
