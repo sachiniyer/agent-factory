@@ -25,7 +25,7 @@ func gitIn(t *testing.T, dir string, args ...string) string {
 func pruneWorktree(t *testing.T) (repo, wt string) {
 	t.Helper()
 	repo = newPruneGuardRepo(t)
-	wt = filepath.Join(t.TempDir(), "wt")
+	wt = filepath.Join(tempRoot(t), "wt")
 	gitIn(t, repo, "worktree", "add", "-b", "af/p", wt)
 	return repo, wt
 }
@@ -109,7 +109,7 @@ func TestWorktreeHeadMatchesBranch(t *testing.T) {
 // drop) stays, and a replacement that now occupies the same path is left alone.
 func TestRemoveArchivedRegistrationLeafIsBoundToTheRecordedOccupant(t *testing.T) {
 	repo, wt := pruneWorktree(t)
-	other := filepath.Join(t.TempDir(), "other")
+	other := filepath.Join(tempRoot(t), "other")
 	gitIn(t, repo, "worktree", "add", "-b", "af/other", other)
 	require.NoError(t, os.RemoveAll(other)) // now stale, as an unmounted worktree would be
 
@@ -119,8 +119,8 @@ func TestRemoveArchivedRegistrationLeafIsBoundToTheRecordedOccupant(t *testing.T
 	require.NoError(t, os.Rename(wt, moved))
 	require.NoError(t, RemoveArchivedRegistrationLeaf(repo, leafName, nonce))
 	list := gitIn(t, repo, "worktree", "list", "--porcelain")
-	assert.NotContains(t, list, wt)
-	assert.Contains(t, list, other, "another session's registration is not ours to drop")
+	assert.NotContains(t, list, canonPath(t, wt))
+	assert.Contains(t, list, canonPath(t, other), "another session's registration is not ours to drop")
 	require.NoError(t, RemoveArchivedRegistrationLeaf(repo, leafName, nonce), "a leaf already gone is done")
 
 	// A replacement now occupies the original path and the same leaf name: it is
@@ -128,9 +128,9 @@ func TestRemoveArchivedRegistrationLeafIsBoundToTheRecordedOccupant(t *testing.T
 	gitIn(t, repo, "worktree", "add", wt, "af/p")
 	err = RemoveArchivedRegistrationLeaf(repo, leafName, nonce)
 	require.ErrorIs(t, err, ErrRegistrationNotOurs)
-	assert.Contains(t, gitIn(t, repo, "worktree", "list", "--porcelain"), wt, "the replacement stays registered")
+	assert.Contains(t, gitIn(t, repo, "worktree", "list", "--porcelain"), canonPath(t, wt), "the replacement stays registered")
 
-	locked := filepath.Join(t.TempDir(), "locked")
+	locked := filepath.Join(tempRoot(t), "locked")
 	gitIn(t, repo, "worktree", "add", "-b", "af/locked", locked)
 	lname, lnonce, err := StampPruneNonce(locked)
 	require.NoError(t, err)
@@ -143,7 +143,7 @@ func TestRemoveArchivedRegistrationLeafIsBoundToTheRecordedOccupant(t *testing.T
 // there instead of reporting it absent (round 13).
 func TestLocalBranchExistsInABareOrigin(t *testing.T) {
 	repo := newPruneGuardRepo(t)
-	bare := filepath.Join(t.TempDir(), "origin.git")
+	bare := filepath.Join(tempRoot(t), "origin.git")
 	gitIn(t, repo, "clone", "--bare", repo, bare)
 	gitIn(t, bare, "branch", "af/kept", "main")
 	ok, err := LocalBranchExists(bare, "af/kept")
@@ -456,9 +456,31 @@ func TestObjectStoresInsideDeletedRootsAreRefusedWhateverTheyAreNamed(t *testing
 		leaf, err := registrationLeaf(wt)
 		require.NoError(t, err)
 		store := filepath.Join(leaf, "store")
-		rel, err := filepath.Rel(filepath.Join(repo, ".git", "objects"), store)
+		// The entry is relative to the objects directory's CANONICAL location (where
+		// git resolves it): computing it from the as-written path builds an entry that
+		// points nowhere whenever a temp root is reached through a symlink (macOS).
+		realObjects, err := filepath.EvalSymlinks(filepath.Join(repo, ".git", "objects"))
+		require.NoError(t, err)
+		realLeaf, err := filepath.EvalSymlinks(leaf)
+		require.NoError(t, err)
+		rel, err := filepath.Rel(realObjects, filepath.Join(realLeaf, "store"))
 		require.NoError(t, err)
 		moveOriginObjects(t, repo, store, rel)
+		gitIn(t, wt, "rev-parse", "--verify", "HEAD") // premise: git resolves the relative entry
+		require.Contains(t, gitIn(t, wt, "count-objects", "-v"), "alternate:", "premise: git lists it")
+		deps, err := objectStoresInsideDeletedRoots(wt)
+		require.NoError(t, err)
+		assert.NotEmpty(t, deps)
+	})
+
+	t.Run("a short relative entry (../worktrees/<leaf>/store)", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		leaf, err := registrationLeaf(wt)
+		require.NoError(t, err)
+		store := filepath.Join(leaf, "store")
+		moveOriginObjects(t, repo, store, "../worktrees/"+filepath.Base(leaf)+"/store")
+		gitIn(t, wt, "rev-parse", "--verify", "HEAD") // premise: git resolves it
+		require.Contains(t, gitIn(t, wt, "count-objects", "-v"), "alternate:")
 		deps, err := objectStoresInsideDeletedRoots(wt)
 		require.NoError(t, err)
 		assert.NotEmpty(t, deps)
@@ -469,7 +491,7 @@ func TestObjectStoresInsideDeletedRootsAreRefusedWhateverTheyAreNamed(t *testing
 		leaf, err := registrationLeaf(wt)
 		require.NoError(t, err)
 		inner := filepath.Join(leaf, "deep")
-		outer := filepath.Join(t.TempDir(), "outer-objects")
+		outer := filepath.Join(tempRoot(t), "outer-objects")
 		moveOriginObjects(t, repo, inner, outer)
 		require.NoError(t, os.MkdirAll(filepath.Join(outer, "info"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(outer, "info", "alternates"), []byte(inner+"\n"), 0o644))
@@ -480,7 +502,7 @@ func TestObjectStoresInsideDeletedRootsAreRefusedWhateverTheyAreNamed(t *testing
 
 	t.Run("an alternate outside both roots is allowed", func(t *testing.T) {
 		repo, wt := pruneWorktree(t)
-		outside := filepath.Join(t.TempDir(), "shared-objects")
+		outside := filepath.Join(tempRoot(t), "shared-objects")
 		moveOriginObjects(t, repo, outside, outside)
 		deps, err := objectStoresInsideDeletedRoots(wt)
 		require.NoError(t, err)
@@ -492,7 +514,7 @@ func TestObjectStoresInsideDeletedRootsAreRefusedWhateverTheyAreNamed(t *testing
 			t.Skip("permission bits are bypassed by root")
 		}
 		repo, wt := pruneWorktree(t)
-		moveOriginObjects(t, repo, filepath.Join(t.TempDir(), "o"), filepath.Join(t.TempDir(), "o"))
+		moveOriginObjects(t, repo, filepath.Join(tempRoot(t), "o"), filepath.Join(tempRoot(t), "o"))
 		alt := filepath.Join(repo, ".git", "objects", "info", "alternates")
 		require.NoError(t, os.Chmod(alt, 0o000))
 		t.Cleanup(func() { _ = os.Chmod(alt, 0o644) })
@@ -598,7 +620,7 @@ func TestObjectStorePathThroughASymlinkInsideTheLeafIsRefused(t *testing.T) {
 	require.NoError(t, err)
 
 	// The real store lives OUTSIDE both roots ...
-	outside := filepath.Join(t.TempDir(), "real-objects")
+	outside := filepath.Join(tempRoot(t), "real-objects")
 	objects := filepath.Join(repo, ".git", "objects")
 	require.NoError(t, os.Rename(objects, outside))
 	// ... but the repository reaches it through a symlink INSIDE the leaf.
@@ -625,7 +647,7 @@ func TestObjectStorePathThroughASymlinkInsideTheLeafIsRefused(t *testing.T) {
 
 	t.Run("a relative entry through a symlink inside the worktree tree", func(t *testing.T) {
 		repo2, wt2 := pruneWorktree(t)
-		out2 := filepath.Join(t.TempDir(), "real-objects")
+		out2 := filepath.Join(tempRoot(t), "real-objects")
 		obj2 := filepath.Join(repo2, ".git", "objects")
 		require.NoError(t, os.Rename(obj2, out2))
 		link2 := filepath.Join(wt2, "vendor-objects")
@@ -639,10 +661,10 @@ func TestObjectStorePathThroughASymlinkInsideTheLeafIsRefused(t *testing.T) {
 
 	t.Run("a path that never touches a root passes", func(t *testing.T) {
 		repo3, wt3 := pruneWorktree(t)
-		out3 := filepath.Join(t.TempDir(), "real-objects")
+		out3 := filepath.Join(tempRoot(t), "real-objects")
 		obj3 := filepath.Join(repo3, ".git", "objects")
 		require.NoError(t, os.Rename(obj3, out3))
-		elsewhere := filepath.Join(t.TempDir(), "link-outside")
+		elsewhere := filepath.Join(tempRoot(t), "link-outside")
 		require.NoError(t, os.Symlink(out3, elsewhere))
 		require.NoError(t, os.MkdirAll(filepath.Join(obj3, "info"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(obj3, "info", "alternates"), []byte(elsewhere+"\n"), 0o644))
@@ -653,7 +675,7 @@ func TestObjectStorePathThroughASymlinkInsideTheLeafIsRefused(t *testing.T) {
 }
 
 func TestWalkPhysicalAppliesDotDotToTheResolvedPrefix(t *testing.T) {
-	base := t.TempDir()
+	base := tempRoot(t)
 	real, err := filepath.EvalSymlinks(base)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Join(real, "a", "b"), 0o755))
@@ -681,7 +703,7 @@ func TestAlternatesFileReachedThroughASymlinkInsideTheLeafIsRefused(t *testing.T
 	require.NoError(t, err)
 
 	// The real store lives outside both roots and is listed by an alternates file ...
-	outside := filepath.Join(t.TempDir(), "real-objects")
+	outside := filepath.Join(tempRoot(t), "real-objects")
 	objects := filepath.Join(repo, ".git", "objects")
 	require.NoError(t, os.Rename(objects, outside))
 	// ... that sits INSIDE the leaf, reached through objects/info -> leaf/info-real.
@@ -712,7 +734,7 @@ func TestObjectStoreDiscoveryAgainstRealGit(t *testing.T) {
 	withAlternate := func(t *testing.T, entryFor func(store string) string, storeName string) (wt, store string) {
 		t.Helper()
 		repo, wt := pruneWorktree(t)
-		store = filepath.Join(t.TempDir(), storeName)
+		store = filepath.Join(tempRoot(t), storeName)
 		objects := filepath.Join(repo, ".git", "objects")
 		require.NoError(t, os.Rename(objects, store))
 		require.NoError(t, os.MkdirAll(filepath.Join(objects, "info"), 0o755))
@@ -790,4 +812,55 @@ func TestParseGitAlternateListings(t *testing.T) {
 	assert.Equal(t, []string{"/a/b ", "/q uoted", "  /leading/spaces"}, entries)
 	_, err = parseAlternatesFile("\"/bad\\q\"\n")
 	assert.Error(t, err)
+}
+
+// tempRoot is t.TempDir(), or — when tempRootViaSymlink is set — a path that REACHES
+// a fresh temp directory through a symlink, so the as-written and the canonical
+// spellings of every test path differ, exactly as on macOS where /var and /tmp are
+// symlinks into /private (master's Test (macOS) failure after #6186).
+var tempRootViaSymlink bool
+
+func tempRoot(t *testing.T) string {
+	t.Helper()
+	real := t.TempDir()
+	if !tempRootViaSymlink {
+		return real
+	}
+	link := filepath.Join(t.TempDir(), "via-link")
+	require.NoError(t, os.Symlink(real, link))
+	return link
+}
+
+// Every prune containment test, again, with every temp path reached through a
+// symlink: both sides of each containment comparison must be canonical, or a store
+// inside a deletion root does not look inside it.
+func TestPruneContainmentWhenTheTempRootIsReachedThroughASymlink(t *testing.T) {
+	prev := tempRootViaSymlink
+	tempRootViaSymlink = true
+	t.Cleanup(func() { tempRootViaSymlink = prev })
+	for name, fn := range map[string]func(*testing.T){
+		"object stores":                TestObjectStoresInsideDeletedRootsAreRefusedWhateverTheyAreNamed,
+		"quoted alternate":             TestQuotedAlternateInsideTheLeafIsRefused,
+		"store path through symlink":   TestObjectStorePathThroughASymlinkInsideTheLeafIsRefused,
+		"alternates file through link": TestAlternatesFileReachedThroughASymlinkInsideTheLeafIsRefused,
+		"discovery against real git":   TestObjectStoreDiscoveryAgainstRealGit,
+		"object storage shape":         TestGitObjectStorageUnderTheDeletedRoots,
+		"any submodule":                TestWorktreeWithAnySubmoduleIsRefused,
+		"hiding flags":                 TestUnrecoverableContentSeesHidingFlags,
+		"occupant nonce":               TestArchiveOccupantNonceRejectsARecreatedWorktree,
+		"leaf scoped removal":          TestRemoveArchivedRegistrationLeafIsBoundToTheRecordedOccupant,
+		"empty leaf":                   TestResumeFinishesAnEmptyLeafLeftAfterTheNonceWasRemoved,
+		"locked registration":          TestLockedRegistrationIsRefusedByTheVerdict,
+	} {
+		t.Run(name, fn)
+	}
+}
+
+// canonPath is path with its directory resolved through symlinks, the form git
+// prints in `worktree list` (the entry itself may no longer exist).
+func canonPath(t *testing.T, path string) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	require.NoError(t, err)
+	return filepath.Join(dir, filepath.Base(path))
 }
