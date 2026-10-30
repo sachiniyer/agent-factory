@@ -249,9 +249,11 @@ func TestSandboxReapScriptKillsByIdentityAndGatesTheRemoval(t *testing.T) {
 	assert.NotContains(t, script, expect,
 		"the script must never contain the expected answer — that is what makes it unforgeable")
 
-	// With no PID there is nothing to signal, but the sentinel still gates.
+	// With no recorded PID there is no literal PID to signal: the only kill left is
+	// the identity-gated one over the HOST's launch record, read at run time.
 	noPID, _ := (&sandboxProvisioner{sessionDir: "/remote/af-session"}).reapScript("a1b2c3d4")
-	assert.NotContains(t, noPID, "kill")
+	assert.Contains(t, noPID, `pid="$hp"`)
+	assert.NotContains(t, noPID, "pid='")
 	assert.Contains(t, noPID, "| tr 'a-z' 'A-Z'")
 }
 

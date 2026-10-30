@@ -266,10 +266,10 @@ type Instance struct {
 	// relocationSettleNotify is the daemon-installed persist callback the
 	// respawn fires after SettleWorktreeRelocationClaim resolves a single-
 	// candidate recovery record but BEFORE the spawn proceeds — the settle is
-	// in-memory only, and a daemon exit between it and the later boundary
-	// write would reload the stale record and strand the session inert
-	// (#5295 review). In-memory only; each daemon generation re-installs it
-	// at its recover/respawn entry points.
+	// in-memory only, and a daemon exit before the later boundary write would
+	// reload the stale record and strand the session inert (#5295 review).
+	// In-memory only; each daemon generation re-installs it at its
+	// recover/respawn entry points.
 	relocationSettleNotify func(*Instance) error
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
 	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit
@@ -301,9 +301,9 @@ type Instance struct {
 	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
 	callbackUnavailable string
 	// hostedRemotely marks an instance running INSIDE a sandbox, where the daemon
-	// holds the session as a remote workspace. It decides which capability
-	// projection the injected guidance is rendered from (guidance.go, #5571 W3.3).
-	hostedRemotely bool
+	// holds the session as a remote workspace (guidance.go, #5571 W3.3).
+	hostedRemotely       bool
+	persistedSiblingTabs int // non-agent tabs the daemon's row records but this fresh hosted instance lacks (W1.4)
 	// advertisedFeatures is what the hosting agent-server advertises on
 	// /v1/health; guidance lifts the static remote floor by it (#5878).
 	advertisedFeatures []string

@@ -308,6 +308,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			RemoteAddr:         p.remoteAddr,
 			AgentServerVersion: p.agentServerVersion,
 			TokenRef:           p.tokenRef,
+			LaunchScript:       p.launchScript,
 			CallbackRef:        p.callbackRef,
 			CallbackReverse:    p.callbackReverse(),
 		},
@@ -322,6 +323,9 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		c.SessionDir, c.RemotePID = sb.cleanup.SessionDir, sb.cleanup.RemotePID
 		c.RemoteAddr, c.AgentServerVersion, c.TokenRef = sb.cleanup.RemoteAddr, sb.cleanup.AgentServerVersion, sb.cleanup.TokenRef
 		c.CallbackRef, c.CallbackReverse = sb.cleanup.CallbackRef, sb.cleanup.CallbackReverse
+		// The script that started THIS server, not the archived one's: a crash
+		// recovery after the restore must relaunch what is actually running.
+		c.LaunchScript = sb.cleanup.LaunchScript
 		sb.cleanup = &c
 		return res, nil
 	}
