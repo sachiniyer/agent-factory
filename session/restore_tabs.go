@@ -23,6 +23,53 @@ import (
 
 const tabRestoreFeature = "tab-restore"
 
+// tabRestoreRetryFeature gates POST /v1/agent/restore-tabs: the same rebind
+// against a running server, outside a launch.
+const tabRestoreRetryFeature = "tab-restore-retry"
+
+// TabRestoreRetryFeature is exported for the agent-server's /v1/health advertisement.
+const TabRestoreRetryFeature = tabRestoreRetryFeature
+
+// TabRestoreState is where an off-box tab stands after an agent-server restart.
+// Every such tab is in exactly one state:
+//
+//	TabRestored (zero)  the server holds it; usable
+//	TabRestoreGone      the sandbox confirmed its session absent; the sweep retires the row
+//	TabRestoreUnknown   not yet answered: an old server, a probe that failed or has
+//	                    not answered, or no recorded session. The row is kept, shown
+//	                    unavailable, never retired, and retried when a server answers.
+//
+// Only Gone lets the roster sweep retire a row. The state is persisted, so a
+// daemon restart does not turn an unknown tab into one the sweep deletes.
+type TabRestoreState string
+
+const (
+	TabRestored       TabRestoreState = ""
+	TabRestoreUnknown TabRestoreState = "unknown"
+	TabRestoreGone    TabRestoreState = "gone"
+)
+
+// normalizeRestoreState reads a persisted value: anything but the two known
+// debts is restored, except an unrecognised non-empty value, which is unknown
+// (never trusted as bound).
+func normalizeRestoreState(s TabRestoreState) TabRestoreState {
+	switch s {
+	case TabRestored, TabRestoreGone, TabRestoreUnknown:
+		return s
+	}
+	return TabRestoreUnknown
+}
+
+// featureVerdict is a three-way advertisement answer: unlike a bool, it keeps a
+// probe that has not answered apart from a server that lacks the feature.
+type featureVerdict int
+
+const (
+	featureUnknown featureVerdict = iota
+	featureAbsent
+	featurePresent
+)
+
 // TabRestoreFeature is exported for the agent-server's /v1/health advertisement.
 const TabRestoreFeature = tabRestoreFeature
 
@@ -61,19 +108,20 @@ func (i *Instance) materializeRestorableTabs() {
 			continue
 		}
 		i.Tabs = append(i.Tabs, &Tab{ID: td.ID, Name: td.Name, Kind: tabKindForData(td.Kind), Command: td.Command,
-			Exit: tabExitFromData(td.Exit), gen: td.Gen, sandboxTmux: td.SandboxTmux})
+			Exit: tabExitFromData(td.Exit), gen: td.Gen, sandboxTmux: td.SandboxTmux, restoreState: normalizeRestoreState(td.RestoreState)})
 		i.touchLocked()
 	}
 	i.pendingMetadataTabs = keep
 }
 
 // restoreRosterLocked is the roster a restarted server is handed: the off-box
-// shell/process rows with the sandbox's own tmux name, plus the ids that have
-// none (created before the daemon recorded it) and so cannot be rebound. Caller
-// holds i.mu.
+// shell/process rows with the sandbox's own tmux name, plus the tabs that have
+// none (created before the daemon recorded it) and so cannot be rebound. A tab
+// already confirmed gone is in neither: it is never resurrected. Caller holds
+// i.mu.
 func (i *Instance) restoreRosterLocked() (rows []TabData, unbound []*Tab) {
 	for idx, tab := range i.Tabs {
-		if idx == 0 || !i.isOffBoxTabLocked(tab) {
+		if idx == 0 || !i.isOffBoxTabLocked(tab) || tab.restoreState == TabRestoreGone {
 			continue
 		}
 		if tab.sandboxTmux == "" {
@@ -85,49 +133,66 @@ func (i *Instance) restoreRosterLocked() (rows []TabData, unbound []*Tab) {
 	return rows, unbound
 }
 
-// restoreRosterForRestart returns the rows to send, and flags every off-box tab
-// the restarted server cannot be given back as unavailable. withFeature is
-// whether the server advertises tab-restore: without it nothing is sent and
-// every off-box tab is flagged, never given a binding the server cannot honour.
-func (i *Instance) restoreRosterForRestart(withFeature bool) []TabData {
+// restoreRosterForRestart is called as a restarted server is adopted. That
+// server holds none of the daemon's off-box tabs, so every one not already
+// confirmed gone becomes unknown — a durable debt — and the returned rows are
+// the ones to send. Only the server's answer (applyRestoreOutcome) moves a tab
+// out of unknown. verdict is the tab-restore advertisement: unless it is
+// present nothing is sent and the debt simply stays, so a probe that has not
+// answered is never mistaken for an old server (#6236) and neither is
+// fabricated a binding.
+func (i *Instance) restoreRosterForRestart(verdict featureVerdict) []TabData {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	rows, unbound := i.restoreRosterLocked()
-	flag := func(t *Tab) {
-		if !t.restoreUnavailable {
-			log.WarningLog.Printf("session %q: restarted agent-server cannot be given back %s tab %q (%s); it is shown unavailable and left running",
+	rows, _ := i.restoreRosterLocked()
+	for idx, t := range i.Tabs {
+		if idx == 0 || !i.isOffBoxTabLocked(t) || t.restoreState == TabRestoreGone {
+			continue
+		}
+		if t.restoreState != TabRestoreUnknown {
+			log.WarningLog.Printf("session %q: restarted agent-server does not hold %s tab %q (%s) yet; it is shown unavailable and left running",
 				i.Title, TabKindName(t.Kind), t.Name, t.ID)
+			t.restoreState = TabRestoreUnknown
+			i.touchLocked()
 		}
-		t.restoreUnavailable = true
 	}
-	if !withFeature {
-		for idx, t := range i.Tabs {
-			if idx > 0 && i.isOffBoxTabLocked(t) {
-				flag(t)
-			}
-		}
+	if verdict != featurePresent {
 		return nil
-	}
-	for _, t := range unbound {
-		flag(t)
 	}
 	return rows
 }
 
-// markRestored lifts the flag on ids the server now holds.
-func (i *Instance) markRestored(ids []string) {
-	if len(ids) == 0 {
-		return
-	}
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	for _, t := range i.Tabs {
-		for _, id := range ids {
-			if t.ID == id {
-				t.restoreUnavailable = false
-			}
+// unknownRestoreRowsLocked is the roster of tabs still in the unknown state
+// that carry a session name to rebind. Caller holds i.mu.
+func (i *Instance) unknownRestoreRowsLocked() []TabData {
+	var rows []TabData
+	for idx, t := range i.Tabs {
+		if idx == 0 || !i.isOffBoxTabLocked(t) || t.restoreState != TabRestoreUnknown || t.sandboxTmux == "" {
+			continue
 		}
+		rows = append(rows, TabData{ID: t.ID, Gen: t.gen, Name: t.Name, Kind: t.Kind, Command: t.Command, TmuxName: t.sandboxTmux})
 	}
+	return rows
+}
+
+// retryUnknownTabRestores re-attempts the restore of every tab still unknown, on
+// a server that is already running — the path a restart adoption's lost,
+// unanswered or unsupported attempt leaves to (#6235, #6236). It reports whether
+// any tab changed state. A server that does not advertise the retry route, or
+// does not answer, leaves every tab unknown.
+func (i *Instance) retryUnknownTabRestores(rs *remoteAgentServer) (changed bool) {
+	i.mu.RLock()
+	rows := i.unknownRestoreRowsLocked()
+	i.mu.RUnlock()
+	if len(rows) == 0 || rs.featureVerdict(tabRestoreRetryFeature) != featurePresent {
+		return false
+	}
+	var resp agentLaunchResp
+	if err := rs.rc.call("/v1/agent/restore-tabs", agentLifecycleReq{Tabs: rows}, &resp); err != nil {
+		log.WarningLog.Printf("session %q: retrying the restore of %d sandbox tab(s) failed; they stay unavailable and are retried: %v", i.Title, len(rows), err)
+		return false
+	}
+	return i.applyRestoreOutcome(rows, resp.TabsRestored, resp.TabsGone)
 }
 
 // RestoreSurvivingTabs rebinds the rows to their surviving tmux sessions on a
@@ -185,29 +250,32 @@ func (i *Instance) RestoreSurvivingTabs(rows []TabData) TabRestoreReport {
 	return rep
 }
 
-// applyRestoreOutcome records the server's answer to a sent roster. A restored
-// id is lifted out of the unavailable state; a gone id is left for the roster
-// sweep to retire, because the server read an empty answer for it; any other id
-// stays unavailable rather than being guessed either way.
-func (i *Instance) applyRestoreOutcome(sent []TabData, restored, gone []string) {
-	answered := map[string]bool{}
-	for _, id := range restored {
-		answered[id] = true
+// applyRestoreOutcome records the server's answer to a sent roster: a restored
+// id is bound (restored), a gone id is confirmed gone — the roster sweep then
+// retires its row (#6237) — and any other id stays unknown, to be retried. It
+// reports whether any tab changed state.
+func (i *Instance) applyRestoreOutcome(sent []TabData, restored, gone []string) (changed bool) {
+	set := func(ids []string, to TabRestoreState) {
+		for _, id := range ids {
+			for _, row := range sent {
+				if row.ID != id {
+					continue
+				}
+				if idx, ok := i.tabIndexByIDLocked(id); ok && i.Tabs[idx].restoreState != to {
+					i.Tabs[idx].restoreState = to
+					changed = true
+				}
+			}
+		}
 	}
-	for _, id := range gone {
-		answered[id] = true
-	}
-	i.markRestored(restored)
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	for _, row := range sent {
-		if answered[row.ID] {
-			continue
-		}
-		if idx, ok := i.tabIndexByIDLocked(row.ID); ok {
-			i.Tabs[idx].restoreUnavailable = true
-		}
+	set(restored, TabRestored)
+	set(gone, TabRestoreGone)
+	if changed {
+		i.touchLocked()
 	}
+	return changed
 }
 
 // reportRebound answers a row whose id this server already holds. The same
