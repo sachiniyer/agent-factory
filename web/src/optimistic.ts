@@ -41,12 +41,23 @@ export class OptimisticSessions {
   /** Captured before fetching, so an older snapshot cannot undo an RPC or event. */
   snapshotFence(): number { return this.revision; }
 
-  /** Adds rows the live-only snapshot left out (an archived page, a deep-linked
-   *  archived session). Not an event and not a snapshot: it bumps no revision, so
-   *  a fetch already in flight is not discarded for it, and it records no pending
-   *  feedback. A row already known is replaced in place. */
-  adopt(rows: SessionData[]): void {
-    for (const row of rows) this.authoritative = upsertSession(this.authoritative, row);
+  /** The one door for archive rows read outside a snapshot (an archived page, a
+   *  deep-linked session, #6206-#6209). `fence` is `snapshotFence()` captured BEFORE
+   *  the read. A row is adopted only if no session event for it is newer than the
+   *  fence: a deletion or kill that arrived while the read was in flight beats the
+   *  stale row, in either arrival order. Adopting anything advances the revision, so
+   *  a snapshot fetched before the adopt fails its own fence and is re-requested
+   *  rather than overwriting the rows. A row already known is replaced in place.
+   *  Returns the rows actually adopted. */
+  adopt(rows: SessionData[], fence: number): SessionData[] {
+    const taken = rows.filter((row) => {
+      const seen = this.sessionEvents.get(sessionKey(row));
+      return !seen || seen.revision <= fence;
+    });
+    if (taken.length === 0) return taken;
+    for (const row of taken) this.authoritative = upsertSession(this.authoritative, row);
+    this.revision++;
+    return taken;
   }
 
   /** `leftLiveSet`: the snapshot was live-only, so a row ABSENT from it may have
