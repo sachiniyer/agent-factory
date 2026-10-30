@@ -20165,8 +20165,10 @@ function selectedSession2() {
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
 var restoreModalFocus = null;
+var modalGeneration = 0;
 var stopModalProjectionWatch = null;
 function closeModal() {
+  modalGeneration++;
   if (modal) {
     const restoreFocus = restoreModalFocus;
     restoreModalFocus = null;
@@ -20206,6 +20208,7 @@ function captureModalInvoker() {
   };
 }
 function openModal(m, focusCard = false, explicitInvoker) {
+  modalGeneration++;
   mountOverlay((mountHost) => {
     const focused = document.activeElement;
     const invoker = explicitInvoker ?? captureModalInvoker();
@@ -20336,6 +20339,7 @@ function newSession() {
 function openConfirm(action, session, invoker = captureModalInvoker()) {
   if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
+  const dialogGeneration = ++modalGeneration;
   const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest) => {
@@ -20465,7 +20469,12 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
     if (immediateRestore) onConfirm();
   };
   if (action === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
-    void fetchKeptBranch(target.id, target.title, token ?? "").then(mountWith);
+    const ticket = createSelectionIntent.snapshot();
+    const generation = connectionGeneration;
+    void fetchKeptBranch(target.id, target.title, token ?? "").then((kept) => {
+      if (modalGeneration !== dialogGeneration || !createSelectionIntent.isCurrent(ticket) || connectionGeneration !== generation) return;
+      mountWith(kept);
+    });
   } else {
     mountWith();
   }
