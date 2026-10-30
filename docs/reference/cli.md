@@ -19,7 +19,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af backlog add`](#af-backlog-add) — Add a draft item, or add and update many items from JSON
 - [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
 - [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
-- [`af backlog done`](#af-backlog-done) — Mark an item done after review
+- [`af backlog done`](#af-backlog-done) — Mark an item done after review, or, from an item session, send it to review
 - [`af backlog draft`](#af-backlog-draft) — Put a queued or in-review item back to draft
 - [`af backlog drop`](#af-backlog-drop) — Mark an item dropped
 - [`af backlog edit`](#af-backlog-edit) — Change an item's title, body, waits-on, program, or sequential flag
@@ -31,6 +31,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af backlog review`](#af-backlog-review) — Send a running item to review
 - [`af backlog runner`](#af-backlog-runner) — Show or change this project's runner
 - [`af backlog show`](#af-backlog-show) — Print one item: body, state and reason, links, runs, and thread
+- [`af backlog start`](#af-backlog-start) — Start an item now
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
 - [`af completion bash`](#af-completion-bash) — Generate the autocompletion script for bash
@@ -498,7 +499,7 @@ af backlog
 - [`af backlog add`](#af-backlog-add) — Add a draft item, or add and update many items from JSON
 - [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
 - [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
-- [`af backlog done`](#af-backlog-done) — Mark an item done after review
+- [`af backlog done`](#af-backlog-done) — Mark an item done after review, or, from an item session, send it to review
 - [`af backlog draft`](#af-backlog-draft) — Put a queued or in-review item back to draft
 - [`af backlog drop`](#af-backlog-drop) — Mark an item dropped
 - [`af backlog edit`](#af-backlog-edit) — Change an item's title, body, waits-on, program, or sequential flag
@@ -510,6 +511,7 @@ af backlog
 - [`af backlog review`](#af-backlog-review) — Send a running item to review
 - [`af backlog runner`](#af-backlog-runner) — Show or change this project's runner
 - [`af backlog show`](#af-backlog-show) — Print one item: body, state and reason, links, runs, and thread
+- [`af backlog start`](#af-backlog-start) — Start an item now
 
 **Flags**
 
@@ -605,13 +607,22 @@ af backlog delete <id>
 
 ## af backlog done
 
-Mark an item done after review
+Mark an item done after review, or, from an item session, send it to review
 
-Mark the item done. Items that wait on it can then start. Open questions on it close; its session stays.
+With an id, mark the item done. Items that wait on it can then start. Open questions on it close; its session stays.
+
+With --self, run from inside an item session: the agent's work is finished and the item goes to review for the user. --pr stores the pull request link.
 
 ```
-af backlog done <id>
+af backlog done <id> | done --self [--pr <url>] [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--pr` | `string` | With --self, the `url` of the pull request for the work |
+| `--self` |  | From inside an item session: the work is finished; send the item to review |
 
 **Global flags**
 
@@ -748,11 +759,17 @@ af backlog move <id> [flags]
 
 Add a note to an item's thread
 
-Add a note to the item's thread. A note is not delivered to the item's session.
+Add a note to the item's thread. A note is not delivered to the item's session. With --self, the item is the one of the session this runs in.
 
 ```
-af backlog note <id> <text>
+af backlog note <id> <text> | note --self <text> [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--self` |  | Note on the item of the session this runs in |
 
 **Global flags**
 
@@ -852,6 +869,25 @@ Print one item: body, state and reason, links, runs, and thread
 
 ```
 af backlog show <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog start
+
+Start an item now
+
+Start the item now, ignoring the runner switch and the budget. An item with a live session gets "continue" in that session; any other item gets a new session on a new branch from the default branch. The command returns at once; the run shows starting until the session exists.
+
+```
+af backlog start <id>
 ```
 
 **Global flags**

@@ -134,3 +134,15 @@ type ChangedEvent struct {
 	RepoID string `json:"repo_id"`
 	IDs    []int  `json:"ids"`
 }
+
+type StartRequest struct {
+	RepoID   string `json:"repo_id,omitempty"`
+	RepoPath string `json:"repo_path,omitempty"`
+	ID       int    `json:"id"`
+}
+
+// StartResponse returns the run at once; a new session's run is still
+// starting.
+type StartResponse struct {
+	Run RunRef `json:"run"`
+}

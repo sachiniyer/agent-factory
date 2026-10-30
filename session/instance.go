@@ -52,6 +52,11 @@ type Instance struct {
 	// construction, so cross-goroutine readers may read it without the mutex
 	// (like ID and Title).
 	TaskID string
+	// BacklogItem is the id of the backlog item this session was started for, 0
+	// for any other session. Immutable after construction. backlog.json is the
+	// source of truth for the item ↔ session link; this is a cache for clients
+	// and the one input restart recovery matches a starting run against.
+	BacklogItem int
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.
@@ -232,6 +237,19 @@ type Instance struct {
 	// failing, and only a never-bound run may be ended failed by it. Persisted
 	// while the run is in flight, with the boundary it qualifies.
 	taskRunPromptBound bool
+	// backlogRunActive is the backlog's run marker. Unlike taskRunActive it is
+	// re-armed each time the backlog delivers a prompt, so one item session has
+	// many runs. It shares the task run's completion gate (prompt boundary, turn
+	// evidence, held edges); a session is never both a task and an item session.
+	backlogRunActive bool
+	// backlogRunEndedAt is when the latest backlog run ended (persisted).
+	backlogRunEndedAt time.Time
+	// backlogRunGen counts the runs armed on this session (in memory only): a
+	// completion queued for run N must not finish run N+1 (ArmBacklogRun).
+	backlogRunGen int
+	// backlogRunEndedAtBeforeArm is backlogRunEndedAt as ArmBacklogRun found it,
+	// for DisarmBacklogRun to restore (in memory only).
+	backlogRunEndedAtBeforeArm time.Time
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

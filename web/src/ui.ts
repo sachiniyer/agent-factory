@@ -524,7 +524,7 @@ export interface Actions {
   /** Opens the edit-task modal seeded from the task, submitting via UpdateTask (#1935). */
   editTask(task: TaskData): void;
   /** Enables/disables a task via UpdateTask. */
-  toggleTask(task: TaskData): void;
+  toggleTask(task: TaskData): Promise<boolean>;
   /** Fires a task now via TriggerTask (enabled cron tasks). */
   triggerTask(task: TaskData): void;
   /** Removes a task via RemoveTask. */

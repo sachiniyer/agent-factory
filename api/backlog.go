@@ -300,6 +300,9 @@ var backlogAddCmd = &cobra.Command{
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
+			if err := refuseFromItemSession("add"); err != nil {
+				return nil, err
+			}
 			if backlogAddFile != "" {
 				return backlogAddBatch(cmd, args)
 			}
@@ -415,6 +418,9 @@ var backlogEditCmd = &cobra.Command{
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
+			if err := refuseFromItemSession("edit"); err != nil {
+				return nil, err
+			}
 			id, err := backlog.ParseID(args[0])
 			if err != nil {
 				return nil, err
@@ -483,6 +489,9 @@ var backlogMoveCmd = &cobra.Command{
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
+			if err := refuseFromItemSession("move"); err != nil {
+				return nil, err
+			}
 			id, err := backlog.ParseID(args[0])
 			if err != nil {
 				return nil, err

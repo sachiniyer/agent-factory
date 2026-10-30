@@ -1823,7 +1823,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/backlog.go backlogListCmd/backlogShowCmd/backlogAddCmd/backlogEditCmd/backlogMoveCmd, api/backlog_status.go backlogDeleteCmd/backlogNoteCmd → POST /v1/GetBacklog, AddBacklogItems, UpdateBacklogItem, MoveBacklogItem, DeleteBacklogItem, PostBacklogMessage (daemon/backlog.go)"
+        "pointer": "api/backlog.go backlogListCmd/backlogShowCmd/backlogAddCmd/backlogEditCmd/backlogMoveCmd, api/backlog_status.go backlogDeleteCmd, api/backlog_self.go backlogNoteCmd (note <id> and note --self) → POST /v1/GetBacklog, AddBacklogItems, UpdateBacklogItem, MoveBacklogItem, DeleteBacklogItem, PostBacklogMessage (daemon/backlog.go)"
       },
       "verdict": "real-gap",
       "issue": "TBD",
@@ -1842,11 +1842,30 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/backlog_status.go backlogStatusCmd (queue, draft, review, reopen, done, drop) → POST /v1/SetBacklogItemStatus (daemon/backlog.go)"
+        "pointer": "api/backlog_status.go backlogStatusCmd (queue, draft, review, reopen, drop), api/backlog_self.go backlogDoneCmd (done <id> and the agent's done --self --pr) → POST /v1/SetBacklogItemStatus (daemon/backlog.go)"
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Backlog PR 3 adds the item panel actions on the web. The agent's done --self (session_id, pr) arrives with item sessions in PR 4. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "notes": "Backlog PR 3 adds the item panel actions on the web. The agent's done --self (session_id, pr) is CLI-only by design: it runs inside an item session. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
+      "id": "backlog.sessions",
+      "title": "Start backlog items as sessions",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_self.go backlogStartCmd → POST /v1/StartBacklogItem (daemon/backlog_start.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 4 starts items as sessions from the CLI; the web Start now button arrives in PR 8. Item sessions are ordinary sessions, so open, archive and restore use the session routes. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.runner",
@@ -1888,6 +1907,7 @@
       "af backlog review": "backlog.status",
       "af backlog reopen": "backlog.status",
       "af backlog done": "backlog.status",
+      "af backlog start": "backlog.sessions",
       "af backlog drop": "backlog.status",
       "af backlog runner": "backlog.runner",
       "af backlog budget": "backlog.runner",
@@ -1993,6 +2013,7 @@
       "POST /v1/PostBacklogMessage": "backlog.items",
       "POST /v1/SetBacklogItemStatus": "backlog.status",
       "POST /v1/SetBacklogSettings": "backlog.runner",
+      "POST /v1/StartBacklogItem": "backlog.sessions",
       "POST /v1/GetBudget": "backlog.runner",
       "POST /v1/SetBudget": "backlog.runner",
       "GET /v1/health": "-",
@@ -2167,6 +2188,10 @@
       "af backlog review --help": "meta.discovery",
       "af backlog reopen --help": "meta.discovery",
       "af backlog done --help": "meta.discovery",
+      "af backlog start --help": "meta.discovery",
+      "af backlog done --self": "backlog.status",
+      "af backlog done --pr": "backlog.status",
+      "af backlog note --self": "backlog.items",
       "af backlog drop --help": "meta.discovery",
       "af backlog runner --help": "meta.discovery",
       "af backlog budget --help": "meta.discovery",
@@ -2550,23 +2575,10 @@
           }
         }
       },
-    "SetBacklogItemStatusRequest": {
-      "cli": {
-        "pr": {
-          "ok": "Set only by the agent's af backlog done --self --pr, which arrives with item sessions in backlog PR 4."
-        },
-        "session_id": {
-          "ok": "Set only by the agent's af backlog done --self, which arrives with item sessions in backlog PR 4."
-        }
-      }
-    },
     "PostBacklogMessageRequest": {
       "cli": {
         "question_id": {
           "ok": "Answers arrive in backlog PR 5 (af backlog answer); this af posts notes only."
-        },
-        "session_id": {
-          "ok": "Set only by af backlog note --self and ask --self, which arrive with item sessions in backlog PR 4 and 5."
         }
       }
     },

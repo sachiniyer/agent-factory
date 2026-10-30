@@ -12,5 +12,5 @@ func CallBacklog(method string, req, resp any) error {
 var backlogMethods = map[string]bool{
 	"GetBacklog": true, "AddBacklogItems": true, "UpdateBacklogItem": true, "MoveBacklogItem": true,
 	"SetBacklogItemStatus": true, "DeleteBacklogItem": true, "PostBacklogMessage": true,
-	"SetBacklogSettings": true, "GetBudget": true, "SetBudget": true,
+	"SetBacklogSettings": true, "GetBudget": true, "SetBudget": true, "StartBacklogItem": true,
 }
