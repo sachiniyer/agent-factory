@@ -152,8 +152,10 @@ test("a git URL routes to RegisterProject's url half and releases the modal for 
   assert.deepEqual(events.filter(e => e.startsWith("rpc:")), ["rpc:url:https://github.com/owner/repo"]);
   assert.equal(pendingPaths.length, 0, "a URL must not reach the path field");
   assert.ok(events.includes("close:1"), "the modal releases — the clone outlives a held form");
-  assert.ok(events.some(e => e.startsWith("notice:") && e.includes("https://github.com/owner/repo")),
-    "the in-flight clone is named so the quiet window reads as progress, not silence");
+  assert.ok(
+    events.includes("notice:Cloning https://github.com/owner/repo on the daemon host — the project appears in the switcher when it lands."),
+    "the in-flight clone is named so the quiet window reads as progress, not silence",
+  );
 
   pendingURLs[0].resolve({ id: "prj_A", root: "/daemon/projects/repo" });
   await settle();
