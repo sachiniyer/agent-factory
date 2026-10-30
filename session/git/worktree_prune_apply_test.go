@@ -59,52 +59,6 @@ func TestUnrecoverableContentSeesHidingFlags(t *testing.T) {
 	})
 }
 
-// BLOCKING (round 9): an ignored file inside an initialized submodule is invisible
-// to the superproject's status, so each submodule is probed itself.
-func TestUnrecoverableContentSeesIgnoredFilesInSubmodules(t *testing.T) {
-	sub := newPruneGuardRepo(t)
-	_, wt := pruneWorktree(t)
-	gitIn(t, wt, "submodule", "add", sub, "mod")
-	gitIn(t, wt, "commit", "-qm", "add submodule")
-	require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", "secret.env"), []byte("only copy"), 0o644))
-
-	reasons, err := WorktreeUnrecoverableContent(wt)
-	require.NoError(t, err)
-	assert.Contains(t, strings.Join(reasons, " "), "submodule mod")
-	assert.Contains(t, strings.Join(reasons, " "), "secret.env")
-}
-
-// P1 (Codex on #6186): in a linked worktree a submodule's object database lives
-// under the registration leaf (.git/worktrees/<id>/modules/…). The kept branch
-// holds only the gitlink hash, so removing the leaf would destroy submodule
-// commits that exist nowhere else. A clean worktree with such a submodule must be
-// refused, naming the submodule.
-func TestUnrecoverableContentRefusesASubmoduleWhoseObjectsLiveInTheRegistration(t *testing.T) {
-	sub := newPruneGuardRepo(t)
-	_, wt := pruneWorktree(t)
-	gitIn(t, wt, "submodule", "add", sub, "mod")
-	// A submodule commit that exists nowhere else.
-	require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", "local-only.txt"), []byte("only here"), 0o644))
-	gitIn(t, filepath.Join(wt, "mod"), "add", "local-only.txt")
-	gitIn(t, filepath.Join(wt, "mod"), "commit", "-qm", "submodule-only commit")
-	gitIn(t, wt, "add", "mod")
-	gitIn(t, wt, "commit", "-qm", "bump submodule")
-
-	n, err := WorktreeDirtyFiles(wt)
-	require.NoError(t, err)
-	require.Zero(t, n, "premise: the worktree reads clean")
-	gitDir := gitIn(t, filepath.Join(wt, "mod"), "rev-parse", "--absolute-git-dir")
-	leaf, err := registrationLeaf(wt)
-	require.NoError(t, err)
-	require.True(t, within(gitDir, leaf), "premise: the submodule's objects live under the registration leaf: %s", gitDir)
-
-	reasons, err := WorktreeUnrecoverableContent(wt)
-	require.NoError(t, err)
-	require.NotEmpty(t, reasons)
-	assert.Contains(t, strings.Join(reasons, " "), "submodule mod")
-	assert.Contains(t, strings.Join(reasons, " "), "pruning deletes")
-}
-
 // BLOCKING (round 9): the occupant is bound by an af-owned nonce. A worktree
 // re-created at the same path with the same branch has the same repo, path and
 // branch, and — on a coarse-timestamp filesystem — the same registration mtime; it
@@ -199,48 +153,53 @@ func TestLocalBranchExistsInABareOrigin(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// One predicate, every shape (Codex P1 round 2 on #6186): a submodule's real git
-// directory must lie outside BOTH roots prune deletes — the worktree tree and the
-// registration leaf — or the worktree is refused.
-func TestSubmoduleObjectsMustLiveOutsideEveryDeletedRoot(t *testing.T) {
-	commitSub := func(t *testing.T, wt string) {
-		require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", "only-here.txt"), []byte("x"), 0o644))
-		gitIn(t, filepath.Join(wt, "mod"), "add", "only-here.txt")
-		gitIn(t, filepath.Join(wt, "mod"), "commit", "-qm", "submodule-only commit")
-		gitIn(t, wt, "add", "mod")
-		gitIn(t, wt, "commit", "-qm", "bump")
-	}
+// Prune never deletes a worktree whose index contains a gitlink (#5189): the kept
+// branch holds only the submodule's commit hash, and its objects and local files
+// can sit in the tree, in the registration, or where status never looks. Every
+// shape is refused with the submodule path named; nothing is probed for "safety".
+func TestWorktreeWithAnySubmoduleIsRefused(t *testing.T) {
 	refused := func(t *testing.T, wt string, want ...string) {
 		t.Helper()
 		reasons, err := WorktreeUnrecoverableContent(wt)
 		require.NoError(t, err)
-		joined := strings.Join(reasons, " ")
 		require.NotEmpty(t, reasons)
+		joined := strings.Join(reasons, " ")
+		assert.Contains(t, joined, "submodule")
 		for _, w := range want {
 			assert.Contains(t, joined, w)
 		}
 	}
 
-	t.Run("absorbed under the registration leaf", func(t *testing.T) {
+	t.Run("uninitialized submodule directory holding a local file", func(t *testing.T) {
 		_, wt := pruneWorktree(t)
 		gitIn(t, wt, "submodule", "add", newPruneGuardRepo(t), "mod")
-		commitSub(t, wt)
-		refused(t, wt, "submodule mod")
+		gitIn(t, wt, "commit", "-qm", "add submodule")
+		gitIn(t, wt, "submodule", "deinit", "-f", "mod")
+		require.NoError(t, os.MkdirAll(filepath.Join(wt, "mod"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", "local-only.txt"), []byte("only copy"), 0o644))
+		n, err := WorktreeDirtyFiles(wt)
+		require.NoError(t, err)
+		require.Zero(t, n, "premise: status never reports a file in an uninitialized submodule path")
+		refused(t, wt, "mod")
 	})
 
-	t.Run("not absorbed: .git directory inside the tree", func(t *testing.T) {
+	t.Run("initialized, absorbed", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		gitIn(t, wt, "submodule", "add", newPruneGuardRepo(t), "mod")
+		gitIn(t, wt, "commit", "-qm", "add submodule")
+		refused(t, wt, "mod")
+	})
+
+	t.Run("initialized, not absorbed (.git directory inside the tree)", func(t *testing.T) {
 		_, wt := pruneWorktree(t)
 		src := newPruneGuardRepo(t)
-		gitIn(t, wt, "clone", src, "mod") // a real .git directory under the worktree
+		gitIn(t, wt, "clone", src, "mod")
 		gitIn(t, wt, "submodule", "add", src, "mod")
-		fi, err := os.Stat(filepath.Join(wt, "mod", ".git"))
-		require.NoError(t, err)
-		require.True(t, fi.IsDir(), "premise: the submodule's .git is a directory inside the tree")
-		commitSub(t, wt)
-		refused(t, wt, "submodule mod")
+		gitIn(t, wt, "commit", "-qm", "add submodule")
+		refused(t, wt, "mod")
 	})
 
-	t.Run("nested submodule", func(t *testing.T) {
+	t.Run("nested", func(t *testing.T) {
 		inner := newPruneGuardRepo(t)
 		outer := newPruneGuardRepo(t)
 		gitIn(t, outer, "submodule", "add", inner, "inner")
@@ -249,32 +208,14 @@ func TestSubmoduleObjectsMustLiveOutsideEveryDeletedRoot(t *testing.T) {
 		gitIn(t, wt, "submodule", "add", outer, "mod")
 		gitIn(t, wt, "submodule", "update", "--init", "--recursive")
 		gitIn(t, wt, "commit", "-qm", "add outer")
-		refused(t, wt, "submodule mod", "mod/inner")
+		refused(t, wt, "mod")
 	})
 
-	t.Run("outside both roots is allowed", func(t *testing.T) {
+	t.Run("a worktree without submodules is not refused for them", func(t *testing.T) {
 		_, wt := pruneWorktree(t)
-		gitIn(t, wt, "submodule", "add", newPruneGuardRepo(t), "mod")
-		gitIn(t, wt, "commit", "-qm", "add submodule")
-		// Relocate the submodule's git directory outside the tree and the leaf.
-		old := gitIn(t, filepath.Join(wt, "mod"), "rev-parse", "--absolute-git-dir")
-		outside := filepath.Join(t.TempDir(), "mod.git")
-		require.NoError(t, os.Rename(old, outside))
-		require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", ".git"), []byte("gitdir: "+outside+"\n"), 0o644))
-		gitIn(t, wt, "config", "--file", filepath.Join(outside, "config"), "core.worktree", filepath.Join(wt, "mod"))
-
 		reasons, err := WorktreeUnrecoverableContent(wt)
 		require.NoError(t, err)
-		assert.Empty(t, reasons, "a submodule whose objects survive the deletion is reclaimable")
-	})
-
-	t.Run("an unresolvable git directory refuses", func(t *testing.T) {
-		_, wt := pruneWorktree(t)
-		gitIn(t, wt, "submodule", "add", newPruneGuardRepo(t), "mod")
-		gitIn(t, wt, "commit", "-qm", "add submodule")
-		require.NoError(t, os.WriteFile(filepath.Join(wt, "mod", ".git"), []byte("gitdir: /nonexistent/elsewhere\n"), 0o644))
-		_, err := WorktreeUnrecoverableContent(wt)
-		require.Error(t, err, "unknown is never reclaimable")
+		assert.Empty(t, reasons)
 	})
 }
 

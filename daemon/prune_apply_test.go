@@ -332,3 +332,30 @@ func TestPruneApply_FailedTombstoneWriteKeepsTheIntentForTheNextApply(t *testing
 	assert.True(t, inst.IsPruned())
 	assert.Nil(t, inst.PruneIntent())
 }
+
+// A worktree whose index holds a gitlink is never pruned, however the submodule
+// looks (#5189): the dry run lists it as skipped, naming the path, and a stale plan
+// that names it deletes nothing.
+func TestPruneApply_NeverDeletesAWorktreeWithASubmodule(t *testing.T) {
+	manager, repoID, _, inst, archived := seedPrunableArchive(t, "has-submodule")
+	subRepo := t.TempDir()
+	gitOut(t, subRepo, "init", "-q", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(subRepo, "f.txt"), []byte("x"), 0o644))
+	gitOut(t, subRepo, "add", "-A")
+	gitOut(t, subRepo, "commit", "-qm", "sub")
+	gitOut(t, archived, "-c", "protocol.file.allow=always", "submodule", "add", subRepo, "mod")
+	gitOut(t, archived, "commit", "-qm", "add submodule")
+
+	dry, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	require.Empty(t, dry.Candidates)
+	require.Len(t, dry.Skipped, 1)
+	assert.Contains(t, dry.Skipped[0].Reason, "submodule")
+	assert.Contains(t, dry.Skipped[0].Reason, "mod")
+
+	resp, err := manager.PruneSessions(applyReq(repoID, inst.ID))
+	require.NoError(t, err)
+	assert.Empty(t, resp.Pruned)
+	assert.DirExists(t, archived)
+	assert.False(t, inst.IsPruned())
+}

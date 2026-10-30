@@ -86,57 +86,32 @@ func VerifyArchiveOccupant(worktreePath, recordedNonce string, archivedAt time.T
 
 // WorktreeUnrecoverableContent returns one reason per way the worktree holds
 // content the kept branch cannot restore, or an error when that could not be
-// established (callers fail closed on an error). It is the dirty probe plus the
-// two things `git status` cannot see:
+// established (callers fail closed on an error). It is the dirty probe plus what
+// `git status` cannot see:
 //
 //   - index entries flagged assume-unchanged (`h`) or skip-worktree (`S`/`s`):
 //     status skips their content, so a modified file reads clean. One
 //     `ls-files -v` read covers every non-`H` tag, without touching the index.
-//   - initialized submodules: the superproject's `status --ignored` never
-//     reports ignored files inside one, so each is probed itself, recursively.
+//   - ANY submodule. A worktree whose index contains a gitlink (mode 160000),
+//     initialized or not, nested or not, is refused outright. The kept branch holds
+//     only the gitlink's commit hash, while the submodule's objects and local files
+//     can live in the tree, in the registration, or nowhere prune can see, and the
+//     "is this submodule's content safe to delete" predicate kept meeting new
+//     shapes (#5189, three P1s). Supporting submodule worktrees is a separate,
+//     separately reviewed change.
 func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 	var reasons []string
-	leaf, err := registrationLeaf(worktreePath)
+	dirty, dirtySample, err := WorktreeDirtyEntries(worktreePath)
 	if err != nil {
 		return nil, err
-	}
-	// The two roots prune deletes, resolved once: the worktree tree and its
-	// registration leaf.
-	deleted := make([]string, 0, 2)
-	for _, p := range []string{worktreePath, leaf} {
-		real, err := filepath.EvalSymlinks(p)
-		if err != nil {
-			return nil, fmt.Errorf("could not resolve %s: %w", p, err)
-		}
-		deleted = append(deleted, real)
-	}
-	if err := probeUnrecoverable(worktreePath, "", 0, deleted, &reasons); err != nil {
-		return nil, err
-	}
-	return reasons, nil
-}
-
-const maxSubmoduleDepth = 8
-
-func probeUnrecoverable(dir, label string, depth int, deleted []string, reasons *[]string) error {
-	if depth > maxSubmoduleDepth {
-		return fmt.Errorf("submodules under %s nest deeper than %d levels", dir, maxSubmoduleDepth)
-	}
-	where := ""
-	if label != "" {
-		where = " in submodule " + label
-	}
-	dirty, dirtySample, err := WorktreeDirtyEntries(dir)
-	if err != nil {
-		return err
 	}
 	if dirty > 0 {
-		*reasons = append(*reasons, fmt.Sprintf("%d uncommitted or ignored file(s)%s that the kept branch does not contain (%s) — commit, move or delete them, then re-run",
-			dirty, where, sampleList(dirtySample, dirty)))
+		reasons = append(reasons, fmt.Sprintf("%d uncommitted or ignored file(s) that the kept branch does not contain (%s) — commit, move or delete them, then re-run",
+			dirty, sampleList(dirtySample, dirty)))
 	}
-	out, err := runBoundedWorktreeGit(dir, true, "--no-optional-locks", "-c", "core.fsmonitor=", "ls-files", "-v", "-z")
+	out, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks", "-c", "core.fsmonitor=", "ls-files", "-v", "-z")
 	if err != nil {
-		return fmt.Errorf("could not read the index flags of %s: %w", dir, err)
+		return nil, fmt.Errorf("could not read the index flags of %s: %w", worktreePath, err)
 	}
 	flagged := 0
 	var flaggedSample []string
@@ -145,7 +120,7 @@ func probeUnrecoverable(dir, label string, depth int, deleted []string, reasons 
 			continue
 		}
 		if len(rec) < 3 || rec[1] != ' ' {
-			return fmt.Errorf("git ls-files -v reported an unreadable record for %s: %q", dir, rec)
+			return nil, fmt.Errorf("git ls-files -v reported an unreadable record for %s: %q", worktreePath, rec)
 		}
 		if rec[0] != 'H' {
 			flagged++
@@ -155,52 +130,25 @@ func probeUnrecoverable(dir, label string, depth int, deleted []string, reasons 
 		}
 	}
 	if flagged > 0 {
-		*reasons = append(*reasons, fmt.Sprintf("%d index entr(ies)%s flagged assume-unchanged or skip-worktree (%s) — git status cannot see their content, so it may not be on the kept branch; clear the flag (git update-index --no-assume-unchanged / --no-skip-worktree) and commit or discard the change",
-			flagged, where, sampleList(flaggedSample, flagged)))
+		reasons = append(reasons, fmt.Sprintf("%d index entr(ies) flagged assume-unchanged or skip-worktree (%s) — git status cannot see their content, so it may not be on the kept branch; clear the flag (git update-index --no-assume-unchanged / --no-skip-worktree) and commit or discard the change",
+			flagged, sampleList(flaggedSample, flagged)))
 	}
-	subs, err := gitlinkPaths(dir)
+	subs, err := gitlinkPaths(worktreePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, sub := range subs {
-		subDir := filepath.Join(dir, filepath.FromSlash(sub))
-		if _, err := BoundedLstat(filepath.Join(subDir, ".git")); err != nil {
-			if os.IsNotExist(err) {
-				continue // not initialized: nothing of its own to lose
-			}
-			return fmt.Errorf("could not inspect submodule %s: %w", subDir, err)
-		}
-		next := sub
-		if label != "" {
-			next = label + "/" + sub
-		}
-		// Do not enumerate the places a submodule's objects can die — invert the
-		// rule. Its real git directory (rev-parse follows gitfile indirection) must
-		// provably lie OUTSIDE both roots prune deletes, the worktree tree (a
-		// non-absorbed submodule keeps .git inside it) and the registration leaf
-		// (an absorbed one keeps it under modules/), or the kept branch's gitlink
-		// hash may name a commit that exists nowhere else. One predicate covers
-		// absorbed, non-absorbed and nested submodules; anything unresolvable
-		// refuses.
-		subGitDir, err := runBoundedWorktreeGit(subDir, true, "--no-optional-locks", "rev-parse", "--absolute-git-dir")
-		if err != nil {
-			return fmt.Errorf("could not locate the git directory of submodule %s: %w", next, err)
-		}
-		realGitDir, err := filepath.EvalSymlinks(strings.TrimSpace(string(subGitDir)))
-		if err != nil {
-			return fmt.Errorf("could not resolve the git directory of submodule %s: %w", next, err)
-		}
-		for _, root := range deleted {
-			if within(realGitDir, root) {
-				*reasons = append(*reasons, fmt.Sprintf("submodule %s keeps its object database at %s, which pruning deletes — its commits may exist nowhere else; move the submodule's git directory outside this worktree (git submodule absorbgitdirs, then relocate it) or push its commits first", next, realGitDir))
-				break
-			}
-		}
-		if err := probeUnrecoverable(subDir, next, depth+1, deleted, reasons); err != nil {
-			return err
-		}
+	if len(subs) > 0 {
+		reasons = append(reasons, fmt.Sprintf("the worktree contains %d submodule(s) (%s) — pruning does not support submodules, because their objects and local files are not covered by the kept branch; remove the archive by hand after preserving them",
+			len(subs), sampleList(firstN(subs, pruneSamplePaths), len(subs))))
 	}
-	return nil
+	return reasons, nil
+}
+
+func firstN(in []string, n int) []string {
+	if len(in) > n {
+		return in[:n]
+	}
+	return in
 }
 
 // gitlinkPaths lists the index's gitlink (mode 160000) paths.
@@ -312,12 +260,6 @@ func RemoveArchivedRegistrationLeaf(repoRoot, leafName, nonce string) error {
 		return fmt.Errorf("registration %s is locked — refusing to remove it", leaf)
 	}
 	return os.RemoveAll(leaf)
-}
-
-// within reports whether path is dir or lies beneath it.
-func within(path, dir string) bool {
-	path, dir = filepath.Clean(path), filepath.Clean(dir)
-	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
 }
 
 func sampleList(sample []string, total int) string {
