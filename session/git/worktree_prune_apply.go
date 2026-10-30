@@ -1,8 +1,10 @@
 package git
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,7 +42,9 @@ func StampArchiveNonce(worktreePath string) (string, error) {
 		return "", err
 	}
 	nonce := hex.EncodeToString(raw[:])
-	if err := os.WriteFile(filepath.Join(leaf, archiveNonceFile), []byte(nonce+"\n"), 0o600); err != nil {
+	if _, err := BoundedFSOp("stamping "+leaf, func() (struct{}, error) {
+		return struct{}{}, os.WriteFile(filepath.Join(leaf, archiveNonceFile), []byte(nonce+"\n"), 0o600)
+	}); err != nil {
 		return "", fmt.Errorf("could not stamp the archive occupant nonce: %w", err)
 	}
 	return nonce, nil
@@ -63,7 +67,11 @@ func VerifyArchiveOccupant(worktreePath, recordedNonce string, archivedAt time.T
 		return err
 	}
 	if recordedNonce != "" {
-		got, err := os.ReadFile(filepath.Join(leaf, archiveNonceFile))
+		got, err := boundedReadFile(filepath.Join(leaf, archiveNonceFile))
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Unknown, not "no nonce": the read did not answer. Refuses all the same.
+			return fmt.Errorf("could not read the archive nonce of %s: %w", worktreePath, err)
+		}
 		if err != nil {
 			return worktreeIdentityMismatchf("worktree %s carries no archive nonce (%v) — it is not the archived original", worktreePath, err)
 		}
@@ -136,12 +144,16 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 	// Anything a later step would refuse is refused HERE, before any mutation: a
 	// locked registration (`git worktree lock`) is one that removal refuses after
 	// the rename, which would strand a half-done prune.
-	if leaf, err := registrationLeaf(worktreePath); err != nil {
+	leaf, err := registrationLeaf(worktreePath)
+	if err != nil {
 		return nil, err
-	} else if _, err := os.Lstat(filepath.Join(leaf, "locked")); err == nil {
-		reasons = append(reasons, "the worktree is locked (git worktree lock) — unlock it (git worktree unlock) and re-run")
-	} else if !os.IsNotExist(err) {
+	}
+	locked, err := BoundedPathExists(filepath.Join(leaf, "locked"))
+	if err != nil {
 		return nil, fmt.Errorf("could not tell whether %s is locked: %w", leaf, err)
+	}
+	if locked {
+		reasons = append(reasons, "the worktree is locked (git worktree lock) — unlock it (git worktree unlock) and re-run")
 	}
 	// The principle, not a list of shapes: prune deletes the worktree tree and its
 	// registration leaf, so neither may hold ANY git object storage — however it got
@@ -238,13 +250,18 @@ func StampPruneNonce(worktreePath string) (leafName, nonce string, err error) {
 		return "", "", fmt.Errorf("could not stat worktree registration %s: %w", leaf, err)
 	}
 	stamp := filepath.Join(leaf, pruneNonceFile)
-	if err := os.WriteFile(stamp, []byte(nonce+"\n"), 0o600); err != nil {
-		return "", "", fmt.Errorf("could not stamp the prune nonce: %w", err)
-	}
-	if err := os.Chtimes(leaf, st.ModTime(), st.ModTime()); err != nil {
-		_ = os.Remove(stamp)
-		_ = os.Chtimes(leaf, st.ModTime(), st.ModTime())
-		return "", "", fmt.Errorf("could not preserve the registration's timestamp while stamping: %w", err)
+	if _, err := BoundedFSOp("stamping "+leaf, func() (struct{}, error) {
+		if err := os.WriteFile(stamp, []byte(nonce+"\n"), 0o600); err != nil {
+			return struct{}{}, fmt.Errorf("could not stamp the prune nonce: %w", err)
+		}
+		if err := os.Chtimes(leaf, st.ModTime(), st.ModTime()); err != nil {
+			_ = os.Remove(stamp)
+			_ = os.Chtimes(leaf, st.ModTime(), st.ModTime())
+			return struct{}{}, fmt.Errorf("could not preserve the registration's timestamp while stamping: %w", err)
+		}
+		return struct{}{}, nil
+	}); err != nil {
+		return "", "", err
 	}
 	return filepath.Base(leaf), nonce, nil
 }
@@ -268,20 +285,24 @@ func RemoveArchivedRegistrationLeaf(repoRoot, leafName, nonce string) error {
 		return err
 	}
 	leaf := filepath.Join(meta, "worktrees", leafName)
-	if _, err := os.Lstat(leaf); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	if exists, err := BoundedPathExists(leaf); err != nil {
 		return err
+	} else if !exists {
+		return nil
 	}
-	got, err := os.ReadFile(filepath.Join(leaf, pruneNonceFile))
+	got, err := boundedReadFile(filepath.Join(leaf, pruneNonceFile))
 	if err != nil || strings.TrimSpace(string(got)) != nonce {
 		return fmt.Errorf("%w (%s)", ErrRegistrationNotOurs, leaf)
 	}
-	if _, err := os.Lstat(filepath.Join(leaf, "locked")); err == nil {
+	locked, err := BoundedPathExists(filepath.Join(leaf, "locked"))
+	if err != nil {
+		return err
+	}
+	if locked {
 		return fmt.Errorf("registration %s is locked — refusing to remove it", leaf)
 	}
-	return os.RemoveAll(leaf)
+	_, err = BoundedFSOp("removing "+leaf, func() (struct{}, error) { return struct{}{}, os.RemoveAll(leaf) })
+	return err
 }
 
 func sampleList(sample []string, total int) string {
@@ -359,7 +380,7 @@ func scanGitObjectStorage(worktreePath string, limits objectStorageScanLimits) (
 	}
 	var roots []string
 	for _, p := range []string{worktreePath, leaf} {
-		real, err := filepath.EvalSymlinks(p)
+		real, err := boundedEvalSymlinks(p)
 		if err != nil {
 			return nil, fmt.Errorf("could not resolve %s: %w", p, err)
 		}
@@ -389,11 +410,13 @@ func scanGitObjectStorage(worktreePath string, limits objectStorageScanLimits) (
 				found = append(found, path)
 				return filepath.SkipDir
 			case d.IsDir() && name == "objects":
-				if _, err := os.Lstat(filepath.Join(filepath.Dir(path), "HEAD")); err == nil {
+				isGitDir, err := BoundedPathExists(filepath.Join(filepath.Dir(path), "HEAD"))
+				if err != nil {
+					return err
+				}
+				if isGitDir {
 					found = append(found, filepath.Dir(path))
 					return filepath.SkipDir
-				} else if !os.IsNotExist(err) {
-					return err
 				}
 			case !d.IsDir() && name == ".git" && path != rootPointer:
 				target, err := gitfileTarget(path)
@@ -420,17 +443,11 @@ func scanGitObjectStorage(worktreePath string, limits objectStorageScanLimits) (
 // relative to the gitfile's own directory, with symlinks resolved when the target
 // exists.
 func gitfileTarget(path string) (string, error) {
-	f, err := os.Open(path)
+	head, err := boundedReadHead(path, 4096)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	buf := make([]byte, 4096)
-	n, err := f.Read(buf)
-	if err != nil && n == 0 {
-		return "", err
-	}
-	line := strings.TrimSpace(string(buf[:n]))
+	line := strings.TrimSpace(string(head))
 	rest, ok := strings.CutPrefix(line, "gitdir:")
 	if !ok {
 		return "", fmt.Errorf("%s is a .git file but not a gitdir pointer", path)
@@ -440,7 +457,7 @@ func gitfileTarget(path string) (string, error) {
 		target = filepath.Join(filepath.Dir(path), target)
 	}
 	target = filepath.Clean(target)
-	if real, err := filepath.EvalSymlinks(target); err == nil {
+	if real, err := boundedEvalSymlinks(target); err == nil {
 		return real, nil
 	} else if !os.IsNotExist(err) {
 		return "", err

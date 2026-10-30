@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -294,7 +295,13 @@ func (m *Manager) pruneApplyOne(c PruneCandidate, cutoff time.Time) (*PrunedEntr
 		return nil, nil, &PruneIncompleteEntry{ID: c.ID, Title: c.Title, RepoID: c.RepoID, Step: "rename", Reason: err.Error()}
 	}
 	if intent.TombstonePath != "" {
-		if err := os.Rename(wt, intent.TombstonePath); err != nil {
+		if err := sessiongit.BoundedRename(wt, intent.TombstonePath); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				// A rename that has not answered may still complete: its outcome is
+				// UNKNOWN, so the intent stays and the row reports incomplete; the
+				// next run decides from the filesystem, never from this guess.
+				return nil, nil, &PruneIncompleteEntry{ID: c.ID, Title: c.Title, RepoID: c.RepoID, Step: "rename", Reason: err.Error()}
+			}
 			instance.ClearPruneIntent()
 			if perr := m.persistInstanceErr(c.RepoID, instance); perr != nil {
 				m.warn().Printf("prune %q: could not clear the intent after a failed rename: %v", c.Title, perr)
@@ -377,7 +384,7 @@ func validatePruneTombstonePath(intent *session.PruneIntentData) error {
 
 // pruneRemoveTree deletes the renamed tree, bounded. A tree already gone is done.
 func pruneRemoveTree(path string) error {
-	info, err := os.Lstat(path)
+	info, err := sessiongit.BoundedLstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -596,13 +603,5 @@ func pruneExists(path string) (bool, error) {
 	if path == "" {
 		return false, nil
 	}
-	_, err := os.Lstat(path)
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, os.ErrNotExist):
-		return false, nil
-	default:
-		return false, err
-	}
+	return sessiongit.BoundedPathExists(path)
 }
