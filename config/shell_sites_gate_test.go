@@ -252,6 +252,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "`git -c core.fsmonitor= …` — git's per-invocation config override with an af-FIXED value, which UNSETS the " +
 			"fsmonitor hook/daemon so a read-only probe cannot spawn it (#5136, #5189); no operator or repo value reaches it",
 	}},
+	"session/git/worktree_prune_apply.go:objectStoresInsideDeletedRoots": {{
+		class: notAShell,
+		note: "`git -c core.quotePath=false count-objects -v` — git's per-invocation config override with an af-FIXED value, " +
+			"so the alternate listing prints raw bytes instead of octal escapes; no operator or repo value reaches it (#5189)",
+	}},
 	"session/git/worktree_prune_apply.go:gitlinkPaths": {{
 		class: notAShell,
 		note: "`git -c core.fsmonitor= …` — git's per-invocation config override with an af-FIXED value, which UNSETS the " +

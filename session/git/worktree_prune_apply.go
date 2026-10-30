@@ -541,15 +541,15 @@ func removeLeafIdentityLast(leaf string, inject func(entry string) error) error 
 	return os.Remove(leaf)
 }
 
-const maxAlternatesDepth = 16
-
-// objectStoresInsideDeletedRoots follows the repository's object-store dependency
-// chain and returns every store (or alternates entry) that lies inside the
-// worktree tree or the registration leaf, judged after EvalSymlinks. Relative
-// alternates entries are resolved against the objects directory of the store that
-// lists them. A store that cannot be read or resolved is an error, which refuses; a
-// listed store that does not exist is judged lexically (git ignores it, so it
-// protects nothing, but it must not name a deleted root).
+// objectStoresInsideDeletedRoots returns every object store the kept branch's
+// repository depends on that lies inside the worktree tree or the registration
+// leaf, judged after EvalSymlinks. The dependency chain is asked of GIT, not parsed
+// here: `rev-parse --git-path objects` names the repository's objects directory and
+// `count-objects -v` lists every alternate git itself resolved (relative entries,
+// C-quoted entries and the transitive chain included), so there is no second
+// alternates parser to disagree with git. Its output is strict: a line that is not
+// a known `key: value` (a git warning about an unreadable alternates file, say) or
+// a value that does not decode refuses.
 func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
 	leaf, err := registrationLeaf(worktreePath)
 	if err != nil {
@@ -567,55 +567,106 @@ func objectStoresInsideDeletedRoots(worktreePath string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not locate the object store of %s: %w", worktreePath, err)
 	}
-	var inside []string
-	visited := map[string]bool{}
-	var walk func(store string, depth int) error
-	walk = func(store string, depth int) error {
-		if depth > maxAlternatesDepth {
-			return fmt.Errorf("the alternates chain of %s is deeper than %d stores", worktreePath, maxAlternatesDepth)
+	stores := []string{strings.TrimSpace(string(out))}
+	listing, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks", "-c", "core.quotePath=false", "count-objects", "-v")
+	if err != nil {
+		return nil, fmt.Errorf("could not list the object stores of %s: %w", worktreePath, err)
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(listing), "\n"), "\n") {
+		key, value, ok := strings.Cut(line, ": ")
+		if !ok || !countObjectsKeys[key] {
+			return nil, fmt.Errorf("git count-objects reported something unexpected for %s: %q", worktreePath, line)
 		}
+		if key != "alternate" {
+			continue
+		}
+		path, err := unquoteGitPath(value)
+		if err != nil {
+			return nil, fmt.Errorf("cannot decode an alternate object store of %s (%q): %w", worktreePath, value, err)
+		}
+		stores = append(stores, path)
+	}
+	var inside []string
+	for _, store := range stores {
 		real, err := boundedEvalSymlinks(store)
 		switch {
 		case err == nil:
 		case os.IsNotExist(err):
 			real = filepath.Clean(store)
 		default:
-			return fmt.Errorf("could not resolve the object store %s: %w", store, err)
+			return nil, fmt.Errorf("could not resolve the object store %s: %w", store, err)
 		}
-		if visited[real] {
-			return nil
-		}
-		visited[real] = true
 		for _, r := range roots {
 			if within(real, r) {
 				inside = append(inside, real)
 				break
 			}
 		}
-		raw, err := boundedReadFile(filepath.Join(real, "info", "alternates"))
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return fmt.Errorf("could not read the alternates of %s: %w", real, err)
-		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			line = strings.Trim(line, `"`)
-			if !filepath.IsAbs(line) {
-				line = filepath.Join(real, line)
-			}
-			if err := walk(filepath.Clean(line), depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := walk(strings.TrimSpace(string(out)), 0); err != nil {
-		return nil, err
 	}
 	return inside, nil
 }
+
+// countObjectsKeys are the keys `git count-objects -v` prints.
+var countObjectsKeys = map[string]bool{
+	"count": true, "size": true, "in-pack": true, "packs": true, "size-pack": true,
+	"prune-packable": true, "garbage": true, "size-garbage": true, "alternate": true,
+}
+
+// unquoteGitPath decodes a path as git prints it: literal unless it starts with a
+// double quote, in which case it is C-quoted (\a \b \f \n \r \t \v \\ \" and
+// three-digit octal \NNN) and must end at the closing quote. Anything else refuses.
+func unquoteGitPath(s string) (string, error) {
+	if !strings.HasPrefix(s, `"`) {
+		return s, nil
+	}
+	var out []byte
+	i := 1
+	for i < len(s) {
+		c := s[i]
+		switch {
+		case c == '"':
+			if i != len(s)-1 {
+				return "", fmt.Errorf("text after the closing quote")
+			}
+			return string(out), nil
+		case c != '\\':
+			out = append(out, c)
+			i++
+		default:
+			i++
+			if i >= len(s) {
+				return "", fmt.Errorf("dangling backslash")
+			}
+			switch e := s[i]; e {
+			case 'a':
+				out = append(out, '\a')
+			case 'b':
+				out = append(out, '\b')
+			case 'f':
+				out = append(out, '\f')
+			case 'n':
+				out = append(out, '\n')
+			case 'r':
+				out = append(out, '\r')
+			case 't':
+				out = append(out, '\t')
+			case 'v':
+				out = append(out, '\v')
+			case '\\', '"':
+				out = append(out, e)
+			case '0', '1', '2', '3':
+				if i+2 >= len(s) || !isOctal(s[i+1]) || !isOctal(s[i+2]) {
+					return "", fmt.Errorf("bad octal escape")
+				}
+				out = append(out, (e-'0')<<6|(s[i+1]-'0')<<3|(s[i+2]-'0'))
+				i += 2
+			default:
+				return "", fmt.Errorf("unknown escape \\%c", e)
+			}
+			i++
+		}
+	}
+	return "", fmt.Errorf("no closing quote")
+}
+
+func isOctal(c byte) bool { return c >= '0' && c <= '7' }

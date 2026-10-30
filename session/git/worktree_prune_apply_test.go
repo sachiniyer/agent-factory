@@ -541,3 +541,49 @@ func TestANonEmptyUnprovenLeafIsStillLeftAlone(t *testing.T) {
 	require.ErrorIs(t, err, ErrRegistrationNotOurs)
 	assert.DirExists(t, leaf)
 }
+
+// P1 (Codex on #6186): an alternates line may be C-quoted. The dependency chain is
+// asked of git itself, so a quoted entry with spaces and escapes that resolves
+// inside the leaf is found; and the decoder for git's output is strict.
+func TestQuotedAlternateInsideTheLeafIsRefused(t *testing.T) {
+	repo, wt := pruneWorktree(t)
+	leaf, err := registrationLeaf(wt)
+	require.NoError(t, err)
+	store := filepath.Join(leaf, "my store\twith tab") // spaces and a TAB in the name
+	objects := filepath.Join(repo, ".git", "objects")
+	require.NoError(t, os.Rename(objects, store))
+	require.NoError(t, os.MkdirAll(filepath.Join(objects, "info"), 0o755))
+	// Written the way git reads a quoted entry: escapes, not the raw characters.
+	quoted := `"` + leaf + `/my store\twith\040tab"`
+	require.NoError(t, os.WriteFile(filepath.Join(objects, "info", "alternates"), []byte(quoted+"\n"), 0o644))
+	gitIn(t, wt, "status", "--porcelain") // premise: git resolves the quoted entry and works
+
+	deps, err := objectStoresInsideDeletedRoots(wt)
+	require.NoError(t, err)
+	require.NotEmpty(t, deps, "the quoted entry resolves inside the leaf")
+	reasons, err := WorktreeUnrecoverableContent(wt)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(reasons, " "), "object store")
+}
+
+func TestUnquoteGitPathDecodesLikeGit(t *testing.T) {
+	good := map[string]string{
+		`/plain/path`:    `/plain/path`,
+		`"/a b/c"`:       `/a b/c`,
+		`"/tab\there"`:   "/tab\there",
+		`"/nl\nx"`:       "/nl\nx",
+		`"/quote\"x"`:    `/quote"x`,
+		`"/back\\slash"`: `/back\slash`,
+		`"/sp\040ace"`:   `/sp ace`,
+		`"/\303\251"`:    "/\u00e9",
+	}
+	for in, want := range good {
+		got, err := unquoteGitPath(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+	for _, bad := range []string{`"/unterminated`, `"/bad\q"`, `"/oct\04"`, `"/x"trailing`, `"/dangling\`, `"/oct\477x"`} {
+		_, err := unquoteGitPath(bad)
+		assert.Error(t, err, bad)
+	}
+}

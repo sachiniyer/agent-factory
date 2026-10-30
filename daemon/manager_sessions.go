@@ -143,16 +143,9 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		m.info().Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
 		return resolved, nil
 	}
-	// A pending prune owns the archive's cleanup (the renamed .prune-* tree and the
-	// intent), and a timed-out prune step may still be running. The check is made
-	// HERE, inside the fence — after the killsInFlight claim and the op lock that
-	// exclude a concurrent prune (which holds both for its whole run) — through the
-	// same shared check every lifecycle operation uses. Asked earlier, a prune could
-	// start and stop incomplete in the gap before the claim (#5189).
-	if instance != nil {
-		if err := m.pruneRowFence(repoID, instance); err != nil {
-			return session.InstanceData{}, fmt.Errorf("cannot kill session %q: %w; run `af sessions prune --apply` to finish it, then kill it", title, err)
-		}
+	// The pending-prune fence is asked HERE, inside the claim and the op lock (#5189).
+	if err := m.killPruneFence(repoID, title, instance); err != nil {
+		return session.InstanceData{}, err
 	}
 	// The caller's own precondition, asked here and nowhere earlier: this line
 	// sits inside both the killsInFlight claim (registered above, before the

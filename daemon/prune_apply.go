@@ -706,3 +706,18 @@ func (m *Manager) pruneRowFence(repoID string, instance *session.Instance) error
 	}
 	return nil
 }
+
+// killPruneFence is KillSession's pending-prune check. It runs INSIDE kill's
+// admission fence — after the killsInFlight claim and the op lock that exclude a
+// concurrent prune (which holds both for its whole run) — through the same shared
+// pruneRowFence every lifecycle operation uses. Asked earlier, a prune could start
+// and stop incomplete in the gap before the claim (#5189).
+func (m *Manager) killPruneFence(repoID, title string, instance *session.Instance) error {
+	if instance == nil {
+		return nil
+	}
+	if err := m.pruneRowFence(repoID, instance); err != nil {
+		return fmt.Errorf("cannot kill session %q: %w; run `af sessions prune --apply` to finish it, then kill it", title, err)
+	}
+	return nil
+}
