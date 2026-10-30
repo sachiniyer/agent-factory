@@ -1,6 +1,7 @@
 package git
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -365,4 +366,47 @@ func TestObjectStorageScanIsBounded(t *testing.T) {
 		require.Error(t, err)
 		assert.Less(t, time.Since(start), 250*time.Millisecond, "the caller does not wait on the parked read")
 	})
+}
+
+// The evidence that proves a registration is ours is removed LAST, so a removal
+// that fails partway leaves a leaf a resume can still prove and finish (Codex on
+// #6186): a plain RemoveAll can delete the nonce early and strand the row.
+func TestLeafRemovalFailingMidwayCanBeResumedToCompletion(t *testing.T) {
+	repo, wt := pruneWorktree(t)
+	leafName, nonce, err := StampPruneNonce(wt)
+	require.NoError(t, err)
+	leaf, err := registrationLeaf(wt)
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(wt, wt+"-moved"))
+
+	// Fail while removing the LAST ordinary entry, so every other entry — whatever
+	// order they sort in relative to the nonce — has already been removed.
+	all, err := os.ReadDir(leaf)
+	require.NoError(t, err)
+	last := ""
+	for _, e := range all {
+		if e.Name() != pruneNonceFile {
+			last = e.Name()
+		}
+	}
+	require.NotEmpty(t, last)
+	prev := leafRemovalFailure
+	leafRemovalFailure = func(entry string) error {
+		if entry == last {
+			return fmt.Errorf("injected failure removing %s", entry)
+		}
+		return nil
+	}
+	t.Cleanup(func() { leafRemovalFailure = prev })
+
+	err = RemoveArchivedRegistrationLeaf(repo, leafName, nonce)
+	require.Error(t, err)
+	assert.FileExists(t, filepath.Join(leaf, pruneNonceFile), "the identity evidence is still there after a partial removal")
+	left, _ := os.ReadDir(leaf)
+	assert.NotEmpty(t, left)
+
+	// Resume: the leaf is provable again and the removal completes.
+	leafRemovalFailure = prev
+	require.NoError(t, RemoveArchivedRegistrationLeaf(repo, leafName, nonce))
+	assert.NoDirExists(t, leaf)
 }

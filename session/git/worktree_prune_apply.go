@@ -301,8 +301,11 @@ func RemoveArchivedRegistrationLeaf(repoRoot, leafName, nonce string) error {
 	if locked {
 		return fmt.Errorf("registration %s is locked — refusing to remove it", leaf)
 	}
+	// Captured by value: the removal may be abandoned at the bound and must not read
+	// a package variable afterwards.
+	inject := leafRemovalFailure
 	return BoundedMutationWithin(10*pruneFSOpTimeout, "removing "+leaf,
-		[]string{leaf, LeafMutationKey(repoRoot, leafName)}, func() error { return os.RemoveAll(leaf) })
+		[]string{leaf, LeafMutationKey(repoRoot, leafName)}, func() error { return removeLeafIdentityLast(leaf, inject) })
 }
 
 func sampleList(sample []string, total int) string {
@@ -469,4 +472,43 @@ func gitfileTarget(path string) (string, error) {
 func within(path, dir string) bool {
 	path, dir = filepath.Clean(path), filepath.Clean(dir)
 	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
+// leafRemovalFailure is a test seam: called with each entry about to be removed,
+// a non-nil return simulates the removal failing there.
+var leafRemovalFailure func(entry string) error
+
+// removeLeafIdentityLast deletes a registration leaf so that the evidence proving
+// it is ours (the prune nonce) is removed LAST: everything else under the leaf
+// goes first, then the nonce, then the empty directory. A removal that fails
+// partway therefore leaves a leaf that still carries its identity, and a resume
+// can prove it again and finish — a plain RemoveAll can delete the nonce early and
+// strand the row incomplete forever (the fail-closed resume could not re-prove it).
+func removeLeafIdentityLast(leaf string, inject func(entry string) error) error {
+	entries, err := os.ReadDir(leaf)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == pruneNonceFile {
+			continue
+		}
+		if inject != nil {
+			if err := inject(e.Name()); err != nil {
+				return err
+			}
+		}
+		if err := os.RemoveAll(filepath.Join(leaf, e.Name())); err != nil {
+			return err
+		}
+	}
+	if inject != nil {
+		if err := inject(pruneNonceFile); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(filepath.Join(leaf, pruneNonceFile)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Remove(leaf)
 }

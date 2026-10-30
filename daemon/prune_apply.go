@@ -374,6 +374,11 @@ func validatePruneTombstonePath(intent *session.PruneIntentData) error {
 }
 
 // pruneRemoveTree deletes the renamed tree, bounded. A tree already gone is done.
+// It carries no identity evidence that a partial removal could destroy: the path is
+// proven by its structure (validatePruneTombstonePath: a .prune- sibling named by
+// the durable intent), not by a marker inside it, so a RemoveAll that fails
+// partway is simply re-run. (The registration leaf, which does carry a nonce, is
+// removed identity-last: see sessiongit.RemoveArchivedRegistrationLeaf.)
 func pruneRemoveTree(path string) error {
 	info, err := sessiongit.BoundedLstat(path)
 	if err != nil {
