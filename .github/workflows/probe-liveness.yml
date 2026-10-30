@@ -67,6 +67,13 @@ jobs:
         run: |
           set +e
           go test -count=40 ./daemon/ -run '^TestWaitForShutdownCompletionIgnoresProcessName$' 2>&1 | grep -E "^(--- FAIL|ok|FAIL|\s+shutdown_pid)" | sort | uniq -c
+      - name: Daemon wait test under CPU load x300
+        continue-on-error: true
+        run: |
+          set +e
+          for i in $(seq 1 $(( $(nproc) * 3 ))); do (while :; do :; done) & done
+          go test -count=300 ./daemon/ -run '^TestWaitForShutdownCompletionIgnoresProcessName$' 2>&1 | grep -E "^(--- FAIL|ok|FAIL|\s+shutdown_pid)" | sed 's/pid [0-9]*/pid N/;s/([0-9.]*s)//' | sort | uniq -c
+          kill $(jobs -p) 2>/dev/null; true
       - name: Four liveness tests
         continue-on-error: true
         run: |
