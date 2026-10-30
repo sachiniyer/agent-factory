@@ -80,7 +80,7 @@ const shadowedTailOperandLimit = 64
 // past shadowedTailOperandLimit fails closed instead. That bound is a property
 // of CHILDLESS tails: PIDs and permuted operands are meaningless past a handful
 // of words, so length there is a reasonable fail-closed signal. A wrapper's
-// returned child tail uses shadowedChildTailMutates instead, which drops it.
+// returned child tail uses shadowedLiteralChildTailMutates instead, which drops it.
 func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	if len(words) > shadowedTailOperandLimit {
 		return true
