@@ -1410,11 +1410,12 @@ function openAddProject(): void {
               // A definite daemon refusal (the URL failed validation, or the
               // clone itself failed): remount the form with its message inline
               // and the typed URL still there to correct — the shape the create
-              // modal's reverted row returns to. If another modal has taken the
-              // slot or the credential moved on, the outcome notice is the path.
+              // modal's reverted row returns to. If another overlay has taken
+              // the slot or the credential moved on, the outcome notice is the
+              // path — openModal would reap a live assistant/login overlay.
               m.setBusy(false);
               m.setError(errorText(e));
-              if (!modal && token === tok) {
+              if (!modal && !configAssistant && !accountLogin && token === tok) {
                 openModal(m, true, invoker);
                 m.el.querySelector<HTMLElement>(".af-modal-card input")?.focus({ preventScroll: true });
               } else {

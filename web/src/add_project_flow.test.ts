@@ -79,6 +79,10 @@ function harness() {
     isMutationOutcomeUncertain: (e: StubError) => e.kind !== "refused",
     errorText: (e: Error) => e.message,
     captureModalInvoker: () => ({ actionLabel: null, header: false }),
+    // Non-modal overlay owners — the remount guard must not reap them. Context
+    // properties (not prelude lets) so a test can open one mid-flight.
+    configAssistant: null as { close(): void } | null,
+    accountLogin: null as { close(): void } | null,
     // The sandbox prelude calls back through this so a remount is observable —
     // the difference between "the refused form came back" and a dropped error.
     recordEvent: (msg: string) => events.push(msg),
@@ -96,7 +100,7 @@ function harness() {
     openAddProject(): void;
     looksLikeGitURL(value: string): boolean;
   };
-  return { app, events, submits, pendingPaths, pendingURLs };
+  return { app, context, events, submits, pendingPaths, pendingURLs };
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -181,6 +185,24 @@ test("a refused URL remounts the form with the daemon's message and the input in
   assert.deepEqual(events.slice(-3), ["busy:1:false", "error:1:git URL must not embed a password", "openModal"],
     "the daemon's refusal returns inline on the SAME remounted form — the typed URL is still there to fix");
   assert.ok(!events.some(e => e.startsWith("outcome:")), "a definite refusal is not an outcome notice");
+});
+
+test("a refused URL does not remount over a live overlay", async () => {
+  const { app, context, events, submits, pendingURLs } = harness();
+  app.openAddProject();
+  submits[0]("https://user:secret@example.com/o/r.git");
+  assert.ok(events.includes("close:1"));
+
+  // A login/assistant overlay opened while the clone ran — reaping it for the
+  // remount would strand the user's in-flight pane.
+  context.accountLogin = { close: () => undefined };
+  pendingURLs[0].reject(new StubError("git URL must not embed a password", "refused"));
+  await settle();
+
+  assert.equal(events.filter(e => e === "openModal").length, 1,
+    "a live overlay is never reaped for the remount — only the initial open may mount");
+  assert.ok(events.some(e => e.startsWith("outcome:failed:")),
+    "the refusal lands as an outcome notice instead of the inline remount");
 });
 
 test("an uncertain URL outcome re-reads the registry and says so", async () => {

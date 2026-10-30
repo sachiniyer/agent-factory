@@ -20625,7 +20625,7 @@ function openAddProject() {
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal && token === tok) {
+            if (!modal && !configAssistant && !accountLogin && token === tok) {
               openModal(m, true, invoker);
               m.el.querySelector(".af-modal-card input")?.focus({ preventScroll: true });
             } else {
