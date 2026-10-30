@@ -508,3 +508,22 @@ func TestFailedAnswerReplaysASkippedCompletion(t *testing.T) {
 		t.Fatalf("status = %s, want review: the held-back completion was not replayed after the failure", it.Status)
 	}
 }
+
+// Dismissing the attention chip does not close the backlog question: the text the
+// session was shown is still the question a terminal line answers (Codex P2 on
+// #6295).
+func TestBacklogSeenQuestionSurvivesADismissedChip(t *testing.T) {
+	m, _, inst := askedItem(t)
+	want := m.backlogSeenQuestion(inst)
+	if want == "" {
+		t.Fatal("no open question")
+	}
+	a := inst.Attention()
+	inst.ClearAttention(a.SetAt)
+	if inst.Attention() != nil {
+		t.Fatal("chip not dismissed")
+	}
+	if got := m.backlogSeenQuestion(inst); got != want {
+		t.Fatalf("seen question after dismissal = %q, want %q", got, want)
+	}
+}

@@ -33,6 +33,11 @@ var backlogAnswerWait = func(stop <-chan struct{}) bool {
 var errBacklogAnswerHeld = errors.New("held")
 
 func (h backlogHost) SetAttention(repoID, sessionID, reason string) {
+	if reason == "" {
+		h.m.backlog.asked.Delete(sessionID)
+	} else {
+		h.m.backlog.asked.Store(sessionID, reason)
+	}
 	req := SetAttentionRequest{ID: sessionID, RepoID: repoID, Reason: reason, Clear: reason == ""}
 	if _, _, err := h.m.SetAttention(req); err != nil {
 		h.m.warn().Printf("backlog attention on session %s: %v", sessionID, err)
@@ -255,6 +260,11 @@ func (m *Manager) backlogSeenQuestion(instance *session.Instance) string {
 	}
 	if a := instance.Attention(); a != nil {
 		return a.Reason
+	}
+	// The chip was dismissed, but the backlog question is still open: its text
+	// is remembered apart from the display (Codex P2 on #6295).
+	if q, ok := m.backlog.asked.Load(instance.ID); ok {
+		return q.(string)
 	}
 	return ""
 }
