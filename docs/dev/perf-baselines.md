@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1216936.000 | 1216936.000–1216936.000 | 0.000 | 1277782.800 |
-| gzip_bytes | 276776.000 | 276776.000–276776.000 | 0.000 | 290614.800 |
+| raw_bytes | 1216991.000 | 1216991.000–1216991.000 | 0.000 | 1277840.550 |
+| gzip_bytes | 276787.000 | 276787.000–276787.000 | 0.000 | 290626.350 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -129,7 +129,7 @@ Master's committed bundle (1,120,104 raw over `web/dist/**.{js,css}`) sat 319 by
 
 ### Bundle refresh provenance (Backlog web actions)
 
-On top of the Backlog view's 1,189,669 raw / 270,362 gzip, the actions port (Refs #6284, fork `0bdb649b62`: runner switch and slots, the budget settings, Start now, the answer box, plan use) takes the committed bundle to 1,216,936 raw / 276,776 gzip, +27,267 raw / +6,414 gzip. Comments do not ship (esbuild strips them), so the growth is feature code. Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
+On top of the Backlog view's 1,189,724 raw / 270,372 gzip, the actions port (Refs #6284, fork `0bdb649b62`: runner switch and slots, the budget settings, Start now, the answer box, plan use) takes the committed bundle to 1,216,991 raw / 276,787 gzip, +27,267 raw / +6,415 gzip. Comments do not ship (esbuild strips them), so the growth is feature code. Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (Backlog web view)
 

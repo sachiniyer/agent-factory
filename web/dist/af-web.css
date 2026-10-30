@@ -3839,6 +3839,9 @@ textarea[class] {
 .af-backlog-actions > .af-backlog-move {
   flex: 1 1 100%;
 }
+.af-backlog-actions > .af-primary {
+  margin-top: 0;
+}
 .af-backlog-move > summary {
   list-style: none;
   cursor: pointer;

@@ -4345,6 +4345,9 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 /* Move… opens a panel under its summary, so it takes its own row rather than
    stretching the action buttons beside it. */
 .af-backlog-actions > .af-backlog-move { flex: 1 1 100%; }
+/* .af-primary carries a top margin for stacked forms; in this row it sat the primary
+   action a few pixels below its ghost neighbours. */
+.af-backlog-actions > .af-primary { margin-top: 0; }
 
 .af-backlog-move > summary { list-style: none; cursor: pointer; }
 .af-backlog-move > summary::-webkit-details-marker { display: none; }
