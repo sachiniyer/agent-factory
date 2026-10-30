@@ -101,7 +101,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// A prune tombstone has no worktree to move back (#5189): refuse by naming the
 	// branch the work was kept on, instead of failing later on a missing path.
 	if at := instance.PrunedAt(); !at.IsZero() {
-		return "", session.PrunedRestoreError(title, instance.GetBranch(), at)
+		return "", session.PrunedRestoreError(title, instance.KeptBranch(), at)
 	}
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
@@ -183,7 +183,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Prune holds this same operation lock for its whole run, so a tombstone (or an
 	// interrupted prune) is visible here even if it landed during the wait (#5189).
 	if at := instance.PrunedAt(); !at.IsZero() {
-		return "", session.PrunedRestoreError(title, instance.GetBranch(), at)
+		return "", session.PrunedRestoreError(title, instance.KeptBranch(), at)
 	}
 	if instance.PruneIntent() != nil {
 		return "", fmt.Errorf("cannot restore session %q: a prune of its archived worktree was interrupted; run `af sessions prune --apply` to finish it first", title)

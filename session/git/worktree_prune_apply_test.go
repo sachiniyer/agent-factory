@@ -328,3 +328,41 @@ func TestGitObjectStorageUnderTheDeletedRoots(t *testing.T) {
 		assert.Empty(t, found)
 	})
 }
+
+// A locked registration is refused by the verdict, before any mutation (a later
+// removal would refuse it after the rename and strand a half-done prune).
+func TestLockedRegistrationIsRefusedByTheVerdict(t *testing.T) {
+	repo, wt := pruneWorktree(t)
+	gitIn(t, repo, "worktree", "lock", wt)
+	reasons, err := WorktreeUnrecoverableContent(wt)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(reasons, " "), "locked")
+}
+
+// The object-storage scan is bounded in entries and in time; exceeding either is
+// unknown, which refuses (it is an error, never an empty "nothing found").
+func TestObjectStorageScanIsBounded(t *testing.T) {
+	_, wt := pruneWorktree(t)
+	for i := 0; i < 10; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "f"+strings.Repeat("x", i)+".txt"), []byte("x"), 0o644))
+	}
+	t.Run("entries", func(t *testing.T) {
+		prev := objectStorageScanMaxEntries
+		objectStorageScanMaxEntries = 3
+		t.Cleanup(func() { objectStorageScanMaxEntries = prev })
+		_, err := gitObjectStorageUnder(wt)
+		require.Error(t, err)
+		_, err = WorktreeUnrecoverableContent(wt)
+		require.Error(t, err, "an unbounded tree is unknown and refuses")
+	})
+	t.Run("time", func(t *testing.T) {
+		prevT, prevH := objectStorageScanTimeout, objectStorageScanHook
+		objectStorageScanTimeout = 50 * time.Millisecond
+		objectStorageScanHook = func() { time.Sleep(300 * time.Millisecond) } // a stalled directory read
+		t.Cleanup(func() { objectStorageScanTimeout, objectStorageScanHook = prevT, prevH })
+		start := time.Now()
+		_, err := gitObjectStorageUnder(wt)
+		require.Error(t, err)
+		assert.Less(t, time.Since(start), 250*time.Millisecond, "the caller does not wait on the parked read")
+	})
+}

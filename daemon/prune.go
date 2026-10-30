@@ -483,12 +483,7 @@ func pruneFilesystemRefusal(data session.InstanceData) (head, reason string) {
 // pruneBranchFor resolves the branch reclaim promises to keep. Branch is the
 // record-level field; Worktree.BranchName is the worktree's own copy and the
 // fallback for rows written before the top-level field.
-func pruneBranchFor(data session.InstanceData) string {
-	if data.Branch != "" {
-		return data.Branch
-	}
-	return data.Worktree.BranchName
-}
+func pruneBranchFor(data session.InstanceData) string { return session.KeptBranchOf(data) }
 
 // boundedLocalBranchExists wraps sessiongit.LocalBranchExists — whose own
 // stat/git probes are unbounded — in the same goroutine-flight concession

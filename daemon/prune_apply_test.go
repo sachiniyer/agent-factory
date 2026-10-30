@@ -397,3 +397,47 @@ func TestPruneApply_ResumeWithUnknownExistenceStaysIncomplete(t *testing.T) {
 	require.NotNil(t, entry)
 	assert.True(t, inst.IsPruned())
 }
+
+// The locked marker is part of the verdict: the dry run reports it and nothing is
+// renamed or deleted.
+func TestPruneApply_LockedRegistrationIsRefusedBeforeAnyMutation(t *testing.T) {
+	manager, repoID, repoPath, inst, archived := seedPrunableArchive(t, "locked-reg")
+	gitOut(t, repoPath, "worktree", "lock", archived)
+	dry, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	require.Empty(t, dry.Candidates)
+	require.Len(t, dry.Skipped, 1)
+	assert.Contains(t, dry.Skipped[0].Reason, "locked")
+	resp, err := manager.PruneSessions(applyReq(repoID, inst.ID))
+	require.NoError(t, err)
+	assert.Empty(t, resp.Pruned)
+	assert.Empty(t, resp.Incomplete, "refused up front, not stranded after the rename")
+	assert.DirExists(t, archived)
+	assert.Nil(t, inst.PruneIntent())
+}
+
+// A kill while a prune is pending never orphans the renamed tree or the intent: it
+// either completes the prune through the resume path or refuses with a message.
+func TestPruneApply_KillDuringAPendingPruneNeverOrphansTheCleanup(t *testing.T) {
+	manager, repoID, _, inst, archived := seedPrunableArchive(t, "kill-pending")
+	c := planOf(t, manager, repoID)
+	pruneStepHook = func(step string) error {
+		if step == "remove" {
+			return errPruneCrash
+		}
+		return nil
+	}
+	t.Cleanup(func() { pruneStepHook = nil })
+	_, err := manager.PruneSessions(applyReq(repoID, c.ID))
+	require.NoError(t, err)
+	pruneStepHook = nil
+	require.Len(t, tombstones(t, archived), 1)
+
+	_, killErr := manager.KillSession(KillSessionRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID})
+	if killErr != nil {
+		assert.Contains(t, killErr.Error(), "unfinished prune")
+		assert.NotNil(t, inst.PruneIntent(), "refused: the intent is still there to finish")
+		return
+	}
+	assert.Empty(t, tombstones(t, archived), "the kill finished the prune's cleanup instead of orphaning it")
+}

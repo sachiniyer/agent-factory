@@ -78,3 +78,17 @@ func TestPruneBookkeepingDoesNotMoveTheArchiveTimeOfALegacyRow(t *testing.T) {
 	assert.True(t, before.Equal(ArchiveTimeFor(inst.ToInstanceData())))
 	assert.Contains(t, PruneSkipReason(inst.ToInstanceData(), time.Now()), "interrupted")
 }
+
+// A row whose branch lives only in Worktree.BranchName still names it (Codex on
+// #6186): the refusal and the verdict resolve the kept branch the same way.
+func TestKeptBranchFallsBackToTheWorktreesCopy(t *testing.T) {
+	d := prunedBaseline(t)
+	d.Branch = ""
+	d.Worktree.BranchName = "siyer/legacy"
+	assert.Equal(t, "siyer/legacy", KeptBranchOf(d))
+	inst, err := FromInstanceData(d)
+	require.NoError(t, err)
+	assert.Equal(t, "siyer/legacy", inst.KeptBranch())
+	d.Branch = "siyer/top"
+	assert.Equal(t, "siyer/top", KeptBranchOf(d))
+}

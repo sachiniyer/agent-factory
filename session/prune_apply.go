@@ -136,3 +136,16 @@ func PrunedRestoreError(title, branch string, at time.Time) error {
 	return fmt.Errorf("session %q was pruned at %s: its archived worktree was deleted. The work is on branch %q — check it out in the repository (git worktree add <path> %s) or recreate the session from it",
 		title, at.Format(time.RFC3339), branch, branch)
 }
+
+// KeptBranchOf is the branch prune keeps and names back to the user: the
+// record-level Branch, else the worktree's own copy (rows written before the
+// top-level field).
+func KeptBranchOf(data InstanceData) string {
+	if data.Branch != "" {
+		return data.Branch
+	}
+	return data.Worktree.BranchName
+}
+
+// KeptBranch is KeptBranchOf for a live Instance.
+func (i *Instance) KeptBranch() string { return KeptBranchOf(i.ToInstanceData()) }

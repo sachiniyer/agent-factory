@@ -61,6 +61,14 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		return session.InstanceData{}, err
 	}
 	m.info().Printf("KillSession requested for session %q (id %s, repo %s) by %s", title, resolvedID, repoID, requester)
+	// A pending prune owns the archive's cleanup (the renamed .prune-* tree and the
+	// intent). Finish it through the same resume path before the kill proceeds, or
+	// refuse: a kill must never orphan either (#5189).
+	if instance != nil && instance.PruneIntent() != nil {
+		if _, inc := m.resumePruneIntent(repoID, instance); inc != nil {
+			return session.InstanceData{}, fmt.Errorf("session %q has an unfinished prune (stopped at %s: %s); run `af sessions prune --apply` to finish it, then kill it", title, inc.Step, inc.Reason)
+		}
+	}
 	// Canonicalize to the resolved session's title so the killsInFlight key,
 	// storage delete, and event all key off the identity we actually resolved
 	// (by id), not the request's title. req is a value copy, so this is local.

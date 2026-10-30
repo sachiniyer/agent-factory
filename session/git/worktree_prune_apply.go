@@ -133,6 +133,16 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 		reasons = append(reasons, fmt.Sprintf("%d index entr(ies) flagged assume-unchanged or skip-worktree (%s) — git status cannot see their content, so it may not be on the kept branch; clear the flag (git update-index --no-assume-unchanged / --no-skip-worktree) and commit or discard the change",
 			flagged, sampleList(flaggedSample, flagged)))
 	}
+	// Anything a later step would refuse is refused HERE, before any mutation: a
+	// locked registration (`git worktree lock`) is one that removal refuses after
+	// the rename, which would strand a half-done prune.
+	if leaf, err := registrationLeaf(worktreePath); err != nil {
+		return nil, err
+	} else if _, err := os.Lstat(filepath.Join(leaf, "locked")); err == nil {
+		reasons = append(reasons, "the worktree is locked (git worktree lock) — unlock it (git worktree unlock) and re-run")
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("could not tell whether %s is locked: %w", leaf, err)
+	}
 	// The principle, not a list of shapes: prune deletes the worktree tree and its
 	// registration leaf, so neither may hold ANY git object storage — however it got
 	// there (absorbed, non-absorbed, retained after the gitlink was removed, a nested
@@ -294,6 +304,35 @@ func sampleList(sample []string, total int) string {
 // follows no symlinks, containment is judged after EvalSymlinks, and any read error
 // refuses (it is returned, and the caller fails closed).
 func gitObjectStorageUnder(worktreePath string) ([]string, error) {
+	type result struct {
+		found []string
+		err   error
+	}
+	done := make(chan result, 1)
+	deadline := time.Now().Add(objectStorageScanTimeout)
+	go func() {
+		found, err := scanGitObjectStorage(worktreePath, deadline)
+		done <- result{found, err}
+	}()
+	select {
+	case r := <-done:
+		return r.found, r.err
+	case <-time.After(objectStorageScanTimeout):
+		// A directory read parked on a stalled mount cannot be interrupted; the
+		// answer is UNKNOWN, and unknown refuses.
+		return nil, fmt.Errorf("scanning %s for git object storage did not finish within %s — the filesystem may be stalled", worktreePath, objectStorageScanTimeout)
+	}
+}
+
+// The scan is bounded in time and in entries; exceeding either is "unknown", which
+// refuses. Vars so tests can exercise the bounds.
+var (
+	objectStorageScanTimeout    = 2 * time.Minute
+	objectStorageScanMaxEntries = 5_000_000
+	objectStorageScanHook       func()
+)
+
+func scanGitObjectStorage(worktreePath string, deadline time.Time) ([]string, error) {
 	leaf, err := registrationLeaf(worktreePath)
 	if err != nil {
 		return nil, err
@@ -307,11 +346,22 @@ func gitObjectStorageUnder(worktreePath string) ([]string, error) {
 		roots = append(roots, real)
 	}
 	var found []string
+	entries := 0
 	for _, root := range roots {
 		rootPointer := filepath.Join(roots[0], ".git")
 		err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
+			}
+			if objectStorageScanHook != nil {
+				objectStorageScanHook()
+			}
+			entries++
+			if entries > objectStorageScanMaxEntries {
+				return fmt.Errorf("more than %d entries", objectStorageScanMaxEntries)
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("deadline passed")
 			}
 			name := d.Name()
 			switch {
