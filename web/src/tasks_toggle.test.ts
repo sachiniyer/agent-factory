@@ -100,3 +100,90 @@ test("a rebuild mid-request repaints the pending value from the map", () => {
   assert.equal(rebuilt.attrs.get("aria-checked"), "true");
   assert.equal(rebuilt.attrs.get("aria-busy"), "true");
 });
+
+// A manual clock for the backstop: set/clear/advance, no real timers.
+function fakeClock() {
+  let now = 0;
+  let next = 1;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  return {
+    set: (fn: () => void, ms: number) => { const id = next++; timers.set(id, { at: now + ms, fn }); return id; },
+    clear: (h: unknown) => { timers.delete(h as number); },
+    advance(ms: number) {
+      const to = now + ms;
+      for (;;) {
+        const due = [...timers.entries()].filter(([, t]) => t.at <= to).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        timers.delete(due[0]);
+        now = due[1].at;
+        due[1].fn();
+      }
+      now = to;
+    },
+    pendingTimers: () => timers.size,
+  };
+}
+
+function backstopHarness() {
+  const clock = fakeClock();
+  const expired: string[] = [];
+  const backstop = { ms: 5000, set: clock.set, clear: clock.clear, expire: (id: string) => { expired.push(id); } };
+  const pending = new Map<string, PendingFlip>();
+  const el = fakeSwitch();
+  const resolvers: ((r: boolean) => void)[] = [];
+  const toggle = () => new Promise<boolean>((res) => { resolvers.push(res); });
+  let enabled = true;
+  const click = () => flipSwitch(pending, { id: "t1", enabled }, toggle, (on, busy) => paintSwitch(el, on, busy), backstop);
+  return { clock, expired, pending, el, resolvers, click, setEnabled: (v: boolean) => { enabled = v; } };
+}
+
+test("a backstop timer clears only the flip it was armed for", async () => {
+  const h = backstopHarness();
+  h.click();                         // flip 1 at t=0
+  h.resolvers[0](true);
+  await flush();                     // applied: backstop 1 armed for t=5000
+  h.clock.advance(1000);
+  releaseSettled(h.pending, { clear: h.clock.clear }); // the list reconciles flip 1
+  h.setEnabled(false);
+  h.clock.advance(1000);
+  h.click();                         // flip 2 at t=2000
+  h.clock.advance(2000);
+  h.resolvers[1](true);
+  await flush();                     // flip 2 applied at t=4000: backstop 2 armed for t=9000
+  h.clock.advance(1000);             // t=5000: flip 1's old deadline passes
+  assert.equal(h.pending.has("t1"), true, "flip 1's timer must not clear flip 2");
+  assert.equal(h.el.attrs.get("aria-busy"), "true");
+  assert.deepEqual(h.expired, []);
+  h.clock.advance(4000);             // t=9000: flip 2's own backstop
+  assert.equal(h.pending.has("t1"), false);
+  assert.deepEqual(h.expired, ["t1"]);
+});
+
+test("a stale backstop that was never cancelled still cannot clear a newer flip", async () => {
+  const h = backstopHarness();
+  h.click();
+  h.resolvers[0](true);
+  await flush();
+  h.clock.advance(1000);
+  releaseSettled(h.pending);         // no clear: the old timer stays armed
+  h.setEnabled(false);
+  h.click();
+  h.clock.advance(2000);
+  h.resolvers[1](true);
+  await flush();
+  h.clock.advance(2000);             // t=5000: the stale timer fires
+  assert.equal(h.pending.has("t1"), true, "the token check keeps the newer flip");
+  assert.deepEqual(h.expired, []);
+});
+
+test("reconciling cancels the backstop", async () => {
+  const h = backstopHarness();
+  h.click();
+  h.resolvers[0](true);
+  await flush();
+  assert.equal(h.clock.pendingTimers(), 1);
+  releaseSettled(h.pending, { clear: h.clock.clear });
+  assert.equal(h.clock.pendingTimers(), 0);
+  h.clock.advance(10000);
+  assert.deepEqual(h.expired, []);
+});

@@ -16554,24 +16554,36 @@ function paintSwitch(el2, on, busy) {
     el2.removeAttribute("aria-disabled");
   }
 }
-function flipSwitch(pending, t, toggle, paint, settledAt) {
+function flipSwitch(pending, t, toggle, paint, backstop) {
   if (pending.has(t.id)) return;
   const next = !t.enabled;
-  const flip = { value: next, settled: false };
+  const flip = { value: next, settled: false, timer: null };
   pending.set(t.id, flip);
   paint(next, true);
   void toggle().then((applied) => applied, () => false).then((applied) => {
     if (applied) {
       flip.settled = true;
-      settledAt?.(t.id);
+      if (backstop) {
+        flip.timer = backstop.set(() => {
+          flip.timer = null;
+          if (pending.get(t.id) !== flip) return;
+          pending.delete(t.id);
+          backstop.expire(t.id);
+        }, backstop.ms);
+      }
       return;
     }
     pending.delete(t.id);
     paint(t.enabled, false);
   });
 }
-function releaseSettled(pending) {
-  for (const [id, flip] of pending) if (flip.settled) pending.delete(id);
+function releaseSettled(pending, backstop) {
+  for (const [id, flip] of pending) {
+    if (!flip.settled) continue;
+    if (flip.timer !== null) backstop?.clear(flip.timer);
+    flip.timer = null;
+    pending.delete(id);
+  }
 }
 var TasksPane = class {
   constructor(actions2) {
@@ -16598,7 +16610,7 @@ var TasksPane = class {
       return;
     }
     this.lastError = error;
-    releaseSettled(this.pending);
+    releaseSettled(this.pending, { clear: (h2) => window.clearTimeout(h2) });
     const token2 = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token2;
@@ -16621,19 +16633,24 @@ var TasksPane = class {
       control?.focus({ preventScroll: true });
     }
   }
+  /** If no list ever arrives to reconcile an applied flip, fall back to the last one. */
+  backstop(paint) {
+    return {
+      ms: 5e3,
+      set: (fn, ms) => window.setTimeout(fn, ms),
+      clear: (handle) => window.clearTimeout(handle),
+      expire: (id) => {
+        const known = this.lastTasks?.find((x) => x.id === id);
+        if (known) paint(id, known.enabled, false);
+      }
+    };
+  }
   flip(t) {
     const paint = (id, on, busy) => {
       const el2 = this.el.querySelector(`[data-task-id="${CSS.escape(id)}"] .af-task-switch`);
       if (el2) paintSwitch(el2, on, busy);
     };
-    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy), (id) => {
-      window.setTimeout(() => {
-        if (!this.pending.get(id)?.settled) return;
-        this.pending.delete(id);
-        const known = this.lastTasks?.find((x) => x.id === id);
-        if (known) paint(id, known.enabled, false);
-      }, 5e3);
-    });
+    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy), this.backstop(paint));
   }
   render(tasks) {
     if (this.lastError) {

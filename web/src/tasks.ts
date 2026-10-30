@@ -376,7 +376,16 @@ export function paintSwitch(el: SwitchEl, on: boolean, busy: boolean): void {
 }
 
 /** One in-flight (or applied-but-unreconciled) switch flip: the value it is moving to. */
-export interface PendingFlip { value: boolean; settled: boolean }
+export interface PendingFlip { value: boolean; settled: boolean; timer: unknown }
+
+/** The timer seam of the backstop: window timers in the pane, a fake in tests. */
+export interface Backstop {
+  ms: number;
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+  /** Called when no list reconciled the flip in time; the flip is already released. */
+  expire(id: string): void;
+}
 
 /**
  * Runs one switch flip: shows the requested value and busy at once and ignores a
@@ -391,17 +400,26 @@ export function flipSwitch(
   t: Pick<TaskData, "id" | "enabled">,
   toggle: () => Promise<boolean>,
   paint: (on: boolean, busy: boolean) => void,
-  settledAt?: (id: string) => void,
+  backstop?: Backstop,
 ): void {
   if (pending.has(t.id)) return;
   const next = !t.enabled;
-  const flip: PendingFlip = { value: next, settled: false };
+  const flip: PendingFlip = { value: next, settled: false, timer: null };
   pending.set(t.id, flip);
   paint(next, true);
   void toggle().then((applied) => applied, () => false).then((applied) => {
     if (applied) {
       flip.settled = true;
-      settledAt?.(t.id);
+      // The backstop belongs to THIS flip: it fires only while this exact flip is
+      // still the pending one, and releaseSettled cancels it on reconcile.
+      if (backstop) {
+        flip.timer = backstop.set(() => {
+          flip.timer = null;
+          if (pending.get(t.id) !== flip) return;
+          pending.delete(t.id);
+          backstop.expire(t.id);
+        }, backstop.ms);
+      }
       return;
     }
     pending.delete(t.id);
@@ -411,8 +429,13 @@ export function flipSwitch(
 
 /** Drops every applied flip: called when a list arrives, which carries the value the
  *  next render and the next click handler are both built from. */
-export function releaseSettled(pending: Map<string, PendingFlip>): void {
-  for (const [id, flip] of pending) if (flip.settled) pending.delete(id);
+export function releaseSettled(pending: Map<string, PendingFlip>, backstop?: Pick<Backstop, "clear">): void {
+  for (const [id, flip] of pending) {
+    if (!flip.settled) continue;
+    if (flip.timer !== null) backstop?.clear(flip.timer);
+    flip.timer = null;
+    pending.delete(id);
+  }
 }
 
 /**
@@ -446,7 +469,7 @@ export class TasksPane {
       return;
     }
     this.lastError = error;
-    releaseSettled(this.pending);
+    releaseSettled(this.pending, { clear: (h) => window.clearTimeout(h as number) });
     const token = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token;
@@ -472,20 +495,25 @@ export class TasksPane {
     }
   }
 
+  /** If no list ever arrives to reconcile an applied flip, fall back to the last one. */
+  private backstop(paint: (id: string, on: boolean, busy: boolean) => void): Backstop {
+    return {
+      ms: 5000,
+      set: (fn, ms) => window.setTimeout(fn, ms),
+      clear: (handle) => window.clearTimeout(handle as number),
+      expire: (id) => {
+        const known = this.lastTasks?.find((x) => x.id === id);
+        if (known) paint(id, known.enabled, false);
+      },
+    };
+  }
+
   private flip(t: TaskData): void {
     const paint = (id: string, on: boolean, busy: boolean): void => {
       const el = this.el.querySelector<HTMLButtonElement>(`[data-task-id="${CSS.escape(id)}"] .af-task-switch`);
       if (el) paintSwitch(el, on, busy);
     };
-    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy), (id) => {
-      // Backstop: if no list ever arrives to reconcile it, fall back to the last one.
-      window.setTimeout(() => {
-        if (!this.pending.get(id)?.settled) return;
-        this.pending.delete(id);
-        const known = this.lastTasks?.find((x) => x.id === id);
-        if (known) paint(id, known.enabled, false);
-      }, 5000);
-    });
+    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy), this.backstop(paint));
   }
 
   private render(tasks: TaskData[]): void {
