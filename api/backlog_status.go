@@ -17,8 +17,19 @@ import (
 // request is sent; nil sends it as is.
 type statusCheck func(b *backlog.Backlog, id int, st backlog.State) error
 
-// reopenCheck lets reopen act only on done and dropped items.
-func reopenCheck(_ *backlog.Backlog, id int, st backlog.State) error {
+// reopenCheck lets reopen act on done and dropped items, and on a parent with at
+// least one done or dropped leaf under it: the service reopens exactly those
+// leaves and leaves the open ones alone, so a parent whose shown state is
+// queued or working (one child done, another still open) is a valid target.
+func reopenCheck(b *backlog.Backlog, id int, st backlog.State) error {
+	if b.IsParent(id) {
+		for _, it := range b.Items {
+			if b.IsAncestor(id, it.ID) && !b.IsParent(it.ID) && !it.Status.Open() {
+				return nil
+			}
+		}
+		return fmt.Errorf("%s has no done or dropped children to reopen", backlog.FormatID(id))
+	}
 	if st != backlog.StateDone && st != backlog.StateDropped {
 		return fmt.Errorf("%s is %s; only a done or dropped item can be reopened", backlog.FormatID(id), strings.ToLower(st.Label()))
 	}

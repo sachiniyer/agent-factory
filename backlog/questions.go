@@ -202,19 +202,41 @@ func (b *Backlog) PendingAnswers() []PendingAnswer {
 	return out
 }
 
-// AnsweredInSession closes the oldest open question of the item whose latest
-// run is sessionID, the one its attention shows: the user answered in the
-// session's terminal. It returns the item id, or 0 when nothing was open.
-func (b *Backlog) AnsweredInSession(sessionID string, now time.Time) int {
+// OpenQuestionID is the id of the oldest open question of the item whose latest
+// run is sessionID, or 0. It is what a line the user is about to submit in the
+// session's terminal would answer.
+func (b *Backlog) OpenQuestionID(sessionID string) int {
 	it := b.ItemForSession(sessionID)
 	if it == nil || it.lastRun().SessionID != sessionID {
 		return 0
 	}
-	q := it.OpenQuestion()
-	if q == nil {
+	if q := it.OpenQuestion(); q != nil {
+		return q.ID
+	}
+	return 0
+}
+
+// AnsweredInSession closes the open question questionID of the item whose latest
+// run is sessionID: the user answered it in the session's terminal. The id was
+// captured BEFORE the line was forwarded, so a question the agent posts after
+// the user typed is never closed by it. It returns the item id, or 0 when that
+// question is not open (already answered, closed, or gone).
+func (b *Backlog) AnsweredInSession(sessionID string, questionID int, now time.Time) int {
+	it := b.ItemForSession(sessionID)
+	if it == nil || it.lastRun().SessionID != sessionID || questionID == 0 {
 		return 0
 	}
-	q.Closed = ClosedAnsweredInSession
+	open := it.OpenQuestion()
+	if open == nil {
+		return 0
+	}
+	// Only a question that was open at submission and is still open closes. The
+	// oldest open one is the one the submission could have answered; a newer one
+	// has a larger id than the captured id.
+	if open.ID != questionID {
+		return 0
+	}
+	open.Closed = ClosedAnsweredInSession
 	it.UpdatedAt = now
 	return it.ID
 }

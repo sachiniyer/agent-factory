@@ -32,11 +32,32 @@ type backlogState struct {
 	// deferredArchive holds the sessions whose on_done archive waits for an
 	// attached client to leave.
 	deferredArchive map[string]bool
+	// pendingEnds holds, per session id, the run generation of an idle edge
+	// observed before the session's start record was committed: the completion
+	// has no item to land on yet, and is replayed by finishBacklogStart.
+	pendingEnds map[string]int
 	// recovered, recovering and recoveryDone track restart recovery.
 	recovered    map[string]bool
 	recovering   bool
 	recoveryDone bool
 	meter        meterState
+}
+
+func (s *backlogState) holdEnd(sessionID string, gen int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingEnds == nil {
+		s.pendingEnds = map[string]int{}
+	}
+	s.pendingEnds[sessionID] = gen
+}
+
+func (s *backlogState) takeEnd(sessionID string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gen, ok := s.pendingEnds[sessionID]
+	delete(s.pendingEnds, sessionID)
+	return gen, ok
 }
 
 func (s *backlogState) reserve(repoID string) {
