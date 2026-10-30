@@ -31,9 +31,9 @@ import {
   filterSessions,
   hiddenCount,
   isDefaultFilter,
-  kindCounts,
   type StatusFilter,
 } from "./filter.js";
+import { type ArchiveState, archiveHasMore, archivedCount, railKindCounts } from "./archive.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
@@ -269,6 +269,9 @@ export interface AppState {
   projectsError?: string;
   /** the live session projection (Snapshot + /v1/events), the rail's data. */
   sessions: SessionData[];
+  /** What is known of the archived sessions the startup snapshot left out, and how
+   *  far each project's archive has been read (#6178). */
+  archive: ArchiveState;
   /** Repos the daemon dropped at startup (SnapshotResponse.skipped_repos, #4742),
    *  so the rail can surface their missing sessions as a persistent incompleteness
    *  notice instead of presenting the truncated projection as a complete list.
@@ -504,6 +507,8 @@ export interface Actions {
   setStatusFilter(kind: OperatorKind, on: boolean): void;
   /** Restores the default filter — every state but archived. */
   resetStatusFilter(): void;
+  /** Reads the next page of the selected project's archive (#6178), or retries a failed read. */
+  loadMoreArchived(): void;
   /** Opens the add-task modal (#1592 Phase 5 PR8). */
   addTask(): void;
   /** Opens the edit-task modal seeded from the task, submitting via UpdateTask (#1935). */
@@ -1668,7 +1673,7 @@ export class AppShell {
     const visible = visibleRailSessions(state);
     const count = String(visible.length);
     if (this.railCount.textContent !== count) this.railCount.textContent = count;
-    const filterSignature = JSON.stringify([kindCounts(scoped), state.statusFilter]);
+    const filterSignature = JSON.stringify([railKindCounts(state.archive, state.selectedProject, scoped), state.statusFilter]);
     if (filterSignature !== this.lastFilterSignature) {
       this.lastFilterSignature = filterSignature;
       this.renderFilterMenu(state, scoped);
@@ -1700,11 +1705,12 @@ export class AppShell {
     );
     // Preserve the notice too: its controls may own focus during a snapshot.
     const noticeSignature = JSON.stringify([state.selectedProject, scoped.length,
-      scoped.some(s => !isArchived(s)), scoped.filter(isArchived).length,
-      visible.length, state.statusFilter]);
+      scoped.some(s => !isArchived(s)), archivedCount(state.archive, state.selectedProject, scoped),
+      visible.length, state.statusFilter, archiveFooterSignature(state)]);
     if (noticeSignature !== this.lastRailNoticeSignature) {
       this.lastRailNoticeSignature = noticeSignature;
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
+      this.cachedArchiveFooter = state.selectedProject ? this.archiveFooter(state) : null;
     }
     // The skipped-repos notice is independent of the project scope and the status
     // filter: it reports snapshot incompleteness the daemon carried alongside the
@@ -1731,7 +1737,8 @@ export class AppShell {
     }
     const head: HTMLElement[] = [];
     if (this.cachedRailNotice) head.push(this.cachedRailNotice);
-    orderChildren(this.railList, [...head, ...rows]);
+    const foot: HTMLElement[] = this.cachedArchiveFooter ? [this.cachedArchiveFooter] : [];
+    orderChildren(this.railList, [...head, ...rows, ...foot]);
     // The skipped-repos notice is a role="alert": it must be a SIBLING of the
     // role="listbox", not one of its owned children (which the ARIA listbox contract
     // expects to be role="option" session rows). Mounting it inside the listbox made
@@ -1762,6 +1769,7 @@ export class AppShell {
   private lastFilterSignature = "";
   private lastRailNoticeSignature = "";
   private cachedRailNotice: HTMLElement | null = null;
+  private cachedArchiveFooter: HTMLElement | null = null;
   private lastSkippedNoticeSignature = "";
   private cachedSkippedNotice: HTMLElement | null = null;
   // The element currently mounted as a sibling of the rail listbox; null when the
@@ -1886,9 +1894,32 @@ export class AppShell {
    *    with the way back, rather than a rail that looks broken.
    *  - otherwise nothing: rows are showing.
    */
+  /** The control under the archived rows (#6178): the archive is read a page at a
+   *  time, so the rail says how many older sessions are still on the daemon and
+   *  offers the next page, reports a read in flight, or names a failed one and
+   *  offers the retry. Null while the archived group is hidden or fully loaded. */
+  private archiveFooter(state: AppState): HTMLElement | null {
+    const a = state.archive;
+    if (!a.lazy || !state.statusFilter.archived) return null;
+    if (a.error) {
+      const retry = h("button", { type: "button", class: "af-rail-empty-new af-rail-archive-retry" }, "Retry");
+      retry.addEventListener("click", () => this.actions.loadMoreArchived());
+      return h("li", { class: "af-rail-archive-status" }, `Could not load archived sessions: ${a.error} `, retry);
+    }
+    if (a.loading) return h("li", { class: "af-rail-archive-status" }, "Loading archived sessions…");
+    if (!archiveHasMore(a, state.selectedProject)) return null;
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const remaining = Math.max(0, archivedCount(a, state.selectedProject, scoped) - scoped.filter(isArchived).length);
+    const more = h("button", { type: "button", class: "af-rail-empty-new af-rail-archive-more" },
+      remaining > 0 ? `Show older archived · ${remaining} more` : "Show older archived");
+    more.addEventListener("click", () => this.actions.loadMoreArchived());
+    return h("li", { class: "af-rail-archive-status" }, more);
+  }
+
   private railNotice(state: AppState, scoped: SessionData[], visible: SessionData[]): HTMLElement | null {
     // The pane owns zero-data guidance; keep only the rail count for that state.
-    if (scoped.length === 0) return null;
+    const archived = archivedCount(state.archive, state.selectedProject, scoped);
+    if (scoped.length === 0 && archived === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
@@ -1900,7 +1931,6 @@ export class AppShell {
       );
       newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
       const empty = h("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} — `, newBtn);
-      const archived = scoped.filter(isArchived).length;
       if (archived > 0 && !state.statusFilter.archived) {
         const show = h("button", { type: "button", class: "af-rail-empty-new af-rail-show-archived" }, "Show archived");
         show.addEventListener("click", () => this.actions.setStatusFilter("archived", true));
@@ -1976,7 +2006,7 @@ export class AppShell {
    *  the menu governs. Rebuilt in place — the menu's open state is preserved across
    *  rebuilds so a live event never snaps it shut mid-narrowing. */
   private renderFilterMenu(state: AppState, scoped: SessionData[]): void {
-    const counts = kindCounts(scoped);
+    const counts = railKindCounts(state.archive, state.selectedProject, scoped);
     const narrowed = !isDefaultFilter(state.statusFilter);
     this.filterDot.classList.toggle("af-rail-filter-dot-on", narrowed);
     this.filterBtn.classList.toggle("af-rail-filter-narrowed", narrowed);
@@ -3343,6 +3373,13 @@ function inertRowReason(s: SessionData): string {
  *  only a lifecycle-actionable session by stable id; a kill-only startup-unknown row
  *  retains its button without becoming attachable. Every inert row carries
  *  aria-disabled, and a managed-but-inert one's title says why (#4394). */
+/** The inputs archiveFooter reads, as a string, so the rail rebuilds it only when
+ *  they change. */
+function archiveFooterSignature(state: AppState): string {
+  const a = state.archive;
+  return JSON.stringify([a.lazy, a.loading, a.error ?? "", archiveHasMore(a, state.selectedProject), state.statusFilter.archived]);
+}
+
 export function sessionRow(
   s: SessionData,
   selected: boolean,

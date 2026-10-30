@@ -47,6 +47,38 @@ type SnapshotRequest struct {
 	// Limit bounds the filtered result. A pointer distinguishes an omitted,
 	// backward-compatible unbounded request from an explicit invalid zero.
 	Limit *int `json:"limit,omitempty"`
+
+	// The remaining fields are the lazy-archive shape (#6178). They are additive:
+	// a request that sets none of them is answered exactly as before, and a daemon
+	// that predates them ignores them and answers with every row, so a client
+	// that asked for LazyArchive detects the absence of ArchivedTotal in the reply
+	// and treats the rows it got as the complete list.
+
+	// LazyArchive asks for the live (non-archived) rows only, with ArchivedTotal
+	// and ArchivedByProject standing in for the archived rows left out — counted
+	// over the repo-scoped rows BEFORE any other filter. It is one switch, not
+	// Live plus a summary flag, so a daemon that honors Live but predates the
+	// summary cannot drop the archived rows without saying how many there are.
+	LazyArchive bool `json:"lazy_archive,omitempty"`
+	// NewestFirst orders the filtered rows newest-created first, ties broken by
+	// descending id, so a page boundary is a stable (created_at, id) position.
+	NewestFirst bool `json:"newest_first,omitempty"`
+	// Before resumes a NewestFirst listing after the row a previous reply's
+	// NextBefore named: only rows strictly older in that order are returned.
+	Before *SnapshotCursor `json:"before,omitempty"`
+	// ProjectPath keeps only rows whose worktree repo path is exactly this. It is
+	// the key the web groups projects by. A sandbox credential's projection
+	// withholds that path, so the field is ignored for one.
+	ProjectPath string `json:"project_path,omitempty"`
+	// IDs keeps only the rows with these stable session ids (a deep link to one
+	// archived session).
+	IDs []string `json:"ids,omitempty"`
+}
+
+// SnapshotCursor is a position in a NewestFirst listing.
+type SnapshotCursor struct {
+	CreatedAt time.Time `json:"created_at"`
+	ID        string    `json:"id"`
 }
 
 // SnapshotCapabilities is the subset of Ping's capability bits a SANDBOX
@@ -64,6 +96,16 @@ type SnapshotCapabilities struct {
 
 type SnapshotResponse struct {
 	Instances []session.InstanceData `json:"instances"`
+	// ArchivedTotal is the number of archived rows in the request's repo scope,
+	// present only when the request set LazyArchive. Its presence is also how a
+	// client learns the daemon understands the lazy-archive request shape.
+	ArchivedTotal *int `json:"archived_total,omitempty"`
+	// ArchivedByProject counts those archived rows per worktree repo path (the
+	// key web groups projects by). Withheld from a sandbox credential.
+	ArchivedByProject map[string]int `json:"archived_by_project,omitempty"`
+	// NextBefore is set when a Limit cut the listing short: pass it as Before to
+	// read the next page.
+	NextBefore *SnapshotCursor `json:"next_before,omitempty"`
 	// Capabilities: see SnapshotCapabilities. Nil for an operator credential.
 	Capabilities *SnapshotCapabilities `json:"capabilities,omitempty"`
 	// Caller is the id of the session the presented sandbox credential is bound
@@ -529,11 +571,26 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 		// operator reading stdout, not the agent reading its own row (#3065).
 		skipped = nil
 	}
-	instances, err := FilterSnapshotInstances(req, instances)
+	if isSandbox {
+		// The projection above withheld the worktree path these two keys read.
+		req.ProjectPath = ""
+	}
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	if req.LazyArchive {
+		total, byProject := archivedSummary(instances)
+		resp.ArchivedTotal = &total
+		if !isSandbox {
+			resp.ArchivedByProject = byProject
+		}
+	}
+	instances, next, err := FilterSnapshotPage(req, instances)
 	if err != nil {
 		return err
 	}
 	resp.Instances = instances
+	resp.NextBefore = next
 	resp.DeliveryAlarms = alarms
 	resp.SkippedRepos = skipped
 	if s.manager.lifecycle != nil {

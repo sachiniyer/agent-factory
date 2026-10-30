@@ -41,7 +41,18 @@ export class OptimisticSessions {
   /** Captured before fetching, so an older snapshot cannot undo an RPC or event. */
   snapshotFence(): number { return this.revision; }
 
-  snapshot(sessions: SessionData[], fence: number): boolean {
+  /** Adds rows the live-only snapshot left out (an archived page, a deep-linked
+   *  archived session). Not an event and not a snapshot: it bumps no revision, so
+   *  a fetch already in flight is not discarded for it, and it records no pending
+   *  feedback. A row already known is replaced in place. */
+  adopt(rows: SessionData[]): void {
+    for (const row of rows) this.authoritative = upsertSession(this.authoritative, row);
+  }
+
+  /** `leftLiveSet`: the snapshot was live-only, so a row ABSENT from it may have
+   *  been archived rather than killed (#6178); an archive request is then settled by
+   *  its absence, as a full snapshot settled it by the row's archived liveness. */
+  snapshot(sessions: SessionData[], fence: number, leftLiveSet = false): boolean {
     if (fence !== this.revision) return false;
     this.authoritative = sessions;
     this.revision++;
@@ -52,7 +63,7 @@ export class OptimisticSessions {
       if (op.kind !== "create" && op.row.id) {
         const target = sessions.find(row => row.id === op.row.id);
         if ((op.kind === "kill" && !target) ||
-          (op.kind === "archive" && target?.liveness === Liveness.Archived)) op.confirmed = true;
+          (op.kind === "archive" && (target?.liveness === Liveness.Archived || (leftLiveSet && !target)))) op.confirmed = true;
       }
       if (op.acknowledged) this.pending.delete(key);
     }
@@ -62,7 +73,7 @@ export class OptimisticSessions {
   /** A tab mutation requires a snapshot accepted after its RPC. Never return
    * the old projection when events cross that request; retry a bounded number
    * of times and cancel silently when this connection no longer owns the work. */
-  async refresh(fetch: () => Promise<SessionData[]>): Promise<SessionData[] | null> {
+  async refresh(fetch: () => Promise<SessionData[]>, leftLiveSet: () => boolean = () => false): Promise<SessionData[] | null> {
     const epoch = this.epoch;
     for (let attempt = 0; attempt < 3; attempt++) {
       const fence = this.snapshotFence();
@@ -74,7 +85,7 @@ export class OptimisticSessions {
         throw error;
       }
       if (epoch !== this.epoch) return null;
-      if (this.snapshot(sessions, fence)) return this.project();
+      if (this.snapshot(sessions, fence, leftLiveSet())) return this.project();
     }
     throw new Error("Could not refresh sessions after the operation because they kept changing. Check the session before trying again.");
   }
