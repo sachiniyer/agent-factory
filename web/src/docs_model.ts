@@ -38,6 +38,8 @@ export function statusText(status: SyncStatus, detail = ""): string {
       return "Not saved";
     case "markers":
       return "Resolve the markers to save";
+    case "recovered":
+      return "Unsaved changes recovered";
     case "error":
       return detail ? `Not saved · ${detail}` : "Not saved";
   }

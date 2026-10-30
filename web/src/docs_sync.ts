@@ -49,6 +49,9 @@ export class DocSync {
   private shown: { status: SyncStatus; detail: string } | null = null;
   private starting: { resolve(): void; reject(e: unknown): void } | null = null;
   private quietWaiters: (() => void)[] = [];
+  /** The draft this sync last wrote to (or read from) per-viewer storage, as JSON. */
+  private storedKey: string | null = null;
+  private closed = false;
 
   constructor(private readonly deps: DocSyncDeps) {}
 
@@ -132,6 +135,7 @@ export class DocSync {
 
   dispose(): void {
     this.attached = false;
+    this.closed = true;
     this.dispatch({ t: "close" });
   }
 
@@ -205,12 +209,14 @@ export class DocSync {
         const reload = fx.reload;
         this.deps.load().then(
           (doc) => {
-            this.dispatch(reload ? { t: "reload_ok", doc } : { t: "load_ok", doc });
-            if (!reload) {
-              const draft = this.deps.draft?.load();
-              if (draft) this.dispatch({ t: "restore_draft", draft });
-              this.starting?.resolve();
+            if (reload) {
+              this.dispatch({ t: "reload_ok", doc });
+              return;
             }
+            const draft = this.deps.draft?.load() ?? null;
+            this.storedKey = draft ? JSON.stringify(draft) : null;
+            this.dispatch({ t: "load_ok", doc, draft });
+            this.starting?.resolve();
           },
           (e: unknown) => {
             this.dispatch(reload ? { t: "reload_fail", error: errorMessage(e) } : { t: "load_fail", error: errorMessage(e) });
@@ -245,12 +251,27 @@ export class DocSync {
         this.cancelTimer();
         return;
       case "stash":
-        this.deps.draft?.store(fx.draft);
+        if (this.ownsStorage()) {
+          this.deps.draft?.store(fx.draft);
+          this.storedKey = JSON.stringify(fx.draft);
+        }
         return;
       case "unstash":
-        this.deps.draft?.clear();
+        if (this.ownsStorage()) {
+          this.deps.draft?.clear();
+          this.storedKey = null;
+        }
         return;
     }
+  }
+
+  /** A closed tab may still be finishing a save, while a newer tab has taken over
+   *  the doc's draft. It then touches storage only while storage still holds what
+   *  it wrote itself. */
+  private ownsStorage(): boolean {
+    if (!this.closed || !this.deps.draft) return true;
+    const now = this.deps.draft.load();
+    return (now ? JSON.stringify(now) : null) === this.storedKey;
   }
 
   private cancelTimer(): void {

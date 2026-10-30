@@ -30,3 +30,14 @@ test("sync engine: with collisions, conflicts, switches and closes keep every in
     assert.equal(v, null, `seed ${seed * 7919}: ${v?.invariant}: ${v?.detail}\n${process.env.AF_TRACE ? v?.trace.join("\n") : ""}`);
   }
 });
+
+test("sync engine: failed saves, lost replies and the page closing never lose an edit", async () => {
+  for (let seed = 1; seed <= SEEDS; seed++) {
+    const v = await runScenario({ seed: seed * 104729, steps: 120, collide: false, faults: 0.3, makeSync });
+    assert.equal(v, null, `seed ${seed * 104729}: ${v?.invariant}: ${v?.detail}\n${process.env.AF_TRACE ? v?.trace.join("\n") : ""}`);
+  }
+  for (let seed = 1; seed <= SEEDS; seed++) {
+    const v = await runScenario({ seed: seed * 15485863, steps: 120, collide: true, faults: 0.3, makeSync });
+    assert.equal(v, null, `seed ${seed * 15485863}: ${v?.invariant}: ${v?.detail}\n${process.env.AF_TRACE ? v?.trace.join("\n") : ""}`);
+  }
+});

@@ -32,6 +32,7 @@ export interface Draft {
   base: string;
   theirs: string;
   head: string;
+  kind?: "conflict" | "unsent";
 }
 
 export interface SyncDepsLike {
@@ -125,6 +126,9 @@ export interface ScenarioOptions {
   steps: number;
   /** Users and the agent may edit the same lines (conflicts happen). */
   collide: boolean;
+  /** Probability that a save fails: dropped before the daemon sees it, or applied
+   *  with the reply lost. The page may also close with saves in flight. */
+  faults?: number;
   makeSync: MakeSync;
 }
 
@@ -183,7 +187,13 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         const sync = syncs.get(doc);
         saves.push({ doc, text, bufferHadMarkers: sync ? hasConflictMarkers(sync.text) : false });
         void final;
-        return call(() => d.save(text, base));
+        const fault = rand() < (o.faults ?? 0) ? (rand() < 0.5 ? "drop" : "lose-reply") : null;
+        return call(() => {
+          if (fault === "drop") throw new Error("503 service unavailable");
+          const result = d.save(text, base);
+          if (fault === "lose-reply") throw new Error("network error: reply lost");
+          return result;
+        });
       },
       setBuffer: (text) => {
         if (attached === doc) {
@@ -310,6 +320,44 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
   }
 
+  /** The page closes: every sync gets its pagehide, requests in flight reach the
+   *  daemon or not, replies are lost, and only per-viewer storage and the daemon
+   *  survive. The user then opens the page again on the same doc. */
+  async function pageClose(): Promise<void> {
+    const doc = attached;
+    if (!doc) return;
+    for (const s of syncs.values()) s.saveBeforeLeaving();
+    await tick();
+    for (const p of net.filter((x) => x.stage === "sent")) {
+      if (rand() < 0.5) {
+        try {
+          p.run();
+        } catch {
+          // The daemon rejected or the reply would have failed: the page is gone either way.
+        }
+      }
+    }
+    net.length = 0;
+    for (const t of timers) t.live = false;
+    events.length = 0;
+    for (const s of syncs.values()) s.dispose();
+    syncs.clear();
+    closing.clear();
+    attached = "";
+    editor.text = "";
+    const unsaved = [...typed.get(doc)!.values()].filter((tok) => !daemons.get(doc)!.everHad(tok) && !excused.has(tok));
+    await open(doc);
+    await drain();
+    const back = syncs.get(doc)!;
+    // I6: unsaved edits that survive only in storage come back, and say so.
+    if (unsaved.length && !["recovered", "conflict", "saving", "saved", "merged"].includes(back.currentStatus)) {
+      fail("recovered-draft-not-shown", `${doc}: reopened as ${back.currentStatus} with unsaved ${unsaved.join(",")}`);
+    }
+    if (unsaved.length && back.currentStatus === "pending") {
+      fail("recovered-draft-not-shown", `${doc}: reopened as pending, not recovered`);
+    }
+  }
+
   function deliverEvent(): void {
     if (!events.length) return;
     const e = events.splice(Math.floor(rand() * events.length), 1)[0]!;
@@ -369,8 +417,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       // I2: with no collisions, the editor always shows the latest keystroke of
       // every line the user typed, never an older version of it.
       for (const [line, tok] of typed.get(attached)!) {
+        if (excused.has(tok)) continue; // the user chose "take theirs"
         if (lines[line] !== tok) {
-          fail("editor-older-than-typed", `${attached} line ${line}: editor has ${lines[line]}, last typed ${tok}`);
+          fail("editor-older-than-typed", `${attached} line ${line}: editor has ${lines[line]}, last typed ${tok} (status ${s.currentStatus}, sync text ${JSON.stringify(s.text)}, stash ${JSON.stringify([...stash])})`);
         }
       }
     }
@@ -430,9 +479,11 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         await drain();
         const back = syncs.get(doc)!;
         if (wasConflict && (back.currentStatus !== "conflict" || back.text !== draft)) {
-          fail("conflict-draft-lost-on-close", `${doc}: reopened as ${back.currentStatus}`);
+          fail("conflict-draft-lost-on-close", `${doc}: reopened as ${back.currentStatus}, draft ${JSON.stringify(draft)}, now ${JSON.stringify(back.text)}, daemon ${JSON.stringify(daemons.get(doc)!.text)}`);
         }
       }
+    } else if (r < 0.845 && (o.faults ?? 0) > 0) {
+      await pageClose();
     } else if (r < 0.86) outage = !outage;
     else if (r < 0.89) {
       if (outage) outage = false;
