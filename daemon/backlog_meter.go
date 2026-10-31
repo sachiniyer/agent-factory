@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -390,7 +391,14 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	// dropping their dedupe keys, buckets and directories now would lose them for
 	// good once it is readable again (Codex P2 on #6299).
 	if runsComplete {
-		state.KeepRunSeen(metered)
+		// A run recorded after this pass listed the backlog is not in metered yet;
+		// its pending directories must survive this pass's prune, or the save below
+		// would make the drop permanent (the next pass finds the run itself).
+		keep := maps.Clone(metered)
+		for id := range appliedDirs {
+			keep[id] = true
+		}
+		state.KeepRunSeen(keep)
 	} else {
 		// The unread projects' runs still own their remembered directories: classify
 		// those as backlog spend now, since a message counted as plain spend is never
