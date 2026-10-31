@@ -161,6 +161,19 @@ wait_for() {
 	return 1
 }
 
+# retry_for <seconds> <cmd...>: re-run a slow command until it succeeds or the
+# wall-clock budget is spent (wait_for counts iterations, which a slow command
+# stretches without bound).
+retry_for() {
+	local budget="$1" start="$SECONDS"
+	shift
+	while :; do
+		"$@" && return 0
+		[ $((SECONDS - start)) -ge "$budget" ] && return 1
+		sleep 1
+	done
+}
+
 cleanup() {
 	local rc=$?
 	# Stop only what this script started: its daemon (pid file in the throwaway
@@ -192,7 +205,7 @@ echo "== environment"
 	echo "bash:     $BASH_VERSION (running $0)"
 	echo "tmux:     $(tmux -V)  ($(command -v tmux))"
 	echo "af:       $("$AF_BIN" version 2>&1 | head -1)  ($AF_BIN)"
-	echo "TMPDIR:   ${TMPDIR:-unset} (${#TMPDIR} bytes)"
+	echo "TMPDIR:   ${TMPDIR:-unset} ($(printf %s "${TMPDIR:-}" | wc -c | tr -d ' ') bytes)"
 	echo "root:     $ROOT"
 	echo "web port: $PORT"
 } | tee -a "$LOG"
@@ -200,7 +213,17 @@ echo "== journey"
 
 # 1. the binary itself ---------------------------------------------------------
 if [ "$(uname -s)" = Darwin ]; then
-	step "codesign -v on the af binary" codesign -v --verbose=2 "$AF_BIN"
+	# arm64 kills an unsigned or invalidly signed binary (Killed: 9); x86_64 runs
+	# unsigned code and Go's linker only signs arm64, so there "not signed at
+	# all" is fine but a signature that is present must still verify.
+	codesign_ok() {
+		if codesign -d "$AF_BIN" 2>&1 | grep -q "not signed at all" && [ "$(uname -m)" = x86_64 ]; then
+			echo "unsigned x86_64 binary (allowed)"
+			return 0
+		fi
+		codesign -v --verbose=2 "$AF_BIN"
+	}
+	step "codesign -v on the af binary" codesign_ok
 	step "af binary is a Mach-O for this machine" sh -c "lipo -archs '$AF_BIN' | tr ' ' '\n' | grep -qx \"\$(uname -m)\""
 fi
 step "af version runs" af version
@@ -224,13 +247,14 @@ record_repo=$?
 REPO="$ROOT/repo"
 
 # 4. daemon --------------------------------------------------------------------
-# The first command that needs the daemon starts it (the documented behaviour).
-step "daemon starts on first use" af sessions --repo "$REPO" list
-step "daemon status answers" af daemon status
-step "web UI answers 200 on loopback" wait_for 20 sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/)\" = 200 ]"
+# The first command that needs the daemon starts it (the documented behaviour);
+# a bare `sessions list` reads state directly and does not, so the daemon comes up
+# with the first session below.
 
 # 5. a plain session -------------------------------------------------------------
-step "create a session" af sessions --repo "$REPO" create --name plain --program claude
+step "create a session (starts the daemon)" af sessions --repo "$REPO" create --name plain --program claude
+step "daemon status answers" af daemon status
+step "web UI answers 200 on loopback" wait_for 20 sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/)\" = 200 ]"
 tmux_name_of() { af sessions --repo "$REPO" get "$1" --json 2>/dev/null | grep -o '"tmux_name": *"[^"]*"' | head -1 | sed 's/.*: *"\(.*\)"/\1/'; }
 PLAIN_TMUX="$(tmux_name_of plain)"
 step "session is live on the private tmux server" sh -c "env -u TMUX tmux -S '$TMUX_SOCK' has-session -t '=$PLAIN_TMUX'"
@@ -273,14 +297,17 @@ step "new window in the account session runs under the account" new_window_is_sc
 # 7. tabs ---------------------------------------------------------------------------
 count_tabs() { af sessions --repo "$REPO" get acct --json 2>/dev/null | grep -c '"kind"'; }
 TABS_BEFORE="$(count_tabs)"
-step "open a terminal (shell) tab" af sessions --repo "$REPO" tab-create acct --kind shell --name smoke-shell
+step "open a terminal (shell) tab" af sessions --repo "$REPO" tab-create acct --kind shell
 tab_added() { [ "$(count_tabs)" -gt "$TABS_BEFORE" ]; }
 step "the terminal tab is listed" tab_added
 
 # 8. daemon restart keeps the account session usable (upgrade shape) ------------------
 step "daemon restart" af daemon restart
 step "web UI answers 200 after restart" wait_for 30 sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/)\" = 200 ]"
-step "new window still scoped after daemon restart" new_window_is_scoped "after restart"
+# The new daemon re-mints the session's capability and rewrites default-command;
+# a window opened before that finishes gets the old one and dies. Poll, as
+# integration/launch_capability_newwindow_test.go does.
+step "new window scoped again after daemon restart" retry_for 40 new_window_is_scoped "after restart"
 
 # 9. archive and restore ----------------------------------------------------------------
 step "archive the account session" af sessions --repo "$REPO" archive acct
@@ -293,8 +320,19 @@ step "restored session is live again" wait_for 20 sh -c "env -u TMUX tmux -S '$T
 step "new window scoped after restore" new_window_is_scoped "after restore"
 
 # 10. doctor ---------------------------------------------------------------------------------
-step "af doctor --setup" af doctor --setup
-step "af doctor" af doctor
+# doctor exits 1 for advisory findings that are expected in a throwaway home
+# (no autostart unit, git identity, a temp-home scan that cannot read every
+# directory). What matters is that it runs and reports no FAIL line.
+doctor_clean() {
+	local out rc
+	out="$(af doctor "$@" 2>&1)"
+	rc=$?
+	printf '%s\n' "$out"
+	printf '%s\n' "$out" | grep -qE '^ *FAIL ' && return 1
+	[ "$rc" -le 1 ]
+}
+step "af doctor --setup (no FAIL)" doctor_clean --setup
+step "af doctor (no FAIL)" doctor_clean
 
 # --- report ---------------------------------------------------------------------------------
 echo
