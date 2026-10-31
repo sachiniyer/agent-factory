@@ -115,8 +115,8 @@ export class ItemPanel {
     this.titles = new SerialSaver((title) => actions.update(id, { title }), (title, ok) => {
       if (this.titleDraft !== title) return;   // a newer submission owns the draft
       this.titleDraft = null;
-      // A refused rename gives the field back its stored title.
-      if (!ok) this.repaint();
+      // A refused rename gives the field back its stored title; an accepted one shows it.
+      this.repaint();
     }, queueFor(`${root}\u0000${id}\u0000title`));
     this.waits = new SerialSaver((waits_on) => actions.update(id, { waits_on }), (list, ok) => {
       if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
@@ -212,7 +212,7 @@ export class ItemPanel {
     const it = this.item();
     if (!it) return;
     this.lookUpMissing(it);
-    if (document.activeElement !== this.title && this.titleDraft === null) this.title.value = it.title;
+    if (document.activeElement !== this.title) this.title.value = this.titleDraft ?? it.title;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));

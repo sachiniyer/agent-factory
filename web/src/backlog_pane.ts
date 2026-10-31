@@ -8,7 +8,7 @@ import { addItem, addNote, deleteItem, moveItem, setItemStatus, updateItem } fro
 import type { BacklogData } from "./backlog_data.js";
 import {
   type Backlog, type BacklogView, type Budget, type DropZone, FILTERS, type Filter, type ListRow, type MoveTarget,
-  applyMove, dropMove, formatID, itemByID, keyboardMove, listRows, sources,
+  applyMove, dropMove, formatID, itemByID, keyboardMove, listRows, overlayMove, sources,
 } from "./backlog_model.js";
 import { ItemPanel, entryField, stateChip } from "./backlog_panel.js";
 import { h } from "./dom.js";
@@ -69,7 +69,7 @@ export class BacklogPane {
   private readonly folded = new Set<number>();
   // A reorder shown before the daemon has it. It stays until data from a refresh
   // started after the move committed arrives; gen is Infinity until then.
-  private pending: { root: string; backlog: Backlog; gen: number } | null = null;
+  private pending: { root: string; backlog: Backlog; base: Backlog; gen: number } | null = null;
   // Reorder writes go out one at a time: each target is computed from the previous
   // optimistic order, so they must commit in the order they were made.
   private moves: Promise<unknown> = Promise.resolve();
@@ -149,7 +149,7 @@ export class BacklogPane {
 
   private view(): BacklogView | undefined {
     const v = this.root ? this.data?.views.get(this.root) : undefined;
-    if (v && this.pending && this.pending.root === this.root) return { ...v, backlog: this.pending.backlog };
+    if (v && this.pending && this.pending.root === this.root) return { ...v, backlog: overlayMove(v.backlog, this.pending.backlog, this.pending.base) };
     return v;
   }
 
@@ -175,7 +175,7 @@ export class BacklogPane {
     const root = this.root;
     if (!v || !root) return;
     const next = applyMove(v.backlog, id, to);
-    const pending = next ? { root, backlog: next, gen: Infinity } : null;
+    const pending = next ? { root, backlog: next, base: v.backlog, gen: Infinity } : null;
     if (pending) {
       this.pending = pending;
       this.focusId = id;

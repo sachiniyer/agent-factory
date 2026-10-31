@@ -178,3 +178,34 @@ test("refresh settles true only when the named project's read succeeded", async 
   answer("GetBudget", budgetOf(1));
   assert.equal(await bad, false, "a failed read of the edited project is not a confirmation");
 });
+
+test("a refresh a newer one superseded is acknowledged only by what the newer one commits", async () => {
+  const l = loader(["/a"]);
+  const confirming = l.refresh("/a");
+  await settle();
+  const first = pending.splice(0);
+  const newer = l.refresh();
+  await settle();
+  first.find((p) => p.method === "GetBacklog")!.resolve(backlogOf("saved"));
+  first.find((p) => p.method === "GetBudget")!.resolve(budgetOf(1));
+  await settle();
+  pending.find((p) => p.method === "GetBacklog")!.reject("down");
+  pending.splice(pending.findIndex((p) => p.method === "GetBacklog"), 1);
+  answer("GetBudget", budgetOf(1));
+  assert.equal(await newer, false);
+  assert.equal(await confirming, false, "its own read was discarded and the newer read failed");
+  assert.equal(commits, 1, "the failed newer read still commits (keeping the old snapshot)");
+
+  const again = l.refresh("/a");
+  await settle();
+  const second = pending.splice(0);
+  const newest = l.refresh();
+  await settle();
+  second.find((p) => p.method === "GetBacklog")!.resolve(backlogOf("stale"));
+  second.find((p) => p.method === "GetBudget")!.resolve(budgetOf(1));
+  await settle();
+  answer("GetBacklog", backlogOf("saved"));
+  answer("GetBudget", budgetOf(1));
+  assert.equal(await newest, true);
+  assert.equal(await again, true, "the newer snapshot that carries the edit committed");
+});
