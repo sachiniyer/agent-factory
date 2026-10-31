@@ -36,7 +36,7 @@ var tasksShowCmd = &cobra.Command{
 	Long: "Show one task in the current project: its trigger, whether the running " +
 		"daemon has it armed, when it will next fire, whether it has missed " +
 		"scheduled runs, and the bounded audit trail of who created, updated, " +
-		"enabled, or disabled it.\n\n" +
+		"enabled, disabled, or manually triggered it.\n\n" +
 		"Overdue is derived, never stored: a cron task is overdue when it has gone " +
 		"more than one period (or five minutes, whichever is larger) past its most " +
 		"recent scheduled occurrence, measured from the latest of its last run, its " +
@@ -131,7 +131,7 @@ func renderTaskShow(w io.Writer, t task.Task, now time.Time, daemonURL string) {
 		// Every task written before #3623 has an empty trail, and so does one that
 		// has not been touched since. Say which of the two this is, rather than
 		// leaving a blank section that reads as "nothing ever happened".
-		fmt.Fprintf(w, "    no recorded changes — the trail starts at the task's next create, update, enable, or disable\n")
+		fmt.Fprintf(w, "    no recorded changes — the trail starts at the task's next create, update, enable, disable, or manual trigger\n")
 		return
 	}
 	for _, e := range t.Audit {

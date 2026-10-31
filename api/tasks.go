@@ -375,7 +375,7 @@ var tasksRunCmd = &cobra.Command{
 		// daemon.RunTask CLI call (#1029 PR 3 / #1169-class fix). The
 		// expectation is re-verified against the same load that produces the
 		// fired record.
-		if err := routedTriggerTask(resolved.ID, expect); err != nil {
+		if err := routedTriggerTask(resolved.ID, expect, task.ActorCLI); err != nil {
 			return jsonError(fmt.Errorf("failed to trigger task: %w", err))
 		}
 

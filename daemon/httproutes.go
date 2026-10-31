@@ -710,7 +710,7 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/TriggerTask",
 		Description: "Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks).",
 		requestType: reflect.TypeOf(TriggerTaskRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.TriggerTask) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.triggerTask) },
 	},
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -281,17 +282,25 @@ func (s *controlServer) removeTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 	return nil
 }
 
-// TriggerTask fires a task NOW through the shared RunTask firing path — the same
+// TriggerTask is the net/rpc entry point; the HTTP route calls triggerTask
+// directly so the request context (and with it the transport the audit actor
+// falls back to) survives. Same split as AddTask/UpdateTask.
+func (s *controlServer) TriggerTask(req TriggerTaskRequest, resp *TriggerTaskResponse) error {
+	return s.triggerTask(context.Background(), req, resp)
+}
+
+// triggerTask fires a task NOW through the shared RunTask firing path — the same
 // entrypoint the in-daemon scheduler uses (#1029 PR 3). This unifies the CLI
 // `af tasks trigger`, the TUI run-now, and the cron scheduler on one
 // daemon-owned firing path, replacing the old in-process daemon.RunTask CLI call
 // (#1169-class fix). RunTask preserves the guards: watch tasks and disabled
 // tasks are refused.
-func (s *controlServer) TriggerTask(req TriggerTaskRequest, resp *TriggerTaskResponse) error {
+func (s *controlServer) triggerTask(ctx context.Context, req TriggerTaskRequest, resp *TriggerTaskResponse) error {
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	if err := RunTask(req.ID, req.Expect); err != nil {
+	runErr := RunTask(req.ID, req.Expect)
+	if runErr != nil {
 		// A committed auto-create inside RunTask's deliver path (#3357) durably
 		// recorded its session/workspace, so the marker must survive the net/rpc
 		// hop that would otherwise flatten it to a plain rpc.ServerError string.
@@ -300,11 +309,24 @@ func (s *controlServer) TriggerTask(req TriggerTaskRequest, resp *TriggerTaskRes
 		// CommittedOutcome() carrier check reconstructs it the way CreateSession,
 		// KillSession, and DeliverPrompt already do. A genuine failure returns
 		// unchanged.
-		if !resp.record(err) {
-			return err
+		if !resp.record(runErr) {
+			return runErr
 		}
-		return nil
+	} else {
+		resp.OK = true
 	}
-	resp.OK = true
+	// The fire is admitted — cleanly, or committed past the point of no return —
+	// so record who asked for it in the task's own audit trail (#6318). Only
+	// this client-facing handler writes the entry: the scheduler's cron fires
+	// and a watch task's line fires go through RunTask directly and are not
+	// actor actions, and a REFUSED trigger (a disabled task, a watch task, a
+	// bad expectation) returns above with nothing recorded, the same rule
+	// every other rejected mutation follows. A trail write that fails is
+	// logged, not returned: the run it describes has already committed, and
+	// surfacing it as an error would tell the caller the fire did not happen
+	// when it did.
+	if err := task.RecordTaskTrigger(req.ID, taskActor(ctx, req.Actor)); err != nil {
+		log.WarningLog.Printf("task %q fired but its triggered audit entry could not be recorded: %v", req.ID, err)
+	}
 	return nil
 }

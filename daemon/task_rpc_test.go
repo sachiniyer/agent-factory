@@ -355,3 +355,51 @@ func TestControlTriggerTask_RefusesDisabledTask(t *testing.T) {
 	assert.Contains(t, err.Error(), "disabled")
 	assert.Empty(t, *creates, "a refused disabled trigger must never create a session")
 }
+
+// TestControlTriggerTask_RecordsTheFireInTheAuditTrail is the #6318 contract:
+// a manual trigger that lands writes a `triggered` entry carrying the surface
+// that asked for it, so "who ran this off-schedule?" is answerable from the
+// trail. The entry rides the row inside the same locked store write every
+// audit entry takes.
+func TestControlTriggerTask_RecordsTheFireInTheAuditTrail(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repo := setupTaskRepo(t)
+	_, _ = stubTaskDelivery(t)
+
+	require.NoError(t, task.AddTask(enabledCronTask("ffff0004", repo)))
+
+	srv := &controlServer{}
+	var resp TriggerTaskResponse
+	require.NoError(t, srv.TriggerTask(
+		TriggerTaskRequest{ID: "ffff0004", Actor: string(task.ActorCLI)}, &resp))
+	assert.True(t, resp.OK)
+
+	got, err := task.GetTask("ffff0004")
+	require.NoError(t, err)
+	require.Len(t, got.Audit, 2, "the create entry plus the trigger entry")
+	fire := got.Audit[1]
+	assert.Equal(t, task.AuditTriggered, fire.Action)
+	assert.Equal(t, task.ActorCLI, fire.Actor)
+	assert.False(t, fire.At.IsZero())
+}
+
+// TestControlTriggerTask_RefusalWritesNoAuditEntry is the other half of #6318:
+// a trigger the daemon refuses is a rejected mutation like any other, and a
+// trail that recorded it would describe a fire that never happened.
+func TestControlTriggerTask_RefusalWritesNoAuditEntry(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	_, _ = stubTaskDelivery(t)
+	require.NoError(t, seedDisabledTask("ffff0005"))
+
+	srv := &controlServer{}
+	var resp TriggerTaskResponse
+	require.Error(t, srv.TriggerTask(
+		TriggerTaskRequest{ID: "ffff0005", Actor: string(task.ActorCLI)}, &resp))
+
+	got, err := task.GetTask("ffff0005")
+	require.NoError(t, err)
+	for _, e := range got.Audit {
+		assert.NotEqual(t, task.AuditTriggered, e.Action,
+			"a refused fire must leave no triggered entry")
+	}
+}
