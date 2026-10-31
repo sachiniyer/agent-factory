@@ -645,7 +645,7 @@ function resolveRoute(): void {
     lookup = !session && route !== null && store.get().archive.lazy && store.get().archive.total > 0;
     if (session?.id) {
       if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
-      setStatusFilter(operatorKind(session), true);
+      store.set({ statusFilter: withKind(store.get().statusFilter, operatorKind(session), true) });
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
