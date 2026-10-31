@@ -770,6 +770,19 @@ var internalHTTPRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(PauseStatusPollRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PauseStatusPoll) },
 	},
+	// The in-sandbox git credential helper's and gh shim's one call (#5571
+	// W7.8): infra a user never scripts, so it stays out of the catalog. Admitted
+	// to the sandbox scope, and its handler answers only the caller's own session,
+	// only over the dedicated sandbox endpoint, and only for that session's own
+	// origin (push_credential.go).
+	{
+		Method:         http.MethodPost,
+		Path:           "/v1/GitCredential",
+		sandboxAllowed: true,
+		Description:    "Answer a sandbox session's git credential request for its own origin with the daemon box's GitHub login (push credentials on listed hosts); sandbox callback only.",
+		requestType:    reflect.TypeOf(GitCredentialRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.gitCredential) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/ResumeStatusPoll",

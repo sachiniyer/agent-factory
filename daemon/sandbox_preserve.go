@@ -29,6 +29,11 @@ import (
 // bounded either way, which is what the poll needs.
 const sandboxPushTimeout = session.AgentArchiveCallTimeout + 30*time.Second
 
+// autoPushFenceGrace is how long push credentials stay withheld from a row after
+// its automatic preserve-push returns: one more archive-call budget, the longest
+// the abandoned in-sandbox work is expected to run on (#5571 W7.8).
+const autoPushFenceGrace = session.AgentArchiveCallTimeout
+
 // The force-reap suggestion renders the per-session escape hatch the refusals below
 // must name. A guard that blocks without naming its own release is #2917, so
 // every refusal in this file ends with this string.
@@ -125,6 +130,14 @@ func reapRefusalSuggestionFor(repoID string, instance *session.Instance) string 
 // drift, or replace an executable force-reap with an unnecessarily destructive
 // kill (#4195).
 func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *session.Instance, reapGuidance string) error {
+	// This push is af's own decision, not the user's, so it must not start
+	// succeeding just because the host can now get push credentials (#5571 W7.8,
+	// the owner's answer to Q4): the credential route refuses this row while the
+	// push runs. The fence outlives the call by autoPushFenceGrace because the
+	// in-sandbox archive takes no context and keeps working after the daemon
+	// stops waiting (sandboxPushTimeout's comment).
+	release := m.pushCreds.beginAutoPush(instance.ID)
+	defer time.AfterFunc(autoPushFenceGrace, release)
 	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
 	if err != nil {
 		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its

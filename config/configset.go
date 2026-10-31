@@ -163,7 +163,8 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// checked at create time (BackendConfigError), like ssh.host — not here.
 	"sandbox.ssh": {kind: cfgString, section: "sandbox"},
 	// Daemon-local path streamed to remote hosts; a bad file surfaces at create.
-	"sandbox.binary": {kind: cfgString, section: "sandbox"},
+	"sandbox.binary":           {kind: cfgString, section: "sandbox"},
+	"sandbox.push_credentials": {kind: cfgBool, section: "sandbox"},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},

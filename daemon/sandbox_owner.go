@@ -91,4 +91,5 @@ var sandboxConstrainedRoutes = map[string]string{
 	"/v1/AddTask":        "cron tasks only, delivering to an off-box session in the caller's project; no watch_cmd, host or spawn",
 	"/v1/RemoveTask":     "non-watch tasks of the caller's own project only",
 	"/v1/SetAttention":   "targets ONLY the caller's own session: the owner id replaces every selector in the request",
+	"/v1/GitCredential":  "the caller's own live session only, over the dedicated sandbox endpoint only, on a host the operator opted in, for exactly that session's own https GitHub origin",
 }
