@@ -113,6 +113,13 @@ func TestSandboxScope_NoResponseCarriesTheDaemonHostLayout(t *testing.T) {
 			`{"task":{"prompt":"p","watch_cmd":"./w.sh","target_session":"peer"}}`,
 			`{"task":{"prompt":"p","cron_expr":"0 * * * *","target_session":"does-not-exist"}}`,
 		},
+		// Over this fixture's main-listener gate every push-credential request is
+		// refused before anything is read (push_credential_test.go drives the
+		// dedicated endpoint); the refusal must carry no layout either.
+		"/v1/GitCredential": {
+			`{"protocol":"https","host":"github.com","path":"owner/repo.git"}`,
+			`{"protocol":"https","host":"github.com","path":"` + otherPath + `"}`, `{}`,
+		},
 		"/v1/RemoveTask": {
 			`{"id":"t-foreign"}`, `{"id":"t-watch"}`, `{"id":"no-such-task"}`,
 			// The expectation's mismatch error is composed from the stored record,
@@ -256,6 +263,7 @@ var requestTypes = map[string]reflect.Type{
 	"/v1/ListTasks":      reflect.TypeFor[ListTasksRequest](),
 	"/v1/AddTask":        reflect.TypeFor[AddTaskRequest](),
 	"/v1/RemoveTask":     reflect.TypeFor[RemoveTaskRequest](),
+	"/v1/GitCredential":  reflect.TypeFor[GitCredentialRequest](),
 }
 
 // stringFieldPaths lists the JSON path of every settable string field of t,
@@ -339,6 +347,8 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 		"/v1/AddTask": {{"cron to a peer", map[string]any{"task": map[string]any{
 			"prompt": "p", "cron_expr": "0 * * * *", "target_session": "peer"}}}},
 		"/v1/RemoveTask": {{"own task", map[string]any{"id": "t-mine"}}},
+		"/v1/GitCredential": {{"own origin", map[string]any{
+			"protocol": "https", "host": "github.com", "path": "owner/repo.git"}}},
 	}
 	for _, host := range []string{"", "h1"} {
 		for _, backend := range []string{"", "ssh", "local", "docker", "sandbox"} {

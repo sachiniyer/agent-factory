@@ -85,7 +85,10 @@ func startSandboxEndpoint(mux http.Handler, reg *sandboxTokenRegistry, path stri
 	}
 	e := &sandboxEndpoint{
 		srv: &http.Server{
-			Handler:           withAuth(mux, sandboxOnlyGate(reg), nil),
+			// The marker is how a route that must never answer on the main
+			// listener (GitCredential, #5571 W7.8) tells the two apart: the
+			// main listener admits sandbox credentials to the scope too.
+			Handler:           markSandboxEndpoint(withAuth(mux, sandboxOnlyGate(reg), nil)),
 			ReadHeaderTimeout: httpReadHeaderTimeout,
 		},
 		ln:   ln,

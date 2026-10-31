@@ -37,6 +37,22 @@ func withSandboxOwner(ctx context.Context, sessionID string) context.Context {
 	return context.WithValue(ctx, sandboxOwnerKey{}, sessionID)
 }
 
+// admittedSandboxCredentialKey carries the sandbox credential a request was admitted with.
+type admittedSandboxCredentialKey struct{}
+
+// withAdmittedSandboxCredential records the credential the gate admitted,
+// beside its owner.
+func withAdmittedSandboxCredential(ctx context.Context, secret string) context.Context {
+	return context.WithValue(ctx, admittedSandboxCredentialKey{}, secret)
+}
+
+// admittedSandboxCredential returns the credential the request was admitted
+// with, "" for the operator's authority.
+func admittedSandboxCredential(ctx context.Context) string {
+	secret, _ := ctx.Value(admittedSandboxCredentialKey{}).(string)
+	return secret
+}
+
 // sandboxOwner returns the session owning the credential this request
 // authenticated with, and whether the request came from a sandbox at all.
 //
@@ -91,4 +107,5 @@ var sandboxConstrainedRoutes = map[string]string{
 	"/v1/AddTask":        "cron tasks only, delivering to an off-box session in the caller's project; no watch_cmd, host or spawn",
 	"/v1/RemoveTask":     "non-watch tasks of the caller's own project only",
 	"/v1/SetAttention":   "targets ONLY the caller's own session: the owner id replaces every selector in the request",
+	"/v1/GitCredential":  "the caller's own live session only, over the dedicated sandbox endpoint only, on a host the operator opted in, for exactly that session's own https GitHub origin",
 }

@@ -67,6 +67,8 @@ type Manager struct {
 	// daemon restart invalidates every outstanding one, which is the correct
 	// side to fail on.
 	sandboxTokens sandboxTokenRegistry
+	// pushCreds answers push-credential requests (#5571 W7.8); push_credential.go.
+	pushCreds pushCredentialState
 
 	// sandboxEndpointSocket is the live dedicated sandbox callback endpoint's
 	// socket path (#5571 W3.4); nil or empty while it is not listening. The mint

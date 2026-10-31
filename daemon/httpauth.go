@@ -113,15 +113,22 @@ func (g *authGate) authorize(r *http.Request) (sandboxOwner string, ok bool) {
 	if err != nil {
 		return "", false
 	}
-	extract := g.presentedToken
-	if extract == nil {
-		extract = webTabAwareToken
-	}
-	presented := extract(r)
+	presented := g.presented(r)
 	if ConstantTimeEqual(presented, want) {
 		return "", true
 	}
 	return g.authorizeSandbox(r, presented)
+}
+
+// presented is the credential this gate reads from r: the one extraction both
+// authorize and servePosture's grant binding use, so they can never read two
+// different values from one request.
+func (g *authGate) presented(r *http.Request) string {
+	extract := g.presentedToken
+	if extract == nil {
+		extract = webTabAwareToken
+	}
+	return extract(r)
 }
 
 // authorizeSandbox admits a per-session sandbox callback credential (#2999).
@@ -310,7 +317,11 @@ func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p r
 			// so the route's own handler can constrain to "the caller's own". Empty
 			// owner = the operator's authority, which stays unconstrained.
 			if owner != "" {
-				r = r.WithContext(withSandboxOwner(r.Context(), owner))
+				// The admitted credential itself rides beside its owner (#5571
+				// W7.8): a handler that does slow work re-checks that THIS grant is
+				// still the session's, which "the session still holds one" cannot
+				// tell from a replacement minted mid-request.
+				r = r.WithContext(withAdmittedSandboxCredential(withSandboxOwner(r.Context(), owner), p.gate.presented(r)))
 				// One response boundary for the whole sandbox surface: no body or
 				// error envelope reaches a sandbox credential carrying the daemon
 				// host's layout (daemon/sandbox_scrub.go).

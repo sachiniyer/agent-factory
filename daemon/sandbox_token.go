@@ -139,6 +139,25 @@ func (r *sandboxTokenRegistry) sessionFor(secret string) (string, bool) {
 	return sessionID, ok
 }
 
+// stillGrants reports whether secret is still sessionID's credential: false once
+// the session's teardown, archive or replacement revoked or replaced it. A route
+// that does slow work after the gate admitted a request re-checks the very
+// credential it was admitted with (push_credential.go).
+func (r *sandboxTokenRegistry) stillGrants(sessionID, secret string) bool {
+	if sessionID == "" || secret == "" {
+		return false
+	}
+	owner, ok := r.sessionFor(secret)
+	return ok && owner == sessionID
+}
+
+// grantFor is the credential sessionID holds right now, "" for none.
+func (r *sandboxTokenRegistry) grantFor(sessionID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.bySession[sessionID]
+}
+
 // revoke drops the credential a session holds. Idempotent: a session that never
 // had one, or whose credential was already replaced, is a no-op success, because
 // every teardown path calls this and none of them should fail for it.

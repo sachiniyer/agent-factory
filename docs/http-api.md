@@ -268,8 +268,13 @@ not list. They fall into three groups:
 - **Internal JSON-envelope RPCs**, same shape as the cataloged ones but deliberately
   unadvertised as public API: `POST /v1/Preview` (the TUI's render path),
   `POST /v1/PauseStatusPoll` and `POST /v1/ResumeStatusPoll` (attach coordination),
-  and `POST /v1/HandoffSessionV2` (the version-bound account-aware handoff
-  transport).
+  `POST /v1/HandoffSessionV2` (the version-bound account-aware handoff
+  transport), and `POST /v1/GitCredential` (the push credential a sandbox session's
+  own git credential helper asks for). `GitCredential` answers only a sandbox
+  session's own callback credential, only on the dedicated sandbox callback
+  endpoint, and only for that session's own origin on a host the operator opted in
+  with `push_credentials`; the operator's token, and a sandbox credential presented
+  on the network listener, get a refusal.
 - **Non-RPC surfaces**, which speak something other than the envelope: the WebSocket
   planes `GET /v1/sessions/{id}/stream`, `GET /v1/sessions/{id}/stream-info` and
   `GET /v1/events`; the config-assistant trio on `/v1/config-assistant` and the
