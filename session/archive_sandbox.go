@@ -316,7 +316,7 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 		Host:                  i.Host,
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 		Adopt:                 adopt,
-		SandboxCreated:        i.createdBySandbox != "",
+		OperatorCreated:       i.OperatorCreated(),
 	}
 	if adopt != nil {
 		// Nothing is cloned or fetched when adopting.

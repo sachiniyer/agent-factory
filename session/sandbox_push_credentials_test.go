@@ -48,7 +48,7 @@ func newPushWiringFixture(t *testing.T, cloneURL string, licensed bool) *pushWir
 		"printf 'username=x-access-token\\npassword=" + stubPushToken + "\\n'\n"
 	require.NoError(t, os.WriteFile(filepath.Join(f.dir, sshAfBinaryName), []byte(stub), 0o755))
 	f.w = &sandboxWorkspace{shell: localShell{}, SessionDir: f.dir, spec: ProvisionSpec{
-		Title: "t", CloneURL: cloneURL, PushCredentials: licensed,
+		Title: "t", CloneURL: cloneURL, PushCredentials: licensed, OperatorCreated: true,
 	}}
 	// What the clone step leaves behind: the value-free env helper.
 	if persist := gitPersistCredentialCommand(cloneURL, f.ws); persist != "" {
@@ -156,12 +156,15 @@ func TestPushWiringIsLeftAloneWithoutTheLicence(t *testing.T) {
 	}{
 		"host not opted in":    {"https://github.com/owner/repo.git", false},
 		"created by a sandbox": {"https://github.com/owner/repo.git", true},
+		"unknown provenance":   {"https://github.com/owner/repo.git", true},
 		"ssh origin":           {"git@github.com:owner/repo.git", true},
 		"not github":           {"https://gitlab.com/owner/repo.git", true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newPushWiringFixture(t, tc.url, tc.licensed)
-			f.w.spec.SandboxCreated = name == "created by a sandbox"
+			// A sandbox-created row and one of unknown provenance both reach the
+			// spec as not operator-created.
+			f.w.spec.OperatorCreated = name != "created by a sandbox" && name != "unknown provenance"
 			before, err := os.ReadFile(filepath.Join(f.ws, ".git", "config"))
 			require.NoError(t, err)
 			f.w.reconcilePushCredentials(time.Minute, false)

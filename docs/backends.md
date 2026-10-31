@@ -1006,21 +1006,32 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
 
 - **Only sessions you created.** A session started from inside another session,
   for example by an agent running `af sessions create` through its af callback,
-  never gets push credentials, wherever it runs. A session without push
-  credentials also can't prompt, schedule a task for, or `archive --push` one
-  that has them. So a repository you run on a host you didn't opt in can't
-  reach your GitHub authority through af.
-- **Only through the session's own connection.** The daemon answers only a
-  request that arrived through the requesting session's own ssh forward. A
-  callback credential copied out of a session directory doesn't work through
-  any other session's connection, or from off the host. A `sandbox.ssh` that
-  shares one `ControlMaster` connection between sessions can't use push
-  credentials.
+  never gets push credentials. Neither does a session af has no record of who
+  created, such as one from before af kept that record: re-create it to make it
+  eligible. A session without push credentials also can't prompt, schedule a
+  task for, or `archive --push` one that has them.
+- **Only while everything on the host is yours.** Sessions on one host share
+  its ssh user, so any of them can read the others' files. af therefore refuses
+  to start a session from inside another session on a host you opted in, or on
+  a host entry that names the same machine. While a session you didn't create
+  runs on that machine anyway, no session there gets push credentials: for
+  example, one that was already there when you opted in. `af hosts check` and
+  `af doctor` name that session; remove it and push credentials resume. This
+  doesn't change the host's readiness or the command's exit code.
+- **Only through the session's own connection.** Every af callback, not only
+  this one, is accepted only through the requesting session's own ssh forward.
+  A callback credential copied out of a session directory doesn't work through
+  any other session's connection, on the daemon's network listener, or from off
+  the host. A `sandbox.ssh` that shares one `ControlMaster` connection between
+  sessions can't carry af callbacks for the sessions multiplexed through it,
+  and the daemon log says so when it refuses one.
 - **Only the machine you opted in.** The opt-in follows the machine the host
   entry named when the session was placed: its host, user and port. Re-point
   `[hosts.<name>]` at another machine, or change `sandbox.ssh`, and sessions
   still on the old one stop getting it. A different `identity_file` doesn't
-  count, because it changes how af connects, not where.
+  count, because it changes how af connects, not where. af compares the names
+  and the address its ssh runtime dialed. A DNS or `/etc/hosts` change that
+  points the same name at another machine isn't detected.
 - **Where the token comes from.** It's the daemon machine's own login: its `GH_TOKEN` /
   `GITHUB_TOKEN` (or `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` for an
   enterprise host) when set, and otherwise `gh auth token --hostname <host>`. That
@@ -1082,12 +1093,12 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
 
 | Who | Gets the token? |
 |---|---|
-| Another session on the same host | **Not through af.** Its wiring names its own session directory, the daemon answers it only for its own origin and only through its own forward, and the token is never stored on the host. **But** sessions on one host share its ssh user. A session that deliberately reads another session's `0600` `af-callback.env` and connects to that session's own socket can ask as that session, for that session's origin, until that session ends. A Unix user per session would close this ([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)). |
-| A repository running on a host you didn't opt in | **No.** A session it creates through af is never eligible, and it can't prompt, schedule for or `archive --push` a session that is. |
+| Another session on the same host | **Not through af.** Its wiring names its own session directory, the daemon answers it only for its own origin and only through its own forward, and the token is never stored on the host. While the host is opted in, every live session on it is one you created: af refuses any other there, and answers nobody on the host while one runs. **But** sessions on one host share its ssh user. One of your own sessions that deliberately reads another's `0600` `af-callback.env` and connects to that session's own socket can ask as that session, for that session's origin, until that session ends. A Unix user per session would close this ([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)). |
+| A repository running on a host you didn't opt in | **No.** A session it creates through af is never eligible and can't be created on a host you opted in. If one runs on such a host anyway, that host gets no push credentials until you remove it. It also can't prompt, schedule for or `archive --push` a session that is eligible. |
 | Programs the agent runs (a Makefile, a script, a repository's git hooks) | **Never handed it.** af puts the token in no environment, command line or file of theirs. They run with the agent's authority, so they can run `git push` or `gh` themselves, exactly as on a local worktree with your `gh` login, and git is answered only for the session's own origin. |
 | Commands af runs itself | **The same, stated plainly.** `post_worktree_commands` and process tabs run in the session after provisioning has wired the helper and the shim and the callback is up. While the switch is on, they can call the helper or `gh` like any program in the session, and none of them is handed the token. `on_archive_command` for a sandbox session runs on the daemon machine, after the archive has revoked the callback, so it never sees the credential. |
 | Other users on the host | **No.** The session directory is `0700`, the callback file and socket are `0600`, and the token is never on a command line. Root on the host is trusted, as for synced accounts. |
-| A copy of the workspace or session directory | **No.** Neither the workspace nor `.git/config` holds a secret. The callback credential in `af-callback.env` is answered only through that session's own forward, so it is useless through any other session's connection or off the host, and it stops working when the session ends. |
+| A copy of the workspace or session directory | **No.** Neither the workspace nor `.git/config` holds a secret. The callback credential in `af-callback.env` is accepted, on every af route, only through that session's own forward. So it is useless through any other session's connection, on the network listener, or off the host, and it stops working when the session ends. |
 | A compromised host you opted in | **Yes**, for its live sessions' origins, with gh carrying your full login. Turning `push_credentials` on means you trust that host with your GitHub authority. |
 
 Not covered yet: cloning a private repository through the helper (the af callback

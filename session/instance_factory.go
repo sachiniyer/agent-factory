@@ -195,7 +195,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		Program:               opts.Program,
 		Host:                  opts.Host,
 		SessionEnvPassthrough: provisionSessionEnv,
-		SandboxCreated:        opts.CreatedBySandbox != "",
+		OperatorCreated:       opts.CreatedBySandbox == "",
 	}
 	// An off-box runtime clones the workspace from the repo's origin (epic
 	// decision 4: GitHub is the durable store); resolve it only for those kinds so
