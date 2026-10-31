@@ -48,6 +48,8 @@ type pushFixture struct {
 	// between the two authorizations.
 	onTokenRead func()
 	tokenErr    error
+	// machines is the machine each row's runtime runs on, by title (placeOn).
+	machines map[string]session.RuntimeMachine
 }
 
 var ownOrigin = pushcred.Origin{Host: "github.com", Path: "owner/repo"}
@@ -59,7 +61,8 @@ var box1 = config.SSHConfig{Host: "box1.example"}
 // listedOn is a placement on listed host name, recorded at destination, whose
 // runtime's callback identity is ref.
 func listedOn(name string, destination config.SSHConfig, ref string) session.PushPlacement {
-	return session.PushPlacement{ListedHost: name, Destination: destination, CallbackRef: ref}
+	return session.PushPlacement{ListedHost: name, Destination: destination, CallbackRef: ref,
+		Machine: session.RuntimeMachine{Host: destination.Host}}
 }
 
 func newPushFixture(t *testing.T) *pushFixture {
@@ -76,8 +79,10 @@ func newPushFixture(t *testing.T) *pushFixture {
 	pf.giveForward(f.secret, "ref-me")
 	prevCarrier := callbackCarrierRef
 	callbackCarrierRef = func(pgid int) (string, bool) {
-		ref, ok := pf.carriers[pgid]
-		return ref, ok
+		if ref, ok := pf.carriers[pgid]; ok {
+			return ref, true
+		}
+		return prevCarrier(pgid) // the scope fixture's own forwards
 	}
 	t.Cleanup(func() { callbackCarrierRef = prevCarrier })
 	prevPlacement, prevOrigin := instancePushPlacement, instancePushOrigin
@@ -109,8 +114,12 @@ func newPushFixture(t *testing.T) *pushFixture {
 }
 
 // giveForward gives token its own forward: a tunnel process group carrying
-// callback identity ref, through which token's requests arrive.
+// callback identity ref, through which token's requests arrive. ref becomes the
+// ref the token's credential derives from, as it is for a real runtime.
 func (pf *pushFixture) giveForward(token, ref string) int {
+	if owner, ok := pf.mgr.sandboxTokens.sessionFor(token); ok {
+		pf.mgr.sandboxTokens.setRefForTest(owner, ref)
+	}
 	pf.nextPGID++
 	pf.carriers[pf.nextPGID] = ref
 	pf.forwardOf[token] = pf.nextPGID
@@ -622,13 +631,13 @@ func TestPushFencesArePrunedOnlyWhenTheCredentialWasReplaced(t *testing.T) {
 	require.NoError(t, err)
 	end(false)
 
-	end, err = s.beginAutoPush("sess-b", "gb", map[string]string{"sess-a": "g1"})
+	end, err = s.beginAutoPush("sess-b", "gb", liveRefs(s, map[string]string{"sess-a": "g1"}))
 	require.NoError(t, err)
 	end(false)
 	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "g1"), "the same credential is still live: kept")
 
 	// Replaced: the session's runtime now has a different callback identity.
-	end, err = s.beginAutoPush("sess-c", "gc", map[string]string{"sess-a": "g2"})
+	end, err = s.beginAutoPush("sess-c", "gc", liveRefs(s, map[string]string{"sess-a": "g2"}))
 	require.NoError(t, err)
 	end(false)
 	reread := &pushCredentialState{fencePath: path}
@@ -767,4 +776,69 @@ func placeWithCallbackRef(t *testing.T, title, ref string) {
 		return prev(i)
 	}
 	t.Cleanup(func() { instancePushPlacement = prev })
+}
+
+// liveRefs is a snapshot source over refs, a map the test mutates to stand for
+// the sessions' runtimes changing: each call reads it, and the write mark, NOW.
+func liveRefs(s *pushCredentialState, refs map[string]string) func() *pushRefSnapshot {
+	return func() *pushRefSnapshot {
+		copied := make(map[string]string, len(refs))
+		for k, v := range refs {
+			copied[k] = v
+		}
+		return &pushRefSnapshot{refs: copied, upTo: s.writeMark()}
+	}
+}
+
+// Codex P2 on #6433 at 6272bfd: two sessions recovering at once. Evidence read
+// before A's replacement runtime was fenced must never delete that NEWER fence,
+// at B's begin or at B's confirmed end. A fence read back from disk predates
+// every snapshot, so a moot one is still pruned after a restart.
+func TestPushFencesAreNeverPrunedOnAStaleSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), pushFenceFileName)
+	s := &pushCredentialState{fencePath: path}
+	stale := &pushRefSnapshot{refs: map[string]string{"sess-a": "ref-a-old"}, upTo: s.writeMark()}
+	staleSource := func() *pushRefSnapshot { return stale }
+
+	endA, err := s.beginAutoPush("sess-a", "ref-a-new", liveRefs(s, map[string]string{"sess-a": "ref-a-new"}))
+	require.NoError(t, err)
+	endA(false) // A's automatic archive timed out: its fence must stay
+
+	endB, err := s.beginAutoPush("sess-b", "ref-b", staleSource)
+	require.NoError(t, err)
+	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "ref-a-new"), "B's begin pruned A's newer fence from a stale snapshot")
+	endB(true)
+	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "ref-a-new"), "B's confirmed end pruned A's newer fence")
+	assert.False(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-b", "ref-b"), "B's own fence is lifted")
+
+	// After a restart, A's fence is read back (write number 0): a snapshot that
+	// shows A on yet another runtime does make it moot.
+	restarted := &pushCredentialState{fencePath: path}
+	endC, err := restarted.beginAutoPush("sess-c", "ref-c", liveRefs(restarted, map[string]string{"sess-a": "ref-a-third"}))
+	require.NoError(t, err)
+	endC(false)
+	assert.False(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "ref-a-new"), "a fence a replacement made moot is pruned")
+	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-c", "ref-c"))
+}
+
+// Second security review of #6433, N2: a confirmed end prunes against the
+// identities current AT THE END. A was replaced while B's push ran, so A's old
+// fence is moot by then, though it was live when B began.
+func TestPushFenceEndPrunesAgainstTheIdentitiesCurrentAtTheEnd(t *testing.T) {
+	path := filepath.Join(t.TempDir(), pushFenceFileName)
+	s := &pushCredentialState{fencePath: path}
+	current := map[string]string{"sess-a": "ref-a1"}
+	endA, err := s.beginAutoPush("sess-a", "ref-a1", liveRefs(s, current))
+	require.NoError(t, err)
+	endA(false)
+
+	endB, err := s.beginAutoPush("sess-b", "ref-b", liveRefs(s, current))
+	require.NoError(t, err)
+	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "ref-a1"), "A's runtime is still the fenced one")
+
+	current["sess-a"] = "ref-a2" // A is replaced while B's push runs
+	endB(true)
+	reread := &pushCredentialState{fencePath: path}
+	assert.False(t, reread.autoPushFenced("sess-a", "ref-a1"), "the end pruned against the identities read when B began")
+	assert.False(t, reread.autoPushFenced("sess-b", "ref-b"))
 }

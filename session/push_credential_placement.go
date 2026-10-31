@@ -1,6 +1,7 @@
 package session
 
 import (
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -36,6 +37,117 @@ type PushPlacement struct {
 	// af callback credential derives from, stable across daemon restarts and new
 	// for a replacement runtime. Empty when no callback was granted.
 	CallbackRef string
+	// Machine is the machine the runtime runs on, as RuntimeMachine names it: what
+	// the host-sharing rule compares against every other live session.
+	Machine RuntimeMachine
+}
+
+// RuntimeMachine names the machine an off-box runtime runs on, from the handle
+// its provision recorded: the ssh destination and the address af actually
+// dialed (the ssh runtime pins it, ssh_machine_pin.go), or the free-form
+// sandbox.ssh command. It exists for one question, Shares, which is asked
+// CONSERVATIVELY: two runtimes that might be one machine are treated as one.
+type RuntimeMachine struct {
+	// Host is the ssh destination's host, as configured.
+	Host string
+	// Addr is the address the ssh runtime dialed and pinned; empty when none was
+	// recorded.
+	Addr string
+	// SandboxSSH is the free-form target's sandbox.ssh command.
+	SandboxSSH string
+}
+
+// Shares reports whether two runtimes may run on the same machine, and so under
+// one ssh user's reach (#5571 W7.8, security review of #6433). It ignores the
+// login and the port, and matches a name or an address on either side. A
+// free-form command is matched against an ssh destination by the words it names.
+// An ssh_config alias or a DNS name that resolves to another's address is not
+// recognized: the ssh runtime runs with -F none, so its own destinations carry no
+// alias, and the address it pinned is compared whenever it was recorded.
+func (m RuntimeMachine) Shares(o RuntimeMachine) bool {
+	switch {
+	case m.ssh() && o.ssh():
+		for _, a := range m.names() {
+			for _, b := range o.names() {
+				if strings.EqualFold(a, b) {
+					return true
+				}
+			}
+		}
+		return false
+	case m.freeForm() && o.freeForm():
+		return strings.TrimSpace(m.SandboxSSH) == strings.TrimSpace(o.SandboxSSH)
+	case m.freeForm() && o.ssh():
+		return commandNamesMachine(m.SandboxSSH, o)
+	case o.freeForm() && m.ssh():
+		return commandNamesMachine(o.SandboxSSH, m)
+	}
+	return false
+}
+
+func (m RuntimeMachine) ssh() bool      { return len(m.names()) > 0 }
+func (m RuntimeMachine) freeForm() bool { return strings.TrimSpace(m.SandboxSSH) != "" }
+
+// names is the host and the pinned address, normalized: trimmed, without IPv6
+// brackets, empty ones dropped.
+func (m RuntimeMachine) names() []string {
+	var out []string
+	for _, n := range []string{m.Host, m.Addr} {
+		if n = strings.Trim(strings.TrimSpace(n), "[]"); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// commandNamesMachine reports whether a sandbox.ssh command names the ssh
+// machine m: any of its words, read as an ssh destination (ssh://, user@, :port
+// stripped), equal to m's host or address.
+func commandNamesMachine(command string, m RuntimeMachine) bool {
+	for _, word := range strings.Fields(command) {
+		word = strings.TrimPrefix(word, "ssh://")
+		if at := strings.LastIndex(word, "@"); at >= 0 {
+			word = word[at+1:]
+		}
+		if h, _, err := net.SplitHostPort(word); err == nil {
+			word = h
+		}
+		word = strings.Trim(word, "[]")
+		for _, n := range m.names() {
+			if word != "" && strings.EqualFold(word, n) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// RuntimeMachine reports the machine this session's off-box runtime runs on, for
+// any ssh runtime (a listed host or a repository's [ssh] target) and the
+// free-form sandbox target. ok is false when no runtime is recorded: a local,
+// docker or hook session, or one whose runtime has been reaped.
+func (i *Instance) RuntimeMachine() (RuntimeMachine, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	provider, ok := i.backend.(runtimeCleanupProvider)
+	if !ok {
+		return RuntimeMachine{}, false
+	}
+	m := machineOf(provider.runtimeCleanupData())
+	return m, m.ssh() || m.freeForm()
+}
+
+func machineOf(data *RuntimeCleanupData) RuntimeMachine {
+	switch {
+	case data == nil:
+		return RuntimeMachine{}
+	case data.SSH != nil:
+		addr, _ := sshPinnedCleanupTarget(data.SSH)
+		return RuntimeMachine{Host: data.SSH.Config.Host, Addr: addr}
+	case data.Sandbox != nil:
+		return RuntimeMachine{SandboxSSH: data.Sandbox.SSHCommand}
+	}
+	return RuntimeMachine{}
 }
 
 // PushCredentialPlacement reports where this session's workspace runs, from the
@@ -56,9 +168,9 @@ func (i *Instance) PushCredentialPlacement() (PushPlacement, bool) {
 	case data == nil:
 		return PushPlacement{}, false
 	case data.SSH != nil && data.SSH.HostName != "":
-		return PushPlacement{ListedHost: data.SSH.HostName, Destination: data.SSH.Config, CallbackRef: data.SSH.CallbackRef}, true
+		return PushPlacement{ListedHost: data.SSH.HostName, Destination: data.SSH.Config, CallbackRef: data.SSH.CallbackRef, Machine: machineOf(data)}, true
 	case data.Sandbox != nil:
-		return PushPlacement{FreeFormSandbox: true, SandboxSSH: data.Sandbox.SSHCommand, CallbackRef: data.Sandbox.CallbackRef}, true
+		return PushPlacement{FreeFormSandbox: true, SandboxSSH: data.Sandbox.SSHCommand, CallbackRef: data.Sandbox.CallbackRef, Machine: machineOf(data)}, true
 	}
 	return PushPlacement{}, false
 }
@@ -102,6 +214,22 @@ func sameSSHDestination(a, b config.SSHConfig) bool {
 // created this one, empty for a session the operator created (#5571 W7.8).
 func (i *Instance) CreatedBySandbox() string {
 	return i.createdBySandbox
+}
+
+// OperatorCreated reports whether the row records that the operator's own
+// authority created it. False for a sandbox-created row AND for one of unknown
+// provenance (InstanceData.CreatedByOperator), which fails closed.
+func (i *Instance) OperatorCreated() bool {
+	return i.createdByOperator && i.createdBySandbox == ""
+}
+
+// ProvenanceText describes a row that OperatorCreated refuses, for a message
+// that names it.
+func (i *Instance) ProvenanceText() string {
+	if i.createdBySandbox != "" {
+		return "created by another session's af"
+	}
+	return "of unknown provenance (created before af recorded who creates a session)"
 }
 
 // PushCredentialOrigin is the origin a push credential may be answered for: the

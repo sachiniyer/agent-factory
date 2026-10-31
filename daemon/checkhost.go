@@ -46,11 +46,19 @@ type HostCheckResult struct {
 	// Readiness is the cached verdict after the probe: ready | blocked | stale |
 	// unprobed.
 	Readiness string `json:"readiness"`
+	// PushCredentialBlockers names, for a host opted into push credentials, each
+	// live session the operator did not create that shares its machine. While any
+	// is listed, no session on the host gets a push credential (#5571 W7.8). It
+	// does not change Readiness: the host can still run sessions.
+	PushCredentialBlockers []string `json:"push_credential_blockers,omitempty"`
 }
 
 // CheckHostResponse lists the probed hosts in name order.
 type CheckHostResponse struct {
 	Hosts []HostCheckResult `json:"hosts"`
+	// SandboxPushCredentialBlockers is PushCredentialBlockers for the sandbox.ssh
+	// target, when sandbox.push_credentials opts it in.
+	SandboxPushCredentialBlockers []string `json:"sandbox_push_credential_blockers,omitempty"`
 }
 
 // hostProbes serializes probes per host: a second request for a host already
@@ -128,6 +136,7 @@ func (s *controlServer) CheckHost(req CheckHostRequest, resp *CheckHostResponse)
 			return err
 		}
 		resp.Hosts = []HostCheckResult{probeOne(ctx, probeHostsFn, name, cfg.Hosts, cfg.SSHHostKeyVerification)}
+		s.manager.fillPushCredentialBlockers(cfg, resp)
 		return nil
 	}
 	for _, n := range config.SortedHostNames(cfg.Hosts) {
@@ -136,6 +145,7 @@ func (s *controlServer) CheckHost(req CheckHostRequest, resp *CheckHostResponse)
 		}
 		resp.Hosts = append(resp.Hosts, probeOne(ctx, probeHostsFn, n, cfg.Hosts, cfg.SSHHostKeyVerification))
 	}
+	s.manager.fillPushCredentialBlockers(cfg, resp)
 	return nil
 }
 

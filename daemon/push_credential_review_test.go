@@ -40,7 +40,9 @@ func TestGitCredential_AnsweredOnlyThroughTheOwnersOwnForward(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pf.forwardOf[pf.secret] = pgid
 			code, got, msg := pf.askOwn(t)
-			requireRefused(t, code, got, msg, refusePushWrongForward)
+			// Refused at the gate, before any route (second review of #6433).
+			assert.Equal(t, http.StatusUnauthorized, code)
+			requireRefused(t, code, got, msg, errUnauthorized.Error())
 		})
 	}
 	assert.Zero(t, pf.tokenReads.Load(), "a request through the wrong forward must not read the token")
@@ -142,7 +144,7 @@ func TestSandboxScopedCreateStampsItsProvenance(t *testing.T) {
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+pf.secret)
 	rec := httptest.NewRecorder()
-	gated.ServeHTTP(rec, req)
+	gated.ServeHTTP(rec, pf.forwards.carry(req))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, pf.me.ID, captured.createdBySandbox, "the created session's row must record which sandbox created it")
 }
@@ -150,7 +152,8 @@ func TestSandboxScopedCreateStampsItsProvenance(t *testing.T) {
 // eligiblePeer makes the fixture's "peer" (a sandbox-backend session in the
 // owner's project) eligible: a free-form placement the operator opted in.
 func (pf *pushFixture) eligiblePeer() {
-	pf.placements["peer"] = session.PushPlacement{FreeFormSandbox: true, SandboxSSH: "ssh peerbox", CallbackRef: "ref-peer"}
+	pf.placements["peer"] = session.PushPlacement{FreeFormSandbox: true, SandboxSSH: "ssh peerbox", CallbackRef: "ref-peer",
+		Machine: session.RuntimeMachine{SandboxSSH: "ssh peerbox"}}
 	pf.setConfig(func(c *config.Config) { c.SandboxSSH, c.SandboxPushCredentials = "ssh peerbox", true })
 }
 

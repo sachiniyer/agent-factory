@@ -275,6 +275,11 @@ func (s *controlServer) createSessionScoped(ctx context.Context, req CreateSessi
 		if err := checkSandboxCreate(req); err != nil {
 			return err
 		}
+		// While a host is push-licensed, no code the operator did not place runs
+		// on it (#5571 W7.8): sessions on one host share its ssh user.
+		if err := s.manager.refuseSandboxCreateOnLicensedHost(req.Host); err != nil {
+			return err
+		}
 		// The project is the owner's, never the caller's: the sandbox's own
 		// working directory is not a path on this host.
 		req.RepoPath = proj.path

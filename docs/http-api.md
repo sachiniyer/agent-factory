@@ -274,7 +274,10 @@ not list. They fall into three groups:
   session's own callback credential, only on the dedicated sandbox callback
   endpoint, and only for that session's own origin on a host the operator opted in
   with `push_credentials`; the operator's token, and a sandbox credential presented
-  on the network listener, get a refusal.
+  on the network listener, get a refusal. Every route a sandbox credential may
+  call accepts it only through its own session's ssh forward to that endpoint: the
+  same credential sent through another session's forward, or to a listener with no
+  forward, is refused as unauthorized.
 - **Non-RPC surfaces**, which speak something other than the envelope: the WebSocket
   planes `GET /v1/sessions/{id}/stream`, `GET /v1/sessions/{id}/stream-info` and
   `GET /v1/events`; the config-assistant trio on `/v1/config-assistant` and the

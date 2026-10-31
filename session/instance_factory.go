@@ -679,6 +679,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		taskRunActive:         opts.TaskID != "",
 		BacklogItem:           opts.BacklogItem,
 		createdBySandbox:      opts.CreatedBySandbox,
+		createdByOperator:     opts.CreatedBySandbox == "", // InstanceData.CreatedByOperator
 		backlogRunActive:      opts.BacklogItem != 0,
 		liveness:              LiveReady,
 		Path:                  absPath,

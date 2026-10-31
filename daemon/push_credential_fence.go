@@ -12,7 +12,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pushcred"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The automatic-push fence (#5571 W7.8, the owner's answer to the plan's Q4): af's
@@ -52,15 +51,40 @@ type pushCredentialState struct {
 	// still fenced. PERSISTED, and written before the push starts, because a
 	// daemon restart re-derives the very same credential.
 	fences map[string]pushFence
+	// writes counts the fences this process has written; each takes the next
+	// number, so a snapshot can tell the fences written before it from those
+	// written after (pushRefSnapshot).
+	writes uint64
 }
 
 // pushFence is one persisted fence.
 type pushFence struct {
 	CallbackRef string    `json:"callback_ref"`
 	At          time.Time `json:"at"`
+	// seq is the write number this process gave the fence: 0 for one read from
+	// disk, which predates every snapshot this process takes. Not persisted.
+	seq uint64
 }
 
 const pushFenceFileName = "push-credential-fences.json"
+
+// pushRefSnapshot is every tracked session's runtime callback identity, and the
+// last fence write before any of it was read. A snapshot is evidence only about
+// fences written by then: a later one may name a runtime the snapshot never saw,
+// and pruning against it would delete a live fence (Codex P2 on #6433, two
+// sessions recovering at once). Ordered by write number, not by clock, so a clock
+// step cannot make a newer fence look older.
+type pushRefSnapshot struct {
+	refs map[string]string
+	upTo uint64
+}
+
+// writeMark is the number of the last fence written so far.
+func (s *pushCredentialState) writeMark() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writes
+}
 
 func (s *pushCredentialState) path() (string, error) {
 	if s.fencePath != "" {
@@ -107,13 +131,17 @@ func (s *pushCredentialState) loadLocked() error {
 // can no longer matter. A fence is moot only once its session's runtime has a
 // DIFFERENT callback identity: a replacement was minted a new ref, so the fenced
 // runtime's credential can never be derived again. Age is never a reason, because
-// the abandoned archive's git steps have no deadline. current maps a session to
-// its runtime's ref now; a session absent from it proves nothing (a row being
+// the abandoned archive's git steps have no deadline.
+//
+// snap is the evidence, and only for fences written BEFORE it was taken; a nil
+// snapshot prunes nothing. A session absent from it proves nothing (a row being
 // restored, a daemon still starting) and keeps its fence. Caller holds s.mu.
-func (s *pushCredentialState) persistLocked(current map[string]string) error {
-	for id, f := range s.fences {
-		if cur := current[id]; cur != "" && cur != f.CallbackRef {
-			delete(s.fences, id)
+func (s *pushCredentialState) persistLocked(snap *pushRefSnapshot) error {
+	if snap != nil {
+		for id, f := range s.fences {
+			if cur := snap.refs[id]; cur != "" && cur != f.CallbackRef && f.seq <= snap.upTo {
+				delete(s.fences, id)
+			}
 		}
 	}
 	path, err := s.path()
@@ -132,9 +160,15 @@ func (s *pushCredentialState) persistLocked(current map[string]string) error {
 // identity; "" when the runtime has no callback, so no credential is possible to
 // fence). The returned end lifts the fence only when called with confirmed=true;
 // any other ending leaves it. An error means the fence could not be recorded, and
-// the caller must not start the push. current is the per-session ref snapshot
-// persisting uses to drop fences a replacement made moot.
-func (s *pushCredentialState) beginAutoPush(sessionID, callbackRef string, current map[string]string) (end func(confirmed bool), err error) {
+// the caller must not start the push.
+//
+// snapshot reads the identities every write prunes against. It is called afresh
+// for each write — at the start, and again at a confirmed end, never reusing the
+// first across the push (second security review of #6433, N2) — and always
+// before s.mu is taken, since it reads s.writes itself. A fence written between
+// the snapshot and the write is newer than it and is kept (pushRefSnapshot).
+func (s *pushCredentialState) beginAutoPush(sessionID, callbackRef string, snapshot func() *pushRefSnapshot) (end func(confirmed bool), err error) {
+	snap := takeSnapshot(snapshot)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.loadLocked(); err != nil {
@@ -145,8 +179,9 @@ func (s *pushCredentialState) beginAutoPush(sessionID, callbackRef string, curre
 	}
 	if callbackRef != "" {
 		prev, had := s.fences[sessionID]
-		s.fences[sessionID] = pushFence{CallbackRef: callbackRef, At: time.Now()}
-		if err := s.persistLocked(current); err != nil {
+		s.writes++
+		s.fences[sessionID] = pushFence{CallbackRef: callbackRef, At: time.Now(), seq: s.writes}
+		if err := s.persistLocked(snap); err != nil {
 			if had {
 				s.fences[sessionID] = prev
 			} else {
@@ -158,11 +193,23 @@ func (s *pushCredentialState) beginAutoPush(sessionID, callbackRef string, curre
 	s.autoPushing[sessionID]++
 	var once sync.Once
 	return func(confirmed bool) {
-		once.Do(func() { s.endAutoPush(sessionID, callbackRef, confirmed, current) })
+		once.Do(func() { s.endAutoPush(sessionID, callbackRef, confirmed, snapshot) })
 	}, nil
 }
 
-func (s *pushCredentialState) endAutoPush(sessionID, callbackRef string, confirmed bool, current map[string]string) {
+// takeSnapshot calls snapshot when there is one; nil prunes nothing.
+func takeSnapshot(snapshot func() *pushRefSnapshot) *pushRefSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	return snapshot()
+}
+
+func (s *pushCredentialState) endAutoPush(sessionID, callbackRef string, confirmed bool, snapshot func() *pushRefSnapshot) {
+	var snap *pushRefSnapshot
+	if confirmed {
+		snap = takeSnapshot(snapshot)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.autoPushing[sessionID]--; s.autoPushing[sessionID] <= 0 {
@@ -173,7 +220,9 @@ func (s *pushCredentialState) endAutoPush(sessionID, callbackRef string, confirm
 	}
 	if f, ok := s.fences[sessionID]; ok && f.CallbackRef == callbackRef {
 		delete(s.fences, sessionID)
-		if err := s.persistLocked(current); err != nil {
+		// Pruned against the identities current NOW, not those read when the push
+		// began.
+		if err := s.persistLocked(snap); err != nil {
 			// The fence stays on disk, which only withholds credentials longer:
 			// the safe side to fail on.
 			log.WarningLog.Printf("session %s: could not lift its push-credential fence after a confirmed automatic push: %v", sessionID, err)
@@ -195,23 +244,18 @@ func (s *pushCredentialState) autoPushFenced(sessionID, callbackRef string) bool
 }
 
 // callbackRefSnapshot maps every tracked session to its runtime's callback
-// identity: the snapshot a fence write prunes against. The instances are
-// collected under m.mu and read outside it, so this never holds the manager lock
-// across an instance lock.
-func (m *Manager) callbackRefSnapshot() map[string]string {
-	m.mu.Lock()
-	insts := make([]*session.Instance, 0, len(m.instances))
-	for _, inst := range m.instances {
-		if inst != nil {
-			insts = append(insts, inst)
-		}
-	}
-	m.mu.Unlock()
+// identity: the snapshot a fence write prunes against. The write mark is taken
+// FIRST, so a fence written while the refs are being read is newer than the
+// snapshot and is kept. The instances are collected under m.mu and read outside
+// it, so this never holds the manager lock across an instance lock.
+func (m *Manager) callbackRefSnapshot() *pushRefSnapshot {
+	upTo := m.pushCreds.writeMark()
+	insts := m.trackedInstances()
 	out := make(map[string]string, len(insts))
 	for _, inst := range insts {
 		if p, ok := instancePushPlacement(inst); ok && p.CallbackRef != "" {
 			out[inst.ID] = p.CallbackRef
 		}
 	}
-	return out
+	return &pushRefSnapshot{refs: out, upTo: upTo}
 }

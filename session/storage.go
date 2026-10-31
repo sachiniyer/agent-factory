@@ -52,9 +52,19 @@ type InstanceData struct {
 	// because eligibility comes only from an operator decision, never from an
 	// action a sandbox initiated. omitempty + additive.
 	CreatedBySandbox string `json:"created_by_sandbox,omitempty"`
-	Title            string `json:"title"`
-	Path             string `json:"path"`
-	Branch           string `json:"branch"`
+	// CreatedByOperator is the positive half of that provenance: set when the
+	// operator's own authority created the session — every create no sandbox
+	// credential asked for, since the daemon stamps CreatedBySandbox at the one
+	// route a sandbox can create through (createSessionScoped) and a
+	// sandbox-created task never spawns a session. A row with neither set has
+	// UNKNOWN provenance (written before af recorded it, or by a release that
+	// drops these fields) and is treated like a sandbox-created one, failing
+	// closed: an operator re-creates it to make it eligible (security review of
+	// #6433, N1). omitempty + additive.
+	CreatedByOperator bool   `json:"created_by_operator,omitempty"`
+	Title             string `json:"title"`
+	Path              string `json:"path"`
+	Branch            string `json:"branch"`
 	// Status is the legacy single-axis status int (#1195). Still written for one
 	// release for rollback safety and read as the fallback source for records
 	// that predate the `liveness` field. New code should read Liveness.

@@ -67,7 +67,7 @@ const (
 	refusePushOtherRepo        = "push credentials cover only this session's own origin repository"
 	refusePushAutoPreserve     = "push credentials are withheld while af runs an automatic preserve-push for this session"
 	refusePushNoLogin          = "the daemon box has no GitHub login for this origin's host: run gh auth login there, or set GH_TOKEN for the daemon"
-	refusePushSandboxCreated   = "this session was started by another session's af, and such sessions never receive push credentials"
+	refusePushSandboxCreated   = "push credentials go only to a session the operator created; this one was started by another session's af, or predates af recording who creates a session (re-create it to make it eligible)"
 	refusePushWrongForward     = "push credentials are answered only through the session's own ssh forward"
 )
 
@@ -112,6 +112,10 @@ func (s *controlServer) gitCredential(ctx context.Context, req GitCredentialRequ
 	return nil
 }
 
+// testHookPushBeforeFinalCheck runs between the second authorization pass and the
+// final liveness check. Tests only.
+var testHookPushBeforeFinalCheck = func() {}
+
 // pushAsk is one request, as the gate and the endpoint admitted it: the owning
 // session, the very credential it presented, and the process group of the
 // connection's peer (the forward it arrived through).
@@ -124,8 +128,8 @@ type pushAsk struct {
 // pushCredentialFor authorizes the request, reads the token, and authorizes
 // again: the read can take seconds (a gh run), and a session archived, killed,
 // replaced or fenced meanwhile must not be answered with a token its own end was
-// meant to stop. The audit line is written before a LAST liveness check, so not
-// even a log write sits between the final check and the reply.
+// meant to stop. A LAST liveness check follows, and only then is the answer
+// logged, so the audit line records what was actually sent.
 func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, error) {
 	origin, _, err := m.authorizePushCredential(ask)
 	if err != nil {
@@ -147,10 +151,12 @@ func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, e
 		// read was for a remote this session no longer has.
 		return "", sandboxRefusal(refusePushOtherRepo)
 	}
-	m.info().Printf("push credential: answered session %s for https://%s/%s", ask.owner, origin.Host, origin.Path)
+	testHookPushBeforeFinalCheck()
 	if err := m.pushStillLive(ask, inst); err != nil {
+		m.info().Printf("push credential: refused session %s for https://%s/%s at the final check: %v", ask.owner, origin.Host, origin.Path, err)
 		return "", err
 	}
+	m.info().Printf("push credential: answered session %s for https://%s/%s", ask.owner, origin.Host, origin.Path)
 	return token, nil
 }
 
@@ -169,7 +175,7 @@ func (m *Manager) authorizePushCredential(ask pushAsk) (pushcred.Origin, *sessio
 	if _, err := m.pushCredentialRow(ask.owner, inst); err != nil {
 		return pushcred.Origin{}, nil, err
 	}
-	if inst.CreatedBySandbox() != "" {
+	if !inst.OperatorCreated() {
 		return pushcred.Origin{}, nil, sandboxRefusal(refusePushSandboxCreated)
 	}
 	backend := instanceBackendType(inst)
@@ -179,6 +185,10 @@ func (m *Manager) authorizePushCredential(ask pushAsk) (pushcred.Origin, *sessio
 	placement, ok := instancePushPlacement(inst)
 	if !ok || !placement.Licensed(m.Config(), backend) {
 		return pushcred.Origin{}, nil, sandboxRefusal(refusePushNotLicensed)
+	}
+	if blockers := m.pushHostBlockers([]session.RuntimeMachine{placement.Machine}); len(blockers) > 0 {
+		m.info().Printf("push credential: withheld from session %s: %s", ask.owner, blockers[0])
+		return pushcred.Origin{}, nil, sandboxRefusal(refusePushHostShared)
 	}
 	if m.pushCreds.autoPushFenced(inst.ID, placement.CallbackRef) {
 		return pushcred.Origin{}, nil, sandboxRefusal(refusePushAutoPreserve)

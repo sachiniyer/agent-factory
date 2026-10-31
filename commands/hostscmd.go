@@ -413,6 +413,16 @@ func renderHostCheck(w io.Writer, r daemon.HostCheckResult, entry config.HostCon
 	for _, warn := range r.Warnings {
 		fmt.Fprintf(w, "    note: %s\n", warn)
 	}
+	renderPushCredentialBlockers(w, r.PushCredentialBlockers)
+}
+
+// renderPushCredentialBlockers names the sessions keeping a push-licensed host
+// from getting push credentials (#5571 W7.8). Not a readiness problem: the host
+// still runs sessions, so it changes no exit code.
+func renderPushCredentialBlockers(w io.Writer, blockers []string) {
+	for _, b := range blockers {
+		fmt.Fprintf(w, "    push credentials withheld: %s\n", b)
+	}
 }
 
 var hostsListCmd = &cobra.Command{
@@ -485,6 +495,10 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 		}
 		hosts, _, _ := hostsLoad()
 		blocked, unreachable, incomplete := false, false, false
+		if !hostsJSONFlag && len(resp.SandboxPushCredentialBlockers) > 0 {
+			fmt.Fprintln(cmd.OutOrStdout(), "  sandbox.ssh target:")
+			renderPushCredentialBlockers(cmd.OutOrStdout(), resp.SandboxPushCredentialBlockers)
+		}
 		for _, r := range resp.Hosts {
 			if !hostsJSONFlag {
 				renderHostCheck(cmd.OutOrStdout(), r, hosts[r.Name])
