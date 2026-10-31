@@ -728,7 +728,13 @@ export class TerminalKeybar {
       // A media query would read the layout viewport; the bar is sized from the
       // visual viewport, and the two disagree under pinch zoom — drive the
       // narrow-keys rule off the width the bar actually gets (#5380).
-      this.bar.classList.toggle("af-keybar-narrow", width < 348);
+      const narrow = width < 348;
+      this.bar.classList.toggle("af-keybar-narrow", narrow);
+      // "More keys" cannot fit a 44px key; its accessible name is unchanged (#6407).
+      for (const button of this.bar.querySelectorAll<HTMLButtonElement>("button[aria-label='More keys']")) {
+        const text = narrow ? "More" : "More keys";
+        if (button.textContent !== text) button.textContent = text;
+      }
       this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
       const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
       this.host.style.maxHeight = `${height}px`;
