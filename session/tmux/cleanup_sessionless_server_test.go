@@ -221,10 +221,10 @@ func TestProbeSessionStrictStaysUnknownWhenAnUnsignallableCandidateRemains(t *te
 	testguard.IsolateTmux(t)
 
 	// A signallable neighbour on a named socket inside the private world.
-	out, err := exec.Command("tmux", "-L", "af_mixed_neighbour", "new-session", "-d", "-s", "x", "sleep 300").CombinedOutput()
+	out, err := exec.Command("tmux", "-L", "af_mix_nbr", "new-session", "-d", "-s", "x", "sleep 300").CombinedOutput()
 	require.NoError(t, err, "tmux -L new-session: %s", out)
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", "af_mixed_neighbour", "kill-server").Run() })
-	out, err = exec.Command("tmux", "-L", "af_mixed_neighbour", "display-message", "-p", "#{pid}").CombinedOutput()
+	t.Cleanup(func() { _ = exec.Command("tmux", "-L", "af_mix_nbr", "kill-server").Run() })
+	out, err = exec.Command("tmux", "-L", "af_mix_nbr", "display-message", "-p", "#{pid}").CombinedOutput()
 	require.NoError(t, err, "tmux display-message: %s", out)
 	neighbour, err := strconv.Atoi(strings.TrimSpace(string(out)))
 	require.NoError(t, err)

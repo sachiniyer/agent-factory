@@ -257,7 +257,7 @@ func TestTabsData_ReportsRosterAndRefreshedExitEvidence(t *testing.T) {
 	// pane.
 	exec := nameKeyedExecWithFinishedPanes(
 		map[string]bool{agentName: true, procName: true},
-		map[string]finishedPane{procName: {status: "7", at: "1726000000"}},
+		map[string]finishedPane{procName: {status: "7", at: "1726000000", start: afPaneStart("./deploy.sh")}},
 	)
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 	repoPath := "/tmp/tabs-roster-repo"

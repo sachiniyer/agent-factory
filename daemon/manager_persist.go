@@ -428,7 +428,53 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 			normalized.State != git.RelocationRecoveryCleanupFinalizing) {
 		return fmt.Errorf("persisted cleanup recovery normalized to non-admissible state %q", normalized.State)
 	}
-	return gw.ValidateRelocationCleanupAdmission()
+	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+		return err
+	}
+	// ValidateRelocationCleanupAdmission runs on a throwaway GitWorktree built
+	// from this row. When it discharges an identity-qualified cleanup_ready record
+	// whose archived directory is conclusively absent (no alternate), the
+	// discharge lives only in the throwaway. Propagate it to the row the ghost
+	// kill is about to tombstone and clean up, so ghost cleanup settles the
+	// missing path instead of refusing on a record the admission already proved
+	// guards nothing — and so the tombstone persists the discharged record-free
+	// state instead of stranding a cleanup_ready row forever (#5102). Without
+	// this, the ghost kill would have no live instance to retry through and the
+	// discharged admission would leave the durable record untouched.
+	if _, _, stillUnresolved := gw.RelocationSnapshot(); !stillUnresolved {
+		data.Worktree.ExternalWorktree = restored.Worktree.ExternalWorktree
+		if restored.Worktree.BranchCreatedByUs != nil {
+			branchCreatedByUs := *restored.Worktree.BranchCreatedByUs
+			data.Worktree.BranchCreatedByUs = &branchCreatedByUs
+		} else {
+			data.Worktree.BranchCreatedByUs = nil
+		}
+		// StartupStateUnknown rides the same fence: a ghost row without an
+		// archive rollback fence carries only the projected compatibility
+		// true, and the decoded record holds the real value. Leaving the
+		// projection in place would let a post-tombstone reload keep the
+		// workspace-frozen verdict prepareKillTeardown gives startup-unknown
+		// rows and skip the git cleanup this discharge just authorized.
+		data.StartupStateUnknown = restored.StartupStateUnknown
+		data.Worktree.RelocationRecovery = nil
+		// The discharge must retire the fence's recovery snapshot too: a loaded
+		// row carries no archiveReportSource, so persistKillTombstone's
+		// ForStorage keeps this report's RollbackFence VERBATIM rather than
+		// rebuilding it, and ghostCleanupWorktree's RestoreArchiveRollbackFence
+		// would then resurrect the discharged cleanup_ready record and refuse
+		// the archive admission just proved conclusively absent — stranding the
+		// tombstoned row the discharge was meant to settle. A projected nil is
+		// authoritative (RelocationRecoveryProjected), while the fence's other
+		// originals are the same decoded values propagated above and still owe
+		// a rolled-back reader the latch that refuses this row.
+		if data.ArchiveReport != nil && data.ArchiveReport.RollbackFence != nil &&
+			data.ArchiveReport.RollbackFence.RelocationRecoveryProjected {
+			report := data.ArchiveReport.Clone()
+			report.RollbackFence.OriginalRelocationRecovery = nil
+			data.ArchiveReport = &report
+		}
+	}
+	return nil
 }
 
 var ghostCleanupWorktree = func(

@@ -105,13 +105,52 @@ func TestBacklogSelfOutsideItemSession(t *testing.T) {
 	}
 }
 
+// An agent in an item session must not use the explicit-id note form. Without
+// the guard, the CLI sends PostBacklogMessage with no SessionID, so the daemon
+// would record the note as the user's. Agents use `note --self`, which resolves
+// the session and attributes; the user-facing id form is unchanged outside an
+// item session.
+func TestBacklogNoteFromItemSession(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 1})
+	*methods = nil
+	if _, err := runBacklogCmd(t, "note", "1", "hello"); err == nil ||
+		!strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatalf("note <id> from an item session: %v", err)
+	}
+	for _, m := range *methods {
+		if m == "PostBacklogMessage" {
+			t.Fatalf("a refused note reached PostBacklogMessage: %v", *methods)
+		}
+	}
+	out, err := runBacklogCmd(t, "note", "--self", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := decodeOut[backlog.Message](t, out); m.Text != "hello" || m.Author != "agent:s1" {
+		t.Fatalf("%+v", m)
+	}
+	*methods = nil
+	backlogSelfSession = func() (*session.InstanceData, error) { return nil, errors.New("not in an af session") }
+	out, err = runBacklogCmd(t, "note", "1", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := decodeOut[backlog.Message](t, out); m.Text != "hello" || m.Author != backlog.AuthorUser {
+		t.Fatalf("%+v", m)
+	}
+	if strings.Join(*methods, ",") != "PostBacklogMessage" {
+		t.Fatal(*methods)
+	}
+}
+
 func TestBacklogGuardRails(t *testing.T) {
 	methods := stubBacklogDaemon(t)
 	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 1})
 	*methods = nil
 	for _, args := range [][]string{
 		{"queue", "1"}, {"draft", "1"}, {"review", "1"}, {"reopen", "1"}, {"start", "1"}, {"done", "1"}, {"drop", "1"}, {"delete", "1"},
-		{"answer", "1", "yes"}, {"run"},
+		{"answer", "1", "yes"}, {"note", "1", "text"}, {"run"},
 		// Plan editing: an agent leaves a note instead (Codex P2 on #6294).
 		{"add", "another"}, {"add", "--file", "-"}, {"edit", "1", "--title", "x"}, {"move", "1", "--top"},
 	} {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -126,8 +127,45 @@ func (r takeoverRoute) mirrorRootScript() string {
 // in a form `source-file` accepts. It runs BEFORE every routing option in attachArgs
 // (prefix, prefix2, key-table, status-right), so the takeover's own values win
 // over a copied one. A failed copy must not abort the takeover.
+//
+// The source is addressed as `=<session>:` (#6270). show-options declares -t a PANE
+// target, and tmux strips the exact-match `=` only from the session part of a split
+// `session:window.pane` target; a bare `=<session>` has no `:` to split on, so the
+// whole string is taken as a pane spec and fails with "no such session". The
+// trailing colon is the same form session/tmux/cleanup.go uses for pane-target
+// commands.
+//
+// A failure is never silent: the script cannot reach af's log from inside the
+// server, so it records the reason on the private session as the user option
+// mirrorErrorOption, and the takeover's cleanup reads it back and logs it.
 func (r takeoverRoute) mirrorSessionOptionsScript() string {
-	return "tmux show-options -t " + shellQuote("="+r.session) + " | sed -E 's/^/set-option -t " + r.group + " /' | tmux source-file - || true"
+	fail := func(why string) string {
+		return "tmux set-option -t " + r.group + " " + mirrorErrorOption + " " + shellQuote(why)
+	}
+	// An empty listing (a source with no local options) is a successful empty copy,
+	// not an error: sed would turn its one blank line into a bare `set-option`.
+	return "opts=$(tmux show-options -t " + shellQuote("="+r.session+":") + ") || { " + fail("show-options on the source session failed") + "; exit 0; }; " +
+		"if [ -n \"$opts\" ]; then printf '%s\\n' \"$opts\" | sed -E 's/^/set-option -t " + r.group + " /' | tmux source-file - || " + fail("source-file rejected the copied options") + "; fi; true"
+}
+
+// mirrorErrorOption is the private session's record of a failed option mirror.
+const mirrorErrorOption = "@af_mirror_error"
+
+// readTakeoverMirrorError asks the server whether the option mirror of the route's
+// private session failed; a var so tests need no tmux.
+var readTakeoverMirrorError = func(socket string, r takeoverRoute) string {
+	args := []string{}
+	if socket != "" {
+		args = append(args, "-S", socket)
+	}
+	args = append(args, "show-options", "-qv", "-t", "="+r.group+":", mirrorErrorOption)
+	c := exec.Command("tmux", args...)
+	c.Env = configAgentAttachEnv()
+	out, err := c.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
@@ -165,6 +203,10 @@ func bareAttachCleanup(cmd *exec.Cmd) {
 		return
 	}
 	reg := v.(registeredRoute)
+	if why := readTakeoverMirrorError(reg.socket, reg.route); why != "" {
+		log.WarningLog.Printf("takeover of %s: the source session's options were not mirrored onto %s (mouse scrolling and selection may be missing): %s",
+			reg.route.session, reg.route.group, why)
+	}
 	for _, args := range reg.route.cleanupArgs() {
 		full := make([]string, 0, len(args)+2)
 		if reg.socket != "" {

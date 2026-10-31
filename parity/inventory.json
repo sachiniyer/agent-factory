@@ -3194,6 +3194,11 @@
           "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
         }
       },
+      "TriggerTask": {
+        "actor": {
+          "ok": "Same deliberate omission as UpdateTask/AddTask: the web client IS the API surface, and taskActor (daemon/task_health.go) resolves an undeclared actor from the transport, so a web run-now that sends nothing is already recorded as \"api\" (#6318). The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
+        }
+      },
       "AddTask": {
         "actor": {
           "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."

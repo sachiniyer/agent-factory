@@ -174,6 +174,19 @@ const (
 // give a different result from a container that has none.
 var tmuxServerProcessPIDs = liveTmuxServerPIDs
 
+// tmuxServerSignal delivers the SIGUSR1 recreate-socket probe to a positively
+// identified tmux server. It is a package var, not a bare syscall.Kill call, for
+// the same reason proctree.Kill is one: a non-ESRCH signal failure such as EPERM
+// or EACCES from a sandbox/LSM signal policy is a real state (cleanup.go and
+// reap_test.go both call it out — "a D-state sleeper or a process this uid may
+// not signal") that a test cannot conjure on demand against a same-uid live
+// process. Tests override it to model a denied signal and exercise the
+// kill-error branch of tmuxSocketClaimed deterministically, without installing
+// a real seccomp filter or a process owned by another uid. It scopes only the
+// ownership probe; the reaper delivers SIGTERM/SIGKILL through proctree.Signal,
+// so overriding this var cannot change how a teardown signals anything.
+var tmuxServerSignal = syscall.Kill
+
 // PinServerProbeForTest fixes the "is a tmux server alive for this uid?" answer
 // and returns the restore. It exists for internal/testguard.IsolateTmux, which
 // declares a private-socket world for a test; without it that isolation is
@@ -274,32 +287,6 @@ func listSessionField(cmdExec cmd.Executor, format string) ([]string, error) {
 		}
 	}
 	return names, nil
-}
-
-// SessionCreatedUnix returns the server's recorded creation time for one tmux
-// session — per-launch temporal evidence the env markers alone cannot carry
-// (#5503): a same-named session killed and respawned gets a fresh timestamp, so
-// a leftover created at-or-after a recorded intent can be attributed to that
-// attempt. Any failure — absent session, wedged server, unparseable answer —
-// is an error; the caller must not read it as "not ours". Second granularity
-// is all tmux records; callers comparing against a finer bound should compare
-// at whole seconds.
-func SessionCreatedUnix(cmdExec cmd.Executor, sanitizedName string) (time.Time, error) {
-	ctx, cancel := tmuxTimeoutContext()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "display-message", "-t", exactTarget(sanitizedName), "-p", "#{session_created}")
-	timedOut := ctx.Err() != nil
-	cancel()
-	if err != nil {
-		if timedOut {
-			return time.Time{}, fmt.Errorf("%w: display-message for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
-		}
-		return time.Time{}, fmt.Errorf("could not read %s's creation time: %w", sanitizedName, err)
-	}
-	sec, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if perr != nil {
-		return time.Time{}, fmt.Errorf("could not parse %s's creation time %q: %w", sanitizedName, strings.TrimSpace(string(out)), perr)
-	}
-	return time.Unix(sec, 0), nil
 }
 
 // CommandDiagnostic returns what tmux wrote to stderr for a failed command,
@@ -483,8 +470,28 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 			unprobedOwnerPossible = true
 			continue
 		}
-		if err := syscall.Kill(pid, syscall.SIGUSR1); err == nil {
+		kerr := tmuxServerSignal(pid, syscall.SIGUSR1)
+		switch {
+		case kerr == nil:
 			signaled = true
+		case errors.Is(kerr, syscall.ESRCH):
+			// The pid vanished between the positive identity check and the
+			// signal. Gone is gone: this candidate IS disproved, so it is
+			// neither counted as signalled nor remembered as a possible owner.
+		default:
+			// A positively-identified live server we could not signal — e.g.
+			// EPERM or EACCES from a sandbox/LSM signal policy, the denied-signal
+			// state cleanup.go and reap_test.go acknowledge as real. A live
+			// owner that kill() refuses is NOT disproved, and a socket that
+			// stays absent is NOT evidence against it: the safe direction is
+			// "claimed" (unknown), exactly the branch the IsTmuxServer skip
+			// above takes. The doc comment's contract — "a table with live
+			// servers that could not all be signaled answers claimed" — already
+			// says so; before this arm existed a mixed table (one kill
+			// succeeding, one failing) answered "unclaimed", manufacturing a
+			// determinate empty for a live owner that was never disproved and
+			// licensing CleanupSessions' destructive path against it.
+			unprobedOwnerPossible = true
 		}
 	}
 	if !signaled {

@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/log/logtest"
 )
@@ -304,6 +307,234 @@ func TestProbePaneExitLivePane(t *testing.T) {
 	assert.True(t, known)
 	assert.False(t, dead)
 	assert.False(t, statusKnown)
+}
+
+// A pane af did not launch carries no @af_pane_pid stamp. Under remain-on-exit
+// the user can split a process tab's window, end up focused on that split pane,
+// and exit it; tmux holds the dead split pane as the session's ACTIVE pane and
+// reports its collected exit status on the recorded command's target. That
+// status is not the command's exit: the active pane never ran the recorded
+// command, and stamping it would fabricate an exit a live root never earned —
+// one the first-wins guard on Tab.Exit would then make permanent. The probe
+// must answer not-dead so the row stays unstamped and the command's real exit
+// can still be recorded.
+func TestProbePaneExitRefusesAnUnstampedForeignPane(t *testing.T) {
+	// A pane the user created by splitting: dead, reaped (status 7), but it
+	// carries no @af_pane_pid stamp, no deaths counter, and no @af_pane_cmd
+	// pin — its own start command does not byte-match the unset pin.
+	foreign := paneState{deaths: "", tty: "/dev/pts/3", stampCmd: "", startCmd: "sh -c 'exit 7'"}
+	ts := NewTmuxSessionWithDeps("pane-exit-foreign", "true", nil,
+		deadPaneExec(t, "8576", "", foreign, "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "an unstamped foreign pane's death is not the recorded command's exit")
+	require.False(t, statusKnown)
+	require.Zero(t, status)
+	require.True(t, at.IsZero(), "no exit time is fabricated for a death not attributed to the command")
+}
+
+// A stale stamp — one a respawn carried past the deaths counter and pty it
+// pinned — cannot name the pane's current incarnation, so its collected status
+// is no more the recorded command's exit than an unstamped pane's is. The probe
+// refuses rather than attributing a foreign incarnation's death.
+func TestProbePaneExitRefusesAStaleStampedPane(t *testing.T) {
+	gone := exitedProcess(t).PID
+	// deaths gap of 2 and a moved pty: the stamp names an earlier incarnation,
+	// not the pane that most recently died.
+	stale := paneState{deaths: "2", tty: "/dev/pts/1", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	ts := NewTmuxSessionWithDeps("pane-exit-stale", "true", nil,
+		deadPaneExec(t, strconv.Itoa(gone), strconv.Itoa(gone)+":0:/dev/pts/0", stale, "7", "", "1726000000", nil))
+	dead, _, _, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "a stale stamp that cannot name the current incarnation is not the command's exit")
+}
+
+// When tmux has collected the status but the @af_pane_deaths counter has not
+// caught up yet (#5335 — the pane-died hook runs on the command queue, after
+// the status is filled), a freshly-dead af pane reads pending on the
+// collected-status path. The probe keeps probing rather than dropping the
+// command's own exit, and records it once the hook lands — the collected-status
+// analogue of TestProbePaneExitWaitsOutAPendingStamp.
+func TestProbePaneExitWaitsForAStampPendingOnACollectedStatus(t *testing.T) {
+	gone := exitedProcess(t).PID
+	stamp := strconv.Itoa(gone) + ":0:/dev/pts/0"
+	ts := NewTmuxSessionWithDeps("pane-exit-collected-pending", "true", nil,
+		laggingDeathsExec(t, strconv.Itoa(gone), stamp, freshPane(), "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.True(t, statusKnown, "the pending stamp resolved and the command's exit was recorded")
+	require.Equal(t, 7, status)
+	require.True(t, at.Equal(time.Unix(1726000000, 0)))
+}
+
+// Real-tmux reproduction of the active-pane misattribution: a process tab
+// runs `sleep 600` in an af-stamped single pane; the user attaches, splits the
+// window, and exits the split with status 7; tmux holds the dead split pane as
+// the session's active pane under remain-on-exit. Before the fix the probe
+// read that active pane's collected status as the recorded command's exit
+// while `sleep 600` kept running. The fix refuses an unstamped pane's death,
+// so the probe answers not-dead and the command's row stays unstamped.
+func TestProbePaneExitRefusesAnUnstampedForeignPaneOnRealTmux(t *testing.T) {
+	testguard.IsolateTmux(t)
+	name := fmt.Sprintf("af_test_foreign_pane_%d", time.Now().UnixNano())
+	// Start the recorded command's pane the way af does: the exec-marker
+	// launch command, remain-on-exit on, and the @af_pane_pid stamp +
+	// pane-died hook installed against the living pane (mirroring
+	// startHeldPane, but the command stays alive).
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, afPaneLaunch("sleep 600"),
+		";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
+	require.NoError(t, exec.Command("tmux", panePidStampArgs(exactTarget(name))...).Run())
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run() })
+	require.Equal(t, "0", tmuxDisplay(t, name, "#{pane_dead}"),
+		"the recorded command's pane is alive, not dead")
+	require.NotEqual(t, "", tmuxDisplay(t, name, "#{"+PanePidMarker+"}"),
+		"sanity: af stamped the recorded command's pane")
+
+	// What a user attaching to the session does: split the window and exit the
+	// new pane with status 7. The split pane inherits remain-on-exit (a window
+	// option), dies, and is held dead.
+	require.NoError(t, exec.Command("tmux", "split-window", "-h", "-t", exactTarget(name),
+		"sh -c 'exit 7'").Run())
+	require.Eventually(t, func() bool {
+		return tmuxDisplay(t, name, "#{pane_dead}") == "1"
+	}, 5*time.Second, 20*time.Millisecond, "the split pane never died")
+	// Confirm the dead split pane is the active pane and carries no af stamp —
+	// the exact shape the probe must not attribute to the recorded command.
+	require.Equal(t, "", tmuxDisplay(t, name, "#{"+PanePidMarker+"}"),
+		"the dead active pane is the user's split: it carries no af stamp")
+
+	// The recorded command's pane is alive and stamped; the active pane is the
+	// dead, unstamped split. The probe must answer not-dead.
+	s := NewTmuxSessionFromSanitizedName(name, "sleep 600")
+	dead, status, statusKnown, _, known := s.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "the dead split pane is not the recorded command's pane; its exit (status %d) must not be stamped as the command's", status)
+	require.False(t, statusKnown, "no status is fabricated for a death not attributed to the recorded command")
+	require.Zero(t, status)
+}
+
+// The remain-on-exit heal (ApplyRemainOnExit) stamps whatever pane is ACTIVE —
+// under a user split that is the foreign pane, and once the pane-died hook
+// counts the death the healed stamp reads stampFresh: pid, deaths gap 1, pty,
+// and the command pin all hold because the heal pinned the foreign pane's OWN
+// start command. The stamp therefore proves af touched the pane, never that af
+// launched it — pane_start_command (no exec marker) is what refuses it.
+func TestProbePaneExitRefusesAHealStampedForeignPane(t *testing.T) {
+	// A heal-written stamp on the user's split pane: fresh in every stamp
+	// field, but the pane's recorded start command is the user's own.
+	healed := paneState{deaths: "1", tty: "/dev/pts/3", stampCmd: "sh -c 'exit 7'", startCmd: "sh -c 'exit 7'"}
+	ts := NewTmuxSessionWithDeps("pane-exit-healed-foreign", "true", nil,
+		deadPaneExec(t, "", "8576:0:/dev/pts/3", healed, "7", "", "1726000000", nil))
+	dead, _, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "a heal stamp on a foreign pane is not launch provenance; its death is not the command's exit")
+	require.False(t, statusKnown)
+	require.True(t, at.IsZero())
+}
+
+// The mirrored legacy cases (Codex P1 on #6336): a process pane af launched
+// BEFORE PID stamping existed carries no stamp, yet its collected status is
+// still the recorded command's exit — pane_start_command keeps the shim
+// marker that proves af launched it. Refusing here would drop a real exit the
+// pre-gate path recorded and misclassify the finished tab as stopped.
+func TestProbePaneExitRecordsAnUnstampedLegacyPane(t *testing.T) {
+	legacy := paneState{deaths: "", tty: "/dev/pts/0", stampCmd: "", startCmd: shimStartCommand}
+	ts := NewTmuxSessionWithDeps("pane-exit-legacy", "true", nil,
+		deadPaneExec(t, "", "", legacy, "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead, "an unstamped pane af launched is still the recorded command's pane")
+	require.True(t, statusKnown)
+	require.Equal(t, 7, status)
+	require.True(t, at.Equal(time.Unix(1726000000, 0)))
+}
+
+// The sibling legacy shape (Codex P2 on #6336): a pane af launched before
+// the incarnation bundle existed carries a BARE-PID @af_pane_pid stamp —
+// readable, but holding none of the proof fields. paneStampPID rules it
+// stampLegacy: unable to name the current incarnation, yet contradicting
+// nothing either. tmux's collected status is still this pane's own last
+// death, so the probe records it; refusing would drop a real exit the
+// pre-gate path kept.
+func TestProbePaneExitRecordsALegacyStampedPane(t *testing.T) {
+	gone := exitedProcess(t).PID
+	legacy := paneState{deaths: "", tty: "/dev/pts/0", stampCmd: "", startCmd: shimStartCommand}
+	ts := NewTmuxSessionWithDeps("pane-exit-legacy-stamp", "true", nil,
+		deadPaneExec(t, strconv.Itoa(gone), strconv.Itoa(gone), legacy, "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead, "a bare-pid stamp predates the incarnation proof; it does not contradict the collected exit")
+	require.True(t, statusKnown)
+	require.Equal(t, 7, status)
+	require.True(t, at.Equal(time.Unix(1726000000, 0)))
+}
+
+// A legacy pane the heal stamped AFTER it died (tmux <3.8 still answers
+// pane_pid then) reads stampPending forever — the pane-died hook cannot count
+// a death that already happened. tmux's collected status is still this pane's
+// own last death, so the probe records it rather than waiting out a hook that
+// can never land.
+func TestProbePaneExitRecordsAHealPendingLegacyPane(t *testing.T) {
+	gone := exitedProcess(t).PID
+	stamp := strconv.Itoa(gone) + ":0:/dev/pts/0"
+	healed := paneState{deaths: "0", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	ts := NewTmuxSessionWithDeps("pane-exit-heal-pending", "true", nil,
+		deadPaneExec(t, "", stamp, healed, "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead, "a healed pane's pending stamp must not stall the exit tmux already collected")
+	require.True(t, statusKnown)
+	require.Equal(t, 7, status)
+	require.True(t, at.Equal(time.Unix(1726000000, 0)))
+}
+
+// The same pending verdict on a pane whose start command is not af's stays
+// refused: pending is not a way through the launch-provenance gate.
+func TestProbePaneExitRefusesAPendingStampedForeignPane(t *testing.T) {
+	gone := exitedProcess(t).PID
+	stamp := strconv.Itoa(gone) + ":0:/dev/pts/3"
+	foreign := paneState{deaths: "0", tty: "/dev/pts/3", stampCmd: "sh -c 'exit 7'", startCmd: "sh -c 'exit 7'"}
+	ts := NewTmuxSessionWithDeps("pane-exit-pending-foreign", "true", nil,
+		deadPaneExec(t, "", stamp, foreign, "7", "", "1726000000", nil))
+	dead, status, statusKnown, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "a pending foreign stamp is not the recorded command's exit either")
+	require.False(t, statusKnown)
+	require.Zero(t, status)
+}
+
+// The marker alone is not launch provenance (Codex re-review P1 on #6336): an
+// account-scoped session's default-command wraps an interactive account shell
+// through the same sessionenv exec marker af's own launches carry, so a split
+// pane the user created from that default reports a GENUINE marker — and the
+// remain-on-exit heal can give it a genuine stamp — without ever having run
+// the recorded command. The wrapper leaves the recorded command as its last
+// argument; the account shell's last word is the shell, so the split's death
+// still is not the command's exit.
+func TestProbePaneExitRefusesAnAccountScopedDefaultCommandSplit(t *testing.T) {
+	gone := exitedProcess(t).PID
+	// The account-scoped default command prepareLaunchEnvironment installs:
+	// a sessionenv-wrapped interactive account shell — marker present, but
+	// the last word is the shell, not the recorded program "true".
+	defaultShell := "/usr/bin/af " + sessionenv.AccountEnvironmentExecMarker + " codex 0 work '' 0 /bin/sh"
+	split := paneState{deaths: "1", tty: "/dev/pts/3", stampCmd: defaultShell, startCmd: defaultShell}
+	ts := NewTmuxSessionWithDeps("pane-exit-account-split", "true", nil,
+		deadPaneExec(t, strconv.Itoa(gone), strconv.Itoa(gone)+":0:/dev/pts/3", split, "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "a marker-bearing default-command split never ran the recorded command; its death is not the command's exit")
+	require.False(t, statusKnown)
+	require.Zero(t, status)
+	require.True(t, at.IsZero())
+}
+
+// tmuxDisplay returns tmux's expansion of format for the session's active pane.
+func tmuxDisplay(t *testing.T, name, format string) string {
+	t.Helper()
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), format).Output()
+	require.NoError(t, err, "tmux display-message -t %s %q", name, format)
+	return strings.TrimSpace(string(out))
 }
 
 // uncollectedProcess returns the pid of a child that has exited and that

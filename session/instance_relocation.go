@@ -153,6 +153,21 @@ func (i *Instance) SettleWorktreeRelocationClaim(claim git.RelocationClaim) erro
 	return gw.SettleRelocationClaim(claim)
 }
 
+// RestoreWorktreeRelocation reinstates a recovery record the destruction
+// admission discharged in memory when the kill's durable commit never landed —
+// the tombstone failed, so the on-disk row still carries the record and this
+// process's instance must keep the identity fence with it. See
+// GitWorktree.RestoreRelocationRecovery.
+func (i *Instance) RestoreWorktreeRelocation(recovery git.RelocationRecovery) error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot restore worktree relocation for %q: instance has no worktree", i.Title)
+	}
+	return gw.RestoreRelocationRecovery(recovery)
+}
+
 // ValidateWorktreeDestructionAdmission is the pre-commit guard. The local
 // backend separately consumes and revalidates the exact cleanup identity before
 // pane teardown; it must not repeat the origin-path admission after the durable

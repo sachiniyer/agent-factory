@@ -355,7 +355,10 @@ unspecified field — and the scheduler-owned fields — as-stored, so a single-
 edit cannot clobber a concurrent edit another client made (#1700). Both mutating
 calls take an optional `actor` naming the calling surface (`cli`, `tui`, `api`,
 `daemon-upgrade`) for the task's audit trail; a client that sends none is
-recorded from the transport, so an HTTP caller is `api` (#3623). Every task the
+recorded from the transport, so an HTTP caller is `api` (#3623). `TriggerTask`
+takes the same optional `actor`, recorded as a `triggered` entry when the
+manual fire lands — scheduled cron and watch fires write no entry (#6318).
+Every task the
 daemon returns carries its schedule health — `overdue`, `missed_occurrences`,
 and, from the live scheduler entry, `next_run_at` and `arming` — derived at read
 time and never stored. See [tasks.md](tasks.md) for the task shape and

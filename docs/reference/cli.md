@@ -4117,7 +4117,7 @@ af tasks restart <id-or-name>
 
 Show one task's schedule health and audit trail
 
-Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, or disabled it.
+Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, disabled, or manually triggered it.
 
 Overdue is derived, never stored: a cron task is overdue when it has gone more than one period (or five minutes, whichever is larger) past its most recent scheduled occurrence, measured from the latest of its last run, its last enable, and its creation — so a task paused and switched back on does not report the occurrences it missed while it was off. Watch tasks have no schedule and are never overdue — their arming state is the signal.
 

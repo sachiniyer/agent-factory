@@ -34,6 +34,7 @@ func showFixture() task.Task {
 		Audit: []task.AuditEntry{
 			{At: time.Date(2026, time.August, 14, 14, 30, 0, 0, time.Local), Actor: task.ActorCLI, Action: task.AuditDisabled, Fields: []string{"enabled"}},
 			{At: time.Date(2026, time.September, 1, 14, 5, 0, 0, time.Local), Actor: task.ActorTUI, Action: task.AuditEnabled, Fields: []string{"enabled"}},
+			{At: time.Date(2026, time.September, 1, 14, 10, 0, 0, time.Local), Actor: task.ActorCLI, Action: task.AuditTriggered},
 		},
 	}
 }
@@ -59,6 +60,8 @@ func TestTasksShow_ReportsTheSilenceAndWhoCausedIt(t *testing.T) {
 		"an enabled task the daemon is not holding will not fire, and must say so:\n%s", got)
 	assert.Contains(t, got, "2026-08-14 14:30  cli            disabled · enabled")
 	assert.Contains(t, got, "2026-09-01 14:05  tui            enabled · enabled")
+	assert.Contains(t, got, "2026-09-01 14:10  cli            triggered",
+		"a manual fire names who asked for it (#6318)")
 }
 
 // TestTasksShow_UnknownArmingIsNotReportedAsUnarmed: with no daemon reachable
