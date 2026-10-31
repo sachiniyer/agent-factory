@@ -100,7 +100,7 @@ func TestBacklogAnswerDelivers(t *testing.T) {
 	if inst.HasAttention() {
 		t.Fatal("attention not cleared")
 	}
-	if len(sent.reqs) != 1 || sent.reqs[0].ID != inst.ID || sent.reqs[0].Prompt != "The user answered your question on B-1: Postgres" {
+	if len(sent.reqs) != 1 || sent.reqs[0].ID != inst.ID || sent.reqs[0].Prompt != "The user answered your question on B-1 (\"Which db?\"): Postgres" {
 		t.Fatalf("sent %+v", sent.reqs)
 	}
 	it := loadItem(t, repoID, 1)
