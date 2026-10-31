@@ -3273,9 +3273,16 @@ textarea[class] {
 }
 .af-terminal-keybar.af-keybar-narrow {
   grid-template-columns: minmax(0, 1fr);
+  gap: calc(var(--af-space-1) / 4);
+  padding-inline: max(calc(var(--af-space-1) / 2), env(safe-area-inset-left)) max(calc(var(--af-space-1) / 2), env(safe-area-inset-right));
+}
+.af-terminal-keybar.af-keybar-narrow .af-keybar-row {
+  gap: calc(var(--af-space-1) / 4);
 }
 .af-terminal-keybar.af-keybar-narrow .af-keybar-row button {
-  min-width: min(calc(var(--af-space-4) + var(--af-space-3)), calc((100% - 6 * var(--af-space-1)) / 7));
+  min-width: min(calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)), calc((100% - 6 * var(--af-space-1) / 4) / 7));
+  padding-inline: 0;
+  font-size: var(--af-type-caption);
 }
 @media (max-width: 768px) {
   .af-session-first .af-appbar {

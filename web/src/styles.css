@@ -3845,22 +3845,30 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   }
 }
 
-/* Seven primary keys need 348px (7×44px targets + 4px gaps + padding). Below
-   that — the 320px phones the keybar still serves — the keys narrow to a 40px
-   floor so the whole row stays inside the viewport; the 44px height never
-   changes (#5380). layout() sets af-keybar-narrow from visualViewport.width —
-   a media query would read the layout viewport and miss a pinch zoom. The
-   bar's auto grid column would size the row to its max-content, so the track
-   is pinned too, letting flex-shrink actually engage. The floor is capped at
-   the row's fair share — (row width − six 4px gaps) ÷ 7 — so a viewport
-   narrower than 320px keeps fitting instead of clipping Arrows; at 320px and
-   up the share is ≥40px and the 40px floor governs. Without the class both
-   rules are inert. */
-.af-terminal-keybar.af-keybar-narrow { grid-template-columns: minmax(0, 1fr); }
+/* Seven 44px targets need 308px. Below 348px of visual viewport (the 320px phones
+   the keybar still serves) the bar's 4px gaps and 8px side padding no longer fit
+   them, so the narrow state trades that spacing — not the targets — for width:
+   1px gaps, 2px side padding, a caption-size label, and "More" for "More keys"
+   (terminal-keybar.ts; the accessible name stays "More keys"). 7×44 + 6×1 + 2×2
+   = 318px ≤ 320px (#6407; before, the keys shrank to a 40px floor and "Paste",
+   "Arrows" and "More keys" were ellipsised). layout() sets af-keybar-narrow from
+   visualViewport.width — a media query would read the layout viewport and miss
+   a pinch zoom. The bar's auto grid column would size the row to its
+   max-content, so the track is pinned too, letting flex-shrink engage. Under
+   320px (pinch-zoomed) the target is capped at the row's fair share so the row
+   still fits rather than clipping Arrows. Without the class every rule is inert. */
+.af-terminal-keybar.af-keybar-narrow {
+  grid-template-columns: minmax(0, 1fr);
+  gap: calc(var(--af-space-1) / 4);
+  padding-inline: max(calc(var(--af-space-1) / 2), env(safe-area-inset-left)) max(calc(var(--af-space-1) / 2), env(safe-area-inset-right));
+}
+.af-terminal-keybar.af-keybar-narrow .af-keybar-row { gap: calc(var(--af-space-1) / 4); }
 .af-terminal-keybar.af-keybar-narrow .af-keybar-row button {
   min-width: min(
-    calc(var(--af-space-4) + var(--af-space-3)),
-    calc((100% - 6 * var(--af-space-1)) / 7));
+    calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)),
+    calc((100% - 6 * var(--af-space-1) / 4) / 7));
+  padding-inline: 0;
+  font-size: var(--af-type-caption);
 }
 
 /* Focused phone sessions reserve one 48px chrome row and one 44px key row. */
