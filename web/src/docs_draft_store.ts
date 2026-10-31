@@ -236,16 +236,18 @@ export function localStorageKV(storage: Storage): KV {
   };
 }
 
-/** An id for this window, stable across a reload of it (sessionStorage), distinct
- *  between windows. */
+/** A new id for a page. Random, never read back from storage: a duplicated browser tab
+ *  starts with a copy of the original's sessionStorage, so a stored id would give two live
+ *  pages one identity (and one set of draft entries to clear). A reload gets a new id, and
+ *  adopts the old page's released entries like any pane. */
+export function newWindowId(random: () => number = Math.random, now: () => number = Date.now): string {
+  return `w${random().toString(36).slice(2, 10)}${now().toString(36)}`;
+}
+
+let pageId: string | null = null;
+
+/** This page's id, fixed for the life of the page. */
 export function windowId(): string {
-  try {
-    const known = window.sessionStorage.getItem("af.window.id");
-    if (known) return known;
-    const id = `w${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
-    window.sessionStorage.setItem("af.window.id", id);
-    return id;
-  } catch {
-    return `w${Math.random().toString(36).slice(2, 10)}`;
-  }
+  pageId ??= newWindowId();
+  return pageId;
 }

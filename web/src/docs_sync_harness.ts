@@ -6,7 +6,7 @@
 // DocSync surface, so it can run against any engine with that surface.
 
 import type { DocText, SaveResult } from "./proposal_api.js";
-import { DraftStorage, type KV } from "./docs_draft_store.js";
+import { DraftStorage, newWindowId, type KV } from "./docs_draft_store.js";
 import { ClosingTabs } from "./docs_closing.js";
 import { missingFrom, RosterOrder } from "./docs_roster.js";
 import { CONFLICT_MINE, CONFLICT_SPLIT, CONFLICT_THEIRS, hasConflictMarkers } from "./text_diff.js";
@@ -216,7 +216,15 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   // engine before panes had owners of their own.)
   const sameWindow = !!o.chaos && rand() < 0.5;
   let ghostSeq = 0;
-  const newGhostStorage = (): DraftStorage => new DraftStorage(kv, sameWindow ? "wA0" : "wGhost", () => now, "s\nplan", process.env.AF_SAME_OWNER && sameWindow ? "0" : `g${++ghostSeq}`);
+  // The second window gets its id from the same function the page uses. (AF_DUP_TAB: a
+  // duplicated browser tab, whose copied sessionStorage gave it the first window's id, and
+  // whose panes count from the start again.)
+  const newGhostStorage = (): DraftStorage => {
+    const dup = !!process.env.AF_DUP_TAB;
+    const win = sameWindow || dup ? "wA0" : newWindowId(rand, () => 0);
+    const pane = (process.env.AF_SAME_OWNER && sameWindow) || dup ? "0" : `g${++ghostSeq}`;
+    return new DraftStorage(kv, win, () => now, "s\nplan", pane);
+  };
   let ghostStorage = newGhostStorage();
   const storageOf = new Map<SyncLike, DraftStorage>();
   /** The owners of panes that have closed. */
