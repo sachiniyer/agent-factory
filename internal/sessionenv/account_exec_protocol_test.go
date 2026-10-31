@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -167,6 +168,18 @@ func TestClaimedShim_RefusesMalformedAndUnclaimable(t *testing.T) {
 		require.Error(t, claimedExecInvocation(args, false), "argv %v", args)
 	}
 	require.ErrorContains(t, claimedExecInvocation([]string{"sock", "tok", "claude"}, false), "no endpoint")
+}
+
+// After an upgrade, a session launched by the previous af still names the old
+// argv in its default-command. The new binary must refuse it as a refused
+// capability, because HandleInternalExec prints the "run af daemon restart" hint
+// only for that class of error (#6384).
+func TestClaimedShim_OldProtocolArgvTakesTheRestartHintPath(t *testing.T) {
+	paneBookkeepingWrite = func(context.Context, string) error { return nil }
+	old := []string{"claude", "0", "work", "", "0", "/bin/sh -i"}
+	err := claimedExecInvocation(old, true)
+	require.Error(t, err)
+	require.True(t, strings.HasPrefix(err.Error(), "launch capability refused"), "got %q", err)
 }
 
 func TestWrapAccountCommand_CarriesOnlyTheClaimCoordinates(t *testing.T) {

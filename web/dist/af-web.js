@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1f9b274e99fd";
+var CLIENT_VERSION = "6d777e506a7d";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18329,6 +18329,13 @@ var AppShell = class {
     this.projectMenu.setAttribute("aria-label", "Switch project");
     this.projectMenu.hidden = true;
     this.projectSwitchWrap = h("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
+    this.projectSwitchWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.projectMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.projectSwitchBtn.focus();
+    });
     document.addEventListener("click", (e) => {
       if (this.projectMenuOpen && !this.projectSwitchWrap.contains(e.target)) {
         this.closeProjectMenu();
@@ -18391,6 +18398,13 @@ var AppShell = class {
     this.filterMenu.setAttribute("aria-label", "Filter sessions");
     this.filterMenu.hidden = true;
     this.filterWrap = h("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
+    this.filterWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.filterMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeFilterMenu();
+      this.filterBtn.focus();
+    });
     document.addEventListener("click", (e) => {
       if (this.filterMenuOpen && !this.filterWrap.contains(e.target)) {
         this.closeFilterMenu();
@@ -19369,6 +19383,7 @@ var AppShell = class {
     return drop.landed;
   }
   toggleFilterMenu() {
+    if (!this.filterMenuOpen) this.closeProjectMenu();
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
     this.filterBtn.setAttribute("aria-expanded", this.filterMenuOpen ? "true" : "false");
@@ -19392,6 +19407,7 @@ var AppShell = class {
     if (this.projectSwitchBtn.disabled) {
       return;
     }
+    this.closeFilterMenu();
     this.projectMenuOpen = true;
     this.projectMenu.hidden = false;
     this.projectSwitchBtn.setAttribute("aria-expanded", "true");
