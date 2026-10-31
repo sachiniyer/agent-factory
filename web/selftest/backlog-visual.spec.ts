@@ -92,6 +92,8 @@ test.describe("backlog view stills", () => {
     await expect(panel).toBeVisible();
     await expect(panel.locator(".af-backlog-body-input")).toBeVisible();
     await expect(panel.getByRole("button", { name: "Close item" })).toBeFocused();
+    // The run's session is looked up before it is called Gone; the still waits for the answer.
+    await expect(panel.locator(".af-backlog-run")).not.toContainText("Checking…");
     await still(page, info, "backlog-desktop.png");
     await page.keyboard.press("Escape");
     await expect(panel).toBeHidden();
