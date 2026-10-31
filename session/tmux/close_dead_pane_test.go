@@ -268,6 +268,33 @@ func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing
 	require.False(t, proctree.AliveSame(root), "the running root of a dead pane survived the teardown")
 }
 
+// tmux marks a pane dead when its pty hits EOF, and the kernel closes a dying
+// process's descriptors before the process becomes a zombie. A root that closes
+// its terminal and exits a moment later is therefore, for that moment, a dead
+// pane over a root that is neither collected nor a zombie; one probe must not
+// answer "alive" for it (#6439). The fixture stretches the moment to 300ms so it
+// is deterministic rather than a 1-in-60 race.
+func TestProbePaneExit_ARootThatIsExitingIsNotReportedAlive(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("a pane is held dead with its root running only on Linux ptys, not on %s", runtime.GOOS)
+	}
+	testguard.IsolateTmux(t)
+	prev := paneRootGrace
+	paneRootGrace = 5 * time.Second
+	t.Cleanup(func() { paneRootGrace = prev })
+	name := fmt.Sprintf("af_test_dead_pane_exiting_%d", time.Now().UnixNano())
+	program := startHeldPane(t, name, `sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; sleep 0.3; exit 7'`)
+
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
+		"#{pane_dead}|#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}").Output()
+	require.NoError(t, err)
+	require.Equal(t, "1|", strings.TrimSpace(string(out)),
+		"the fixture must hold a dead pane whose root is still running and uncollected")
+
+	status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, program), name)
+	require.Equal(t, 7, status)
+}
+
 // shimStartCommand is what #{pane_start_command} answers for a pane af
 // launched through its exec shim: the sessionenv marker and the recorded
 // command as the wrapper's last word are what paneLaunchIsRecorded reads as

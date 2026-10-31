@@ -43,6 +43,8 @@ import {
   agentConfigSkippedText,
   archiveWarningText,
   attentionReason,
+  attentionWords,
+  otherAttentionCount,
   hasAttention,
   callbackUnavailableText,
   canHandoff,
@@ -1167,6 +1169,9 @@ export class AppShell {
 
   // Drawer state is local UI ephemera; closing it restores session-first chrome.
   private readonly navToggle: HTMLButtonElement;
+  /** Count pill on the drawer toggle, and the words line in the drawer (#6405). */
+  private readonly navBadge: HTMLElement;
+  private readonly railAttention: HTMLElement;
   private readonly navScrim: HTMLElement;
   private navOpen = false;
 
@@ -1216,6 +1221,13 @@ export class AppShell {
     this.projectMenu.setAttribute("aria-label", "Switch project");
     this.projectMenu.hidden = true;
     this.projectSwitchWrap = h("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
+    this.projectSwitchWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.projectMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.projectSwitchBtn.focus();
+    });
     // Dismiss the menu on any click outside the switcher (a click on the button or a
     // menu item is handled by their own listeners, which stopPropagation / close).
     document.addEventListener("click", (e) => {
@@ -1230,6 +1242,10 @@ export class AppShell {
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
+    this.navBadge = h("span", { class: "af-nav-badge" });
+    this.navBadge.setAttribute("aria-hidden", "true");
+    this.navBadge.hidden = true;
+    this.navToggle.append(this.navBadge);
 
     // Share one MediaQueryList so app-controls closes its old layout before
     // syncPhone reparents the session controls.
@@ -1296,6 +1312,16 @@ export class AppShell {
     this.filterMenu.setAttribute("aria-label", "Filter sessions");
     this.filterMenu.hidden = true;
     this.filterWrap = h("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
+    // Escape closes the menu and hands focus back to its button, the same disclosure
+    // model components.ts gives the app controls. stopPropagation keeps the key from
+    // also reaching a terminal (index.ts forwards Escape to the agent).
+    this.filterWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.filterMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeFilterMenu();
+      this.filterBtn.focus();
+    });
     // Dismiss on any click outside (the button + the checkboxes stopPropagation), so
     // the menu stays open across several toggles — the common act is narrowing to a
     // couple of states, not one click.
@@ -1312,10 +1338,13 @@ export class AppShell {
       this.railCount,
       h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn),
     );
+    this.railAttention = h("div", { class: "af-rail-attention" });
+    this.railAttention.setAttribute("role", "status");
+    this.railAttention.hidden = true;
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railAttention, this.railList);
 
     this.main = h("section", { class: "af-main" });
     // The drawer scrim: a tap-to-dismiss layer over the terminal while the mobile rail
@@ -1433,6 +1462,7 @@ export class AppShell {
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
+    this.patchNavAttention(state);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -2337,6 +2367,8 @@ export class AppShell {
   }
 
   private toggleFilterMenu(): void {
+    // One rail popover at a time: opening the filter dismisses the project menu.
+    if (!this.filterMenuOpen) this.closeProjectMenu();
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
     this.filterBtn.setAttribute("aria-expanded", this.filterMenuOpen ? "true" : "false");
@@ -2363,6 +2395,7 @@ export class AppShell {
     if (this.projectSwitchBtn.disabled) {
       return;
     }
+    this.closeFilterMenu();
     this.projectMenuOpen = true;
     this.projectMenu.hidden = false;
     this.projectSwitchBtn.setAttribute("aria-expanded", "true");
@@ -3019,6 +3052,21 @@ export class AppShell {
     if (this.tabInsert) {
       this.tabInsert.hidden = true;
     }
+  }
+
+  /** Surface other sessions' attention requests without opening the drawer: a count
+   *  on the toggle, the state in words on the toggle's label and at the top of the
+   *  drawer (#6405). Words, not hover: a touch screen has no hover. */
+  private patchNavAttention(state: AppState): void {
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const count = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
+    const words = attentionWords(count);
+    this.navBadge.hidden = count === 0;
+    if (this.navBadge.textContent !== String(count)) this.navBadge.textContent = count ? String(count) : "";
+    this.navToggle.setAttribute("aria-label", words ? `Toggle sessions, ${words}` : "Toggle sessions");
+    this.navToggle.toggleAttribute("data-attention", count > 0);
+    this.railAttention.hidden = count === 0;
+    if (this.railAttention.textContent !== words) this.railAttention.textContent = words;
   }
 
   private patchMainHead(state: AppState): void {

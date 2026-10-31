@@ -202,6 +202,34 @@ button:disabled,
   line-height: 1;
   cursor: pointer;
 }
+.af-nav-toggle {
+  position: relative;
+}
+.af-nav-badge {
+  position: absolute;
+  top: calc(var(--af-space-1) / -2);
+  right: calc(var(--af-space-1) / -2);
+  min-width: calc(var(--af-space-3) + var(--af-space-1));
+  padding: 0 var(--af-space-1);
+  border-radius: var(--af-radius-control);
+  background: var(--af-attention);
+  color: var(--af-surface);
+  font-size: var(--af-type-caption);
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+}
+.af-nav-badge[hidden] {
+  display: none;
+}
+.af-rail-attention {
+  padding: var(--af-space-1) var(--af-space-3);
+  color: var(--af-attention);
+  font-size: var(--af-type-body);
+}
+.af-rail-attention[hidden] {
+  display: none;
+}
 .af-nav-toggle:hover {
   background: var(--af-surface-raised);
   border-color: var(--af-border);
@@ -3273,9 +3301,16 @@ textarea[class] {
 }
 .af-terminal-keybar.af-keybar-narrow {
   grid-template-columns: minmax(0, 1fr);
+  gap: calc(var(--af-space-1) / 4);
+  padding-inline: max(calc(var(--af-space-1) / 2), env(safe-area-inset-left)) max(calc(var(--af-space-1) / 2), env(safe-area-inset-right));
+}
+.af-terminal-keybar.af-keybar-narrow .af-keybar-row {
+  gap: calc(var(--af-space-1) / 4);
 }
 .af-terminal-keybar.af-keybar-narrow .af-keybar-row button {
-  min-width: min(calc(var(--af-space-4) + var(--af-space-3)), calc((100% - 6 * var(--af-space-1)) / 7));
+  min-width: min(calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)), calc((100% - 6 * var(--af-space-1) / 4) / 7));
+  padding-inline: 0;
+  font-size: var(--af-type-caption);
 }
 @media (max-width: 768px) {
   .af-session-first .af-appbar {

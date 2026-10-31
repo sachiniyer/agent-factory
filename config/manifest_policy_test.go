@@ -255,7 +255,7 @@ func expectedMerge(entry ManifestEntry) MergePolicy {
 		return MergeMapByKey
 	case "docker", "ssh", "root_agent":
 		return MergeTableByField
-	case "network.cors_allowed_origins", "post_worktree_commands", "limit_account_candidates":
+	case "network.cors_allowed_origins", "network.allowed_hosts", "post_worktree_commands", "limit_account_candidates":
 		return MergeListReplace
 	default:
 		return MergeReplace

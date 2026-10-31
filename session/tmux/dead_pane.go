@@ -518,6 +518,29 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 // unknown.
 func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, at time.Time, known bool) {
 	exit, uncollected := t.readPaneExit(tmuxCommandTimeout)
+	// A dead pane whose root is still running is either a root that closed its
+	// terminal and carries on, or one that is exiting right now: tmux marks the pane
+	// dead when the pty hits EOF, and the kernel closes a dying process's
+	// descriptors before it becomes a zombie. One read cannot tell them apart, so
+	// give the second kind a short grace to become collectable (#6439) before
+	// answering that the root is alive.
+	if exit.rootRunning {
+		graceEnd := time.Now().Add(paneRootGrace)
+		for pause := 5 * time.Millisecond; exit.rootRunning && time.Now().Before(graceEnd); pause = min(2*pause, 25*time.Millisecond) {
+			time.Sleep(pause)
+			budget := time.Until(graceEnd)
+			if budget <= 0 {
+				break
+			}
+			next, nextUncollected := t.readPaneExit(budget)
+			if !next.known {
+				// A re-read that cannot answer, including one cut off by the end of
+				// the grace, must not undo the reading that did.
+				break
+			}
+			exit, uncollected = next, nextUncollected
+		}
+	}
 	// Every re-read is bounded by what is left of the wait, so a tmux that
 	// stalls mid-wait cannot hold the caller for a whole command timeout.
 	deadline := time.Now().Add(paneStatusWait)
@@ -562,6 +585,12 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 // const, so tests can lower it.
 var paneStatusWait = 2 * time.Second
 
+// paneRootGrace bounds how long ProbePaneExit waits for the running root of a dead
+// pane to finish exiting before it concludes the root is alive. It is paid only by
+// a pane that is held dead with its root running, which is rare. var, not const,
+// so tests can widen it.
+var paneRootGrace = 200 * time.Millisecond
+
 // paneDeathsWait bounds how long panePID re-reads a row whose stamp is pending
 // — dead on every freshness input but the deaths counter. The pane-died hook
 // runs on tmux's command queue and pane_dead is observable first (#5335), so a
@@ -591,8 +620,10 @@ func (t *TmuxSession) nudgeReap(budget time.Duration) {
 // paneExit is one reading of ProbePaneExit's answer.
 type paneExit struct {
 	dead, statusKnown, known bool
-	status                   int
-	at                       time.Time
+	// rootRunning marks a dead pane whose root is neither collected nor a zombie.
+	rootRunning bool
+	status      int
+	at          time.Time
 	// version is the tmux SERVER's own version, for the nudge's log line: the
 	// installed client can be newer than a server started before an upgrade.
 	version string
@@ -686,7 +717,7 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 			return exit, false
 		}
 		if !exitedUncollected(pid) {
-			return paneExit{known: true}, false
+			return paneExit{known: true, rootRunning: true}, false
 		}
 		return exit, true
 	}
