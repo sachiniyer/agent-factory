@@ -76,9 +76,10 @@ const afProposalSkillName = "proposal"
 // pluginCommands, ensurePluginDir writes every entry and prunes undeclared ones.
 // A callbackless session gets none: every skill here teaches af verbs, which is
 // exactly the content a session that cannot reach the daemon must not see
-// (#5571 W3.1).
+// (#5571 W3.1). The one skill is the proposal entry point, so a session whose
+// credential cannot reach the proposal store gets none either.
 func pluginSkills(caps guidanceCaps) map[string]string {
-	if !caps.Callback {
+	if !caps.Callback || !caps.HostStores {
 		return nil
 	}
 	return map[string]string{

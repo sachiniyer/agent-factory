@@ -204,6 +204,12 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 		// running with an older snapshot; other checks retain nil/unconfigured.
 		daemonConfig = config.DefaultConfig()
 	}
+	if h.PingErr == nil {
+		// A WARN, not a FAIL: the daemon works without the web UI (#6386).
+		if notice := h.Listeners.WebListenerNotice(); notice != "" {
+			report.Warn(sectionDaemon, "web listener", notice, daemon.WebListenerRemedy, true)
+		}
+	}
 	if h.PingErr == nil && daemonConfig != nil {
 		checkRunningDaemonConfig(report, h, daemonConfig)
 		checkRootAgentPrograms(ctx, report, daemonConfig)
@@ -211,6 +217,9 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	// The listener/auth disk-posture row (#5137 refusal, opted-in exposure)
 	// lives in listener_posture.go.
 	checkListenerPosture(report, cfg)
+	if h.PingErr == nil {
+		checkRefusedHosts(report, h.RefusedHosts, cfg)
+	}
 	// "A unit file exists" is not "this home has autostart". There is one unit
 	// per user and it bakes its AGENT_FACTORY_HOME at install time, so under a
 	// non-default AGENT_FACTORY_HOME the installed unit is somebody else's

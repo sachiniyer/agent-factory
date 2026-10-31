@@ -36,6 +36,10 @@ type ErrBox struct {
 	// hideDetailsHint drops the hint altogether, for a field where no key opens
 	// the details: advertising one there would name an action that does nothing.
 	hideDetailsHint bool
+	// standing is a condition that stays true until its source retracts it
+	// (SetStanding("")): it paints only while no notice is on the bar, never
+	// lands in retained, and is not reachable through `E details`.
+	standing string
 }
 
 var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
@@ -59,6 +63,12 @@ func (e *ErrBox) SetNotice(err error) { e.set(err, false) }
 // second `E` after the hint expires must find the store still empty rather
 // than opening "Last notice" on the hint's own text (#5351 review).
 func (e *ErrBox) SetHint(err error) { e.err = err }
+
+// SetStanding shows a persistent one-line condition on the bar whenever no
+// notice is up, until it is set to "". Used for a state that is true now and
+// stays true (the daemon's web listener is unbound, #6386) rather than for
+// the outcome of an action.
+func (e *ErrBox) SetStanding(text string) { e.standing = sanitizeError(text) }
 
 func (e *ErrBox) set(err error, failure bool) {
 	e.err = err
@@ -124,14 +134,24 @@ func (e *ErrBox) String() string {
 		return ""
 	}
 	var err string
-	if e.err != nil {
+	switch {
+	case e.err != nil:
 		err = e.statusLine()
+	case e.standing != "":
+		err = e.standingLine()
 	}
 	style := theme.Styles().Body
 	if e.retainedIsFailure {
 		style = theme.Styles().Error
 	}
 	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, style.Render(err))
+}
+
+func (e *ErrBox) standingLine() string {
+	if layout.Cells(e.standing) <= e.width {
+		return e.standing
+	}
+	return truncateStatusText(e.standing, e.width)
 }
 
 func (e *ErrBox) statusLine() string {

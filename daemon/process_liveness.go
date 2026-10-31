@@ -43,12 +43,15 @@ func pidLooksAlive(pid int) bool {
 		switch {
 		case err == nil && len(strings.TrimRight(string(data), "\x00")) == 0:
 			return false
-		case errors.Is(err, os.ErrNotExist):
-			// Signal 0 succeeded on a zombie and the process was reaped before this
-			// read: /proc/<pid> is gone, which is an exit, not "alive". Reading the
-			// failure as alive made a wait that had just observed the exit disagree
-			// with the very next check (#6381). Any other read error (EACCES, a
-			// transient failure) is still not evidence of death.
+		case errors.Is(err, os.ErrNotExist), errors.Is(err, syscall.ESRCH):
+			// Signal 0 succeeded on a zombie and the process was reaped before or
+			// during this read: /proc/<pid> is gone (ENOENT at open), or the task
+			// vanished between open and read, which the kernel reports as ESRCH
+			// (proc_pid_cmdline_read: no task for the inode). Both are an exit, not
+			// "alive". Reading the failure as alive made a wait that had just observed
+			// the exit disagree with the very next check (#6381, twice: ENOENT in
+			// #6383, ESRCH here). Any other read error (EACCES, a transient failure) is
+			// still not evidence of death.
 			return false
 		}
 	}

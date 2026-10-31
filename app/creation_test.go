@@ -133,6 +133,9 @@ func newTestHome(t *testing.T) *home {
 		// regress this.) Tests exercising the fetch path assign their own fake to
 		// h.snapshotFetcher. The fetcher is a per-home field, not a shared global, so
 		// parallel tests can't race each other's swaps.
+		// Same reason for the web-listener poll (#6386): Init arms it, so the
+		// harness must never reach the real fetcher, which dials the daemon.
+		webListenerFetcher: func() string { return "" },
 		snapshotFetcher: func(string) (daemon.SnapshotResponse, error) {
 			return daemon.SnapshotResponse{}, fmt.Errorf("snapshot fetcher not stubbed in test")
 		},

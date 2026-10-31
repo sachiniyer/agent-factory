@@ -6648,6 +6648,13 @@ function hasAttention(s) {
   const kind = rowKind(s);
   return kind === "ready" || kind === "working";
 }
+function otherAttentionCount(sessions, selectedId) {
+  return sessions.filter((s) => s.id !== selectedId && hasAttention(s)).length;
+}
+function attentionWords(count) {
+  if (count <= 0) return "";
+  return count === 1 ? "1 session needs attention" : `${count} sessions need attention`;
+}
 function attentionReason(s) {
   return hasAttention(s) ? (s.attention?.reason ?? "").trim() : "";
 }
@@ -7035,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "3c2971959912";
+var CLIENT_VERSION = "4f8e570f8d5c";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -10267,7 +10274,12 @@ var TerminalKeybar = class {
       this.bar.style.left = `${this.viewport?.offsetLeft ?? 0}px`;
       const width = this.viewport?.width ?? window.innerWidth;
       this.bar.style.width = `${width}px`;
-      this.bar.classList.toggle("af-keybar-narrow", width < 348);
+      const narrow = width < 348;
+      this.bar.classList.toggle("af-keybar-narrow", narrow);
+      for (const button of this.bar.querySelectorAll("button[aria-label='More keys']")) {
+        const text = narrow ? "More" : "More keys";
+        if (button.textContent !== text) button.textContent = text;
+      }
       this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
       const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
       this.host.style.maxHeight = `${height}px`;
@@ -18339,6 +18351,10 @@ var AppShell = class {
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
+    this.navBadge = h("span", { class: "af-nav-badge" });
+    this.navBadge.setAttribute("aria-hidden", "true");
+    this.navBadge.hidden = true;
+    this.navToggle.append(this.navBadge);
     this.appControls = appbarControls([
       ...this.installEl ? [this.installEl] : []
     ], this.phone, () => {
@@ -18406,10 +18422,13 @@ var AppShell = class {
       this.railCount,
       h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn)
     );
+    this.railAttention = h("div", { class: "af-rail-attention" });
+    this.railAttention.setAttribute("role", "status");
+    this.railAttention.hidden = true;
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railAttention, this.railList);
     this.main = h("section", { class: "af-main" });
     this.navScrim = h("div", { class: "af-nav-scrim" });
     this.navScrim.setAttribute("aria-hidden", "true");
@@ -18612,6 +18631,9 @@ var AppShell = class {
   idleAgeTimer;
   // Drawer state is local UI ephemera; closing it restores session-first chrome.
   navToggle;
+  /** Count pill on the drawer toggle, and the words line in the drawer (#6405). */
+  navBadge;
+  railAttention;
   navScrim;
   navOpen = false;
   /** Stop wall-clock-only rail work when logout replaces this shell. */
@@ -18672,6 +18694,7 @@ var AppShell = class {
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
+    this.patchNavAttention(state);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -19896,6 +19919,20 @@ var AppShell = class {
     if (this.tabInsert) {
       this.tabInsert.hidden = true;
     }
+  }
+  /** Surface other sessions' attention requests without opening the drawer: a count
+   *  on the toggle, the state in words on the toggle's label and at the top of the
+   *  drawer (#6405). Words, not hover: a touch screen has no hover. */
+  patchNavAttention(state) {
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const count = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
+    const words = attentionWords(count);
+    this.navBadge.hidden = count === 0;
+    if (this.navBadge.textContent !== String(count)) this.navBadge.textContent = count ? String(count) : "";
+    this.navToggle.setAttribute("aria-label", words ? `Toggle sessions, ${words}` : "Toggle sessions");
+    this.navToggle.toggleAttribute("data-attention", count > 0);
+    this.railAttention.hidden = count === 0;
+    if (this.railAttention.textContent !== words) this.railAttention.textContent = words;
   }
   patchMainHead(state) {
     const selected = selectedSession(state);
