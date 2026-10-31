@@ -198,6 +198,15 @@ var httpRoutes = []HTTPRoute{
 		// see whether the caller is a sandbox and narrow to its own session (#3056).
 		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.snapshot) },
 	},
+	// Not sandboxAllowed: it reads any session's agent tab by id, and a sandbox
+	// must not read another session's screen.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/PreviewSession",
+		Description: "Read the last lines (1-40, default 40) of a session's agent tab, by stable id, as plain text with escapes and control characters removed; read only.",
+		requestType: reflect.TypeOf(PreviewSessionRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PreviewSession) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/KillSession",

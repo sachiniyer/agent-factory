@@ -13,6 +13,8 @@ import {
   agentConfigSkippedText,
   archiveWarningText,
   attentionReason,
+  attentionWords,
+  otherAttentionCount,
   callbackUnavailableText,
   canHandoff,
   type DotKind,
@@ -653,4 +655,22 @@ test("rowTitle prefixes [remote] for every off-box backend like the TUI (#4336)"
   }
   assert.equal(rowTitle(sess({ title: "w", backend_type: "local" })), "w");
   assert.equal(rowTitle(sess({ title: "w" })), "w");
+});
+
+test("otherAttentionCount counts only other live sessions asking for the user (#6405)", () => {
+  const asking = { reason: "x", set_at: "2026-10-20T12:00:00Z" };
+  const sessions = [
+    sess({ id: "a", liveness: Liveness.Ready, attention: asking }),
+    sess({ id: "b", liveness: Liveness.Running, attention: asking }),
+    sess({ id: "c", liveness: Liveness.Ready }),
+  ];
+  assert.equal(otherAttentionCount(sessions, "a"), 1);
+  assert.equal(otherAttentionCount(sessions, null), 2);
+  assert.equal(otherAttentionCount(sessions, "c"), 2);
+});
+
+test("attentionWords states the count in words (#6405)", () => {
+  assert.equal(attentionWords(0), "");
+  assert.equal(attentionWords(1), "1 session needs attention");
+  assert.equal(attentionWords(3), "3 sessions need attention");
 });
