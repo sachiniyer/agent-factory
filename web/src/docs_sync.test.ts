@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { AUTOSAVE_DELAY_MS, DocSync, SAVE_RETRY_MS, SAVE_TIMEOUT_MS, type SyncStatus } from "./docs_sync.js";
 import { SAVE_DROP_GIVE_UP_MS, SAVE_GIVE_UP_MS } from "./docs_sync_model.js";
+import { ApiError } from "./api.js";
 import type { DocText, SaveResult } from "./proposal_api.js";
 
 interface Deferred<T> {
@@ -464,7 +465,7 @@ test("a save whose connection dropped and lands later does not overwrite an undo
   h.type("v1"); // the user undoes back to the acknowledged text
   // The connection drops (the browser reports only that fetch failed): the daemon does not cancel the
   // save when its client leaves, so the request can still commit.
-  h.saves[0]!.reply.reject(new TypeError("Failed to fetch"));
+  h.saves[0]!.reply.reject(new ApiError(0, "cannot reach the daemon: Failed to fetch"));
   await tick();
   let verdict: string | null = null;
   void h.sync.whenSaved().then((v) => (verdict = v));
@@ -485,7 +486,7 @@ test("a dropped save's doubt ends after the drop window when nothing landed", as
   h.type("v2");
   await h.fire();
   h.type("v1");
-  h.saves[0]!.reply.reject(new TypeError("Failed to fetch"));
+  h.saves[0]!.reply.reject(new ApiError(0, "cannot reach the daemon: Failed to fetch"));
   await tick();
   let verdict: string | null = null;
   void h.sync.whenSaved().then((v) => (verdict = v));
