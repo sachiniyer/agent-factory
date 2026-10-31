@@ -683,5 +683,6 @@ func (m *home) Init() tea.Cmd {
 			return previewTickMsg{}
 		},
 		tickRefreshExternalCmd,
+		webListenerNoticeCmd(m.ctx, 2*time.Second),
 	)
 }
