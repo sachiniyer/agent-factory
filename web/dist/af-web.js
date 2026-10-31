@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "a46b9069ec72";
+var CLIENT_VERSION = "9e773a802cb3";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -16860,12 +16860,12 @@ function triggerSummary(t) {
 function canTrigger(t) {
   return t.enabled && !!t.cron_expr && t.cron_expr.trim() !== "" && !(t.watch_cmd && t.watch_cmd.trim() !== "");
 }
-function lastRunSummary(t) {
+function lastRunSummary(t, now = /* @__PURE__ */ new Date()) {
   if (!t.last_run_at) {
     return "never run";
   }
   const status = t.last_run_status ? ` (${t.last_run_status})` : "";
-  return `last run ${t.last_run_at}${status}`;
+  return `last run ${formatTime(t.last_run_at, now)}${status}`;
 }
 function taskNeedsAttention(t) {
   return !!t.overdue || !!t.unschedulable || notArmed(t);
