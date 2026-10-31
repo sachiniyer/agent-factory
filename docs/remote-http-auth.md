@@ -659,6 +659,60 @@ allowed_hosts = ["box.tailnet.ts.net"]
   plain 404, so `network.allowed_hosts` does not apply there. The headless agent-server is not a browser surface; its token is
   mandatory for every peer, and it has no `Host` rule.
 
+## Cross-site browser requests are refused
+
+**The guarantee:** a browser request from another site never reaches the
+daemon's API or its WebSocket streams over TCP, whatever `network.require_token`
+says. Non-browser clients (the `af` CLI and TUI, the in-sandbox `af`, scripts)
+are unaffected except for one rule: a request body must be sent as
+`Content-Type: application/json`.
+
+Why it matters: a browser sends some requests to any address without asking
+first — a form-encoded, multipart or `text/plain` POST, or one with no body — and
+a WebSocket handshake is not covered by CORS at all. The page that sends one
+cannot read the answer, but under the tokenless default the side effect would
+still happen: a session created with a prompt, a prompt sent to an agent, a
+session killed. The Host check above does not stop this, because such a request
+is addressed to a genuine `127.0.0.1`.
+
+Before any route runs, the daemon judges each request to `/v1/…` in this order:
+
+1. **An origin you listed** in `network.cors_allowed_origins` is admitted, exactly
+   as before (see [CORS](#cors-for-the-browser-web-client)).
+2. **Fetch metadata.** When the browser sends `Sec-Fetch-Site`, only
+   `same-origin` and `none` (a URL the user typed or bookmarked) are admitted.
+   `cross-site` is refused, and so is `same-site`: on this machine that means
+   another port of the same host — where an agent's dev server runs — and nothing
+   af serves needs it.
+3. **Origin**, for an older browser that sends no fetch metadata: an `Origin` that
+   is not the daemon's own (the same host name and port the request was addressed
+   to, and `https` when the request arrived over HTTPS) is refused, `null`
+   included.
+4. **Content type.** A request with a body must send
+   `Content-Type: application/json`, and any declared `Content-Type` must be JSON.
+   A form cannot, and a JSON request from another site needs a preflight the daemon
+   grants only to the origins in step 1. A POST with no body and no `Content-Type`
+   is fine.
+
+A refusal is `403` (steps 2–3) or `415` (step 4) with the daemon's usual error
+envelope, and the daemon logs it, rate-limited, without the body or the query.
+
+- **`curl` over TCP:** send JSON as JSON —
+  `curl -H 'Content-Type: application/json' -d '{}' …` or `curl --json '{}' …`.
+  Plain `-d` sends a form and gets `415`. The Unix socket is unchanged, so the
+  `curl --unix-socket … -d '{}'` examples in the [HTTP API guide](http-api.md) keep
+  working.
+- **Behind a reverse proxy**, the web UI keeps working: a modern browser marks its
+  own requests `same-origin`. A browser without fetch metadata is judged by
+  `Origin` instead, so if your proxy rewrites the `Host` header (nginx's default
+  `proxy_pass` sends `127.0.0.1:8443`), either forward it (`proxy_set_header Host
+  $host`, plus `X-Forwarded-Proto`) or add your public origin to
+  `network.cors_allowed_origins`.
+- **Not covered, deliberately:** the web-tab and editor content under
+  `/v1/webtab/…`, and the preview listener. That content belongs to the app being
+  previewed — its sandboxed frame's own requests are cross-site by definition —
+  and it goes to that app's dev server or editor, never to af's API.
+
 ## CORS (for the browser web client)
 
 Browsers enforce CORS, so a web client served from a different origin than the
@@ -678,7 +732,9 @@ cors_allowed_origins = ["https://af.example.com"]
   **unaffected** by this key either way.
 - A CORS preflight (`OPTIONS`) carries no credentials and is answered before the
   token gate, so cross-origin discovery works; the actual request still needs a
-  valid token.
+  valid token. A preflight from an origin that is **not** listed is refused
+  outright, as is any other request from it (see [Cross-site browser
+  requests](#cross-site-browser-requests-are-refused)).
 
 If you front af with a reverse proxy, the browser's origin is the **proxy's**
 origin — allow-list that (an `https://` origin), and let the proxy reach af's
@@ -726,6 +782,10 @@ plaintext backend.
   DNS-rebinding page cannot reach the tokenless loopback API. Add a name only if you
   reach af through it on purpose. See [Host names the daemon answers
   to](#host-names-the-daemon-answers-to).
+- **No other site can drive the daemon from a browser.** Cross-site requests and
+  WebSocket handshakes are refused before any route runs, in every auth posture,
+  and request bodies must be JSON. See [Cross-site browser
+  requests](#cross-site-browser-requests-are-refused).
 - **Rotate on suspected exposure.** `af token rotate` invalidates the old token
   for new connections at once — no restart, no downtime for live sessions.
 

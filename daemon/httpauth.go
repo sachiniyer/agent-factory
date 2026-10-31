@@ -257,6 +257,12 @@ type requestPosture struct {
 	// withLiveHostGuard before routing (hostguard.go). servePosture never consults
 	// it: by the time a request reaches the gate its Host has been admitted.
 	allowedHosts []string
+	// refuseCrossSite turns on the cross-site request guard (crosssite.go): a
+	// browser request from another site never reaches a control-plane route. Set
+	// by startTCPListenerWithListen for every TCP listener except the preview
+	// origin (whose path space is the previewed app's); left false by the unix
+	// sockets, which no browser can reach.
+	refuseCrossSite bool
 	// previewOrigin marks a listener that carries NO control plane and whose whole
 	// path space belongs to the previewed app (#1856 step 3b). It changes three
 	// things below, and all three follow from that one fact:
@@ -283,6 +289,15 @@ type requestPosture struct {
 // caller has ALREADY built from a single config read. It performs no config read
 // of its own — that is the whole point: the one read happened once, above.
 func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p requestPosture) {
+	// The cross-site guard runs first — before the CORS headers, the OPTIONS and
+	// auth-info shortcuts, and the gate — so a refused request is answered by
+	// nothing but its refusal. It reads only this posture's cors list.
+	if p.refuseCrossSite {
+		if d := crossSiteRefusal(r, p.cors); d != nil {
+			refuseCrossSite(w, r, d)
+			return
+		}
+	}
 	applyCORSPolicy(w, r, p.cors)
 	// Both shortcuts below are CONTROL-PLANE conveniences, and both are withheld on a
 	// per-tab preview origin, where every path and every method belongs to the
