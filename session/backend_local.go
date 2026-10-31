@@ -650,8 +650,18 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				}
 			}
 			if err != nil {
-				if account != "" {
-					return fmt.Errorf("restore account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
+				// One predicate decides every row kind. An account-scoped row refuses
+				// any restore failure (a persisted pane that cannot be replaced would
+				// expose ambient credentials, #3340). A refused restore
+				// (restoreDeferred: tmux.ErrSessionSocketUnverified or
+				// tmux.ErrSpawnDirMissing) is final for the pass for EVERY row kind:
+				// the session is kept as it was. Continuing would let the dead-shell
+				// check below re-probe it with pre-spawn semantics, read a
+				// possibly-live shell as absent and Start it under its own name — a
+				// second tmux server on the recreated socket, an orphaned shell, and
+				// the live agent's unknown liveness turned into absent (#6247).
+				if account != "" || restoreDeferred(err) {
+					return fmt.Errorf("restore tab %q for %q: %w", tab.Name, i.Title, err)
 				}
 				// A refused restore (restoreDeferred — tmux.ErrSpawnDirMissing or
 				// tmux.ErrSessionSocketUnverified) holds the contract "the session is
