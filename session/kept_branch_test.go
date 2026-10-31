@@ -38,3 +38,16 @@ func TestKeptBranchSaysWhenHeadCannotBeRead(t *testing.T) {
 	assert.Empty(t, k.Name)
 	assert.Contains(t, k.Note(), "Could not read")
 }
+
+// A tag that shares the recorded branch's name must not make --short answer
+// "heads/dev/beta": the af-owned branch is still not an extra kept branch.
+func TestKeptBranchIgnoresATagSharingTheBranchName(t *testing.T) {
+	dir := t.TempDir()
+	keptGit(t, dir, "init", "-q", "-b", "dev/beta")
+	keptGit(t, dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x")
+	keptGit(t, dir, "tag", "dev/beta")
+
+	assert.False(t, keptBranchFor(dir, "dev/beta").Any(), "HEAD on the recorded branch: nothing extra is kept")
+	keptGit(t, dir, "checkout", "-q", "-b", "feature/x")
+	assert.Equal(t, "feature/x", keptBranchFor(dir, "dev/beta").Name)
+}

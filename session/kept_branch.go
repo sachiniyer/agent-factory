@@ -55,7 +55,7 @@ func KeptBranchAt(path, recorded string) KeptBranch { return keptBranchFor(path,
 func keptBranchFor(path, recorded string) KeptBranch {
 	ctx, cancel := context.WithTimeout(context.Background(), keptBranchGitTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", path, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	out, err := exec.CommandContext(ctx, "git", "-C", path, "symbolic-ref", "--quiet", "HEAD").Output()
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) && exit.ExitCode() == 1 {
@@ -63,7 +63,9 @@ func keptBranchFor(path, recorded string) KeptBranch {
 		}
 		return KeptBranch{Unreadable: true}
 	}
-	head := strings.TrimSpace(string(out))
+	// The full ref, with exactly refs/heads/ stripped: --short can answer
+	// heads/dev/beta when a tag shares the branch's name.
+	head := strings.TrimPrefix(strings.TrimSpace(string(out)), "refs/heads/")
 	if head == "" || head == recorded {
 		return KeptBranch{}
 	}
