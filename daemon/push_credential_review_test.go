@@ -140,6 +140,9 @@ func TestGitCredential_RefusesASessionASandboxCreated(t *testing.T) {
 // it is not a request field a caller can send or omit.
 func TestSandboxScopedCreateStampsItsProvenance(t *testing.T) {
 	pf := newPushFixture(t)
+	pf.setConfig(func(c *config.Config) {
+		c.Hosts = map[string]config.HostConfig{"box1": c.Hosts["box1"], "h1": {Host: "h1.example"}}
+	})
 	var captured CreateSessionRequest
 	cs := &controlServer{manager: pf.mgr}
 	cs.createSessionFn = func(_ context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error {

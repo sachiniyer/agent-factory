@@ -193,22 +193,43 @@ func TestOperatorProvenanceIsPositiveAndUnknownFailsClosed(t *testing.T) {
 }
 
 func TestRuntimeMachineSharesIsConservative(t *testing.T) {
+	t.Cleanup(SetMachineLookupForTest(map[string][]string{
+		"box1.example": {"198.51.100.7", "2001:db8::7"},
+		"box2.example": {"198.51.100.8"},
+		"box9":         {"198.51.100.9"},
+		"box3":         {"198.51.100.3"},
+		"box4":         {"198.51.100.4"},
+		// Spellings that resolve ELSEWHERE, so only the naming rules can match
+		// them, not a shared address or the fail-closed unknown.
+		"box1.example.": {"203.0.113.50"},
+		"box1":          {"203.0.113.51"},
+	}))
 	box1 := RuntimeMachine{Host: "box1.example", Addr: "198.51.100.7"}
 	for name, tc := range map[string]struct {
 		a, b RuntimeMachine
 		want bool
 	}{
 		"same host":                       {box1, RuntimeMachine{Host: "BOX1.example"}, true},
+		"trailing dot":                    {box1, RuntimeMachine{Host: "box1.example."}, true},
+		"short name of an FQDN":           {box1, RuntimeMachine{Host: "box1"}, true},
 		"same pinned address":             {box1, RuntimeMachine{Host: "box2.example", Addr: "198.51.100.7"}, true},
 		"host is the other's address":     {box1, RuntimeMachine{Host: "198.51.100.7"}, true},
+		"IPv4-mapped IPv6":                {box1, RuntimeMachine{Host: "::ffff:198.51.100.7"}, true},
+		"another IPv6 spelling":           {box1, RuntimeMachine{Host: "2001:0db8:0:0::7"}, true},
+		"two addresses of one name":       {RuntimeMachine{Host: "2001:db8::7"}, RuntimeMachine{Host: "198.51.100.7", Addr: "198.51.100.7"}, false},
+		"the name links both addresses":   {RuntimeMachine{Host: "2001:db8::7"}, box1, true},
 		"another machine":                 {box1, RuntimeMachine{Host: "box2.example", Addr: "198.51.100.8"}, false},
-		"ipv6 brackets":                   {RuntimeMachine{Addr: "[2001:db8::1]"}, RuntimeMachine{Host: "2001:db8::1"}, true},
-		"same free-form command":          {RuntimeMachine{SandboxSSH: "ssh box3"}, RuntimeMachine{SandboxSSH: " ssh box3 "}, true},
-		"other free-form command":         {RuntimeMachine{SandboxSSH: "ssh box3"}, RuntimeMachine{SandboxSSH: "ssh box4"}, false},
-		"free-form naming the ssh host":   {RuntimeMachine{SandboxSSH: "ssh -p 2222 dev@box1.example"}, box1, true},
+		"an unresolvable name":            {box1, RuntimeMachine{Host: "nowhere.example"}, true},
+		"an in-flight provision":          {box1, RuntimeMachine{Unknown: true}, true},
+		"same free-form destination":      {RuntimeMachine{SandboxSSH: "ssh box3"}, RuntimeMachine{SandboxSSH: " ssh  box3 "}, true},
+		"other free-form destination":     {RuntimeMachine{SandboxSSH: "ssh box3"}, RuntimeMachine{SandboxSSH: "ssh box4"}, false},
+		"free-form naming the ssh host":   {RuntimeMachine{SandboxSSH: "ssh -p 2222 -i /k dev@box1.example"}, box1, true},
 		"free-form url naming an address": {box1, RuntimeMachine{SandboxSSH: "ssh ssh://dev@198.51.100.7:22"}, true},
+		"free-form HostName override":     {box1, RuntimeMachine{SandboxSSH: "ssh -o HostName=198.51.100.7 alias"}, true},
 		"free-form naming another":        {RuntimeMachine{SandboxSSH: "ssh dev@box9"}, box1, false},
-		"nothing recorded":                {RuntimeMachine{}, RuntimeMachine{}, false},
+		"free-form ssh_config alias":      {RuntimeMachine{SandboxSSH: "ssh myalias"}, box1, true},
+		"free-form wrapper script":        {RuntimeMachine{SandboxSSH: "/usr/local/bin/to-box"}, box1, true},
+		"nothing recorded":                {RuntimeMachine{}, box1, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.a.Shares(tc.b))
@@ -230,7 +251,7 @@ func TestRuntimeMachineReadsTheRecordedRuntime(t *testing.T) {
 	repoTarget := &Instance{Title: "r", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", Config: config.SSHConfig{Host: "box1.example"}}}}
 	m, ok = repoTarget.RuntimeMachine()
 	require.True(t, ok, "a repository's own [ssh] target still runs on a machine")
-	assert.Equal(t, "box1.example", m.Host)
+	assert.Equal(t, RuntimeMachine{Host: "box1.example", RepoChosen: true}, m, "one the repository chose")
 
 	free := &Instance{Title: "f", backend: &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{SessionDir: "/s", SSHCommand: "ssh box3"}}}
 	m, ok = free.RuntimeMachine()
@@ -273,4 +294,66 @@ func TestStoppedPreservedArchiveNeedsEveryConditionOfAConfirmedStop(t *testing.T
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 	assert.True(t, restored.StoppedPreservedArchive())
+}
+
+// Third review of #6433, B: while a re-provision replaces the runtime, the
+// machine is Unknown (fail closed), and an archive mid-restore is not "stopped".
+func TestRuntimeMachineIsUnknownWhileAReprovisionRuns(t *testing.T) {
+	listed := &Instance{Title: "l", Host: "box1", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1",
+		Config: config.SSHConfig{Host: "box1.example"}}}}
+	end := listed.beginProvisioning()
+	m, ok := listed.RuntimeMachine()
+	require.True(t, ok)
+	assert.Equal(t, RuntimeMachine{Unknown: true}, m, "a listed host the operator named stays operator-placed")
+	end()
+	end() // idempotent
+	m, _ = listed.RuntimeMachine()
+	assert.False(t, m.Unknown)
+
+	reaped := &Instance{Title: "r", backend: &sshBackend{}}
+	_, ok = reaped.RuntimeMachine()
+	assert.False(t, ok, "a reaped runtime runs nowhere")
+	end = reaped.beginProvisioning()
+	m, ok = reaped.RuntimeMachine()
+	require.True(t, ok, "but one being re-provisioned runs somewhere af can't name")
+	assert.Equal(t, RuntimeMachine{Unknown: true, RepoChosen: true}, m, "with no named host, not shown to be the operator's placement")
+	end()
+
+	archived := &Instance{Title: "a", liveness: LiveArchived, archivedWorkspace: &ArchivedWorkspaceData{Host: "box1", Dir: "/s"}}
+	end = archived.beginProvisioning()
+	assert.False(t, archived.StoppedPreservedArchive(), "an archive being restored is not stopped")
+	end()
+	assert.True(t, archived.StoppedPreservedArchive())
+}
+
+func TestPlannedRuntimeMachineResolvesTheTargetTheRuntimeWill(t *testing.T) {
+	t.Setenv("GH_HOST", "")
+	cfg := &config.ResolvedConfig{}
+	cfg.Hosts = map[string]config.HostConfig{"box1": {Host: "box1.example"}}
+	cfg.SandboxSSH = "ssh freebox"
+	prev := resolvedConfigFor
+	resolvedConfigFor = func(string) (*config.ResolvedConfig, error) { return cfg, nil }
+	t.Cleanup(func() { resolvedConfigFor = prev })
+
+	m, offBox := PlannedRuntimeMachine(InstanceOptions{Host: "box1"}, t.TempDir())
+	require.True(t, offBox)
+	assert.Equal(t, RuntimeMachine{Host: "box1.example"}, m, "a named listed host is the operator's placement")
+
+	cfg.DefaultHost = "box1"
+	m, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendSSH}, t.TempDir())
+	assert.Equal(t, RuntimeMachine{Host: "box1.example"}, m, "default_host too")
+
+	cfg.DefaultHost = ""
+	cfg.SSH = &config.SSHConfig{Host: "repo-box.example"}
+	m, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendSSH}, t.TempDir())
+	assert.Equal(t, RuntimeMachine{Host: "repo-box.example", RepoChosen: true}, m, "a repository's own [ssh] target")
+
+	m, _ = PlannedRuntimeMachine(InstanceOptions{Host: "not-listed"}, t.TempDir())
+	assert.True(t, m.Unknown, "a target that can't be resolved is Unknown")
+
+	m, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendSandbox}, t.TempDir())
+	assert.Equal(t, RuntimeMachine{SandboxSSH: "ssh freebox"}, m)
+
+	_, offBox = PlannedRuntimeMachine(InstanceOptions{Backend: BackendLocal}, t.TempDir())
+	assert.False(t, offBox, "a local session gets no callback")
 }

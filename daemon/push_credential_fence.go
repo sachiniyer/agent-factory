@@ -55,6 +55,40 @@ type pushCredentialState struct {
 	// number, so a snapshot can tell the fences written before it from those
 	// written after (pushRefSnapshot).
 	writes uint64
+
+	// inflight holds the creates the operator did not place while they provision
+	// (holdInflightCreate), under inflightMu.
+	inflightMu sync.Mutex
+	inflight   map[string]inflightCreate
+}
+
+// holdInflight records c under id until the returned func runs.
+func (s *pushCredentialState) holdInflight(id string, c inflightCreate) (release func()) {
+	s.inflightMu.Lock()
+	if s.inflight == nil {
+		s.inflight = map[string]inflightCreate{}
+	}
+	s.inflight[id] = c
+	s.inflightMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.inflightMu.Lock()
+			delete(s.inflight, id)
+			s.inflightMu.Unlock()
+		})
+	}
+}
+
+// inflightCreates is a copy of the creates being held.
+func (s *pushCredentialState) inflightCreates() map[string]inflightCreate {
+	s.inflightMu.Lock()
+	defer s.inflightMu.Unlock()
+	out := make(map[string]inflightCreate, len(s.inflight))
+	for id, c := range s.inflight {
+		out[id] = c
+	}
+	return out
 }
 
 // pushFence is one persisted fence.

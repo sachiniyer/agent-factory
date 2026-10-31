@@ -3,11 +3,14 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	stdlog "log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -147,6 +150,22 @@ func TestGitCredential_WithheldWhileASessionTheOperatorDidNotCreateSharesTheMach
 		// nothing; its recorded runtime only lets a later kill reap the directory.
 		"sandbox-created, confirmed-stopped preserved archive": {session.InstanceData{ID: "t1", Title: "t", CreatedBySandbox: "x",
 			Status: session.Archived, ArchivedWorkspace: &session.ArchivedWorkspaceData{Host: "box1", Dir: "/s"}}, &box1Machine, false},
+		// Third review of #6433, D: a repository's own [ssh] target is a placement
+		// the repository chose, whoever created the session.
+		"operator-created, a repo's [ssh] target on the same machine": {session.InstanceData{ID: "t1", Title: "t", CreatedByOperator: true},
+			&session.RuntimeMachine{Host: "box1.example", RepoChosen: true}, true},
+		"operator-created, a repo's [ssh] target elsewhere": {session.InstanceData{ID: "t1", Title: "t", CreatedByOperator: true},
+			&session.RuntimeMachine{Host: "box9.example", RepoChosen: true}, false},
+		// B: a re-provision in flight runs somewhere af can't name yet.
+		"sandbox-created, being re-provisioned": {session.InstanceData{ID: "t1", Title: "t", CreatedBySandbox: "x"},
+			&session.RuntimeMachine{Unknown: true}, true},
+		"operator-created on a listed host, being re-provisioned": {session.InstanceData{ID: "t1", Title: "t", CreatedByOperator: true},
+			&session.RuntimeMachine{Unknown: true}, false},
+		// C: a machine that can't be shown to differ is the same one.
+		"sandbox-created, on a name that does not resolve": {session.InstanceData{ID: "t1", Title: "t", CreatedBySandbox: "x"},
+			&session.RuntimeMachine{Host: "nowhere.example"}, true},
+		"sandbox-created, on the licensed name with a trailing dot": {session.InstanceData{ID: "t1", Title: "t", CreatedBySandbox: "x"},
+			&session.RuntimeMachine{Host: "BOX1.example."}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pf := newPushFixture(t)
@@ -206,9 +225,16 @@ func TestSandboxCannotCreateOnAPushLicensedMachine(t *testing.T) {
 	for _, host := range []string{"box1", " box1 ", "box1-alias", "by-address"} {
 		code, body := create(host)
 		assert.NotEqualf(t, http.StatusOK, code, "create on %q", host)
-		assert.Containsf(t, body, refuseSandboxCreateLicensed, "create on %q", host)
+		assert.Containsf(t, body, refuseSandboxCreateHost, "create on %q", host)
 	}
 	assert.Empty(t, created, "nothing reached the create")
+
+	// Third review of #6433: the refusal must not tell a sandbox WHICH names are
+	// licensed, so a licensed name answers exactly as a name that is not listed.
+	_, licensed := create("box1")
+	_, unlisted := create("not-a-listed-host")
+	assert.Equal(t, licensed, unlisted, "a licensed host and an unlisted one must be refused alike")
+	assert.NotContains(t, licensed, "push", "nor name the reason")
 
 	code, body := create("box9")
 	require.Equal(t, http.StatusOK, code, body)
@@ -218,7 +244,7 @@ func TestSandboxCannotCreateOnAPushLicensedMachine(t *testing.T) {
 	pf.setConfig(func(c *config.Config) { c.SandboxSSH, c.SandboxPushCredentials = "ssh dev@box9.example", true })
 	code, body = create("box9")
 	assert.NotEqual(t, http.StatusOK, code)
-	assert.Contains(t, body, refuseSandboxCreateLicensed)
+	assert.Contains(t, body, refuseSandboxCreateHost)
 }
 
 func TestCheckHostNamesTheSessionsThatWithholdPushCredentials(t *testing.T) {
@@ -280,4 +306,90 @@ func TestGitCredential_AuditLineFollowsTheFinalCheck(t *testing.T) {
 	requireRefused(t, code, got, msg, refusePushNotLive)
 	assert.NotContains(t, buf.String(), "push credential: answered", "a request refused at the final check was logged as answered")
 	assert.Contains(t, buf.String(), "refused session "+pf.me.ID)
+}
+
+// --- third review of #6433: B, an in-flight create ----------------------------
+
+// A create the operator did not place runs its hooks on its machine before its
+// row is tracked: from before provisioning until then, that machine is held.
+func TestGitCredential_WithheldWhileACreateTheOperatorDidNotPlaceProvisions(t *testing.T) {
+	pf := newPushFixture(t)
+	planned := session.RuntimeMachine{Host: "box1.example"}
+	prev := plannedRuntimeMachine
+	plannedRuntimeMachine = func(session.InstanceOptions, string) (session.RuntimeMachine, bool) { return planned, true }
+	t.Cleanup(func() { plannedRuntimeMachine = prev })
+
+	release := pf.mgr.holdInflightCreate("child-9", "child", session.InstanceOptions{}, pf.me.Path, true)
+	code, got, msg := pf.askOwn(t)
+	requireRefused(t, code, got, msg, refusePushHostShared)
+	release()
+	code, got, msg = pf.askOwn(t)
+	requireAnswered(t, code, got, msg)
+
+	planned = session.RuntimeMachine{Host: "box1.example", RepoChosen: true}
+	release = pf.mgr.holdInflightCreate("repo-1", "repo", session.InstanceOptions{}, pf.me.Path, false)
+	code, got, msg = pf.askOwn(t)
+	requireRefused(t, code, got, msg, refusePushHostShared)
+	release()
+
+	// An operator create onto a placement the operator chose is not held, and one
+	// onto another machine holds nothing here.
+	planned = session.RuntimeMachine{Host: "box1.example"}
+	release = pf.mgr.holdInflightCreate("op-1", "op", session.InstanceOptions{}, pf.me.Path, false)
+	code, got, msg = pf.askOwn(t)
+	requireAnswered(t, code, got, msg)
+	release()
+	planned = session.RuntimeMachine{Host: "box9.example", RepoChosen: true}
+	release = pf.mgr.holdInflightCreate("repo-2", "repo2", session.InstanceOptions{}, pf.me.Path, false)
+	code, got, msg = pf.askOwn(t)
+	requireAnswered(t, code, got, msg)
+	release()
+}
+
+// And CreateSession holds it across provisioning: a credential asked for while
+// the backend is being provisioned is refused, and answered once the create is
+// over.
+func TestCreateSessionHoldsItsMachineWhileItProvisions(t *testing.T) {
+	pf := newPushFixture(t)
+	prev := plannedRuntimeMachine
+	plannedRuntimeMachine = func(session.InstanceOptions, string) (session.RuntimeMachine, bool) {
+		return session.RuntimeMachine{Host: "box1.example", RepoChosen: true}, true
+	}
+	t.Cleanup(func() { plannedRuntimeMachine = prev })
+	var during string
+	var provisioned bool
+	t.Cleanup(session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+		provisioned = true
+		_, _, during = pf.askOwn(t)
+		return nil, errors.New("provisioning stopped by the test")
+	}))
+	_, err := pf.mgr.CreateSession(context.Background(), CreateSessionRequest{Title: "repo-target", RepoPath: pf.me.Path, Program: "claude"})
+	require.Error(t, err)
+	require.True(t, provisioned, "the create reached provisioning")
+	assert.Contains(t, during, refusePushHostShared, "a credential asked for mid-provision")
+	assert.Empty(t, pf.mgr.pushCreds.inflightCreates(), "released once the create is over")
+	code, got, msg := pf.askOwn(t)
+	requireAnswered(t, code, got, msg)
+}
+
+// --- third review of #6433: the cross-forward refusal log is rate-limited -------
+
+func TestCrossForwardRefusalLogIsRateLimited(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var lines []string
+	l := &crossForwardLog{now: func() time.Time { return now }, lastLogged: map[string]time.Time{},
+		logf: func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }}
+	for i := 0; i < 50; i++ {
+		l.record("sess-a", "a listener with no ssh forward")
+	}
+	require.Len(t, lines, 1, "one line per session per interval, however often it is refused")
+	for i := 0; i < 30; i++ {
+		l.record(fmt.Sprintf("sess-%d", i), "a listener with no ssh forward")
+	}
+	assert.Len(t, lines, crossForwardLogBurst, "at most a burst a minute across all sessions")
+
+	now = now.Add(crossForwardLogInterval)
+	l.record("sess-a", "a listener with no ssh forward")
+	require.Len(t, lines, crossForwardLogBurst+1)
+	assert.Contains(t, lines[len(lines)-1], "further refusals not logged", "the suppressed count is carried into the next line")
 }

@@ -211,6 +211,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 	// The backend/target selection comes from the one resolver validation used.
 	req.applyBackendSelection(&launchOpts)
+	// Its hooks run on its machine before the row is tracked (#5571 W7.8).
+	defer m.holdInflightCreate(pending.ID, title, launchOpts, workspace, req.createdBySandbox != "")()
 	instance, err := session.NewInstance(launchOpts)
 	// A create that does not finish must not leave a live credential behind
 	// (#3012 review). The mint happens INSIDE NewInstance, so a provisioning
