@@ -137,6 +137,127 @@ func (t lockedTarget) confirmDir() error {
 		t.link, t.dir, moved, t.dirResolved)
 }
 
+// confirmSiblingDir verifies the pinned directory holds the legacy config.json
+// readSibling is about to open — the premise the conversion's
+// readSibling/renameSibling pair depends on. The lock covers config.toml, and
+// the conversion reads and renames the legacy config.json BESIDE it through that
+// same pinned fd; that is correct only while the config.json readSibling reaches
+// is the user's legacy one.
+//
+// A config.toml installed as a symlink to another directory between LoadConfig
+// observing it missing and this lock pinning it leaves dirFD pointing at the
+// symlink target's directory rather than the home holding the legacy
+// config.json. readSibling would then open an unrelated file there (or, absent
+// one, return ENOENT and silently leave the real legacy configuration
+// unconverted) — the sibling race the pinned directory exists to close, reopened
+// at the file instead of the home. Refuse that one-shot race up front by
+// comparing the file the pinned name reaches with the file the legacy path
+// resolves to. A config.json that is ITSELF a symlink into the home from
+// elsewhere is a valid sibling — readSibling follows it to the same file the
+// path resolves to — so this confirms it rather than refusing. A config.json
+// that has already vanished is readSibling's to answer with defaults, not a
+// symlink race; a home link that moves mid-operation is confirm's, before the
+// write and the rename.
+func (t lockedTarget) confirmSiblingDir(siblingPath string) error {
+	var want unix.Stat_t
+	if err := unix.Stat(siblingPath, &want); err != nil {
+		if os.IsNotExist(err) {
+			// The vanished-sibling case is readSibling's to answer (defaults),
+			// not a freshly introduced symlink race — but only when the
+			// directory siblingPath reaches is the one the lock covers. A
+			// config.json removed after LoadConfig read it while another
+			// process installs config.toml as a symlink to a different
+			// directory leaves dirFD pointing at that target dir, where
+			// readSibling would open an unrelated config.json and the rename
+			// would move it aside. Confirm the parent identity the same way
+			// the present-sibling and pinned-ENOENT branches below do, and
+			// refuse the same one-shot symlink race up front when the
+			// directories differ; let the pinned read handle absence only
+			// when the legacy path's parent is the pinned directory.
+			same, dErr := t.reachesPinnedDir(siblingPath)
+			if dErr != nil {
+				return dErr
+			}
+			if !same {
+				return fmt.Errorf("cannot convert %s under the lock on %s: the legacy config.json is not in the directory the lock covers (%s) — a freshly introduced config.toml symlink points elsewhere than the home holding it; re-run once config.toml is not a symlink out of its home",
+					siblingPath, t.link, t.dirResolved)
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to inspect the legacy %s: %w", siblingPath, err)
+	}
+	if confirmSiblingDirStatHookForTest != nil {
+		confirmSiblingDirStatHookForTest()
+	}
+	// Fstatat with flags=0 follows a symlink the way readSibling's openat does,
+	// so the ENOENT check confirms whether the legacy name is in the pinned
+	// directory at all. An ENOENT here can mean one of two things: the pinned
+	// directory is not the one siblingPath reaches (the TOML-symlink race),
+	// or the sibling was concurrently removed between the stat above and this
+	// lookup. The latter is readSibling's to answer with defaults, not a
+	// refusal that aborts startup, so classify by the parent-directory
+	// identity: refuse only when the directories differ; when they match, let
+	// the pinned read handle absence the way a vanished sibling already does.
+	var got unix.Stat_t
+	if err := unix.Fstatat(t.dirFD, filepath.Base(siblingPath), &got, 0); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			same, dErr := t.reachesPinnedDir(siblingPath)
+			if dErr != nil {
+				return dErr
+			}
+			if same {
+				// The sibling was removed in the same directory the lock covers
+				// between the stat above and this lookup; readSibling answers
+				// that with defaults rather than aborting startup.
+				return nil
+			}
+			return fmt.Errorf("cannot convert %s under the lock on %s: the legacy config.json is not in the directory the lock covers (%s) — a freshly introduced config.toml symlink points elsewhere than the home holding it; re-run once config.toml is not a symlink out of its home",
+				siblingPath, t.link, t.dirResolved)
+		}
+		return fmt.Errorf("failed to confirm the legacy %s sits beside %s: %w", siblingPath, t.link, err)
+	}
+	// The file is present in the pinned directory. Compare the directory
+	// siblingPath reaches with dirFD rather than the file's own inode, so an
+	// editor that atomically replaces config.json (same directory, different
+	// inode) is accepted rather than tripping a false out-of-home-symlink
+	// refusal. The file-level stat above only confirms the name exists in the
+	// pinned directory; the inode can change between that and the directory
+	// check below when an editor rewrites config.json in place.
+	same, dErr := t.reachesPinnedDir(siblingPath)
+	if dErr != nil {
+		return dErr
+	}
+	if same {
+		return nil
+	}
+	return fmt.Errorf("cannot convert %s under the lock on %s: the config.json in the directory the lock covers (%s) is not the legacy %s — a freshly introduced config.toml symlink points at a directory other than the one holding the legacy config.json; re-run once config.toml is not a symlink out of its home",
+		siblingPath, t.link, t.dirResolved, siblingPath)
+}
+
+// reachesPinnedDir reports whether the directory siblingPath reaches is the
+// one the lock covers. confirmSiblingDir uses it both to confirm a present
+// sibling sits beside the locked file and to classify an ENOENT from the
+// pinned lookup: a same-directory ENOENT is a concurrently removed sibling
+// (readSibling answers with defaults), while a different-directory ENOENT is
+// the freshly introduced TOML-symlink race.
+func (t lockedTarget) reachesPinnedDir(siblingPath string) (bool, error) {
+	var wantDir, gotDir unix.Stat_t
+	if err := unix.Stat(filepath.Dir(siblingPath), &wantDir); err != nil {
+		return false, fmt.Errorf("failed to inspect the directory holding the legacy %s: %w", siblingPath, err)
+	}
+	if err := unix.Fstat(t.dirFD, &gotDir); err != nil {
+		return false, fmt.Errorf("failed to confirm the directory the lock covers for %s: %w", t.link, err)
+	}
+	return sameInode(&wantDir, &gotDir), nil
+}
+
+// confirmSiblingDirStatHookForTest, when non-nil, runs between the
+// unix.Stat(siblingPath) lookup and the Fstatat/directory comparison below —
+// the check-then-act window an editor's atomic config.json rewrite (same
+// directory, different inode) slips into. Tests use it to replace config.json
+// in that window and pin the directory-level comparison's acceptance.
+var confirmSiblingDirStatHookForTest func()
+
 // followedWriteRaceHookForTest, when non-nil, runs after confirm has passed and
 // before the bytes move — the check-then-act window confirm cannot close. Tests
 // use it to drive a retarget INTO that window, where only the pinned directory
@@ -208,6 +329,32 @@ func (t lockedTarget) read() ([]byte, error) {
 	return data, nil
 }
 
+// readSibling reads a file BESIDE the locked one — the legacy config.json the
+// one-time json→toml conversion reads — opened through the pinned directory
+// rather than by name. It is the read half of the hazard writeSibling and
+// removeSibling close for the write and delete: a path opened by name re-resolves
+// the home link at open time, so a home that moved between the lock's confirm and
+// the body's read feeds the conversion bytes from a directory this lock does not
+// cover — the same sibling race migrate.go pins its own body against, left
+// path-based here when the conversion was first written and never converted
+// (#3688, #3697).
+//
+// Errors are wrapped as *os.PathError naming path so callers keep testing them
+// with os.IsNotExist, the way read does for the locked file itself.
+func (t lockedTarget) readSibling(path string) ([]byte, error) {
+	fd, err := unix.Openat(t.dirFD, filepath.Base(path), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, &os.PathError{Op: "read", Path: path, Err: err}
+	}
+	return data, nil
+}
+
 // perm reports the locked file's current mode bits, asked of the pinned
 // directory. Callers use it to carry an existing file's mode onto a rewrite
 // rather than widening it to a fresh default.
@@ -249,6 +396,25 @@ func (t lockedTarget) writeSibling(path string, data []byte, perm os.FileMode) e
 func (t lockedTarget) removeSibling(path string) error {
 	if err := unix.Unlinkat(t.dirFD, filepath.Base(path), 0); err != nil {
 		return &os.PathError{Op: "remove", Path: path, Err: err}
+	}
+	return nil
+}
+
+// renameSibling renames a sibling of the locked file — the conversion's
+// config.json → config.json.bak move — inside the pinned directory. A
+// path-based os.Rename resolves both ends of the move through the home link at
+// call time, so a home repointed between the locked config.toml write and this
+// move can land it in a directory the lock does not cover — silently renaming
+// another home's active config.json to a .bak slot there while the conversion
+// reports success. renameat(dirFD, …, dirFD, …) asks the directory this lock
+// holds open, the way writeSibling's write and removeSibling's unlink do
+// (#3688, #3697). The caller confirms the link still names the pinned
+// directory before calling, so a retarget is refused loudly rather than made in
+// the wrong place; the move itself does not confirm, mirroring the writers,
+// because the fd it uses cannot be redirected regardless.
+func (t lockedTarget) renameSibling(srcPath, dstPath string) error {
+	if err := unix.Renameat(t.dirFD, filepath.Base(srcPath), t.dirFD, filepath.Base(dstPath)); err != nil {
+		return &os.LinkError{Op: "rename", Old: srcPath, New: dstPath, Err: err}
 	}
 	return nil
 }
