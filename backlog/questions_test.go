@@ -80,7 +80,7 @@ func TestServiceAnswerDelivers(t *testing.T) {
 	if h.attention["s1"] != "" {
 		t.Fatalf("attention not cleared: %q", h.attention["s1"])
 	}
-	want := PendingAnswer{ID: 1, AnswerID: out.Message.ID, SessionID: "s1", Prompt: "The user answered your question on B-1: Postgres"}
+	want := PendingAnswer{ID: 1, AnswerID: out.Message.ID, SessionID: "s1", Prompt: "The user answered your question on B-1 (\"Which db?\"): Postgres"}
 	if len(h.delivered) != 1 || h.delivered[0] != want {
 		t.Fatalf("%+v", h.delivered)
 	}
@@ -475,5 +475,61 @@ func TestAnswerFailedAfterAContinueLeavesTheItemRunning(t *testing.T) {
 	}
 	if got := b.Item(1).Status; got != StatusRunning {
 		t.Fatalf("status = %s: the failed answer overwrote the continued run", got)
+	}
+}
+
+// A pending answer belongs to the run that accepted it (its RunCount), so after a
+// restart it is never retargeted at a replacement run (Codex P2 on #6297).
+func TestPendingAnswerStaysWithTheRunThatAcceptedIt(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusReview
+	it.Runs = []RunRef{{SessionID: "old", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
+	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
+	if _, err := b.Answer(1, 0, "Postgres", true, now); err != nil {
+		t.Fatal(err)
+	}
+	if p := b.PendingAnswers(); len(p) != 1 || p[0].SessionID != "old" || p[0].Superseded {
+		t.Fatalf("before the replacement: %+v", p)
+	}
+	// The old session is killed and the item started again before the failure was recorded.
+	it.Runs = append(it.Runs, RunRef{SessionID: "new", State: RunStarted, StartedAt: now.Add(time.Minute)})
+	p := b.PendingAnswers()
+	if len(p) != 1 || p[0].SessionID != "old" || !p[0].Superseded {
+		t.Fatalf("after the replacement the answer must stay with the old run and be superseded: %+v", p)
+	}
+}
+
+// An answer accepted under an earlier run does not lend its saved status to an
+// answer in the replacement run (Codex P2 on #6295).
+func TestAnswerDoesNotInheritAnEarlierRunsRollbackStatus(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusReview
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
+	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
+	if _, err := b.Answer(1, 0, "Postgres", true, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.BeginStart(1, StartedByUser, nil, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.FinishStart(1, now.Add(time.Second), "s2", "A-2", nil, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := b.AddNote(1, AuthorAF, "ignored", now)
+	_ = q
+	it.Thread = append(it.Thread, Message{ID: 90, Kind: KindQuestion, Author: AuthorAF, Text: "Which cache?"})
+	ans, err := b.Answer(1, 90, "Redis", true, now.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AnswerFailed(1, ans.Answer.ID, "pane gone", now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Item(1).Status; got != StatusRunning {
+		t.Fatalf("status = %s: the replacement run's answer rolled back to the earlier run's status", got)
 	}
 }

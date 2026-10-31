@@ -359,6 +359,14 @@ func (m *Manager) redeliverBacklogAnswers(repoID string, b *backlog.Backlog) map
 		if it := b.Item(a.ID); it == nil || !answeredBefore(it, a.AnswerID, daemonProcessStart) {
 			continue
 		}
+		if a.Superseded {
+			// The run that accepted it is gone: recording the failure is all that is
+			// left, and it must not mark the new run's session as answering.
+			m.launchBackgroundMutation(func(stop <-chan struct{}) {
+				m.backlogAnswerFailed(repoID, a, "the item was started again in another session", stop)
+			})
+			continue
+		}
 		out[a.SessionID] = true
 		backlogHost{m: m}.DeliverAnswer(repoID, a)
 	}

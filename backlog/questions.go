@@ -7,9 +7,23 @@ import (
 	"time"
 )
 
-// AnswerPrompt is what af delivers to the item's session with an answer.
-func AnswerPrompt(it *Item, text string) string {
-	return fmt.Sprintf("The user answered your question on %s: %s", FormatID(it.ID), text)
+// AnswerPrompt is what af delivers to the item's session with an answer. It names
+// the question the answer is for, so two open questions answered in turn read
+// differently to the agent.
+func AnswerPrompt(it *Item, answer Message) string {
+	question := ""
+	for _, m := range it.Thread {
+		if m.ID == answer.Answers && m.Kind == KindQuestion {
+			question = strings.Join(strings.Fields(m.Text), " ")
+			if r := []rune(question); len(r) > 300 {
+				question = string(r[:300]) + "…"
+			}
+		}
+	}
+	if question == "" {
+		return fmt.Sprintf("The user answered your question on %s: %s", FormatID(it.ID), answer.Text)
+	}
+	return fmt.Sprintf("The user answered your question on %s (%q): %s", FormatID(it.ID), question, answer.Text)
 }
 
 // GoneError is returned when an answer cannot reach the item's session. The
@@ -107,7 +121,7 @@ func (b *Backlog) Answer(id, questionID int, text string, deliver bool, now time
 		// to where it was when both fail.
 		prev := it.Status
 		for _, x := range it.Thread {
-			if x.Kind == KindAnswer && x.Delivery == DeliveryPending && x.PrevStatus.Valid() {
+			if x.Kind == KindAnswer && x.Delivery == DeliveryPending && x.PrevStatus.Valid() && (x.RunCount == 0 || x.RunCount == len(it.Runs)) {
 				prev = x.PrevStatus
 				break
 			}
@@ -204,6 +218,9 @@ type PendingAnswer struct {
 	AnswerID  int
 	SessionID string
 	Prompt    string
+	// Superseded: the item was started again after the answer was accepted, so the
+	// run that accepted it is not the latest. It is never delivered to the new run.
+	Superseded bool
 }
 
 // PendingAnswers lists the answers still pending delivery, oldest first per
@@ -212,14 +229,23 @@ func (b *Backlog) PendingAnswers() []PendingAnswer {
 	var out []PendingAnswer
 	for i := range b.Items {
 		it := &b.Items[i]
-		last := it.lastRun()
 		for _, m := range it.Thread {
 			if m.Kind != KindAnswer || m.Delivery != DeliveryPending {
 				continue
 			}
-			p := PendingAnswer{ID: it.ID, AnswerID: m.ID, Prompt: AnswerPrompt(it, m.Text)}
-			if last != nil {
-				p.SessionID = last.SessionID
+			p := PendingAnswer{ID: it.ID, AnswerID: m.ID, Prompt: AnswerPrompt(it, m)}
+			// The run that accepted the answer, not whichever run is latest now
+			// (a legacy answer without a run count belongs to the latest).
+			run := it.lastRun()
+			if m.RunCount > 0 {
+				run = nil
+				if m.RunCount <= len(it.Runs) {
+					run = &it.Runs[m.RunCount-1]
+				}
+				p.Superseded = m.RunCount != len(it.Runs)
+			}
+			if run != nil {
+				p.SessionID = run.SessionID
 			}
 			out = append(out, p)
 		}
