@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "a6d8d430c077";
+var CLIENT_VERSION = "ec09fbcff2bf";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -22105,6 +22105,32 @@ var BacklogLoader = class {
   }
 };
 
+// src/viewport-insets.ts
+function viewportInsets(innerHeight, vv) {
+  const top = Math.max(0, vv.offsetTop);
+  const bottom = Math.max(0, innerHeight - (top + vv.height));
+  return { top: Math.round(top), bottom: Math.round(bottom) };
+}
+function trackViewportInsets(root2, win = window) {
+  const vv = win.visualViewport;
+  const apply = () => {
+    const { top, bottom } = vv ? viewportInsets(win.innerHeight, vv) : { top: 0, bottom: 0 };
+    root2.style.setProperty("--af-vv-top", `${top}px`);
+    root2.style.setProperty("--af-vv-bottom", `${bottom}px`);
+  };
+  apply();
+  if (!vv) return () => {
+  };
+  vv.addEventListener("resize", apply);
+  vv.addEventListener("scroll", apply);
+  win.addEventListener("resize", apply);
+  return () => {
+    vv.removeEventListener("resize", apply);
+    vv.removeEventListener("scroll", apply);
+    win.removeEventListener("resize", apply);
+  };
+}
+
 // src/index.ts
 var initialThemeChoice = bootStampTheme();
 registerServiceWorker();
@@ -22203,6 +22229,7 @@ var modal = null;
 var configAssistant = null;
 var accountLogin = null;
 var installAffordance = new InstallAffordance();
+trackViewportInsets(document.documentElement);
 var splitView = new SplitView(termHost, {
   onStatus: (s, retryAt) => store.set({ termStatus: s, termRetryAt: retryAt ?? null }),
   // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every

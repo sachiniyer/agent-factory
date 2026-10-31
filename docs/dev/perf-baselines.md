@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1234144.000 | 1234144.000–1234144.000 | 0.000 | 1295851.200 |
-| gzip_bytes | 281155.000 | 281155.000–281155.000 | 0.000 | 295212.750 |
+| raw_bytes | 1235189.000 | 1235189.000–1235189.000 | 0.000 | 1296948.450 |
+| gzip_bytes | 281464.000 | 281464.000–281464.000 | 0.000 | 295537.200 |
 | lazy_raw_bytes | 368912.000 | 368912.000–368912.000 | 0.000 | 387357.600 |
 | lazy_gzip_bytes | 119387.000 | 119387.000–119387.000 | 0.000 | 125356.350 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
@@ -137,7 +137,7 @@ so the three samples are identical. The same PR adds the Docs tab's loader, shel
 
 ### Bundle refresh provenance (#6297)
 
-Master's committed bundle is 1,159,036 raw / 262,733 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,234,144 raw / 281,155 gzip, +75,108 raw / +18,422 gzip (the shell metrics; the lazy Docs editor is unchanged by this PR). The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the daemon stack branch (#6295) and master, which carry the attention-dot rail work (#5581). Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
+Master's committed bundle is 1,160,081 raw / 263,042 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,235,189 raw / 281,464 gzip, +75,108 raw / +18,422 gzip (the shell metrics; the lazy Docs editor is unchanged by this PR). The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the daemon stack branch (#6295) and master, which carry the attention-dot rail work (#5581). Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6289)
 

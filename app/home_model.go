@@ -82,6 +82,11 @@ type home struct {
 	// bar (#6386). Per-home like snapshotFetcher; nil means no poll, so only
 	// newHome — never a bare test home — reaches the daemon.
 	webListenerFetcher func() string
+	// primeSessionSnapshot, when set, is called once before a batch of snapshot
+	// restores and returns the release to run after it: it primes one server-wide
+	// tmux listing so the restores stop asking tmux three questions per session
+	// (#6423). nil (tests) means no priming.
+	primeSessionSnapshot func() (release func())
 	// previewFetcher captures a session tab's content through the daemon — the sole
 	// capturer since #1592 Phase 2 PR6 (the TUI no longer shells out to tmux
 	// capture-pane). It backs TabPane's render path for content not streamed live
@@ -583,6 +588,7 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 		mouseClock:                  time.Now,
 		snapshotFetcher:             snapshotThroughDaemon,
 		webListenerFetcher:          fetchWebListenerNotice,
+		primeSessionSnapshot:        primeTmuxSessionSnapshot,
 		previewFetcher:              previewThroughDaemon,
 		pauseStatusPoll:             pauseStatusPollThroughDaemon,
 		resumeStatusPoll:            resumeStatusPollThroughDaemon,
