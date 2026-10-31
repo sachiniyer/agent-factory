@@ -331,6 +331,7 @@ func TestBacklogDoneClearsAttention(t *testing.T) {
 // (Codex P2 on #6295): the backlog mirrors attention itself, so its sends are
 // not "the user answering whatever is set". A plain send still clears it.
 func TestBacklogSendKeepsTheNextQuestionsAttention(t *testing.T) {
+	drain := queuedAttentionClears(t)
 	for _, tc := range []struct {
 		name          string
 		backlogOrigin bool
@@ -349,10 +350,9 @@ func TestBacklogSendKeepsTheNextQuestionsAttention(t *testing.T) {
 			if _, err := manager.SendPromptWithStatus(SendPromptRequest{Title: "worker", RepoID: repoID, Prompt: "answer", BacklogOrigin: tc.backlogOrigin}); err != nil {
 				t.Fatal(err)
 			}
-			deadline := time.Now().Add(2 * time.Second)
-			for time.Now().Before(deadline) && inst.HasAttention() == tc.wantKept {
-				time.Sleep(20 * time.Millisecond)
-			}
+			// The clear a delivered user prompt queues runs after the send returns
+			// (a goroutine in production); drain it as the worker would.
+			drain()
 			if inst.HasAttention() != tc.wantKept {
 				t.Fatalf("attention kept = %v, want %v", inst.HasAttention(), tc.wantKept)
 			}
