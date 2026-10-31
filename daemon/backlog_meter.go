@@ -310,7 +310,12 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	itemRuns, runsComplete := m.startedItemRuns(home)
 	for _, r := range itemRuns {
 		usage.Runs[r.run.SessionID] = r.run.Cost()
-		running := r.item.Status == backlog.StatusRunning
+		// Only the item's CURRENT run can be an active-run metering failure: an
+		// archived non-Claude session or a historical run with no transcript must
+		// not close the runner for a run that is metered fine (Codex P2 on #6300).
+		// Historical runs are still metered for their cost.
+		running := r.item.Status == backlog.StatusRunning && len(r.item.Runs) > 0 &&
+			r.item.Runs[len(r.item.Runs)-1].SessionID == r.run.SessionID
 		var configDir string
 		var dirs []string
 		if r.inst != nil {
