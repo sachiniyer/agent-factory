@@ -175,8 +175,11 @@ func pathWithout(list, dir string) string {
 // git-credential`) reaches the host's real gh with the host's own login, never
 // this session's shim. A seam so tests never reach a real login.
 var hostCredentialFill = func(sessionDir string, req pushcred.CredentialRequest) (username, password string, ok bool) {
-	env := make([]string, 0, len(os.Environ())+4)
-	for _, kv := range os.Environ() {
+	// Inside a gh process the shim launched, the token variables hold the
+	// OPERATOR's token: never hand them to a host helper (Codex P2 on #6442).
+	base := pushcred.WithoutShimToken(os.Environ())
+	env := make([]string, 0, len(base)+4)
+	for _, kv := range base {
 		name, value, _ := strings.Cut(kv, "=")
 		if hostOnlyGitEnvDrop[name] || strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
 			continue
@@ -243,6 +246,8 @@ func runGHShim(errw io.Writer, sessionDir string, args []string) error {
 	}
 	env := os.Environ()
 	if fallback {
+		// The host's own login only: not a token a shim ancestor set.
+		env = pushcred.WithoutShimToken(env)
 		if err := execGH(exe, append([]string{"gh"}, args...), env); err != nil {
 			fmt.Fprintf(errw, "af: running %s: %v\n", exe, err)
 			return err

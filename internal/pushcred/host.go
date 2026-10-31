@@ -190,6 +190,36 @@ func EnvironmentToken(getenv func(string) string, hostname, ghHost string) (stri
 // tokenVars are every variable gh reads a token from.
 var tokenVars = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
 
+// WithoutShimToken returns environ without the token the gh shim put there: when
+// the shim's marker is present, every token variable and the marker are dropped,
+// since that token is the OPERATOR's. Anything the host helpers af runs on the
+// host's behalf would read (a global `!gh auth git-credential`) then sees only the
+// host's own login. An environ without the marker is returned unchanged: its
+// token variables are the host user's own.
+func WithoutShimToken(environ []string) []string {
+	marked := false
+	for _, kv := range environ {
+		if name, value, _ := strings.Cut(kv, "="); name == ShimTokenEnv && value != "" {
+			marked = true
+			break
+		}
+	}
+	if !marked {
+		return environ
+	}
+	drop := map[string]bool{ShimTokenEnv: true}
+	for _, name := range tokenVars {
+		drop[name] = true
+	}
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		if name, _, _ := strings.Cut(kv, "="); !drop[name] {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 // GHEnv is the environment the gh shim execs gh with: the pane's own, with every
 // token variable removed and exactly ONE set for the origin's host kind —
 // GH_TOKEN for github.com and *.ghe.com, GH_HOST plus GH_ENTERPRISE_TOKEN for an

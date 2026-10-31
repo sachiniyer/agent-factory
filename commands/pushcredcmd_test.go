@@ -325,3 +325,38 @@ func TestGitCredentialHelperFallsBackToTheHostsOwnTokenVariables(t *testing.T) {
 	require.NoError(t, runGitCredential(strings.NewReader("protocol=https\nhost=ghe.example:8443\npath=t/s.git\n\n"), &out, &errw, dir, "get"))
 	assert.Equal(t, "username=x-access-token\npassword=host-ghe-token\n", out.String())
 }
+
+// Codex P2 on #6442 at 40ff0b9: inside a gh process the shim launched, the token
+// variables hold the OPERATOR's token. When the daemon refuses that gh's git and
+// the helper falls back, a global `!gh auth git-credential` must not find it:
+// the real gh then answers with the host's own login, or with nothing.
+func TestHostCredentialFillNeverHandsTheShimsTokenToAHostHelper(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential]\n\thelper = !gh auth git-credential\n"), 0o644))
+	// The "real" gh answers with whatever token its environment holds, as gh does.
+	realDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "gh"), []byte("#!/bin/sh\n"+
+		"[ \"$1 $2 $3\" = \"auth git-credential get\" ] || exit 0\n"+
+		"[ -n \"$GH_TOKEN\" ] || exit 1\n"+
+		"printf 'username=x-access-token\\npassword=%s\\n' \"$GH_TOKEN\"\n"), 0o755))
+	gitDir := filepath.Dir(mustLookPath(t, "git"))
+	t.Setenv("PATH", strings.Join([]string{realDir, gitDir, "/usr/bin", "/bin"}, string(os.PathListSeparator)))
+	req := pushcred.CredentialRequest{Protocol: "https", Host: "github.com", Path: "other/repo.git"}
+
+	t.Setenv("GH_TOKEN", "OPERATOR-TOKEN")
+	t.Setenv(pushcred.ShimTokenEnv, "1")
+	_, pass, ok := hostCredentialFill("", req)
+	assert.NotEqual(t, "OPERATOR-TOKEN", pass, "the operator's token reached a host helper")
+	assert.False(t, ok, "with the operator's token withheld, this host has no login of its own")
+
+	// Anti-vacuous: the same helper with the host user's OWN token still works.
+	t.Setenv(pushcred.ShimTokenEnv, "")
+	t.Setenv("GH_TOKEN", "host-own-token")
+	_, pass, ok = hostCredentialFill("", req)
+	require.True(t, ok)
+	assert.Equal(t, "host-own-token", pass)
+}

@@ -1017,7 +1017,11 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
   runs on that machine anyway, no session there gets push credentials: for
   example, one that was already there when you opted in. `af hosts check` and
   `af doctor` name that session; remove it and push credentials resume. This
-  doesn't change the host's readiness or the command's exit code.
+  doesn't change the host's readiness or the command's exit code. An archive
+  af confirmed stopped doesn't count, because nothing of it runs. af tracks
+  sessions, not processes. It can't see code that a session you didn't create
+  left running past its own end, before you opted the host in. So opt in a host
+  whose past sessions you trust, or a fresh one.
 - **Only through the session's own connection.** Every af callback, not only
   this one, is accepted only through the requesting session's own ssh forward.
   A callback credential copied out of a session directory doesn't work through
@@ -1066,7 +1070,8 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
   and the session directory off `PATH`, in the order git used before af was
   wired in. A host login therefore keeps working, and af's token still never
   reaches those helpers: inside that fallback the gh shim fetches nothing, and
-  the token it gives a `gh` process is never mistaken for the host's own. If
+  the token it gives a `gh` process is removed before any host helper runs and
+  is never mistaken for the host's own. If
   they have nothing either, git stops rather than prompting, and says why.
 - **What gh gets.** The shim runs the host's real `gh`, found on absolute `PATH`
   entries only. The token goes into that one process's environment: `GH_TOKEN`,

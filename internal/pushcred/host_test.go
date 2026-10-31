@@ -2,6 +2,7 @@ package pushcred
 
 import (
 	"bytes"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -122,5 +123,18 @@ func TestEnvironmentTokenIsTheHostsOwnAndNeverTheShims(t *testing.T) {
 	vars["GH_TOKEN"] = "two\nlines"
 	if _, ok := EnvironmentToken(get, "github.com", ""); ok {
 		t.Fatal("an implausible token was offered")
+	}
+}
+
+func TestWithoutShimTokenDropsOnlyAShimSuppliedToken(t *testing.T) {
+	marked := []string{"PATH=/usr/bin", "GH_TOKEN=op", "GITHUB_TOKEN=op2", "GH_ENTERPRISE_TOKEN=op3", "GITHUB_ENTERPRISE_TOKEN=op4", "GH_HOST=ghe.example", ShimTokenEnv + "=1"}
+	got := WithoutShimToken(marked)
+	sort.Strings(got)
+	if want := []string{"GH_HOST=ghe.example", "PATH=/usr/bin"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("marked environment = %v, want %v", got, want)
+	}
+	host := []string{"PATH=/usr/bin", "GH_TOKEN=mine", ShimTokenEnv + "="}
+	if got := WithoutShimToken(host); !reflect.DeepEqual(got, host) {
+		t.Fatalf("an unmarked environment (the host's own token) changed: %v", got)
 	}
 }
