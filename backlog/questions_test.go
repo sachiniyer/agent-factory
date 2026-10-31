@@ -423,3 +423,57 @@ func TestAnsweredInSessionTextMatchesACappedQuestion(t *testing.T) {
 		t.Fatalf("a capped question the user saw was not closed: %d", got)
 	}
 }
+
+// A pending answer whose session was killed, with a replacement run started before
+// its failure is recorded, rolls nothing back (Codex P2 on #6298): the status
+// belongs to the replacement now.
+func TestAnswerFailedAfterAReplacementRunLeavesTheItemRunning(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusReview
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
+	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
+	ans, err := b.Answer(1, 0, "Postgres", true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The session is killed and the user starts a replacement before the worker
+	// records the failure.
+	if _, err := b.BeginStart(1, StartedByUser, nil, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.FinishStart(1, now.Add(time.Second), "s2", "A-2", nil, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AnswerFailed(1, ans.Answer.ID, "the session is gone", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Item(1).Status; got != StatusRunning {
+		t.Fatalf("status = %s: the failed answer's rollback overwrote the replacement run", got)
+	}
+}
+
+// A held answer accepted on an item in review, then a continue started before the
+// answer fails, keeps the continued work running (Codex P2 on #6295).
+func TestAnswerFailedAfterAContinueLeavesTheItemRunning(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusReview
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
+	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
+	ans, err := b.Answer(1, 0, "Postgres", true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Continued(1, "s1", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AnswerFailed(1, ans.Answer.ID, "pane gone", now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Item(1).Status; got != StatusRunning {
+		t.Fatalf("status = %s: the failed answer overwrote the continued run", got)
+	}
+}
