@@ -42,6 +42,7 @@ export class DraftStorage {
   private readonly adopted = new Map<string, string>();
   /** What this pane last stored per doc, for a bfcache restore to write back. */
   private readonly held = new Map<string, Draft>();
+  private lastTouch: number | null = null;
   /** The pane is gone for good: whatever its still-closing syncs write later is
    *  released at once. */
   private closed = false;
@@ -187,6 +188,7 @@ export class DraftStorage {
     if (!this.write(this.key(doc, this.owner), { owner: this.owner, at: this.now(), released: this.closed || this.unloading, draft })) return;
     this.dropAdopted(doc); // this pane's copy now holds the work
     this.held.set(doc, draft);
+    this.lastTouch = this.now();
   }
 
   /** Removes this pane's entry only, and the adopted source it was still holding. */
@@ -210,10 +212,23 @@ export class DraftStorage {
   }
 
   /** The heartbeat: tells other panes this one is alive and still holds its entries. */
-  touch(): void {
+  touch(restore = false): void {
     if (this.closed) return;
     this.unloading = false;
     const t = this.now();
+    // A beat later than the staleness window means the heartbeat stalled (a throttled background
+    // tab) and another window may have taken an entry as dead.
+    const stalled = this.lastTouch !== null && t - this.lastTouch > DRAFT_STALE_MS;
+    this.lastTouch = t;
+    // A heartbeat that resumed after a stall (a throttled background tab) finds that another
+    // window took an entry for dead: the sync still counts that work as stored, so it is
+    // written back here, not only on a bfcache restore.
+    if (restore || stalled) {
+      for (const [doc, draft] of this.held) {
+        const key = this.key(doc, this.owner);
+        if (!this.read(key)) this.write(key, { owner: this.owner, at: t, released: false, draft });
+      }
+    }
     for (const key of this.owned()) {
       const e = this.read(key);
       if (e) this.write(key, { ...e, at: t, released: false });
@@ -227,11 +242,7 @@ export class DraftStorage {
   revive(): void {
     if (this.closed) return;
     this.unloading = false;
-    for (const [doc, draft] of this.held) {
-      const key = this.key(doc, this.owner);
-      if (!this.read(key)) this.write(key, { owner: this.owner, at: this.now(), released: false, draft });
-    }
-    this.touch();
+    this.touch(true);
   }
 
   /** The pane is gone for good. Its entries can be adopted at once, and what its syncs
