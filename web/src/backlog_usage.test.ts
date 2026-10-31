@@ -140,6 +140,12 @@ test("closedGate names the first closed budget gate, keyed by gate and window", 
   const limited: RunnerView = { state: "stopped", gate: "usage_limit", reason: "Usage limit until 14:00", used: 0, max: 1 };
   assert.deepEqual(g(budget(), usage(), limited), { key: "usage_limit", text: "Usage limit until 14:00." });
   assert.equal(g(null, null, { ...limited, gate: "no_reading" }), null);
+  // The daemon's runner view has no gate field: an exhausted dollar limit is read from the budget.
+  const stoppedNoGate: RunnerView = { state: "stopped", reason: "Dollar limit reached", used: 0, max: 1 };
+  assert.deepEqual(g(budget({ usd_limit: 5, usd_spent: 5 }), null, stoppedNoGate), { key: "usd_limit", text: "The backlog spent its $5.00 dollar limit." });
+  assert.deepEqual(g(budget({ usd_limit: 5, usd_spent: 7.5 }), null), { key: "usd_limit", text: "The backlog spent its $5.00 dollar limit." });
+  assert.equal(g(budget({ usd_limit: 5, usd_spent: 4.99 }), null), null);
+  assert.equal(g(budget({ usd_limit: 0, usd_spent: 9 }), null), null, "0 is off");
 });
 
 test("webReason drops the clauses that name af commands", () => {

@@ -18237,6 +18237,9 @@ function closedGate(b, u, runner, now) {
       }
     }
   }
+  if (b && b.usd_limit > 0 && b.usd_spent >= b.usd_limit) {
+    return { key: "usd_limit", text: `The backlog spent its ${usd(b.usd_limit)} dollar limit.` };
+  }
   if (runner?.state === "stopped" && (runner.gate === "usage_limit" || runner.gate === "usd_limit") && runner.reason) {
     return { key: runner.gate, text: `${webReason(runner.reason).replace(/\.$/, "")}.` };
   }
