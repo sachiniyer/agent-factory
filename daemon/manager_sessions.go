@@ -532,6 +532,10 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	// is in flight is asking a question the user never saw, and the keyed clear
 	// must leave it alone.
 	answered := instance.Attention()
+	// The backlog question this prompt answers, captured the same way (and from
+	// memory, so a dismissed chip still names it): a user's send-prompt is the
+	// same answer as a line typed in the pane.
+	seenQuestion := m.backlogSeenQuestion(instance)
 	// Liveness cannot express "owed a stale-pane teardown": a committed retry
 	// restores LiveRunning/LiveReady for its owner, and the pane this would
 	// reach may still be bound to the deleted inode. The durable flag is the
@@ -568,12 +572,17 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
-	if !req.TaskOrigin && !req.BacklogOrigin && answered != nil && status != session.PromptNotDelivered {
+	if !req.TaskOrigin && !req.BacklogOrigin && status != session.PromptNotDelivered {
 		// A delivered prompt is the user's answer, same as a keystroke into the
 		// pane — and the only answer a client with no PTY input can send. Task
 		// deliveries are automation, not the user, and PromptNotDelivered (which
 		// returns nil) means the answer never arrived.
-		m.queueAttentionClear(instance, answered.SetAt)
+		if answered != nil {
+			m.queueAttentionClear(instance, answered.SetAt)
+		}
+		if seenQuestion != "" {
+			m.noteBacklogSubmitted(instance, seenQuestion)
+		}
 	}
 	return status, nil
 }

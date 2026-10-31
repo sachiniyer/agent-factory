@@ -58,6 +58,7 @@ func (b *Backlog) BeginStart(id int, by string, facts Facts, now time.Time) (Sta
 	}
 	run := RunRef{State: RunStarting, PrevStatus: it.Status, StartedBy: by, StartedAt: now}
 	it.Status = StatusRunning
+	it.LiveAnswers = 0 // answers accepted under an earlier run belong to it, not this one
 	it.Runs = append(it.Runs, run)
 	it.UpdatedAt = now
 	return StartPlan{Run: run}, nil
@@ -77,6 +78,10 @@ func (b *Backlog) Continued(id int, sessionID string, now time.Time) error {
 		return err
 	}
 	it.Status = StatusRunning
+	// The continued work counts like a live answer: the rollback of an answer
+	// accepted earlier (held, then failing) must not put its saved status back over
+	// it.
+	it.LiveAnswers++
 	it.UpdatedAt = now
 	return nil
 }
@@ -88,7 +93,10 @@ func (b *Backlog) ContinueFailed(id int, prev Status, sendErr error, now time.Ti
 	if err != nil {
 		return err
 	}
-	if it.Status == StatusRunning && prev.Valid() && CheckStatusChange(StatusChange{ID: id, From: it.Status, To: prev,
+	if it.LiveAnswers > 0 {
+		it.LiveAnswers--
+	}
+	if it.LiveAnswers == 0 && it.Status == StatusRunning && prev.Valid() && CheckStatusChange(StatusChange{ID: id, From: it.Status, To: prev,
 		By: ActorAF, StartFailed: true, PrevStatus: prev}) == nil {
 		it.Status = prev
 		it.UpdatedAt = now
