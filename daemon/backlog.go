@@ -85,38 +85,6 @@ func (s *backlogState) releaseAnswer(repoID string, a backlog.PendingAnswer) {
 	delete(s.answering, answerKey(repoID, a))
 }
 
-// restoreLock is the per-session restore mutex.
-func (s *backlogState) restoreLock(sessionID string) *sync.Mutex {
-	mu, _ := s.restoring.LoadOrStore(sessionID, &sync.Mutex{})
-	return mu.(*sync.Mutex)
-}
-
-func answerKey(repoID string, a backlog.PendingAnswer) string {
-	return fmt.Sprintf("%s\x00%d\x00%d", repoID, a.ID, a.AnswerID)
-}
-
-// claimAnswer reports whether the caller may start a delivery worker for a;
-// false when one is outstanding.
-func (s *backlogState) claimAnswer(repoID string, a backlog.PendingAnswer) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	k := answerKey(repoID, a)
-	if s.answering[k] {
-		return false
-	}
-	if s.answering == nil {
-		s.answering = map[string]bool{}
-	}
-	s.answering[k] = true
-	return true
-}
-
-func (s *backlogState) releaseAnswer(repoID string, a backlog.PendingAnswer) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.answering, answerKey(repoID, a))
-}
-
 func (s *backlogState) holdEnd(sessionID string, gen int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
