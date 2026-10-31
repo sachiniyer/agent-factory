@@ -114,7 +114,7 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 		}
 		s.host.SetAttention(p.id, sessionID, next)
 		pending = PendingAnswer{ID: req.ID, AnswerID: out.Answer.ID, SessionID: sessionID,
-			Prompt: AnswerPrompt(b.Item(req.ID), out.Answer.Text)}
+			Prompt: AnswerPrompt(b.Item(req.ID), out.Answer)}
 		return []int{req.ID}, nil
 	})
 	if err != nil {
