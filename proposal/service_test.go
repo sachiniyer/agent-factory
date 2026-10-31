@@ -2,6 +2,7 @@ package proposal
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -647,5 +648,100 @@ func TestScanFollowsAttachChanges(t *testing.T) {
 	svc.Scan(in)
 	if ev := host.takeEvents(); len(ev) != 0 {
 		t.Fatalf("a detached proposal must not be watched, got %+v", ev)
+	}
+}
+
+// The #6310 sequence: a save B times out and is still on the wire, the user undoes, the
+// writer's later save lands, and then B arrives. B merges cleanly against the later head
+// (the undo is invisible to a three-way merge against its base), so only the fence stops it.
+func TestSaveFenceRefusesALateSaveThatWouldMergeCleanly(t *testing.T) {
+	target := Target{SessionID: sessA}
+	for _, tc := range []struct {
+		name   string
+		writer string
+		seq    int64
+		wantOK bool
+	}{
+		{"without a fence the late save merges cleanly and brings B back", "", 0, true},
+		{"with a fence it is refused", "tab-1", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _ := newTestService(t)
+			if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+				t.Fatal(err)
+			}
+			r := readFor(t, svc, "goals")
+			// the writer's save 2 (the undo, plus a tail edit) lands first
+			if _, err := svc.SaveFenced(target, "p", "goals", r.Text+"tail\n", r.Commit, "tab-1", 2); err != nil {
+				t.Fatal(err)
+			}
+			head := readFor(t, svc, "goals")
+			// then its save 1 (B, made against the original base) arrives
+			_, err := svc.SaveFenced(target, "p", "goals", "B edit\n"+r.Text, r.Commit, tc.writer, tc.seq)
+			after := readFor(t, svc, "goals")
+			if tc.wantOK {
+				if err != nil || !strings.HasPrefix(after.Text, "B edit\n") {
+					t.Fatalf("late save = %v, text %q; want it merged in", err, after.Text)
+				}
+				return
+			}
+			var stale *StaleSaveError
+			if !errors.As(err, &stale) || stale.Last != 2 || stale.APIErrorCode() != ErrorCodeStaleSave || stale.HTTPStatus() != 409 {
+				t.Fatalf("late save = %v; want a StaleSaveError fenced by seq 2", err)
+			}
+			if after.Commit != head.Commit || after.Text != head.Text {
+				t.Fatalf("a refused save changed the doc: %+v -> %+v", head, after)
+			}
+		})
+	}
+}
+
+func TestSaveFenceIsPerWriterAndPerDocAndOptional(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	if _, err := svc.Start(sessA, "p", []string{"goals", "api"}); err != nil {
+		t.Fatal(err)
+	}
+	g := readFor(t, svc, "goals")
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", g.Text+"1\n", g.Commit, "w1", 5); err != nil {
+		t.Fatal(err)
+	}
+	head := readFor(t, svc, "goals")
+	// the same seq again (a duplicate delivery) is refused
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", g.Text+"1\n", g.Commit, "w1", 5); !errors.As(err, new(*StaleSaveError)) {
+		t.Fatalf("a duplicate seq = %v; want stale", err)
+	}
+	// another writer, another doc, no writer, and no seq are not fenced by w1's seq 5
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", g.Text+"1\n2\n", head.Commit, "w2", 1); err != nil {
+		t.Fatalf("another writer: %v", err)
+	}
+	a := readFor(t, svc, "api")
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "api", a.Text+"x\n", a.Commit, "w1", 1); err != nil {
+		t.Fatalf("another doc: %v", err)
+	}
+	h2 := readFor(t, svc, "goals")
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", h2.Text+"3\n", h2.Commit, "", 0); err != nil {
+		t.Fatalf("unfenced save: %v", err)
+	}
+	h3 := readFor(t, svc, "goals")
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", h3.Text+"4\n", h3.Commit, "w1", 6); err != nil {
+		t.Fatalf("a higher seq: %v", err)
+	}
+}
+
+func TestFenceTableForgetsTheOldestWriter(t *testing.T) {
+	var f fenceTable
+	for i := 0; i < fenceCap+10; i++ {
+		if ok, _ := f.admit(fmt.Sprintf("k%d", i), 1); !ok {
+			t.Fatalf("first save of k%d refused", i)
+		}
+	}
+	if len(f.seen) != fenceCap {
+		t.Fatalf("remembers %d writers, want %d", len(f.seen), fenceCap)
+	}
+	if ok, _ := f.admit("k0", 1); !ok {
+		t.Fatal("a forgotten writer is unfenced")
+	}
+	if ok, _ := f.admit(fmt.Sprintf("k%d", fenceCap+9), 1); ok {
+		t.Fatal("a remembered writer's repeat seq must be refused")
 	}
 }

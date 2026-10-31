@@ -118,6 +118,8 @@ type Service struct {
 	push  map[string]*pushEntry
 	now   func() time.Time
 	spawn func(func())
+	// fence refuses a save that arrives after a later save of the same writer.
+	fence fenceTable
 }
 
 // NewService returns a service that uses host.
@@ -607,6 +609,16 @@ func (s *Service) Write(t Target, slug, doc, text string, author Author) (*DocRe
 
 // Save is the Docs tab save: a human edit with a three-way merge against base.
 func (s *Service) Save(t Target, slug, doc, text, base string) (*SaveDocResult, error) {
+	return s.SaveFenced(t, slug, doc, text, base, "", 0)
+}
+
+// SaveFenced is Save with a writer fence. writer names one editor (a Docs tab's sync) and seq
+// counts its saves upward: a save whose seq is not above the highest the daemon has seen from
+// that writer for the doc is refused with a *StaleSaveError and commits nothing. That is what
+// stops a request that outlived its client (a timeout, a closed tab) from landing after the
+// writer's later saves: a three-way merge against base cannot, because the late edit merges
+// cleanly. An empty writer or a zero seq is not fenced.
+func (s *Service) SaveFenced(t Target, slug, doc, text, base, writer string, seq int64) (*SaveDocResult, error) {
 	r, err := s.resolve(t)
 	if err != nil {
 		return nil, err
@@ -614,6 +626,12 @@ func (s *Service) Save(t Target, slug, doc, text, base string) (*SaveDocResult, 
 	file := doc
 	if n, err := NormalizeDocName(doc); err == nil {
 		file = docFile(n)
+	}
+	if writer != "" && seq > 0 {
+		key := r.repoID + "\x00" + slug + "\x00" + file + "\x00" + writer
+		if ok, last := s.fence.admit(key, seq); !ok {
+			return nil, &StaleSaveError{Writer: writer, Seq: seq, Last: last}
+		}
 	}
 	before, err := r.store.Head()
 	if err != nil {
