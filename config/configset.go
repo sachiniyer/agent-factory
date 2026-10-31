@@ -160,8 +160,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 		}
 		return nil
 	}},
-	// Free-form: any ssh invocation the operator already uses. Its usability is
-	// checked at create time (BackendConfigError), like ssh.host — not here.
+	// Free-form ssh invocation; usability is checked at create, like ssh.host.
 	"sandbox.ssh": {kind: cfgString, section: "sandbox"},
 	// Daemon-local path streamed to remote hosts; a bad file surfaces at create.
 	"sandbox.binary":           {kind: cfgString, section: "sandbox"},

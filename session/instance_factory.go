@@ -676,8 +676,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		// is never counted against a cap.
 		taskRunActive:         opts.TaskID != "",
 		BacklogItem:           opts.BacklogItem,
-		createdBySandbox:      opts.CreatedBySandbox,
-		createdByOperator:     opts.CreatedBySandbox == "", // InstanceData.CreatedByOperator
+		provenance:            provenance{createdBySandbox: opts.CreatedBySandbox, createdByOperator: opts.CreatedBySandbox == ""},
 		backlogRunActive:      opts.BacklogItem != 0,
 		liveness:              LiveReady,
 		Path:                  absPath,

@@ -503,8 +503,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		// finished run from an interrupted one.
 		taskRunActive:        data.TaskRunActive,
 		BacklogItem:          data.BacklogItem,
-		createdBySandbox:     data.CreatedBySandbox,
-		createdByOperator:    data.CreatedByOperator,
+		provenance:           provenance{createdBySandbox: data.CreatedBySandbox, createdByOperator: data.CreatedByOperator},
 		backlogRunActive:     data.BacklogRunActive && data.BacklogItem != 0,
 		backlogRunEndedAt:    data.BacklogRunEndedAt,
 		taskRunInterrupted:   data.TaskRunInterrupted && !data.TaskRunActive,
