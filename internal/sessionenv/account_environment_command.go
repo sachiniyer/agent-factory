@@ -433,7 +433,7 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 	case isAccountCommandName(words[0], "xargs"):
 		var unsafe bool
 		words, unsafe = unwrapXargs(words[1:], names, memo)
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	default:
@@ -605,10 +605,13 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 // childTailBuriesMutation scans the tail a modeled wrapper returns for a
 // LITERAL buried suffix a PATH-shadowed wrapper (`shift N; exec "$@"`) would
 // promote to the executed command, as unwrapIonice and unwrapTaskset do for
-// their own tails (#4708). The five siblings returned the tail unscanned, so
-// `nice echo a a a xargs --process-slot-var CODEX_HOME codex` passed where the
-// same payload under ionice was refused (#5034). words[0] is the child command
-// the main walk judges next; the scan covers what follows it.
+// their own tails (#4708). nohup, nice, timeout, setsid, stdbuf and xargs
+// returned the tail unscanned, so `nice echo a a a xargs --process-slot-var
+// CODEX_HOME codex` passed where the same payload under ionice was refused
+// (#5034); xargs returned its child tail through the separate
+// unwrapXargs/xargsChild input-reach path, so it was the last of the modeled
+// wrappers to be closed. words[0] is the child command the main walk judges
+// next; the scan covers what follows it.
 //
 // Only literal boundaries are judged. ionice also treats a non-literal word as
 // a possible boundary, which refuses every `ionice codex "$PROMPT"`; applying

@@ -8,15 +8,20 @@ import (
 
 // #5034: ionice and taskset scan their child tail for a buried suffix that a
 // PATH-shadowed wrapper (`shift N; exec "$@"`) would promote to the executed
-// command; the five structurally identical wrappers returned the tail
-// unscanned. Every wrapper must give the verdict ionice gives for the same
+// command; the five structurally identical wrappers and xargs historically
+// returned the tail unscanned (the five fixed in #5711; xargs, which returns its
+// child tail through the separate unwrapXargs/xargsChild input-reach path, was
+// the last). Every wrapper must give the verdict ionice gives for the same
 // buried payload.
 func TestWrapperChildTailBuriedSuffixMatchesIonice(t *testing.T) {
 	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
 	for name := range accountShellStartupNames {
 		names[name] = struct{}{}
 	}
-	wrappers := []string{"ionice", "taskset 0x1", "nice", "nohup", "timeout 5", "setsid", "stdbuf -o0"}
+	wrappers := []string{
+		"ionice", "taskset 0x1", "nice", "nohup", "timeout 5", "setsid", "stdbuf -o0",
+		"xargs", "xargs -r", "/usr/bin/xargs",
+	}
 	payloads := []struct {
 		tail string
 		want bool
@@ -48,6 +53,10 @@ func TestWrapperChildTailBuriedSuffixMatchesIonice(t *testing.T) {
 		"setsid -- echo unset CODEX_HOME",
 		"stdbuf -oL -- echo unset CODEX_HOME",
 		"stdbuf -eL echo unset CODEX_HOME",
+		"xargs -- echo unset CODEX_HOME",
+		"xargs -r echo unset CODEX_HOME",
+		"xargs -a /dev/null echo unset CODEX_HOME",
+		"xargs --null echo unset CODEX_HOME",
 	} {
 		require.True(t, commandMutatesAccountEnvironment(command, names), "command %q", command)
 	}
@@ -58,7 +67,7 @@ func TestWrapperChildTailBuriedSuffixMatchesIonice(t *testing.T) {
 // and only a recognized wrapper in that position is recursed into.
 func TestWrapperCommandPositionBoundary(t *testing.T) {
 	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
-	for _, wrapper := range []string{"nice", "nice -n 5", "nohup", "timeout 5", "setsid", "stdbuf -o0"} {
+	for _, wrapper := range []string{"nice", "nice -n 5", "nohup", "timeout 5", "setsid", "stdbuf -o0", "xargs", "xargs -r", "/usr/bin/xargs"} {
 		for _, test := range []struct {
 			tail string
 			want bool
@@ -77,13 +86,13 @@ func TestWrapperCommandPositionBoundary(t *testing.T) {
 	}
 }
 
-// ionice and taskset follow the same command-position rule as the five
+// ionice, taskset and xargs follow the same command-position rule as the five
 // siblings (#5034): a dynamic word where the command goes refuses, a literal
 // command's dynamic arguments are opaque, and a buried LITERAL suffix still
 // refuses.
 func TestIoniceTasksetCommandPositionBoundary(t *testing.T) {
 	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
-	for _, wrapper := range []string{"ionice", "ionice -c 3", "ionice --", "taskset 0x1", "taskset -c 0-3"} {
+	for _, wrapper := range []string{"ionice", "ionice -c 3", "ionice --", "taskset 0x1", "taskset -c 0-3", "xargs", "xargs -r", "xargs --", "/usr/bin/xargs"} {
 		for _, test := range []struct {
 			tail string
 			want bool
