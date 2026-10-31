@@ -644,3 +644,19 @@ test("a rename the daemon took but whose read failed stays in the field until a 
   pane.update(data({ "/a": view(item(1, { title: "newer elsewhere" })) }, 3), "/a", []);
   assert.equal(titleInput(pane).value, "newer elsewhere", "released once a snapshot carried it");
 });
+
+test("an optimistic move survives a newer snapshot whose read of its project failed", async () => {
+  const pane = mount(host({ started: () => 1 }));
+  pane.update(data({ "/a": view(item(1), item(2), item(3)) }), "/a", []);
+  key(row(pane, 3), "ArrowUp", { altKey: true });
+  await settle();
+  assert.deepEqual(rowIds(pane), [1, 3, 2]);
+  const failed = { ...data({ "/a": view(item(1), item(2), item(3)) }, 2), errors: new Map([["/a", "down"]]) };
+  pane.update(failed, "/a", []);
+  assert.deepEqual(rowIds(pane), [1, 3, 2], "the moved order stays, so the next move builds on it");
+  key(row(pane, 3), "ArrowUp", { altKey: true });
+  await settle();
+  assert.deepEqual(calls.filter((c) => c.method === "MoveBacklogItem").map((c) => c.body.before), [2, 1]);
+  pane.update(data({ "/a": view(item(3), item(1), item(2)) }, 3), "/a", []);
+  assert.deepEqual(rowIds(pane), [3, 1, 2], "a read that succeeded carries the real order");
+});

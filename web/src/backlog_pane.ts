@@ -118,7 +118,8 @@ export class BacklogPane {
       this.cursor = null;
       this.folded.clear();
     }
-    if (this.pending && data.generation > this.pending.gen) this.pending = null;
+    // A read of the project that failed kept its pre-move snapshot, which says nothing about the move.
+    if (this.pending && data.generation > this.pending.gen && !data.errors.has(this.pending.root)) this.pending = null;
     this.data = data;
     this.root = root;
     this.sessions = sessions;

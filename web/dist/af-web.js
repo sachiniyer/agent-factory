@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "9076961279eb";
+var CLIENT_VERSION = "4346c572b852";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19296,7 +19296,7 @@ var BacklogPane = class {
       this.cursor = null;
       this.folded.clear();
     }
-    if (this.pending && data.generation > this.pending.gen) this.pending = null;
+    if (this.pending && data.generation > this.pending.gen && !data.errors.has(this.pending.root)) this.pending = null;
     this.data = data;
     this.root = root2;
     this.sessions = sessions;
