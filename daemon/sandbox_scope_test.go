@@ -35,6 +35,9 @@ func TestSandboxScopeTableIsPinned(t *testing.T) {
 		got = append(got, path)
 	}
 	sort.Strings(got)
+	// The agent guidance relies on this table too: a sandbox session is not
+	// taught the proposal or backlog verbs because none of their routes is here
+	// (session.guidanceCaps.HostStores). Admitting one means teaching it there.
 	assert.Equal(t, want, got, "the sandbox scope changed: every entry needs its own handler-side owner constraint")
 
 	for _, path := range []string{
