@@ -298,3 +298,21 @@ func TestTaskPaneMaxRunsRowSurvivesAnEightyCellPane(t *testing.T) {
 		}
 	}
 }
+
+// TestTaskPaneFormLabelsAreSeparatedFromTheirValue pins the label column's
+// width: the widest label, "Max runs:", filled the old 9-cell column exactly,
+// so the cron task's reason ran into it ("Max runs:Cron fires already
+// coalesce."). Every form row must leave at least one space after its label.
+func TestTaskPaneFormLabelsAreSeparatedFromTheirValue(t *testing.T) {
+	tp := editTaskWithCap(t, 0, false, "")
+	tp.SetSize(80, 40)
+
+	out := stripANSI(tp.String())
+	for _, label := range []string{"Target:", "On done:", "Max runs:", "Host:", "Path:", "Program:"} {
+		i := strings.Index(out, label)
+		if assert.GreaterOrEqual(t, i, 0, "label %q must be on screen", label) {
+			assert.Equal(t, " ", out[i+len(label):i+len(label)+1],
+				"label %q must be followed by a space, not touch its value", label)
+		}
+	}
+}

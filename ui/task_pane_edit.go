@@ -400,7 +400,7 @@ func (s *TaskPane) renderEditMode() string {
 	}
 
 	label := func(text string) string {
-		return labelStyle.Render(fmt.Sprintf("%-9s", text))
+		return labelStyle.Render(fmt.Sprintf("%-10s", text))
 	}
 	// fieldErr renders the inline validation message directly under the
 	// field it belongs to, instead of a global error footer — ellipsized to
