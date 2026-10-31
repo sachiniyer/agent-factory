@@ -491,10 +491,8 @@ otherwise — see #1826.
   clause.
 - **No caps-shouting** for emphasis — write the emphasis into the sentence. CAPS
   are reserved for env vars (`AF_HOME`) and literal flag/command names.
-- **Animated indicators are allowed where they carry state a static glyph
-  cannot** (a blink that pulls the eye to an agent blocked on the user, as on the
-  web rail's needs-attention dot and the favicon) — not as decoration, and never
-  a spinner for work that is merely in progress (#1766: state reads from a static
-  glyph). Every animation must honour `prefers-reduced-motion: reduce` with a
-  static fallback that still carries the state (the rail dot becomes a ring, the
-  favicon holds still), and must be pinned by a test under both settings.
+- **Animated indicators are allowed, not as decoration.** Each one (a working
+  spinner, an attention blink) must carry state. Under `prefers-reduced-motion:
+  reduce` each falls back to a static glyph that still carries that state (the
+  rail dot becomes a ring, the favicon holds still), and each is pinned by a
+  test under both settings. Otherwise state reads from a static glyph (#1766).
