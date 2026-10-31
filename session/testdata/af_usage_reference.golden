@@ -48,6 +48,12 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
   af tasks remove <id-or-name>
 Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, --target-session "" reverts to session-per-run, and --project-path moves the task to another project (--repo still scopes its current project). A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
 
+Backlog (one project's work items in a strict order; ids are B-12 or 12; items you add are always drafts; do not queue or start items unless the user asks):
+  af backlog list [--all] [--state <s>]                Items in order, as a tree, with each one's state (--all includes done and dropped)
+  af backlog show <id>                                 One item: body, state and reason, waits-on, children, runs, and thread
+  af backlog add <title> [--body <text or ->] [--parent <id>] [--waits-on <id>,…]  Add one draft item
+  af backlog add --file <path or ->                    Add or update many items at once from JSON: {"proposal": "<slug>", "items": [{"key", "title", "body", "parent", "waits_on", "program", "sequential"}]}; every item needs a title; parent and waits_on take a key (a string) or an item id (a number, such as 12), and "12" or "B-12" as a string is read as a key; with "proposal" set, an item with the same proposal and key is updated, not added again
+
 Root-agent configuration (global unless --project <id-or-path> selects a personal project override):
   af config set root_agent <compact-json>             Merge the enabled/program profile as one table
   af config set root_agent.enabled <bool>             Enable or disable the singleton profile
@@ -57,6 +63,12 @@ Root-agent configuration is frozen at daemon start. An already-running root sess
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".
 
 Proposals: when the user asks to make a proposal (a plan or design written as docs you edit together), run "af proposal start <slug>" with a short lowercase-dashed slug. When the user asks you to work on an existing proposal, run "af proposal list" to find it and "af proposal attach <slug>". Both print the proposal's path and a "rules" field: follow those rules for the rest of the work. Do not write proposal docs into the repository yourself; af keeps them outside the worktree.
+
+Backlog items: when af started your session for a backlog item (your first prompt says "You are working on backlog item B-12"), report through that item, not only in your reply:
+  af backlog done --self [--pr <url>]                  The work is finished; the item goes to the user for review. Pass --pr when you opened a pull request
+  af backlog ask --self <text>                         Ask the user a question on the item, then stop and wait; the answer arrives in this session as a prompt
+  af backlog note --self <text>                        Add a note to the item's thread; nobody is notified
+From an item session af refuses these, which are the user's: add, edit, move, queue, draft, review, reopen, start, done <id>, drop, delete, note <id>, answer, and changing the runner or budget. If you need one of them, ask with "af backlog ask --self". Do not create other af sessions from an item session.
 
 Asking for the user: the user watches many sessions at once and cannot tell that you are blocked on them. Run "af sessions attention --self --reason '<what you need, in one line>'" only when you are blocked on a decision or question that only the user can answer, as the last step before you stop, after you write the question in your reply. Do not run it when a task has simply finished or at the end of an ordinary turn. It clears on its own when the user replies; "af sessions attention --self --clear" removes it if you no longer need them.
 

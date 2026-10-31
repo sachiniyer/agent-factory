@@ -75,6 +75,7 @@ var backendReadersUnderLock = map[string]bool{
 	"toInstanceDataLocked":          true,
 	"PreviewTabSnapshotByID":        true,
 	"FromInstanceData":              true,
+	"FromInstanceDataWithContext":   true, // the same constructor body; FromInstanceData delegates to it (#6446)
 	"ReattachSandbox":               true,
 	"RemoteRuntimeUnbound":          true,
 	"PushCredentialPlacement":       true,

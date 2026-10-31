@@ -210,6 +210,13 @@ func sameSSHDestination(a, b config.SSHConfig) bool {
 		a.User == b.User && port(a.Port) == port(b.Port)
 }
 
+// provenance is who created a session: InstanceData.CreatedBySandbox and
+// CreatedByOperator. Immutable after construction, so read without a lock.
+type provenance struct {
+	createdBySandbox  string
+	createdByOperator bool
+}
+
 // CreatedBySandbox is the id of the session whose sandbox callback credential
 // created this one, empty for a session the operator created (#5571 W7.8).
 func (i *Instance) CreatedBySandbox() string {

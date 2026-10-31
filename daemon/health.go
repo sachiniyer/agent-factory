@@ -40,6 +40,8 @@ type HealthStatus struct {
 	// Zero/nil with PingErr == nil means the responder predates these fields.
 	ServingPID int
 	BootConfig *DaemonBootConfig
+	// RefusedHosts is the responder's recent Host refusals (PingResponse).
+	RefusedHosts []RefusedHost
 	// HTTPSocketPath is the daemon's HTTP/JSON socket location.
 	HTTPSocketPath string
 	// HTTPSocketExists reports whether HTTPSocketPath is present on disk.
@@ -108,6 +110,7 @@ func Health() HealthStatus {
 		h.Listeners = ping.Listeners
 		h.ServingPID = ping.PID
 		h.BootConfig = ping.BootConfig
+		h.RefusedHosts = ping.RefusedHosts
 	}
 	h.HTTPSocketPath, h.HTTPSocketExists, h.HTTPListening = probeHTTPSocket()
 	h.AutostartUnit = AutostartInstalled()

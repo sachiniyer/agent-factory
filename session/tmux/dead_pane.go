@@ -308,6 +308,10 @@ func pidGone(pid int) bool {
 	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 }
 
+// paneRootGone is pidGone as readPaneExit asks it, a variable so a test can decide
+// what happens between the probe's format read and this check.
+var paneRootGone = pidGone
+
 // paneRowHasNoPane recognizes the reply a missing session produces on this
 // multi-field format: every pane-sourced field empty. Field 1 — pane_dead —
 // is the discriminator because it is a boolean tmux always answers for a real
@@ -439,6 +443,11 @@ func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
 // handed it elsewhere — no match. An unanswerable list or a vanished session
 // returns an error: "cannot prove" must never masquerade as either verdict.
 func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, error) {
+	// A restore pass primes one server-wide listing (#6423): a session that is in
+	// it answers from there, in place of its own list-panes.
+	if rows, ok := currentSnapshot().paneRows(t.sanitizedName); ok {
+		return paneRowsHoldRoot(rows, pid, startID)
+	}
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	output, err := t.outputTmuxBounded(ctx, "list-panes", "-s", "-t", exactTarget(t.sanitizedName), "-F", paneRowFormat)
@@ -454,7 +463,13 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 	if strings.TrimSpace(string(output)) == "" {
 		return false, errPaneQueryFoundNoPane
 	}
-	for _, field := range strings.Fields(string(output)) {
+	return paneRowsHoldRoot(strings.Fields(string(output)), pid, startID)
+}
+
+// paneRowsHoldRoot is PaneRootProcessMatches' verdict over a session's pane rows,
+// whether they came from its own list-panes or from a primed SessionSnapshot.
+func paneRowsHoldRoot(fields []string, pid int, startID uint64) (bool, error) {
+	for _, field := range fields {
 		row, err := parsePaneRow(field)
 		if err != nil {
 			return false, fmt.Errorf("%w (list-panes row %q)", err, field)
@@ -518,6 +533,29 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 // unknown.
 func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, at time.Time, known bool) {
 	exit, uncollected := t.readPaneExit(tmuxCommandTimeout)
+	// A dead pane whose root is still running is either a root that closed its
+	// terminal and carries on, or one that is exiting right now: tmux marks the pane
+	// dead when the pty hits EOF, and the kernel closes a dying process's
+	// descriptors before it becomes a zombie. One read cannot tell them apart, so
+	// give the second kind a short grace to become collectable (#6439) before
+	// answering that the root is alive.
+	if exit.rootRunning {
+		graceEnd := time.Now().Add(paneRootGrace)
+		for pause := 5 * time.Millisecond; exit.rootRunning && time.Now().Before(graceEnd); pause = min(2*pause, 25*time.Millisecond) {
+			time.Sleep(pause)
+			budget := time.Until(graceEnd)
+			if budget <= 0 {
+				break
+			}
+			next, nextUncollected := t.readPaneExit(budget)
+			if !next.known {
+				// A re-read that cannot answer, including one cut off by the end of
+				// the grace, must not undo the reading that did.
+				break
+			}
+			exit, uncollected = next, nextUncollected
+		}
+	}
 	// Every re-read is bounded by what is left of the wait, so a tmux that
 	// stalls mid-wait cannot hold the caller for a whole command timeout.
 	deadline := time.Now().Add(paneStatusWait)
@@ -545,6 +583,26 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 		}
 		exit, uncollected = next, stillUncollected
 	}
+	// The status fields and the root's liveness are two reads, not one: tmux can
+	// collect the root between the format read (status still empty) and the
+	// pidGone check, which then answers "gone" with a status the next read has. A
+	// pane that took that path settles for a short bounded time rather than
+	// reporting a finished command whose status is unknown (#6439).
+	if exit.reapedNoStatus {
+		settleEnd := time.Now().Add(paneRootGrace)
+		for pause := 5 * time.Millisecond; exit.reapedNoStatus && time.Now().Before(settleEnd); pause = min(2*pause, 25*time.Millisecond) {
+			time.Sleep(pause)
+			budget := time.Until(settleEnd)
+			if budget <= 0 {
+				break
+			}
+			next, _ := t.readPaneExit(budget)
+			if !next.known || !next.dead {
+				break
+			}
+			exit = next
+		}
+	}
 	if nudges > 0 {
 		version := exit.version
 		if version == "" {
@@ -561,6 +619,12 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 // normally milliseconds; the bound only matters when tmux is stalled. var, not
 // const, so tests can lower it.
 var paneStatusWait = 2 * time.Second
+
+// paneRootGrace bounds how long ProbePaneExit waits for the running root of a dead
+// pane to finish exiting before it concludes the root is alive. It is paid only by
+// a pane that is held dead with its root running, which is rare. var, not const,
+// so tests can widen it.
+var paneRootGrace = 200 * time.Millisecond
 
 // paneDeathsWait bounds how long panePID re-reads a row whose stamp is pending
 // — dead on every freshness input but the deaths counter. The pane-died hook
@@ -591,8 +655,13 @@ func (t *TmuxSession) nudgeReap(budget time.Duration) {
 // paneExit is one reading of ProbePaneExit's answer.
 type paneExit struct {
 	dead, statusKnown, known bool
-	status                   int
-	at                       time.Time
+	// rootRunning marks a dead pane whose root is neither collected nor a zombie.
+	rootRunning bool
+	// reapedNoStatus marks a dead pane whose root is gone but whose status the read
+	// did not carry: tmux may have recorded it after the read.
+	reapedNoStatus bool
+	status         int
+	at             time.Time
 	// version is the tmux SERVER's own version, for the nudge's log line: the
 	// installed client can be newer than a server started before an upgrade.
 	version string
@@ -682,11 +751,12 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 		if perr != nil || pid <= 0 {
 			return paneExit{}, false
 		}
-		if pidGone(pid) {
+		if paneRootGone(pid) {
+			exit.reapedNoStatus = true
 			return exit, false
 		}
 		if !exitedUncollected(pid) {
-			return paneExit{known: true}, false
+			return paneExit{known: true, rootRunning: true}, false
 		}
 		return exit, true
 	}

@@ -1082,7 +1082,7 @@
         "pointer": "api/sessions.go:582 sessionsPreviewCmd"
       },
       "verdict": "parity",
-      "notes": "The CLI uses the internal Preview RPC; the UIs get the same content off the live stream."
+      "notes": "The CLI uses the internal Preview RPC; the UIs get the same content off the live stream. POST /v1/PreviewSession is the public, read-only short form for scripts: the last 1-40 lines of the agent tab as plain text, by stable id (#6284)."
     },
     {
       "id": "session.preview-full",
@@ -2078,6 +2078,7 @@
       "POST /v1/ListOnComplete": "task.on-complete",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
+      "POST /v1/PreviewSession": "session.preview",
       "POST /v1/PruneSessions": "session.prune",
       "POST /v1/QuotaReport": "quota.usage-report",
       "POST /v1/RegisterAccount": "session.accounts",

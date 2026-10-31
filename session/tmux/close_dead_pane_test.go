@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -266,6 +267,76 @@ func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing
 	require.NoError(t, err)
 	require.Equal(t, PaneStateKnown, state)
 	require.False(t, proctree.AliveSame(root), "the running root of a dead pane survived the teardown")
+}
+
+// tmux marks a pane dead when its pty hits EOF, and the kernel closes a dying
+// process's descriptors before the process becomes a zombie. A root that closes
+// its terminal and exits a moment later is therefore, for that moment, a dead
+// pane over a root that is neither collected nor a zombie; one probe must not
+// answer "alive" for it (#6439). The fixture stretches the moment to 300ms so it
+// is deterministic rather than a 1-in-60 race.
+func TestProbePaneExit_ARootThatIsExitingIsNotReportedAlive(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("a pane is held dead with its root running only on Linux ptys, not on %s", runtime.GOOS)
+	}
+	testguard.IsolateTmux(t)
+	prev := paneRootGrace
+	paneRootGrace = 5 * time.Second
+	t.Cleanup(func() { paneRootGrace = prev })
+	name := fmt.Sprintf("af_test_dead_pane_exiting_%d", time.Now().UnixNano())
+	program := startHeldPane(t, name, `sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; sleep 0.3; exit 7'`)
+
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
+		"#{pane_dead}|#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}").Output()
+	require.NoError(t, err)
+	require.Equal(t, "1|", strings.TrimSpace(string(out)),
+		"the fixture must hold a dead pane whose root is still running and uncollected")
+
+	status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, program), name)
+	require.Equal(t, 7, status)
+}
+
+// The probe's status fields and its liveness check are two reads. If tmux collects
+// the root between them, the check answers "gone" while the fields it just read
+// still had no status; the probe must read again rather than report a finished
+// command with an unknown status (#6439). The ordering is forced, not timed: the
+// root exits only when the liveness check releases it, and the check is held until
+// tmux has recorded the status, which is exactly "root collected after the format
+// read, before the check".
+func TestProbePaneExit_AStatusRecordedBetweenTheReadAndTheLivenessCheckIsNotLost(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("a pane is held dead with its root running only on Linux ptys, not on %s", runtime.GOOS)
+	}
+	testguard.IsolateTmux(t)
+	name := fmt.Sprintf("af_test_dead_pane_reap_order_%d", time.Now().UnixNano())
+	// The root closes its terminal (so tmux holds the pane dead) and then stays up
+	// until the injected liveness check lets it go: it cannot exit, and so cannot be
+	// collected, before the probe has taken its format read.
+	gate := filepath.Join(t.TempDir(), "exit")
+	program := startHeldPane(t, name, fmt.Sprintf(
+		`sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; while [ ! -f %s ]; do sleep 0.01; done; exit 7'`, gate))
+
+	var raced atomic.Bool
+	prev := paneRootGone
+	paneRootGone = func(pid int) bool {
+		// The first check is the one that follows the format read that saw no
+		// status. Let the root exit now, and hold the check until tmux has
+		// collected it and recorded 7.
+		if raced.CompareAndSwap(false, true) {
+			require.NoError(t, os.WriteFile(gate, nil, 0o600))
+			require.Eventually(t, func() bool {
+				out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead_status}").Output()
+				return err == nil && strings.TrimSpace(string(out)) == "7"
+			}, 5*time.Second, 5*time.Millisecond, "tmux never recorded the root's status")
+			return true
+		}
+		return prev(pid)
+	}
+	t.Cleanup(func() { paneRootGone = prev })
+
+	status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, program), name)
+	require.Equal(t, 7, status)
+	require.True(t, raced.Load(), "the fixture never reached the liveness check")
 }
 
 // shimStartCommand is what #{pane_start_command} answers for a pane af

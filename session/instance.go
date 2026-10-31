@@ -13,6 +13,10 @@ import (
 
 // Instance is a running instance of claude code.
 type Instance struct {
+	// restoreCtx is the batch-shared repo/config resolution for the duration of a
+	// FromInstanceDataWithContext restore (#6446); nil otherwise.
+	restoreCtx atomic.Pointer[RestoreContext]
+
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):
 	// started, liveness/inFlightOp, Tabs (and the agent tab's tmux session),
@@ -57,10 +61,7 @@ type Instance struct {
 	// source of truth for the item ↔ session link; this is a cache for clients
 	// and the one input restart recovery matches a starting run against.
 	BacklogItem int
-	// createdBySandbox and createdByOperator are InstanceData.CreatedBySandbox
-	// and CreatedByOperator. Immutable after construction.
-	createdBySandbox  string
-	createdByOperator bool
+	provenance  // who created the session (push_credential_placement.go)
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.

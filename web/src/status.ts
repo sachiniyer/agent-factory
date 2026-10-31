@@ -234,6 +234,19 @@ export function hasAttention(s: SessionData): boolean {
   return kind === "ready" || kind === "working";
 }
 
+/** How many sessions OTHER than `selectedId` are asking for the user. The
+ * selected session already shows its own chip; this is what a phone with the
+ * rail drawer closed cannot otherwise see (#6405). */
+export function otherAttentionCount(sessions: readonly SessionData[], selectedId: string | null): number {
+  return sessions.filter(s => s.id !== selectedId && hasAttention(s)).length;
+}
+
+/** "1 session needs attention" / "3 sessions need attention", or "" for none. */
+export function attentionWords(count: number): string {
+  if (count <= 0) return "";
+  return count === 1 ? "1 session needs attention" : `${count} sessions need attention`;
+}
+
 /** The reason the agent gave with its attention request, trimmed, or "". */
 export function attentionReason(s: SessionData): string {
   return hasAttention(s) ? (s.attention?.reason ?? "").trim() : "";
