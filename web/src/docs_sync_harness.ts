@@ -1085,14 +1085,18 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     await drain();
     // Sometimes the tab is closed now, a new tab opens, and the user edits in it before the
     // old request lands: the closed tab handed the doc over and must not write any more.
-    const reopened = rand() < 0.5;
-    if (reopened) {
+    const mode = rand();
+    const reopened = mode < 0.35; // closed, reopened and edited before the old request lands
+    const closedOnly = mode >= 0.35 && mode < 0.7; // closed; the doc is reopened only after it landed
+    if (reopened || closedOnly) {
       s.dispose();
       closedSyncs.add(s);
       closing.track(doc, s as Closable);
       syncs.delete(doc);
       attached = "";
       editor.text = "";
+    }
+    if (reopened) {
       await open(doc);
       await drain();
       userEdit();
@@ -1105,6 +1109,12 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
     s.remoteChanged(daemons.get(doc)!.read().commit); // the daemon's change event
     await drain();
+    if (closedOnly) {
+      // The closed tab's request landed, and no pane is open: the undo must still be
+      // recoverable, and the pane that opens next must show it.
+      await open(doc);
+      await drain();
+    }
     for (let i = 0; i < 3; i++) {
       await advance(6000);
       await drain();
