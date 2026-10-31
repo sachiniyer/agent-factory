@@ -814,6 +814,7 @@ func init() {
 	SessionsCmd.AddCommand(sessionsWatchCmd)
 	SessionsCmd.AddCommand(sessionsKillCmd)
 	SessionsCmd.AddCommand(sessionsArchiveCmd)
+	SessionsCmd.AddCommand(newSessionsAttentionCmd())
 	SessionsCmd.AddCommand(sessionsHandoffCmd)
 	SessionsCmd.AddCommand(sessionsRetryLimitCmd)
 	// The escape hatch for recovery's refusal to reap a reachable sandbox without

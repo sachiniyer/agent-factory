@@ -279,6 +279,19 @@ func routedCloseTab(req daemon.CloseTabRequest) (string, error) {
 	return name, remoteMutationError("tab-delete", err)
 }
 
+func routedSetAttention(req daemon.SetAttentionRequest) (daemon.SetAttentionResponse, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.SetAttention(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return daemon.SetAttentionResponse{}, err
+	}
+	defer c.CloseIdleConnections()
+	resp, err := c.SetAttention(req)
+	return resp, remoteMutationError("attention", err)
+}
+
 func routedRenameTab(req daemon.RenameTabRequest) (string, error) {
 	if !apiclient.IsRemoteTarget() {
 		return daemon.RenameTab(req)

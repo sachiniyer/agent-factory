@@ -162,7 +162,7 @@ export function applyTerminalPlacement(el: Pick<HTMLElement, "textContent" | "ti
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; placement?: { detail: string; remote: boolean }; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; newTab(kind: "shell" | "vscode"): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
+export function terminalChrome(opts: { title: string; placement?: { detail: string; remote: boolean }; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; clearAttention(): void; newTab(kind: "shell" | "vscode"): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
   const menu = actionsDisclosure("More session actions");
   menu.trigger.replaceChildren(icon("ellipsis"));
   menu.trigger.title = "More session actions";
@@ -229,8 +229,30 @@ export function terminalChrome(opts: { title: string; placement?: { detail: stri
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  const attention = attentionChip(opts.clearAttention);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+}
+
+/** The agent's open request for the user. Only the × clears it, so looking at the
+ *  session or focusing its pane never dismisses it by accident. */
+export function attentionChip(onDismiss: () => void) {
+  const label = h("span", { class: "af-term-attention-label" }, "Attention");
+  const dismiss = h("button", { type: "button", class: "af-term-attention-dismiss", title: "Dismiss attention request" }, icon("x"));
+  dismiss.setAttribute("aria-label", "Dismiss attention request");
+  dismiss.addEventListener("click", (event) => { event.stopPropagation(); dismiss.blur(); onDismiss(); });
+  const el = h("div", { class: "af-term-attention", role: "status" }, icon("bell", "af-term-attention-bell"), label, dismiss);
+  el.hidden = true;
+  const patch = (on: boolean, reason: string) => {
+    el.hidden = !on;
+    const title = reason ? `Needs attention: ${reason}` : "Needs attention";
+    if (el.title !== title) {
+      el.title = title;
+      // The phone app bar shows the bell and × only, so the words live here.
+      el.setAttribute("aria-label", title);
+    }
+  };
+  return { el, dismiss, patch };
 }
 
 /** Split leaves share the same title/close treatment as the main tab row. */

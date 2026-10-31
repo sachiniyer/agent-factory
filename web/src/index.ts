@@ -20,6 +20,7 @@ import {
   addTask,
   ApiError,
   archiveSession,
+  clearAttention,
   clearToken,
   closeTab,
   createSession,
@@ -198,6 +199,7 @@ const store = new Store<AppState>({
   focus: "rail",
   activeTab: 0,
   shownTabs: [0],
+  openTabs: [],
   tabError: null,
   tasks: [],
   registeredProjects: [],
@@ -232,7 +234,6 @@ const pendingRestores = new PendingRestores(
   requestPendingRestoreResync,
 );
 const connectionGate = createLatestRequestGate();
-
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
  *  offer a program picker: new session, add task, edit task. One helper rather than
  *  three copies of the token dance — the hardcoded-list bug this RPC exists to
@@ -320,7 +321,7 @@ const splitView = new SplitView(termHost, {
   // Mirror the layout into the store so the tab bar can highlight the focused pane's
   // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
   // on a real change, so this write never loops back through rerender → syncSplit.
-  onLayout: ({ focusedTab, shownTabs }) => store.set({ activeTab: focusedTab, shownTabs }),
+  onLayout: ({ focusedTab, shownTabs, openTabs }) => store.set({ activeTab: focusedTab, shownTabs, openTabs }),
 });
 
 let root: HTMLElement | null = null;
@@ -522,6 +523,7 @@ async function connect(candidate: string): Promise<void> {
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: undefined,
     tasks,
@@ -595,6 +597,7 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: undefined,
     tasks: [],
@@ -2879,6 +2882,19 @@ function doTriggerTask(task: TaskData): void {
     });
 }
 
+/** Dismisses the selected session's attention request — the × on the header chip.
+ *  The clear names the request the chip showed, so an agent that raised a newer
+ *  one meanwhile keeps it. */
+function doClearAttention(): void {
+  const sel = selectedSessionData();
+  const tok = token;
+  const setAt = sel?.attention?.set_at;
+  if (!sel || tok === null || !setAt) {
+    return;
+  }
+  void clearAttention(sel.id ?? "", setAt, tok).catch(surfaceTabError);
+}
+
 /**
  * Resumes the selected session from its usage-limit wall (#1934) — the web's
  * analogue of the TUI's `c`.
@@ -3098,6 +3114,7 @@ const actions = {
   archive: (session: ActionableSession) => openConfirm("archive", session),
   restore: (session: ActionableSession) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  clearAttention: doClearAttention,
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,

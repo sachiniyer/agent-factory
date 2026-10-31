@@ -207,6 +207,7 @@ func (i *Instance) MarkUserKilled() {
 		// would report "waiting on the environment" while only the tombstone's
 		// cleanup loop runs. It commits clear with the tombstone (#5295 review).
 		i.lostRestoreWait = LostRestoreWait{}
+		i.attention = nil
 		i.touchLocked()
 	}
 	i.inFlightOp = OpNone

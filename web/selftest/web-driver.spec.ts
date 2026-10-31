@@ -1598,30 +1598,28 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await p.goto("/");
   await expect(p.locator(".af-app")).toBeVisible();
 
-  // Working row: NO status dot at all — the dot span is omitted entirely. The row
-  // must be asserted present FIRST: toHaveCount(0) on a row that never rendered
-  // would pass for the wrong reason.
+  // The rail carries state by glyph only: no state words in any row.
   await expect(row(p, "probe-working")).toBeVisible({ timeout: 15_000 });
-  await expect(row(p, "probe-working").locator(".af-dot")).toHaveCount(0);
-  await expect(row(p, "probe-working").locator(".af-row-status")).toHaveCount(1);
-  await expect(row(p, "probe-working").locator(".af-operator-state")).toHaveText("Working");
-  // Needs-you row: the static filled circle, in the ready color bucket, never spinning.
-  const readyDot = row(p, "probe-needs-you").locator(".af-dot");
-  await expect(readyDot).toHaveClass(/af-dot-ready/);
-  await expect(readyDot.locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
-  await expect(readyDot).not.toHaveClass(/af-dot-spin/);
+  await expect(p.locator(".af-rail-list .af-operator-state")).toHaveCount(0);
+  const workingDot = row(p, "probe-working").locator(".af-dot");
+  await expect(workingDot).toHaveClass(/af-dot-working/);
+  await expect(workingDot.locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
+  await expect(row(p, "probe-working")).toHaveClass(/af-row-operator-working/);
+  // An idle Ready row is blank, but keeps its fixed status cell so titles align.
+  await expect(row(p, "probe-needs-you").locator(".af-dot")).toHaveCount(0);
+  await expect(row(p, "probe-needs-you").locator(".af-row-status")).toHaveCount(1);
   await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
-  await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
-  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("Needs you · synth-probe-needs-you");
-  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("Needs you");
+  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("synth-probe-needs-you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("");
   await expect(row(p, "probe-no-branch").locator(".af-row-branch-name")).toHaveCount(0);
   await row(p, "probe-needs-you").click();
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
-  // Positive non-delivery is Broken even though the underlying process is Ready.
+  // Positive non-delivery is Broken even though the underlying process is Ready,
+  // so the row draws the dead glyph instead of staying blank.
   const promptBroken = row(p, "probe-broken-prompt");
   await expect(promptBroken).toHaveClass(/af-row-operator-broken/);
-  await expect(promptBroken.locator(".af-operator-state")).toHaveText("Broken");
+  await expect(promptBroken.locator(".af-dot")).toHaveClass(/af-dot-dead/);
   await expect(promptBroken.locator(".af-idle-reason")).toHaveCount(0);
   await promptBroken.click();
   await expect(promptBroken.locator(".af-idle-reason")).toContainText("prompt not delivered");
@@ -1629,14 +1627,11 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   // Error/terminal states keep distinct STATIC shapes.
   await expect(row(p, "probe-lost").locator('.af-icon[data-icon="circle-dashed"]')).toHaveCount(1);
   await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
-  await expect(row(p, "probe-lost").locator(".af-operator-state")).toHaveText("Broken");
+  await expect(row(p, "probe-lost")).toHaveClass(/af-row-operator-broken/);
   await expect(row(p, "probe-dead").locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
   await expect(row(p, "probe-limit").locator('.af-icon[data-icon="diamond"]')).toHaveCount(1);
-  await expect(row(p, "probe-limit").locator(".af-operator-state")).toHaveText("Waiting on a limit");
-  // The animation class is gone from every status row, and the removed "working" dot
-  // kind never renders anywhere.
+  await expect(row(p, "probe-limit")).toHaveClass(/af-row-operator-waiting-limit/);
   await expect(p.locator(".af-dot-spin")).toHaveCount(0);
-  await expect(p.locator(".af-dot-working")).toHaveCount(0);
 
   // Retry limit remains the conditional pane-header escape from a usage-limit wall
   // (#1934): selecting the synthetic limit row reveals it, while selecting an
@@ -7780,7 +7775,7 @@ test("filter (feat): the default shows every state EXCEPT archived", REAL_FIXTUR
   // user actually reads, so a default that drifts in filter.ts is caught here too.
   await page.locator(".af-rail-filter").click();
   await expect(filterItem(page, "archived")).toHaveAttribute("aria-checked", "false");
-  for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
+  for (const kind of ["attention", "needs-you", "working", "waiting-limit", "broken"]) {
     await expect(filterItem(page, kind), `${kind} must be shown by default`).toHaveAttribute("aria-checked", "true");
   }
   // The default is NOT a "narrowed" state — it must not nag with an indicator the
@@ -7805,7 +7800,7 @@ test("filter (feat): Show archived reveals the archived row as inactive, and hid
   const archived = row(page, SESSION_B);
   await expect(archived).toBeVisible();
   await expect(archived).toHaveClass(/af-row-archived.*af-row-operator-archived|af-row-operator-archived.*af-row-archived/);
-  await expect(archived.locator(".af-operator-state")).toHaveText("Archived");
+  await expect(archived.locator(".af-dot-archived")).toHaveCount(1);
   expect(Number(await archived.evaluate((el) => Number(getComputedStyle(el).opacity)))).toBe(1);
   // Revealing the archive IS a departure from the default, so the control says so.
   await expect(page.locator(".af-rail-filter")).toHaveClass(/af-rail-filter-narrowed/);
@@ -7981,7 +7976,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     // Hide every non-archived state. Selection and the terminal pane intentionally
     // survive this display filter, so management must move with them instead of
     // disappearing with the row.
-    for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
+    for (const kind of ["attention", "needs-you", "working", "waiting-limit", "broken"]) {
       await setFilter(p, kind, false);
     }
     await expect(row(p, title)).toHaveCount(0);
@@ -11045,14 +11040,14 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
           // Exercise a deterministic set of live placements. Session status icons
           // legitimately come and go as the seeded agent moves between Needs you and
           // Working, so they cannot be the reason this coverage happens to exceed its
-          // floor. The default filter always exposes four checked semantic groups.
+          // floor. The default filter always exposes five checked semantic groups.
           await p.getByRole("button", { name: "Filter sessions" }).click();
           await expect(p.locator(".af-filter-menu")).toBeVisible();
           // Armed here, before the gate below rather than just before the geometry: the
           // window that went wrong in the #3681 trace is the 43 ms of round trips
           // BETWEEN this gate and the measurement, not the measurement itself.
           await armIconRebuildWatch(p);
-          await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+          await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(5);
 
           const projectIcon = p.locator(".af-project-glyph");
           const filterIcon = p.locator(".af-rail-filter-glyph");
@@ -11338,7 +11333,7 @@ test("#3681 a zero box over a QUIET window is reported as a product defect, nami
     await openTokenless(p);
     await p.getByRole("button", { name: "Filter sessions" }).click();
     await expect(p.locator(".af-filter-menu")).toBeVisible();
-    await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+    await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(5);
 
     await armIconRebuildWatch(p);
     await p.addStyleTag({
@@ -11362,7 +11357,7 @@ test("#3681 a zero box over a QUIET window is reported as a product defect, nami
     expect(message, "a quiet window makes a zero box the product's defect, not the reading's").toContain(
       "no rebuild in the window",
     );
-    for (const named of ["check:af-icon", "circle:af-icon", "git-branch:af-icon", "plus:af-icon", "ellipsis:af-icon"]) {
+    for (const named of ["check:af-icon", "git-branch:af-icon", "plus:af-icon", "ellipsis:af-icon"]) {
       expect(message, `the failure must name ${named}`).toContain(named);
     }
     expect(message, "and say which of the three clauses rejected it").toContain("zero box 0x0");

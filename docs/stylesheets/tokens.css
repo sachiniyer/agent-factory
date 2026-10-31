@@ -3,6 +3,7 @@
   color-scheme: light;
   --af-accent: #2d6271;
   --af-archived: #4c566a;
+  --af-attention: #856200;
   --af-border: #657084;
   --af-dead: #883b43;
   --af-ink: #2e3440;
@@ -29,6 +30,7 @@
   color-scheme: dark;
   --af-accent: #2296f3;
   --af-archived: #d8dee9;
+  --af-attention: #f5c400;
   --af-border: #3d3d3d;
   --af-dead: #e4c8cd;
   --af-ink: #cccccc;

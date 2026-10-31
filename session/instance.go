@@ -537,6 +537,8 @@ type Instance struct {
 	// every rail, and cleared the first time a client opens the session's pane.
 	rootRecreateContext RootRecreateContext
 
+	attention *Attention
+
 	// userKilled is the kill-intent tombstone (#1108): set (and persisted)
 	// before an explicit kill's teardown begins, so a record that survives a
 	// daemon crash or teardown failure mid-kill is provably a corpse the user

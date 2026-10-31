@@ -84,6 +84,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
+- [`af sessions attention`](#af-sessions-attention) — Ask the user for attention, or clear the request
 - [`af sessions backends`](#af-sessions-backends) — List the runtimes this project can create sessions on
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
@@ -2655,6 +2656,7 @@ af sessions
 
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
+- [`af sessions attention`](#af-sessions-attention) — Ask the user for attention, or clear the request
 - [`af sessions backends`](#af-sessions-backends) — List the runtimes this project can create sessions on
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
@@ -2748,6 +2750,43 @@ Attach to a running session's tmux terminal. Detach with the configured detach k
 ```
 af sessions attach <title>
 ```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions attention
+
+Ask the user for attention, or clear the request
+
+Mark a session as needing the user. The web rail shows a blinking yellow
+dot on the row, and the reason in the row tooltip.
+
+Agents run this with --self only when they are blocked on a decision or
+question that only the user can answer, as the last step before they stop.
+They do not run it when a task has simply finished.
+
+The request clears when the user submits a line in the agent pane, dismisses
+it from the session header in the web UI, or when the agent starts work again
+after it went idle.
+--clear removes it now.
+
+```
+af sessions attention [<title>] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--clear` |  | Remove the attention request |
+| `--reason` | `string` | Short note that tells the user what you need |
+| `--self` |  | Target the current session (resolved via whoami) |
 
 **Global flags**
 

@@ -824,6 +824,16 @@ func RebindProject(req RebindProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// SetAttention asks the daemon to set or clear a session's attention request
+// (`af sessions attention`).
+func SetAttention(req SetAttentionRequest) (SetAttentionResponse, error) {
+	var resp SetAttentionResponse
+	if err := callDaemon("SetAttention", req, &resp); err != nil {
+		return SetAttentionResponse{}, err
+	}
+	return resp, nil
+}
+
 // SetProjectColor asks the daemon to set or clear a registered project's
 // display color (`af projects color`).
 func SetProjectColor(req SetProjectColorRequest) (config.Project, error) {

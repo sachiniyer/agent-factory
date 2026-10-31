@@ -1,4 +1,4 @@
-/* Product chrome uses the generated 23-token contract in tokens.css. */
+/* Product chrome uses the generated 24-token contract in tokens.css. */
 :root {
  --af-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, sans-serif;
  --af-font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -1086,11 +1086,6 @@ button:disabled,
   text-overflow: ellipsis;
 }
 
-.af-operator-state {
-  font-weight: 400;
-  font-size: var(--af-type-body);
-}
-
 .af-row-branch-name {
   /* Inline text truncates within the branch; an atomic inline-flex box was
    * replaced wholesale by the parent's ellipsis, leaving only the separator. */
@@ -1107,8 +1102,7 @@ button:disabled,
   opacity: 1;
 }
 
-/* A fixed status cell aligns every title even though Working intentionally has no
- * glyph (#1766). Shape + visible operator label carry state beyond color. */
+/* A fixed status cell aligns every title, also for an idle row with no glyph. */
 .af-row-status {
   display: inline-flex;
   align-items: center;
@@ -1125,13 +1119,50 @@ button:disabled,
   font-size: var(--af-type-body);
 }
 
-.af-dot-ready .af-icon,
+.af-dot-working .af-icon,
 .af-dot-limit .af-icon {
   fill: currentColor;
 }
 
-.af-dot-ready {
-  color: var(--af-ready);
+.af-dot-working {
+  color: var(--af-ink-muted);
+}
+
+.af-dot-attention .af-icon {
+  fill: currentColor;
+}
+
+.af-dot-attention {
+  color: var(--af-attention);
+  animation: af-attention-blink 1.2s steps(2, jump-none) infinite;
+}
+
+@keyframes af-attention-blink {
+  from { opacity: 1; }
+  to { opacity: 0.25; }
+}
+
+/* Without the blink, a ring keeps attention distinct from the working circle
+   by shape, not only by colour. */
+@media (prefers-reduced-motion: reduce) {
+  .af-dot-attention { animation: none; }
+  .af-dot-attention .af-icon {
+    border-radius: 50%;
+    outline: calc(var(--af-space-1) / 2) solid currentColor;
+    outline-offset: calc(var(--af-space-1) / 4);
+  }
+}
+
+.af-visually-hidden {
+  position: absolute;
+  width: calc(var(--af-space-1) / 4);
+  height: calc(var(--af-space-1) / 4);
+  margin: calc(var(--af-space-1) / -4);
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .af-dot-lost {
@@ -1152,12 +1183,6 @@ button:disabled,
 
 /* Resolved state is independent of the selected surface. Failure detail remains
  * readable even for a ready process whose prompt could not be delivered. */
-.af-row[data-state="ready"] .af-operator-state { color: var(--af-ready); }
-.af-row[data-state="working"] .af-operator-state { color: var(--af-running); }
-.af-row[data-state="lost"] .af-operator-state { color: var(--af-lost); }
-.af-row[data-state="dead"] .af-operator-state { color: var(--af-dead); }
-.af-row[data-state="archived"] .af-operator-state { color: var(--af-archived); }
-.af-row[data-state="limit"] .af-operator-state { color: var(--af-limit-reached); }
 .af-row-operator-broken .af-idle-reason { color: var(--af-dead); }
 .af-row-selected .af-row-title { font-weight: 600; }
 .af-row-selected::before {
@@ -1351,6 +1376,51 @@ body[data-project-color] [data-af-theme="dark"] {
   min-width: 0;
   max-width: min(calc(var(--af-space-3) * 18), 26vw);
   overflow: hidden;
+}
+
+.af-term-attention {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--af-space-1);
+  padding: 0 0 0 var(--af-space-2);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-attention);
+  border-radius: var(--af-radius-control);
+  color: var(--af-attention);
+  font-size: var(--af-type-body);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.af-term-attention[hidden] { display: none; }
+
+.af-term-attention-bell {
+  animation: af-attention-blink 1.2s steps(2, jump-none) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .af-term-attention-bell { animation: none; }
+}
+
+.af-term-attention-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  padding: 0 var(--af-space-1);
+  background: transparent;
+  color: inherit;
+  border: none;
+  border-left: calc(var(--af-space-1) * 0.25) solid var(--af-attention);
+  border-radius: 0 var(--af-radius-control) var(--af-radius-control) 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.af-term-attention-dismiss:hover,
+.af-term-attention-dismiss:focus-visible {
+  color: var(--af-ink);
+  background: var(--af-surface-raised);
 }
 
 .af-copy-link {
@@ -3006,6 +3076,8 @@ body[data-project-color] [data-af-theme="dark"] {
   }
   .af-term-new-group { grid-row: 1; grid-column: 3; }
   .af-term-new-label { display: none; }
+  .af-term-head > .af-term-attention { grid-row: 1; grid-column: 2; }
+  .af-term-attention-dismiss { min-width: calc(var(--af-space-3) * 2); }
 
   .af-term-head-main {
     grid-row: 1;
@@ -3795,6 +3867,8 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   }
   .af-session-first .af-nav-toggle { flex-shrink: 0; }
   .af-session-first .af-term-title { order: 1; flex: 1; }
+  .af-session-first .af-term-attention { order: 2; flex-shrink: 0; }
+  .af-session-first .af-term-attention-label { display: none; }
   .af-session-first .af-term-new-group { order: 3; flex-shrink: 0; }
   .af-session-first .af-appbar-tools-wrap { order: 4; flex-shrink: 0; }
   .af-session-first .af-term-head { display: none; }

@@ -211,6 +211,17 @@ func (c *Client) ReorderTab(req daemon.ReorderTabRequest) (daemon.ReorderTabResp
 	return resp, nil
 }
 
+// SetAttention sets or clears a session's attention request over /v1/SetAttention
+// — the same route the web clears it with, and the one `af sessions attention`
+// reaches under a remote target or a sandbox credential.
+func (c *Client) SetAttention(req daemon.SetAttentionRequest) (daemon.SetAttentionResponse, error) {
+	var resp daemon.SetAttentionResponse
+	if err := c.call("SetAttention", req, &resp); err != nil {
+		return daemon.SetAttentionResponse{}, err
+	}
+	return resp, nil
+}
+
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
 // one attached session (#1160). Best-effort attach coordination; it rides an
 // internal (non-cataloged) route because it is daemon infra, not a public verb.

@@ -22,6 +22,7 @@ var verbTargetClass = map[string]string{
 
 	"af sessions archive":      classRouted,
 	"af sessions attach":       classRouted,
+	"af sessions attention":    classRouted,
 	"af sessions backends":     classRouted,
 	"af sessions create":       classRouted,
 	"af sessions get":          classRouted,

@@ -15,6 +15,7 @@ func Colors() map[string]lipgloss.AdaptiveColor {
 	return map[string]lipgloss.AdaptiveColor{
 		"accent":         {Light: "#2d6271", Dark: "#2296f3"},
 		"archived":       {Light: "#4c566a", Dark: "#d8dee9"},
+		"attention":      {Light: "#856200", Dark: "#f5c400"},
 		"border":         {Light: "#657084", Dark: "#3d3d3d"},
 		"dead":           {Light: "#883b43", Dark: "#e4c8cd"},
 		"ink":            {Light: "#2e3440", Dark: "#cccccc"},
@@ -31,6 +32,7 @@ func Colors() map[string]lipgloss.AdaptiveColor {
 type Palette struct {
 	Accent        lipgloss.AdaptiveColor
 	Archived      lipgloss.AdaptiveColor
+	Attention     lipgloss.AdaptiveColor
 	Border        lipgloss.AdaptiveColor
 	Dead          lipgloss.AdaptiveColor
 	Ink           lipgloss.AdaptiveColor
@@ -49,6 +51,7 @@ func Roles() Palette {
 	return Palette{
 		Accent:        c["accent"],
 		Archived:      c["archived"],
+		Attention:     c["attention"],
 		Border:        c["border"],
 		Dead:          c["dead"],
 		Ink:           c["ink"],

@@ -108,13 +108,13 @@ test("relative idle ages refresh without a session event", () => {
       idleReason: "settled-after-pane-change",
       paneChurnAt: "2026-08-10T12:50:00Z",
     },
-    textContent: " · pane changed · <1m ago",
+    textContent: "pane changed · <1m ago",
     closest: () => row,
   };
   const root = { querySelectorAll: () => [idle] };
 
   refreshIdleReasonAges(root as unknown as ParentNode, new Date("2026-08-10T15:00:00Z"));
-  assert.equal(idle.textContent, " · pane changed · 2h ago");
+  assert.equal(idle.textContent, "pane changed · 2h ago");
   assert.equal(row.title, "worker — Ready; pane changed · 2h ago; archive incomplete");
 });
 
@@ -254,6 +254,22 @@ test("an actionable row still opens on click and carries no disabled marker", ()
   assert.doesNotMatch(el.getAttribute("title") ?? "", /cannot be opened/);
   el.click();
   assert.equal(open.calls, 1, "the fix must not disable a row that CAN open");
+});
+
+test("each rail option names its state in visually hidden text", () => {
+  const hidden = (el: RowElement): string[] => [
+    ...(el.className === "af-visually-hidden" ? [el.textContent.trim()] : []),
+    ...el.children.flatMap(hidden),
+  ];
+  const cases: Array<[Partial<SessionData>, string]> = [
+    [{ liveness: Liveness.Ready }, "Idle"],
+    [{ liveness: Liveness.Running }, "Working"],
+    [{ liveness: Liveness.Ready, attention: { set_at: "2026-10-22T00:00:00Z" } }, "Needs attention"],
+    [{ liveness: Liveness.Archived }, "Archived"],
+  ];
+  for (const [over, label] of cases) {
+    assert.deepEqual(hidden(row(over).el), [label]);
+  }
 });
 
 test("an unmanaged inert row stays disabled without a managed-row reason", () => {
