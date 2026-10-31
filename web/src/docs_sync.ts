@@ -24,6 +24,9 @@ export { AUTOSAVE_DELAY_MS, SAVE_RETRY_MS };
 
 /** A save with no reply by now has an unknown outcome: it may have landed. */
 export const SAVE_TIMEOUT_MS = 30_000;
+/** A save that timed out and is still unanswered this long after is treated as ended: the
+ *  browser's own request timeout is about as long, and a doubt must not outlive its tab. */
+export const SAVE_GIVE_UP_MS = 5 * 60_000;
 export type { Conflict, Draft, SyncStatus };
 
 export interface DocSyncDeps {
@@ -229,7 +232,9 @@ export class DocSync {
     // Clean is not saved while the outcome of a save is unknown: the daemon may hold
     // text the buffer has since moved off (an undo back to the acknowledged text), and
     // the corrective save follows the reconcile read.
-    if (!isDirty(m)) return m.phase === "saving" || m.phase === "reconciling" || m.unknown ? null : "saved";
+    // A save that timed out can still land: until it has ended, the daemon may come to hold
+    // text the buffer has moved off.
+    if (!isDirty(m)) return m.phase === "saving" || m.phase === "reconciling" || m.unknown || m.late.some((l) => l.ended === null) ? null : "saved";
     if (m.phase === "idle" && !m.unknown && (hasConflictMarkers(m.buffer) || m.note?.kind === "error")) return "blocked";
     return null;
   }
@@ -348,20 +353,36 @@ export class DocSync {
         // A save with no reply is not a failed save: it may have landed. After the
         // timeout its outcome is unknown, and a reply that comes later is ignored
         // (its request id no longer matches).
+        let timedOut = false;
+        let giveUp: unknown = null;
+        const ended = (): void => {
+          if (giveUp !== null) this.deps.clearTimer(giveUp);
+          giveUp = null;
+          this.dispatch({ t: "late_done", seq });
+        };
         const timeout = this.deps.setTimer(() => {
           if (settled) return;
           settled = true;
-          this.dispatch({ t: "save_fail", seq, error: "the daemon did not answer in time" });
+          timedOut = true;
+          // Still on the wire: it can land after the head has been read again.
+          this.dispatch({ t: "save_fail", seq, error: "the daemon did not answer in time", outstanding: true });
+          giveUp = this.deps.setTimer(ended, SAVE_GIVE_UP_MS);
         }, SAVE_TIMEOUT_MS);
         this.deps.save(fx.text, fx.base, fx.final).then(
           (result) => {
-            if (settled) return;
+            if (settled) {
+              if (timedOut) ended();
+              return;
+            }
             settled = true;
             this.deps.clearTimer(timeout);
             this.dispatch(result.kind === "conflict" ? { t: "save_conflict", seq, result } : { t: "save_ok", seq, result });
           },
           (e: unknown) => {
-            if (settled) return;
+            if (settled) {
+              if (timedOut) ended();
+              return;
+            }
             settled = true;
             this.deps.clearTimer(timeout);
             if (statusOf404(e)) this.dispatch({ t: "gone", of: "save", seq });

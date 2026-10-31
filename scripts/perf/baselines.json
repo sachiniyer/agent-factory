@@ -99,23 +99,23 @@
     "margin": 350.6397233333334
   },
   "lazy_raw_bytes": {
-    "baseline": 364655,
+    "baseline": 365513,
     "samples": [
-      364655,
-      364655,
-      364655
+      365513,
+      365513,
+      365513
     ],
     "stddev": 0,
-    "margin": 18232.75
+    "margin": 18275.65
   },
   "lazy_gzip_bytes": {
-    "baseline": 117995,
+    "baseline": 118320,
     "samples": [
-      117995,
-      117995,
-      117995
+      118320,
+      118320,
+      118320
     ],
     "stddev": 0,
-    "margin": 5899.75
+    "margin": 5916.0
   }
 }

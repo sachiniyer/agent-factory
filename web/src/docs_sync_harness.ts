@@ -149,7 +149,8 @@ class Daemon {
 interface Pending {
   /** The window that made the request: a closing window takes only its own with it. */
   owner: "a" | "g";
-  stage: "sent" | "processed";
+  /** "held": the request is still on its way to the daemon, and reaches it when released. */
+  stage: "sent" | "processed" | "held";
   /** The reply never arrives (the client times out). */
   hang?: boolean;
   run(): unknown;
@@ -246,9 +247,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const events: { doc: string; commit: string }[] = [];
   let outage = false;
 
-  const call = <T>(run: () => T | Promise<T>, owner: "a" | "g" = "a"): Promise<T> =>
+  const call = <T>(run: () => T | Promise<T>, owner: "a" | "g" = "a", held = false): Promise<T> =>
     new Promise<T>((resolve, reject) => {
-      net.push({ owner, stage: "sent", run, resolve: resolve as (v: unknown) => void, reject });
+      net.push({ owner, stage: held ? "held" : "sent", hang: held, run, resolve: resolve as (v: unknown) => void, reject });
     });
 
   const httpErr = (status: number, message: string): Error => Object.assign(new Error(message), { status });
@@ -304,7 +305,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
           if (fault === "lose-reply") throw new Error("network error: reply lost");
           if (fault === "hang-applied") return new Promise<never>(() => undefined);
           return result;
-        }, owner);
+        }, owner, fault === "slow");
         return pending;
       },
       setBuffer: (text) => {
@@ -370,7 +371,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const agentLines = o.collide ? [0, 1, 2, 3, 4] : [3, 4];
 
   /** Forces the next save to fail in a given way (for scripted events). */
-  let nextSaveFault: "lose-reply" | "hang-applied" | null = null;
+  let nextSaveFault: "lose-reply" | "hang-applied" | "slow" | null = null;
 
   function userEdit(forced?: number): number | null {
     const s = syncs.get(attached);
@@ -890,6 +891,74 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     if (revived && s.currentStatus === "gone" && !d.deleted) fail("revived-doc-marked-gone-again", `${doc}: a 404 to a request from before the restore marked the restored doc deleted`);
   }
 
+  /** A save is in flight, the user undoes back to the acknowledged text, and the doc is
+   *  deleted before the reply: the deleted doc's tab keeps the undone buffer in storage,
+   *  because the daemon may hold the text that was sent. */
+  async function undoThenGone(): Promise<void> {
+    const doc = attached;
+    const s = syncs.get(doc);
+    const d = daemons.get(doc)!;
+    if (!doc || !s || !isLoaded(s) || s.ended || d.deleted) return;
+    const line = userEdit();
+    if (line === null) return;
+    s.flush();
+    await tick();
+    if (!net.some((x) => x.stage === "sent" && x.owner === "a")) return;
+    userUndo(line);
+    d.deleted = true;
+    s.remoteDeleted?.();
+    await tick();
+    if (s.currentStatus === "gone") {
+      const owner = storageOf.get(s)!.owner;
+      const stored = [...kvMap.keys()].some((k) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`) && k.endsWith(`\n${owner}`));
+      // I17: what stays with a deleted doc stays in storage, an undo back to the old text included.
+      if (!stored) fail("gone-doc-work-not-stored", `${doc}: the tab keeps work for a deleted doc but nothing is stored for it`);
+    }
+    d.readd(initialText(doc));
+    await reviveGone();
+    await drain();
+  }
+
+  /** A save takes longer than the client waits (30 s) to reach the daemon. The client gives
+   *  up on it and reads the head, which has not changed; the user undoes; then the request
+   *  lands, and the daemon's change event reaches the tab. The undo must stand. */
+  async function lateLanding(): Promise<void> {
+    const doc = attached;
+    const s = syncs.get(doc);
+    if (!doc || !s || !isLoaded(s) || s.ended || o.collide || ghostBox.cur || daemons.get(doc)!.deleted) return;
+    const line = userEdit();
+    if (line === null) return;
+    nextSaveFault = "slow";
+    s.flush();
+    await tick();
+    if (!net.some((x) => x.stage === "held" && x.owner === "a")) {
+      nextSaveFault = null;
+      return;
+    }
+    userUndo(line);
+    const want = typed.get(doc)!.get(line);
+    await advance(31_000); // the client's timeout fires; its read of the head runs and finds nothing changed
+    await drain();
+    for (const p of net.filter((x) => x.stage === "held" && x.owner === "a")) {
+      p.stage = "sent";
+      p.hang = false;
+      runPending(p); // the request finally reaches the daemon, and lands
+      deliver(p);
+    }
+    s.remoteChanged(daemons.get(doc)!.read().commit); // the daemon's change event
+    await drain();
+    for (let i = 0; i < 3; i++) {
+      await advance(6000);
+      await drain();
+    }
+    // I16: a save that timed out and lands later does not overwrite the undo.
+    const after = syncs.get(doc);
+    if (after && !after.ended && ["saved", "pending", "merged", "recovered", "saving"].includes(after.currentStatus)) {
+      const got = after.text.split("\n")[line];
+      if (got !== want) fail("late-landing-save-overwrote-undo", `${doc} line ${line}: expected ${want}, the tab shows ${got} (status ${after.currentStatus})`);
+    }
+  }
+
   /** The doc is deleted under unsaved work and the user discards it: nothing may write
    *  the discarded work back into storage, now or on any later event. */
   async function discardDeleted(): Promise<void> {
@@ -1111,7 +1180,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     else if (o.chaos && r >= 0.955 && r < 0.96) await reviveGone();
     else if (o.chaos && r >= 0.96 && r < 0.9615) daemonRestart();
     else if (o.chaos && r >= 0.9615 && r < 0.9625) await lateNotFound();
-    else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9625 && r < 0.966) await deleteThenClose();
+    else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9625 && r < 0.9645) await deleteThenClose();
+    else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9645 && r < 0.9655) await lateLanding();
+    else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9655 && r < 0.966) await undoThenGone();
     else if (o.chaos && o.collide && r >= 0.966 && r < 0.97) rollbackHead();
     else if (o.chaos && !o.collide && r >= 0.966 && r < 0.97) await discardDeleted();
     else if (o.chaos && r >= 0.97 && r < 0.98) {
@@ -1133,6 +1204,15 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   // reconnect, and let every timer and reload run to completion.
   outage = false;
   for (const d of daemons.values()) d.down = 0;
+  for (const p of net.filter((x) => x.stage === "held")) {
+    p.stage = "sent";
+    p.hang = false;
+  }
+  // A request that never answers is given up on after five minutes.
+  await advance(310_000); // timeouts fire...
+  await drain();
+  await advance(310_000); // ...and then the give-ups they armed
+  await drain();
   for (let round = 0; round < 12 && !violation; round++) {
     if (o.chaos) {
       // Deleted docs are added again, and the kept work is carried onto them.
@@ -1193,6 +1273,16 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     for (const s of syncs.values()) s.reconnect?.();
     await drain();
     await advance(6000);
+  }
+  // A request that is still out is given up on five minutes after it timed out: let the
+  // timeouts and then the give-ups run, and settle what they leave.
+  for (let k = 0; k < 2; k++) {
+    await advance(310_000);
+    await drain();
+    for (const s of syncs.values()) s.reconnect?.();
+    await drain();
+    await advance(6000);
+    await drain();
   }
   await drain();
   await advance(6000);

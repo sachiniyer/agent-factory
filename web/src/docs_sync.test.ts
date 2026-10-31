@@ -392,7 +392,6 @@ test("whenSaved stays pending while a lost-reply save is unreconciled, even when
   h.holdLoad = null;
   await tick();
   assert.equal(verdict, null, "the corrective save of v1 is still to land");
-  await h.fire();
   assert.equal(h.saves.at(-1)!.text, "v1");
   assert.equal(h.saves.at(-1)!.base, "c2");
   h.saves.at(-1)!.reply.resolve({ kind: "saved", text: "v1", commit: "c3", merged: false });
@@ -428,4 +427,28 @@ test("a 404 to a save sent before the doc was restored does not mark the restore
   h.saves[0]!.reply.reject(Object.assign(new Error("404 doc not found"), { status: 404 })); // the old save's answer, late
   await tick();
   assert.notEqual(h.sync.currentStatus, "gone", "the restore stands");
+});
+
+test("a save that timed out and lands later does not overwrite an undo", async () => {
+  const h = await started();
+  h.type("v2");
+  await h.fire(); // the save of v2 against c1 goes out and takes its time
+  h.type("v1"); // the user undoes back to the acknowledged text
+  // The client gives up after 30 s and reads the head, which has not changed.
+  const timeout = h.timers.find((t) => t.live && t.ms === 30_000)!;
+  timeout.live = false;
+  timeout.fn();
+  await tick();
+  let verdict: string | null = null;
+  void h.sync.whenSaved().then((v) => (verdict = v));
+  await tick();
+  assert.equal(verdict, null, "the request is still out: the daemon may yet hold v2");
+  // The request lands after all, and the daemon's change event reaches the tab.
+  h.head = { text: "v2", commit: "c2" };
+  h.sync.remoteChanged("c2");
+  h.saves[0]!.reply.resolve({ kind: "saved", text: "v2", commit: "c2", merged: false }); // ignored as a reply, but it ends the request
+  await tick();
+  await tick();
+  assert.equal(h.buffer, "v1", "the undo stands over the landed save");
+  assert.equal(h.saves.at(-1)!.text, "v1", "and is saved on top of it");
 });
