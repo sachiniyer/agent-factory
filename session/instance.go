@@ -13,6 +13,10 @@ import (
 
 // Instance is a running instance of claude code.
 type Instance struct {
+	// restoreCtx is the batch-shared repo/config resolution for the duration of a
+	// FromInstanceDataWithContext restore (#6446); nil otherwise.
+	restoreCtx atomic.Pointer[RestoreContext]
+
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):
 	// started, liveness/inFlightOp, Tabs (and the agent tab's tmux session),

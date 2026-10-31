@@ -192,7 +192,8 @@ export function terminalChrome(opts: { title: string; placement?: { detail: stri
   };
   const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
   const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
-  const newTabs = h("div", { class: "af-term-new-group" }, newTerminal, newVSCode);
+  const docsShortcuts = h("div", { class: "af-term-docs-group" });
+  const newTabs = h("div", { class: "af-term-new-group" }, docsShortcuts, newTerminal, newVSCode);
   const title = h("span", { class: "af-term-title" });
   applyTerminalTitle(title, opts.title);
   const placement = h("span", { class: "af-term-placement" });
@@ -231,7 +232,7 @@ export function terminalChrome(opts: { title: string; placement?: { detail: stri
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions, closePane);
   const attention = attentionChip(opts.clearAttention);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, docsShortcuts, tabUnavailable, menu, dispose: menu.dispose };
 }
 
 /** The agent's open request for the user. Only the × clears it, so looking at the

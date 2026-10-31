@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "ec09fbcff2bf";
+var CLIENT_VERSION = "8850d16e2109";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8074,7 +8074,8 @@ function terminalChrome(opts) {
   };
   const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
   const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
-  const newTabs = h("div", { class: "af-term-new-group" }, newTerminal, newVSCode);
+  const docsShortcuts2 = h("div", { class: "af-term-docs-group" });
+  const newTabs = h("div", { class: "af-term-new-group" }, docsShortcuts2, newTerminal, newVSCode);
   const title = h("span", { class: "af-term-title" });
   applyTerminalTitle(title, opts.title);
   const placement = h("span", { class: "af-term-placement" });
@@ -8106,7 +8107,7 @@ function terminalChrome(opts) {
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
   const attention = attentionChip(opts.clearAttention);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, docsShortcuts: docsShortcuts2, tabUnavailable, menu, dispose: menu.dispose };
 }
 function attentionChip(onDismiss) {
   const label = h("span", { class: "af-term-attention-label" }, "Attention");
@@ -13577,7 +13578,7 @@ function confirmDeleteTabModal(opts) {
     confirmClass: "af-danger",
     onCancel: opts.onCancel
   });
-  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : opts.kind === TabKind.Docs ? "This removes the Docs tab. The proposal and its docs stay. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
+  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : opts.kind === TabKind.Docs ? "This removes the Proposal tab. The proposal and its docs stay. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
   asForm(handle.el.firstElementChild, opts.onConfirm);
   queueMicrotask(() => cancelBtn.focus());
   return handle;
@@ -14315,6 +14316,63 @@ function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
   return tab;
 }
 
+// src/docs_autosplit.ts
+var AGENT_TAB = 0;
+function placeNewDocsTabs(tree, tabIds, tabKinds, seen, key, narrow) {
+  let out = tree;
+  tabKinds.forEach((kind, tab) => {
+    const k = key(tabIds[tab] ?? "");
+    if (kind !== TabKind.Docs || seen.has(k)) {
+      return;
+    }
+    seen.add(k);
+    if (narrow || leaves(out).some((l) => tabKinds[l.tab] === TabKind.Web || tabKinds[l.tab] === TabKind.VSCode)) {
+      return;
+    }
+    out = placeDocs(out, tab, tabKinds);
+  });
+  return out;
+}
+function placeDocs(tree, docs, tabKinds) {
+  const panes = leaves(tree);
+  if (panes.some((l) => l.tab === docs)) {
+    return tree;
+  }
+  const docsPane = panes.find((l) => tabKinds[l.tab] === TabKind.Docs);
+  if (docsPane) {
+    return replaceTab(tree, docsPane.id, docs);
+  }
+  const target = panes.find((l) => l.tab === AGENT_TAB) ?? (tree.kind === "leaf" ? tree : null);
+  return target ? splitLeaf(tree, target.id, "right", docs) : tree;
+}
+function isProposalView(tree, tabKinds) {
+  return tree.kind === "split" && tree.dir === "row" && tree.a.kind === "leaf" && tree.a.tab === AGENT_TAB && tree.b.kind === "leaf" && tabKinds[tree.b.tab] === TabKind.Docs;
+}
+function showTab(tree, focusedId, tab, tabKinds, narrow, ratio) {
+  if (tabKinds[tab] === TabKind.Docs && !narrow && tab !== AGENT_TAB) {
+    if (isProposalView(tree, tabKinds) && tree.kind === "split" && tree.b.kind === "leaf" && tree.b.tab === tab) {
+      return { tree, focus: tree.b.id };
+    }
+    const shown = leaves(tree).find((l) => l.tab === AGENT_TAB);
+    const agent = shown ? { kind: "leaf", id: shown.id, tab: AGENT_TAB } : singleLeaf(AGENT_TAB);
+    const view = splitLeaf(agent, agent.id, "right", tab);
+    const sized = view.kind === "split" ? setRatio(view, view.id, ratio) : view;
+    return { tree: sized, focus: leaves(sized).find((l) => l.tab === tab)?.id ?? agent.id };
+  }
+  if (isProposalView(tree, tabKinds) && tree.kind === "split") {
+    const keep = tab === AGENT_TAB ? tree.a.id : focusedId;
+    return { tree: { kind: "leaf", id: keep, tab }, focus: keep };
+  }
+  const next = replaceTab(tree, focusedId, tab);
+  return { tree: next, focus: leaves(next).find((l) => l.tab === tab)?.id ?? focusedId };
+}
+function rebindTab(tree, focusedId, tab, tabKinds, narrow, ratio) {
+  if (leaves(tree).find((l) => l.id === focusedId)?.tab === tab) {
+    return { tree, focus: focusedId };
+  }
+  return showTab(tree, focusedId, tab, tabKinds, narrow, ratio);
+}
+
 // src/docs_tab.ts
 var docsModule = null;
 function loadDocsModule() {
@@ -14534,7 +14592,7 @@ function tabLabel(tab) {
     case TabKind.VSCode:
       return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     case TabKind.Docs:
-      return tab.name && tab.name !== "docs" ? tab.name : "Docs";
+      return tab.name && tab.name !== "docs" ? tab.name : "Proposal";
     default:
       return tab.name || "Tab";
   }
@@ -14548,6 +14606,9 @@ function isRenameableTab(kind) {
 
 // src/split.ts
 var EDGE_BAND = 0.3;
+function phoneWidth() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia("(max-width: 768px)").matches : false;
+}
 function el(tag, cls) {
   const node = document.createElement(tag);
   node.className = cls;
@@ -14646,9 +14707,10 @@ function probeFallbackMsg(health, host) {
   return health === "unreachable" ? `Could not reach the daemon to check ${host}.` : `No dev server is answering at ${host} yet.`;
 }
 var SplitView = class {
-  constructor(host, cb) {
+  constructor(host, cb, narrow = phoneWidth) {
     this.host = host;
     this.cb = cb;
+    this.narrow = narrow;
   }
   // Retained layout per session id (in-memory; a nice-to-have to persist across
   // reload is out of scope for v1). Keyed by the stable session id.
@@ -14739,6 +14801,12 @@ var SplitView = class {
   // ordinal later would ask the current roster about a past position and get the wrong
   // tab, so the id is captured at the same moment as the ordinal.
   lastFocusedTabId = "";
+  // Docs tabs already auto-split once this page load, keyed by session and tab
+  // identity, so a split the user closes is not put back.
+  docsPlaced = /* @__PURE__ */ new Set();
+  // The divider ratio of each session's proposal view, so the view comes back as
+  // the user left it.
+  proposalRatios = /* @__PURE__ */ new Map();
   /**
    * Shows `sessionId`'s layout, building/rebuilding terminals as needed. Called on
    * every selection/tab change: a NEW session rebuilds from its retained tree (or a
@@ -14774,7 +14842,7 @@ var SplitView = class {
       this.tabCount = tabCount;
       const before = this.tree;
       const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds, nextSynth);
-      this.tree = validate(settled, tabCount);
+      this.tree = this.placeDocs(sessionId, validate(settled, tabCount), tabIds, tabKinds);
       this.retain(sessionId, this.tree, tabIds);
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
       const renamed = !sameTabs(prevNames, tabNames);
@@ -14789,7 +14857,12 @@ var SplitView = class {
     this.forgetFocusHistory();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
-    this.tree = validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount);
+    this.tree = this.placeDocs(
+      sessionId,
+      validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount),
+      tabIds,
+      tabKinds
+    );
     this.retain(sessionId, this.tree, tabIds);
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
@@ -14827,6 +14900,10 @@ var SplitView = class {
     }
     return remapByIdentity(rec.tree, rec.ids, tabIds, nextSynth);
   }
+  placeDocs(sessionId, tree, tabIds, tabKinds) {
+    const key = (identity) => `${sessionId}\0${identity}`;
+    return placeNewDocsTabs(tree, tabIds, tabKinds, this.docsPlaced, key, this.narrow());
+  }
   /** Retains `tree` for `sessionId` together with the identities it is bound against. */
   retain(sessionId, tree, ids) {
     this.trees.set(sessionId, { tree, ids });
@@ -14834,11 +14911,9 @@ var SplitView = class {
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
    *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
   setFocusedTab(tab) {
-    if (!this.tree || !this.focusedId) {
-      return;
+    if (this.showTab(tab)) {
+      this.commit();
     }
-    this.tree = replaceTab(this.tree, this.focusedId, tab);
-    this.commit();
   }
   /** setFocusedTab for the post-await apply of an awaited tab mutation
    *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
@@ -14851,11 +14926,22 @@ var SplitView = class {
    *  overlapping awaited gestures by issue order, so a stale apply still refuses
    *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
   setFocusedTabAwaited(tab) {
-    if (!this.tree || !this.focusedId) {
-      return;
+    if (this.showTab(tab, true)) {
+      this.land();
     }
-    this.tree = replaceTab(this.tree, this.focusedId, tab);
-    this.land();
+  }
+  /** Applies docs_autosplit's showTab rule to the tree and focus; false without a
+   *  focused pane. */
+  showTab(tab, awaited = false) {
+    if (!this.tree || !this.focusedId) {
+      return false;
+    }
+    const ratio = this.sessionId && this.proposalRatios.get(this.sessionId) || 0.5;
+    const apply = awaited ? rebindTab : showTab;
+    const next = apply(this.tree, this.focusedId, tab, this.tabKinds, this.narrow(), ratio);
+    this.tree = next.tree;
+    this.focusedId = next.focus;
+    return true;
   }
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
@@ -15048,6 +15134,8 @@ var SplitView = class {
     const desired = leaves(this.tree);
     const wanted = new Set(desired.map((l) => l.id));
     const focusedDropped = this.focusedId !== null && !wanted.has(this.focusedId);
+    const heldPane = this.focusedId !== null && wanted.has(this.focusedId) ? this.panes.get(this.focusedId) : void 0;
+    const heldKeyboard = this.termHoldsFocus && !!heldPane?.term && heldPane.container.contains(document.activeElement);
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
         pane.term?.dispose();
@@ -15158,6 +15246,9 @@ var SplitView = class {
     }
     this.applyFocusClass();
     this.reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped);
+    if (heldKeyboard && !focusedRebuilt && !focusedDropped && heldPane && !heldPane.container.contains(document.activeElement)) {
+      this.refocus();
+    }
   }
   /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, or closed it
    *  and re-pointed focus at a survivor, correcting the desync where `store.focus`
@@ -15522,6 +15613,9 @@ var SplitView = class {
         document.body.classList.remove("af-resizing-col", "af-resizing-row");
         if (this.tree) {
           this.tree = setRatio(this.tree, node.id, node.ratio);
+          if (this.sessionId && this.tree.kind === "split" && isProposalView(this.tree, this.tabKinds)) {
+            this.proposalRatios.set(this.sessionId, this.tree.ratio);
+          }
           if (this.sessionId) {
             this.retain(this.sessionId, this.tree, this.tabIds);
           }
@@ -17942,6 +18036,33 @@ function projectColorRow(current, label, onPick) {
   row.setAttribute("role", "group");
   row.setAttribute("aria-label", `Color for ${label}`);
   return row;
+}
+
+// src/docs_shortcut.ts
+function docsTabIndexes(tabs) {
+  const out = [];
+  tabs.forEach((tab, i) => {
+    if (tab.kind === TabKind.Docs) out.push(i);
+  });
+  return out;
+}
+function docsShortcuts(tabs, open) {
+  return docsTabIndexes(tabs).map((index) => {
+    const tab = tabs[index];
+    const name = `Open ${tabDisplayLabel(tab)}`;
+    const button2 = h(
+      "button",
+      { type: "button", class: "af-ghost af-term-action af-term-docs", title: name },
+      icon(tabIcon(tab.kind))
+    );
+    button2.setAttribute("aria-label", name);
+    button2.dataset.tabIndex = String(index);
+    button2.addEventListener("click", () => {
+      button2.blur();
+      open(index);
+    });
+    return button2;
+  });
 }
 
 // src/tabreorder.ts
@@ -21213,6 +21334,7 @@ var AppShell = class {
       const offered = offeredNewTabKinds(selected);
       chrome.newTerminal.hidden = !offered.includes("shell");
       chrome.newVSCode.hidden = !offered.includes("vscode");
+      chrome.docsShortcuts.replaceChildren(...docsShortcuts(tabs, (i) => this.openTab(i)));
       chrome.tabUnavailable.hidden = unavailable === null;
       chrome.tabUnavailable.textContent = unavailable ?? "";
       chrome.tabUnavailable.title = unavailable ?? "";

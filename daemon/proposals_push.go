@@ -116,7 +116,7 @@ func (m *Manager) setProposalPushMode(sessionID string, mode proposal.PushMode) 
 	}
 	if instance.SetDocsTabsPushMode(slug, string(mode)) == 0 {
 		release()
-		return nil, fmt.Errorf("session %q has no Docs tab for proposal %s: run af proposal attach %s", title, slug, slug)
+		return nil, fmt.Errorf("session %q has no Proposal tab for proposal %s: run af proposal attach %s", title, slug, slug)
 	}
 	data := instance.ToInstanceData()
 	if err := persistInstanceData(repoID, data); err != nil {
