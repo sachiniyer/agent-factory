@@ -52,6 +52,7 @@ require_token = true
 require_loopback_token = true
 allow_unauthenticated_network = true
 cors_allowed_origins = ['https://af.example.com']
+allowed_hosts = ['box.tailnet.ts.net']
 `
 
 // TestMigrateRewritesEveryDeprecatedAliasKey is the core of #3624: every

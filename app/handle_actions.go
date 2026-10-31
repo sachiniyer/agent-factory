@@ -929,7 +929,7 @@ func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
 	case session.TabKindVSCode:
 		return fmt.Errorf("this is a VS Code tab — view it in the web UI; a terminal can't render the editor")
 	case session.TabKindDocs:
-		return fmt.Errorf("this is a Docs tab — the proposal editor is web only; view it in the web UI")
+		return fmt.Errorf("this is a Proposal tab — the proposal editor is web only; view it in the web UI")
 	default:
 		return nil
 	}

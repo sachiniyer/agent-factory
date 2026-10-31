@@ -106,7 +106,7 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 			return backlog.RunRef{}, err
 		}
 		if root == "" {
-			return backlog.RunRef{}, fmt.Errorf("project %s is not registered; open it in af first", ref.ID)
+			return backlog.RunRef{}, fmt.Errorf("project %s is not registered, so its checkout is unknown — run \"af projects add <path to the repository>\" and start the item again", ref.ID)
 		}
 	}
 

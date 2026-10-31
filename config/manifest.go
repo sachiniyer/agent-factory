@@ -630,6 +630,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "network.allowed_hosts",
+		Type:       "list",
+		Default:    "none",
+		Purpose:    "Extra host names the web UI and API answer to, such as the name a reverse proxy like tailscale serve forwards · localhost and this listener's own address always work; any other name is refused.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeListReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "root_agents",
 		Type:       "table",
 		Default:    "none",

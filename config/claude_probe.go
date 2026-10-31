@@ -208,10 +208,17 @@ func probeClaudeCommand() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, shell, args...)
-	// Own process group so the whole probe tree — including processes the rc
-	// file backgrounded with `&` or `disown` — can be signaled together,
-	// mirroring the post-worktree hook runner (#610, #769).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Own SESSION (which is also its own process group, so kill(-pid) below still
+	// reaches the whole probe tree — including processes the rc file backgrounded
+	// with `&` or `disown`; mirrors the post-worktree hook runner, #610, #769).
+	// Setsid rather than Setpgid, because Setpgid alone leaves the probe attached
+	// to af's controlling terminal as a BACKGROUND process group: the interactive
+	// `bash -i` used for alias detection then tries job control on that terminal,
+	// is stopped (SIGTTOU/SIGTTIN), and sits there until the 5s deadline below
+	// kills it. Every af launch from a terminal with SHELL=bash paid those 5s
+	// before the TUI drew anything (#6396). A new session has no controlling
+	// terminal, so bash cannot stop on one.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error {
 		// On the context deadline, SIGKILL the group rather than just the
 		// shell (the default Cancel), so a foreground rc command that is

@@ -189,6 +189,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"network.require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
 	"network.require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"network.cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
+	"network.allowed_hosts":          func(a, b *config.Config) bool { return !reflect.DeepEqual(a.AllowedHosts, b.AllowedHosts) },
 	// The #5137 opt-in flips the listener refusal posture, which reconcile
 	// evaluates on every apply — it can bind a refused listener or retire a
 	// serving one with no address change, so it applies live.

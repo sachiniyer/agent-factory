@@ -708,6 +708,11 @@ type PingResponse struct {
 	// synthetic test server with no manager). A pointer preserves the difference
 	// between an older daemon and the valid false value of RequireToken.
 	BootConfig *DaemonBootConfig `json:"boot_config,omitempty"`
+	// RefusedHosts lists the Host names the daemon's browser-facing listeners
+	// have refused recently (hostguard.go), most recent first, so `af doctor` can
+	// name the network.allowed_hosts line a proxied name needs. Additive: an older
+	// daemon omits it and doctor reports nothing.
+	RefusedHosts []RefusedHost `json:"refused_hosts,omitempty"`
 }
 
 type ShutdownRequest struct{}

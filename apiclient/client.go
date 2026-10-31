@@ -354,6 +354,14 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 		Error *apiproto.EnvelopeError `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
+		if httpResp.StatusCode != http.StatusOK {
+			// Quote what answered, as the 404 path does: a non-envelope refusal is
+			// usually an intermediary's page, or the daemon's Host guard (421), whose
+			// first line names the config command that fixes it. The classification
+			// is unchanged — still malformed, so a mutation's outcome stays uncertain.
+			return &malformedResponseError{err: fmt.Errorf("apiclient: malformed response envelope (HTTP %d: %s): %w",
+				httpResp.StatusCode, bodySnippet(raw), err)}
+		}
 		return &malformedResponseError{err: fmt.Errorf("apiclient: malformed response envelope: %w", err)}
 	}
 	if env.Error != nil {

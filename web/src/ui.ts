@@ -21,6 +21,7 @@ import { renderMutationOutcome, recoveryScreen, scopeRecovery, type MutationOutc
 
 import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
+import { connectionInput, connectionNotice, connectionWords, isDown } from "./connection.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
 import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, applyTerminalTitle, applyTerminalPlacement, actionsDisclosure, placeMenu } from "./components.js";
@@ -43,6 +44,8 @@ import {
   agentConfigSkippedText,
   archiveWarningText,
   attentionReason,
+  attentionWords,
+  otherAttentionCount,
   hasAttention,
   callbackUnavailableText,
   canHandoff,
@@ -71,6 +74,7 @@ import {
 import type { AccountsState } from "./accounts.js";
 import type { QuotaState } from "./quota.js";
 import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
+import { docsShortcuts } from "./docs_shortcut.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
@@ -292,6 +296,10 @@ export interface AppState {
   live: EventStreamStatus;
   /** the attach terminal's connection state, shown in the pane header. */
   termStatus: TerminalStatus;
+  /** epoch ms of the next scheduled reconnect of each socket, for the "Reconnecting…"
+   *  chip's countdown (#6430); null/absent while no attempt is scheduled. */
+  liveRetryAt?: number | null;
+  termRetryAt?: number | null;
   /** which pane owns the keyboard (#1693): "rail" is the default nav mode (j/k move
    *  the selection); "terminal" means keys go to the agent — Escape included, as its
    *  interrupt (#2517) — until ctrl+] hands the keyboard back. Drives the visible
@@ -1148,6 +1156,13 @@ export class AppShell {
   private lastSessions: SessionData[] | null = null;
   private lastSelectedId: string | null = null;
   private lastLive: EventStreamStatus | null = null;
+  /** The "Reconnecting…" chip in the session header and its rail twin (#6430). */
+  private readonly connNotice: HTMLElement;
+  private readonly connRetry: HTMLElement;
+  private readonly railConn: HTMLElement;
+  private connState: AppState | null = null;
+  private connDownSince: number | null = null;
+  private connTimer: number | null = null;
   private lastKb: KeyboardFocus | null = null;
   private lastError: string | null = null;
   // The last value written to document.title, so an unrelated update doesn't
@@ -1164,6 +1179,9 @@ export class AppShell {
 
   // Drawer state is local UI ephemera; closing it restores session-first chrome.
   private readonly navToggle: HTMLButtonElement;
+  /** Count pill on the drawer toggle, and the words line in the drawer (#6405). */
+  private readonly navBadge: HTMLElement;
+  private readonly railAttention: HTMLElement;
   private readonly navScrim: HTMLElement;
   private navOpen = false;
 
@@ -1213,6 +1231,13 @@ export class AppShell {
     this.projectMenu.setAttribute("aria-label", "Switch project");
     this.projectMenu.hidden = true;
     this.projectSwitchWrap = h("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
+    this.projectSwitchWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.projectMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.projectSwitchBtn.focus();
+    });
     // Dismiss the menu on any click outside the switcher (a click on the button or a
     // menu item is handled by their own listeners, which stopPropagation / close).
     document.addEventListener("click", (e) => {
@@ -1227,6 +1252,10 @@ export class AppShell {
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
+    this.navBadge = h("span", { class: "af-nav-badge" });
+    this.navBadge.setAttribute("aria-hidden", "true");
+    this.navBadge.hidden = true;
+    this.navToggle.append(this.navBadge);
 
     // Share one MediaQueryList so app-controls closes its old layout before
     // syncPhone reparents the session controls.
@@ -1293,6 +1322,16 @@ export class AppShell {
     this.filterMenu.setAttribute("aria-label", "Filter sessions");
     this.filterMenu.hidden = true;
     this.filterWrap = h("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
+    // Escape closes the menu and hands focus back to its button, the same disclosure
+    // model components.ts gives the app controls. stopPropagation keeps the key from
+    // also reaching a terminal (index.ts forwards Escape to the agent).
+    this.filterWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.filterMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeFilterMenu();
+      this.filterBtn.focus();
+    });
     // Dismiss on any click outside (the button + the checkboxes stopPropagation), so
     // the menu stays open across several toggles — the common act is narrowing to a
     // couple of states, not one click.
@@ -1309,10 +1348,19 @@ export class AppShell {
       this.railCount,
       h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn),
     );
+    this.connRetry = h("span", { class: "af-term-conn-retry" });
+    this.connNotice = h("div", { class: "af-term-conn", role: "status" },
+      icon("wifi-off", "af-term-conn-glyph"), h("span", { class: "af-term-conn-label" }, "Reconnecting…"), this.connRetry);
+    this.connNotice.hidden = true;
+    this.railConn = h("div", { class: "af-rail-conn", role: "status" });
+    this.railConn.hidden = true;
+    this.railAttention = h("div", { class: "af-rail-attention" });
+    this.railAttention.setAttribute("role", "status");
+    this.railAttention.hidden = true;
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railConn, this.railAttention, this.railList);
 
     this.main = h("section", { class: "af-main" });
     // The drawer scrim: a tap-to-dismiss layer over the terminal while the mobile rail
@@ -1364,6 +1412,11 @@ export class AppShell {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose(): void {
     window.clearInterval(this.idleAgeTimer);
+    // The reconnect countdown tick would otherwise outlive a shell that is dropped
+    // mid-outage (logout, auth failure), retaining its DOM and last snapshot.
+    if (this.connTimer !== null) window.clearInterval(this.connTimer);
+    this.connTimer = null;
+    this.connState = null;
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
@@ -1430,6 +1483,7 @@ export class AppShell {
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
+    this.patchNavAttention(state);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -1488,6 +1542,7 @@ export class AppShell {
       this.lastLive = state.live;
       this.el.dataset.live = state.live;
     }
+    this.patchConnection(state);
 
     // View switching: show the active view's body, hide the other, and highlight its
     // appbar tab. The sessions body is only HIDDEN (never removed), so the terminal
@@ -2334,6 +2389,8 @@ export class AppShell {
   }
 
   private toggleFilterMenu(): void {
+    // One rail popover at a time: opening the filter dismisses the project menu.
+    if (!this.filterMenuOpen) this.closeProjectMenu();
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
     this.filterBtn.setAttribute("aria-expanded", this.filterMenuOpen ? "true" : "false");
@@ -2360,6 +2417,7 @@ export class AppShell {
     if (this.projectSwitchBtn.disabled) {
       return;
     }
+    this.closeFilterMenu();
     this.projectMenuOpen = true;
     this.projectMenu.hidden = false;
     this.projectSwitchBtn.setAttribute("aria-expanded", "true");
@@ -2465,6 +2523,7 @@ export class AppShell {
     this.attachTabTouchDrag(tabBar);
 
     const head = chrome.head;
+    head.insertBefore(this.connNotice, chrome.attention.el);
     const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -2485,7 +2544,7 @@ export class AppShell {
       [chrome.title, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
-      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header], [chrome.attention.el, this.header],
+      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header], [this.connNotice, this.header], [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
     ]);
     this.renderTabBar(state);
@@ -2558,6 +2617,7 @@ export class AppShell {
       const offered = offeredNewTabKinds(selected);
       chrome.newTerminal.hidden = !offered.includes("shell");
       chrome.newVSCode.hidden = !offered.includes("vscode");
+      chrome.docsShortcuts.replaceChildren(...docsShortcuts(tabs, (i) => this.openTab(i)));
       chrome.tabUnavailable.hidden = unavailable === null;
       chrome.tabUnavailable.textContent = unavailable ?? "";
       chrome.tabUnavailable.title = unavailable ?? "";
@@ -3004,6 +3064,55 @@ export class AppShell {
     if (this.tabInsert) {
       this.tabInsert.hidden = true;
     }
+  }
+
+  /** The "Reconnecting…" state (#6430): drawn once a socket has been down for the
+   *  grace period (a blink of reconnect stays invisible), with the time of the next
+   *  attempt, and cleared on reconnect. Static glyph plus words, so reduced motion
+   *  needs no fallback. The 1s tick runs only while a drop is in progress. */
+  private patchConnection(state: AppState): void {
+    this.connState = state;
+    const down = isDown(connectionInput(state));
+    if (!down) {
+      this.connDownSince = null;
+    } else if (this.connDownSince === null) {
+      this.connDownSince = Date.now();
+    }
+    this.renderConnection();
+    if (down && this.connTimer === null) {
+      this.connTimer = window.setInterval(() => this.renderConnection(), 1000);
+    } else if (!down && this.connTimer !== null) {
+      window.clearInterval(this.connTimer);
+      this.connTimer = null;
+    }
+  }
+
+  private renderConnection(): void {
+    const state = this.connState;
+    const notice = state ? connectionNotice(connectionInput(state), this.connDownSince, Date.now()) : null;
+    const words = notice ? connectionWords(notice) : null;
+    this.connNotice.hidden = !words;
+    this.railConn.hidden = !words;
+    if (!words) return;
+    this.connRetry.textContent = words.retry ? ` ${words.retry.replace("retry in ", "")}` : "";
+    this.connNotice.setAttribute("aria-label", words.full);
+    this.connNotice.title = words.full;
+    if (this.railConn.textContent !== words.full) this.railConn.textContent = words.full;
+  }
+
+  /** Surface other sessions' attention requests without opening the drawer: a count
+   *  on the toggle, the state in words on the toggle's label and at the top of the
+   *  drawer (#6405). Words, not hover: a touch screen has no hover. */
+  private patchNavAttention(state: AppState): void {
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const count = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
+    const words = attentionWords(count);
+    this.navBadge.hidden = count === 0;
+    if (this.navBadge.textContent !== String(count)) this.navBadge.textContent = count ? String(count) : "";
+    this.navToggle.setAttribute("aria-label", words ? `Toggle sessions, ${words}` : "Toggle sessions");
+    this.navToggle.toggleAttribute("data-attention", count > 0);
+    this.railAttention.hidden = count === 0;
+    if (this.railAttention.textContent !== words) this.railAttention.textContent = words;
   }
 
   private patchMainHead(state: AppState): void {
