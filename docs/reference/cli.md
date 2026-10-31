@@ -241,7 +241,7 @@ reporting the one you asked for. Sessions on one host share its ssh user, so the
 read each other's synced credentials.
 
 sandbox and hook targets cannot be listed, so they refuse an explicit account. docker
-bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
+bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
 
 By default af never switches accounts on its own. With limit_auto_resume enabled,
 an explicit limit_account_candidates list may opt an unpinned local session into
@@ -1844,6 +1844,14 @@ accumulate silently on a machine running agent-factory:
     no session owns it — live, archived, mid-kill and awaiting-teardown
     sessions all count — and removes nothing at all when any part of that
     inventory cannot be read
+  - listed host readiness: one row per host in the global hosts list (ready,
+    blocked by a prerequisite problem, unknown, or unreachable) when the
+    daemon can complete the host check. Silent when no host is listed; a
+    daemon that is not answering emits one aggregate warning instead of
+    per-host rows and marks the check incomplete rather than a pass — the
+    daemon runs the probe, doctor does not dial the host. The probe is the
+    one thing a default run can write: under accept-new host-key
+    verification its ssh can pin a newly learned key
 
 The version-skew check exists because a skewed daemon fails quietly: it keeps
 answering while rejecting fields a newer client sends, which surfaces as
@@ -1885,7 +1893,8 @@ thousands on a busy machine. Use --verbose to show each item behind those
 summaries. A summary from a check that did not finish reads "at least N … a
 lower bound" in its own row, so its count is never mistaken for the total.
 
-Read-only by default. With --fix, applies the safe remediations — killing
+Read-only by default — apart from the listed-host probe, whose ssh can
+learn a host key under accept-new. With --fix, applies the safe remediations — killing
 orphans whose ancestry markers prove they came from a dead af session, removing
 stale temp homes, stopping daemons proven to be running a temp-dir binary,
 removing directories holding nothing but a dead daemon socket, and removing the
@@ -2981,7 +2990,8 @@ Hand a session's work over to another agent or account without losing it.
 Use --account to choose a registered account. Omit --to to keep the same
 agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
-respects it. Targets with current usage-limit evidence are refused.
+respects it. Targets with current usage-limit evidence are refused on a
+local session; an off-box account rotation does not re-check the ledger.
 
 An account belongs to one agent, so a scoped session that changes agents
 must name the incoming agent's account with --account — unless the target
@@ -3003,9 +3013,11 @@ agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
 
 A same-agent account handoff (--account alone, or --to naming the current
-agent) keeps the conversation for claude and codex: af copies the transcript
-into the new account's home and resumes it. If that copy cannot be made, the
-new account starts a fresh conversation, and its brief says why.
+agent) keeps the conversation for claude and codex on a local worktree: af copies
+the transcript into the new account's home and resumes it. If that copy cannot be
+made, the new account starts a fresh conversation, and its brief says why. An
+off-box (listed-host sandbox) account swap cannot reach the previous account's
+transcript and always starts a fresh conversation with a notice saying why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
@@ -3017,12 +3029,17 @@ handoff the incoming agent cannot read what its predecessor was thinking, only
 the working tree and the git history. The brief points it at both. Because of
 that, a handoff is recorded — the swap and the branch tip at the moment it
 happened — so a reviewer reading the resulting diff can tell which agent wrote
-which part.
+which part. An off-box account rotation is the exception: it updates the
+session's account and runtime metadata only, with no handoff record and no
+recorded branch tip.
 
-Local-worktree sessions and ssh/sandbox sessions whose agent-server supports it
-can be handed off in place: the sandbox's agent-server swaps the agent in the same
-workspace and resolves the new agent's program on its own host. An account-scoped
-sandbox session, and docker or hook sessions, cannot be handed off yet.
+Local-worktree sessions, ssh/sandbox sessions whose agent-server advertises
+agent-swap, and an already account-scoped listed-host ssh/sandbox session whose
+agent-server advertises account-swap (same-agent --account only, rotating its
+existing scope) can be handed off in place: the sandbox's agent-server swaps the
+agent in the same workspace and resolves the new agent's program on its own host.
+A cross-agent --to on an account-scoped sandbox session, and any handoff on
+docker or hook sessions, cannot be handed off yet.
 
 Examples:
   af sessions handoff fix-auth --account personal

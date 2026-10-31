@@ -12,6 +12,7 @@ All commands print JSON, the same as the other `af` commands.
 | `af proposal list` | no | Lists proposals by last edit: slug, docs, attached sessions, and last edit time. |
 | `af proposal path <slug>` | no | Prints the absolute folder path. |
 | `af proposal add-doc <slug> <name>` | no | Adds a doc from a template, or a blank doc if there is no template with that name. |
+| `af proposal remove-doc <slug> <doc>` | no | Removes a doc from a proposal; it stays in the proposal's history. |
 | `af proposal changes` | yes | Prints the edits that other people and other sessions made since this session's cursor, then moves the cursor. |
 | `af proposal checkpoint` | yes | Commits this session's edits and moves its cursor. |
 | `af proposal cat <slug> <doc>` | no | Prints a doc. This is for agents that cannot read the host disk. |
@@ -159,7 +160,7 @@ Shapes:
   `""`. Detach, and an attach that moves the session to another slug, close the
   old Docs tabs first. When that close fails, the request fails and the
   attachment does not change, so a retry closes them.
-- `docs` in `StartProposal` is a list of doc names. Empty means all five
+- `docs` in `StartProposal` is a list of doc names. Empty means all
   built-in templates.
 - `author` is `human`, `agent` or `external`. `agent` needs `session_id`, and
   the commit records that session. The Docs tab sends `human`.

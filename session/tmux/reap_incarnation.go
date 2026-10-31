@@ -79,7 +79,7 @@ func ReapProvenIncarnation(cmdExec cmd.Executor, program string, proof Incarnati
 		{EnvMarkerHome, proof.Home},
 		{EnvMarkerSession, proof.SessionName},
 	} {
-		got, present, err := sessionEnvMarkerAt(cmdExec, gen.sessionID, proof.SessionName, want.marker)
+		got, present, err := sessionEnvMarkerAt(cmdExec, gen.sessionID, proof.SessionName, want.marker, "")
 		switch {
 		case err != nil:
 			if same, known, gerr := t.confirmIncarnation(gen); gerr == nil && known && !same {

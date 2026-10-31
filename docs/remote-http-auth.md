@@ -185,9 +185,9 @@ prints which target an invocation uses and why (never the token); `af target
 clear` forgets it. A saved file that is unreadable, malformed or readable by
 other users is refused rather than falling back to the local daemon.
 
-Flags take precedence over the environment. When `--daemon-url` (or
-`AF_DAEMON_URL`) is unset, `af` uses the local Unix socket exactly as before —
-the remote path is entirely opt-in.
+Flags take precedence over the environment. When no remote target is set,
+`af` uses the local Unix socket exactly as before — the remote path is
+entirely opt-in.
 
 ```bash
 # One-off command against a remote daemon

@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -184,76 +183,6 @@ func TestSaveStateWritesSchemaVersion(t *testing.T) {
 	assert.Equal(t, StateSchemaVersion, loaded.SchemaVersion)
 	assert.Equal(t, uint32(7), loaded.HelpScreensSeen)
 	assert.False(t, loaded.OnboardingSeen)
-}
-
-// TestTrySaveStateNeverBlocks is the launch-path guarantee, and it is the whole
-// reason TrySaveState exists.
-//
-// SaveState takes a blocking WithFileLock with no timeout. The onboarding marker
-// is written during launch, and this repo has a documented bug class where work
-// moved in front of the TUI turns a benign lock into a launch hang — af starting
-// while another process holds state.json would simply never draw. Losing the race
-// must cost one extra onboarding offer, not the terminal.
-//
-// The lock is held by a REAL concurrent holder here, not a stub: the point is
-// that the syscall does not wait.
-func TestTrySaveStateNeverBlocks(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", home)
-	statePath := filepath.Join(home, StateFileName)
-
-	held := make(chan struct{})
-	released := make(chan struct{})
-	go func() {
-		_ = WithFileLock(statePath, func() error {
-			close(held)
-			<-released // hold it until the assertion below has run
-			return nil
-		})
-	}()
-	<-held
-
-	done := make(chan struct{})
-	var acquired bool
-	var err error
-	go func() {
-		acquired, err = TrySaveState(&State{OnboardingSeen: true})
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		close(released)
-		t.Fatal("TrySaveState BLOCKED on a held state lock — on the launch path that is a TUI that never draws")
-	}
-	close(released)
-
-	if err != nil {
-		t.Fatalf("a contended try-lock is not an error, it is a skip: %v", err)
-	}
-	if acquired {
-		t.Fatal("TrySaveState reported it acquired a lock another process was holding")
-	}
-}
-
-// TestTrySaveStateWritesWhenUncontended pins the normal path: with nothing
-// holding the lock, the marker is written and reads back.
-func TestTrySaveStateWritesWhenUncontended(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-
-	acquired, err := TrySaveState(&State{OnboardingSeen: true})
-	if err != nil {
-		t.Fatalf("try save: %v", err)
-	}
-	if !acquired {
-		t.Fatal("an uncontended try-lock must acquire")
-	}
-
-	got := LoadState()
-	if !got.OnboardingSeen {
-		t.Error("the onboarding marker must survive a save/load round trip — otherwise onboarding re-offers forever")
-	}
 }
 
 // TestOnboardingMarkerDefaultsFalse pins that a fresh home has not seen

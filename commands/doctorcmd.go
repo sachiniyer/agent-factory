@@ -27,7 +27,8 @@ var doctorRun = doctor.Run
 // processes, runaway CPU children, leaked af_ tmux sessions, stale temp
 // agent-factory homes, daemons running a binary no install owns, directories
 // holding nothing but a dead daemon socket (#3845), and daemon problems.
-// Read-only by default; --fix applies only the remediations whose ancestry is
+// Read-only by default — the listed-host probe aside, whose ssh can learn a
+// host key under accept-new; --fix applies only the remediations whose ancestry is
 // verified (killing marked orphans of dead sessions, removing abandoned temp
 // homes, killing daemons whose home was deleted or whose binary is a temp-dir
 // build). Anything ambiguous is reported, never touched.
@@ -86,6 +87,14 @@ accumulate silently on a machine running agent-factory:
     no session owns it — live, archived, mid-kill and awaiting-teardown
     sessions all count — and removes nothing at all when any part of that
     inventory cannot be read
+  - listed host readiness: one row per host in the global hosts list (ready,
+    blocked by a prerequisite problem, unknown, or unreachable) when the
+    daemon can complete the host check. Silent when no host is listed; a
+    daemon that is not answering emits one aggregate warning instead of
+    per-host rows and marks the check incomplete rather than a pass — the
+    daemon runs the probe, doctor does not dial the host. The probe is the
+    one thing a default run can write: under accept-new host-key
+    verification its ssh can pin a newly learned key
 
 The version-skew check exists because a skewed daemon fails quietly: it keeps
 answering while rejecting fields a newer client sends, which surfaces as
@@ -127,7 +136,8 @@ thousands on a busy machine. Use --verbose to show each item behind those
 summaries. A summary from a check that did not finish reads "at least N … a
 lower bound" in its own row, so its count is never mistaken for the total.
 
-Read-only by default. With --fix, applies the safe remediations — killing
+Read-only by default — apart from the listed-host probe, whose ssh can
+learn a host key under accept-new. With --fix, applies the safe remediations — killing
 orphans whose ancestry markers prove they came from a dead af session, removing
 stale temp homes, stopping daemons proven to be running a temp-dir binary,
 removing directories holding nothing but a dead daemon socket, and removing the

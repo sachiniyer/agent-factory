@@ -477,10 +477,10 @@ How the target is rendered depends on whether it is **local** or **external**:
 
 - **Local (`--port`, `localhost`, `127.0.0.1`, `::1`):** the **daemon
   reverse-proxies** it under a same-origin path (`/v1/webtab/…`), and the web UI
-  iframes that. Because the daemon shares the machine with the dev server, the
-  preview works **even when you view the web UI remotely** (over Tailscale or an
-  SSH-forwarded port) — a raw `localhost` iframe would otherwise hit *your*
-  machine, not the daemon's. Same-origin also sidesteps the dev server's
+  iframes that. Because the daemon, not your browser, reaches the dev server,
+  the preview works **even when you view the web UI remotely** (over Tailscale
+  or an SSH-forwarded port) — a raw `localhost` iframe would otherwise hit
+  *your* machine, not the daemon's. Same-origin also sidesteps the dev server's
   `X-Frame-Options`. Only loopback targets are proxied — the daemon never proxies
   an external host, so it can't be turned into an open proxy.
 - **External (`https://…`):** the web UI iframes it **directly** (never through the
@@ -667,7 +667,7 @@ its own origin is what partitions that store.
 
 Two consequences worth knowing:
 
-- **Editor origins require a LOOPBACK, fixed preview port.** With
+- **`*.localhost` editor origins require a LOOPBACK, fixed preview port.** With
   `network.preview_listen_addr` bound to a network interface (or to an ephemeral `:0`), web
   tabs still get per-tab origins but **editors do not** — they stay on the same-origin
   mirror. On that listener the hostname is the only credential, and a remote client can
