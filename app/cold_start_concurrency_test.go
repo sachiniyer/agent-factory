@@ -111,3 +111,34 @@ func TestMaterializeSnapshot_SkipsAFailedBuildAndKeepsTheRest(t *testing.T) {
 	}
 	require.Equal(t, want, titles, "the remaining sessions keep snapshot order around the skipped one")
 }
+
+// #6423: the batch primes one tmux listing before the restores and releases it
+// after the last one, so the restores' existence/generation/pane-row probes answer
+// from it instead of asking tmux per session.
+func TestMaterializeSnapshot_PrimesTheTmuxSnapshotAroundTheBatchOnce(t *testing.T) {
+	h := newTestHome(t)
+	data, insts := snapshotRecords(t, 6)
+
+	var mu sync.Mutex
+	var events []string
+	record := func(e string) { mu.Lock(); events = append(events, e); mu.Unlock() }
+	h.primeSessionSnapshot = func() func() {
+		record("prime")
+		return func() { record("release") }
+	}
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		record("build")
+		return insts[d.Title], nil
+	}))
+
+	h.materializeSnapshot(data)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, events, len(data)+2)
+	require.Equal(t, "prime", events[0], "the listing must be primed before any restore asks tmux")
+	require.Equal(t, "release", events[len(events)-1], "and released once the batch is done")
+	for _, e := range events[1 : len(events)-1] {
+		require.Equal(t, "build", e, "prime and release each happen exactly once per batch")
+	}
+}

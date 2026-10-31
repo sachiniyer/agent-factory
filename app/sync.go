@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 )
@@ -196,6 +197,11 @@ func (m *home) materializeSnapshot(data []session.InstanceData) {
 	if workers <= 0 {
 		workers = defaultSnapshotBuildWorkers
 	}
+	if m.primeSessionSnapshot != nil {
+		// One `tmux list-panes -a` answers the existence, generation and pane-row
+		// probes of every restore in the batch (#6423); released when it is done.
+		defer m.primeSessionSnapshot()()
+	}
 	for _, inst := range buildSnapshotInstances(data, workers) {
 		// A row BUILT from a snapshot can already carry a daemon-owned op, and it is
 		// just as adopted as one mirrored onto an existing row — the cold-start
@@ -203,6 +209,17 @@ func (m *home) materializeSnapshot(data []session.InstanceData) {
 		m.adoptedOpsFor().note(inst, inst.GetInFlightOp())
 		m.store.AddInstance(inst)()
 	}
+}
+
+// primeTmuxSessionSnapshot lists every tmux pane once and primes the restore-time
+// probes with it. A failed listing (no tmux server, a remote target) primes
+// nothing, and every restore then asks tmux per session exactly as before.
+func primeTmuxSessionSnapshot() func() {
+	snap, err := tmux.CaptureSessionSnapshot()
+	if err != nil {
+		return func() {}
+	}
+	return tmux.PrimeSessionSnapshot(snap)
 }
 
 // buildSnapshotInstances restores the snapshot records with at most `workers`
