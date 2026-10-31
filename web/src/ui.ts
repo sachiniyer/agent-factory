@@ -74,6 +74,7 @@ import {
 import type { AccountsState } from "./accounts.js";
 import type { QuotaState } from "./quota.js";
 import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
+import { docsShortcuts } from "./docs_shortcut.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
@@ -2616,6 +2617,7 @@ export class AppShell {
       const offered = offeredNewTabKinds(selected);
       chrome.newTerminal.hidden = !offered.includes("shell");
       chrome.newVSCode.hidden = !offered.includes("vscode");
+      chrome.docsShortcuts.replaceChildren(...docsShortcuts(tabs, (i) => this.openTab(i)));
       chrome.tabUnavailable.hidden = unavailable === null;
       chrome.tabUnavailable.textContent = unavailable ?? "";
       chrome.tabUnavailable.title = unavailable ?? "";

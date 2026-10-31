@@ -416,7 +416,7 @@ func (s *Service) Detach(sessionID string) (*DetachResult, error) {
 		return res, nil
 	}
 	if res.Tab, err = s.host.CloseDocsTabs(r.session.ID, slug); err != nil {
-		return nil, fmt.Errorf("still attached to %s: closing its Docs tab failed: %w", slug, err)
+		return nil, fmt.Errorf("still attached to %s: closing its Proposal tab failed: %w", slug, err)
 	}
 	if _, err := r.store.Detach(r.session.ID); err != nil {
 		return nil, err
