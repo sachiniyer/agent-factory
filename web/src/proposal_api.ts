@@ -193,13 +193,17 @@ export async function putDoc(
   base: string,
   token: string,
   keepalive = false,
+  /** Names this editor and counts its saves upward: the daemon refuses (409 proposal_stale_save) a
+   *  save at or below one it has already seen from the same writer, so a request that outlived
+   *  its client cannot land after that client's later saves. */
+  fence?: { writer: string; seq: number },
 ): Promise<SaveResult> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token !== "") {
     headers.Authorization = `Bearer ${token}`;
   }
   let resp: Response;
-  const payload = JSON.stringify({ session_id: sessionId, slug, doc, text, base });
+  const payload = JSON.stringify({ session_id: sessionId, slug, doc, text, base, ...(fence ? { writer: fence.writer, seq: fence.seq } : {}) });
   try {
     resp = await fetch("/v1/SaveProposalDoc", {
       method: "POST",

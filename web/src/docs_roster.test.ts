@@ -23,3 +23,12 @@ test("missingFrom names the open docs the list lacks", () => {
   assert.deepEqual(missingFrom(["goals", "api", "notes"], ["goals", "api"]), ["notes"]);
   assert.deepEqual(missingFrom([], ["goals"]), []);
 });
+
+test("a list requested before the roster was changed is dropped, one requested after is used", () => {
+  const r = new RosterOrder();
+  const before = r.begin(); // a refresh goes out while a doc is deleted
+  r.invalidate(); // Restore doc adds it again
+  assert.equal(r.accept(before), false, "its list lacks the restored doc");
+  const after = r.begin();
+  assert.equal(r.accept(after), true);
+});

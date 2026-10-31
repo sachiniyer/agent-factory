@@ -320,6 +320,8 @@ export class DocsPane {
     } catch {
       // It may exist again already (a rename lands as a delete and an add): read it.
     }
+    // A list requested before the doc was added again lacks it, and would mark it deleted again.
+    this.roster.invalidate();
     await sync.revive();
     this.goneDocs.delete(name);
     this.scheduleListRefresh();
@@ -705,8 +707,8 @@ export class DocsPane {
         if (stored) return { text: stored.base, commit: "" };
         return getDoc(this.opts.sessionId, this.opts.slug, doc.name, this.opts.token);
       },
-      save: (text, base, final) => putDoc(this.opts.sessionId, this.opts.slug, doc.name, text, base,
-        this.opts.token, final === true),
+      save: (text, base, final, fence) => putDoc(this.opts.sessionId, this.opts.slug, doc.name, text, base,
+        this.opts.token, final === true, fence),
       setBuffer: (text) => {
         if (this.sync !== sync || !this.editor) return;
         if (this.freshBuffer) {
