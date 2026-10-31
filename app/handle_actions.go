@@ -710,8 +710,8 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		}
 		// Committing a sidebar tab-row preview is a tree-navigation action (the
 		// preview only exists while the tree cursor sits on a tab row), so this
-		// Enter selects/commits — it must NOT type into the agent (nil replay),
-		// exactly like the tree select path below (#1576).
+		// Enter selects/commits — it must NOT type into the agent, exactly like
+		// the tree select path below (#1576, #4722).
 		//
 		// enterPane routes the committed target correctly for either kind: an
 		// embeddable tab enters interactive mode in place, while a remote /
@@ -724,16 +724,14 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		if p == nil {
 			return m, commitCmd
 		}
-		mod, interactCmd := m.enterPane(p, nil)
+		mod, interactCmd := m.enterPane(p)
 		return mod, tea.Batch(commitCmd, interactCmd)
 	}
 	if p := m.focusedOpenPane(); p != nil {
-		// Enter on an already-focused pane: from the pane's point of view this
-		// is the first in-pane keystroke, so forward it into the agent on entry
-		// rather than swallowing it (#1576). Only this branch replays — the
-		// preview-commit above and the tree select below are navigation Enters.
-		enterKey := tea.KeyMsg{Type: tea.KeyEnter}
-		return m.enterPane(p, &enterKey)
+		// Enter on an already-focused pane enters interactive mode. The key is
+		// consumed by the mode switch and never reaches the pane's PTY —
+		// forwarding it would submit whatever sits on the input line (#4722).
+		return m.enterPane(p)
 	}
 
 	sel := m.sidebar.GetSelection()
@@ -782,7 +780,7 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, cmd
 	}
-	mod, interactCmd := m.requestInteractive(p, nil)
+	mod, interactCmd := m.requestInteractive(p)
 	return mod, tea.Batch(cmd, interactCmd)
 }
 

@@ -538,7 +538,6 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 	// Check if this help screen has been seen before
 	// Only show if we're showing the general help screen or the corresponding flag is not set
 	// in the seen bitmask.
-	m.replayHelpDismissKey = false
 	m.textOverlayDismissPolicy = nil
 	m.textOverlayPendingSeenMask = 0
 	if alwaysShow || (m.appState.GetHelpScreensSeen()&flag) == 0 {
@@ -574,11 +573,11 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 			m.textOverlayDismissAnyKey = false
 			m.textOverlayDismissPolicy = attachHelpDismissPolicy
 		case helpTypeInteractive:
-			// The one screen that stays a press-any-key gate: its dismiss
-			// keystroke is deliberately the user's first pane input and gets
-			// replayed into the pane (#1576/#2413). An overflowing overlay still
-			// narrows that to the dismiss keys — see handleHelpState.
-			m.replayHelpDismissKey = true
+			// The one screen that stays a press-any-key gate. Its dismiss key is
+			// consumed by the overlay like every other overlay key — the mode
+			// switch it completes must never forward it into the pane (#4722). An
+			// overflowing overlay still narrows that to the dismiss keys — see
+			// handleHelpState.
 		}
 		m.layoutTextOverlay()
 		m.state = stateHelp
@@ -671,8 +670,6 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if shouldClose {
 		m.recordHelpScreenSeen()
-		replayDismissKey := m.replayHelpDismissKey
-		m.replayHelpDismissKey = false
 		m.textOverlayDismissAnyKey = false
 		m.textOverlayDismissPolicy = nil
 		// Menu.SetState rebuilds the options slice; call it synchronously
@@ -685,9 +682,6 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.state = stateDefault
 			m.menu.SetState(ui.StateDefault)
-		}
-		if replayDismissKey {
-			dismissCmd = replayKeyAfterInteractiveHelpDismiss(dismissCmd, msg)
 		}
 		// dismissCmd forwards repaintAfterDetachMsg{} from the attach
 		// callback (#579) so the post-detach repaint doesn't have to wait
@@ -705,7 +699,7 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // everything" here: while its content overflows the scroll keys must scroll,
 // and every other key still dismisses through the branch below — which is what
 // keeps the first-run interactive help's ctrl+] alive at sizes where it
-// overflows (#1576/#2413).
+// overflows (#2413).
 func (m *home) dismissesTextOverlay(msg tea.KeyMsg) bool {
 	if m.textOverlayDismissPolicy != nil {
 		dismiss, _ := m.textOverlayDismissPolicy(msg)
@@ -793,19 +787,4 @@ func isHelpDismissKey(msg tea.KeyMsg) bool {
 		}
 	}
 	return false
-}
-
-func replayKeyAfterInteractiveHelpDismiss(dismissCmd tea.Cmd, keyMsg tea.KeyMsg) tea.Cmd {
-	if dismissCmd == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		msg := dismissCmd()
-		if enter, ok := msg.(enterInteractiveMsg); ok {
-			enter.replayKey = keyMsg
-			enter.replay = true
-			return enter
-		}
-		return msg
-	}
 }

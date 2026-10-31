@@ -864,10 +864,10 @@ func TestAttachHelpScrollKeyReboundToQuitStillReachesItsPolicy(t *testing.T) {
 
 // TestFirstRunInteractiveHelpKeepsAnyKeyDismissalWhenItOverflows answers the
 // third Codex finding on #3634, and it is #2413's trap in reverse. The
-// interactive help is a press-any-key gate BY DESIGN: the dismiss keystroke is
-// the user's first pane input and gets replayed (#1576). Suspending that gate
-// whenever the content overflows made every non-scroll key inert at small
-// sizes — including ctrl+], the key the overlay's own last line names.
+// interactive help is a press-any-key gate BY DESIGN — its dismiss keystroke
+// is consumed by the overlay (#4722). Suspending that gate whenever the
+// content overflows made every non-scroll key inert at small sizes —
+// including ctrl+], the key the overlay's own last line names.
 func TestFirstRunInteractiveHelpKeepsAnyKeyDismissalWhenItOverflows(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)

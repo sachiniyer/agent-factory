@@ -376,10 +376,6 @@ type home struct {
 	// textOverlayDismissPolicy, when set, decides whether a help overlay key
 	// closes the overlay and whether its OnDismiss callback should run.
 	textOverlayDismissPolicy func(tea.KeyMsg) (dismiss bool, runOnDismiss bool)
-	// replayHelpDismissKey marks the first-run interactive pane help: the
-	// key that closes that overlay is the user's first pane keystroke, so it
-	// must be forwarded after the deferred live bind completes (#1410).
-	replayHelpDismissKey bool
 	// confirmationOverlay displays confirmation modals
 	confirmationOverlay *overlay.ConfirmationOverlay
 	// pendingConfirmMsg holds a non-error tea.Msg returned by a confirmation
