@@ -477,3 +477,26 @@ func TestAnswerFailedAfterAContinueLeavesTheItemRunning(t *testing.T) {
 		t.Fatalf("status = %s: the failed answer overwrote the continued run", got)
 	}
 }
+
+// A pending answer belongs to the run that accepted it (its RunCount), so after a
+// restart it is never retargeted at a replacement run (Codex P2 on #6297).
+func TestPendingAnswerStaysWithTheRunThatAcceptedIt(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusReview
+	it.Runs = []RunRef{{SessionID: "old", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
+	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
+	if _, err := b.Answer(1, 0, "Postgres", true, now); err != nil {
+		t.Fatal(err)
+	}
+	if p := b.PendingAnswers(); len(p) != 1 || p[0].SessionID != "old" || p[0].Superseded {
+		t.Fatalf("before the replacement: %+v", p)
+	}
+	// The old session is killed and the item started again before the failure was recorded.
+	it.Runs = append(it.Runs, RunRef{SessionID: "new", State: RunStarted, StartedAt: now.Add(time.Minute)})
+	p := b.PendingAnswers()
+	if len(p) != 1 || p[0].SessionID != "old" || !p[0].Superseded {
+		t.Fatalf("after the replacement the answer must stay with the old run and be superseded: %+v", p)
+	}
+}

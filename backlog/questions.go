@@ -204,6 +204,9 @@ type PendingAnswer struct {
 	AnswerID  int
 	SessionID string
 	Prompt    string
+	// Superseded: the item was started again after the answer was accepted, so the
+	// run that accepted it is not the latest. It is never delivered to the new run.
+	Superseded bool
 }
 
 // PendingAnswers lists the answers still pending delivery, oldest first per
@@ -212,14 +215,23 @@ func (b *Backlog) PendingAnswers() []PendingAnswer {
 	var out []PendingAnswer
 	for i := range b.Items {
 		it := &b.Items[i]
-		last := it.lastRun()
 		for _, m := range it.Thread {
 			if m.Kind != KindAnswer || m.Delivery != DeliveryPending {
 				continue
 			}
 			p := PendingAnswer{ID: it.ID, AnswerID: m.ID, Prompt: AnswerPrompt(it, m.Text)}
-			if last != nil {
-				p.SessionID = last.SessionID
+			// The run that accepted the answer, not whichever run is latest now
+			// (a legacy answer without a run count belongs to the latest).
+			run := it.lastRun()
+			if m.RunCount > 0 {
+				run = nil
+				if m.RunCount <= len(it.Runs) {
+					run = &it.Runs[m.RunCount-1]
+				}
+				p.Superseded = m.RunCount != len(it.Runs)
+			}
+			if run != nil {
+				p.SessionID = run.SessionID
 			}
 			out = append(out, p)
 		}
