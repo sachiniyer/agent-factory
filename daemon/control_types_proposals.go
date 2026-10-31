@@ -95,6 +95,12 @@ type SaveProposalDocRequest struct {
 	Text      string `json:"text"`
 	// Base is the commit of the last read or save of this doc.
 	Base string `json:"base"`
+	// Writer names the editor that sent the save (a Docs tab's sync) and Seq counts its saves
+	// upward. A save whose Seq is not above the highest the daemon has seen from that Writer
+	// for the doc is refused (409, proposal_stale_save): a request that outlived its client
+	// must not land after the writer's later saves. Both omitted: no fence.
+	Writer string `json:"writer,omitempty"`
+	Seq    int64  `json:"seq,omitempty"`
 }
 
 type SaveProposalDocResponse = proposal.SaveDocResult

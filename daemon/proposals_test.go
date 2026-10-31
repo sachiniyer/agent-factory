@@ -188,3 +188,23 @@ func TestProposalEvents_SaveAndDiskEdit(t *testing.T) {
 	require.Equal(t, proposal.AuthorExternal, c.Author)
 	require.Equal(t, "goals.md", c.Doc)
 }
+
+func TestProposalRoutes_SaveWithAStaleSeqIsRefusedWith409(t *testing.T) {
+	manager, _, data := createRealKillSession(t, "fenced")
+	cs := &controlServer{manager: manager}
+	code, env := postProposalRoute(t, cs, "StartProposal", StartProposalRequest{SessionID: data.ID, Slug: "p", Docs: []string{"goals"}})
+	require.Equal(t, http.StatusOK, code, env)
+	code, env = postProposalRoute(t, cs, "ReadProposalDoc", ReadProposalDocRequest{SessionID: data.ID, Slug: "p", Doc: "goals"})
+	require.Equal(t, http.StatusOK, code, env)
+	base := env["data"].(map[string]any)["commit"].(string)
+
+	code, env = postProposalRoute(t, cs, "SaveProposalDoc", SaveProposalDocRequest{SessionID: data.ID, Slug: "p", Doc: "goals", Text: "second\n", Base: base, Writer: "tab", Seq: 2})
+	require.Equal(t, http.StatusOK, code, env)
+	code, env = postProposalRoute(t, cs, "SaveProposalDoc", SaveProposalDocRequest{SessionID: data.ID, Slug: "p", Doc: "goals", Text: "late\n", Base: base, Writer: "tab", Seq: 1})
+	require.Equal(t, http.StatusConflict, code, env)
+	require.Equal(t, proposal.ErrorCodeStaleSave, env["error"].(map[string]any)["code"])
+
+	code, env = postProposalRoute(t, cs, "ReadProposalDoc", ReadProposalDocRequest{SessionID: data.ID, Slug: "p", Doc: "goals"})
+	require.Equal(t, http.StatusOK, code, env)
+	require.Equal(t, "second\n", env["data"].(map[string]any)["text"], "the refused save changed nothing")
+}
