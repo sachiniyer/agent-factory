@@ -521,8 +521,9 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
         // A closed tab handed the doc over when it went quiet (its stored draft, with the
         // text in doubt, is the next pane's to restore and reconcile): it must not read
         // and send a corrective save of its own over what that pane has done since.
-        m.late = m.late.filter((l) => l.seq !== e.seq);
-        m.inDoubt = m.late.map((l) => l.text);
+        // Its draft keeps the text in doubt (the next pane reconciles it against the head
+        // when it restores), so this tab does not clear it: it may be the only copy of an undo.
+        m.late = m.late.map((l) => (l.seq === e.seq ? { ...l, ended: m.nextSeq } : l));
         return;
       }
       // The request has ended, and may have landed after the read that found the head

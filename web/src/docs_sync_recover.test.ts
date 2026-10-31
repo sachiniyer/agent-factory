@@ -212,5 +212,6 @@ test("a closed tab whose timed-out save ends later sends no corrective save of i
   const seq = r.m.late[0]!.seq;
   r = run(r.m, { t: "late_done", seq });
   assert.equal(r.fx.some((f) => f.t === "save" || f.t === "load"), false, "it reads nothing and sends nothing: the next pane restores its draft");
-  assert.equal(r.m.late.length, 0);
+  assert.equal(r.fx.some((f) => f.t === "unstash"), false, "and the draft, which may be the only copy of the undo, stays");
+  assert.ok(r.m.stashed !== null);
 });
