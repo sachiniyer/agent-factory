@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { installFakeDom } from "./backlog_fakedom.js";
 import { BodyEditor, SAVE_DELAY_MS, bodyEditorLoader } from "./backlog_body.js";
+import { resetSerialState } from "./backlog_serial.js";
 
 let dom: ReturnType<typeof installFakeDom>;
 const realLoad = bodyEditorLoader.load;
@@ -11,6 +12,7 @@ let change: (t: string) => void;
 let destroyed: boolean;
 
 beforeEach(() => {
+  resetSerialState();
   dom = installFakeDom();
   destroyed = false;
   bodyEditorLoader.load = async () => ({

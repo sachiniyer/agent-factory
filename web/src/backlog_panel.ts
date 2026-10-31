@@ -13,7 +13,7 @@ import {
   childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, neededBy, openQuestion, safeHttpUrl,
 } from "./backlog_model.js";
 import { ROW_KIND_LABELS, isArchived, rowKind } from "./status.js";
-import { SerialSaver, queueFor } from "./backlog_serial.js";
+import { SerialSaver, getDraft, queueFor, setDraft } from "./backlog_serial.js";
 import { formatTime } from "./time.js";
 import type { SessionData } from "./types.js";
 
@@ -98,14 +98,20 @@ export class ItemPanel {
   private readonly lookups = new Map<string, "pending" | "done" | "failed">();
   // The title the user submitted that no confirming response has covered yet: a
   // refresh that read the old item must not put the old title back over it.
-  private titleDraft: string | null = null;
+  private get titleDraft(): string | null { return getDraft<string>(this.titleKey); }
+  private set titleDraft(v: string | null) { setDraft(this.titleKey, v); }
   // The waits-on list the user last submitted, likewise held until acknowledged, so
   // a second change builds on it instead of on the stored list.
-  private waitsDraft: number[] | null = null;
+  private get waitsDraft(): number[] | null { return getDraft<number[]>(this.waitsKey); }
+  private set waitsDraft(v: number[] | null) { setDraft(this.waitsKey, v); }
+  private readonly titleKey: string;
+  private readonly waitsKey: string;
   private readonly titles: SerialSaver<string>;
   private readonly waits: SerialSaver<number[]>;
 
   constructor(readonly root: string, readonly id: number, private readonly actions: PanelActions) {
+    this.titleKey = `${root}\u0000${id}\u0000title`;
+    this.waitsKey = `${root}\u0000${id}\u0000waits`;
     this.titles = new SerialSaver((title) => actions.update(id, { title }), (title, ok) => {
       if (this.titleDraft !== title) return;   // a newer submission owns the draft
       this.titleDraft = null;

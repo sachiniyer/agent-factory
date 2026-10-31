@@ -2,7 +2,7 @@
 // seam: today a plain textarea, and the CodeMirror live preview from the lazy Docs
 // bundle can replace it by swapping bodyEditorLoader once that bundle is on master.
 
-import { SerialQueue, queueFor } from "./backlog_serial.js";
+import { SerialQueue, getDraft, queueFor, setDraft } from "./backlog_serial.js";
 
 export const SAVE_DELAY_MS = 800;
 
@@ -53,7 +53,10 @@ export class BodyEditor {
   // debounce is running) or saved and still in flight. Stored text arriving while it
   // is set is older than the edit and must not replace it. It survives a failed save,
   // so the edit is kept (and the next change saves it again).
-  private draft: string | null = null;
+  private localDraft: string | null = null;
+  private readonly draftKey: string | undefined;
+  private get draft(): string | null { return this.draftKey === undefined ? this.localDraft : getDraft<string>(this.draftKey); }
+  private set draft(v: string | null) { if (this.draftKey === undefined) this.localDraft = v; else setDraft(this.draftKey, v); }
   private disposed = false;
 
   /** `save` may return a promise that settles true once the write AND the refresh
@@ -64,6 +67,9 @@ export class BodyEditor {
    *  queue, so a save held by a closed panel cannot land after a reopened one's. */
   constructor(private readonly save: (text: string) => Promise<boolean> | void, label: string, queueKey?: string) {
     this.queue = queueKey === undefined ? new SerialQueue() : queueFor(queueKey);
+    this.draftKey = queueKey;
+    // A save from a panel that was closed is still unconfirmed: show it, not the stored text.
+    if (this.draft !== null) this.text = this.draft;
     this.el = document.createElement("div");
     this.el.className = "af-backlog-body";
     const fallback = document.createElement("pre");
