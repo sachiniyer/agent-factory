@@ -298,46 +298,52 @@ func (i *Instance) OffBoxAccountHandoffApplies() bool {
 
 // admitOffBoxAccountSwap proves every refusal that costs nothing, before anything
 // is staged or stopped. It returns the workspace and the incoming account bound
-// into the spec the launch checks run against.
-func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*sandboxWorkspace, sessionenv.Account, error) {
+// into the spec the launch checks run against, plus the sandbox_agent_config
+// snapshot admission resolved from the global config — handed back so the swap
+// half re-derives the operator's agent personalization from that snapshot instead
+// of re-opening the config (a second read could fail mid-swap, while the remote
+// CanSwapAccount call is in flight, and silently stage a bare scope: the very
+// personalization-loss bug this path exists to fix). sandbox_agent_config is
+// global-only, so the snapshot does not depend on the account and is safe to reuse.
+func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*sandboxWorkspace, sessionenv.Account, []string, error) {
 	w := p.account
 	if w == nil || w.spec.Account.Dir == "" {
-		return nil, sessionenv.Account{}, fmt.Errorf("session %q carries no synced account to hand off", i.Title)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q carries no synced account to hand off", i.Title)
 	}
 	if name = strings.TrimSpace(name); name == "" {
-		return nil, sessionenv.Account{}, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
 	}
 	if name == w.spec.Account.Name {
-		return nil, sessionenv.Account{}, fmt.Errorf("session %q already uses account %q", i.Title, name)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q already uses account %q", i.Title, name)
 	}
 	old := w.spec.Account
 	// The licence is the one that let the outgoing account in, re-asked of the
 	// incoming one: a listed host, and an agent whose credential files af knows.
 	next, err := selectAccountInNamespace(old.Agent, name)
 	if err != nil {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
 	}
 	if next.Agent != old.Agent {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: it is a %s account, and the session runs %s; a sandbox session keeps its agent when it changes account",
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: it is a %s account, and the session runs %s; a sandbox session keeps its agent when it changes account",
 			i.Title, name, next.Agent, old.Agent)
 	}
 	check := *w
 	check.spec.Account = next
 	if _, err := check.accountSyncApplies(); err != nil {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
 	}
 	// The same command proof the provision ran, with the incoming account: an
 	// attributed binary and no identity variable of the command's own.
 	rc, err := resolveRepoConfig(i.Path)
 	if err != nil {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: its program cannot be checked against the account: %w", i.Title, name, err)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: its program cannot be checked against the account: %w", i.Title, name, err)
 	}
 	spec := check.spec
 	if err := validateRemoteAccountProgram(rc, &spec); err != nil {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
 	}
 	next.TrustedExecutable, next.GeneratedArgs = spec.Account.TrustedExecutable, spec.Account.GeneratedArgs
-	return w, next, nil
+	return w, next, rc.SandboxAgentConfig, nil
 }
 
 // ValidateOffBoxAccountSwap is the admission half alone: every refusal that costs
@@ -349,7 +355,7 @@ func (i *Instance) ValidateOffBoxAccountSwap(name string) error {
 	}
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
-	_, _, err := i.admitOffBoxAccountSwap(p, name)
+	_, _, _, err := i.admitOffBoxAccountSwap(p, name)
 	return err
 }
 
@@ -380,7 +386,7 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	}
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
-	w, next, err := i.admitOffBoxAccountSwap(p, name)
+	w, next, agentConfigFiles, err := i.admitOffBoxAccountSwap(p, name)
 	if err != nil {
 		return OffBoxAccountSwap{}, err
 	}
@@ -405,21 +411,16 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	// restart. An off-box swap would then stage the incoming account WITHOUT the
 	// operator's personalization (a bare agent) and the rotation would delete the
 	// outgoing scope that held the provision-time copy. Re-derive it here, from the
-	// same repo config the admission proof just resolved, mirroring provision's
-	// pairing of AgentConfigFiles with AccountSyncHost (backend_ssh.go):
-	// sandbox_agent_config is global-only, so this re-reads nothing a repository
-	// could set, and AccountSyncHost — durable in the row — is the licence that
-	// provision set both under. The gate leaves a freshly provisioned workspace's
-	// provision-time selection untouched.
+	// snapshot admission just resolved (mirroring provision's pairing of
+	// AgentConfigFiles with AccountSyncHost in backend_ssh.go): sandbox_agent_config
+	// is global-only, so this re-reads nothing a repository could set, and
+	// AccountSyncHost — durable in the row — is the licence that provision set both
+	// under. Reusing the admission snapshot (rather than re-opening the config here)
+	// closes the race where a read failure between admission and the swap silently
+	// stages a bare scope and reproduces the bug. The gate leaves a freshly
+	// provisioned workspace's provision-time selection untouched.
 	if len(w.spec.AgentConfigFiles) == 0 && strings.TrimSpace(w.spec.AccountSyncHost) != "" {
-		if rc, rcErr := resolveRepoConfig(i.Path); rcErr == nil {
-			w.spec.AgentConfigFiles = append([]string(nil), rc.SandboxAgentConfig...)
-		} else {
-			// admission already proved resolveRepoConfig(i.Path) works (it is the
-			// one program-validation depends on); a miss here is a transient read
-			// failure, so proceed as before rather than surface a new refusal.
-			log.WarningLog.Printf("account handoff of %q: re-deriving sandbox agent config: %v", i.Title, rcErr)
-		}
+		w.spec.AgentConfigFiles = append([]string(nil), agentConfigFiles...)
 	}
 	res := OffBoxAccountSwap{From: w.spec.Account.Name, To: next.Name}
 	versions, err := w.stageAccountNext(sshShortStepTimeout, next)
