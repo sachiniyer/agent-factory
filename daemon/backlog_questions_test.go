@@ -632,3 +632,35 @@ func TestAnswerIsNotSentToASupersededSession(t *testing.T) {
 		t.Fatalf("the answer was not recorded as undelivered: %+v", it.Thread)
 	}
 }
+
+// Recovery after a crash between a replacement run being recorded and the held
+// answer's failure being written: the answer is failed with a note, never
+// delivered into the replacement run (Codex P2 on #6297).
+func TestRecoveryDoesNotRedeliverAnAnswerIntoAReplacementRun(t *testing.T) {
+	m, repoID, inst := askedItem(t)
+	sent := stubBacklogSend(t, m, repoID)
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		if _, err := b.Answer(1, 0, "Postgres", true, daemonProcessStart.Add(-time.Minute)); err != nil {
+			return err
+		}
+		b.Item(1).Runs = append(b.Item(1).Runs, backlog.RunRef{State: backlog.RunStarted, SessionID: inst.ID, Title: inst.Title})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.recoverBacklog(repoID, nil)
+	m.backgroundMutationWG.Wait()
+	if sent.count() != 0 {
+		t.Fatalf("the answer was redelivered into the replacement run: %+v", sent.reqs)
+	}
+	if len(mustLoad(t, repoID).PendingAnswers()) != 0 {
+		t.Fatal("the superseded answer is still pending")
+	}
+	var failed bool
+	for _, msg := range loadItem(t, repoID, 1).Thread {
+		failed = failed || (msg.Kind == backlog.KindAnswer && msg.Delivery == backlog.DeliveryFailed)
+	}
+	if !failed {
+		t.Fatal("the superseded answer was not recorded as undelivered")
+	}
+}
