@@ -371,3 +371,31 @@ test("dispose does not repeat a save that is already in flight", async () => {
   h.sync.dispose();
   assert.equal(h.saves.length, 1);
 });
+
+test("whenSaved stays pending while a lost-reply save is unreconciled, even when the buffer is back to the acknowledged text", async () => {
+  const h = await started();
+  h.type("v2");
+  await h.fire(); // the save of v2 against c1 goes out
+  // It lands on the daemon, but its reply is lost.
+  h.head = { text: "v2", commit: "c2" };
+  h.holdLoad = deferred<DocText>(); // the read of the head is not answered yet
+  h.saves[0]!.reply.reject(new Error("503 service unavailable"));
+  await tick();
+  // The user undoes back to the text they last saw acknowledged.
+  h.type("v1");
+  let verdict: string | null = null;
+  void h.sync.whenSaved().then((v) => (verdict = v));
+  await tick();
+  assert.equal(verdict, null, "the daemon may still hold v2: nothing is saved yet");
+  // The read answers: v2 did land, so the undo is a real edit and is saved on top of it.
+  h.holdLoad.resolve({ ...h.head });
+  h.holdLoad = null;
+  await tick();
+  assert.equal(verdict, null, "the corrective save of v1 is still to land");
+  await h.fire();
+  assert.equal(h.saves.at(-1)!.text, "v1");
+  assert.equal(h.saves.at(-1)!.base, "c2");
+  h.saves.at(-1)!.reply.resolve({ kind: "saved", text: "v1", commit: "c3", merged: false });
+  await tick();
+  assert.equal(verdict, "saved");
+});
