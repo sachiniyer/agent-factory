@@ -80,28 +80,6 @@ jobs:
         script: |
           await require('./.github/scripts/macos-verdict.js').gateRelease({ github, core, context });
 
-    # web/dist is committed (web/embed.go embeds it) but PRs no longer carry it:
-    # web-dist-sync.yml lands it after the source (#6447). A tag must never embed a
-    # bundle that lags web/src, so rebuild and fail on any difference. The wait is
-    # minutes; the next run picks the release up once the sync PR has merged.
-    - name: Set up Node
-      uses: actions/setup-node@v6
-      with:
-        node-version: '22'
-        cache: npm
-        cache-dependency-path: web/package-lock.json
-
-    - name: Committed web/dist matches web/src
-      run: |
-        make web-build
-        dirty="$(git status --porcelain -- web/dist)"
-        if [ -n "$dirty" ]; then
-          echo "::error::web/dist is stale: it does not match a fresh build of web/src, so a release would embed an old web client."
-          echo "$dirty"
-          echo "web-dist-sync.yml proposes the fix as a dist-only PR (branch web-dist-sync); release once it has merged."
-          exit 1
-        fi
-
     - name: Release preflight
       run: |
         unformatted=$(gofmt -l .)
@@ -121,9 +99,46 @@ jobs:
         go test -v -race -count=1 -timeout=30m ./...
         go build ./...
 
+  # web/dist is committed (web/embed.go embeds it) but, once WEB_DIST_SYNC is on, PRs no
+  # longer carry it: web-dist-sync.yml lands it after the source (#6447). A tag must never
+  # embed a bundle that lags web/src, so rebuild and fail on any difference. This runs
+  # npm, which executes package scripts, so it is its OWN job: contents: read, no
+  # persisted credential, no npm cache, and no workspace shared with the jobs that hold
+  # contents: write or run `go ./...`. `build` needs it. The wait is minutes; the next
+  # run picks the release up once the sync PR has merged.
+  web-bundle:
+    name: Committed web/dist is current
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+
+    - name: Set up Node
+      if: vars.WEB_DIST_SYNC == 'true'
+      uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+
+    - name: Committed web/dist matches web/src
+      if: vars.WEB_DIST_SYNC == 'true'
+      run: |
+        make web-build
+        dirty="$(git status --porcelain -- web/dist)"
+        if [ -n "$dirty" ]; then
+          echo "::error::web/dist is stale: it does not match a fresh build of web/src, so a release would embed an old web client."
+          echo "$dirty"
+          echo "web-dist-sync.yml proposes the fix as a dist-only PR (branch web-dist-sync); release once it has merged."
+          exit 1
+        fi
+
   build:
     name: Build
-    needs: validate
+    needs: [validate, web-bundle]
     runs-on: ubuntu-24.04
     strategy:
       matrix:

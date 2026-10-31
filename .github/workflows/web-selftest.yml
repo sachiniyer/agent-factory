@@ -113,7 +113,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # PRs no longer carry web/dist (#6447), so the committed bundle can lag the
+      # Once WEB_DIST_SYNC is on, PRs do not carry web/dist (#6447), so the committed bundle can lag the
       # source under test. Build the bundle from this tree first; the container
       # copies the working tree, dist included, so the suite drives what this
       # source would ship.

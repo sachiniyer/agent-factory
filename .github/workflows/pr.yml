@@ -283,9 +283,10 @@ jobs:
         run: node --test .github/scripts/stale-external-pr.test.js
 
       # The guard in front of web-dist-sync.yml's write-capable commit job (#6447):
-      # it must refuse symlinks, odd names, oversize and non-bundle trees.
-      - name: Test the web/dist artifact guard
-        run: node --test .github/scripts/web-dist-guard.test.js
+      # it must refuse symlinks, odd names, oversize and non-bundle trees. And the
+      # PR-side rule for web/dist, which has to hold for non-ASCII names and renames.
+      - name: Test the web/dist guard and PR rules
+        run: node --test .github/scripts/web-dist-guard.test.js .github/scripts/web-dist-pr-rules.test.js
 
       # The container harness's own disk hygiene (#2133): cleanup must run on a
       # FAILING run, and every prune must be scoped to artifacts the harness
@@ -688,21 +689,26 @@ jobs:
       - name: Typecheck and test the web client
         run: make web-test
 
-      # Bundle reproducibility, since #6447. web/dist is still COMMITTED because the
-      # Go binary embeds it (web/embed.go) and the Go side must stay Node-free, but
-      # pull requests no longer carry it: every web change rewrote the one generated
-      # bundle, so any two web PRs conflicted. web-dist-sync.yml rebuilds it after the
-      # source lands and proposes it as a dist-only PR on the bot branch
-      # `web-dist-sync`. So:
-      #   * a normal PR must NOT touch web/dist (it would conflict again);
+      # Bundle reproducibility. web/dist is COMMITTED because the Go binary embeds it
+      # (web/embed.go) and the Go side must stay Node-free.
+      #
+      # Until the repository variable WEB_DIST_SYNC is `true`, the rule is the original
+      # one: every PR carries a web/dist byte-identical to a fresh build, and any
+      # difference fails. With it `true` (#6447, web-dist-sync.yml, which the owner turns
+      # on only once its credential exists) PRs no longer carry the bundle, because
+      # every web change rewrote the one generated file and any two web PRs conflicted;
+      # web-dist-sync.yml proposes it after the source lands, as a dist-only PR on the
+      # bot branch `web-dist-sync`. Then:
+      #   * a normal PR must NOT touch web/dist (a pathspec diff, see
+      #     .github/scripts/web-dist-pr-rules.sh);
       #   * the sync PR may touch ONLY web/dist, and its bundle must be byte-identical
-      #     to a fresh build of the PR's own merge tree: this is the independent
-      #     second build that stands between the sync job's artifact and master;
-      #   * everywhere else (master push, nightly, dispatch) a stale bundle is the
-      #     sync job's to fix. It is a WARNING on a push, where failing would turn
-      #     Build red in the minutes between a merge and its sync PR and halt the
-      #     merger, and an ERROR on the nightly, which is the backstop that notices
-      #     a sync job that has stopped working. The release workflows fail hard.
+      #     to a fresh build of the PR's own merge tree: the independent second build
+      #     that stands between the sync job's artifact and master;
+      #   * everywhere else (master push, nightly, dispatch) a stale bundle is the sync
+      #     job's to fix. It is a WARNING on a push, where failing would turn Build red
+      #     in the minutes between a merge and its sync PR and halt the merger, and an
+      #     ERROR on the nightly, which is the backstop that notices a sync job that has
+      #     stopped working. The release workflows fail hard.
       - name: Rebuild the bundle
         run: make web-build
 
@@ -714,6 +720,7 @@ jobs:
       - name: Check the committed bundle
         env:
           EVENT: ${{ github.event_name }}
+          SYNC: ${{ vars.WEB_DIST_SYNC }}
           HEAD_REF: ${{ github.head_ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           REPO: ${{ github.repository }}
@@ -722,6 +729,24 @@ jobs:
         run: |
           set -euo pipefail
           stale="$(git status --porcelain -- web/dist)"
+
+          if [ "$SYNC" != "true" ]; then
+            if [ -n "$stale" ]; then
+              echo "::error::web/dist is stale — it does not match a fresh build of web/src."
+              echo "$stale"
+              echo
+              echo "The Go binary embeds the COMMITTED web/dist (web/embed.go), so this change would"
+              echo "ship a bundle that does not match its source. Fix it with:"
+              echo
+              echo "    make web-build && git add web/dist"
+              echo
+              echo "Rebuild — never hand-edit or hand-merge dist/af-web.js; it is generated."
+              git diff -- web/dist | head -50
+              exit 1
+            fi
+            echo "web/dist matches a fresh build."
+            exit 0
+          fi
 
           # Which rules apply. A pull_request is the obvious case. The other is a
           # workflow_dispatch on a PR BRANCH: auto-gate.js dispatches pr.yml on
@@ -742,15 +767,8 @@ jobs:
           fi
 
           if [ -n "$base" ]; then
-            changed="$(git diff --name-only "$base" HEAD)"
-            touches="$(printf '%s\n' "$changed" | grep '^web/dist/' || true)"
             if [ "$HEAD_REF" = "web-dist-sync" ] && [ "$HEAD_REPO" = "$REPO" ]; then
-              outside="$(printf '%s\n' "$changed" | grep -v '^web/dist/' | grep . || true)"
-              if [ -n "$outside" ]; then
-                echo "::error::the web-dist-sync PR may change only web/dist/, but it also changes:"
-                echo "$outside"
-                exit 1
-              fi
+              .github/scripts/web-dist-pr-rules.sh "$base" sync
               if [ -n "$stale" ]; then
                 echo "::error::the web-dist-sync bundle does not match a fresh build of this tree."
                 echo "$stale"
@@ -761,16 +779,7 @@ jobs:
               echo "web/dist in this sync PR is byte-identical to a fresh build."
               exit 0
             fi
-            if [ -n "$touches" ]; then
-              echo "::error::this PR changes web/dist, which is generated and committed only by web-dist-sync.yml (#6447)."
-              echo "$touches"
-              echo
-              echo "Committed bundles are what made every open web PR conflict whenever another web PR merged."
-              echo "Drop it from your branch (your source change is all a web PR needs):"
-              echo
-              echo "    git checkout origin/master -- web/dist && git commit -m 'Drop generated web/dist'"
-              exit 1
-            fi
+            .github/scripts/web-dist-pr-rules.sh "$base" normal
             echo "No web/dist change in this PR (the bundle is synced after merge)."
             exit 0
           fi
@@ -915,7 +924,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
-      # PRs no longer carry web/dist (#6447), so measure a fresh build of this
+      # Once WEB_DIST_SYNC is on, PRs do not carry web/dist (#6447), so measure a fresh build of this
       # tree's source: the container copies the working tree, dist included.
       - name: Set up Node
         uses: actions/setup-node@v6

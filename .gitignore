@@ -42,7 +42,8 @@ __debug_bin*
 
 # Web client toolchain (#1592 Phase 5). node_modules is never committed; the built
 # web/dist/ IS committed (locked decision) so `go build`/Go tests stay Node-free, but
-# only by web-dist-sync.yml after the source merges (#6447), never in a PR.
+# only by web-dist-sync.yml after the source merges (#6447, once WEB_DIST_SYNC is on),
+# never in a PR.
 web/node_modules/
 web/*.tsbuildinfo
 # Playwright web-driver-selftest run artifacts (#1592 Phase 5 PR6). The harness

@@ -23,7 +23,9 @@ if [ ! -d "$dir" ] || [ -L "$dir" ]; then
 fi
 
 # Anything that is not a regular file or a directory (symlink, fifo, socket,
-# device, hard-link oddities included) is refused.
+# device) is refused, and so is a regular file with more than one hard link: an
+# artifact extraction has no business creating one, and it would alias a file
+# outside the tree.
 odd="$(find "$dir" -mindepth 1 ! -type f ! -type d -print -quit)"
 if [ -n "$odd" ]; then
 	echo "guard: refusing non-regular entry: $odd" >&2
@@ -32,6 +34,13 @@ fi
 
 name_re='^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$'
 export LC_ALL=C
+reserved_re='^(con|prn|aux|nul|com[1-9]|lpt[1-9])$'
+
+hard="$(find "$dir" -type f -links +1 -print -quit)"
+if [ -n "$hard" ]; then
+	echo "guard: refusing hard-linked file: $hard" >&2
+	exit 1
+fi
 
 # Names relative to the tree: letters, digits, dot, underscore, dash, slash. No
 # empty, `.`/`..` component, no leading dash or dot component (so no .git, no
@@ -43,6 +52,17 @@ while IFS= read -r -d '' p; do
 		echo "guard: refusing unsafe name: $rel" >&2
 		exit 1
 	fi
+	# Names a Windows checkout cannot hold (a component ending in a dot or space is
+	# stripped; the DOS device names are reserved with or without an extension), so
+	# a bundle cannot be unreadable or aliased on a contributor's machine.
+	IFS=/ read -r -a parts <<<"$rel"
+	for part in "${parts[@]}"; do
+		stem="${part%%.*}"
+		if [[ "$part" == *. ]] || [[ "${stem,,}" =~ $reserved_re ]]; then
+			echo "guard: refusing Windows-hostile name: $rel" >&2
+			exit 1
+		fi
+	done
 done < <(find "$dir" -mindepth 1 -print0)
 
 count="$(find "$dir" -type f | wc -l)"

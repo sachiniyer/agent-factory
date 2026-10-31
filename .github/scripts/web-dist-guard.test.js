@@ -81,3 +81,33 @@ test("a tree without index.html is refused", () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /index.html/);
 });
+
+test("a hard-linked file is refused", () => {
+  const r = run(tree((d, root) => {
+    fs.writeFileSync(path.join(root, "outside"), "x");
+    fs.linkSync(path.join(root, "outside"), path.join(d, "linked.js"));
+  }));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /hard-linked/);
+});
+
+test("Windows-hostile names are refused", () => {
+  for (const name of ["CON", "nul.js", "Lpt1.txt", "trailing.", "lazy/aux.js"]) {
+    const r = run(tree((d) => {
+      fs.mkdirSync(path.dirname(path.join(d, name)), { recursive: true });
+      fs.writeFileSync(path.join(d, name), "x");
+    }));
+    assert.notEqual(r.status, 0, name);
+    assert.match(r.stderr, /Windows-hostile/, name);
+  }
+});
+
+test("ordinary look-alikes pass", () => {
+  for (const name of ["console.js", "icons/auxiliary.svg", "af-web.css", "a.b.c"]) {
+    const r = run(tree((d) => {
+      fs.mkdirSync(path.dirname(path.join(d, name)), { recursive: true });
+      fs.writeFileSync(path.join(d, name), "x");
+    }));
+    assert.equal(r.status, 0, name + " " + r.stderr);
+  }
+});

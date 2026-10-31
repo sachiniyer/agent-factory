@@ -650,8 +650,10 @@ Recommended:
   (`web/src/modals.ts:183`) is directly reusable. Note this is exactly the gap
   [#1934](https://github.com/sachiniyer/agent-factory/issues/1934) already
   reports: the web renders `Limit reached` with *no way out*. Shipping handoff
-  TUI-only would reproduce that bug one level down. Remember `web/dist/` is
-  committed — a web change is a two-part commit including `make web-build`.
+  TUI-only would reproduce that bug one level down. `web/dist/` is
+  committed but generated: once `WEB_DIST_SYNC` is on (#6447) a web PR carries only
+  its source and `web-dist-sync.yml` commits the rebuilt bundle after it lands;
+  until then a web change is a two-part commit including `make web-build`.
 - **Agent-facing docs.** `session/systemprompt.go:16` `afUsageReference` is the
   hand-written command list taught to every agent; a new verb must be added there
   or agents won't know it exists.

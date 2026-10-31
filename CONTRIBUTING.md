@@ -5,6 +5,7 @@ Thanks for your interest in contributing to Agent Factory!
 ## Guidelines
 
 1. **Test your changes** — run `go build ./...` and `go test ./...` before submitting a PR.
+   Changing `web/src`? Run `make web-build` to try it, but once `WEB_DIST_SYNC` is on (#6447) do not commit `web/dist`: a bot proposes the rebuilt bundle after your source merges, and a PR that touches it fails the `Web` check (`git checkout origin/master -- web/dist` drops it).
 2. **Explain why** — include the reason your change is useful in the PR description. What problem does it solve?
 
 That's it. Keep PRs focused and small when possible.
