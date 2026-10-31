@@ -449,6 +449,13 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 		} else {
 			data.Worktree.BranchCreatedByUs = nil
 		}
+		// StartupStateUnknown rides the same fence: a ghost row without an
+		// archive rollback fence carries only the projected compatibility
+		// true, and the decoded record holds the real value. Leaving the
+		// projection in place would let a post-tombstone reload keep the
+		// workspace-frozen verdict prepareKillTeardown gives startup-unknown
+		// rows and skip the git cleanup this discharge just authorized.
+		data.StartupStateUnknown = restored.StartupStateUnknown
 		data.Worktree.RelocationRecovery = nil
 		// The discharge must retire the fence's recovery snapshot too: a loaded
 		// row carries no archiveReportSource, so persistKillTombstone's

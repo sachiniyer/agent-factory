@@ -515,10 +515,14 @@ func TestValidateGhostCleanupAdmission_AbsentArchiveDischargesCleanupReady(t *te
 	stored := data.ForStorage()
 	require.NotNil(t, stored.Worktree.RelocationRecovery,
 		"setup must persist a cleanup_ready record")
+	require.True(t, stored.StartupStateUnknown,
+		"setup: the rollback fence projects startup-unknown for older readers")
 	require.NoError(t, validateGhostWorktreeDestructionAdmission(&stored),
 		"a cleanup_ready ghost over a conclusively absent archive must discharge at admission")
 	assert.Nil(t, stored.Worktree.RelocationRecovery,
 		"the discharge must propagate to the persisted row so ghost cleanup settles the absent path")
+	assert.False(t, stored.StartupStateUnknown,
+		"the discharge must restore the decoded startup flag or a post-tombstone reload reads the projected stall and skips the git cleanup it authorized")
 	assert.False(t, stored.Worktree.ExternalWorktree,
 		"the discharge must restore the decoded ownership so ghostCleanupWorktree does not bail at ghostRestoredWorktreeRemovable and orphan the branch")
 	if stored.Worktree.BranchCreatedByUs != nil {
