@@ -49,6 +49,8 @@ export interface Flight {
   seq: number;
   text: string;
   base: string;
+  /** The acknowledged text `base` names: what the save's edits were made against. */
+  baseText: string;
   final: boolean;
 }
 
@@ -80,6 +82,9 @@ export interface Model {
   unknown: boolean;
   /** Texts of saves whose outcome is unknown. */
   inDoubt: string[];
+  /** Saves that timed out and have not been answered: they can still land. Their texts
+   *  stay in `inDoubt` until they have completed and the daemon has been read again. */
+  late: { seq: number; text: string; baseText: string; ended: number | null }[];
   /** The daemon refused a save for good (too large, rejected): no retry until the
    *  buffer changes. */
   fatal: boolean;
@@ -111,7 +116,10 @@ export type Event =
   | { t: "save_ok"; seq: number; result: Extract<SaveResult, { kind: "saved" }> }
   | { t: "save_conflict"; seq: number; result: Extract<SaveResult, { kind: "conflict" }> }
   /** The outcome is unknown: a timeout, a network error, a 5xx. */
-  | { t: "save_fail"; seq: number; error: string }
+  /** `outstanding`: the request timed out unanswered, so it can still land. */
+  | { t: "save_fail"; seq: number; error: string; outstanding?: boolean }
+  /** A save that timed out has finally been answered (or has failed): it can land no more. */
+  | { t: "late_done"; seq: number }
   /** The daemon refused the save outright (4xx): it certainly did not apply. */
   | { t: "save_fatal"; seq: number; error: string }
   | { t: "remote"; commit: string }
@@ -182,6 +190,7 @@ export function initialModel(): Model {
     backoff: false,
     unknown: false,
     inDoubt: [],
+    late: [],
     fatal: false,
     gone: false,
     leaving: false,
@@ -217,7 +226,7 @@ export function statusOf(m: Model): { status: SyncStatus; detail: string } {
 /** Returns the next model and the effects to run. The input is not modified. */
 export function step(prev: Model, e: Event): [Model, Effect[]] {
   if (prev.dead) return [prev, []];
-  const m: Model = { ...prev, inDoubt: [...prev.inDoubt] };
+  const m: Model = { ...prev, inDoubt: [...prev.inDoubt], late: [...prev.late] };
   const fx: Effect[] = [];
   reduce(m, e, fx);
   settle(m, fx);
@@ -315,7 +324,7 @@ function startSave(m: Model, fx: Effect[], final: boolean): void {
   disarm(m, fx);
   const seq = m.nextSeq++;
   m.phase = "saving";
-  m.flight = { seq, text: m.buffer, base: m.base, final };
+  m.flight = { seq, text: m.buffer, base: m.base, baseText: m.saved, final };
   m.note = null;
   fx.push({ t: "save", seq, text: m.buffer, base: m.base, final });
 }
@@ -359,6 +368,9 @@ function goneEvent(m: Model, fx: Effect[]): void {
     return;
   }
   m.gone = true;
+  // The save that was out may have landed, and the buffer may have moved off it (an
+  // undo): the work that stays with the deleted doc includes that, so the draft keeps it.
+  if (m.flight && m.flight.text !== m.saved) m.inDoubt = [...m.inDoubt, m.flight.text];
   m.flight = null;
   if (m.phase === "saving" || m.phase === "reloading" || m.phase === "reconciling") m.phase = "idle";
   m.readSeq = null;
@@ -426,7 +438,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.flight = null;
       m.phase = "idle";
       m.note = null;
-      m.inDoubt = [];
+      m.inDoubt = m.late.map((l) => l.text);
       m.unknown = false;
       const mergedAgentEdits = r.merged && r.text !== sent;
       if (!mergedAgentEdits) {
@@ -463,7 +475,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
     case "save_conflict": {
       if (m.phase !== "saving" || !m.flight || e.seq !== m.flight.seq) return;
       m.flight = null;
-      m.inDoubt = [];
+      m.inDoubt = m.late.map((l) => l.text);
       m.unknown = false;
       const r = e.result;
       if (m.buffer === r.theirs) {
@@ -484,11 +496,22 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       // The outcome is unknown, not "failed": the save may have landed. Remember its
       // text, and read the daemon's head (settle) before sending or loading anything.
       m.inDoubt = [...m.inDoubt, m.flight.text];
+      if (e.outstanding) m.late = [...m.late, { seq: e.seq, text: m.flight.text, baseText: m.flight.baseText, ended: null }];
       m.flight = null;
       m.phase = "idle";
       m.unknown = true;
       m.backoff = false;
       m.note = { kind: "error", detail: e.error };
+      return;
+    }
+
+    case "late_done": {
+      if (m.dead || !m.late.some((l) => l.seq === e.seq && l.ended === null)) return;
+      // The request has ended, and may have landed after the read that found the head
+      // unchanged: read the head again, with its text (and what it was made against)
+      // still in doubt. A read issued from now on (a request id above `nextSeq`) settles it.
+      m.late = m.late.map((l) => (l.seq === e.seq ? { ...l, ended: m.nextSeq } : l));
+      m.unknown = true;
       return;
     }
 
@@ -519,6 +542,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       if (m.phase === "conflict") m.phase = "idle";
       m.unknown = false;
       m.inDoubt = [];
+      m.late = [];
       m.fatal = false;
       m.base = e.head.commit;
       m.saved = e.head.text;
@@ -581,13 +605,19 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       const head = e.doc;
       m.phase = "idle";
       m.readSeq = null;
-      m.unknown = false;
+      // A request that ended before this read was issued is settled by it; one that ended
+      // while it was in flight may have landed after it, and is read for again.
+      const endedLater = m.late.some((l) => l.ended !== null && l.ended >= e.seq);
+      m.unknown = endedLater;
       m.note = null;
       // An unknown save landed if the daemon's head already contains its edits:
       // merging them onto the head changes nothing.
-      const landed = [...m.inDoubt].reverse().find((s) => s !== m.saved && mergeWithMarkers(m.saved, s, head.text) === head.text);
+      // (a request still out was made against the text current when it was sent)
+      const baseOf = (s: string): string => m.late.find((l) => l.text === s)?.baseText ?? m.saved;
+      const landed = [...m.inDoubt].reverse().find((s) => s !== m.saved && mergeWithMarkers(baseOf(s), s, head.text) === head.text);
       const baseText = landed ?? m.saved;
-      m.inDoubt = [];
+      m.late = m.late.filter((l) => l.ended === null || l.ended >= e.seq);
+      m.inDoubt = m.late.map((l) => l.text); // a request still out can land later
       if (head.text === m.buffer) {
         m.base = head.commit;
         m.saved = head.text;
@@ -700,7 +730,7 @@ function settle(m: Model, fx: Effect[]): void {
     return;
   }
   const dirty = isDirty(m);
-  if (!dirty && m.stale && !m.backoff) {
+  if (!dirty && m.stale && !m.backoff && !m.late.some((l) => l.ended === null)) {
     startRead(m, fx, "reload");
     return;
   }

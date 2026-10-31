@@ -177,3 +177,12 @@ test("Discard on a deleted doc leaves no draft behind: an abandoned sync does no
   r = run(r.m, { t: "edit", text: "v1 edited again" });
   assert.equal(r.fx.some((f) => f.t === "stash"), false, "and later edits are inert");
 });
+
+test("a deleted doc keeps an undone buffer in storage when the save that was out may have landed", () => {
+  // load v1, edit v2, save (out), undo to v1, then the doc is deleted before the reply.
+  let r = run(loaded(), { t: "edit", text: "v2" }, { t: "flush" }, { t: "edit", text: "v1" });
+  r = run(r.m, { t: "gone" });
+  assert.equal(statusOf(r.m).status, "gone");
+  assert.ok(!r.fx.some((f) => f.t === "unstash"), "the recovery entry stays");
+  assert.deepEqual(r.m.inDoubt, ["v2"]);
+});
