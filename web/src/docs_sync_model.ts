@@ -14,7 +14,30 @@
 // unsaved work is mirrored into per-window storage so closing the page cannot lose it.
 
 import type { DocText, SaveResult } from "./proposal_api.js";
-import { hasConflictMarkers, mergeWithMarkers } from "./text_diff.js";
+import { changedLines, hasConflictMarkers, landedIn, mergeWithMarkers } from "./text_diff.js";
+
+/** The save, of those that may have landed, that is in `head`. The save whose text is the head is the one
+ *  that landed (the latest such). Otherwise a save is in the head when merging it onto the head changes
+ *  nothing, or when every change it made is there in order, which holds when another writer's edits touch
+ *  its lines (the merge reads that as a conflict). Several saves can pass that test (a later one that
+ *  repeats part of an earlier one), and the one that explains the most changed lines is the one that
+ *  landed; ties go to the latest. */
+function findLanded(saves: readonly { text: string; from: string }[], head: string): { text: string; from: string } | undefined {
+  const maybe = [...saves].reverse().filter((d) => d.text !== d.from);
+  const same = maybe.find((d) => d.text === head);
+  if (same) return same;
+  let best: { text: string; from: string } | undefined;
+  let bestLines = -1;
+  for (const d of maybe) {
+    if (mergeWithMarkers(d.from, d.text, head) !== head && !landedIn(d.from, d.text, head)) continue;
+    const lines = changedLines(d.from, d.text);
+    if (lines > bestLines) {
+      best = d;
+      bestLines = lines;
+    }
+  }
+  return best;
+}
 
 export const AUTOSAVE_DELAY_MS = 500;
 export const SAVE_RETRY_MS = 5000;
@@ -297,10 +320,7 @@ function restoreDraft(m: Model, fx: Effect[], draft: Draft): void {
   // head changes nothing), even when the agent edited other lines since; the edits then
   // rebase from that text, which is how an undo back to the old one survives.
   const landed = unsent
-    ? [...(draft.maybe ?? [])]
-        .map((t, i) => ({ t, from: draft.maybeBases?.[i] ?? draft.base }))
-        .reverse()
-        .find((d) => d.t !== d.from && mergeWithMarkers(d.from, d.t, m.saved) === m.saved)?.t
+    ? findLanded((draft.maybe ?? []).map((text, i) => ({ text, from: draft.maybeBases?.[i] ?? draft.base })), m.saved)?.text
     : undefined;
   const base = unsent ? (landed ?? draft.base) : draft.base;
   const rebased = unsent ? mergeWithMarkers(base, draft.buffer, m.saved) : draft.buffer;
@@ -489,7 +509,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.unknown = false;
       const mergedAgentEdits = r.merged && r.text !== sent;
       const landed = mergedAgentEdits
-        ? doubts.find((d) => d.text !== d.from && d.text !== sent && mergeWithMarkers(d.from, d.text, r.text) === r.text)
+        ? findLanded(doubts.filter((d) => d.text !== sent).map((d) => ({ text: d.text, from: d.from })), r.text)
         : undefined;
       if (landed) {
         // Rebase what the user holds now onto the merged text from the doubted save, not from
@@ -698,7 +718,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       // merging them onto the head changes nothing.
       // (a request still out was made against the text current when it was sent)
       const baseOf = (s: string): string => m.late.find((l) => l.text === s)?.baseText ?? m.saved;
-      const landed = [...m.inDoubt].reverse().find((s) => s !== m.saved && mergeWithMarkers(baseOf(s), s, head.text) === head.text);
+      const landed = findLanded(m.inDoubt.filter((s) => s !== m.saved).map((text) => ({ text, from: baseOf(text) })), head.text)?.text;
       const baseText = landed ?? m.saved;
       // A request still out can land later; one the head already holds has landed, and cannot again.
       m.late = m.late.filter((l) => l.text !== landed && (l.ended === null || l.ended >= e.seq));

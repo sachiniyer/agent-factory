@@ -266,3 +266,22 @@ test("a refused save keeps its error visible when a reconcile read completes (#6
   assert.equal(r.m.fatal, true, "the refusal still blocks the autosave");
   assert.equal(statusOf(r.m).status, "error", "the pane still says the save was refused, not that it is about to save");
 });
+
+test("an undo stands when the save it undid landed beside an agent's edits to the lines next to it", () => {
+  const base = "a8\na11\na9\nu1\na3";
+  const doubted = "u17\na11\na9\nu1\na3";
+  // The save of `doubted` loses its connection, and the user undoes the line before the read comes back.
+  let r = open({ text: base, commit: "c1" });
+  r = run(r.m, { t: "edit", text: doubted }, { t: "timer" });
+  r = run(r.m, { t: "save_fail", error: "cannot reach the daemon", outstanding: true });
+  r = run(r.m, { t: "edit", text: base });
+  // The read finds the save landed, with the agent's edits to the two lines after it. The merge of the
+  // save onto this head is a conflict, because the edits touch, so it cannot tell the save landed.
+  r = run(r.m, { t: "reconcile_ok", doc: { text: "u17\na15\na14\nu1\na3", commit: "c2" } });
+  // The undo is not silently replaced by the landed text: it stands as the user's side of a conflict
+  // with the agent's edits (their text is theirs to keep or take), where before it was reloaded away.
+  assert.notEqual(r.m.buffer, "u17\na15\na14\nu1\na3", "the buffer is not reloaded over the undo");
+  assert.equal(r.m.phase, "conflict");
+  assert.equal(r.m.conflict?.ours, base, "the undo is the user's side");
+  assert.equal(r.m.conflict?.theirs, "u17\na15\na14\nu1\na3");
+});
