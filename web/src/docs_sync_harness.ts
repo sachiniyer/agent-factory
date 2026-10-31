@@ -1087,8 +1087,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     // old request lands: the closed tab handed the doc over and must not write any more.
     const mode = rand();
     const reopened = mode < 0.35; // closed, reopened and edited before the old request lands
-    const closedOnly = mode >= 0.35 && mode < 0.7; // closed; the doc is reopened only after it landed
-    if (reopened || closedOnly) {
+    const closedOnly = mode >= 0.35 && mode < 0.55; // closed; the doc is reopened only after it landed
+    const quietReopen = mode >= 0.55 && mode < 0.8; // closed and reopened with no edit, before it lands
+    if (reopened || closedOnly || quietReopen) {
       s.dispose();
       closedSyncs.add(s);
       closing.track(doc, s as Closable);
@@ -1096,10 +1097,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       attached = "";
       editor.text = "";
     }
-    if (reopened) {
+    if (reopened || quietReopen) {
       await open(doc);
       await drain();
-      userEdit();
+      if (reopened) userEdit();
     }
     for (const p of net.filter((x) => x.stage === "held" && x.owner === "a")) {
       p.stage = "sent";
@@ -1108,6 +1109,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       deliver(p);
     }
     s.remoteChanged(daemons.get(doc)!.read().commit); // the daemon's change event
+    syncs.get(doc)?.remoteChanged(daemons.get(doc)!.read().commit); // reaches the reopened tab too
     await drain();
     if (closedOnly) {
       // The closed tab's request landed, and no pane is open: the undo must still be
@@ -1266,6 +1268,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   await drain();
 
   for (let step = 0; step < o.steps && !violation; step++) {
+    // The late-landing interleavings are rare by chance. AF_LATE_LANDING_STRESS reaches them on
+    // purpose at fixed steps: it fails today on a known gap (a closed tab's final save merging with
+    // a request that lands late: tracked as a follow-up), so it is not part of the default run.
+    if (process.env.AF_LATE_LANDING_STRESS && o.chaos && (o.faults ?? 0) > 0 && (step === 30 || step === 70 || step === 110)) await lateLanding();
     const r = rand();
     trace.push(`step ${step} r=${r.toFixed(3)} attached=${attached} status=${syncs.get(attached)?.currentStatus} text=${JSON.stringify(syncs.get(attached)?.text)}`);
     if (r < 0.28) userEdit();

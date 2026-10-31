@@ -7,6 +7,7 @@ import type { DocText, SaveResult } from "./proposal_api.js";
 import { hasConflictMarkers } from "./text_diff.js";
 import {
   AUTOSAVE_DELAY_MS,
+  SAVE_GIVE_UP_MS,
   SAVE_RETRY_MS,
   type Conflict,
   type Draft,
@@ -20,13 +21,11 @@ import {
   step,
 } from "./docs_sync_model.js";
 
-export { AUTOSAVE_DELAY_MS, SAVE_RETRY_MS };
+export { AUTOSAVE_DELAY_MS, SAVE_GIVE_UP_MS, SAVE_RETRY_MS };
 
 /** A save with no reply by now has an unknown outcome: it may have landed. */
 export const SAVE_TIMEOUT_MS = 30_000;
-/** A save that timed out and is still unanswered this long after is treated as ended: the
- *  browser's own request timeout is about as long, and a doubt must not outlive its tab. */
-export const SAVE_GIVE_UP_MS = 5 * 60_000;
+
 export type { Conflict, Draft, SyncStatus };
 
 export interface DocSyncDeps {
@@ -281,7 +280,7 @@ export class DocSync {
     // A closed tab that is still retrying (unsent edits, a save whose outcome is
     // unknown, a read in flight) is not quiet: a tab that reopens the doc must not
     // load, or write, while the old one can still write.
-    if (m.closed && !m.gone && !m.fatal && (m.unknown || m.phase === "reconciling" || (m.phase === "idle" && isDirty(m)))) return false;
+    if (m.closed && !m.gone && !m.fatal && ((m.unknown && m.phase !== "conflict") || m.phase === "reconciling" || (m.phase === "idle" && isDirty(m)))) return false;
     return true;
   }
 
@@ -413,6 +412,13 @@ export class DocSync {
           this.deps.draft?.store(fx.draft);
           this.storedKey = JSON.stringify(fx.draft);
         }
+        return;
+      case "give_up":
+        // The requests of an adopted draft (made by a pane that has closed) may still be out:
+        // after the same wait as for our own, they count as ended and the head is read again.
+        this.deps.setTimer(() => {
+          for (const seq of fx.seqs) this.dispatch({ t: "late_done", seq });
+        }, fx.ms);
         return;
       case "unstash":
         if (this.ownsStorage()) {

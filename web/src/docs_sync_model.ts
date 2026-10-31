@@ -18,6 +18,9 @@ import { hasConflictMarkers, mergeWithMarkers } from "./text_diff.js";
 
 export const AUTOSAVE_DELAY_MS = 500;
 export const SAVE_RETRY_MS = 5000;
+/** A save that timed out and is still unanswered this long after is treated as ended: the
+ *  browser's own request timeout is about as long, and a doubt must not outlive its tab. */
+export const SAVE_GIVE_UP_MS = 5 * 60_000;
 /** How long to wait before the next attempt after `fails` saves in a row went unanswered. */
 export function retryDelay(fails: number): number {
   return Math.min(SAVE_RETRY_MS * 2 ** Math.max(0, fails - 1), 60_000);
@@ -161,7 +164,9 @@ export type Effect =
   /** Keeps unsaved work in per-window storage, so it survives closing the tab or
    *  the page. The proposal doc never receives a conflict draft. */
   | { t: "stash"; draft: Draft }
-  | { t: "unstash" };
+  | { t: "unstash" }
+  /** The requests of an adopted draft that may still be out: after `ms`, treat them as ended. */
+  | { t: "give_up"; seqs: number[]; ms: number };
 
 /** Unsaved work, as stored for this window: an unresolved conflict's draft, or
  *  edits no save has landed yet. */
@@ -178,6 +183,9 @@ export interface Draft {
   /** Texts a save of ours may have left on the daemon: the user's edit may be to
    *  revert one of them, which a merge against `base` cannot see. */
   maybe?: string[];
+  /** For each of `maybe`, the acknowledged text its save was made against (`base` when
+   *  absent): the head may have moved since, and a merge needs the right base. */
+  maybeBases?: string[];
 }
 
 export function initialModel(): Model {
@@ -263,7 +271,22 @@ function canSave(m: Model): boolean {
  *  settle can start a reload that would otherwise let the storage mirror drop it. */
 function restoreDraft(m: Model, fx: Effect[], draft: Draft): void {
   m.stashed = draftKey(draft);
-  if (draft.buffer === m.saved) return;
+  if (draft.buffer === m.saved) {
+    // Nothing differs from the head, but a save of the closed pane that stored this draft
+    // may still be out (the request outlives its pane): its text stays in doubt, here, until
+    // it has ended or a change event shows it landed. Clearing the draft now would lose an undo.
+    const doubts = draft.kind === "unsent" ? (draft.maybe ?? []).map((text, i) => ({ text, baseText: draft.maybeBases?.[i] ?? draft.base })).filter((d) => d.text !== m.saved) : [];
+    if (doubts.length === 0) return;
+    const seqs: number[] = [];
+    for (const d of doubts) {
+      const seq = m.nextSeq++;
+      seqs.push(seq);
+      m.late = [...m.late, { seq, text: d.text, baseText: d.baseText, ended: null }];
+    }
+    m.inDoubt = [...m.inDoubt, ...doubts.map((d) => d.text)];
+    fx.push({ t: "give_up", seqs, ms: SAVE_GIVE_UP_MS });
+    return;
+  }
   const unsent = draft.kind === "unsent";
   // If the daemon holds a text one of our saves may have left there, the edits were
   // made against that text (an undo back to the old one is only visible that way).
@@ -271,7 +294,10 @@ function restoreDraft(m: Model, fx: Effect[], draft: Draft): void {
   // head changes nothing), even when the agent edited other lines since; the edits then
   // rebase from that text, which is how an undo back to the old one survives.
   const landed = unsent
-    ? [...(draft.maybe ?? [])].reverse().find((t) => t !== draft.base && mergeWithMarkers(draft.base, t, m.saved) === m.saved)
+    ? [...(draft.maybe ?? [])]
+        .map((t, i) => ({ t, from: draft.maybeBases?.[i] ?? draft.base }))
+        .reverse()
+        .find((d) => d.t !== d.from && mergeWithMarkers(d.from, d.t, m.saved) === m.saved)?.t
     : undefined;
   const base = unsent ? (landed ?? draft.base) : draft.base;
   const rebased = unsent ? mergeWithMarkers(base, draft.buffer, m.saved) : draft.buffer;
@@ -302,10 +328,17 @@ function wantedDraft(m: Model): Draft | null {
   // A save of text other than what is acknowledged may have landed, or may yet
   // land, so a buffer that equals the acknowledged text (the user undid back to
   // it) is still unsaved work as far as the daemon is concerned.
-  const maybe = [...(m.flight ? [m.flight.text] : []), ...m.inDoubt].filter((t) => t !== m.saved);
-  if (isDirty(m) || maybe.length > 0) {
+  const pairs = [
+    ...(m.flight ? [{ text: m.flight.text, from: m.flight.baseText }] : []),
+    ...m.inDoubt.map((text) => ({ text, from: m.late.find((l) => l.text === text)?.baseText ?? m.saved })),
+  ].filter((p) => p.text !== m.saved);
+  if (isDirty(m) || pairs.length > 0) {
     const d: Draft = { buffer: m.buffer, base: m.saved, theirs: "", head: "", kind: "unsent" };
-    if (maybe.length > 0) d.maybe = [...new Set(maybe)];
+    if (pairs.length > 0) {
+      const byText = new Map(pairs.map((p) => [p.text, p.from]));
+      d.maybe = [...byText.keys()];
+      d.maybeBases = [...byText.values()];
+    }
     return d;
   }
   return null;
@@ -546,6 +579,9 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       if (m.closed || m.gone) return;
       if (e.commit !== "" && e.commit === m.base && m.phase !== "loading" && m.phase !== "restoring") return;
       m.stale = true;
+      // A save of ours may still be out and may be what changed: read the head with its text
+      // in doubt (reconcile), not a plain reload that would take the daemon's text over ours.
+      if (m.late.some((l) => l.ended === null)) m.unknown = true;
       return;
 
     case "gone":
