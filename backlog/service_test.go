@@ -20,19 +20,23 @@ type testHost struct {
 	facts   Facts
 	// attention is each session's mirrored attention reason.
 	attention map[string]string
-	target    AnswerTarget
-	delivered []PendingAnswer
-	usage     planusage.Usage
+	// attentionID is the question id each session's attention mirrors.
+	attentionID map[string]int
+	target      AnswerTarget
+	delivered   []PendingAnswer
+	usage       planusage.Usage
 	// onTarget runs inside AnswerTarget, between the service reading the item and
 	// its transaction.
 	onTarget func()
 }
 
-func (h *testHost) SetAttention(_, sessionID string, _ int, reason string) {
+func (h *testHost) SetAttention(_, sessionID string, questionID int, reason string) {
 	if h.attention == nil {
 		h.attention = map[string]string{}
+		h.attentionID = map[string]int{}
 	}
 	h.attention[sessionID] = reason
+	h.attentionID[sessionID] = questionID
 }
 func (h *testHost) AnswerTarget(string, string) AnswerTarget {
 	if h.onTarget != nil {

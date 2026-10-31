@@ -267,8 +267,14 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		return r != nil && facts != nil && facts(r.SessionID).RunActive
 	}
 	var asked map[int]string
+	var askedRef map[int]openQuestion
 	b, err := s.update(p, func(b *Backlog) ([]int, error) {
 		asked = b.questionSessions()
+		askedRef = map[int]openQuestion{}
+		for id := range asked {
+			qid, text := b.OpenQuestionRef(id)
+			askedRef[id] = openQuestion{qid, text}
+		}
 		by := ActorUser
 		if req.SessionID != "" {
 			if err := checkAgentReview(b, req); err != nil {
@@ -289,6 +295,13 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		for id, sessionID := range asked {
 			if _, open := still[id]; !open {
 				s.host.SetAttention(p.id, sessionID, 0, "")
+				continue
+			}
+			// The oldest open question changed (send-to-review closed af's own
+			// question and left the agent's): the mirror and the remembered
+			// identity follow it, or a terminal answer fails the identity check.
+			if qid, text := b.OpenQuestionRef(id); (openQuestion{qid, text}) != askedRef[id] {
+				s.host.SetAttention(p.id, sessionID, qid, text)
 			}
 		}
 		return changed, nil
@@ -297,6 +310,12 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		return nil, err
 	}
 	return &ItemResponse{Item: *b.Item(req.ID)}, nil
+}
+
+// openQuestion is the identity of an item's oldest open question.
+type openQuestion struct {
+	id   int
+	text string
 }
 
 func checkAgentReview(b *Backlog, req SetItemStatusRequest) error {

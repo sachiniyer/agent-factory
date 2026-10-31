@@ -266,6 +266,9 @@ func (m *Manager) startBacklogItemCapped(req backlog.StartRequest, by string) (b
 	if by == backlog.StartedByRunner && !b.RunnerEligible(req.ID, b.DeriveAll(backlogHost{m: m}.Facts(ref.ID))) {
 		return backlog.RunRef{}, errNotRunnable
 	}
+	if by == backlog.StartedByRunner && m.continuationUnmeterable(ref.ID, b, req.ID) {
+		return backlog.RunRef{}, errNotRunnable
+	}
 	if m.backlogSlotsUsed(ref.ID) >= b.Settings.MaxRunning {
 		return backlog.RunRef{}, errSlotsFull
 	}
@@ -353,6 +356,9 @@ func (m *Manager) selectStarts(repoID string, b *backlog.Backlog, states map[int
 		// bound its spend (Codex P2 on #6300).
 		if it := b.Item(id); it != nil && it.Program != "" && sessionenv.AgentForCommand(it.Program) != tmux.ProgramClaude {
 			continue
+		}
+		if m.continuationUnmeterable(repoID, b, id) {
+			continue // a handed-off session: nothing to meter, no automatic work
 		}
 		acct := m.continuationAccount(repoID, b, id)
 		if acct == "" {

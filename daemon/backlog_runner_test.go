@@ -580,3 +580,51 @@ func TestPlanAccountFollowsTheInheritedConfigDir(t *testing.T) {
 		t.Fatalf("an unregistered dir = %q, want the ambient key", got)
 	}
 }
+
+// An item whose live session was handed off to another agent is not continued
+// automatically: the budget meters Claude only, so that work could not be bounded
+// (Codex P2 on #6300). Item.Program names a NEW session's agent, not this one's.
+func TestAutomaticContinuationSkipsASessionHandedOffToAnotherAgent(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Program = "claude"
+	if m.continuationUnmeterable(repoID, b, 1) {
+		t.Fatal("a Claude session is meterable")
+	}
+	inst.Program = "codex"
+	if !m.continuationUnmeterable(repoID, b, 1) {
+		t.Fatal("a session now running Codex was treated as meterable")
+	}
+	if m.continuationUnmeterable(repoID, b, 99) {
+		t.Fatal("an item with no live session starts a new one, which is the item's own program")
+	}
+}
+
+// A limit recorded on a durable session row that cannot materialize after a
+// restart still closes the gate, and evidence that cannot be read closes it too
+// (Codex P2 on #6300).
+func TestClaudeUsageLimitUsesDurableRowEvidenceAndFailsClosed(t *testing.T) {
+	m, _ := runnerTestManager(t)
+	prev := loadAccountLimitEvidenceForSwap
+	t.Cleanup(func() { loadAccountLimitEvidenceForSwap = prev })
+	now := time.Now()
+	loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
+		return []session.AccountLimitObservationData{{Agent: tmux.ProgramClaude, Account: "work", ResetAt: now.Add(time.Hour)}}, nil
+	}
+	limited, until, err := m.claudeUsageLimit("work", now)
+	if err != nil || !limited || until.IsZero() {
+		t.Fatalf("limited=%v until=%v err=%v: the row's limit did not close the gate", limited, until, err)
+	}
+	if limited, _, _ := m.claudeUsageLimit("other", now); limited {
+		t.Fatal("another account was limited by work's evidence")
+	}
+	loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
+		return nil, errors.New("unreadable row")
+	}
+	if _, _, err := m.claudeUsageLimit("work", now); err == nil {
+		t.Fatal("unreadable evidence did not fail closed")
+	}
+}

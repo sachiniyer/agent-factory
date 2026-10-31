@@ -146,19 +146,39 @@ func (m *Manager) backlogGate(repoID string, budget backlog.Budget, usage planus
 // that session whatever the project's default is now), else "" (a new session,
 // which launches with the project's default account).
 func (m *Manager) continuationAccount(repoID string, b *backlog.Backlog, id int) string {
+	s := m.liveContinuation(repoID, b, id)
+	if s == nil {
+		return ""
+	}
+	return planAccount(s.instance.Account)
+}
+
+// liveContinuation is the live session an automatic start of item id would
+// continue in place, or nil when it would start a new one.
+func (m *Manager) liveContinuation(repoID string, b *backlog.Backlog, id int) *itemSession {
 	r := b.LatestRun(id)
 	if r == nil || r.State != backlog.RunStarted || r.SessionID == "" {
-		return ""
+		return nil
 	}
 	s, ok := m.itemSessions(repoID)[r.SessionID]
 	if !ok {
-		return ""
+		return nil
 	}
 	switch s.view.Liveness {
 	case session.LiveArchived, session.LiveDead, session.LiveLost:
-		return "" // restarted or replaced, not continued in place
+		return nil // restarted or replaced, not continued in place
 	}
-	return planAccount(s.instance.Account)
+	return &s
+}
+
+// continuationUnmeterable reports that an automatic start of item id would
+// continue a live session whose current agent is not Claude (it was handed off):
+// the budget meters Claude transcripts only, so that work's spend and cap could
+// not be bounded. Item.Program names the agent a NEW session would run, not the
+// one the live session runs now.
+func (m *Manager) continuationUnmeterable(repoID string, b *backlog.Backlog, id int) bool {
+	s := m.liveContinuation(repoID, b, id)
+	return s != nil && s.instance.ResolvedAgent() != tmux.ProgramClaude
 }
 
 // backlogGateFor checks the gates for one named account.
@@ -214,7 +234,10 @@ func (m *Manager) claudeUsageLimit(account string, now time.Time) (bool, time.Ti
 	}
 	m.mu.Unlock()
 	rs := &m.backlog.runner
-	ledger, err := loadAccountLimitLedger()
+	// The live sessions, the retained ledger and every durable session row: a row
+	// that cannot materialize after a restart is absent from m.instances but its
+	// limit still holds, and evidence that cannot be read closes the gate.
+	ledger, err := loadAccountLimitEvidenceForSwap()
 	rs.mu.Lock()
 	warn := err != nil && !rs.ledgerWarned
 	rs.ledgerWarned = err != nil
@@ -224,7 +247,7 @@ func (m *Manager) claudeUsageLimit(account string, now time.Time) (bool, time.Ti
 			m.warn().Printf("backlog runner: account limit ledger: %v", err)
 		}
 		path, _ := accountLimitLedgerPath()
-		return false, time.Time{}, fmt.Errorf("af cannot read %s; fix or remove it", path)
+		return false, time.Time{}, fmt.Errorf("af cannot read its account-limit evidence (%s or a session row): %v; fix or remove it", path, err)
 	}
 	limited, until := activeLimit(append(obs, ledger...), tmux.ProgramClaude, account, now)
 	return limited, until, nil
