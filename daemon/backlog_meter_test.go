@@ -147,3 +147,34 @@ func TestTranscriptConfigRoot(t *testing.T) {
 		}
 	}
 }
+
+// A start that finds a metering pass running leaves its run directories pending
+// rather than dropping them, and the pass that follows saves them: the session
+// can be killed before then, and its spend would stay unmetered (Codex P2 on #6299).
+func TestRunDirsRecordedDuringAPassAreNotDropped(t *testing.T) {
+	cs, _ := newBacklogTestServer(t)
+	m := cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	st := &m.backlog.meter
+
+	st.mu.Lock() // a pass is running
+	m.rememberRunDirs("s-1", []string{"/x/projects/-w-1"})
+	st.mu.Unlock()
+	state, err := planusage.LoadMeter()
+	require.NoError(t, err)
+	require.Empty(t, state.RunDirs["s-1"], "nothing is saved while the pass holds the meter")
+
+	st.mu.Lock()
+	m.meterPassLocked(time.Now())
+	st.mu.Unlock()
+	state, err = planusage.LoadMeter()
+	require.NoError(t, err)
+	require.Equal(t, []string{"/x/projects/-w-1"}, state.RunDirs["s-1"], "the next pass saves the pending record")
+	require.Empty(t, st.pendingDirs, "a saved record is no longer pending")
+
+	m.rememberRunDirs("s-2", []string{"/x/projects/-w-2"})
+	state, err = planusage.LoadMeter()
+	require.NoError(t, err)
+	require.Equal(t, []string{"/x/projects/-w-2"}, state.RunDirs["s-2"], "with no pass running it saves at once")
+}

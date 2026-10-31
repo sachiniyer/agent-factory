@@ -81,16 +81,19 @@ type Item struct {
 	// the reason the item is running: +1 on accept, -1 when one fails, 0 when the
 	// item leaves running. A failed delivery gives the replaced status back only
 	// when it was the last (Codex P2 on #6295).
-	LiveAnswers int       `json:"live_answers,omitempty"`
-	WaitsOn     []int     `json:"waits_on,omitempty"`
-	Program     string    `json:"program,omitempty"`
-	Source      *Source   `json:"source,omitempty"`
-	PR          string    `json:"pr,omitempty"`
-	External    string    `json:"external,omitempty"`
-	Runs        []RunRef  `json:"runs,omitempty"`
-	Thread      []Message `json:"thread,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	LiveAnswers int `json:"live_answers,omitempty"`
+	// LiveEpoch changes whenever LiveAnswers is reset (the item left running, or a
+	// run began), so an answer accepted before the reset can tell its count is gone.
+	LiveEpoch int       `json:"live_epoch,omitempty"`
+	WaitsOn   []int     `json:"waits_on,omitempty"`
+	Program   string    `json:"program,omitempty"`
+	Source    *Source   `json:"source,omitempty"`
+	PR        string    `json:"pr,omitempty"`
+	External  string    `json:"external,omitempty"`
+	Runs      []RunRef  `json:"runs,omitempty"`
+	Thread    []Message `json:"thread,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Source struct {
@@ -140,6 +143,9 @@ type Message struct {
 	// answer belongs to the latest of them. A rollback applies only while no newer
 	// run has begun (zero, from before this field, is not fenced).
 	RunCount int `json:"run_count,omitempty"`
+	// LiveEpoch is the item's LiveEpoch when the answer was accepted: a rollback
+	// applies only within the same epoch.
+	LiveEpoch int `json:"live_epoch,omitempty"`
 }
 
 type Settings struct {
@@ -233,6 +239,14 @@ func (it *Item) OpenQuestion() *Message {
 // been delivered to its session yet. Only an answer of the CURRENT run counts: one
 // accepted under an earlier run never reaches this one and must not hold back its
 // completion (a legacy answer without a run count counts).
+// resetLiveAnswers forgets the live-answer count and starts a new epoch, so a
+// failure of an answer accepted before the reset cannot touch the count or the
+// status of the work that follows it.
+func (it *Item) resetLiveAnswers() {
+	it.LiveAnswers = 0
+	it.LiveEpoch++
+}
+
 func (it *Item) answerPending() bool {
 	for _, m := range it.Thread {
 		if m.Kind == KindAnswer && m.Delivery == DeliveryPending && (m.RunCount == 0 || m.RunCount == len(it.Runs)) {

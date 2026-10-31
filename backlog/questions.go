@@ -121,12 +121,12 @@ func (b *Backlog) Answer(id, questionID int, text string, deliver bool, now time
 		// to where it was when both fail.
 		prev := it.Status
 		for _, x := range it.Thread {
-			if x.Kind == KindAnswer && x.Delivery == DeliveryPending && x.PrevStatus.Valid() && (x.RunCount == 0 || x.RunCount == len(it.Runs)) {
+			if x.Kind == KindAnswer && x.Delivery == DeliveryPending && x.PrevStatus.Valid() && (x.RunCount == 0 || x.RunCount == len(it.Runs)) && x.LiveEpoch == it.LiveEpoch {
 				prev = x.PrevStatus
 				break
 			}
 		}
-		answer.Delivery, answer.PrevStatus, answer.RunCount = DeliveryPending, prev, len(it.Runs)
+		answer.Delivery, answer.PrevStatus, answer.RunCount, answer.LiveEpoch = DeliveryPending, prev, len(it.Runs), it.LiveEpoch
 		it.Status = StatusRunning
 		it.LiveAnswers++
 	}
@@ -191,10 +191,11 @@ func (b *Backlog) AnswerFailed(id, answerID int, reason string, now time.Time) e
 	}
 	prev := m.PrevStatus
 	m.Delivery = DeliveryFailed
-	if m.RunCount != 0 && m.RunCount != len(it.Runs) {
+	if (m.RunCount != 0 && m.RunCount != len(it.Runs)) || m.LiveEpoch != it.LiveEpoch {
 		// A newer run began since the answer was accepted (the session was killed
-		// and the item restarted): the item's status and live-answer count belong to
-		// that run now, and this failure rolls nothing back.
+		// and the item restarted), or the item left running and was answered again
+		// (a new live-answer epoch): the status and count belong to that work now,
+		// and this failure rolls nothing back.
 		_, err = b.AddNote(id, AuthorAF, "The answer was not delivered: "+reason+". It is kept in the thread.", now)
 		return err
 	}

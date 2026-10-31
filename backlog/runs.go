@@ -58,7 +58,7 @@ func (b *Backlog) BeginStart(id int, by string, facts Facts, now time.Time) (Sta
 	}
 	run := RunRef{State: RunStarting, PrevStatus: it.Status, StartedBy: by, StartedAt: now}
 	it.Status = StatusRunning
-	it.LiveAnswers = 0 // answers accepted under an earlier run belong to it, not this one
+	it.resetLiveAnswers() // answers accepted under an earlier run belong to it, not this one
 	it.Runs = append(it.Runs, run)
 	it.UpdatedAt = now
 	return StartPlan{Run: run}, nil
@@ -285,7 +285,7 @@ func (b *Backlog) RunEnded(sessionID string, now time.Time) RunEnd {
 			return out
 		}
 		it.Status = StatusReview
-		it.LiveAnswers = 0
+		it.resetLiveAnswers()
 		it.UpdatedAt = now
 		_, _ = b.AddNote(it.ID, AuthorAF, RunEndNote, now)
 		out.Changed = true

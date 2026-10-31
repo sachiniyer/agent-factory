@@ -604,3 +604,44 @@ func TestRunEndedIgnoresAnAnswerPendingForAnEarlierRun(t *testing.T) {
 		t.Fatalf("the replacement's completion was held back by the old run's answer: %+v %s", end, b.Item(1).Status)
 	}
 }
+
+// Answer(first), the user marks the item for review, Answer(second), then the
+// first fails: the first's failure must not decrement the second's live count or
+// put the status it replaced over the second's work (Codex P2 on #6295).
+func TestAnswerFailedAfterAStatusResetLeavesALaterAnswersWorkRunning(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusReview
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
+	it.Thread = []Message{
+		{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"},
+		{ID: 2, Kind: KindQuestion, Author: AuthorAF, Text: "Which cache?"},
+	}
+	first, err := b.Answer(1, 1, "Postgres", true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.SetStatus(1, StatusReview, ActorUser, func(*Item) bool { return false }, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	second, err := b.Answer(1, 2, "Redis", true, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Item(1).Thread[len(b.Item(1).Thread)-1].PrevStatus; got != StatusReview {
+		t.Fatalf("second answer saved %q: it inherited the first answer's rollback status", got)
+	}
+	if err := b.AnswerFailed(1, first.Answer.ID, "the session is gone", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Item(1).Status; got != StatusRunning {
+		t.Fatalf("status = %s: the first answer's failure restored review over the second answer's work", got)
+	}
+	if got := b.Item(1).LiveAnswers; got != 1 {
+		t.Fatalf("LiveAnswers = %d, want the second answer's 1", got)
+	}
+	if err := b.AnswerDelivered(1, second.Answer.ID, now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+}
