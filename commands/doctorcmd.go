@@ -86,6 +86,10 @@ accumulate silently on a machine running agent-factory:
     no session owns it — live, archived, mid-kill and awaiting-teardown
     sessions all count — and removes nothing at all when any part of that
     inventory cannot be read
+  - listed host readiness: one row per host in the global hosts list (ready,
+    blocked with the missing tool, or unreachable). Silent when no host is
+    listed; a daemon that is not answering marks the check incomplete rather
+    than a pass — the daemon runs the probe, doctor does not dial the host
 
 The version-skew check exists because a skewed daemon fails quietly: it keeps
 answering while rejecting fields a newer client sends, which surfaces as
