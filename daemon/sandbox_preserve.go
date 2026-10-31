@@ -136,7 +136,7 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 	// session ends. The fence is persisted BEFORE the push starts; if it cannot
 	// be, the push does not run.
 	grant := m.sandboxTokens.grantFor(instance.ID)
-	endFence, ferr := m.pushCreds.beginAutoPush(instance.ID, grant)
+	endFence, ferr := m.pushCreds.beginAutoPush(instance.ID, grant, m.sandboxTokens.grantFor)
 	if ferr != nil {
 		return fmt.Errorf(
 			"refusing to replace the sandbox for %q: the record that keeps push credentials away from af's own "+
