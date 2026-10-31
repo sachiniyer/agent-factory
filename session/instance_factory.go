@@ -36,9 +36,8 @@ type InstanceOptions struct {
 	// BacklogItem marks the session as started for a backlog item, and opens its
 	// first backlog run.
 	BacklogItem int
-	// CreatedBySandbox is the id of the session whose sandbox callback credential
-	// asked for this create (#5571 W7.8). Set only by the daemon, from the
-	// credential that admitted the request, never from a request field.
+	// CreatedBySandbox is the session whose sandbox credential asked for this
+	// create (#5571 W7.8): set by the daemon from that credential, never a field.
 	CreatedBySandbox string
 	// SandboxCredentials mints and revokes the per-session credential a provisioned
 	// sandbox uses to call back into the daemon (#2999, #3068). An INTERFACE rather
