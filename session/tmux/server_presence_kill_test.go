@@ -70,7 +70,11 @@ func pinServerProbeSignalForTest(t *testing.T, sig func(int, syscall.Signal) err
 }
 
 // startNamedTmuxNeighbour launches a private tmux server on a -L named socket
-// and returns its server pid. The server is a real, signallable tmux server,
+// and returns its server pid. Keep the label SHORT: the socket path is
+// TMUX_TMPDIR/tmux-<uid>/<label>, and TMUX_TMPDIR already runs ~57 chars on a
+// macOS runner (/private/var/folders/…), so a label past ~17 chars pushes the
+// path over the ~104-byte unix socket limit and new-session fails "File name
+// too long" (#6335's macOS regression). The server is a real, signallable tmux server,
 // so proctree.IsTmuxServer positively identifies it: this is what reaches the
 // kill() branch of tmuxSocketClaimed. Isolated by -L (never the default
 // socket, never tmux kill-server on the ambient server — the rule in
@@ -134,7 +138,7 @@ func pinClaimedNeighbours(t *testing.T, labelA, labelB string) (n1, n2 int, sock
 // true; the ESRCH and nil rows already pass there, which is why the defect
 // lived only in the mixed-kill-error branch.
 func TestTmuxSocketClaimedKillOutcomes(t *testing.T) {
-	n1, n2, socket := pinClaimedNeighbours(t, "af_claim_kill_a", "af_claim_kill_b")
+	n1, n2, socket := pinClaimedNeighbours(t, "af_ck_a", "af_ck_b")
 
 	for _, tc := range []struct {
 		name        string
@@ -172,7 +176,7 @@ func TestTmuxSocketClaimedKillOutcomes(t *testing.T) {
 // CleanupSessions to delete worktrees and kill processes under a live,
 // unsignallable owner.
 func TestNoServerRunningRefusesWhenASignallableServerKillFails(t *testing.T) {
-	n1, n2, socket := pinClaimedNeighbours(t, "af_noserver_eperm_a", "af_noserver_eperm_b")
+	n1, n2, socket := pinClaimedNeighbours(t, "af_ns_a", "af_ns_b")
 	pinServerProbeSignalForTest(t, func(pid int, sig syscall.Signal) error {
 		if pid == n2 {
 			return syscall.EPERM
@@ -197,7 +201,7 @@ func TestNoServerRunningRefusesWhenASignallableServerKillFails(t *testing.T) {
 // `af reset` proceeds to delete worktrees and kill processes out from under
 // a live, unsignallable tmux server.
 func TestProbeSessionStrictStaysUnknownWhenASignallableServerKillFails(t *testing.T) {
-	n1, n2, _ := pinClaimedNeighbours(t, "af_eperm_neighbour_a", "af_eperm_neighbour_b")
+	n1, n2, _ := pinClaimedNeighbours(t, "af_en_a", "af_en_b")
 	pinServerProbeSignalForTest(t, func(pid int, sig syscall.Signal) error {
 		if pid == n2 {
 			return syscall.EPERM
@@ -225,7 +229,7 @@ func TestProbeSessionStrictStaysUnknownWhenASignallableServerKillFails(t *testin
 // obvious cousin of the mixed-table bug, so it is pinned here against a
 // future change that "tidies" one branch and forgets the other.
 func TestTmuxSocketClaimedAllKillsFailStaysClaimed(t *testing.T) {
-	n1, n2, socket := pinClaimedNeighbours(t, "af_claim_allfail_a", "af_claim_allfail_b")
+	n1, n2, socket := pinClaimedNeighbours(t, "af_af_a", "af_af_b")
 	pinServerProbeSignalForTest(t, func(int, syscall.Signal) error { return syscall.EPERM })
 
 	require.True(t, tmuxSocketClaimed(socket, []int{n1, n2}),
