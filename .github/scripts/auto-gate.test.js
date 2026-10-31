@@ -13246,6 +13246,7 @@ test("merge invalidates the old-head aggregate before dispatching docs", async (
     "dispatch:build.yml",
     "dispatch:docs.yml",
     "dispatch:lint.yml",
+    "dispatch:mac-e2e.yml",
     "dispatch:pr.yml",
     "dispatch:sandbox-e2e.yml",
     "dispatch:tui-driver-selftest.yml",
