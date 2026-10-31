@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -137,6 +139,57 @@ func TestKillSession_UnrecordableKill_AbortsBeforeTeardown(t *testing.T) {
 	if _, err := manager.KillSession(KillSessionRequest{Title: "unrecordable", RepoID: repoID}); err != nil {
 		t.Fatalf("retry after the write recovered must succeed, got: %v", err)
 	}
+}
+
+// TestKillSession_TombstoneFailureRestoresDischargedRecovery: the destruction
+// admission's DISCHARGE is an in-memory mutation that lands BEFORE the commit
+// point — a cleanup_ready record whose only authorized directory is
+// conclusively absent leaves the live worktree at admission, while the durable
+// row still carries it until the tombstone persists the discharge. When the
+// tombstone write fails the kill aborts — and the instance must reinstate the
+// discharged record, or this process's instance sits record-free against a row
+// that still guards the path by identity: a directory appearing there later
+// would be adopted without the identity check the row would have imposed
+// (Codex on #6333).
+func TestKillSession_TombstoneFailureRestoresDischargedRecovery(t *testing.T) {
+	manager, repoID, inst := installRaceBackend(t, &raceBackend{}, "discharge-abort")
+
+	// A cleanup_ready record over an archived directory that is then deleted
+	// outside af: the admission proves it conclusively absent and discharges it
+	// from the live worktree before the tombstone.
+	repoPath := inst.GetRepoPath()
+	if repoPath == "" {
+		repoPath = inst.Path
+	}
+	require.NotEmpty(t, repoPath)
+	archive := filepath.Join(t.TempDir(), "archive")
+	require.NoError(t, os.Mkdir(archive, 0o755))
+	recovery := preparedCleanupRecovery(t, repoPath, archive, "discharge-abort")
+	require.NoError(t, os.RemoveAll(archive))
+	gw, err := git.NewGitWorktreeFromStorage(repoPath, archive, "discharge-abort", "af/discharge-abort", "", false, true)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(recovery))
+	inst.SetGitWorktreeForTest(gw)
+
+	prev := killTombstonePersist
+	killTombstonePersist = func(string, session.InstanceData) error {
+		return fmt.Errorf("instances lock is held by another process")
+	}
+	t.Cleanup(func() { killTombstonePersist = prev })
+
+	_, err = manager.KillSession(KillSessionRequest{Title: "discharge-abort", RepoID: repoID})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "retry")
+
+	// The aborted kill reinstates the discharged record: the durable row still
+	// holds it, so the in-memory instance must too.
+	got, held := inst.WorktreeRelocationRecovery()
+	require.True(t, held, "an aborted kill must reinstate the recovery record its admission discharged")
+	require.Equal(t, git.RelocationRecoveryCleanupReady, got.State)
+	require.Equal(t, recovery.Device, got.Device)
+	require.Equal(t, recovery.Inode, got.Inode)
+	require.Equal(t, recovery.CleanupGeneration, got.CleanupGeneration,
+		"the reinstated record must keep the identity fence the durable row still carries")
 }
 
 // TestFinishUserKill_UnsafeTeardown_KeepsTheRecordForRetry: the tombstone finisher

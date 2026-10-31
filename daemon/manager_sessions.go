@@ -157,6 +157,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	// Admission belongs before the commit point and before AgentServer.Kill closes
 	// brokers or the local backend tears panes down. Cleanup's later backstop can
 	// retain a record, but it cannot undo teardown that already happened.
+	var admissionDischargedRecovery *sessiongit.RelocationRecovery
 	if instance != nil {
 		// A direct kill of an archived session may be the first operation to
 		// learn its origin repo is gone (#3176). Nothing failed before this
@@ -170,7 +171,11 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 			return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: %w", req.Title, prepErr)
 		}
 		stage.set("validating destruction admission")
-		if admissionErr := instance.ValidateWorktreeDestructionAdmission(); admissionErr != nil {
+		// The returned record is any in-memory discharge the tombstone still
+		// owes persistence; the failed-tombstone branch below reinstates it.
+		var admissionErr error
+		admissionDischargedRecovery, admissionErr = admitWorktreeDestruction(instance)
+		if admissionErr != nil {
 			return session.InstanceData{}, fmt.Errorf(
 				"kill of session %q was not started because its worktree relocation is unresolved; nothing was changed: %w",
 				req.Title, admissionErr,
@@ -212,6 +217,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	// because the failure stops here.
 	stage.set("persisting kill tombstone")
 	if err := m.persistKillTombstone(repoID, instance, data); err != nil {
+		m.rollbackDischargedAdmission(instance, admissionDischargedRecovery, req.Title)
 		return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: its kill intent could not be recorded, and tearing the session down without that record risks it being restored later; the session was not torn down — retry the kill: %w", req.Title, err)
 	}
 	// Past the commit point. Every error below leaves the kill durably recorded
