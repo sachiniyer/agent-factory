@@ -528,7 +528,12 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 		graceEnd := time.Now().Add(paneRootGrace)
 		for pause := 5 * time.Millisecond; exit.rootRunning && time.Now().Before(graceEnd); pause = min(2*pause, 25*time.Millisecond) {
 			time.Sleep(pause)
-			exit, uncollected = t.readPaneExit(max(time.Until(graceEnd), time.Millisecond))
+			next, nextUncollected := t.readPaneExit(tmuxCommandTimeout)
+			if !next.known {
+				// A re-read that cannot answer must not undo the reading that did.
+				break
+			}
+			exit, uncollected = next, nextUncollected
 		}
 	}
 	// Every re-read is bounded by what is left of the wait, so a tmux that
