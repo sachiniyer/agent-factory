@@ -19,8 +19,12 @@ func (e *accountTabScopeUnknownError) Error() string {
 	return fmt.Sprintf("restore account-scoped tab %q for %q: tmux session state is unknown", e.tab, e.title)
 }
 
+// probeRestoredTabSession is the existence read of a restore pass. It carries
+// restore-kind semantics: an unlinked socket under a possibly-live server is
+// unknown, so a tab behind it is never marked inert or absent while the same
+// pass's RestoreWithResult would refuse it (#6254).
 var probeRestoredTabSession = func(session *tmux.TmuxSession) (bool, bool) {
-	return session.ProbeSession()
+	return session.ProbeSessionForRestore()
 }
 
 // The typed recover/respawn failure shapes LocalBackend hands the daemon, split
