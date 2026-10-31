@@ -5,14 +5,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/planusage"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/stretchr/testify/require"
 )
@@ -424,4 +428,75 @@ func TestMeterPassRunWindowCoversLiveRunFromCurrentConfigDir(t *testing.T) {
 		require.Contains(t, usage.RunWindow, k, "run %q missing from run_window", k)
 	}
 }
+
+// A live run whose session switched accounts still holds pre-swap buckets under
+// the old account, but its resolved current config dir scopes run_window to the
+// current account — the documented "cost within its account's current 5-hour
+// window". Summing every bucket would report $7 for a run that spent $5 before
+// the swap and $2 after, and the per-run percentage compares run_window against
+// the CURRENT account's all_cost (Codex P2 on #6328). The all-bucket sum stays
+// only as the fallback for a run whose current config dir cannot be resolved.
+func TestMeterPassRunWindowScopesSwappedRunToCurrentAccount(t *testing.T) {
+	cs, repoPath := newBacklogTestServer(t)
+	cs.manager.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now := time.Now().UTC()
+	// The account the session swapped TO.
+	accDir, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+	line := func(id string, input int) string {
+		return `{"type":"assistant","timestamp":"` + now.Add(-time.Minute).Format(time.RFC3339) +
+			`","message":{"id":"` + id + `","model":"claude-opus-5-5","usage":{"input_tokens":` +
+			strconv.Itoa(input) + `,"output_tokens":0}}}` + "\n"
+	}
+	// $5 of pre-swap history filed under the default account's config root, $2
+	// under the swapped-to account's. Both dirs are remembered, so the pass
+	// meters both into session|account buckets regardless of the live dir.
+	defaultProj := filepath.Join(claudeDir, "projects", "-home-me-x")
+	swappedProj := filepath.Join(accDir, "projects", "-home-me-x")
+	require.NoError(t, os.MkdirAll(defaultProj, 0o755))
+	require.NoError(t, os.MkdirAll(swappedProj, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(defaultProj, "s-old.jsonl"), []byte(line("m-old", 1250000)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(swappedProj, "s-new.jsonl"), []byte(line("m-new", 500000)), 0o644))
+	reset := now.Add(2 * time.Hour).Truncate(time.Hour)
+	for _, account := range []string{planusage.DefaultAccount, "work"} {
+		require.NoError(t, planusage.WriteReading(account, planusage.Reading{
+			FiveHour: &planusage.Limit{UsedPercentage: 30, ResetsAt: reset.Unix()}, ReadAt: now,
+		}))
+	}
+	const repoID = "meter-swap-repo"
+	const title = "swapped"
+	_, err = backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = append(b.Items, backlog.Item{ID: 1, Title: "t", Status: backlog.StatusRunning})
+		b.Item(1).Runs = []backlog.RunRef{{State: backlog.RunStarted, SessionID: "s-swapped", StartedAt: now.Add(-3 * time.Minute)}}
+		return nil
+	})
+	require.NoError(t, err)
+	// A live instance on the swapped-to account: its resolved config dir scopes
+	// the run's window to that account.
+	inst, err := session.NewInstance(session.InstanceOptions{ID: "s-swapped", Title: title, Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	gw, _, err := sessiongit.NewGitWorktreeInPlace(repoPath)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	inst.BacklogItem = 1
+	inst.Account = "work"
+	cs.manager.instances[daemonInstanceKey(repoID, title)] = inst
+	cs.manager.rememberRunDirs("s-swapped", []string{defaultProj, swappedProj})
+
+	st := &cs.manager.backlog.meter
+	st.mu.Lock()
+	cs.manager.meterPassLocked(now)
+	st.mu.Unlock()
+
+	st.usageMu.Lock()
+	usage := st.usage
+	st.usageMu.Unlock()
+	require.InDelta(t, 7.0, usage.Runs["s-swapped"], 1e-9, "the run's total cost spans both accounts' transcripts")
+	require.InDelta(t, 2.0, usage.RunWindow["s-swapped"], 1e-9,
+		"a live run's window is scoped to its current account, not the sum of every bucket")
 }
