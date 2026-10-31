@@ -998,6 +998,17 @@ ssh = "ssh box3"
 push_credentials = true
 ```
 
+**Opting a host in trusts its ssh user.** Every session on a host runs as the one
+ssh user af connects as. So anything that has ever run as that user, or ever will,
+can read a session's callback file and ask for its push credential as that
+session. That includes your own sessions, a repository's hooks and build scripts,
+and a process left behind by a session that has since ended, including one from
+before you opted in. af keeps the sessions it can see in line (below), but it
+can't prove that no such process exists. So opt in only a fresh, dedicated host
+user that runs nothing but your own af sessions. Per-session Unix users would
+remove this
+([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)).
+
 Both are off by default, so listing a host never opts it in. The daemon reads them
 on every request: turn one off, or remove the host, and the next request is
 refused. Turning one on wires the sessions created or restored after it; a session
@@ -1010,18 +1021,25 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
   created, such as one from before af kept that record: re-create it to make it
   eligible. A session without push credentials also can't prompt, schedule a
   task for, or `archive --push` one that has them.
-- **Only while everything on the host is yours.** Sessions on one host share
-  its ssh user, so any of them can read the others' files. af therefore refuses
-  to start a session from inside another session on a host you opted in, or on
-  a host entry that names the same machine. While a session you didn't create
-  runs on that machine anyway, no session there gets push credentials: for
-  example, one that was already there when you opted in. `af hosts check` and
-  `af doctor` name that session; remove it and push credentials resume. This
-  doesn't change the host's readiness or the command's exit code. An archive
-  af confirmed stopped doesn't count, because nothing of it runs. af tracks
-  sessions, not processes. It can't see code that a session you didn't create
-  left running past its own end, before you opted the host in. So opt in a host
-  whose past sessions you trust, or a fresh one.
+- **Only while every session on the machine is yours.** af refuses to start a
+  session from inside another session on a host you opted in, or on any listed
+  host it can't show is a different machine. While a session you didn't place
+  runs on that machine, no session there gets push credentials. That covers a
+  session:
+  - started from inside another session;
+  - af has no record of who created;
+  - on a repository's own `[ssh]` target, which the repository chose;
+  - still being created or re-provisioned there.
+
+  `af hosts check` and `af doctor` name it; remove it and push credentials
+  resume. This doesn't change the host's readiness or the command's exit code.
+  An archive af confirmed stopped doesn't count.
+- **One machine, compared carefully.** af treats two hosts as one machine when
+  a name matches or an address does. Case, a trailing dot, and a short name for
+  a full one don't matter. Addresses count as configured, as af's ssh dialed
+  them, and as DNS resolves them. A name that doesn't resolve, or a `sandbox.ssh`
+  command af can't read a destination from, counts as every machine. af can't
+  link two literal addresses of one machine that no name connects.
 - **Only through the session's own connection.** Every af callback, not only
   this one, is accepted only through the requesting session's own ssh forward.
   A callback credential copied out of a session directory doesn't work through
@@ -1033,9 +1051,9 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
   entry named when the session was placed: its host, user and port. Re-point
   `[hosts.<name>]` at another machine, or change `sandbox.ssh`, and sessions
   still on the old one stop getting it. A different `identity_file` doesn't
-  count, because it changes how af connects, not where. af compares the names
-  and the address its ssh runtime dialed. A DNS or `/etc/hosts` change that
-  points the same name at another machine isn't detected.
+  count, because it changes how af connects, not where. The licence compares
+  the entry as configured, so a DNS or `/etc/hosts` change that points the same
+  name at another machine isn't detected.
 - **Where the token comes from.** It's the daemon machine's own login: its `GH_TOKEN` /
   `GITHUB_TOKEN` (or `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` for an
   enterprise host) when set, and otherwise `gh auth token --hostname <host>`. That
@@ -1098,7 +1116,7 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
 
 | Who | Gets the token? |
 |---|---|
-| Another session on the same host | **Not through af.** Its wiring names its own session directory, the daemon answers it only for its own origin and only through its own forward, and the token is never stored on the host. While the host is opted in, every live session on it is one you created: af refuses any other there, and answers nobody on the host while one runs. **But** sessions on one host share its ssh user. One of your own sessions that deliberately reads another's `0600` `af-callback.env` and connects to that session's own socket can ask as that session, for that session's origin, until that session ends. A Unix user per session would close this ([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)). |
+| Another session on the same host | **Not through af.** Its wiring names its own session directory, the daemon answers it only for its own origin and only through its own forward, and the token is never stored on the host. While the host is opted in, every live session af knows of on it is one you placed: af refuses any other there, and answers nobody on the host while one runs. **But** sessions on one host share its ssh user. Any process running as that user can read a session's `0600` `af-callback.env`, connect to that session's own socket, and ask as that session, for that session's origin, until that session ends. That includes one of your sessions, or something a past session left running. That is the trust opting in grants (above). A Unix user per session would close it ([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)). |
 | A repository running on a host you didn't opt in | **No.** A session it creates through af is never eligible and can't be created on a host you opted in. If one runs on such a host anyway, that host gets no push credentials until you remove it. It also can't prompt, schedule for or `archive --push` a session that is eligible. |
 | Programs the agent runs (a Makefile, a script, a repository's git hooks) | **Never handed it.** af puts the token in no environment, command line or file of theirs. They run with the agent's authority, so they can run `git push` or `gh` themselves, exactly as on a local worktree with your `gh` login, and git is answered only for the session's own origin. |
 | Commands af runs itself | **The same, stated plainly.** `post_worktree_commands` and process tabs run in the session after provisioning has wired the helper and the shim and the callback is up. While the switch is on, they can call the helper or `gh` like any program in the session, and none of them is handed the token. `on_archive_command` for a sandbox session runs on the daemon machine, after the archive has revoked the callback, so it never sees the credential. |
