@@ -18,18 +18,22 @@ import (
 //  1. ELIGIBILITY COMES ONLY FROM AN OPERATOR DECISION. A sandbox credential can
 //     act on other sessions of its project (W3.5: create, prompt, archive, tasks).
 //     Through those it must never move push credentials somewhere the operator
-//     did not put them. So a session a sandbox credential created is never
-//     eligible (durable provenance on its row), and a session that is not
-//     eligible cannot prompt, schedule a task for, or push-archive one that is.
+//     did not put them. So only a session the operator created is eligible
+//     (durable, positive provenance on its row: a sandbox-created row and one of
+//     unknown provenance both fail), and a session that is not eligible cannot
+//     prompt, schedule a task for, or push-archive one that is.
 //     An eligible caller gains nothing by doing so — its peers in the same
 //     project share its origin — so it keeps those verbs.
-//  2. A CREDENTIAL IS ANSWERED ONLY THROUGH ITS OWN FORWARD. Every session's -R
-//     forward ends on the one dedicated endpoint, and the token alone names the
-//     owner, so a token copied out of a session directory would otherwise work
-//     through ANY live session's forward. The endpoint records the peer of each
-//     connection — the ssh client of one session's supervised tunnel, which
-//     leads its own process group — and the route answers only when that tunnel
-//     is the owner's.
+//  2. A CREDENTIAL IS ACCEPTED ONLY THROUGH ITS OWN FORWARD, on every route.
+//     Every session's -R forward ends on the one dedicated endpoint, and the
+//     token alone names the owner, so a token copied out of a session directory
+//     would otherwise work through ANY live session's forward — and, through
+//     CreateTab, SendPrompt or AddTask, run code inside the owner. The endpoint
+//     records the peer of each connection — the ssh client of one session's
+//     supervised tunnel, which leads its own process group — and the auth gate
+//     (authorizeSandbox) admits a sandbox credential only when that tunnel
+//     carries the credential's own callback identity. GitCredential checks it
+//     once more against the row's runtime.
 
 // --- the endpoint: marker and carrier ------------------------------------------
 
@@ -99,12 +103,12 @@ func carriedByOwnForward(pgid int, ownerRef string) bool {
 // --- eligibility ------------------------------------------------------------------
 
 // pushEligible reports whether inst could be answered with a push credential by
-// the operator's decision alone: an off-box row the operator created (not a
-// sandbox credential), on a placement the live config licenses. It reads no
-// origin (no git run), so it is safe under an op lock; an ssh origin only makes
-// the answer more conservative.
+// the operator's decision alone: an off-box row the operator created, on a
+// placement the live config licenses. It reads no origin (no git run) and no
+// other row (the host-sharing rule), so it is safe under an op lock; both
+// omissions only make the escalation guard that uses it more conservative.
 func (m *Manager) pushEligible(inst *session.Instance) bool {
-	if inst == nil || inst.CreatedBySandbox() != "" {
+	if inst == nil || !inst.OperatorCreated() {
 		return false
 	}
 	backend := instanceBackendType(inst)

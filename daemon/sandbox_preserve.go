@@ -143,7 +143,7 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 	if placement, ok := instancePushPlacement(instance); ok {
 		callbackRef = placement.CallbackRef
 	}
-	endFence, ferr := m.pushCreds.beginAutoPush(instance.ID, callbackRef, m.callbackRefSnapshot())
+	endFence, ferr := m.pushCreds.beginAutoPush(instance.ID, callbackRef, m.callbackRefSnapshot)
 	if ferr != nil {
 		return fmt.Errorf(
 			"refusing to replace the sandbox for %q: the record that keeps push credentials away from af's own "+

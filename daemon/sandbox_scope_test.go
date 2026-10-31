@@ -67,6 +67,9 @@ type scopeFixture struct {
 	other  *session.Instance // another project, off-box
 	secret string
 	gated  http.Handler
+	// forwards stands in for each session's own supervised tunnel: call sends a
+	// request through its token owner's own forward.
+	forwards *ownForwards
 	// backends is the persisted backend type per session title (the seam).
 	backends map[string]string
 	rows     func(insts ...*session.Instance) []byte
@@ -115,6 +118,7 @@ func newScopeFixture(t *testing.T) *scopeFixture {
 	secret, err := mgr.sandboxTokens.mint(f.me.ID)
 	require.NoError(t, err)
 	f.secret = secret
+	f.forwards = installOwnForwards(t, &mgr.sandboxTokens)
 	mux := newHTTPMux(&controlServer{manager: mgr})
 	f.gated = withAuth(mux, &authGate{
 		expectedToken: func() (string, error) { return "operator-token", nil },
@@ -129,7 +133,7 @@ func (f *scopeFixture) call(t *testing.T, token, path, body string) (int, string
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	f.gated.ServeHTTP(rec, req)
+	f.gated.ServeHTTP(rec, f.forwards.carry(req))
 	return rec.Code, rec.Body.String()
 }
 

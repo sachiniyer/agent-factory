@@ -47,6 +47,8 @@ import (
 //     i.mu.RLock (#5571 W7.8), because a teardown clears that handle under i.mu;
 //     reading the backend through currentBackend() and then the handle unlocked
 //     is exactly the race the security review of #6433 found.
+//   - RuntimeMachine — the same handle, under the same lock, for the same reason:
+//     the host-sharing rule reads every live session's machine (#5571 W7.8).
 //
 // owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
 // backend pointer its caller already read under i.mu as an argument and never
@@ -76,6 +78,7 @@ var backendReadersUnderLock = map[string]bool{
 	"ReattachSandbox":               true,
 	"RemoteRuntimeUnbound":          true,
 	"PushCredentialPlacement":       true,
+	"RuntimeMachine":                true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.

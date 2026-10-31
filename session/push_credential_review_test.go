@@ -155,3 +155,93 @@ func TestCallbackCarrierRefNamesOnlyTheOwnTunnel(t *testing.T) {
 	_, ok = CallbackCarrierRef(pgidB)
 	assert.False(t, ok)
 }
+
+// --- second review, finding 1 and N1 --------------------------------------------
+
+func TestOperatorProvenanceIsPositiveAndUnknownFailsClosed(t *testing.T) {
+	op, err := NewInstance(InstanceOptions{Title: "mine", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	assert.True(t, op.OperatorCreated(), "a create no sandbox asked for is the operator's")
+	assert.True(t, op.ToInstanceData().CreatedByOperator, "and is recorded on the row")
+
+	child, err := NewInstance(InstanceOptions{Title: "child", Path: t.TempDir(), Program: "claude", CreatedBySandbox: "parent-1"})
+	require.NoError(t, err)
+	assert.False(t, child.OperatorCreated())
+	assert.False(t, child.ToInstanceData().CreatedByOperator)
+
+	base := InstanceData{ID: "r", Title: "r", Path: t.TempDir(), Status: Archived, BackendType: "local",
+		Worktree: GitWorktreeData{RepoPath: "/r", WorktreePath: "/r/wt"}}
+	for name, tc := range map[string]struct {
+		byOperator bool
+		bySandbox  string
+		want       bool
+	}{
+		"operator":                       {byOperator: true, want: true},
+		"unknown (no provenance at all)": {},
+		"sandbox":                        {bySandbox: "p"},
+		"both (contradictory)":           {byOperator: true, bySandbox: "p"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := base
+			data.CreatedByOperator, data.CreatedBySandbox = tc.byOperator, tc.bySandbox
+			restored, err := FromInstanceData(data)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, restored.OperatorCreated())
+			assert.Equal(t, tc.byOperator, restored.ToInstanceData().CreatedByOperator, "round-trips")
+		})
+	}
+}
+
+func TestRuntimeMachineSharesIsConservative(t *testing.T) {
+	box1 := RuntimeMachine{Host: "box1.example", Addr: "198.51.100.7"}
+	for name, tc := range map[string]struct {
+		a, b RuntimeMachine
+		want bool
+	}{
+		"same host":                       {box1, RuntimeMachine{Host: "BOX1.example"}, true},
+		"same pinned address":             {box1, RuntimeMachine{Host: "box2.example", Addr: "198.51.100.7"}, true},
+		"host is the other's address":     {box1, RuntimeMachine{Host: "198.51.100.7"}, true},
+		"another machine":                 {box1, RuntimeMachine{Host: "box2.example", Addr: "198.51.100.8"}, false},
+		"ipv6 brackets":                   {RuntimeMachine{Addr: "[2001:db8::1]"}, RuntimeMachine{Host: "2001:db8::1"}, true},
+		"same free-form command":          {RuntimeMachine{SandboxSSH: "ssh box3"}, RuntimeMachine{SandboxSSH: " ssh box3 "}, true},
+		"other free-form command":         {RuntimeMachine{SandboxSSH: "ssh box3"}, RuntimeMachine{SandboxSSH: "ssh box4"}, false},
+		"free-form naming the ssh host":   {RuntimeMachine{SandboxSSH: "ssh -p 2222 dev@box1.example"}, box1, true},
+		"free-form url naming an address": {box1, RuntimeMachine{SandboxSSH: "ssh ssh://dev@198.51.100.7:22"}, true},
+		"free-form naming another":        {RuntimeMachine{SandboxSSH: "ssh dev@box9"}, box1, false},
+		"nothing recorded":                {RuntimeMachine{}, RuntimeMachine{}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.a.Shares(tc.b))
+			assert.Equal(t, tc.want, tc.b.Shares(tc.a), "symmetric")
+		})
+	}
+}
+
+func TestRuntimeMachineReadsTheRecordedRuntime(t *testing.T) {
+	listed := &Instance{Title: "l", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1",
+		Config: config.SSHConfig{Host: "box1.example"}, DialAddress: "198.51.100.7"}}}
+	m, ok := listed.RuntimeMachine()
+	require.True(t, ok)
+	assert.Equal(t, RuntimeMachine{Host: "box1.example", Addr: "198.51.100.7"}, m)
+	p, ok := listed.PushCredentialPlacement()
+	require.True(t, ok)
+	assert.Equal(t, m, p.Machine, "the placement carries the same machine")
+
+	repoTarget := &Instance{Title: "r", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", Config: config.SSHConfig{Host: "box1.example"}}}}
+	m, ok = repoTarget.RuntimeMachine()
+	require.True(t, ok, "a repository's own [ssh] target still runs on a machine")
+	assert.Equal(t, "box1.example", m.Host)
+
+	free := &Instance{Title: "f", backend: &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{SessionDir: "/s", SSHCommand: "ssh box3"}}}
+	m, ok = free.RuntimeMachine()
+	require.True(t, ok)
+	assert.Equal(t, RuntimeMachine{SandboxSSH: "ssh box3"}, m)
+
+	for name, inst := range map[string]*Instance{
+		"reaped": {Title: "x", backend: &sshBackend{}},
+		"local":  {Title: "y", backend: &LocalBackend{}},
+	} {
+		_, ok := inst.RuntimeMachine()
+		assert.False(t, ok, name)
+	}
+}

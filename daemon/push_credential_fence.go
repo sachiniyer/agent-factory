@@ -12,7 +12,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pushcred"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The automatic-push fence (#5571 W7.8, the owner's answer to the plan's Q4): af's
@@ -161,10 +160,15 @@ func (s *pushCredentialState) persistLocked(snap *pushRefSnapshot) error {
 // identity; "" when the runtime has no callback, so no credential is possible to
 // fence). The returned end lifts the fence only when called with confirmed=true;
 // any other ending leaves it. An error means the fence could not be recorded, and
-// the caller must not start the push. snap, taken just before this call, lets the
-// write drop fences a replacement made moot; ending the push prunes nothing, since
-// by then any snapshot is older than fences written while the push ran.
-func (s *pushCredentialState) beginAutoPush(sessionID, callbackRef string, snap *pushRefSnapshot) (end func(confirmed bool), err error) {
+// the caller must not start the push.
+//
+// snapshot reads the identities every write prunes against. It is called afresh
+// for each write — at the start, and again at a confirmed end, never reusing the
+// first across the push (second security review of #6433, N2) — and always
+// before s.mu is taken, since it reads s.writes itself. A fence written between
+// the snapshot and the write is newer than it and is kept (pushRefSnapshot).
+func (s *pushCredentialState) beginAutoPush(sessionID, callbackRef string, snapshot func() *pushRefSnapshot) (end func(confirmed bool), err error) {
+	snap := takeSnapshot(snapshot)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.loadLocked(); err != nil {
@@ -189,11 +193,23 @@ func (s *pushCredentialState) beginAutoPush(sessionID, callbackRef string, snap 
 	s.autoPushing[sessionID]++
 	var once sync.Once
 	return func(confirmed bool) {
-		once.Do(func() { s.endAutoPush(sessionID, callbackRef, confirmed) })
+		once.Do(func() { s.endAutoPush(sessionID, callbackRef, confirmed, snapshot) })
 	}, nil
 }
 
-func (s *pushCredentialState) endAutoPush(sessionID, callbackRef string, confirmed bool) {
+// takeSnapshot calls snapshot when there is one; nil prunes nothing.
+func takeSnapshot(snapshot func() *pushRefSnapshot) *pushRefSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	return snapshot()
+}
+
+func (s *pushCredentialState) endAutoPush(sessionID, callbackRef string, confirmed bool, snapshot func() *pushRefSnapshot) {
+	var snap *pushRefSnapshot
+	if confirmed {
+		snap = takeSnapshot(snapshot)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.autoPushing[sessionID]--; s.autoPushing[sessionID] <= 0 {
@@ -204,8 +220,9 @@ func (s *pushCredentialState) endAutoPush(sessionID, callbackRef string, confirm
 	}
 	if f, ok := s.fences[sessionID]; ok && f.CallbackRef == callbackRef {
 		delete(s.fences, sessionID)
-		// Its own entry only: no pruning from evidence older than this push.
-		if err := s.persistLocked(nil); err != nil {
+		// Pruned against the identities current NOW, not those read when the push
+		// began.
+		if err := s.persistLocked(snap); err != nil {
 			// The fence stays on disk, which only withholds credentials longer:
 			// the safe side to fail on.
 			log.WarningLog.Printf("session %s: could not lift its push-credential fence after a confirmed automatic push: %v", sessionID, err)
@@ -233,14 +250,7 @@ func (s *pushCredentialState) autoPushFenced(sessionID, callbackRef string) bool
 // it, so this never holds the manager lock across an instance lock.
 func (m *Manager) callbackRefSnapshot() *pushRefSnapshot {
 	upTo := m.pushCreds.writeMark()
-	m.mu.Lock()
-	insts := make([]*session.Instance, 0, len(m.instances))
-	for _, inst := range m.instances {
-		if inst != nil {
-			insts = append(insts, inst)
-		}
-	}
-	m.mu.Unlock()
+	insts := m.trackedInstances()
 	out := make(map[string]string, len(insts))
 	for _, inst := range insts {
 		if p, ok := instancePushPlacement(inst); ok && p.CallbackRef != "" {

@@ -305,3 +305,21 @@ func TestRenderHostCheck_UnknownArmMirrorsDoctor(t *testing.T) {
 	renderHostCheck(&out3, daemon.HostCheckResult{Name: "box", Probed: true, Reachable: true, Complete: true}, config.HostConfig{Host: "box.example"})
 	assert.Contains(t, out3.String(), "box: ready (git, tmux and gh answered)")
 }
+
+// #5571 W7.8: `af hosts check` names each session that keeps a push-licensed
+// host (or the sandbox.ssh target) from getting push credentials, without
+// changing the exit code — the host still runs sessions.
+func TestHostsCheck_NamesPushCredentialBlockers(t *testing.T) {
+	f := &hostsFake{hosts: map[string]config.HostConfig{"a": {Host: "a.example", PushCredentials: true}}}
+	installHostsFake(t, f)
+	f.reply = daemon.CheckHostResponse{
+		Hosts: []daemon.HostCheckResult{{Name: "a", Probed: true, Reachable: true, Complete: true,
+			PushCredentialBlockers: []string{`session "child" (child-7) is created by another session's af`}}},
+		SandboxPushCredentialBlockers: []string{`session "legacy" (legacy-3) is of unknown provenance`},
+	}
+	out, err := runHosts(t, hostsCheckCmd)
+	require.NoError(t, err)
+	assert.Contains(t, out, `push credentials withheld: session "child" (child-7)`)
+	assert.Contains(t, out, "sandbox.ssh target:")
+	assert.Contains(t, out, `push credentials withheld: session "legacy" (legacy-3)`)
+}

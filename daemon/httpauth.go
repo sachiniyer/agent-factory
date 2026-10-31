@@ -165,6 +165,15 @@ func (g *authGate) authorizeSandbox(r *http.Request, presented string) (string, 
 	if owner == "" {
 		return "", false
 	}
+	// Every sandbox credential is accepted only through its owner's own forward,
+	// on every route (#5571 W7.8, second security review of #6433): here, at the
+	// one gate, so no route can forget it. A credential copied out of a session
+	// directory and sent through another session's forward — or to a listener
+	// with no forward at all, which records no carrier — is refused before any
+	// handler sees it.
+	if !carriedByOwnForward(carrierPGID(r.Context()), g.sandboxTokens.refFor(owner)) {
+		return "", false
+	}
 	return owner, true
 }
 
