@@ -991,14 +991,20 @@ The `ssh`/`sandbox` `af sessions archive` default instead **preserves the
 workspace on its host** (W8.5): the agent stops and the session directory is kept
 where it is — nothing is pushed, committed or reaped — and restore **reattaches**
 that workspace (W8.6), so the branch, worktree, index and ignored files come back
-exactly as archived and the agent resumes its conversation.
+exactly as archived. The agent resumes its conversation only when its provider
+store survives the archive: a session run under a synced account has that account
+directory removed on archive (the credential teardown the reap would do), so
+restore finds no transcript and starts a fresh conversation, while a session
+with no synced account keeps its provider store in place and resumes.
 
-This is the same flow for every off-box backend (it is written once against the runtime
-seam), and it is why `docker`/`ssh`/`sandbox`/`hook` match `local` on the lifecycle
-capabilities — `Archive` and `Recover` are both supported. All four are declared
-off-box in one place (`backendProvisionsOffBox`), and all four share a single
-capability declaration, so none of them can differ from the others here without
-that being a deliberate change. Parity is not total: they declare
+The **push archive** is the same flow for every off-box backend (it is written once
+against the runtime seam); the preserve/reattach path is an `ssh`/`sandbox`-specific
+alternative *implementation* of the same capabilities. Either way
+`docker`/`ssh`/`sandbox`/`hook` match `local` on the lifecycle capabilities —
+`Archive` and `Recover` are both supported. All four are declared off-box in one
+place (`backendProvisionsOffBox`), and all four share a single capability
+declaration, so none of them can differ from the others in those capabilities
+without that being a deliberate change. Parity is not total: they declare
 `TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`). The static declaration is the floor: an
 off-box session whose agent-server advertises `tab-api` lifts `TabManagement` and
 serves shell and process tabs off-box too. Without that advertisement an off-box
@@ -1105,9 +1111,13 @@ For a push archive (`docker`/`hook` by default, or `ssh`/`sandbox` with
 - **The agent's conversation history** lived only in the disposed sandbox and is
   **not** restored — a fresh agent runs on the restored branch. (The `local`
   backend, which relocates the worktree in place, does resume the conversation,
-  as does an `ssh`/`sandbox` session archived by default, whose restore reattaches
-  the preserved workspace and resumes it (W8.5/W8.6); this is the difference the
-  push/clone flow has and the preserve path does not.)
+  as does an `ssh`/`sandbox` session archived by default **whose provider store
+  survives the archive** — restore reattaches the preserved workspace and resumes
+  from the kept transcript (W8.5/W8.6). A default `ssh`/`sandbox` archive of a
+  session run under a synced account removes that account directory on archive,
+  so the transcript does not survive and restore starts a fresh conversation;
+  losing the history is otherwise the difference the push/clone flow has and the
+  preserve path does not.)
 
 ### Requirements
 
