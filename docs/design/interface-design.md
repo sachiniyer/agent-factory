@@ -381,8 +381,8 @@ to a static glyph that still carries the state, and each is pinned by a test und
 both settings. The needs-attention blink on the web rail's dot and on the favicon
 is in use today: it makes a waiting agent visible from across the screen or from
 another tab, and under reduced motion the dot is a static ring and the favicon
-holds still. Connecting…,
-Creating… and Running are static. This includes connection chrome; agent-owned
+holds still. Connecting… and
+Creating… are static. This includes connection chrome; agent-owned
 terminal output is not an af indicator. User-caused web disclosure may take at
 most 120ms, with 0ms under reduced motion. TUI transitions are immediate.
 Background events never start motion or resize content. There is no motion setting
