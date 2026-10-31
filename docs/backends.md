@@ -1064,9 +1064,10 @@ What the sandbox host needs, and what af does to it:
     persisted command (the token and callback credential it sources are
     unchanged, so the restarted process keeps the session's identity),
     re-dials to the new port, and re-adopts the surviving tmux session
-    through the ordinary restore path (reattaching a live agent, respawning
-    one whose tmux session is gone), so the agent is not re-run and unpushed
-    work is preserved. A row that cannot be proven empty — no recorded
+    through the ordinary restore path: when that reattaches a live agent
+    the agent is not re-run and unpushed work is preserved, but when the
+    tmux session is gone it respawns the agent (re-running startup, so
+    only work already at `origin` is preserved). A row that cannot be proven empty — no recorded
     launch command or PID, the recorded PID still alive, or the host
     cannot tell — is reported and left alone, so a slow agent-server is
     never doubled.
