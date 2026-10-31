@@ -99,3 +99,38 @@ test("typing during a save keeps the newer draft when the older save is acknowle
   ed.setText("one");
   assert.equal(text, "one two");
 });
+
+test("saves are serialized: an edit made during a save waits and goes out as the latest text", async () => {
+  const sent: string[] = [];
+  const resolvers: ((ok: boolean) => void)[] = [];
+  const ed = new BodyEditor((t) => { sent.push(t); return new Promise<boolean>((r) => { resolvers.push(r); }); }, "Body");
+  await settle();
+  change("one");
+  mock.timers.tick(SAVE_DELAY_MS);
+  change("one two");
+  mock.timers.tick(SAVE_DELAY_MS);          // the second pause while the first save is still in flight
+  change("one two three");
+  mock.timers.tick(SAVE_DELAY_MS);
+  assert.deepEqual(sent, ["one"], "no second request while the first is in flight");
+  resolvers[0](true);
+  await settle();
+  assert.deepEqual(sent, ["one", "one two three"], "one follow-up with the latest text, not one per pause");
+  ed.setText("one");
+  assert.equal(text, "one two three", "the older acknowledgement does not release the newer draft");
+  resolvers[1](true);
+  await settle();
+  ed.setText("stored by agent");
+  assert.equal(text, "stored by agent");
+});
+
+test("a failed save does not retry on its own", async () => {
+  const sent: string[] = [];
+  const ed = new BodyEditor((t) => { sent.push(t); return Promise.resolve(false); }, "Body");
+  await settle();
+  change("x");
+  mock.timers.tick(SAVE_DELAY_MS);
+  await settle();
+  assert.deepEqual(sent, ["x"]);
+  ed.setText("stored");
+  assert.equal(text, "x");
+});

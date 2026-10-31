@@ -1324,9 +1324,6 @@ body[data-project-color] [data-af-theme="dark"] {
 .af-app[data-project-color] .af-appbar .af-project-menu :is(button, summary, a):focus-visible {
   outline-color: var(--af-accent);
 }
-.af-app[data-project-color] .af-appbar .af-term-keyboard {
-  color: inherit;
-}
 .af-app[data-project-color] .af-viewnav,
 .af-app[data-project-color] .af-viewtab,
 .af-app[data-project-color] .af-viewtab:hover,
@@ -3971,6 +3968,7 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 }
 .af-task-switch-on .af-task-switch-track { background: var(--af-accent); border-color: var(--af-accent); }
 .af-task-switch-on .af-task-switch-thumb { left: auto; right: calc(var(--af-space-1) / 2); background: var(--af-surface); }
+.af-task-switch[aria-disabled="true"] { cursor: default; opacity: 0.6; }
 .af-task-switch:focus-visible { outline: none; }
 .af-task-switch:focus-visible .af-task-switch-track { outline: calc(var(--af-space-1) / 2) solid var(--af-accent); outline-offset: calc(var(--af-space-1) / 2); }
 @media (max-width: 768px) {

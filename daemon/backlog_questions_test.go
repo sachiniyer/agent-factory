@@ -527,3 +527,26 @@ func TestBacklogSeenQuestionSurvivesADismissedChip(t *testing.T) {
 		t.Fatalf("seen question after dismissal = %q, want %q", got, want)
 	}
 }
+
+// After a restart the remembered question comes back from the backlog, without
+// restoring a dismissed chip (Codex P2 on #6299).
+func TestRebuildAskedQuestionsFromTheBacklog(t *testing.T) {
+	m, repoID, inst := askedItem(t)
+	want := m.backlogSeenQuestion(inst)
+	inst.ClearAttention(inst.Attention().SetAt)
+	m.backlog.asked.Delete(inst.ID) // a fresh daemon
+	if m.backlogSeenQuestion(inst) != "" {
+		t.Fatal("nothing should be remembered yet")
+	}
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.rebuildAskedQuestions(b)
+	if got := m.backlogSeenQuestion(inst); got != want {
+		t.Fatalf("rebuilt question = %q, want %q", got, want)
+	}
+	if inst.Attention() != nil {
+		t.Fatal("the dismissed chip must stay dismissed")
+	}
+}
