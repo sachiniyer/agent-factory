@@ -145,6 +145,10 @@ func newTestHome(t *testing.T) *home {
 		resumeStatusPoll: func(daemon.ResumeStatusPollRequest) error { return nil },
 		store:            proj,
 		repoID:           repoID,
+		// Many tests mint instances inside a fake snapshot builder and rely on
+		// their creation order (the store sorts by CreatedAt), so build serially
+		// by default; the #6423 tests opt into concurrency explicitly.
+		snapshotBuildWorkers: 1,
 	}
 	// Content capture routes through the daemon Preview RPC since #1592 PR6.
 	// Resolve the title back to the in-store instance and read it directly, so the

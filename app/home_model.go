@@ -72,6 +72,11 @@ type home struct {
 	// delivery-failure alarms (#1238) arrive from one authoritative RPC — the
 	// alarm is a field on the snapshot, not a side channel.
 	snapshotFetcher func(repoID string) (daemon.SnapshotResponse, error)
+	// snapshotBuildWorkers caps how many snapshot records materializeSnapshot
+	// restores at once; 0 means the default (#6423). A per-model field so tests
+	// that mint instances inside a fake builder (and rely on their creation order)
+	// can pin 1 without touching production behavior.
+	snapshotBuildWorkers int
 	// previewFetcher captures a session tab's content through the daemon — the sole
 	// capturer since #1592 Phase 2 PR6 (the TUI no longer shells out to tmux
 	// capture-pane). It backs TabPane's render path for content not streamed live
