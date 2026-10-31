@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -329,7 +330,7 @@ func TestGitCredential_ReauthorizesAfterTheTokenRead(t *testing.T) {
 		// session holding a credential, just not the one this request presented.
 		"replaced":     func(pf *pushFixture) { _, _ = pf.mgr.sandboxTokens.mint(pf.me.ID) },
 		"licence off":  func(pf *pushFixture) { pf.setConfig(func(c *config.Config) { c.Hosts = nil }) },
-		"auto push":    func(pf *pushFixture) { pf.mgr.pushCreds.beginAutoPush(pf.me.ID) },
+		"auto push":    func(pf *pushFixture) { _, _ = pf.mgr.pushCreds.beginAutoPush(pf.me.ID, pf.secret) },
 		"origin moved": func(pf *pushFixture) { pf.origins["me"] = pushcred.Origin{Host: "github.com", Path: "owner/elsewhere"} },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -354,7 +355,7 @@ func TestGitCredential_ChangesDuringTheFinalOriginLookupAreCaught(t *testing.T) 
 		"replaced":    func(pf *pushFixture) { _, _ = pf.mgr.sandboxTokens.mint(pf.me.ID) },
 		"archived":    func(pf *pushFixture) { pf.me.SetStatusForTest(session.Archived) },
 		"licence off": func(pf *pushFixture) { pf.setConfig(func(c *config.Config) { c.Hosts = nil }) },
-		"auto push":   func(pf *pushFixture) { pf.mgr.pushCreds.beginAutoPush(pf.me.ID) },
+		"auto push":   func(pf *pushFixture) { _, _ = pf.mgr.pushCreds.beginAutoPush(pf.me.ID, pf.secret) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			pf := newPushFixture(t)
@@ -380,7 +381,8 @@ func TestGitCredential_ChangesDuringTheFinalOriginLookupAreCaught(t *testing.T) 
 // the daemon runs an automatic preserve-push for a row, that row gets nothing.
 func TestGitCredential_WithheldDuringAnAutomaticPreservePush(t *testing.T) {
 	pf := newPushFixture(t)
-	release := pf.mgr.pushCreds.beginAutoPush(pf.me.ID)
+	end, err := pf.mgr.pushCreds.beginAutoPush(pf.me.ID, pf.secret)
+	require.NoError(t, err)
 	code, got, msg := pf.askOwn(t)
 	requireRefused(t, code, got, msg, refusePushAutoPreserve)
 
@@ -392,8 +394,8 @@ func TestGitCredential_WithheldDuringAnAutomaticPreservePush(t *testing.T) {
 	code, got, msg = pf.ask(t, other, "https", "github.com", "owner/other.git")
 	requireAnswered(t, code, got, msg)
 
-	release()
-	release() // idempotent
+	end(true)
+	end(true) // idempotent
 	code, got, msg = pf.askOwn(t)
 	requireAnswered(t, code, got, msg)
 }
@@ -454,7 +456,9 @@ func TestPreserveSandboxBeforeReapFencesPushCredentials(t *testing.T) {
 // answered.
 func TestGitCredential_AbandonedAutoPushFencesOnlyThatCredential(t *testing.T) {
 	pf := newPushFixture(t)
-	pf.mgr.pushCreds.abandonAutoPush(pf.me.ID, pf.secret)
+	end, err := pf.mgr.pushCreds.beginAutoPush(pf.me.ID, pf.secret)
+	require.NoError(t, err)
+	end(false) // timed out, lost, refused: not confirmed
 	code, got, msg := pf.askOwn(t)
 	requireRefused(t, code, got, msg, refusePushAutoPreserve)
 
@@ -462,6 +466,80 @@ func TestGitCredential_AbandonedAutoPushFencesOnlyThatCredential(t *testing.T) {
 	require.NoError(t, err)
 	code, got, msg = pf.ask(t, fresh, "https", "github.com", "owner/repo.git")
 	requireAnswered(t, code, got, msg)
+}
+
+// A daemon restart re-derives the very same callback credential (W3.6), so a
+// fence held only in memory would lift while an abandoned archive ran on (Codex
+// P2 on #6433). The fence is persisted before the push starts and read back by
+// the next process; a confirmed success removes it from the record too.
+func TestPushFencesSurviveADaemonRestart(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), pushFenceFileName)
+	const grant = "sbx-grant-0001"
+
+	first := &pushCredentialState{fencePath: path}
+	end, err := first.beginAutoPush("sess-a", grant)
+	require.NoError(t, err)
+	// The process dies mid-push: end never runs.
+	_ = end
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), grant, "the record keeps a digest, never the credential")
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+	second := &pushCredentialState{fencePath: path}
+	assert.True(t, second.autoPushFenced("sess-a", grant), "the restarted daemon must still fence the re-derived credential")
+	assert.False(t, second.autoPushFenced("sess-a", "sbx-grant-0002"), "a replacement runtime's credential is not fenced")
+	assert.False(t, second.autoPushFenced("sess-b", grant))
+
+	// A later automatic push that is CONFIRMED lifts it, durably.
+	end, err = second.beginAutoPush("sess-a", grant)
+	require.NoError(t, err)
+	end(true)
+	third := &pushCredentialState{fencePath: path}
+	assert.False(t, third.autoPushFenced("sess-a", grant))
+}
+
+// An unreadable record may be hiding a fence: every request is refused, and no
+// automatic push starts, until it can be read.
+func TestPushFencesFailClosedOnAnUnreadableRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), pushFenceFileName)
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+	s := &pushCredentialState{fencePath: path}
+	assert.True(t, s.autoPushFenced("any", "grant"))
+	_, err := s.beginAutoPush("any", "grant")
+	assert.Error(t, err)
+
+	nullRecord := filepath.Join(t.TempDir(), pushFenceFileName)
+	require.NoError(t, os.WriteFile(nullRecord, []byte("null"), 0o600))
+	n := &pushCredentialState{fencePath: nullRecord}
+	assert.False(t, n.autoPushFenced("any", "grant"))
+	end, err := n.beginAutoPush("any", "grant")
+	require.NoError(t, err, "a null record reads as empty, not as a panic")
+	end(true)
+}
+
+// If the fence cannot be recorded, the automatic push does not run.
+func TestPreserveSandboxBeforeReapRefusesWhenItsFenceCannotBeRecorded(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	var archived atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		archived.Store(true)
+		writeSandboxProbeEnvelope(w, map[string]any{"branch": "af/x"})
+	}))
+	t.Cleanup(srv.Close)
+	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "unfenceable", srv.URL, session.Ready)
+	_, err := manager.sandboxTokens.mint(inst.ID)
+	require.NoError(t, err)
+	manager.pushCreds.fencePath = filepath.Join(t.TempDir(), "missing-dir", "deeper", pushFenceFileName)
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(manager.pushCreds.fencePath))), []byte("a file, not a dir"), 0o600))
+
+	err = manager.preserveSandboxBeforeReap(repoID, daemonInstanceKey(repoID, "unfenceable"), inst, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not be written")
+	assert.False(t, archived.Load(), "the automatic push must not start without its fence")
 }
 
 func TestGitCredential_NoLoginOnTheDaemonBoxIsNamed(t *testing.T) {

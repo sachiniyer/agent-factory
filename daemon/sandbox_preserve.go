@@ -129,17 +129,23 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 	// succeeding just because the host can now get push credentials (#5571 W7.8,
 	// the owner's answer to Q4): the credential route refuses this row while the
 	// push runs. Only a CONFIRMED success lifts the fence. Any other ending — a
-	// timeout, a lost reply, a refusal — may leave the in-sandbox archive running
-	// (it takes no context, and its git steps have no deadline), so the row stays
-	// fenced for as long as its current callback credential lives: until a
-	// replacement runtime gets a new one, or the session ends.
+	// timeout, a lost reply, a refusal, a daemon restart — may leave the
+	// in-sandbox archive running (it takes no context, and its git steps have no
+	// deadline), so the row stays fenced for as long as its current callback
+	// credential lives: until a replacement runtime gets a new one, or the
+	// session ends. The fence is persisted BEFORE the push starts; if it cannot
+	// be, the push does not run.
 	grant := m.sandboxTokens.grantFor(instance.ID)
-	release := m.pushCreds.beginAutoPush(instance.ID)
-	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
-	if err != nil {
-		m.pushCreds.abandonAutoPush(instance.ID, grant)
+	endFence, ferr := m.pushCreds.beginAutoPush(instance.ID, grant)
+	if ferr != nil {
+		return fmt.Errorf(
+			"refusing to replace the sandbox for %q: the record that keeps push credentials away from af's own "+
+				"preserve-push could not be written (%w), so the push that would make its work durable did not run. "+
+				"It stays recoverable. Recovery guidance: %s",
+			instance.Title, ferr, reapGuidance)
 	}
-	release()
+	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
+	endFence(err == nil)
 	if err != nil {
 		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its
 		// push fails. The session stays Lost and the retry loop keeps trying, which

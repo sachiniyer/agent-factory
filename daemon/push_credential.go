@@ -4,11 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pushcred"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -79,78 +86,177 @@ var errGitCredentialOperator = errors.New("GitCredential answers only a sandbox 
 
 // pushCredentialState is the Manager's push-credential state.
 type pushCredentialState struct {
-	// source reads the daemon box's token. A test replaces it via
-	// pushCredentialSourceForTest.
+	// source reads the daemon box's token.
 	source pushcred.Source
 	// tokenFor overrides source.Token in tests; nil in production.
 	tokenFor func(ctx context.Context, o pushcred.Origin) (string, error)
+	// fencePath overrides where the fences persist (tests); "" means
+	// <AF home>/push-credential-fences.json.
+	fencePath string
 
-	mu sync.Mutex
-	// autoPushing counts, per session id, the automatic preserve-pushes the
-	// daemon is running right now (preserveSandboxBeforeReap).
+	mu     sync.Mutex
+	loaded bool
+	// loadErr is set when the fence record exists but cannot be read. Every
+	// request is then refused (fail closed) until it can: an unreadable record
+	// may be hiding a fence.
+	loadErr error
+	// autoPushing counts, per session id, the automatic preserve-pushes this
+	// process is running right now (preserveSandboxBeforeReap).
 	autoPushing map[string]int
-	// abandoned maps a session id to the callback credential it held when one of
-	// its automatic preserve-pushes ended WITHOUT a confirmed success. The
-	// in-sandbox archive takes no context and runs its git steps with no
-	// deadline, so after a timeout or a lost reply it may still reach its push;
-	// no amount of elapsed time proves it will not. The fence therefore holds for
-	// as long as that credential does: until a replacement runtime is minted a
-	// new one, or the session ends and revokes it. It keeps a digest of the
-	// credential, never the credential.
-	abandoned map[string]string
+	// fences maps a session id to the callback credential it held when an
+	// automatic preserve-push STARTED, until that push is confirmed to have
+	// succeeded. The in-sandbox archive takes no context and runs its git steps
+	// with no deadline, so after a timeout, a lost reply or a daemon restart it
+	// may still reach its push; no elapsed time proves it will not. A fence
+	// therefore lasts as long as that credential does: until a replacement
+	// runtime is minted a new one, or the session ends and revokes it.
+	//
+	// PERSISTED, and written before the push starts: a callback credential
+	// survives a daemon restart (W3.6 re-derives the very same one), so a fence
+	// held only in memory would lift on a restart while the archive ran on. It
+	// keeps a digest of the credential, never the credential.
+	fences map[string]pushFence
 }
 
-// beginAutoPush fences sessionID off from push credentials for the duration of
-// an automatic preserve-push; the returned func lifts it.
-func (s *pushCredentialState) beginAutoPush(sessionID string) func() {
-	s.mu.Lock()
-	if s.autoPushing == nil {
-		s.autoPushing = map[string]int{}
-	}
-	s.autoPushing[sessionID]++
-	s.mu.Unlock()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			s.mu.Lock()
-			if s.autoPushing[sessionID]--; s.autoPushing[sessionID] <= 0 {
-				delete(s.autoPushing, sessionID)
-			}
-			s.mu.Unlock()
-		})
-	}
+// pushFence is one persisted fence.
+type pushFence struct {
+	Grant string    `json:"grant"`
+	At    time.Time `json:"at"`
 }
 
-// abandonAutoPush keeps sessionID fenced for as long as grant is its callback
-// credential: an automatic preserve-push ended without a confirmed success.
-func (s *pushCredentialState) abandonAutoPush(sessionID, grant string) {
-	if grant == "" {
-		return // no credential, so nothing it could ever be answered with
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.abandoned == nil {
-		s.abandoned = map[string]string{}
-	}
-	s.abandoned[sessionID] = grantDigest(grant)
-}
+// pushFenceRetention bounds how long a fence is kept: far beyond any archive,
+// and only so a record that names sessions long gone does not grow forever.
+const pushFenceRetention = 30 * 24 * time.Hour
+
+const pushFenceFileName = "push-credential-fences.json"
 
 func grantDigest(grant string) string {
 	sum := sha256.Sum256([]byte(grant))
 	return hex.EncodeToString(sum[:])
 }
 
+func (s *pushCredentialState) path() (string, error) {
+	if s.fencePath != "" {
+		return s.fencePath, nil
+	}
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, pushFenceFileName), nil
+}
+
+// loadLocked reads the persisted fences once. Caller holds s.mu.
+func (s *pushCredentialState) loadLocked() {
+	if s.loaded {
+		return
+	}
+	s.loaded = true
+	s.fences = map[string]pushFence{}
+	path, err := s.path()
+	if err != nil {
+		s.loadErr = err
+		return
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err == nil {
+		err = json.Unmarshal(data, &s.fences)
+	}
+	if err != nil {
+		s.loadErr = fmt.Errorf("reading %s: %w", path, err)
+		log.ErrorLog.Printf("push credentials are withheld from every sandbox session until %s can be read (it records which sessions an automatic preserve-push fences): %v", path, err)
+		return
+	}
+	if s.fences == nil { // a record holding JSON null
+		s.fences = map[string]pushFence{}
+	}
+	for id, f := range s.fences {
+		if time.Since(f.At) > pushFenceRetention {
+			delete(s.fences, id)
+		}
+	}
+}
+
+// persistLocked writes the fences, 0600, atomically. Caller holds s.mu.
+func (s *pushCredentialState) persistLocked() error {
+	path, err := s.path()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(s.fences)
+	if err != nil {
+		return err
+	}
+	return config.AtomicWriteFileRefusingLink(path, data, 0o600)
+}
+
+// beginAutoPush fences sessionID for an automatic preserve-push, PERSISTED
+// before the push may start. The returned end lifts the fence only when called
+// with confirmed=true; any other ending leaves it, tied to grant. An error means
+// the fence could not be recorded, and the caller must not start the push.
+func (s *pushCredentialState) beginAutoPush(sessionID, grant string) (end func(confirmed bool), err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	if s.loadErr != nil {
+		return nil, s.loadErr
+	}
+	if s.autoPushing == nil {
+		s.autoPushing = map[string]int{}
+	}
+	if grant != "" {
+		prev, had := s.fences[sessionID]
+		s.fences[sessionID] = pushFence{Grant: grantDigest(grant), At: time.Now()}
+		if err := s.persistLocked(); err != nil {
+			if had {
+				s.fences[sessionID] = prev
+			} else {
+				delete(s.fences, sessionID)
+			}
+			return nil, err
+		}
+	}
+	s.autoPushing[sessionID]++
+	var once sync.Once
+	return func(confirmed bool) {
+		once.Do(func() { s.endAutoPush(sessionID, grant, confirmed) })
+	}, nil
+}
+
+func (s *pushCredentialState) endAutoPush(sessionID, grant string, confirmed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.autoPushing[sessionID]--; s.autoPushing[sessionID] <= 0 {
+		delete(s.autoPushing, sessionID)
+	}
+	if !confirmed || s.autoPushing[sessionID] > 0 || grant == "" {
+		return
+	}
+	if f, ok := s.fences[sessionID]; ok && f.Grant == grantDigest(grant) {
+		delete(s.fences, sessionID)
+		if err := s.persistLocked(); err != nil {
+			// The fence stays on disk, which only withholds credentials longer:
+			// the safe side to fail on.
+			log.WarningLog.Printf("session %s: could not lift its push-credential fence after a confirmed automatic push: %v", sessionID, err)
+		}
+	}
+}
+
 // autoPushFenced reports whether a request from sessionID, admitted with grant,
-// falls inside an automatic preserve-push's fence: one is running now, or one was
-// abandoned while this same credential was the session's.
+// is inside an automatic preserve-push's fence. An unreadable record fences
+// everything.
 func (s *pushCredentialState) autoPushFenced(sessionID, grant string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.autoPushing[sessionID] > 0 {
+	s.loadLocked()
+	if s.loadErr != nil || s.autoPushing[sessionID] > 0 {
 		return true
 	}
-	fenced, ok := s.abandoned[sessionID]
-	return ok && grant != "" && fenced == grantDigest(grant)
+	f, ok := s.fences[sessionID]
+	return ok && grant != "" && f.Grant == grantDigest(grant)
 }
 
 func (s *pushCredentialState) token(ctx context.Context, o pushcred.Origin) (string, error) {
