@@ -628,6 +628,40 @@ func TestTerminalAnswerOnAQueuedItemRunsAndArmsIt(t *testing.T) {
 	}
 }
 
+// The item went to review before its session's idle poll, so the run marker is
+// still active when the answer is typed in the pane: the answer is still new work.
+// The item runs and counts it, and the active marker is not armed a second time
+// (Codex P2 on #6295).
+func TestTerminalAnswerWithAStillActiveMarkerRunsTheReviewedItem(t *testing.T) {
+	drain := queuedAttentionClears(t)
+	m, repoID, inst := askedItem(t)
+	if !inst.ArmBacklogRun(time.Now()) {
+		t.Fatal("could not arm the session's run")
+	}
+	gen := inst.BacklogRunGeneration()
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Item(1).Status = backlog.StatusReview
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SendPromptWithStatus(SendPromptRequest{Title: inst.Title, RepoID: repoID, Prompt: "Postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	m.backgroundMutationWG.Wait()
+	it := loadItem(t, repoID, 1)
+	if it.OpenQuestion() != nil {
+		t.Fatalf("the question stayed open: %+v", it.Thread)
+	}
+	if it.Status != backlog.StatusRunning || it.LiveAnswers != 1 {
+		t.Fatalf("status = %s, live answers = %d: the answered item was left in review", it.Status, it.LiveAnswers)
+	}
+	if got := inst.BacklogRunGeneration(); got != gen || !inst.BacklogRunActive() {
+		t.Fatalf("run generation %d -> %d (active %v): the active marker must be kept, not re-armed", gen, got, inst.BacklogRunActive())
+	}
+}
+
 // An answer waiting to be delivered is not sent once the item was started again in
 // another session (Codex P2 on #6295): two sessions would work on it.
 func TestAnswerIsNotSentToASupersededSession(t *testing.T) {
