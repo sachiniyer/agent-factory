@@ -348,19 +348,19 @@ func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
 	if _, err := b.Ask(1, "s1", "first?", now); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.AnsweredInSessionText("s1", "second?", nil, now); got != 0 {
+	if got := b.AnsweredInSessionText("s1", 0, "second?", nil, now); got != 0 {
 		t.Fatalf("closed %d for a question the user did not see", got)
 	}
-	if got := b.AnsweredInSessionText("s1", "", nil, now); got != 0 {
+	if got := b.AnsweredInSessionText("s1", 0, "", nil, now); got != 0 {
 		t.Fatal("no seen question must close nothing")
 	}
 	if _, err := b.Ask(1, "s1", "second?", now); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.AnsweredInSessionText("s1", "second?", nil, now); got != 0 {
+	if got := b.AnsweredInSessionText("s1", 0, "second?", nil, now); got != 0 {
 		t.Fatal("only the oldest open question can have been answered by a line")
 	}
-	if got := b.AnsweredInSessionText("s1", "first?", nil, now); got != 1 {
+	if got := b.AnsweredInSessionText("s1", 0, "first?", nil, now); got != 1 {
 		t.Fatalf("got %d", got)
 	}
 	if b.OpenQuestionText(1) != "second?" {
@@ -416,10 +416,10 @@ func TestAnsweredInSessionTextMatchesACappedQuestion(t *testing.T) {
 		}
 		return s
 	}
-	if got := b.AnsweredInSessionText("s1", capped(long), nil, now); got != 0 {
+	if got := b.AnsweredInSessionText("s1", 0, capped(long), nil, now); got != 0 {
 		t.Fatal("without the normalization the capped text cannot match")
 	}
-	if got := b.AnsweredInSessionText("s1", capped(long), capped, now); got != 1 {
+	if got := b.AnsweredInSessionText("s1", 0, capped(long), capped, now); got != 1 {
 		t.Fatalf("a capped question the user saw was not closed: %d", got)
 	}
 }
@@ -531,5 +531,76 @@ func TestAnswerDoesNotInheritAnEarlierRunsRollbackStatus(t *testing.T) {
 	}
 	if got := b.Item(1).Status; got != StatusRunning {
 		t.Fatalf("status = %s: the replacement run's answer rolled back to the earlier run's status", got)
+	}
+}
+
+// Two open questions that share their first 500 runes are told apart by id: a
+// second submission bound to the first question does not close the second
+// (Codex P2 on #6295).
+func TestAnsweredInSessionBindsToTheQuestionIDNotItsText(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusRunning
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+	long := strings.Repeat("x", 600)
+	it.Thread = []Message{
+		{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: long + "A"},
+		{ID: 2, Kind: KindQuestion, Author: AuthorAF, Text: long + "B"},
+	}
+	if got := b.AnsweredInSessionText("s1", 1, "", nil, now); got != 1 {
+		t.Fatalf("first submission: %d", got)
+	}
+	if got := b.AnsweredInSessionText("s1", 1, "", nil, now); got != 0 {
+		t.Fatalf("the second submission bound to question 1 closed question 2: %d", got)
+	}
+	if q := b.Item(1).OpenQuestion(); q == nil || q.ID != 2 {
+		t.Fatalf("question 2 must stay open: %+v", q)
+	}
+}
+
+// A session replaced between the service reading the item and its transaction
+// refuses the answer and leaves the question open for the retry (Codex P2 on
+// #6295), rather than closing it against a stale gone-session target.
+func TestServiceAnswerRefusesWhenTheSessionChangedUnderIt(t *testing.T) {
+	s, h := newTestService(t)
+	mustAdd(t, s, ItemInput{Key: "a", Title: "A"})
+	withRun(t, 1, StatusRunning)
+	ask(t, s, "Which db?")
+	h.target = TargetGone // the killed session
+	h.onTarget = func() { // ...replaced before the transaction
+		if _, err := Update(repoID, func(b *Backlog) error {
+			b.Item(1).Runs = append(b.Item(1).Runs, RunRef{SessionID: "s2", Title: "B-1 A", State: RunStarted})
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	_, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "Postgres"})
+	if err == nil || !strings.Contains(err.Error(), "changed while answering") {
+		t.Fatalf("err = %v, want the retry error", err)
+	}
+	b, _ := Load(repoID)
+	if b.Item(1).OpenQuestion() == nil {
+		t.Fatal("the question was closed without an answer being delivered")
+	}
+}
+
+// An answer accepted under an earlier run does not hold back the replacement
+// run's completion (Codex P2 on #6299).
+func TestRunEndedIgnoresAnAnswerPendingForAnEarlierRun(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusReview
+	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
+	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
+	if _, err := b.Answer(1, 0, "Postgres", true, now); err != nil {
+		t.Fatal(err)
+	}
+	it.Runs = append(it.Runs, RunRef{SessionID: "s2", State: RunStarted, StartedAt: now.Add(time.Minute)})
+	it.Status = StatusRunning
+	if end := b.RunEnded("s2", now.Add(2*time.Minute)); !end.Changed || b.Item(1).Status != StatusReview {
+		t.Fatalf("the replacement's completion was held back by the old run's answer: %+v %s", end, b.Item(1).Status)
 	}
 }

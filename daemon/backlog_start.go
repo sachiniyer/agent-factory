@@ -249,9 +249,10 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 	}
 	inst := s.instance
 	var (
-		prev   backlog.Status
-		prompt string
-		armed  bool
+		prev     backlog.Status
+		prompt   string
+		armed    bool
+		armedGen int
 	)
 	out, err := svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
 		p, err := b.BeginStart(id, by, backlogHost{m: m}.Facts(ref.ID), svc.Now())
@@ -272,14 +273,14 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 		if !inst.ArmBacklogRun(time.Now()) {
 			return nil, fmt.Errorf("session %q is not an item session", inst.Title)
 		}
-		armed = true
+		armed, armedGen = true, inst.BacklogRunGeneration()
 		return []int{id}, nil
 	})
 	if err != nil {
 		if armed {
 			// The write failed after the closure armed the live session; the
 			// backlog change was discarded, the instance change was not.
-			m.disarmBacklogRun(ref.ID, inst)
+			m.disarmBacklogRunGen(ref.ID, inst, armedGen)
 		}
 		return backlog.RunRef{}, svc.Named(ref, err)
 	}
@@ -294,7 +295,9 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 			m.noteBacklogUncertainDelivery(ref, id, sendErr)
 			sendErr = nil
 		case sendErr != nil:
-			m.disarmBacklogRun(ref.ID, inst)
+			// Only the run this continue armed: an answer worker that took the target
+			// lock first armed (and delivered) a newer generation of its own.
+			m.disarmBacklogRunGen(ref.ID, inst, armedGen)
 			sendErr = fmt.Errorf("send continue to session %q: %w", inst.Title, sendErr)
 		}
 	}
@@ -364,7 +367,11 @@ func (m *Manager) noteBacklogUncertainDelivery(ref backlog.ProjectRef, id int, c
 }
 
 func (m *Manager) disarmBacklogRun(repoID string, inst *session.Instance) {
-	if inst.DisarmBacklogRun() {
+	m.disarmBacklogRunGen(repoID, inst, -1)
+}
+
+func (m *Manager) disarmBacklogRunGen(repoID string, inst *session.Instance, gen int) {
+	if inst.DisarmBacklogRunGen(gen) {
 		m.persistAndPublishInstance(repoID, inst)
 	}
 }

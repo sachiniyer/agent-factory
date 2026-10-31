@@ -259,12 +259,21 @@ func (b *Backlog) PendingAnswers() []PendingAnswer {
 // question's text) before forwarding the line, without touching the backlog
 // file. It closes the oldest open question only if that is the question with this
 // text; a different or newer one is left alone. It returns the item id, or 0.
-func (b *Backlog) AnsweredInSessionText(sessionID, text string, normalize func(string) string, now time.Time) int {
+func (b *Backlog) AnsweredInSessionText(sessionID string, questionID int, text string, normalize func(string) string, now time.Time) int {
 	it := b.ItemForSession(sessionID)
-	if it == nil || it.lastRun().SessionID != sessionID || text == "" {
+	if it == nil || it.lastRun().SessionID != sessionID || (text == "" && questionID == 0) {
 		return 0
 	}
 	open := it.OpenQuestion()
+	if questionID != 0 {
+		// Identity, not display text: two questions can share their first 500 runes.
+		if open == nil || open.ID != questionID {
+			return 0
+		}
+		open.Closed = ClosedAnsweredInSession
+		it.UpdatedAt = now
+		return it.ID
+	}
 	if normalize == nil {
 		normalize = func(s string) string { return s }
 	}
@@ -276,6 +285,16 @@ func (b *Backlog) AnsweredInSessionText(sessionID, text string, normalize func(s
 	open.Closed = ClosedAnsweredInSession
 	it.UpdatedAt = now
 	return it.ID
+}
+
+// OpenQuestionRef is the id and text of the item's oldest open question, or 0 and "".
+func (b *Backlog) OpenQuestionRef(id int) (int, string) {
+	if it := b.Item(id); it != nil {
+		if q := it.OpenQuestion(); q != nil {
+			return q.ID, q.Text
+		}
+	}
+	return 0, ""
 }
 
 // OpenQuestionText is the text of the item's oldest open question, or "".

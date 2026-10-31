@@ -32,11 +32,11 @@ var backlogAnswerWait = func(stop <-chan struct{}) bool {
 
 var errBacklogAnswerHeld = errors.New("held")
 
-func (h backlogHost) SetAttention(repoID, sessionID, reason string) {
+func (h backlogHost) SetAttention(repoID, sessionID string, questionID int, reason string) {
 	if reason == "" {
 		h.m.backlog.asked.Delete(sessionID)
 	} else {
-		h.m.backlog.asked.Store(sessionID, session.NormalizeAttentionReason(reason))
+		h.m.backlog.asked.Store(sessionID, seenQuestion{ID: questionID, Text: session.NormalizeAttentionReason(reason)})
 	}
 	req := SetAttentionRequest{ID: sessionID, RepoID: repoID, Reason: reason, Clear: reason == ""}
 	if _, _, err := h.m.SetAttention(req); err != nil {
@@ -207,8 +207,8 @@ func (m *Manager) sendBacklogAnswer(repoID string, inst *session.Instance, promp
 // that was just restored, under the backlog lock.
 func (m *Manager) syncBacklogAttention(repoID string, a backlog.PendingAnswer) {
 	_, err := m.backlogService().Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
-		if text := b.OpenQuestionText(a.ID); text != "" {
-			backlogHost{m: m}.SetAttention(repoID, a.SessionID, text)
+		if qid, text := b.OpenQuestionRef(a.ID); text != "" {
+			backlogHost{m: m}.SetAttention(repoID, a.SessionID, qid, text)
 		}
 		return []int{}, nil
 	})
@@ -261,27 +261,43 @@ func (m *Manager) reconcileIdleRun(repoID, sessionID string, stop <-chan struct{
 // answer: what the session's attention shows. It is read from memory, never from
 // backlog.json, so the terminal's input path cannot stall behind the backlog
 // lock; the question is then closed on a worker (noteBacklogSubmitted).
-func (m *Manager) backlogSeenQuestion(instance *session.Instance) string {
+func (m *Manager) backlogSeenQuestion(instance *session.Instance) seenQuestion {
 	if instance == nil || instance.BacklogItem == 0 {
-		return ""
+		return seenQuestion{}
+	}
+	remembered, have := seenQuestion{}, false
+	if q, ok := m.backlog.asked.Load(instance.ID); ok {
+		remembered, have = q.(seenQuestion), true
 	}
 	if a := instance.Attention(); a != nil {
-		return a.Reason
+		// What the chip shows. The remembered question supplies the identity when it
+		// is the same one; an attention the backlog did not set has text only.
+		if have && remembered.Text == a.Reason {
+			return remembered
+		}
+		return seenQuestion{Text: a.Reason}
 	}
-	// The chip was dismissed, but the backlog question is still open: its text
-	// is remembered apart from the display (Codex P2 on #6295).
-	if q, ok := m.backlog.asked.Load(instance.ID); ok {
-		return q.(string)
-	}
-	return ""
+	// The chip was dismissed, but the backlog question is still open: it is
+	// remembered apart from the display (Codex P2 on #6295).
+	return remembered
 }
+
+// seenQuestion is the backlog question a session showed: its message id (zero when
+// only the display text is known) and the attention-normalized text. The id is the
+// identity; two questions can share their first 500 runes.
+type seenQuestion struct {
+	ID   int
+	Text string
+}
+
+func (q seenQuestion) empty() bool { return q.ID == 0 && q.Text == "" }
 
 // noteBacklogSubmitted closes the question the user saw (questionText, captured
 // before the line was forwarded) as answered in session, and arms the run if the
 // item is running without one, in the same transaction so an old completion
 // cannot observe the gap.
-func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionText string) {
-	if instance == nil || instance.BacklogItem == 0 || questionText == "" {
+func (m *Manager) noteBacklogSubmitted(instance *session.Instance, question seenQuestion) {
+	if instance == nil || instance.BacklogItem == 0 || question.empty() {
 		return
 	}
 	repoID, ok := m.repoIDForInstance(instance)
@@ -293,11 +309,12 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionText 
 		svc := m.backlogService()
 		armed := false
 		err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
-			id := b.AnsweredInSessionText(sessionID, questionText, session.NormalizeAttentionReason, svc.Now())
+			id := b.AnsweredInSessionText(sessionID, question.ID, question.Text, session.NormalizeAttentionReason, svc.Now())
 			if id == 0 {
 				return []int{}, nil
 			}
-			backlogHost{m: m}.SetAttention(repoID, sessionID, b.OpenQuestionText(id))
+			nextID, nextText := b.OpenQuestionRef(id)
+			backlogHost{m: m}.SetAttention(repoID, sessionID, nextID, nextText)
 			// The answer typed in the pane is new work: an item in review (the agent
 			// asked after finishing) goes back to running, counts as a live answer
 			// for rollbacks of other pending ones, and gets its run armed here, in
@@ -332,20 +349,20 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance, questionText 
 // isSubmittedInput.
 type backlogSubmitBinding struct {
 	ptyTabBinding
-	openQuestion func() string
-	submitted    func(questionText string)
+	openQuestion func() seenQuestion
+	submitted    func(question seenQuestion)
 	// submit carries bracketed-paste state across the connection's frames.
 	submit *submitDetector
 }
 
 func (b backlogSubmitBinding) input(p []byte) error {
 	submit := b.submit.Submitted(p) // every frame, so paste state stays current
-	seen := ""
+	var seen seenQuestion
 	if submit {
 		seen = b.openQuestion()
 	}
 	err := b.ptyTabBinding.input(p)
-	if err == nil && submit && seen != "" {
+	if err == nil && submit && !seen.empty() {
 		b.submitted(seen)
 	}
 	return err
@@ -400,12 +417,12 @@ func backlogItemOfSession(repoID, sessionID string) int {
 // dismissed (Codex P2 on #6299).
 func (m *Manager) rebuildAskedQuestions(b *backlog.Backlog) {
 	for _, it := range b.Items {
-		q := b.OpenQuestionText(it.ID)
+		qid, q := b.OpenQuestionRef(it.ID)
 		r := b.LatestRun(it.ID)
 		if q == "" || r == nil || r.SessionID == "" {
 			continue
 		}
-		m.backlog.asked.Store(r.SessionID, session.NormalizeAttentionReason(q))
+		m.backlog.asked.Store(r.SessionID, seenQuestion{ID: qid, Text: session.NormalizeAttentionReason(q)})
 	}
 }
 

@@ -276,7 +276,7 @@ func TestBacklogAnsweredInSessionOnSubmit(t *testing.T) {
 	// The question the user's line answers is the one open when it is submitted;
 	// the agent posts the next one while the line is in flight.
 	answered := m.backlogSeenQuestion(inst)
-	if answered == "" {
+	if answered.empty() {
 		t.Fatal("no open question to capture")
 	}
 	if _, err := m.backlogService().PostMessage(backlog.PostMessageRequest{RepoID: repoID, ID: 1,
@@ -515,7 +515,7 @@ func TestFailedAnswerReplaysASkippedCompletion(t *testing.T) {
 func TestBacklogSeenQuestionSurvivesADismissedChip(t *testing.T) {
 	m, _, inst := askedItem(t)
 	want := m.backlogSeenQuestion(inst)
-	if want == "" {
+	if want.empty() {
 		t.Fatal("no open question")
 	}
 	a := inst.Attention()
@@ -535,7 +535,7 @@ func TestRebuildAskedQuestionsFromTheBacklog(t *testing.T) {
 	want := m.backlogSeenQuestion(inst)
 	inst.ClearAttention(inst.Attention().SetAt)
 	m.backlog.asked.Delete(inst.ID) // a fresh daemon
-	if m.backlogSeenQuestion(inst) != "" {
+	if !m.backlogSeenQuestion(inst).empty() {
 		t.Fatal("nothing should be remembered yet")
 	}
 	b, err := backlog.Load(repoID)
@@ -576,8 +576,8 @@ func TestLongQuestionIsAnsweredInSessionWithADismissedChip(t *testing.T) {
 			m.rebuildAskedQuestions(b)
 		}
 		seen := m.backlogSeenQuestion(inst)
-		if seen == "" || seen != session.NormalizeAttentionReason(long) {
-			t.Fatalf("rebuilt=%v: seen question %d runes, want the normalized form", rebuilt, len([]rune(seen)))
+		if seen.empty() || seen.Text != session.NormalizeAttentionReason(long) {
+			t.Fatalf("rebuilt=%v: seen question %d runes, want the normalized form", rebuilt, len([]rune(seen.Text)))
 		}
 	}
 	m.noteBacklogSubmitted(inst, m.backlogSeenQuestion(inst))
@@ -662,5 +662,27 @@ func TestRecoveryDoesNotRedeliverAnAnswerIntoAReplacementRun(t *testing.T) {
 	}
 	if !failed {
 		t.Fatal("the superseded answer was not recorded as undelivered")
+	}
+}
+
+// A failed continue closes only the run it armed: an answer worker that took the
+// target lock first armed (and delivered) a newer generation, which stays active
+// (Codex P2 on #6295).
+func TestFailedContinueLeavesANewerDeliverysRunArmed(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	inst.DisarmBacklogRun()
+	m.backlogRunEnded(repoID, inst.ID)
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(*Manager, SendPromptRequest) error {
+		inst.ArmBacklogRun(time.Now()) // the answer delivery that got the lock first
+		return errors.New("pane gone")
+	}
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err == nil {
+		t.Fatal("the continue should report the failed send")
+	}
+	m.backgroundMutationWG.Wait()
+	if !inst.BacklogRunActive() {
+		t.Fatal("the failed continue disarmed the answer delivery's run")
 	}
 }
