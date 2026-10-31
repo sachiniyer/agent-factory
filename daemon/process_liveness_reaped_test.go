@@ -30,6 +30,17 @@ func TestPidLooksAlive_ProcEntryVanishedAfterSignalZeroIsAnExit(t *testing.T) {
 		t.Fatal("pidExitObserved = false for a process whose /proc entry vanished after signal 0")
 	}
 
+	// The task can also vanish BETWEEN open and read: the kernel answers ESRCH.
+	readProcCmdline = func(int) ([]byte, error) {
+		return nil, &os.PathError{Op: "read", Path: "/proc/x/cmdline", Err: syscall.ESRCH}
+	}
+	if pidLooksAlive(pid) {
+		t.Fatal("pidLooksAlive = true for a process that vanished between open and read (ESRCH); that is an exit")
+	}
+	if !pidExitObserved(pid) {
+		t.Fatal("pidExitObserved = false for a process that vanished between open and read (ESRCH)")
+	}
+
 	// A read that fails for any other reason is not evidence of death.
 	readProcCmdline = func(int) ([]byte, error) {
 		return nil, &os.PathError{Op: "open", Path: "/proc/x/cmdline", Err: syscall.EACCES}
