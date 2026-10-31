@@ -72,6 +72,11 @@ type home struct {
 	// delivery-failure alarms (#1238) arrive from one authoritative RPC — the
 	// alarm is a field on the snapshot, not a side channel.
 	snapshotFetcher func(repoID string) (daemon.SnapshotResponse, error)
+
+	// webListenerFetcher reads the daemon's web-listener notice for the bottom
+	// bar (#6386). Per-home like snapshotFetcher; nil means no poll, so only
+	// newHome — never a bare test home — reaches the daemon.
+	webListenerFetcher func() string
 	// previewFetcher captures a session tab's content through the daemon — the sole
 	// capturer since #1592 Phase 2 PR6 (the TUI no longer shells out to tmux
 	// capture-pane). It backs TabPane's render path for content not streamed live
@@ -572,6 +577,7 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 		zones:                       zones.NewRegistry(),
 		mouseClock:                  time.Now,
 		snapshotFetcher:             snapshotThroughDaemon,
+		webListenerFetcher:          fetchWebListenerNotice,
 		previewFetcher:              previewThroughDaemon,
 		pauseStatusPoll:             pauseStatusPollThroughDaemon,
 		resumeStatusPoll:            resumeStatusPollThroughDaemon,
@@ -683,5 +689,6 @@ func (m *home) Init() tea.Cmd {
 			return previewTickMsg{}
 		},
 		tickRefreshExternalCmd,
+		webListenerNoticeCmd(m.ctx, m.webListenerFetcher, 2*time.Second),
 	)
 }
