@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { AUTOSAVE_DELAY_MS, DocSync, SAVE_RETRY_MS, SAVE_TIMEOUT_MS, type SyncStatus } from "./docs_sync.js";
+import { SAVE_DROP_GIVE_UP_MS, SAVE_GIVE_UP_MS } from "./docs_sync_model.js";
 import type { DocText, SaveResult } from "./proposal_api.js";
 
 interface Deferred<T> {
@@ -64,7 +65,8 @@ class Harness {
   }
 
   async fire(): Promise<void> {
-    const live = this.liveTimers();
+    // (A doubt's give-up timer is not the timer being fired.)
+    const live = this.liveTimers().filter((t) => t.ms !== SAVE_DROP_GIVE_UP_MS && t.ms !== SAVE_GIVE_UP_MS);
     assert.equal(live.length, 1, "exactly one timer should be pending");
     live[0]!.live = false;
     live[0]!.fn();
@@ -455,6 +457,49 @@ test("a save that timed out and lands later does not overwrite an undo", async (
   assert.equal(h.saves.at(-1)!.text, "v1", "and is saved on top of it");
 });
 
+test("a save whose connection dropped and lands later does not overwrite an undo", async () => {
+  const h = await started();
+  h.type("v2");
+  await h.fire(); // the save of v2 against c1 goes out
+  h.type("v1"); // the user undoes back to the acknowledged text
+  // The connection drops (the browser reports only that fetch failed): the daemon does not cancel the
+  // save when its client leaves, so the request can still commit.
+  h.saves[0]!.reply.reject(new TypeError("Failed to fetch"));
+  await tick();
+  let verdict: string | null = null;
+  void h.sync.whenSaved().then((v) => (verdict = v));
+  await tick();
+  assert.equal(verdict, null, "the daemon may yet hold v2: nothing is saved yet");
+  // The head read found nothing changed. The request then commits, and the change event arrives.
+  h.head = { text: "v2", commit: "c2" };
+  h.sync.remoteChanged("c2");
+  await tick();
+  await tick();
+  assert.equal(h.buffer, "v1", "the undo stands over the landed save");
+  await h.fire();
+  assert.equal(h.saves.at(-1)!.text, "v1", "and is saved on top of it");
+});
+
+test("a dropped save's doubt ends after the drop window when nothing landed", async () => {
+  const h = await started();
+  h.type("v2");
+  await h.fire();
+  h.type("v1");
+  h.saves[0]!.reply.reject(new TypeError("Failed to fetch"));
+  await tick();
+  let verdict: string | null = null;
+  void h.sync.whenSaved().then((v) => (verdict = v));
+  await tick();
+  assert.equal(verdict, null);
+  const giveUp = h.timers.find((t) => t.live && t.ms === SAVE_DROP_GIVE_UP_MS);
+  assert.ok(giveUp, "a drop is given up on after a short window, not the five minutes of a timeout");
+  giveUp!.live = false;
+  giveUp!.fn();
+  await tick();
+  await tick();
+  assert.equal(verdict, "saved", "Send now is not held for good by a connection blip");
+});
+
 test("a pumped whenSaved does not turn a failing save into a loop of save and read", async () => {
   const h = await started();
   h.type("v2");
@@ -462,7 +507,7 @@ test("a pumped whenSaved does not turn a failing save into a loop of save and re
   await tick();
   for (let i = 0; i < 20; i++) {
     const n = h.saves.length;
-    h.saves.at(-1)!.reply.reject(new Error("503 service unavailable"));
+    h.saves.at(-1)!.reply.reject(Object.assign(new Error("503 service unavailable"), { status: 503 }));
     await tick();
     await tick();
     assert.equal(h.saves.length, n, `no save is sent until the retry timer fires (round ${i})`);

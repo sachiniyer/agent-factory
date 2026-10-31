@@ -117,7 +117,10 @@ class Daemon {
     return prev;
   }
   /** The doc is added again from its template: a new commit with the original text. */
+  /** Counts re-adds: a request made against an earlier incarnation of the doc must not land in this one. */
+  epoch = 0;
   readd(initial: string): void {
+    this.epoch++;
     this.deleted = false;
     this.commit(initial);
   }
@@ -339,6 +342,26 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
           if (fault === "drop") throw httpErr(503, "503 service unavailable");
           if (fault === "refuse") throw httpErr(413, "413 doc is larger than the limit");
           if (fault === "hang-lost") return new Promise<never>(() => undefined);
+          if (fault === "drop-late" && !process.env.AF_NO_DROP_LATE) {
+            // The connection drops before the reply, and the daemon (which does not cancel a save when its
+            // client leaves) commits the request some seconds later.
+            const epoch = d.epoch;
+            timers.push({
+              at: now + 5000, // (a fixed delay: this event takes nothing from the seeded stream)
+              live: true,
+              owner,
+              fn: () => {
+                if (d.epoch !== epoch) return; // the doc was deleted and added again since: that request died with the old doc
+                try {
+                  const r = d.save(text, base, fence);
+                  if (r.kind === "saved" && !outage) events.push({ doc, commit: r.commit });
+                } catch {
+                  // refused (stale or gone): nothing committed
+                }
+              },
+            });
+            throw new Error("Failed to fetch");
+          }
           const result = d.save(text, base, fence);
           if (fault === "lose-reply") throw new Error("network error: reply lost");
           if (fault === "hang-applied") return new Promise<never>(() => undefined);
@@ -429,7 +452,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const agentLines = o.collide ? [0, 1, 2, 3, 4] : [3, 4];
 
   /** Forces the next save to fail in a given way (for scripted events). */
-  let nextSaveFault: "lose-reply" | "hang-applied" | "slow" | null = null;
+  let nextSaveFault: "lose-reply" | "hang-applied" | "slow" | "drop-late" | null = null;
 
   function userEdit(forced?: number): number | null {
     const s = syncs.get(attached);
@@ -908,6 +931,43 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     if (c && !outage) events.push({ doc, commit: c });
   }
 
+  /** The user types, the connection drops before the reply (the browser only says fetch failed), the user
+   *  undoes the line, and the daemon, which does not cancel a save when its client leaves, commits the
+   *  request seconds later. The undo must stand over the landed save.
+   *  (AF_NO_DROP_LATE leaves the request uncommitted, which is what an engine that trusts a rejection assumes.) */
+  async function dropThenLand(): Promise<void> {
+    const s = syncs.get(attached);
+    if (!s || !isLoaded(s) || s.ended) return;
+    if (userEdit(0) === null) return;
+    const landed = editor.text.split("\n")[0];
+    nextSaveFault = "drop-late";
+    s.flush();
+    await tick();
+    for (const p of net.filter((x) => x.stage === "sent" && x.owner === "a")) {
+      runPending(p);
+      break;
+    }
+    for (const p of net.filter((x) => x.stage === "processed" && !x.hang && x.owner === "a")) {
+      deliver(p);
+      break;
+    }
+    await tick();
+    userUndo(0);
+    const doc = attached;
+    const want = editor.text.split("\n")[0];
+    // The request commits, its change event reaches the tab, and everything settles.
+    await advance(6000);
+    while (events.length) deliverEvent();
+    await drain();
+    await advance(12_000);
+    await drain();
+    const now0 = syncs.get(doc);
+    if (!now0 || now0 !== s || !isLoaded(s) || s.currentStatus === "conflict" || s.currentStatus === "gone" || hasConflictMarkers(s.text)) return;
+    const shown = (attached === doc ? editor.text : s.text).split("\n")[0];
+    // (An agent edit of the same line may legitimately win the merge; the landed save's own text must not come back.)
+    if (landed !== want && shown === landed && s.text.split("\n")[0] === landed) fail("undo-overwritten-by-landed-save", `${doc}: the user undid line 0 from ${JSON.stringify(landed)} to ${JSON.stringify(want)}, and after the dropped save landed the pane shows ${JSON.stringify(shown)} again`);
+  }
+
   /** The user types, the save lands but its reply is lost, and the user changes their
    *  mind (undoes the line) before the tab has found out what happened. */
   async function ambiguousUndo(): Promise<void> {
@@ -1368,6 +1428,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   for (let step = 0; step < o.steps && !violation; step++) {
     // The late-landing interleavings are rare by chance, so they are reached on purpose at fixed steps.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 30 || step === 70 || step === 110)) await lateLanding();
+    if (o.chaos && (o.faults ?? 0) > 0 && (step === 60 || step === 100) && !o.collide) await dropThenLand();
     // The page holds adopted drafts, then goes through the back-forward cache.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 40 || step === 80 || step === 120)) {
       bfcacheReturn(true);
