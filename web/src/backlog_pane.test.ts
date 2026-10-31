@@ -435,6 +435,8 @@ test("a refresh that read the old item does not put the old title back over an u
   pane.update(data({ "/a": view(item(1, { title: "old" })) }, 2), "/a", []);
   assert.equal(titleInput(pane).value, "new", "the stale snapshot does not revert the field");
   submitTitle(pane, "new revised");
+  finish();
+  await settle();
   assert.equal(calls.filter((c) => c.method === "UpdateBacklogItem").at(-1)?.body.title, "new revised",
     "the next edit builds on the draft, not the reverted text");
   finish();
@@ -451,4 +453,62 @@ test("a refused rename gives the field back its stored title", async () => {
   submitTitle(pane, "rejected");
   await settle();
   assert.equal(titleInput(pane).value, "old");
+});
+
+const updates = (): Call[] => calls.filter((c) => c.method === "UpdateBacklogItem");
+
+test("title saves are serialized: a second rename waits for the first and goes out as the latest", async () => {
+  const finish: (() => void)[] = [];
+  reply = (method) => method === "UpdateBacklogItem" ? new Promise((r) => { finish.push(() => r({})); }) : Promise.resolve({});
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1, { title: "old" })) }), "/a", []);
+  pane.select(1);
+  submitTitle(pane, "new");
+  submitTitle(pane, "new revised");
+  submitTitle(pane, "new revised again");
+  assert.deepEqual(updates().map((c) => c.body.title), ["new"], "one request in flight");
+  finish[0]();
+  await settle();
+  assert.deepEqual(updates().map((c) => c.body.title), ["new", "new revised again"], "one follow-up with the latest title");
+  assert.equal(titleInput(pane).value, "new revised again");
+  finish[1]();
+  await settle();
+});
+
+test("removing two dependencies before the first write lands removes both", async () => {
+  const finish: (() => void)[] = [];
+  reply = (method) => method === "UpdateBacklogItem" ? new Promise((r) => { finish.push(() => r({})); }) : Promise.resolve({});
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1, { waits_on: [2, 3] }), item(2), item(3)) }), "/a", []);
+  pane.select(1);
+  const remove = (n: number): void => {
+    el(pane).querySelector(`button[aria-label="Remove B-${n}"]`)!.click();
+  };
+  remove(2);
+  remove(3);                                   // built from the pending list, not the stored [2, 3]
+  assert.deepEqual(updates().map((c) => c.body.waits_on), [[3]]);
+  finish[0]();
+  await settle();
+  assert.deepEqual(updates().map((c) => c.body.waits_on), [[3], []], "the second removal is sent from the first's result");
+  finish[1]();
+  await settle();
+});
+
+test("a refused note comes back to the box, ahead of anything typed since", async () => {
+  reply = async (method) => { if (method === "PostBacklogMessage") throw new Error("busy"); return {}; };
+  const h = host();
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1)) }), "/a", []);
+  pane.select(1);
+  const note = el(pane).querySelector(".af-backlog-note")!;
+  const addNote = (): void => {
+    [...el(pane).querySelectorAll("button")].find((b) => b.textContent === "Add note")!.click();
+  };
+  note.value = "a long investigation";
+  addNote();
+  assert.equal(note.value, "", "cleared on submit");
+  note.value = "typed meanwhile";
+  await settle();
+  assert.equal(note.value, "a long investigation\ntyped meanwhile");
+  assert.deepEqual(h.notices, ["busy"]);
 });

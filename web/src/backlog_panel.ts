@@ -13,8 +13,13 @@ import {
   childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, neededBy, openQuestion, safeHttpUrl,
 } from "./backlog_model.js";
 import { ROW_KIND_LABELS, isArchived, rowKind } from "./status.js";
+import { SerialSaver } from "./backlog_serial.js";
 import { formatTime } from "./time.js";
 import type { SessionData } from "./types.js";
+
+function sameList(a: readonly number[], b: readonly number[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
 
 export interface PanelActions {
   /** A promise settles true once the write and the refresh after it have landed (the body editor's acknowledgement). */
@@ -22,7 +27,8 @@ export interface PanelActions {
   status(id: number, status: Status): void;
   remove(id: number): void;
   move(id: number, to: MoveTarget): void;
-  note(id: number, text: string): void;
+  /** A promise settles true once the note and the refresh after it have landed; false when it was refused. */
+  note(id: number, text: string): Promise<boolean> | void;
   addChild(parent: number, title: string): void;
   select(id: number): void;
   close(): void;
@@ -93,25 +99,32 @@ export class ItemPanel {
   // The title the user submitted that no confirming response has covered yet: a
   // refresh that read the old item must not put the old title back over it.
   private titleDraft: string | null = null;
+  // The waits-on list the user last submitted, likewise held until acknowledged, so
+  // a second change builds on it instead of on the stored list.
+  private waitsDraft: number[] | null = null;
+  private readonly titles: SerialSaver<string>;
+  private readonly waits: SerialSaver<number[]>;
 
   constructor(readonly root: string, readonly id: number, private readonly actions: PanelActions) {
+    this.titles = new SerialSaver((title) => actions.update(id, { title }), (title, ok) => {
+      if (this.titleDraft !== title) return;   // a newer submission owns the draft
+      this.titleDraft = null;
+      // A refused rename gives the field back its stored title.
+      if (!ok && this.view) this.render(this.view, this.sessions);
+    });
+    this.waits = new SerialSaver((waits_on) => actions.update(id, { waits_on }), (list, ok) => {
+      if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
+      if (!ok && this.view) this.render(this.view, this.sessions);
+    });
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
     this.title.setAttribute("aria-label", "Title");
     const commitTitle = (): void => {
       const it = this.item();
       const t = this.title.value.trim();
       if (!it) return;
-      if (t && t !== it.title) {
+      if (t && t !== (this.titleDraft ?? it.title)) {
         this.titleDraft = t;
-        const done = actions.update(id, { title: t });
-        const settle = (ok: boolean): void => {
-          if (this.titleDraft !== t) return;   // a newer submission owns the draft
-          this.titleDraft = null;
-          // A refused rename gives the field back its stored title.
-          if (!ok && this.view) this.render(this.view, this.sessions);
-        };
-        if (done) done.then(settle, () => settle(false));
-        else settle(true);
+        this.titles.submit(t);
       } else this.title.value = this.titleDraft ?? it.title;
     };
     this.title.addEventListener("change", commitTitle);
@@ -125,7 +138,9 @@ export class ItemPanel {
       const text = this.note.value.trim();
       if (!text) return;
       this.note.value = "";
-      actions.note(id, text);
+      const done = actions.note(id, text);
+      // A refused note comes back to the box, ahead of anything typed since.
+      if (done) done.then((ok) => { if (!ok) this.note.value = this.note.value ? `${text}\n${this.note.value}` : text; }, () => {});
     });
     this.head = h("div", { class: "af-backlog-panel-state" });
     this.above = h("div", { class: "af-backlog-panel-rest" });
@@ -163,6 +178,17 @@ export class ItemPanel {
       if (this.view) this.render(this.view, this.sessions);
     };
     this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
+  }
+
+  /** The waits-on list as the user sees it: their last submission until it is acknowledged. */
+  private waitsOf(it: Item): number[] {
+    return this.waitsDraft ?? it.waits_on ?? [];
+  }
+
+  private setWaits(it: Item, list: number[]): void {
+    this.waitsDraft = list;
+    this.waits.submit(list);
+    if (this.view) this.render(this.view, this.sessions);
   }
 
   private item(): Item | undefined {
@@ -256,11 +282,11 @@ export class ItemPanel {
   private waitsSection(view: BacklogView, it: Item): HTMLElement {
     const b = view.backlog;
     const chips = h("div", { class: "af-backlog-chips" });
-    for (const w of it.waits_on ?? []) {
+    for (const w of this.waitsOf(it)) {
       const target = itemByID(b, w);
       const remove = h("button", { type: "button", class: "af-backlog-chip-x", title: `Remove ${formatID(w)}` }, icon("x"));
       remove.setAttribute("aria-label", `Remove ${formatID(w)}`);
-      remove.addEventListener("click", () => this.actions.update(it.id, { waits_on: (it.waits_on ?? []).filter((x) => x !== w) }));
+      remove.addEventListener("click", () => this.setWaits(it, this.waitsOf(it).filter((x) => x !== w)));
       const state = target ? STATE_LABELS[derivedOf(view, w).state] : "missing";
       chips.append(h("span", { class: "af-backlog-link" },
         h("span", {}, `${formatID(w)} ${target?.title ?? ""}`), h("span", { class: "af-backlog-reason" }, state), remove));
@@ -290,7 +316,7 @@ export class ItemPanel {
     const list = h("ul", { class: "af-backlog-picker-list" });
     const fill = (): void => {
       const q = this.pickerQuery.trim().toLowerCase().replace(/^b-/, "");
-      const options = b.items.filter((o) => o.id !== it.id && !(it.waits_on ?? []).includes(o.id) &&
+      const options = b.items.filter((o) => o.id !== it.id && !this.waitsOf(it).includes(o.id) &&
         (q === "" || String(o.id).startsWith(q) || o.title.toLowerCase().includes(q)));
       list.replaceChildren(...options.map((o) => {
         const block = waitsOnBlock(b, it.id, o.id);
@@ -299,7 +325,7 @@ export class ItemPanel {
         opt.addEventListener("click", () => {
           this.pickerOpen = false;
           this.pickerQuery = "";
-          this.actions.update(it.id, { waits_on: [...(it.waits_on ?? []), o.id] });
+          this.setWaits(it, [...this.waitsOf(it), o.id]);
         });
         return h("li", {}, opt);
       }));
