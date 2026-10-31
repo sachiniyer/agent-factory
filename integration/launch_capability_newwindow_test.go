@@ -17,8 +17,8 @@ import (
 // window with no command runs the session's default-command, which for an
 // account-scoped session is af's scoped-shell shim, and the shim now needs a
 // capability its OWNER serves. The owner must be the long-lived daemon: not a
-// short-lived CLI process that merely restored the session (af sessions preview
-// and attach both do), and not a daemon that has since been replaced (an upgrade).
+// short-lived CLI process that merely restored the session (af sessions attach
+// does, and so does the TUI), and not a daemon that has since been replaced (an upgrade).
 //
 // Real af binary, real daemon, real tmux on the harness's private server. "A new
 // window" here is what a manual tmux prefix-c does: new-window with no command.
@@ -92,14 +92,17 @@ func TestAccountSessionKeepsOpeningNewWindows(t *testing.T) {
 
 	newWindowIsScoped("fresh session")
 
-	// A CLI process restores the session when it previews it. It must not take
-	// over the capability behind default-command: it exits right after.
+	// A CLI process restores the session in-process when it resolves an attach
+	// target (resolveAttachTarget -> session.FromInstanceData, whose reattach runs
+	// the account-environment refresh). It must not take over the capability behind
+	// default-command: it exits right after. The attach itself cannot proceed with no
+	// terminal; its error is not the point, the restore it performed first is.
 	before := defaultCommand()
-	h.preview("acct")
+	_, _ = h.runResult("sessions", "attach", "acct")
 	if after := defaultCommand(); after != before {
 		t.Fatalf("a CLI restore rewrote default-command, handing the capability to a process that exits:\n before: %s\n after:  %s", before, after)
 	}
-	newWindowIsScoped("after af sessions preview")
+	newWindowIsScoped("after af sessions attach")
 
 	// An upgrade: the daemon is replaced while the session lives on carrying the
 	// OLD protocol's default-command (account name, proof and counts in argv, no
