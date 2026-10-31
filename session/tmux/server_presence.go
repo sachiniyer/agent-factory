@@ -276,32 +276,6 @@ func listSessionField(cmdExec cmd.Executor, format string) ([]string, error) {
 	return names, nil
 }
 
-// SessionCreatedUnix returns the server's recorded creation time for one tmux
-// session — per-launch temporal evidence the env markers alone cannot carry
-// (#5503): a same-named session killed and respawned gets a fresh timestamp, so
-// a leftover created at-or-after a recorded intent can be attributed to that
-// attempt. Any failure — absent session, wedged server, unparseable answer —
-// is an error; the caller must not read it as "not ours". Second granularity
-// is all tmux records; callers comparing against a finer bound should compare
-// at whole seconds.
-func SessionCreatedUnix(cmdExec cmd.Executor, sanitizedName string) (time.Time, error) {
-	ctx, cancel := tmuxTimeoutContext()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "display-message", "-t", exactTarget(sanitizedName), "-p", "#{session_created}")
-	timedOut := ctx.Err() != nil
-	cancel()
-	if err != nil {
-		if timedOut {
-			return time.Time{}, fmt.Errorf("%w: display-message for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
-		}
-		return time.Time{}, fmt.Errorf("could not read %s's creation time: %w", sanitizedName, err)
-	}
-	sec, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if perr != nil {
-		return time.Time{}, fmt.Errorf("could not parse %s's creation time %q: %w", sanitizedName, strings.TrimSpace(string(out)), perr)
-	}
-	return time.Unix(sec, 0), nil
-}
-
 // CommandDiagnostic returns what tmux wrote to stderr for a failed command,
 // whitespace-collapsed onto one line, or "" when there is nothing to report.
 //
