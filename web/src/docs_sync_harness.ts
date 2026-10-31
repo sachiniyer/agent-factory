@@ -1083,6 +1083,20 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     const want = typed.get(doc)!.get(line);
     await advance(31_000); // the client's timeout fires; its read of the head runs and finds nothing changed
     await drain();
+    // Sometimes the tab is closed now, a new tab opens, and the user edits in it before the
+    // old request lands: the closed tab handed the doc over and must not write any more.
+    const reopened = rand() < 0.5;
+    if (reopened) {
+      s.dispose();
+      closedSyncs.add(s);
+      closing.track(doc, s as Closable);
+      syncs.delete(doc);
+      attached = "";
+      editor.text = "";
+      await open(doc);
+      await drain();
+      userEdit();
+    }
     for (const p of net.filter((x) => x.stage === "held" && x.owner === "a")) {
       p.stage = "sent";
       p.hang = false;
@@ -1097,7 +1111,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
     // I16: a save that timed out and lands later does not overwrite the undo.
     const after = syncs.get(doc);
-    if (after && !after.ended && ["saved", "pending", "merged", "recovered", "saving"].includes(after.currentStatus)) {
+    if (!reopened && after && !after.ended && ["saved", "pending", "merged", "recovered", "saving"].includes(after.currentStatus)) {
       const got = after.text.split("\n")[line];
       if (got !== want) fail("late-landing-save-overwrote-undo", `${doc} line ${line}: expected ${want}, the tab shows ${got} (status ${after.currentStatus})`);
     }

@@ -202,3 +202,15 @@ test("a closed tab whose saves keep failing waits longer each time, while its re
   }
   assert.deepEqual(delays, [5000, 10000, 20000, 40000, 60000, 60000]);
 });
+
+test("a closed tab whose timed-out save ends later sends no corrective save of its own", () => {
+  // save B (timed out, still out), undo to A, the tab closes and goes quiet; the request then ends.
+  let r = run(loaded(), { t: "edit", text: "v2" }, { t: "flush" });
+  r = run(r.m, { t: "save_fail", error: "the daemon did not answer in time", outstanding: true });
+  r = run(r.m, { t: "reconcile_ok", doc: { text: "v1", commit: "c1" } });
+  r = run(r.m, { t: "edit", text: "v1" }, { t: "close" });
+  const seq = r.m.late[0]!.seq;
+  r = run(r.m, { t: "late_done", seq });
+  assert.equal(r.fx.some((f) => f.t === "save" || f.t === "load"), false, "it reads nothing and sends nothing: the next pane restores its draft");
+  assert.equal(r.m.late.length, 0);
+});
