@@ -398,6 +398,29 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	if !can {
 		return OffBoxAccountSwap{}, ErrAccountSwapUnsupported
 	}
+	// restoreAccountWorkspace rebuilds a reattached session's account workspace
+	// from the row alone (#5948), and the cleanup handle carries no repo config to
+	// re-derive the operator's sandbox_agent_config selection from — so
+	// spec.AgentConfigFiles stays empty for the session's whole life after a
+	// restart. An off-box swap would then stage the incoming account WITHOUT the
+	// operator's personalization (a bare agent) and the rotation would delete the
+	// outgoing scope that held the provision-time copy. Re-derive it here, from the
+	// same repo config the admission proof just resolved, mirroring provision's
+	// pairing of AgentConfigFiles with AccountSyncHost (backend_ssh.go):
+	// sandbox_agent_config is global-only, so this re-reads nothing a repository
+	// could set, and AccountSyncHost — durable in the row — is the licence that
+	// provision set both under. The gate leaves a freshly provisioned workspace's
+	// provision-time selection untouched.
+	if len(w.spec.AgentConfigFiles) == 0 && strings.TrimSpace(w.spec.AccountSyncHost) != "" {
+		if rc, rcErr := resolveRepoConfig(i.Path); rcErr == nil {
+			w.spec.AgentConfigFiles = append([]string(nil), rc.SandboxAgentConfig...)
+		} else {
+			// admission already proved resolveRepoConfig(i.Path) works (it is the
+			// one program-validation depends on); a miss here is a transient read
+			// failure, so proceed as before rather than surface a new refusal.
+			log.WarningLog.Printf("account handoff of %q: re-deriving sandbox agent config: %v", i.Title, rcErr)
+		}
+	}
 	res := OffBoxAccountSwap{From: w.spec.Account.Name, To: next.Name}
 	versions, err := w.stageAccountNext(sshShortStepTimeout, next)
 	if err != nil {
