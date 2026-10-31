@@ -415,3 +415,17 @@ test("a tab closed while its first read is out is not quiet until that read has 
   await tick();
   assert.equal(quiet, true);
 });
+
+test("a 404 to a save sent before the doc was restored does not mark the restored doc deleted", async () => {
+  const h = await started();
+  h.type("v2");
+  await h.fire(); // the save goes out
+  h.sync.remoteDeleted(); // the doc list says the doc is gone: unsaved work keeps the tab
+  assert.equal(h.sync.currentStatus, "gone");
+  h.head = { text: "v1", commit: "c5" }; // the doc is added again
+  await h.sync.revive();
+  assert.notEqual(h.sync.currentStatus, "gone");
+  h.saves[0]!.reply.reject(Object.assign(new Error("404 doc not found"), { status: 404 })); // the old save's answer, late
+  await tick();
+  assert.notEqual(h.sync.currentStatus, "gone", "the restore stands");
+});

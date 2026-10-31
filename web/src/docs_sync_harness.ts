@@ -850,6 +850,46 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
   }
 
+  /** A save is in flight when the doc is deleted: the daemon answers it 404, and the reply
+   *  is delayed. The tab learns of the delete from the doc list, the user restores the
+   *  doc, and only then does the old 404 arrive: it must not mark the restored doc gone. */
+  async function lateNotFound(): Promise<void> {
+    const doc = attached;
+    const s = syncs.get(doc);
+    const d = daemons.get(doc)!;
+    if (!doc || !s || !isLoaded(s) || s.ended || d.deleted || userEdit() === null) return;
+    s.flush();
+    await tick();
+    const sent = net.filter((x) => x.stage === "sent" && x.owner === "a");
+    if (!sent.length) return;
+    d.deleted = true;
+    d.down = 0; // the daemon is up: the restore's own read must be able to answer
+    for (const p of sent) runPending(p); // the daemon answers 404; the replies are still on the wire
+    s.remoteDeleted?.();
+    await tick();
+    if (s.currentStatus !== "gone") {
+      d.readd(initialText(doc));
+      return;
+    }
+    d.readd(initialText(doc));
+    let revived = false; // its read can fail (the daemon is down): the doc then stays deleted, and the user tries again
+    void s.revive?.().then(() => { revived = true; }, () => undefined);
+    await tick();
+    // The restore's read answers first (the one request sent after the doc came back)...
+    for (const p of net.filter((x) => x.stage === "sent" && x.owner === "a")) {
+      runPending(p);
+      deliver(p);
+    }
+    await tick();
+    await tick();
+    // ...and only then do the old 404s arrive.
+    for (const p of net.filter((x) => x.stage === "processed" && !x.hang && x.owner === "a")) deliver(p);
+    await tick();
+    await drain();
+    // I15: a reply to a request from before the restore does not undo the restore.
+    if (revived && s.currentStatus === "gone" && !d.deleted) fail("revived-doc-marked-gone-again", `${doc}: a 404 to a request from before the restore marked the restored doc deleted`);
+  }
+
   /** The doc is deleted under unsaved work and the user discards it: nothing may write
    *  the discarded work back into storage, now or on any later event. */
   async function discardDeleted(): Promise<void> {
@@ -1069,7 +1109,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     else if (o.chaos && r >= 0.945 && r < 0.95) remoteDelete();
     else if (o.chaos && r >= 0.95 && r < 0.955) remoteReadd();
     else if (o.chaos && r >= 0.955 && r < 0.96) await reviveGone();
-    else if (o.chaos && r >= 0.96 && r < 0.9625) daemonRestart();
+    else if (o.chaos && r >= 0.96 && r < 0.9615) daemonRestart();
+    else if (o.chaos && r >= 0.9615 && r < 0.9625) await lateNotFound();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9625 && r < 0.966) await deleteThenClose();
     else if (o.chaos && o.collide && r >= 0.966 && r < 0.97) rollbackHead();
     else if (o.chaos && !o.collide && r >= 0.966 && r < 0.97) await discardDeleted();

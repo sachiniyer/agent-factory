@@ -326,7 +326,7 @@ export class DocSync {
           },
           (e: unknown) => {
             if (kind !== "initial" && statusOf404(e)) {
-              this.dispatch({ t: "gone" });
+              this.dispatch({ t: "gone", of: "read", seq });
               return;
             }
             const error = errorMessage(e);
@@ -364,7 +364,7 @@ export class DocSync {
             if (settled) return;
             settled = true;
             this.deps.clearTimer(timeout);
-            if (statusOf404(e)) this.dispatch({ t: "gone" });
+            if (statusOf404(e)) this.dispatch({ t: "gone", of: "save", seq });
             else if (refused(e)) this.dispatch({ t: "save_fatal", seq, error: errorMessage(e) });
             else this.dispatch({ t: "save_fail", seq, error: errorMessage(e) });
           },
