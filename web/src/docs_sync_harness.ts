@@ -750,7 +750,20 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       break;
     }
     await tick();
+    const doubted = typed.get(attached)!.get(line);
     userUndo(line);
+    // I10: Send now waits on whenSaved(). It must not say "saved" while the daemon still
+    // holds the save whose reply was lost, whatever the buffer shows: the pane would send
+    // that text to the agent.
+    const undone = syncs.get(attached);
+    if (undone?.whenSaved && doubted !== undefined) {
+      const doc = attached;
+      void undone.whenSaved().then((v) => {
+        if (v === "saved" && daemons.get(doc)!.text.split("\n")[line] === doubted && undone.text.split("\n")[line] !== doubted) {
+          fail("saved-reported-while-daemon-holds-undone-text", `${doc} line ${line}: whenSaved said saved but the daemon still holds ${doubted}`);
+        }
+      });
+    }
     const want = typed.get(attached)!.get(line);
     await drain();
     for (let i = 0; i < 2; i++) {

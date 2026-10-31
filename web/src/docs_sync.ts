@@ -226,7 +226,10 @@ export class DocSync {
     const m = this.model;
     if (!m.loaded) return m.loadFailed !== null ? "blocked" : null;
     if (m.phase === "conflict" || m.gone || m.fatal) return "blocked";
-    if (!isDirty(m)) return m.phase === "saving" ? null : "saved";
+    // Clean is not saved while the outcome of a save is unknown: the daemon may hold
+    // text the buffer has since moved off (an undo back to the acknowledged text), and
+    // the corrective save follows the reconcile read.
+    if (!isDirty(m)) return m.phase === "saving" || m.phase === "reconciling" || m.unknown ? null : "saved";
     if (m.phase === "idle" && !m.unknown && (hasConflictMarkers(m.buffer) || m.note?.kind === "error")) return "blocked";
     return null;
   }
