@@ -31,17 +31,24 @@ interface Entry {
   owner: string;
   at: number;
   released: boolean;
-  draft: Draft;
+  /** The draft the pane's sync is working from, or null while the pane holds only drafts it took over
+   *  and has not yet been asked to restore (`load` brings the next one forward). */
+  draft: Draft | null;
   /** Other drafts of the doc this pane took over together with `draft` (orphans of several closed or
-   *  dead panes): kept here so none is left under a closed pane's id and none is lost. `clear` brings
-   *  the next one forward. */
+   *  dead panes): kept here so none is left under a closed pane's id and none is lost. */
   more?: Draft[];
 }
 
-/** At most this many extra drafts ride along on one entry. */
-const MAX_MORE = 8;
-
 const sameDraft = (a: Draft, b: Draft): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/** Every draft an entry holds, the working one first. */
+const draftsOf = (e: Entry): Draft[] => [...(e.draft ? [e.draft] : []), ...(e.more ?? [])];
+
+/** The draft a load of this entry would restore. */
+const currentDraft = (e: Entry): Draft | null => e.draft ?? e.more?.[0] ?? null;
+
+/** `list` without repeats (the first of identical drafts is kept). */
+const distinct = (list: Draft[]): Draft[] => list.reduce<Draft[]>((out, d) => (out.some((x) => sameDraft(x, d)) ? out : [...out, d]), []);
 
 export class DraftStorage {
   /** The entries this pane owns are keyed by this id. */
@@ -138,7 +145,7 @@ export class DraftStorage {
   /** The draft `load` would return, without adopting it. */
   peek(doc: string): Draft | null {
     const best = this.takeable(doc).sort((a, b) => Number(b.entry.owner === this.owner) - Number(a.entry.owner === this.owner) || b.entry.at - a.entry.at)[0];
-    if (best) return best.entry.draft;
+    if (best) return currentDraft(best.entry);
     try {
       const raw = this.kv.get(this.legacyKey(doc));
       return raw === null ? null : (JSON.parse(raw) as Draft);
@@ -162,7 +169,7 @@ export class DraftStorage {
     const own = this.read(ownKey);
     // A pane that is gone takes nothing over: its closing syncs only check whether what
     // they last wrote is still stored, and must not move another pane's draft here.
-    if (this.closed) return own ? own.draft : null;
+    if (this.closed) return own ? currentDraft(own) : null;
     const t = this.now();
     // The orphans of closed or dead panes, newest first (a live pane's entry is not ours to take).
     const orphans: { key: string; entry: Entry }[] = [];
@@ -175,26 +182,31 @@ export class DraftStorage {
       orphans.push({ key, entry });
     }
     orphans.sort((a, b) => b.entry.at - a.entry.at);
-    // However many orphans there are, and whether or not this pane already holds a draft of the doc, none
-    // is left under the id of a pane that closed: the newest is the draft (unless the pane has its own),
-    // and the rest ride along on this pane's entry, identical ones dropped.
+    // However many orphans there are, and whether or not this pane already holds drafts of the doc, none
+    // is left under the id of a pane that closed: this pane's own drafts come first, then the orphans'
+    // newest first, identical ones dropped; the first is the draft restored now and the rest stay on this
+    // pane's entry until a later load restores them.
     if (orphans.length > 0) {
-      const primary = own ? own.draft : orphans[0]!.entry.draft;
-      const rest = own ? orphans : orphans.slice(1);
-      const more: Draft[] = [...(own?.more ?? [])];
-      const candidates = [...rest.flatMap((o) => [o.entry.draft, ...(o.entry.more ?? [])]), ...(own ? [] : orphans[0]!.entry.more ?? [])];
-      for (const d of candidates) {
-        if (!sameDraft(d, primary) && !more.some((m) => sameDraft(m, d))) more.push(d);
-      }
-      const entry: Entry = { owner: this.owner, at: t, released: this.unloading, draft: primary, ...(more.length ? { more: more.slice(0, MAX_MORE) } : {}) };
+      const all = distinct([...(own ? draftsOf(own) : []), ...orphans.flatMap((o) => draftsOf(o.entry))]);
+      const primary = all[0]!;
+      const more = all.slice(1);
+      const entry: Entry = { owner: this.owner, at: t, released: this.unloading, draft: primary, ...(more.length ? { more } : {}) };
       if (this.write(ownKey, entry)) {
         for (const o of orphans) this.remove(o.key);
       } else if (!own) {
-        this.adopted.set(doc, orphans[0]!.key); // not stored here yet: the source stays until it is
+        this.adopted.set(doc, orphans[0]!.key); // not stored here yet: the sources stay until it is
       }
       return primary;
     }
-    if (own) return own.draft;
+    if (own) {
+      if (own.draft) return own.draft;
+      // Only drafts taken over earlier: the next one is restored now.
+      const next = own.more?.[0];
+      if (!next) return null;
+      const rest = own.more!.slice(1);
+      this.write(ownKey, { ...own, draft: next, ...(rest.length ? { more: rest } : { more: undefined }) });
+      return next;
+    }
     // A draft stored before entries had owners.
     try {
       const raw = this.kv.get(this.legacyKey(doc));
@@ -211,22 +223,31 @@ export class DraftStorage {
   }
 
   store(doc: string, draft: Draft): void {
-    const more = this.read(this.key(doc, this.owner))?.more;
-    if (!this.write(this.key(doc, this.owner), { owner: this.owner, at: this.now(), released: this.closed || this.unloading, draft, ...(more?.length ? { more } : {}) })) return;
+    const ownKey = this.key(doc, this.owner);
+    const more = this.carried(doc);
+    if (!this.write(ownKey, { owner: this.owner, at: this.now(), released: this.closed || this.unloading, draft, ...(more.length ? { more } : {}) })) return;
     this.dropAdopted(doc); // this pane's copy now holds the work
     this.held.set(doc, draft);
     this.lastTouch = this.now();
   }
 
+  /** The drafts this pane holds for `doc` besides the one its sync works from: the ones it took over, and
+   *  those that came bundled with a source it has not yet copied (a copy that did not fit). */
+  private carried(doc: string): Draft[] {
+    const prev = this.read(this.key(doc, this.owner));
+    const from = this.adopted.get(doc);
+    const source = from === undefined ? null : this.read(from);
+    return distinct([...(prev?.more ?? []), ...(source?.more ?? [])]);
+  }
+
   /** Removes this pane's draft of the doc, and the adopted source it was still holding. Other drafts it took
-   *  over with it are not the user's to lose: the next one becomes this pane's draft. */
+   *  over with it are not the user's to lose: they stay, and the next load restores the next one. */
   clear(doc: string): void {
     this.held.delete(doc);
     const key = this.key(doc, this.owner);
-    const more = this.read(key)?.more;
-    if (more?.length) {
-      const rest = more.slice(1);
-      this.write(key, { owner: this.owner, at: this.now(), released: this.closed || this.unloading, draft: more[0]!, ...(rest.length ? { more: rest } : {}) });
+    const more = this.carried(doc);
+    if (more.length) {
+      this.write(key, { owner: this.owner, at: this.now(), released: this.closed || this.unloading, draft: null, more });
     } else {
       this.remove(key);
     }

@@ -249,8 +249,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     [...kvMap.entries()]
       .filter(([k]) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`))
       .flatMap(([, v]) => {
-        const e = JSON.parse(v) as { draft: Draft; more?: Draft[] };
-        return [e.draft.buffer, ...(e.more ?? []).map((d) => d.buffer)]; // drafts a pane took over with its own
+        const e = JSON.parse(v) as { draft: Draft | null; more?: Draft[] };
+        return [...(e.draft ? [e.draft.buffer] : []), ...(e.more ?? []).map((d) => d.buffer)]; // drafts a pane took over with its own
       });
   const initialText = (n: string): string => Array.from({ length: LINES }, (_, i) => `${n}${i}`).join("\n");
   // The values each line had before the user typed over it, for undo.
@@ -585,7 +585,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
     const mine = names.flatMap((doc) => {
       const own = kvMap.get(`af.docs.draft\ns\nplan\n${doc}\n${storageA.owner}`);
-      return own ? [{ doc, buffer: (JSON.parse(own) as { draft: Draft }).draft.buffer }] : [];
+      const held = own ? (JSON.parse(own) as { draft: Draft | null }).draft : null;
+      return held ? [{ doc, buffer: held.buffer }] : []; // (an entry with only taken-over drafts is not what a sync holds)
     });
     if (!mine.length) return;
     if (stall) {
@@ -728,7 +729,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       const ghostSuffix = ghostBox.cur ? `\n${ghostStorage.owner}` : null;
       const stored = [...kvMap.entries()]
         .filter(([k]) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`) && !(ghostSuffix && k.endsWith(ghostSuffix)))
-        .flatMap(([, v]) => (JSON.parse(v) as { draft: Draft }).draft.buffer.split("\n"));
+        .flatMap(([, v]) => {
+          const e = JSON.parse(v) as { draft: Draft | null; more?: Draft[] };
+          return [...(e.draft ? [e.draft] : []), ...(e.more ?? [])].flatMap((d) => d.buffer.split("\n"));
+        });
       const stranded = [...typed.get(doc)!.values()].filter((tok) => !excused.has(tok) && !d.everHad(tok) && stored.includes(tok));
       if (stranded.length && syncs.get(doc)?.currentStatus !== "gone") {
         fail("stored-draft-of-deleted-doc-unreachable", `${doc}: ${stranded.join(",")} is stored for a doc the daemon no longer has, and the reopened pane shows ${syncs.get(doc)?.currentStatus ?? "nothing"}`);

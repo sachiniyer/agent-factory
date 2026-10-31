@@ -302,3 +302,71 @@ test("identical drafts are not kept twice, and storing keeps the drafts taken ov
   d.clear("goals");
   assert.equal(d.load("goals")?.buffer, "one", "storing did not drop the draft it took over");
 });
+
+test("a draft taken over with the newest stays protected until a load restores it, however the pane writes meanwhile", () => {
+  // The newest draft matches the server and is cleared; the pane then types: the older draft it came with
+  // must not be overwritten by that write, because the editor has not been shown it.
+  const kv = memory();
+  let now = 1000;
+  const older = new DraftStorage(kv, "wOlder", () => now, "s\nplan");
+  older.store("goals", draft("older unsent work"));
+  older.release();
+  now += 5;
+  const newest = new DraftStorage(kv, "wNewest", () => now, "s\nplan");
+  newest.store("goals", draft("newest work"));
+  newest.release();
+  now += 5;
+  const next = new DraftStorage(kv, "wNext", () => now, "s\nplan");
+  assert.equal(next.load("goals")?.buffer, "newest work");
+  next.clear("goals"); // it matched the server
+  next.store("goals", draft("typed after")); // the next edit
+  next.clear("goals"); // saved
+  assert.equal(next.load("goals")?.buffer, "older unsent work", "the older draft survived the writes in between");
+});
+
+test("a page that takes over many drafts keeps every one", () => {
+  const kv = memory();
+  let now = 1000;
+  for (let i = 0; i < 12; i++) {
+    const w = new DraftStorage(kv, `wOld${i}`, () => now, "s\nplan");
+    w.store("goals", draft(`work ${i}`));
+    w.release();
+    now += 1;
+  }
+  const next = new DraftStorage(kv, "wNext", () => now, "s\nplan");
+  const seen: string[] = [];
+  for (let i = 0; i < 12; i++) {
+    const d = next.load("goals");
+    if (d) seen.push(d.buffer);
+    next.clear("goals");
+  }
+  assert.deepEqual([...seen].sort(), Array.from({ length: 12 }, (_, i) => `work ${i}`).sort(), "all twelve come back, one at a time");
+  assert.equal(next.load("goals"), null);
+});
+
+test("drafts bundled with an orphan survive a failed adoption", () => {
+  const kv = memory();
+  let now = 1000;
+  const a = new DraftStorage(kv, "wA", () => now, "s\nplan");
+  a.store("goals", draft("a"));
+  a.release();
+  now += 1;
+  const b = new DraftStorage(kv, "wB", () => now, "s\nplan");
+  b.store("goals", draft("b"));
+  b.release();
+  now += 1;
+  // wC takes both over (b is the draft, a rides along) and then closes without restoring them.
+  const c = new DraftStorage(kv, "wC", () => now, "s\nplan");
+  assert.equal(c.load("goals")?.buffer, "b");
+  c.release();
+  now += 1;
+  // wD finds the bundle while storage is full: the copy does not fit, and the bundle must stay whole.
+  let full = true;
+  const limited: typeof kv = { ...kv, set: (k, v) => { if (full && !kv.map.has(k)) throw new Error("QuotaExceededError"); kv.set(k, v); } };
+  const d = new DraftStorage(limited, "wD", () => now, "s\nplan");
+  assert.equal(d.load("goals")?.buffer, "b", "its own copy does not fit, the draft is still returned");
+  full = false;
+  d.store("goals", draft("b, edited")); // space is back and the pane writes
+  d.clear("goals");
+  assert.equal(d.load("goals")?.buffer, "a", "the draft that rode along with the orphan was not lost with its source");
+});
