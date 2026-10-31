@@ -507,7 +507,7 @@
         "pointer": "commands/docs_gen.go:29 (hidden); commands/docs_gen.go:61 (--plugin-root); commands/agentservercmd.go:34; commands/legacy_tmuxguardcmd.go"
       },
       "verdict": "deliberate",
-      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio\u2194TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes \u2014 running it by hand does nothing useful. af internal plan-tap is hidden too: it is the Claude Code status line command af injects into the Claude sessions it launches, so Claude Code runs it, not a person; it records plan usage and runs the user's own status line. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
+      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio\u2194TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes \u2014 running it by hand does nothing useful. af internal plan-tap is hidden too: it is the Claude Code status line command af injects into the Claude sessions it launches, so Claude Code runs it, not a person; it records plan usage and runs the user's own status line. af internal git-credential and af internal gh-shim are hidden for the same reason (#5571 W7.8): git runs the first as the credential helper a sandbox workspace's repo-local config names, and the gh shim on the session's PATH runs the second; each asks the daemon for the session's own push credential over its own callback, so no person invokes them. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
       "id": "task.path-validate",
@@ -1961,6 +1961,8 @@
       "af help": "meta.discovery",
       "af hook-guard-tmux": "meta.internal",
       "af internal plan-tap": "meta.internal",
+      "af internal git-credential": "meta.internal",
+      "af internal gh-shim": "meta.internal",
       "af keys": "meta.discovery",
       "af projects add": "project.add",
       "af projects delete": "project.delete",
@@ -2336,6 +2338,10 @@
       "af hook-guard-tmux --help": "meta.internal",
       "af internal --help": "meta.internal",
       "af internal plan-tap --help": "meta.internal",
+      "af internal git-credential --help": "meta.internal",
+      "af internal git-credential --session-dir": "meta.internal",
+      "af internal gh-shim --help": "meta.internal",
+      "af internal gh-shim --session-dir": "meta.internal",
       "af keys --help": "meta.discovery",
       "af keys --json": "cli.json-envelope",
       "af projects --help": "meta.discovery",

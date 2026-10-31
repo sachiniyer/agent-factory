@@ -20,14 +20,14 @@ import (
 type Origin struct {
 	// Host is the URL's host, port included when non-default, lowercased: the
 	// exact `host` field git's credential protocol sends for it.
-	Host string
+	Host string `json:"host"`
 	// Path is "owner/repo", lowercased, without a leading slash or a ".git"
 	// suffix. GitHub resolves owner and repository names case-insensitively.
-	Path string
+	Path string `json:"path"`
 	// Enterprise is true when the token comes from the enterprise variables
 	// (GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN) rather than the public
 	// ones: a configured GH_HOST that is not github.com or a *.ghe.com tenant.
-	Enterprise bool
+	Enterprise bool `json:"enterprise,omitempty"`
 }
 
 // Hostname is Host without a port, the name `gh --hostname` and GH_HOST take.

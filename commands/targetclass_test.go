@@ -137,6 +137,10 @@ var verbTargetClass = map[string]string{
 	"af gen-docs":          classLocal,
 	"af hook-guard-tmux":   classLocal,
 	"af internal plan-tap": classLocal, // Claude Code's status line command, run on THIS machine
+	// W7.8: run on the SANDBOX host by git and the gh shim; each dials its own
+	// session's callback socket, never a --daemon-url target.
+	"af internal git-credential": classLocal,
+	"af internal gh-shim":        classLocal,
 }
 
 func collectLeaves(c *cobra.Command, out *[]string) {
