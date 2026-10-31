@@ -539,6 +539,28 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     if (!outage) events.push({ doc, commit });
   }
 
+  /** The page goes into the back-forward cache: its pagehide releases the drafts, another window
+   *  adopts them and resolves its copy, and the page comes back. What it held unsaved must be in
+   *  storage again, because its sync stashed it once and will not store it a second time.
+   *  (AF_NO_BFCACHE_REVIVE is the pane that only refreshes the entries that still exist.) */
+  function bfcacheReturn(): void {
+    const mine = names.flatMap((doc) => {
+      const own = kvMap.get(`af.docs.draft\ns\nplan\n${doc}\n${storageA.owner}`);
+      return own ? [{ doc, buffer: (JSON.parse(own) as { draft: Draft }).draft.buffer }] : [];
+    });
+    if (!mine.length) return;
+    storageA.release();
+    const other = new DraftStorage(kv, `wBF${++winSeq}`, () => now, "s\nplan");
+    for (const { doc } of mine) {
+      if (other.load(doc)) other.clear(doc);
+    }
+    if (process.env.AF_NO_BFCACHE_REVIVE) storageA.touch();
+    else storageA.revive();
+    for (const { doc, buffer } of mine) {
+      if (!stashedBuffers(doc).includes(buffer)) fail("bfcache-draft-lost", `${doc}: the page came back from the back-forward cache without ${JSON.stringify(buffer)} in storage`);
+    }
+  }
+
   async function advance(ms: number): Promise<void> {
     now += ms;
     // Windows that are alive refresh their drafts (the heartbeat).
@@ -1411,7 +1433,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     else if (o.chaos && r >= 0.9693 && r < 0.9697) await listAfterRestore();
     else if (o.chaos && o.collide && r >= 0.9665 && r < 0.9690) rollbackHead();
     else if (o.chaos && !o.collide && r >= 0.9665 && r < 0.9690) await discardDeleted();
-    else if (o.chaos && r >= 0.9695 && r < 0.97) toggleWriteOutage();
+    else if (o.chaos && r >= 0.9697 && r < 0.9699) bfcacheReturn();
+    else if (o.chaos && r >= 0.9695 && r < 0.9697) toggleWriteOutage();
+    else if (o.chaos && r >= 0.9699 && r < 0.97) toggleWriteOutage();
     else if (o.chaos && r >= 0.97 && r < 0.98) {
       if (!ghostBox.cur) ghostOpen();
       else if (rand() < 0.5) ghostEdit();

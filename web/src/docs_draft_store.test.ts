@@ -180,3 +180,20 @@ test("a duplicated browser tab gets its own window id even with a copy of the fi
   const b = new DraftStorage(memory(), dup, () => 0, "s\nplan", "1");
   assert.notEqual(a.owner, b.owner, "the same pane number in both pages is still two owners");
 });
+
+test("a bfcache restore writes back a draft another window adopted and removed", () => {
+  const kv = memory();
+  const now = 1000;
+  const a = new DraftStorage(kv, "wA", () => now, "s\nplan");
+  a.store("goals", draft("unresolved conflict"));
+  a.release(); // pagehide into the back-forward cache
+  const b = new DraftStorage(kv, "wB", () => now, "s\nplan");
+  assert.equal(b.load("goals")?.buffer, "unresolved conflict", "B adopts it and the original entry is removed");
+  b.clear("goals"); // B resolves or discards its copy
+  assert.equal(a.load("goals"), null, "A's entry is gone: touch() alone could not bring it back");
+  a.revive(); // pageshow
+  assert.equal(a.load("goals")?.buffer, "unresolved conflict", "A still holds the work it never resolved");
+  a.clear("goals");
+  a.revive();
+  assert.equal(a.load("goals"), null, "a draft the sync cleared is not written back");
+});

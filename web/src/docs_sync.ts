@@ -228,6 +228,8 @@ export class DocSync {
 
   private savedVerdict(): "saved" | "blocked" | null {
     const m = this.model;
+    // An abandoned sync (its doc deleted) will never save: a waiter must not hang on it.
+    if (m.dead) return "blocked";
     if (!m.loaded) return m.loadFailed !== null ? "blocked" : null;
     if (m.phase === "conflict" || m.gone || m.fatal) return "blocked";
     // Clean is not saved while the outcome of a save is unknown: the daemon may hold
