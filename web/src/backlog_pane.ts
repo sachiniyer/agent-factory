@@ -19,7 +19,8 @@ import type { SessionData } from "./types.js";
 
 export interface BacklogHost {
   token(): string | null;
-  refresh(): Promise<void>;
+  /** Re-reads the backlogs; settles true when the read of `root` (all, when none is named) succeeded. */
+  refresh(root?: string): Promise<boolean>;
   /** The newest backlog refresh started so far. */
   started(): number;
   notify(message: string): void;
@@ -71,7 +72,7 @@ export class BacklogPane {
   private pending: { root: string; backlog: Backlog; gen: number } | null = null;
   // Reorder writes go out one at a time: each target is computed from the previous
   // optimistic order, so they must commit in the order they were made.
-  private moves: Promise<void> = Promise.resolve();
+  private moves: Promise<unknown> = Promise.resolve();
   private panel: ItemPanel | null = null;
   private dragId: number | null = null;
   private focusId: number | null = null;
@@ -160,9 +161,12 @@ export class BacklogPane {
   private write(run: (token: string) => Promise<unknown>): Promise<boolean> {
     const token = this.host.token();
     if (token === null) return Promise.resolve(false);
-    return run(token).then(() => this.host.refresh().then(() => true), (e: unknown) => {
+    const root = this.root ?? undefined;
+    // True only when the refresh after the write also read the project: an edit is
+    // acknowledged by a snapshot that carries it, not by a failed read that kept the old one.
+    return run(token).then(() => this.host.refresh(root), (e: unknown) => {
       this.host.notify(errorText(e));
-      return this.host.refresh().then(() => false);
+      return this.host.refresh(root).then(() => false);
     });
   }
 

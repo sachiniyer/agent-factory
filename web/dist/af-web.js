@@ -18869,9 +18869,10 @@ var BacklogPane = class {
   write(run) {
     const token2 = this.host.token();
     if (token2 === null) return Promise.resolve(false);
-    return run(token2).then(() => this.host.refresh().then(() => true), (e) => {
+    const root2 = this.root ?? void 0;
+    return run(token2).then(() => this.host.refresh(root2), (e) => {
       this.host.notify(errorText(e));
-      return this.host.refresh().then(() => false);
+      return this.host.refresh(root2).then(() => false);
     });
   }
   move(id, to) {
@@ -19625,8 +19626,7 @@ var AppShell = class {
     });
     this.backlogPane = new BacklogPane(this.actions.backlog ?? {
       token: () => null,
-      refresh: async () => {
-      },
+      refresh: async () => true,
       started: () => 0,
       notify: () => {
       },
@@ -21559,18 +21559,23 @@ var BacklogLoader = class {
   started() {
     return this.generation;
   }
-  /** Refetches every project. A later call wins over one still in flight. */
-  async refresh() {
+  /** Refetches every project. A later call wins over one still in flight. Settles true
+   *  when the read of `root` (every project's, when none is named) succeeded: a read
+   *  that failed leaves the old snapshot in place, and a write that was only
+   *  followed by such a read has not been confirmed. */
+  async refresh(root2) {
     const token2 = this.opts.token();
-    if (token2 === null) return;
+    if (token2 === null) return false;
     const gen = ++this.generation;
     const budgetGen = ++this.budgetGeneration;
     const roots = [...new Set(this.opts.roots().filter(Boolean))];
     const [results, budget] = await Promise.all([
-      Promise.all(roots.map((root2) => getBacklog(root2, token2).then((view) => ({ root: root2, view, error: "" })).catch((e) => ({ root: root2, view: null, error: errorText(e) })))),
+      Promise.all(roots.map((root3) => getBacklog(root3, token2).then((view) => ({ root: root3, view, error: "" })).catch((e) => ({ root: root3, view: null, error: errorText(e) })))),
       getBudget(token2).catch(() => null)
     ]);
-    if (gen !== this.generation || this.opts.token() !== token2) return;
+    const read = root2 === void 0 || !results.some((r) => r.root === root2) ? results.every((r) => r.view !== null) : results.some((r) => r.root === root2 && r.view !== null);
+    if (this.opts.token() !== token2) return false;
+    if (gen !== this.generation) return read;
     const cur = this.opts.current();
     const prev = cur.views;
     const views = /* @__PURE__ */ new Map();
@@ -21584,6 +21589,7 @@ var BacklogLoader = class {
       }
     }
     this.opts.commit({ views, errors, budget: budgetGen === this.budgetGeneration ? budget ?? cur.budget : cur.budget, generation: gen });
+    return read;
   }
   /** Refetches only the budget, for backlog.spend. */
   async refreshBudget() {
@@ -23498,7 +23504,7 @@ var actions = {
   retryTasks: refreshTasks,
   backlog: {
     token: () => token,
-    refresh: () => backlogLoader.refresh(),
+    refresh: (root2) => backlogLoader.refresh(root2),
     started: () => backlogLoader.started(),
     notify: (message) => showTransientNotice(message),
     openSession: openBacklogSession,

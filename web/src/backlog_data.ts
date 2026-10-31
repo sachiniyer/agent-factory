@@ -72,10 +72,13 @@ export class BacklogLoader {
     return this.generation;
   }
 
-  /** Refetches every project. A later call wins over one still in flight. */
-  async refresh(): Promise<void> {
+  /** Refetches every project. A later call wins over one still in flight. Settles true
+   *  when the read of `root` (every project's, when none is named) succeeded: a read
+   *  that failed leaves the old snapshot in place, and a write that was only
+   *  followed by such a read has not been confirmed. */
+  async refresh(root?: string): Promise<boolean> {
     const token = this.opts.token();
-    if (token === null) return;
+    if (token === null) return false;
     const gen = ++this.generation;
     const budgetGen = ++this.budgetGeneration;
     const roots = [...new Set(this.opts.roots().filter(Boolean))];
@@ -85,7 +88,11 @@ export class BacklogLoader {
         .catch((e: unknown) => ({ root, view: null, error: errorText(e) })))),
       getBudget(token).catch(() => null),
     ]);
-    if (gen !== this.generation || this.opts.token() !== token) return;
+    const read = root === undefined || !results.some((r) => r.root === root)
+      ? results.every((r) => r.view !== null)
+      : results.some((r) => r.root === root && r.view !== null);
+    if (this.opts.token() !== token) return false;
+    if (gen !== this.generation) return read;   // a newer refresh commits; this read was still after the write
     const cur = this.opts.current();
     const prev = cur.views;
     const views = new Map<string, BacklogView>();
@@ -99,6 +106,7 @@ export class BacklogLoader {
       }
     }
     this.opts.commit({ views, errors, budget: budgetGen === this.budgetGeneration ? budget ?? cur.budget : cur.budget, generation: gen });
+    return read;
   }
 
   /** Refetches only the budget, for backlog.spend. */
