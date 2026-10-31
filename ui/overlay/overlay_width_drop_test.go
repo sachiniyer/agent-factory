@@ -106,8 +106,8 @@ func TestPlaceOverlayKeepsTheFrameWhenAModalIsTooTall(t *testing.T) {
 }
 
 // The clamp below the clip must never see a negative upper bound. Before #3433
-// the oversize cases returned early, so `clamp(placeX, 0, bgWidth-fgWidth)` was
-// unreachable with fgWidth > bgWidth; clipping makes it reachable, and it is only
+// the oversize cases returned early, so `layout.ClampInt(placeX, 0, bgWidth-fgWidth)`
+// was unreachable with fgWidth > bgWidth; clipping makes it reachable, and it is only
 // safe because the clip sets fgWidth == bgWidth first. This pins that ordering.
 func TestPlaceOverlayClipsBeforeClamping(t *testing.T) {
 	const cols, rows = 20, 5

@@ -210,7 +210,7 @@ func (p *ProjectsPane) SelectedProject() (SidebarProject, bool) {
 	if len(p.projects) == 0 {
 		return SidebarProject{}, false
 	}
-	sel := clampInt(p.selected, 0, len(p.projects)-1)
+	sel := layout.ClampInt(p.selected, 0, len(p.projects)-1)
 	return p.projects[sel], true
 }
 
