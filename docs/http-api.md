@@ -285,6 +285,17 @@ not list. They fall into three groups:
   method qualification the stdlib uses. See
   [Profiling the daemon](dev/daemon-memory.md#profiling-the-daemon).
 
+**Reading a session's screen.** `PreviewSession` takes
+`{ "id": "<session-id>", "lines": <1-40> }` and returns `{ "text": "…" }`: the last
+`lines` lines (default 40) of the session's agent tab as plain text. Escape sequences
+and control characters other than newline and tab are removed, and trailing blank
+rows are dropped. It is read only and sits behind the same authentication as every
+other route; it does not accept the scoped sandbox credential. `id` is the session's
+stable id (`id` in a `Snapshot` row); a title does not resolve. An unknown id, an
+archived session, a session that is not running, and one being deleted are errors,
+never empty text. For other tabs, scrollback, or raw escapes, use
+`af sessions preview`.
+
 **Response shapes.** These are not part of the generated request-field catalog,
 so they are documented here. `CreateSession` returns `{ "instance": <session> }`;
 `Snapshot` returns `{ "instances": [<session>…] }`;
