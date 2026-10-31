@@ -154,12 +154,14 @@ func TestPushWiringIsLeftAloneWithoutTheLicence(t *testing.T) {
 		url      string
 		licensed bool
 	}{
-		"host not opted in": {"https://github.com/owner/repo.git", false},
-		"ssh origin":        {"git@github.com:owner/repo.git", true},
-		"not github":        {"https://gitlab.com/owner/repo.git", true},
+		"host not opted in":    {"https://github.com/owner/repo.git", false},
+		"created by a sandbox": {"https://github.com/owner/repo.git", true},
+		"ssh origin":           {"git@github.com:owner/repo.git", true},
+		"not github":           {"https://gitlab.com/owner/repo.git", true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newPushWiringFixture(t, tc.url, tc.licensed)
+			f.w.spec.SandboxCreated = name == "created by a sandbox"
 			before, err := os.ReadFile(filepath.Join(f.ws, ".git", "config"))
 			require.NoError(t, err)
 			f.w.reconcilePushCredentials(time.Minute, false)

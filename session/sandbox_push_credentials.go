@@ -90,7 +90,10 @@ func unsetAll(ws, key string) string {
 // useful than no session (the W3.1 rule for the callback itself).
 func (w *sandboxWorkspace) reconcilePushCredentials(timeout time.Duration, adopted bool) {
 	origin, ok := pushOriginFor(w.spec)
-	wire := ok && w.spec.PushCredentials
+	// A session a sandbox credential created is never wired, whatever the
+	// runtime's licence says: the daemon refuses it too, but nothing on the host
+	// should even ask.
+	wire := ok && w.spec.PushCredentials && !w.spec.SandboxCreated
 	if !wire && !adopted {
 		return
 	}

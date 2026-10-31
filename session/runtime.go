@@ -177,6 +177,11 @@ type ProvisionSpec struct {
 	// credential helper and the gh shim); the daemon re-checks the live licence
 	// on every credential request, so this is never what grants a token.
 	PushCredentials bool
+	// SandboxCreated marks a session a sandbox callback credential created
+	// (InstanceData.CreatedBySandbox). Such a session is never wired for push
+	// credentials, whatever its host's opt-in says: eligibility comes only from
+	// an operator decision (#5571 W7.8, security review of #6433).
+	SandboxCreated bool
 	// AgentConfigFiles is the operator's sandbox_agent_config selection (#5571
 	// W7.7), as "<agent>:<file>" entries, copied from the global config by the ssh
 	// runtime. It is placed only where AccountSyncHost licenses a sync.
