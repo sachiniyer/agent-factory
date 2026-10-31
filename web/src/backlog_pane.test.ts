@@ -600,3 +600,21 @@ test("an accepted note is not restored to the box when the read after it fails",
   assert.equal(box.value, "", "the daemon has it; resending would duplicate it");
   assert.equal(calls.filter((c) => c.method === "PostBacklogMessage").length, 1);
 });
+
+test("a queued save is acknowledged by a read of its own project, even after another project is selected", async () => {
+  const finish: (() => void)[] = [];
+  reply = (method) => method === "UpdateBacklogItem" ? new Promise((r) => { finish.push(() => r({})); }) : Promise.resolve({});
+  const roots: (string | undefined)[] = [];
+  const pane = mount(host({ refresh: async (root?: string) => { roots.push(root); return true; } }));
+  pane.update(data({ "/a": view(item(1, { title: "old" })), "/b": view(item(1)) }), "/a", []);
+  pane.select(1);
+  submitTitle(pane, "first");
+  submitTitle(pane, "second");              // queued behind the first
+  pane.update(data({ "/a": view(item(1, { title: "old" })), "/b": view(item(1)) }, 2), "/b", []);
+  finish[0]();
+  await settle();
+  finish[1]?.();
+  await settle();
+  assert.deepEqual(roots, ["/a", "/a"], "both confirmations read /a, the project the saves modified");
+  assert.deepEqual(updates().map((c) => c.body.repo_path), ["/a", "/a"]);
+});

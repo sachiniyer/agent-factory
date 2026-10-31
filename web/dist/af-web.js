@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "8850d16e2109";
+var CLIENT_VERSION = "2d5bd54a4de8";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19312,14 +19312,15 @@ var BacklogPane = class {
     return v;
   }
   mutate(run) {
-    if (this.root) this.write(run);
+    if (this.root) this.write(this.root, run);
   }
-  /** Settles true once the write and the refresh after it have landed, false when the write failed;
+  /** `root` is the project the write modifies, bound by the caller: a save the serial queue starts
+   *  later must be acknowledged by a read of that project, not of whichever one is selected by then.
+   *  Settles true once the write and the refresh after it have landed, false when the write failed;
    *  `appendOnly` writes (a note) settle true as soon as the daemon accepted them, since resending one duplicates it. */
-  write(run, appendOnly = false) {
+  write(root2, run, appendOnly = false) {
     const token2 = this.host.token();
     if (token2 === null) return Promise.resolve(false);
-    const root2 = this.root ?? void 0;
     return run(token2).then(() => appendOnly ? this.host.refresh(root2).then(() => true) : this.host.refresh(root2), (e) => {
       this.host.notify(errorText(e));
       return this.host.refresh(root2).then(() => false);
@@ -19603,18 +19604,18 @@ var BacklogPane = class {
   panelActions(root2) {
     const here = () => this.root === root2;
     return {
-      update: (id, u) => this.write((t) => updateItem(root2, id, u, t)),
-      status: (id, s) => this.write((t) => setItemStatus(root2, id, s, t)),
+      update: (id, u) => this.write(root2, (t) => updateItem(root2, id, u, t)),
+      status: (id, s) => this.write(root2, (t) => setItemStatus(root2, id, s, t)),
       remove: (id) => {
         if (here()) this.selected = null;
-        this.write((t) => deleteItem(root2, id, t));
+        this.write(root2, (t) => deleteItem(root2, id, t));
       },
       move: (id, to) => {
         if (here()) this.move(id, to);
       },
       // A note is appended once the daemon accepts it, whether or not the read after it landed.
-      note: (id, text) => this.write((t) => addNote(root2, id, text, t), true),
-      addChild: (parent, title) => this.write((t) => addItem(root2, { title, parent }, t)),
+      note: (id, text) => this.write(root2, (t) => addNote(root2, id, text, t), true),
+      addChild: (parent, title) => this.write(root2, (t) => addItem(root2, { title, parent }, t)),
       select: (id) => this.select(id, root2),
       close: () => {
         if (!here()) return;

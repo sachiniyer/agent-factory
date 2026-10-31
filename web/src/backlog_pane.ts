@@ -154,15 +154,16 @@ export class BacklogPane {
   }
 
   private mutate(run: (token: string) => Promise<unknown>): void {
-    if (this.root) this.write(run);
+    if (this.root) this.write(this.root, run);
   }
 
-  /** Settles true once the write and the refresh after it have landed, false when the write failed;
+  /** `root` is the project the write modifies, bound by the caller: a save the serial queue starts
+   *  later must be acknowledged by a read of that project, not of whichever one is selected by then.
+   *  Settles true once the write and the refresh after it have landed, false when the write failed;
    *  `appendOnly` writes (a note) settle true as soon as the daemon accepted them, since resending one duplicates it. */
-  private write(run: (token: string) => Promise<unknown>, appendOnly = false): Promise<boolean> {
+  private write(root: string, run: (token: string) => Promise<unknown>, appendOnly = false): Promise<boolean> {
     const token = this.host.token();
     if (token === null) return Promise.resolve(false);
-    const root = this.root ?? undefined;
     // True only when the refresh after the write also read the project: an edit is
     // acknowledged by a snapshot that carries it, not by a failed read that kept the old one.
     return run(token).then(() => appendOnly ? this.host.refresh(root).then(() => true) : this.host.refresh(root), (e: unknown) => {
@@ -433,18 +434,18 @@ export class BacklogPane {
   private panelActions(root: string) {
     const here = (): boolean => this.root === root;
     return {
-      update: (id: number, u: Parameters<typeof updateItem>[2]) => this.write((t) => updateItem(root, id, u, t)),
-      status: (id: number, s: Parameters<typeof setItemStatus>[2]) => this.write((t) => setItemStatus(root, id, s, t)),
+      update: (id: number, u: Parameters<typeof updateItem>[2]) => this.write(root, (t) => updateItem(root, id, u, t)),
+      status: (id: number, s: Parameters<typeof setItemStatus>[2]) => this.write(root, (t) => setItemStatus(root, id, s, t)),
       remove: (id: number) => {
         if (here()) this.selected = null;
-        this.write((t) => deleteItem(root, id, t));
+        this.write(root, (t) => deleteItem(root, id, t));
       },
       move: (id: number, to: MoveTarget) => {
         if (here()) this.move(id, to);
       },
       // A note is appended once the daemon accepts it, whether or not the read after it landed.
-      note: (id: number, text: string) => this.write((t) => addNote(root, id, text, t), true),
-      addChild: (parent: number, title: string) => this.write((t) => addItem(root, { title, parent }, t)),
+      note: (id: number, text: string) => this.write(root, (t) => addNote(root, id, text, t), true),
+      addChild: (parent: number, title: string) => this.write(root, (t) => addItem(root, { title, parent }, t)),
       select: (id: number) => this.select(id, root),
       close: () => {
         if (!here()) return;
