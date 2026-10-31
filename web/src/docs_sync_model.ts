@@ -17,19 +17,23 @@ import type { DocText, SaveResult } from "./proposal_api.js";
 import { changedLines, hasConflictMarkers, landedIn, mergeWithMarkers } from "./text_diff.js";
 
 /** The save, of those that may have landed, that is in `head`. The save whose text is the head is the one
- *  that landed (the latest such). Otherwise a save is in the head when merging it onto the head changes
- *  nothing, or when every change it made is there in order, which holds when another writer's edits touch
- *  its lines (the merge reads that as a conflict). Several saves can pass that test (a later one that
- *  repeats part of an earlier one), and the one that explains the most changed lines is the one that
- *  landed; ties go to the latest. */
-function findLanded(saves: readonly { text: string; from: string }[], head: string): { text: string; from: string } | undefined {
+ *  that landed (the latest such). Otherwise the latest save the exact merge holds: merging it onto the head
+ *  changes nothing. Failing that, a save every change of which is in the head, in order, which holds when
+ *  another writer's edits touch its lines (the merge reads that as a conflict). A later save can repeat part
+ *  of an earlier one and pass that last test too, so among the saves made against the latest one's base the
+ *  one that explains the most changed lines wins (sizes against different bases say nothing). */
+export function findLanded(saves: readonly { text: string; from: string }[], head: string): { text: string; from: string } | undefined {
   const maybe = [...saves].reverse().filter((d) => d.text !== d.from);
   const same = maybe.find((d) => d.text === head);
   if (same) return same;
-  let best: { text: string; from: string } | undefined;
-  let bestLines = -1;
-  for (const d of maybe) {
-    if (mergeWithMarkers(d.from, d.text, head) !== head && !landedIn(d.from, d.text, head)) continue;
+  const exact = maybe.find((d) => mergeWithMarkers(d.from, d.text, head) === head);
+  if (exact) return exact;
+  const inOrder = maybe.filter((d) => landedIn(d.from, d.text, head));
+  if (inOrder.length === 0) return undefined;
+  const sameBase = inOrder.filter((d) => d.from === inOrder[0]!.from);
+  let best = sameBase[0]!;
+  let bestLines = changedLines(best.from, best.text);
+  for (const d of sameBase.slice(1)) {
     const lines = changedLines(d.from, d.text);
     if (lines > bestLines) {
       best = d;

@@ -135,6 +135,9 @@ export function landedIn(base: string, text: string, head: string): boolean {
     if (i === bEnd && inserted.length === 0) return true; // nothing between these two matches
     changes++;
     if (inserted.length === 0) return false; // a removal leaves nothing to find in the head
+    // What the save removed must be gone from the head: a base line it replaced that the head still
+    // holds means the replacement was only added beside it (the removal never landed).
+    for (let k = i; k < bEnd; k++) if (mt[k]! >= 0) return false;
     let left = i - 1;
     while (left >= 0 && mt[left]! < 0) left--;
     let right = bEnd;

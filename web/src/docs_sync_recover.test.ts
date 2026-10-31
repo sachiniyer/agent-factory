@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type Draft, type Event, type Model, initialModel, statusOf, step } from "./docs_sync_model.js";
+import { type Draft, type Event, type Model, findLanded, initialModel, statusOf, step } from "./docs_sync_model.js";
 
 type Loose = Event | { t: "save_ok" | "save_conflict" | "save_fail" | "save_fatal" | "reload_ok" | "reload_fail" | "reconcile_ok" | "reconcile_fail"; [k: string]: unknown };
 
@@ -284,4 +284,16 @@ test("an undo stands when the save it undid landed beside an agent's edits to th
   assert.equal(r.m.phase, "conflict");
   assert.equal(r.m.conflict?.ours, base, "the undo is the user's side");
   assert.equal(r.m.conflict?.theirs, "u17\na15\na14\nu1\na3");
+});
+
+test("the latest save the head holds is the one that landed, whatever size an older one was against its own base", () => {
+  // An older two-line edit (against the text before a retry was acknowledged) and a newer one-line edit
+  // (against the text after it) both merge onto this head to give exactly the head: the changed-line
+  // counts are measured against different bases and say nothing about which landed last.
+  const base0 = "a\n1\n2\n3\n4\nb\n6\n7\n8\n9\nc";
+  const older = "A\n1\n2\n3\n4\nB\n6\n7\n8\n9\nc";
+  const newer = "A\n1\n2\n3\n4\nB\n6\n7\n8\n9\nC";
+  const head = "A\n1\nR\n3\n4\nB\n6\n7\n8\n9\nC";
+  const picked = findLanded([{ text: older, from: base0 }, { text: newer, from: older }], head);
+  assert.equal(picked?.text, newer);
 });

@@ -63,3 +63,10 @@ test("landedIn needs each changed chunk to match its own, later, lines of the he
   assert.equal(landedIn("a\nb\nc", "P\nb\nQ", "Q\nP"), false, "in the wrong order they are not");
   assert.equal(landedIn("a\nb\nc", "P\nb\nQ", "P\nQ"), true);
 });
+
+test("landedIn does not count a replacement whose removed lines are still in the head", () => {
+  // The head only inserted the replacement beside the original: the removal never landed.
+  assert.equal(landedIn("a\nb", "X\nb", "a\nX\nb"), false, "`a` is still there");
+  assert.equal(landedIn("a\nb", "X\nb", "X\nb"), true, "the replacement landed whole");
+  assert.equal(landedIn("a\nb\nc", "a\nX\nc", "a\nX\nQ\nc"), true, "the removed line is gone, other edits sit beside it");
+});
