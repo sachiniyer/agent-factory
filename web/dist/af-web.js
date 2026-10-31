@@ -17559,20 +17559,26 @@ function projectAccent(color, ...surfaces) {
   }
   return hex(target);
 }
-function projectFaviconSvg(color) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
+function projectFaviconSvg(color, inverted = false) {
+  const [tile, mark] = faviconColors(color, inverted);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${tile}"/><path d="${FAVICON_MARK_PATH}" fill="${mark}"/></svg>`;
 }
-function projectFaviconDataUrl(color) {
-  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color))}`;
+function projectFaviconDataUrl(color, inverted = false) {
+  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color, inverted))}`;
 }
-function projectFaviconPng(color, size) {
+function faviconColors(color, inverted) {
+  const ink = markInk(color);
+  return inverted ? [ink, color] : [color, ink];
+}
+function projectFaviconPng(color, inverted, size) {
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d");
   if (!ctx || typeof Path2D === "undefined") return null;
+  const [tile, mark] = faviconColors(color, inverted);
   ctx.scale(size / 512, size / 512);
-  ctx.fillStyle = color;
+  ctx.fillStyle = tile;
   ctx.beginPath();
   ctx.moveTo(112, 0);
   ctx.arcTo(512, 0, 512, 512, 112);
@@ -17581,19 +17587,66 @@ function projectFaviconPng(color, size) {
   ctx.arcTo(0, 0, 512, 0, 112);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = markInk(color);
+  ctx.fillStyle = mark;
   ctx.fill(new Path2D(FAVICON_MARK_PATH));
   return canvas.toDataURL("image/png");
 }
 var DEFAULT_FAVICON_COLOR = "#2f5fd8";
-var appliedFavicon = null;
-function applyProjectFavicon(color) {
-  if (appliedFavicon === color) return;
-  appliedFavicon = color;
-  const tile = color ?? DEFAULT_FAVICON_COLOR;
+var FAVICON_BLINK_MS = 1e3;
+var appliedColor = null;
+var appliedAttention = false;
+var blinkTimer = null;
+var blinkInverted = false;
+var lastBlinkAt = 0;
+var motionQuery = null;
+var faviconHrefs = /* @__PURE__ */ new Map();
+function applyProjectFavicon(color, attention = false) {
+  if (appliedColor === color && appliedAttention === attention) return;
+  if (appliedColor !== color) faviconHrefs.clear();
+  appliedColor = color;
+  appliedAttention = attention;
+  restartBlink();
+  paintFavicon();
+}
+function restartBlink() {
+  if (blinkTimer !== null) {
+    clearInterval(blinkTimer);
+    blinkTimer = null;
+  }
+  blinkInverted = appliedAttention;
+  if (appliedAttention && !prefersReducedMotion()) {
+    lastBlinkAt = Date.now();
+    blinkTimer = setInterval(blinkTick, FAVICON_BLINK_MS);
+  }
+}
+function blinkTick() {
+  const now = Date.now();
+  const late = now - lastBlinkAt > 2 * FAVICON_BLINK_MS;
+  lastBlinkAt = now;
+  blinkInverted = late ? true : !blinkInverted;
+  paintFavicon();
+}
+function prefersReducedMotion() {
+  if (motionQuery === null && typeof matchMedia === "function") {
+    motionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+    motionQuery.addEventListener("change", () => {
+      restartBlink();
+      paintFavicon();
+    });
+  }
+  return motionQuery?.matches ?? false;
+}
+function paintFavicon() {
+  const tile = appliedColor ?? DEFAULT_FAVICON_COLOR;
   for (const link of document.querySelectorAll('link[rel="icon"]')) {
     if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    const href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile) : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
+    const size = Number.parseInt(link.sizes.value, 10) || 32;
+    const key = `${link.type}|${size}|${blinkInverted}`;
+    let href = faviconHrefs.get(key);
+    if (href === void 0) {
+      href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile, blinkInverted) : projectFaviconPng(tile, blinkInverted, size);
+      faviconHrefs.set(key, href);
+    }
     link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }
@@ -18445,7 +18498,7 @@ var AppShell = class {
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
-    applyProjectFavicon(color);
+    applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
