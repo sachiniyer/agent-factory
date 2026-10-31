@@ -65,11 +65,19 @@ func TestSandboxEndpointRecordsEachConnectionsPeerGroup(t *testing.T) {
 		got.Store(int64(carrierPGID(r.Context())))
 		w.WriteHeader(http.StatusOK)
 	})
-	sock := filepath.Join(testguard.SocketTempDir(t), "cb.sock")
-	ep, err := startSandboxEndpoint(mux, &reg, sock)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ep.close() })
-	do := func() int {
+	dir := testguard.SocketTempDir(t)
+	// start serves a fresh endpoint. The peer lookup is a package var read by the
+	// endpoint's accept loop, so a test that swaps it starts a new endpoint after
+	// the swap: the new loop's goroutine begins after the write.
+	start := func(name string) string {
+		t.Helper()
+		sock := filepath.Join(dir, name)
+		ep, err := startSandboxEndpoint(mux, &reg, sock)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ep.close() })
+		return sock
+	}
+	do := func(sock string) int {
 		t.Helper()
 		client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
@@ -83,7 +91,7 @@ func TestSandboxEndpointRecordsEachConnectionsPeerGroup(t *testing.T) {
 		client.CloseIdleConnections()
 		return resp.StatusCode
 	}
-	require.Equal(t, http.StatusOK, do())
+	require.Equal(t, http.StatusOK, do(start("a.sock")))
 	// The client is this test process, so the peer's group is ours.
 	assert.Equal(t, int64(unix.Getpgrp()), got.Load(), "the endpoint must record the peer's process group")
 
@@ -91,7 +99,7 @@ func TestSandboxEndpointRecordsEachConnectionsPeerGroup(t *testing.T) {
 	connPeerPGID = func(net.Conn) (int, error) { return 0, assert.AnError }
 	t.Cleanup(func() { connPeerPGID = prev })
 	got.Store(-1)
-	assert.Equal(t, http.StatusUnauthorized, do(), "an unreadable peer records no carrier, so the gate refuses it")
+	assert.Equal(t, http.StatusUnauthorized, do(start("b.sock")), "an unreadable peer records no carrier, so the gate refuses it")
 	assert.Equal(t, int64(-1), got.Load(), "before any handler runs")
 }
 
