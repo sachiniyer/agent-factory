@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "2d5bd54a4de8";
+var CLIENT_VERSION = "9076961279eb";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -16860,12 +16860,12 @@ function triggerSummary(t) {
 function canTrigger(t) {
   return t.enabled && !!t.cron_expr && t.cron_expr.trim() !== "" && !(t.watch_cmd && t.watch_cmd.trim() !== "");
 }
-function lastRunSummary(t) {
+function lastRunSummary(t, now = /* @__PURE__ */ new Date()) {
   if (!t.last_run_at) {
     return "never run";
   }
   const status = t.last_run_status ? ` (${t.last_run_status})` : "";
-  return `last run ${t.last_run_at}${status}`;
+  return `last run ${formatTime(t.last_run_at, now)}${status}`;
 }
 function taskNeedsAttention(t) {
   return !!t.overdue || !!t.unschedulable || notArmed(t);
@@ -18767,6 +18767,13 @@ function waitsOnBlock(b, id, target) {
 function sameList(a, b) {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
+function outcomeSaver(done2, note) {
+  if (!done2) return;
+  return done2.then((o) => {
+    note(o);
+    return o === "confirmed";
+  });
+}
 var ACTION_STATUS = {
   queue: "queued",
   draft: "draft",
@@ -18812,14 +18819,20 @@ var ItemPanel = class {
     this.actions = actions2;
     this.titleKey = `${root2}\0${id}\0title`;
     this.waitsKey = `${root2}\0${id}\0waits`;
-    this.titles = new SerialSaver((title) => actions2.update(id, { title }), (title, ok) => {
+    let titleOutcome = "confirmed";
+    let waitsOutcome = "confirmed";
+    this.titles = new SerialSaver((title) => outcomeSaver(actions2.update(id, { title }), (o) => {
+      titleOutcome = o;
+    }), (title) => {
       if (this.titleDraft !== title) return;
-      this.titleDraft = null;
+      if (titleOutcome !== "unconfirmed") this.titleDraft = null;
       this.repaint();
     }, queueFor(`${root2}\0${id}\0title`));
-    this.waits = new SerialSaver((waits_on) => actions2.update(id, { waits_on }), (list, ok) => {
-      if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
-      if (!ok) this.repaint();
+    this.waits = new SerialSaver((waits_on) => outcomeSaver(actions2.update(id, { waits_on }), (o) => {
+      waitsOutcome = o;
+    }), (list) => {
+      if (this.waitsDraft !== null && sameList(this.waitsDraft, list) && waitsOutcome !== "unconfirmed") this.waitsDraft = null;
+      this.repaint();
     }, queueFor(`${root2}\0${id}\0waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
     this.title.setAttribute("aria-label", "Title");
@@ -18836,7 +18849,8 @@ var ItemPanel = class {
     this.title.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) this.title.blur();
     });
-    this.body = new BodyEditor((text) => actions2.update(id, { body: text }), "Body", `${root2}\0${id}\0body`);
+    this.body = new BodyEditor((text) => outcomeSaver(actions2.update(id, { body: text }), () => {
+    }), "Body", `${root2}\0${id}\0body`);
     this.note = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: "Add a note\u2026" });
     this.note.setAttribute("aria-label", "Note");
     const addNote2 = button("Add note", () => {
@@ -18955,6 +18969,8 @@ ${this.note.value}` : text;
     const it = this.item();
     if (!it) return;
     this.lookUpMissing(it);
+    if (this.titleDraft !== null && this.titleDraft === it.title && !queueFor(this.titleKey).busy()) this.titleDraft = null;
+    if (this.waitsDraft !== null && sameList(this.waitsDraft, it.waits_on ?? []) && !queueFor(this.waitsKey).busy()) this.waitsDraft = null;
     if (document.activeElement !== this.title) this.title.value = this.titleDraft ?? it.title;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
@@ -19316,14 +19332,15 @@ var BacklogPane = class {
   }
   /** `root` is the project the write modifies, bound by the caller: a save the serial queue starts
    *  later must be acknowledged by a read of that project, not of whichever one is selected by then.
-   *  Settles true once the write and the refresh after it have landed, false when the write failed;
-   *  `appendOnly` writes (a note) settle true as soon as the daemon accepted them, since resending one duplicates it. */
-  write(root2, run, appendOnly = false) {
+   *  Settles "confirmed" once the write and a refresh that read the project have landed, "refused" when
+   *  the write failed, and "unconfirmed" when the daemon took it but the read after it failed (the
+   *  edit may be saved; the caller keeps what it shows until a snapshot says so). */
+  write(root2, run) {
     const token2 = this.host.token();
-    if (token2 === null) return Promise.resolve(false);
-    return run(token2).then(() => appendOnly ? this.host.refresh(root2).then(() => true) : this.host.refresh(root2), (e) => {
+    if (token2 === null) return Promise.resolve("refused");
+    return run(token2).then(() => this.host.refresh(root2).then((read) => read ? "confirmed" : "unconfirmed"), (e) => {
       this.host.notify(errorText(e));
-      return this.host.refresh(root2).then(() => false);
+      return this.host.refresh(root2).then(() => "refused");
     });
   }
   move(id, to) {
@@ -19614,7 +19631,7 @@ var BacklogPane = class {
         if (here()) this.move(id, to);
       },
       // A note is appended once the daemon accepts it, whether or not the read after it landed.
-      note: (id, text) => this.write(root2, (t) => addNote(root2, id, text, t), true),
+      note: (id, text) => this.write(root2, (t) => addNote(root2, id, text, t)).then((o) => o !== "refused"),
       addChild: (parent, title) => this.write(root2, (t) => addItem(root2, { title, parent }, t)),
       select: (id) => this.select(id, root2),
       close: () => {
