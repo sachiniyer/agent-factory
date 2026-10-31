@@ -148,3 +148,4 @@ export function decode(raw: Uint8Array): Frame {
       throw new Error(`agentproto: unknown opcode 0x${(op as number).toString(16).padStart(2, "0")}`);
   }
 }
+// probe
