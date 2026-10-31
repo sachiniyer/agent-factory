@@ -67,19 +67,55 @@ func (e *claimEndpoint) ensure() {
 		ul.SetUnlinkOnClose(false)
 	}
 	_ = e.ln.Close()
-	if err := os.MkdirAll(e.dir, 0o700); err != nil {
-		e.ln = nil
+	// The directory's mode is the only thing keeping other users from the tokens in
+	// default-command, and the path is predictable (/tmp/af-claim-<uid>-<pid> when the
+	// temp dir is long): after a cleanup another user may have planted something
+	// there. Verify before EVERY bind, and fail closed. Leaving the closed listener
+	// in place makes the next tick retry from here.
+	if err := prepareClaimDir(e.dir); err != nil {
 		return
 	}
-	_ = os.Chmod(e.dir, 0o700)
 	ln, err := net.Listen("unix", e.socket)
 	if err != nil {
-		// Leave a closed listener in place so the next tick retries from here.
 		return
 	}
 	_ = os.Chmod(e.socket, 0o600)
 	e.ln = ln
 	go e.b.Serve(ln)
+}
+
+// prepareClaimDir creates dir (mode 0700) or accepts one that already exists, and
+// either way requires what it will bind in to be ours: a real directory (not a
+// symlink), owned by this uid, with mode exactly 0700. os.Mkdir, never MkdirAll, so
+// an existing path is inspected rather than adopted; an existing directory's mode is
+// never "fixed", because a directory someone else made is not ours to repair.
+func prepareClaimDir(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err == nil {
+		// Mkdir applies the umask; a restrictive one must not leave 0500 behind.
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+	} else if !os.IsExist(err) {
+		return err
+	}
+	return verifyClaimDir(dir)
+}
+
+func verifyClaimDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return fmt.Errorf("claim directory %s is not a plain directory", dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("claim directory %s is not owned by this user", dir)
+	}
+	if fi.Mode().Perm() != 0o700 || fi.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fmt.Errorf("claim directory %s has mode %v, want 0700", dir, fi.Mode())
+	}
+	return nil
 }
 
 func (e *claimEndpoint) close() {
@@ -131,10 +167,10 @@ func startLaunchEndpoint(lookup PaneLookup, alive SessionLiveness) (*CapabilityB
 	launchStop = stop
 	launchEP.Store(ep)
 	go b.Serve(ln)
+	ensure := time.NewTicker(capabilityEnsureInterval) // read here, not in the goroutine
 	go func() {
 		ticker := time.NewTicker(capabilitySweepInterval)
 		defer ticker.Stop()
-		ensure := time.NewTicker(capabilityEnsureInterval)
 		defer ensure.Stop()
 		for {
 			select {
@@ -165,6 +201,10 @@ func startLaunchEndpoint(lookup PaneLookup, alive SessionLiveness) (*CapabilityB
 // exit 127. Errors are ignored: a path that is already gone is reported by the
 // shim's own dial, with the restart hint.
 func keepClaimEndpointFresh(socket, dir string, now time.Time) {
+	// Chtimes follows symlinks; only touch a directory that is still ours.
+	if verifyClaimDir(dir) != nil {
+		return
+	}
 	_ = os.Chtimes(socket, now, now)
 	_ = os.Chtimes(dir, now, now)
 }
@@ -213,7 +253,7 @@ func claimSocketDir() (string, error) {
 		dir = filepath.Join(tmp, prefix+strconv.Itoa(os.Getpid()))
 	}
 	_ = os.RemoveAll(dir) // a reused pid's leftover
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	if err := prepareClaimDir(dir); err != nil {
 		return "", err
 	}
 	return dir, nil

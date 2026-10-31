@@ -80,6 +80,10 @@ func TestCapability_ARestartedBrokerRefusesAnOlderProcessesToken(t *testing.T) {
 // while sessions still name it in their default-command (#6384).
 func TestCapability_KeepClaimEndpointFreshRefreshesAgedSocketAndDir(t *testing.T) {
 	dir := t.TempDir()
+	// The keep-alive only touches a directory that is still ours, 0700 like the real one.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	socket := filepath.Join(dir, "claim.sock")
 	if err := os.WriteFile(socket, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -148,4 +152,59 @@ func TestCapability_EndpointRecreatesItsSocketAndDirAtTheSamePath(t *testing.T) 
 	fi, err := os.Stat(dir)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o700), fi.Mode().Perm(), "a recreated directory keeps the private mode")
+}
+
+// Re-creating the directory after a temp cleanup must not adopt what another local
+// user planted at the predictable path: the directory's mode is the only thing
+// protecting claim tokens, which sit in argv. A symlink, or a directory that is not
+// exactly 0700, must be refused (and nothing bound in it); once the path is clear
+// the endpoint comes back at the same path (#6384).
+func TestCapability_EndpointRefusesAPlantedDirectoryAndRecoversWhenClear(t *testing.T) {
+	t.Setenv("TMPDIR", shortSocketDir(t))
+	prev := capabilityEnsureInterval
+	capabilityEnsureInterval = time.Hour // drive ensure() by hand
+	t.Cleanup(func() { capabilityEnsureInterval = prev })
+
+	b, socket, err := startLaunchEndpoint(paneOf("s", os.Getpid()), nil)
+	require.NoError(t, err)
+	t.Cleanup(ShutdownLaunchCapabilities)
+	ep := launchEP.Load()
+	dir := filepath.Dir(socket)
+
+	unreachable := func(stage string) {
+		t.Helper()
+		_, err := claimAs(t, socket, "x", "%1")
+		require.ErrorContains(t, err, "unreachable", stage)
+	}
+
+	// A symlink to a directory the attacker controls.
+	attacker := shortSocketDir(t)
+	require.NoError(t, os.RemoveAll(dir))
+	require.NoError(t, os.Symlink(attacker, dir))
+	ep.ensure()
+	unreachable("symlinked directory")
+	entries, err := os.ReadDir(attacker)
+	require.NoError(t, err)
+	require.Empty(t, entries, "nothing may be bound inside the attacker's directory")
+
+	// A real directory that is not 0700.
+	require.NoError(t, os.Remove(dir))
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+	ep.ensure()
+	unreachable("0755 directory")
+	entries, err = os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "nothing may be bound in a directory that is not ours")
+	fi, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), fi.Mode().Perm(), "a directory that is not ours is not repaired")
+
+	// Clear path: a normal re-create works and serves a claim at the same path.
+	require.NoError(t, os.Remove(dir))
+	ep.ensure()
+	token, err := b.Mint(testCap())
+	require.NoError(t, err)
+	_, err = claimAs(t, socket, token, "%1")
+	require.NoError(t, err)
 }
