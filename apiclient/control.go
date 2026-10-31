@@ -45,7 +45,16 @@ func (c *Client) CreateSession(req daemon.CreateSessionRequest) (*session.Instan
 // request and never answers strands the row in `Deleting` permanently. See
 // callCtx for why the local socket has no deadline of its own.
 func (c *Client) KillSession(ctx context.Context, req daemon.KillSessionRequest) error {
-	return c.callCtx(ctx, "KillSession", req, &daemon.KillSessionResponse{})
+	_, err := c.KillSessionKept(ctx, req)
+	return err
+}
+
+// KillSessionKept is KillSession that also returns the branch the kill left in
+// place in the repo (#6233).
+func (c *Client) KillSessionKept(ctx context.Context, req daemon.KillSessionRequest) (session.KeptBranch, error) {
+	var resp daemon.KillSessionResponse
+	err := c.callCtx(ctx, "KillSession", req, &resp)
+	return resp.KeptBranch, err
 }
 
 // WorkspaceFacts asks the daemon to measure an off-box session's workspace for
@@ -207,6 +216,17 @@ func (c *Client) ReorderTab(req daemon.ReorderTabRequest) (daemon.ReorderTabResp
 	var resp daemon.ReorderTabResponse
 	if err := c.call("ReorderTab", req, &resp); err != nil {
 		return daemon.ReorderTabResponse{}, err
+	}
+	return resp, nil
+}
+
+// SetAttention sets or clears a session's attention request over /v1/SetAttention
+// — the same route the web clears it with, and the one `af sessions attention`
+// reaches under a remote target or a sandbox credential.
+func (c *Client) SetAttention(req daemon.SetAttentionRequest) (daemon.SetAttentionResponse, error) {
+	var resp daemon.SetAttentionResponse
+	if err := c.call("SetAttention", req, &resp); err != nil {
+		return daemon.SetAttentionResponse{}, err
 	}
 	return resp, nil
 }

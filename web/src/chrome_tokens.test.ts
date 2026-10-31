@@ -6,7 +6,7 @@ import { test } from "node:test";
 const migrated = /./;
 const tokens = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
 const tokenNames = new Set([...tokens.matchAll(/(--af-[\w-]+):/g)].map((m) => m[1]));
-// Fonts and stacking levels are fixed structural rules, outside the 26-token budget.
+// Fonts and stacking levels are fixed structural rules, outside the 27-token budget.
 const structural = new Set(["--af-font-ui", "--af-font-mono", "--af-z-appbar", "--af-z-drawer", "--af-z-popover", "--af-z-modal"]);
 // User-chosen project colors, set inline by project_color.ts from the registry.
 const userData = new Set([

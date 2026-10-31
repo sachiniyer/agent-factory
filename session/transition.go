@@ -119,6 +119,19 @@ type TransitionEvent struct {
 	resetAt     time.Time
 	epoch       uint64
 	epochScoped bool
+	churnOnly   bool
+}
+
+// ChurnOnly marks a Running observation as inferred from pane churn alone, with
+// no in-turn indicator from the agent. A repainted composer (a typed draft) churns
+// the pane too, so such an observation moves the liveness but is not the agent
+// starting work, and it must not count as the user's answer to an attention
+// request. Use it only for an agent whose indicator the daemon can read
+// (task.PublishesWorkingContent); the evidence is reported separately through
+// AttentionAnsweredByWork.
+func (ev TransitionEvent) ChurnOnly() TransitionEvent {
+	ev.churnOnly = true
+	return ev
 }
 
 // AtEpoch scopes an event to the state epoch its decision was made at (#2135):
@@ -580,6 +593,14 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// mis-ordered edge (#2135). The observer re-decides on its next tick.
 		return nil
 	}
+	if ev.kind == tkObserveLiveness && ev.churnOnly && ev.lv == LiveRunning {
+		keep := cloneAttention(i.attention)
+		defer func() {
+			if keep != nil && i.liveness == LiveRunning {
+				i.attention = keep
+			}
+		}()
+	}
 	if ev.kind == tkBeginArchive && i.archiveCheckpointSealed {
 		return fmt.Errorf("session %q cannot begin an archive after the daemon shutdown checkpoint was sealed", i.Title)
 	}
@@ -634,8 +655,13 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	// Only ever true→false: a capped task creates one session per event, so a
 	// session has exactly one run, and anything that happens to it afterwards
 	// (a user prompting it, an un-archive) is not the task's.
-	if i.taskRunActive {
-		if ev.kind == tkConfirmLive && from.op == OpRestoring && i.agentRuntimeReplaced {
+	//
+	// The backlog run marker shares this gate but is re-armed per delivery
+	// (ArmBacklogRun); endRunsLocked clears both markers. The replaced-runtime
+	// interruption below is the TASK run's contract (#4222): a backlog run that
+	// meets a replaced runtime takes the ordinary edges.
+	if i.runGateActiveLocked() {
+		if i.taskRunActive && ev.kind == tkConfirmLive && from.op == OpRestoring && i.agentRuntimeReplaced {
 			// A restore landing on a REPLACED runtime ends a still-in-flight
 			// run as interrupted (#4222): the prompt's owner died with the old
 			// process and the replacement is never replayed the prompt, so the
@@ -652,16 +678,12 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		} else {
 			switch spec.run {
 			case runEnds:
-				i.taskRunActive = false
-				i.taskRunIdleEdgeHeld = false
-				i.taskRunTurnGateHeld = false
-				i.touchLocked()
 				// The completion transition IS the capture point for the adoption
 				// baseline (#3865): taken here, inside the same i.mu section that ends
 				// the run, nothing — not the rest of this transition, not the poll's
 				// later persistPollChange — can land a delivery that reads as though it
 				// had always been there. See session/adoption_fence.go.
-				i.captureAdoptionBaselineLocked()
+				i.endRunsLocked()
 			case runEndsOnIdleEdge:
 				// The AGENT's own axis, and the EDGE into it. Not ClassifyActivity — that
 				// calls an in-flight archive "pending", which would miss an agent going
@@ -740,11 +762,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 								i.Title, i.currentAgentNameLocked(),
 								time.Since(i.taskRunPromptAttemptAt).Round(time.Second))
 						}
-						i.taskRunActive = false
-						i.taskRunIdleEdgeHeld = false
-						i.taskRunTurnGateHeld = false
-						i.touchLocked()
-						i.captureAdoptionBaselineLocked()
+						i.endRunsLocked()
 					}
 				}
 			}
@@ -795,6 +813,12 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	switch ev.kind {
 	case tkCommitArchive, tkBeginRestore:
 		i.clearAgentModelChangeLocked()
+	}
+	// An attention request belongs to the agent that wrote it: a committed
+	// handoff swaps the runtime without crossing a liveness edge, so nothing
+	// else drops the outgoing agent's question for the incoming one.
+	if ev.kind == tkCommitHandoff {
+		i.attention = nil
 	}
 	// tkCommitArchive is the single commit edge every archive route converges
 	// on — local worktree relocation and remote branch-push alike — so it is the

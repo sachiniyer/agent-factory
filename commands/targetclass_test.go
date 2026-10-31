@@ -22,6 +22,7 @@ var verbTargetClass = map[string]string{
 
 	"af sessions archive":      classRouted,
 	"af sessions attach":       classRouted,
+	"af sessions attention":    classRouted,
 	"af sessions backends":     classRouted,
 	"af sessions create":       classRouted,
 	"af sessions get":          classRouted,
@@ -44,6 +45,24 @@ var verbTargetClass = map[string]string{
 	"af sessions watch":        classRouted,
 	// whoami reads the TMUX pane it runs in, which only exists on this machine.
 	"af sessions whoami": classLocal,
+
+	// The backlog verbs talk to the daemon the client targets (api/backlog.go).
+	"af backlog add":    classRouted,
+	"af backlog budget": classRouted,
+	"af backlog delete": classRouted,
+	"af backlog done":   classRouted,
+	"af backlog draft":  classRouted,
+	"af backlog drop":   classRouted,
+	"af backlog edit":   classRouted,
+	"af backlog list":   classRouted,
+	"af backlog move":   classRouted,
+	"af backlog note":   classRouted,
+	"af backlog queue":  classRouted,
+	"af backlog reopen": classRouted,
+	"af backlog review": classRouted,
+	"af backlog runner": classRouted,
+	"af backlog show":   classRouted,
+	"af backlog start":  classRouted,
 
 	"af tasks add":     classRouted,
 	"af tasks get":     classRouted,

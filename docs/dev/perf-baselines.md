@@ -96,10 +96,10 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1123037.000 | 1123037.000–1123037.000 | 0.000 | 1179188.850 |
-| gzip_bytes | 253171.000 | 253171.000–253171.000 | 0.000 | 265829.550 |
-| lazy_raw_bytes | 362415.000 | 362415.000–362415.000 | 0.000 | 380535.750 |
-| lazy_gzip_bytes | 117256.000 | 117256.000–117256.000 | 0.000 | 123118.800 |
+| raw_bytes | 1126071.000 | 1126071.000–1126071.000 | 0.000 | 1182374.550 |
+| gzip_bytes | 255761.000 | 255761.000–255761.000 | 0.000 | 268549.050 |
+| lazy_raw_bytes | 362626.000 | 362626.000–362626.000 | 0.000 | 380757.300 |
+| lazy_gzip_bytes | 117357.000 | 117357.000–117357.000 | 0.000 | 123224.850 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -133,7 +133,11 @@ only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
 `lazy_*` entries measure it on its own, with the same 5% margin. Both lazy values
 were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
 `report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
-so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,140,136 raw and 257,851 gzip bytes over `web/dist` without `lazy/`. Both are inside the existing shell budgets (raw 1,179,188; gzip 265,829), so those baselines are not moved. Lazy bundle: 362,415 raw / 117,256 gzip.
+so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,149,042 raw and 260,363 gzip bytes over `web/dist` without `lazy/`. Both are inside the existing shell budgets (raw 1,182,374; gzip 268,549), so those baselines are not moved. Lazy bundle: 362,626 raw / 117,357 gzip.
+
+### Bundle refresh provenance (#6289)
+
+Master's committed bundle (1,123,102 raw / 254,923 gzip over `web/dist/**.{js,css}`, gzip level 9, after #6290) is where this branch started from; #6289 (the task switch pending state) takes it to 1,126,071 raw / 255,761 gzip, +2,969 raw / +838 gzip. Comments do not ship (esbuild strips them), so the growth is the flip state machine's code. Both entries are moved to the deterministic byte sums, three identical samples, margin baseline x 0.05; every timing and layout-shift baseline is unchanged. Computed from a clean `npm ci` build of the merged tree rather than recorded with `make perf-container`, which is not a routine local run; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6290)
 

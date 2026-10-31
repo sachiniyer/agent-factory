@@ -508,6 +508,12 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.PendingHandoffMission != "" {
 		d.PendingHandoffMission = redactedMarker
 	}
+	// The agent writes the attention reason as free text about the user's work.
+	if d.Attention != nil && d.Attention.Reason != "" {
+		attention := *d.Attention
+		attention.Reason = redactedMarker
+		d.Attention = &attention
+	}
 	if d.Worktree.SessionName != "" {
 		d.Worktree.SessionName = redactedMarker
 	}

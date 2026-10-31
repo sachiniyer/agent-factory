@@ -14,7 +14,7 @@ async function carrySessionActionsToPhone(
   await page.goto(`/#/session/${encodeURIComponent(session.id)}`);
   await expect(page.locator(".af-term-title")).toHaveText(session.title);
   if (filterSelected) {
-    for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
+    for (const kind of ["attention", "needs-you", "working", "waiting-limit", "broken"]) {
       await page.locator(".af-rail-filter").click();
       const item = page.locator(`.af-filter-item[data-kind="${kind}"]`);
       await expect(item).toBeVisible();

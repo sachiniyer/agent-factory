@@ -66,6 +66,18 @@ func (t *TmuxSession) ProbeSessionLiveness() (exists bool, known bool) {
 	return a.exists, a.known
 }
 
+// ProbeSessionForRestore is ProbeSession for a caller deciding the fate of an
+// EXISTING session during a restore pass (probeRestore): an unlinked socket under
+// a possibly-live server is unknown, never absent. It is the probe every restore
+// pass read must use, so no tab is classified dead with pre-spawn semantics while
+// RestoreWithResult would refuse the same session (#6254).
+func (t *TmuxSession) ProbeSessionForRestore() (exists bool, known bool) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	a := probeSessionAs(ctx, t.cmdExec, t.sanitizedName, probeRestore)
+	return a.exists, a.known
+}
+
 // probeSessionAs is the has-session probe for an explicit caller kind.
 func probeSessionAs(ctx context.Context, cmdExec cmd.Executor, name string, kind probeKind) probeAnswer {
 	// Liveness falls back to the legacy answer where the platform cannot prove a

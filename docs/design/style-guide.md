@@ -1,7 +1,7 @@
 # Interface style guide
 
 The [interface design](interface-design.md) prescribes one treatment for each component.
-There are **26 design tokens: 15 colour roles, five type steps, four spacing steps and
+There are **27 design tokens: 16 colour roles, five type steps, four spacing steps and
 two radii**. The six liveness bindings are fixed semantics, including the empty running
 glyph. The only user-facing theme choice is **Light / Dark / System**. These are internal
 product constants, not user-editable tokens, presets or a custom-palette API.
@@ -378,10 +378,11 @@ The examples above are the specification; this compact reference is for implemen
 not a palette picker. Every value below comes from `design/tokens.json`. Adding a role
 or step fails validation: revise a component rule before enlarging this contract.
 
-<details><summary>Exact internal values · 23 tokens</summary>
+<details><summary>Exact internal values · 27 tokens</summary>
 <table><thead><tr><th>Colour role</th><th>Light</th><th>Dark</th><th>Required use</th></tr></thead><tbody>
 <tr><td>accent</td><td>#2d6271</td><td>#2296f3</td><td>Primary button fill, selected marker, active-tab underline and keyboard-focus outline; never liveness</td></tr>
 <tr><td>archived</td><td>#4c566a</td><td>#d8dee9</td><td>Archived glyph and label only; retained history</td></tr>
+<tr><td>attention</td><td>#856200</td><td>#f5c400</td><td>Needs-attention glyph only: the agent asked for the user</td></tr>
 <tr><td>border</td><td>#657084</td><td>#3d3d3d</td><td>Unfocused control and pane outlines only; never a rule around every content row</td></tr>
 <tr><td>callout-decision</td><td>#2c6440</td><td>#a8d8b4</td><td>Proposal docs decision callout border and label only: a settled choice</td></tr>
 <tr><td>callout-question</td><td>#8a4600</td><td>#f2b880</td><td>Proposal docs question callout border and label only: the agent waits for an answer</td></tr>

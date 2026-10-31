@@ -1,0 +1,165 @@
+package session
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+func backlogRunSession(t *testing.T) *Instance {
+	t.Helper()
+	inst, err := NewInstance(InstanceOptions{
+		Title:       "B-7 item",
+		Path:        t.TempDir(),
+		Program:     "claude",
+		BacklogItem: 7,
+	})
+	require.NoError(t, err)
+	inst.SetBackend(NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(Running)
+	return inst
+}
+
+func TestBacklogRunArmedAtCreate(t *testing.T) {
+	inst := backlogRunSession(t)
+	require.True(t, inst.BacklogRunActive())
+	require.False(t, inst.TaskRunActive())
+	v := inst.LifecycleView()
+	require.Equal(t, 7, v.BacklogItem)
+	require.True(t, v.BacklogRunActive)
+}
+
+func TestBacklogRunEndsOnIdleEdgeAfterTurn(t *testing.T) {
+	inst := backlogRunSession(t)
+	attemptedAt := time.Now().Add(-10 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.BacklogRunActive(), "an idle edge before the turn is held")
+
+	require.True(t, inst.RecordTaskRunTurn(attemptedAt.Add(2*time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.BacklogRunActive(), "the held edge ends the run once the turn was observed")
+}
+
+func TestBacklogRunReArmsOnReadySession(t *testing.T) {
+	inst := backlogRunSession(t)
+	first := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, first))
+	require.True(t, inst.RecordTaskRunTurn(first.Add(time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.BacklogRunActive(), "precondition: the first run ended")
+
+	armedAt := time.Now().Add(-10 * time.Second)
+	require.True(t, inst.ArmBacklogRun(armedAt))
+	require.True(t, inst.BacklogRunActive())
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.BacklogRunActive(), "a Ready → Ready tick before the turn does not end the re-armed run")
+
+	require.True(t, inst.RecordTaskRunTurn(armedAt.Add(3*time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.BacklogRunActive(), "the held edge ends the run on a Ready → Ready tick after the turn")
+}
+
+func TestBacklogRunArmRefusedOutsideItemSession(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "plain", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	require.False(t, inst.ArmBacklogRun(time.Now()))
+	require.False(t, inst.BacklogRunActive())
+}
+
+func TestBacklogRunClearedByCommitArchive(t *testing.T) {
+	inst := backlogRunSession(t)
+	require.NoError(t, inst.Transition(BeginArchive()))
+	require.NoError(t, inst.Transition(CommitArchive()))
+	require.False(t, inst.BacklogRunActive())
+}
+
+func TestBacklogRunDisarm(t *testing.T) {
+	inst := backlogRunSession(t)
+	require.True(t, inst.DisarmBacklogRun())
+	require.False(t, inst.BacklogRunActive())
+	require.False(t, inst.DisarmBacklogRun())
+}
+
+func TestBacklogRunSurvivesRoundTrip(t *testing.T) {
+	inst := backlogRunSession(t)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+
+	data := inst.ToInstanceData()
+	require.Equal(t, 7, data.BacklogItem)
+	require.True(t, data.BacklogRunActive)
+	require.False(t, data.TaskRunActive)
+	require.True(t, data.TaskRunTurnGateHeld, "the gate fields persist for a backlog run")
+	require.False(t, data.TaskRunPromptAttemptAt.IsZero())
+
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.Equal(t, 7, reloaded.BacklogItem)
+	require.True(t, reloaded.BacklogRunActive())
+	require.True(t, reloaded.taskRunTurnGateHeld)
+}
+
+func TestBacklogRunMarkerIgnoredWithoutItem(t *testing.T) {
+	inst := backlogRunSession(t)
+	data := inst.ToInstanceData()
+	data.BacklogItem = 0
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.False(t, reloaded.BacklogRunActive())
+}
+
+func TestReconcileBacklogRunState(t *testing.T) {
+	inst := backlogRunSession(t)
+	require.False(t, inst.ReconcileBacklogRunState(true))
+	require.True(t, inst.ReconcileBacklogRunState(false))
+	require.False(t, inst.BacklogRunActive())
+}
+
+func TestMarkStartupStateUnknownEndsBacklogRun(t *testing.T) {
+	inst := backlogRunSession(t)
+	inst.MarkStartupStateUnknown()
+	require.False(t, inst.BacklogRunActive())
+}
+
+func TestBacklogRunEndRecordsFenceBaseline(t *testing.T) {
+	inst := backlogRunSession(t)
+	require.True(t, inst.BacklogRunEndedAt().IsZero())
+	attemptedAt := time.Now().Add(-10 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+	require.True(t, inst.RecordTaskRunTurn(attemptedAt.Add(time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.BacklogRunActive())
+	require.False(t, inst.BacklogRunEndedAt().IsZero(), "the idle edge records when the run ended")
+	require.Equal(t, inst.AdoptionDeliveries(), inst.AdoptionDeliveriesAtRunEnd(), "the run end takes the adoption baseline")
+
+	require.True(t, inst.ArmBacklogRun(time.Now()))
+	require.True(t, inst.BacklogRunEndedAt().IsZero(), "a new run clears the end time")
+}
+
+// Disarming a continuation that never started puts the previous run's end back
+// (Codex P2 on #6294): arming cleared it, and pane churn since would otherwise
+// read as "changed after its run ended" and block the on_done archive forever.
+func TestDisarmRestoresThePreviousRunEnd(t *testing.T) {
+	inst := backlogRunSession(t)
+	inst.EndBacklogRunForTest()
+	ended := inst.BacklogRunEndedAt()
+	require.False(t, ended.IsZero())
+
+	require.True(t, inst.ArmBacklogRun(time.Now()))
+	require.True(t, inst.BacklogRunEndedAt().IsZero(), "an armed run has no end yet")
+	require.True(t, inst.DisarmBacklogRun())
+	require.True(t, inst.BacklogRunEndedAt().Equal(ended), "the failed continuation must leave the previous run's end alone")
+
+	// A re-arm while a run is already active keeps the ORIGINAL previous end.
+	require.True(t, inst.ArmBacklogRun(time.Now()))
+	require.True(t, inst.ArmBacklogRun(time.Now()))
+	require.True(t, inst.DisarmBacklogRun())
+	require.True(t, inst.BacklogRunEndedAt().Equal(ended))
+}

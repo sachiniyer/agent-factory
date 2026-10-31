@@ -28,6 +28,7 @@ function sess(over: Partial<SessionData> = {}): SessionData {
 
 /** A session per operator kind, so a filter can exercise every action group at once. */
 const ROWS: Record<OperatorKind, SessionData> = {
+  attention: sess({ title: "attention", liveness: Liveness.Running, attention: { set_at: "2026-10-20T12:00:00Z" } }),
   "needs-you": sess({ title: "needs-you", liveness: Liveness.Ready, idle_reason: "settled-after-pane-change" }),
   working: sess({ title: "working", liveness: Liveness.Running }),
   "waiting-limit": sess({ title: "waiting-limit", liveness: Liveness.LimitReached }),
@@ -75,7 +76,7 @@ test("by default the rail shows the live states and hides only the archived row"
   const shown = filterSessions(ALL, defaultFilter());
   assert.deepEqual(
     shown.map((s) => s.title),
-    ["needs-you", "working", "waiting-limit", "broken"],
+    ["attention", "needs-you", "working", "waiting-limit", "broken"],
   );
   assert.equal(hiddenCount(ALL, defaultFilter()), 1);
 });
@@ -95,7 +96,7 @@ test("unchecking one state hides exactly that group", () => {
   const f = withKind(defaultFilter(), "working", false);
   assert.deepEqual(
     filterSessions(ALL, f).map((s) => s.title),
-    ["needs-you", "waiting-limit", "broken"],
+    ["attention", "needs-you", "waiting-limit", "broken"],
   );
   // withKind is pure — the caller's filter is untouched (the store swaps references).
   assert.equal(defaultFilter().working, true);
@@ -103,6 +104,7 @@ test("unchecking one state hides exactly that group", () => {
 
 test("narrowing to a single state shows only it (the only-working case)", () => {
   const only: StatusFilter = {
+    attention: false,
     "needs-you": false,
     working: true,
     "waiting-limit": false,
@@ -119,6 +121,7 @@ test("an all-off filter empties the rail rather than falling back to showing eve
   // The empty-state copy depends on this being an honest zero: renderRail reports
   // "no sessions match" instead of quietly ignoring the user's filter.
   const none: StatusFilter = {
+    attention: false,
     "needs-you": false,
     working: false,
     "waiting-limit": false,

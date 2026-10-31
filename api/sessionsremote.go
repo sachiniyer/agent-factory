@@ -47,16 +47,17 @@ func remoteMutationError(verb string, err error) error {
 		verb, apiclient.RemoteTargetURL(), apiclient.RemoteTargetURL(), err)
 }
 
-func routedKillSession(req daemon.KillSessionRequest) error {
+func routedKillSession(req daemon.KillSessionRequest) (session.KeptBranch, error) {
 	if !apiclient.IsRemoteTarget() {
-		return daemon.KillSession(req)
+		return daemon.KillSessionKept(req)
 	}
 	c, err := remoteSessionClient()
 	if err != nil {
-		return err
+		return session.KeptBranch{}, err
 	}
 	defer c.CloseIdleConnections()
-	return remoteMutationError("kill", c.KillSession(context.Background(), req))
+	kept, err := c.KillSessionKept(context.Background(), req)
+	return kept, remoteMutationError("kill", err)
 }
 
 func routedArchiveSession(req daemon.ArchiveSessionRequest) (string, error) {
@@ -277,6 +278,19 @@ func routedCloseTab(req daemon.CloseTabRequest) (string, error) {
 	defer c.CloseIdleConnections()
 	name, err := c.CloseTab(req)
 	return name, remoteMutationError("tab-delete", err)
+}
+
+func routedSetAttention(req daemon.SetAttentionRequest) (daemon.SetAttentionResponse, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.SetAttention(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return daemon.SetAttentionResponse{}, err
+	}
+	defer c.CloseIdleConnections()
+	resp, err := c.SetAttention(req)
+	return resp, remoteMutationError("attention", err)
 }
 
 func routedRenameTab(req daemon.RenameTabRequest) (string, error) {

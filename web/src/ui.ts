@@ -41,6 +41,8 @@ import { serializeProjectRoute } from "./route.js";
 import { applyProjectColor, applyProjectFavicon, projectColor, projectColorRow } from "./project_color.js";
 import {
   archiveWarningText,
+  attentionReason,
+  hasAttention,
   callbackUnavailableText,
   canHandoff,
   compareSessionsForRail,
@@ -59,6 +61,7 @@ import {
   placementShort,
   type OperatorKind,
   operatorKind,
+  rowDot,
   rowStatus,
   rowTitle,
   isOffBoxWorkspace,
@@ -304,6 +307,10 @@ export interface AppState {
    *  layout mirror), so the tab bar can flag which tabs are already open in a pane.
    *  Defaults to [activeTab] — one pane — for the unsplit case. */
   shownTabs: number[];
+  /** the subset of shownTabs whose pane's stream is open — a connecting or
+   *  reconnecting pane shows its placeholder, not the tab's content, so attention
+   *  acknowledgement waits for the agent tab to land here. */
+  openTabs: number[];
   /** an actionable message shown as a transient toast when a tab op (create/close)
    *  or a task op (toggle/trigger/remove) fails, or null when there is none. These
    *  ops have no modal to surface an error in (unlike create/kill/archive), so the
@@ -389,6 +396,8 @@ export interface Actions {
    *  TUI: it is not destructive (it re-delivers the prompt the session was already
    *  going to run) and it is the obvious next step for a session that is stuck. */
   retryLimit(): void;
+  /** Dismisses the selection's attention request — the × on the header chip. */
+  clearAttention(): void;
   /** Retires the selection's pending handoff mission WITHOUT resending it
    *  (#4429) — the web half of the TUI resolve picker's "Mark delivered" row.
    *  Opens a confirm modal: the attestation is the operator's, so the click must
@@ -515,7 +524,7 @@ export interface Actions {
   /** Opens the edit-task modal seeded from the task, submitting via UpdateTask (#1935). */
   editTask(task: TaskData): void;
   /** Enables/disables a task via UpdateTask. */
-  toggleTask(task: TaskData): void;
+  toggleTask(task: TaskData): Promise<boolean>;
   /** Fires a task now via TriggerTask (enabled cron tasks). */
   triggerTask(task: TaskData): void;
   /** Removes a task via RemoveTask. */
@@ -1091,6 +1100,7 @@ export class AppShell {
   // treatment, and for the same reason, as lifecycleBtn above: a session hits the
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
+  private attentionChip: ReturnType<typeof terminalChrome>["attention"] | null = null;
   private retryBtn: HTMLElement | null = null;
   private retryKind: RetryActionPresentation["kind"] | null = null;
   // The "Mark delivered" button and whether it is currently shown (#4429). Same
@@ -1418,7 +1428,7 @@ export class AppShell {
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
-    applyProjectFavicon(color);
+    applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -2372,6 +2382,7 @@ export class AppShell {
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
+      this.attentionChip = null;
       this.archiveWarning = null;
       this.headActions = null;
       this.headActionSig = "";
@@ -2412,11 +2423,13 @@ export class AppShell {
       },
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
+      clearAttention: () => this.actions.clearAttention(),
       closePane: () => this.actions.closePane?.(),
       fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta),
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
+    this.attentionChip = chrome.attention;
     this.retryBtn = chrome.retry;
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
@@ -2471,7 +2484,7 @@ export class AppShell {
       [chrome.title, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
-      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header],
+      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header], [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
     ]);
     this.renderTabBar(state);
@@ -3002,6 +3015,7 @@ export class AppShell {
     if (this.terminalChrome) {
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
+    this.attentionChip?.patch(hasAttention(selected), attentionReason(selected));
     const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
@@ -3453,11 +3467,9 @@ export function sessionRow(
   // TUI keeps it for the same reason (#5571 W1.3).
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
-  const branchParts: Array<Node | string> = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
-  ];
+  const branchParts: Array<Node | string> = [];
   if ((selected || outageDetail !== "") && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, ` · ${idleDetail}`);
+    const idle = h("span", { class: "af-idle-reason" }, idleDetail);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (outageDetail !== "" && s.unreachable) {
       // Repaint hook: refreshIdleReasonAges re-ages the outage without a
@@ -3470,8 +3482,10 @@ export function sessionRow(
     branchParts.push(idle);
   }
   if (s.branch) {
+    if (branchParts.length > 0) {
+      branchParts.push(" · ");
+    }
     branchParts.push(
-      " · ",
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch),
     );
   }
@@ -3482,7 +3496,10 @@ export function sessionRow(
     branchParts.push(" · ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
-  const main = h("div", { class: "af-row-main" }, title, branch);
+  // The glyph is aria-hidden and the rail shows no state words, so the option's
+  // accessible name carries the state in visually hidden text.
+  const stateLabel = h("span", { class: "af-visually-hidden" }, ` ${OPERATOR_KIND_LABELS[operator]}`);
+  const main = h("div", { class: "af-row-main" }, title, stateLabel, branch);
 
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
     actionable ? "" : " af-row-inert"
@@ -3492,15 +3509,12 @@ export function sessionRow(
   row.replaceChildren();
   row.onclick = null;
   row.removeAttribute("aria-disabled");
-  row.dataset.state = status.kind ?? "working";
-  // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
-  // one. The empty fixed-width slot matches the TUI's blank status cell and keeps
-  // every title aligned without inventing a working indicator.
+  row.dataset.state = status.kind;
   const statusSlot = h("span", { class: "af-row-status" });
   statusSlot.setAttribute("aria-hidden", "true");
-  if (status.kind && status.icon) {
-    const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
-    statusSlot.append(dot);
+  const dot = rowDot(s);
+  if (dot) {
+    statusSlot.append(h("span", { class: `af-dot af-dot-${dot.kind}` }, icon(dot.icon)));
   }
   row.append(statusSlot);
   row.append(main);
@@ -3527,7 +3541,8 @@ export function sessionRow(
   // title says why. The reason rides a dataset fragment like the other title
   // parts so refreshIdleReasonAges preserves it on an idle-age repaint.
   const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
-  row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
+  const reason = attentionReason(s);
+  row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}${reason ? `: ${reason}` : ""}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
@@ -3558,7 +3573,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       } as SessionData,
       now,
     );
-    idle.textContent = detail ? ` · ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row") as HTMLElement | null;
     if (row) {
       const reason = detail ? `; ${detail}` : "";
@@ -3576,7 +3591,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       } as SessionData,
       now,
     );
-    idle.textContent = detail ? ` · ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row") as HTMLElement | null;
     if (row) {
       const reason = detail ? `; ${detail}` : "";

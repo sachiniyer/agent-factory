@@ -65,6 +65,10 @@ type CreateSessionRequest struct {
 	// not-attempted outcome across admission and net/rpc.
 	TaskOrigin        bool `json:"-"`
 	MaxConcurrentRuns int  `json:"-"`
+	// BacklogItem is the backlog item this create starts, set only by the
+	// daemon's own item start. `json:"-"` for the same reason as TaskID: an HTTP
+	// client must not tag a session as an item session.
+	BacklogItem int `json:"-"`
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch; kill/cleanup leaves the user's tree and branch
@@ -169,6 +173,9 @@ type KillSessionRequest struct {
 
 type KillSessionResponse struct {
 	OK bool `json:"ok"`
+	// KeptBranch is a branch af does not own that the worktree was on when the
+	// kill ran; it and its commits are left in the repo (#6233).
+	KeptBranch session.KeptBranch `json:"kept_branch,omitempty"`
 	MutationOutcome
 }
 

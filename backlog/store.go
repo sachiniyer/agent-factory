@@ -71,24 +71,27 @@ func Update(repoID string, fn func(*Backlog) error) (*Backlog, error) {
 	return updateFile(path, backlogStore, fn)
 }
 
-// Budget is the global spend limit for the runner, in US dollars at API list
-// prices.
+// Budget is the share of the user's Claude plan the runner may use, for all
+// projects. Percents are of a plan window; USDLimit is a dollar limit at API
+// prices for accounts with no plan readings.
 type Budget struct {
-	SchemaVersion int       `json:"schema_version"`
-	Limit         float64   `json:"limit"`
-	Spent         float64   `json:"spent"`
-	MaxPerRun     float64   `json:"max_per_run"`
-	ResetAt       time.Time `json:"reset_at"`
+	SchemaVersion int     `json:"schema_version"`
+	Share         float64 `json:"share"`
+	StopAt        float64 `json:"stop_at"`
+	MaxPerRun     float64 `json:"max_per_run"`
+	USDLimit      float64 `json:"usd_limit"`
+	USDSpent      float64 `json:"usd_spent"`
 }
 
-const DefaultMaxPerRun = 5
+const (
+	DefaultShare     = 50
+	DefaultStopAt    = 90
+	DefaultMaxPerRun = 10
+)
 
 func NewBudget() *Budget {
-	return &Budget{SchemaVersion: BudgetSchemaVersion, MaxPerRun: DefaultMaxPerRun}
+	return &Budget{SchemaVersion: BudgetSchemaVersion, Share: DefaultShare, StopAt: DefaultStopAt, MaxPerRun: DefaultMaxPerRun}
 }
-
-// Used reports whether the runner may not start more work.
-func (b *Budget) Used() bool { return b.Spent >= b.Limit }
 
 // LoadBudget reads the global budget. A missing file is the default budget.
 func LoadBudget() (*Budget, error) {

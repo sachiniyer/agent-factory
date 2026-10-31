@@ -6526,7 +6526,8 @@ function formatTime(value, now = /* @__PURE__ */ new Date()) {
 
 // src/status.ts
 var OPERATOR_KIND_LABELS = {
-  "needs-you": "Needs you",
+  attention: "Needs attention",
+  "needs-you": "Idle",
   working: "Working",
   "waiting-limit": "Waiting on a limit",
   broken: "Broken",
@@ -6597,12 +6598,11 @@ function unreachableDetail(s, now = /* @__PURE__ */ new Date()) {
 function formatPaneChurnAge(churn, now) {
   return formatDuration(now.getTime() - churn.getTime());
 }
-var READY_ICON = "circle";
 var DEAD_ICON = "circle";
 var LOST_ICON = "circle-dashed";
 var ARCHIVED_ICON = "archive";
 var LIMIT_ICON = "diamond";
-var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
+var WORKING = { icon: "circle", kind: "working", label: ROW_KIND_LABELS.working };
 function rowStatus(s) {
   const op = s.in_flight_op ?? InFlightOp.None;
   if (op !== InFlightOp.None) {
@@ -6611,7 +6611,7 @@ function rowStatus(s) {
   return dotForLiveness(livenessOf(s));
 }
 function isWorking(s) {
-  return rowStatus(s).kind === null;
+  return rowStatus(s).kind === "working";
 }
 function hasInFlightOp(s) {
   return (s.in_flight_op ?? InFlightOp.None) !== InFlightOp.None;
@@ -6620,10 +6620,13 @@ function isCreating(s) {
   return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
 }
 function rowKind(s) {
-  return rowStatus(s).kind ?? "working";
+  return rowStatus(s).kind;
 }
 function operatorKind(s) {
   const displayed = rowKind(s);
+  if (hasAttention(s)) {
+    return "attention";
+  }
   if (displayed === "working") {
     return "working";
   }
@@ -6637,6 +6640,33 @@ function operatorKind(s) {
     return "broken";
   }
   return "needs-you";
+}
+function hasAttention(s) {
+  if (!s.attention) {
+    return false;
+  }
+  const kind = rowKind(s);
+  return kind === "ready" || kind === "working";
+}
+function attentionReason(s) {
+  return hasAttention(s) ? (s.attention?.reason ?? "").trim() : "";
+}
+function rowDot(s) {
+  if (hasAttention(s)) {
+    return { icon: "circle", kind: "attention" };
+  }
+  const status = rowStatus(s);
+  if (status.kind !== "ready") {
+    return status.icon ? { icon: status.icon, kind: status.kind } : null;
+  }
+  switch (operatorKind(s)) {
+    case "broken":
+      return { icon: DEAD_ICON, kind: "dead" };
+    case "waiting-limit":
+      return { icon: LIMIT_ICON, kind: "limit" };
+    default:
+      return null;
+  }
 }
 function livenessOf(s) {
   const lv = s.liveness ?? Liveness.Unset;
@@ -6661,7 +6691,7 @@ function livenessOf(s) {
 function dotForLiveness(lv) {
   switch (lv) {
     case Liveness.Ready:
-      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
+      return { icon: null, kind: "ready", label: ROW_KIND_LABELS.ready };
     case Liveness.Lost:
       return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
     case Liveness.Dead:
@@ -7118,6 +7148,17 @@ async function killSession(id, title, token2) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
 }
+async function fetchKeptBranch(id, title, token2) {
+  try {
+    const r = await af("WorkspaceFacts", { id, title, repo_id: "" }, token2);
+    return r.kept_branch ?? {};
+  } catch {
+    return { unreadable: true };
+  }
+}
+async function clearAttention(id, setAt, token2) {
+  await af("SetAttention", { id, clear: true, set_at: setAt }, token2);
+}
 async function archiveSession(id, title, token2) {
   const result = await af("ArchiveSession", { id, title, repo_id: "" }, token2);
   if (result.warning) {
@@ -7551,6 +7592,17 @@ var ArrowRight = [
   ["path", { d: "m12 5 7 7-7 7" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/bell.mjs
+var Bell = [
+  ["path", { d: "M10.268 21a2 2 0 0 0 3.464 0" }],
+  [
+    "path",
+    {
+      d: "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"
+    }
+  ]
+];
+
 // node_modules/lucide/dist/esm/icons/bot.mjs
 var Bot = [
   ["path", { d: "M12 8V4H8" }],
@@ -7777,6 +7829,7 @@ var ICONS = {
   archive: Archive,
   "archive-restore": ArchiveRestore,
   "arrow-right": ArrowRight,
+  bell: Bell,
   bot: Bot,
   check: Check,
   "chevron-down": ChevronDown,
@@ -8022,8 +8075,30 @@ function terminalChrome(opts) {
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  const attention = attentionChip(opts.clearAttention);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+}
+function attentionChip(onDismiss) {
+  const label = h("span", { class: "af-term-attention-label" }, "Attention");
+  const dismiss = h("button", { type: "button", class: "af-term-attention-dismiss", title: "Dismiss attention request" }, icon("x"));
+  dismiss.setAttribute("aria-label", "Dismiss attention request");
+  dismiss.addEventListener("click", (event) => {
+    event.stopPropagation();
+    dismiss.blur();
+    onDismiss();
+  });
+  const el2 = h("div", { class: "af-term-attention", role: "status" }, icon("bell", "af-term-attention-bell"), label, dismiss);
+  el2.hidden = true;
+  const patch = (on, reason) => {
+    el2.hidden = !on;
+    const title = reason ? `Needs attention: ${reason}` : "Needs attention";
+    if (el2.title !== title) {
+      el2.title = title;
+      el2.setAttribute("aria-label", title);
+    }
+  };
+  return { el: el2, dismiss, patch };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -13204,7 +13279,21 @@ function handoffSameAgentTarget(catalogValues, currentAgent, recordedProgram, re
   if (matched !== void 0) return matched;
   return resolvedAgents === void 0 ? currentAgent : void 0;
 }
+function keptBranchNote(kept) {
+  if (kept?.name) {
+    return `Branch '${kept.name}' is checked out in the worktree and af does not own it \xB7 the branch and its commits are kept in the repo.`;
+  }
+  if (kept?.unreadable) {
+    return "Could not read the worktree's current branch \xB7 a branch you created there, and its commits, would be kept in the repo.";
+  }
+  return "";
+}
 function deletionConfirmationBody(opts) {
+  const base = deletionBaseBody(opts);
+  const kept = opts.offBox || opts.externalWorktree ? "" : keptBranchNote(opts.keptBranch);
+  return kept ? `${base} ${kept}` : base;
+}
+function deletionBaseBody(opts) {
   if (opts.archived && opts.offBox) {
     return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
   }
@@ -13565,8 +13654,9 @@ function shortcutRepeatGuard() {
 
 // src/filter.ts
 var FILTER_KEY = "af-status-filter";
-var FILTER_KINDS = ["needs-you", "working", "waiting-limit", "broken", "archived"];
+var FILTER_KINDS = ["attention", "needs-you", "working", "waiting-limit", "broken", "archived"];
 var DEFAULTS = {
+  attention: true,
   "needs-you": true,
   working: true,
   "waiting-limit": true,
@@ -13587,6 +13677,7 @@ function withKind(filter, kind, on) {
 }
 function kindCounts(list) {
   const counts = {
+    attention: 0,
     "needs-you": 0,
     working: 0,
     "waiting-limit": 0,
@@ -15637,6 +15728,7 @@ var SplitView = class {
     if (pane) {
       pane.status = status;
     }
+    this.report();
     if (leafId === this.focusedId) {
       this.cb.onStatus(status);
     }
@@ -15672,16 +15764,17 @@ var SplitView = class {
   report() {
     this.syncFocusedTabId();
     const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
+    const openTabs = this.tree ? leaves(this.tree).filter((l) => this.panes.get(l.id)?.status === "open").map((l) => l.tab) : [];
     const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0 : 0;
     const paneCount = shownTabs.length;
-    const shownKey = shownTabs.join(",");
+    const shownKey = `${shownTabs.join(",")}|${openTabs.join(",")}`;
     if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
       return;
     }
     this.lastFocusedTab = focusedTab;
     this.lastShown = shownKey;
     this.lastPaneCount = paneCount;
-    this.cb.onLayout({ focusedTab, shownTabs, paneCount });
+    this.cb.onLayout({ focusedTab, shownTabs, openTabs, paneCount });
   }
   /** Recomputes the focused pane's CURRENT tab id (by stable daemon id) and records the
    *  tab focus is LEAVING onto the MRU. THE funnel for keeping the focused-tab-id
@@ -16718,6 +16811,54 @@ function taskVerbs(t, actions2) {
     { label: "Remove", glyph: "trash", run: () => actions2.remove(t) }
   ];
 }
+function paintSwitch(el2, on, busy) {
+  el2.classList.toggle("af-task-switch-on", on);
+  el2.setAttribute("aria-checked", on ? "true" : "false");
+  el2.title = on ? "Enabled \xB7 click to disable" : "Disabled \xB7 click to enable";
+  if (busy) {
+    el2.setAttribute("aria-busy", "true");
+    el2.setAttribute("aria-disabled", "true");
+  } else {
+    el2.removeAttribute("aria-busy");
+    el2.removeAttribute("aria-disabled");
+  }
+}
+function flipSwitch(pending, t, toggle, paint, latest, backstop) {
+  if (pending.has(t.id)) return;
+  const next = !t.enabled;
+  const flip = { value: next, settled: false, timer: null };
+  pending.set(t.id, flip);
+  paint(next, true);
+  void toggle().then((applied) => applied, () => false).then((applied) => {
+    if (applied) {
+      flip.settled = true;
+      if (backstop) {
+        flip.timer = backstop.set(() => {
+          flip.timer = null;
+          if (pending.get(t.id) !== flip) return;
+          pending.delete(t.id);
+          backstop.expire(t.id);
+        }, backstop.ms);
+      }
+      return;
+    }
+    pending.delete(t.id);
+    paint(latest(), false);
+  });
+}
+function releaseSettled(pending, tasks, backstop) {
+  const enabled = new Map(tasks.map((t) => [t.id, t.enabled]));
+  for (const [id, flip] of pending) {
+    if (!flip.settled) continue;
+    if (enabled.has(id) && enabled.get(id) !== flip.value) continue;
+    if (flip.timer !== null) backstop?.clear(flip.timer);
+    flip.timer = null;
+    pending.delete(id);
+  }
+}
+function reconcileOnUpdate(pending, previous, tasks, backstop) {
+  if (previous !== tasks) releaseSettled(pending, tasks, backstop);
+}
 var TasksPane = class {
   constructor(actions2) {
     this.actions = actions2;
@@ -16732,6 +16873,9 @@ var TasksPane = class {
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
   // next-run recalculation) keeps the reader's place (#2933).
   lastToken = null;
+  // Task id -> the value an in-flight toggle is moving to. Rebuilds re-apply it so
+  // a refetch mid-request cannot hand back an enabled switch for the same task.
+  pending = /* @__PURE__ */ new Map();
   /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
    *  tasks whose project_path matches, so the tasks view operates within the same
    *  project the rail is scoped to. A null project (none exist) shows no tasks. */
@@ -16740,6 +16884,7 @@ var TasksPane = class {
       return;
     }
     this.lastError = error;
+    reconcileOnUpdate(this.pending, this.lastTasks, tasks, { clear: (h2) => window.clearTimeout(h2) });
     const token2 = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token2;
@@ -16761,6 +16906,32 @@ var TasksPane = class {
       const control = [...row?.querySelectorAll("button") ?? []].find((button) => sameControlKey(controlKey(button), focused));
       control?.focus({ preventScroll: true });
     }
+  }
+  /** If no list ever arrives to reconcile an applied flip, fall back to the last one. */
+  backstop(paint) {
+    return {
+      ms: 5e3,
+      set: (fn, ms) => window.setTimeout(fn, ms),
+      clear: (handle) => window.clearTimeout(handle),
+      expire: (id) => {
+        const known = this.lastTasks?.find((x) => x.id === id);
+        if (known) paint(id, known.enabled, false);
+      }
+    };
+  }
+  flip(t) {
+    const paint = (id, on, busy) => {
+      const el2 = this.el.querySelector(`[data-task-id="${CSS.escape(id)}"] .af-task-switch`);
+      if (el2) paintSwitch(el2, on, busy);
+    };
+    flipSwitch(
+      this.pending,
+      t,
+      () => this.actions.toggle(t),
+      (on, busy) => paint(t.id, on, busy),
+      () => this.lastTasks?.find((x) => x.id === t.id)?.enabled ?? t.enabled,
+      this.backstop(paint)
+    );
   }
   render(tasks) {
     if (this.lastError) {
@@ -16841,7 +17012,11 @@ var TasksPane = class {
     toggle.setAttribute("aria-checked", t.enabled ? "true" : "false");
     toggle.setAttribute("aria-label", `Enabled: ${t.name}`);
     toggle.title = t.enabled ? "Enabled \xB7 click to disable" : "Disabled \xB7 click to enable";
-    toggle.addEventListener("click", () => this.actions.toggle(t));
+    const inFlight = this.pending.get(t.id);
+    if (inFlight !== void 0) {
+      paintSwitch(toggle, inFlight.value, true);
+    }
+    toggle.addEventListener("click", () => this.flip(t));
     const verbs = taskVerbs(t, this.actions);
     const iconBtns = verbs.map(({ label, glyph, run, blocked }) => {
       const btn = h("button", { type: "button", class: "af-task-icon-btn", title: blocked ?? label }, icon(glyph));
@@ -17533,20 +17708,26 @@ function projectAccent(color, ...surfaces) {
   }
   return hex(target);
 }
-function projectFaviconSvg(color) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
+function projectFaviconSvg(color, inverted = false) {
+  const [tile, mark] = faviconColors(color, inverted);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${tile}"/><path d="${FAVICON_MARK_PATH}" fill="${mark}"/></svg>`;
 }
-function projectFaviconDataUrl(color) {
-  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color))}`;
+function projectFaviconDataUrl(color, inverted = false) {
+  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color, inverted))}`;
 }
-function projectFaviconPng(color, size) {
+function faviconColors(color, inverted) {
+  const ink = markInk(color);
+  return inverted ? [ink, color] : [color, ink];
+}
+function projectFaviconPng(color, inverted, size) {
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d");
   if (!ctx || typeof Path2D === "undefined") return null;
+  const [tile, mark] = faviconColors(color, inverted);
   ctx.scale(size / 512, size / 512);
-  ctx.fillStyle = color;
+  ctx.fillStyle = tile;
   ctx.beginPath();
   ctx.moveTo(112, 0);
   ctx.arcTo(512, 0, 512, 512, 112);
@@ -17555,19 +17736,66 @@ function projectFaviconPng(color, size) {
   ctx.arcTo(0, 0, 512, 0, 112);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = markInk(color);
+  ctx.fillStyle = mark;
   ctx.fill(new Path2D(FAVICON_MARK_PATH));
   return canvas.toDataURL("image/png");
 }
 var DEFAULT_FAVICON_COLOR = "#2f5fd8";
-var appliedFavicon = null;
-function applyProjectFavicon(color) {
-  if (appliedFavicon === color) return;
-  appliedFavicon = color;
-  const tile = color ?? DEFAULT_FAVICON_COLOR;
+var FAVICON_BLINK_MS = 1e3;
+var appliedColor = null;
+var appliedAttention = false;
+var blinkTimer = null;
+var blinkInverted = false;
+var lastBlinkAt = 0;
+var motionQuery = null;
+var faviconHrefs = /* @__PURE__ */ new Map();
+function applyProjectFavicon(color, attention = false) {
+  if (appliedColor === color && appliedAttention === attention) return;
+  if (appliedColor !== color) faviconHrefs.clear();
+  appliedColor = color;
+  appliedAttention = attention;
+  restartBlink();
+  paintFavicon();
+}
+function restartBlink() {
+  if (blinkTimer !== null) {
+    clearInterval(blinkTimer);
+    blinkTimer = null;
+  }
+  blinkInverted = appliedAttention;
+  if (appliedAttention && !prefersReducedMotion()) {
+    lastBlinkAt = Date.now();
+    blinkTimer = setInterval(blinkTick, FAVICON_BLINK_MS);
+  }
+}
+function blinkTick() {
+  const now = Date.now();
+  const late = now - lastBlinkAt > 2 * FAVICON_BLINK_MS;
+  lastBlinkAt = now;
+  blinkInverted = late ? true : !blinkInverted;
+  paintFavicon();
+}
+function prefersReducedMotion() {
+  if (motionQuery === null && typeof matchMedia === "function") {
+    motionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+    motionQuery.addEventListener("change", () => {
+      restartBlink();
+      paintFavicon();
+    });
+  }
+  return motionQuery?.matches ?? false;
+}
+function paintFavicon() {
+  const tile = appliedColor ?? DEFAULT_FAVICON_COLOR;
   for (const link of document.querySelectorAll('link[rel="icon"]')) {
     if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    const href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile) : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
+    const size = Number.parseInt(link.sizes.value, 10) || 32;
+    const key = `${link.type}|${size}|${blinkInverted}`;
+    let href = faviconHrefs.get(key);
+    if (href === void 0) {
+      href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile, blinkInverted) : projectFaviconPng(tile, blinkInverted, size);
+      faviconHrefs.set(key, href);
+    }
     link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }
@@ -18299,6 +18527,7 @@ var AppShell = class {
   // treatment, and for the same reason, as lifecycleBtn above: a session hits the
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
+  attentionChip = null;
   retryBtn = null;
   retryKind = null;
   // The "Mark delivered" button and whether it is currently shown (#4429). Same
@@ -18418,7 +18647,7 @@ var AppShell = class {
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
-    applyProjectFavicon(color);
+    applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -19156,6 +19385,7 @@ var AppShell = class {
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
+      this.attentionChip = null;
       this.archiveWarning = null;
       this.headActions = null;
       this.headActionSig = "";
@@ -19201,11 +19431,13 @@ var AppShell = class {
       },
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
+      clearAttention: () => this.actions.clearAttention(),
       closePane: () => this.actions.closePane?.(),
       fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta)
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
+    this.attentionChip = chrome.attention;
     this.retryBtn = chrome.retry;
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
@@ -19248,6 +19480,7 @@ var AppShell = class {
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
       [chrome.newTabs, this.header],
+      [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
     ]);
@@ -19648,6 +19881,7 @@ var AppShell = class {
     if (this.terminalChrome) {
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
+    this.attentionChip?.patch(hasAttention(selected), attentionReason(selected));
     const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
@@ -19854,11 +20088,9 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
-  const branchParts = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator])
-  ];
+  const branchParts = [];
   if ((selected || outageDetail !== "") && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, ` \xB7 ${idleDetail}`);
+    const idle = h("span", { class: "af-idle-reason" }, idleDetail);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (outageDetail !== "" && s.unreachable) {
       idle.dataset.unreachableSince = s.unreachable.since ?? "";
@@ -19869,8 +20101,10 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
     branchParts.push(idle);
   }
   if (s.branch) {
+    if (branchParts.length > 0) {
+      branchParts.push(" \xB7 ");
+    }
     branchParts.push(
-      " \xB7 ",
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch)
     );
   }
@@ -19881,19 +20115,20 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
     branchParts.push(" \xB7 ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
-  const main = h("div", { class: "af-row-main" }, title, branch);
+  const stateLabel = h("span", { class: "af-visually-hidden" }, ` ${OPERATOR_KIND_LABELS[operator]}`);
+  const main = h("div", { class: "af-row-main" }, title, stateLabel, branch);
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
   const row = previous ?? h("li", { class: cls });
   row.className = cls;
   row.replaceChildren();
   row.onclick = null;
   row.removeAttribute("aria-disabled");
-  row.dataset.state = status.kind ?? "working";
+  row.dataset.state = status.kind;
   const statusSlot = h("span", { class: "af-row-status" });
   statusSlot.setAttribute("aria-hidden", "true");
-  if (status.kind && status.icon) {
-    const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
-    statusSlot.append(dot);
+  const dot = rowDot(s);
+  if (dot) {
+    statusSlot.append(h("span", { class: `af-dot af-dot-${dot.kind}` }, icon(dot.icon)));
   }
   row.append(statusSlot);
   row.append(main);
@@ -19911,7 +20146,8 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const archiveWarning = archiveWarningText(s);
   const callbackWarning = callbackUnavailableText(s);
   const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
-  row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}`;
+  const reason = attentionReason(s);
+  row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}${reason ? `: ${reason}` : ""}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
@@ -19935,7 +20171,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       },
       now
     );
-    idle.textContent = detail ? ` \xB7 ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row");
     if (row) {
       const reason = detail ? `; ${detail}` : "";
@@ -19953,7 +20189,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       },
       now
     );
-    idle.textContent = detail ? ` \xB7 ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row");
     if (row) {
       const reason = detail ? `; ${detail}` : "";
@@ -20075,6 +20311,7 @@ var store = new Store({
   focus: "rail",
   activeTab: 0,
   shownTabs: [0],
+  openTabs: [],
   tabError: null,
   tasks: [],
   registeredProjects: [],
@@ -20127,7 +20364,7 @@ var splitView = new SplitView(termHost, {
   // Mirror the layout into the store so the tab bar can highlight the focused pane's
   // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
   // on a real change, so this write never loops back through rerender → syncSplit.
-  onLayout: ({ focusedTab, shownTabs }) => store.set({ activeTab: focusedTab, shownTabs })
+  onLayout: ({ focusedTab, shownTabs, openTabs }) => store.set({ activeTab: focusedTab, shownTabs, openTabs })
 });
 var root = null;
 function mount() {
@@ -20263,6 +20500,7 @@ async function connect(candidate) {
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: void 0,
     tasks,
@@ -20323,6 +20561,7 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: void 0,
     tasks: [],
@@ -20496,8 +20735,10 @@ function selectedSession2() {
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
 var restoreModalFocus = null;
+var modalGeneration = 0;
 var stopModalProjectionWatch = null;
 function closeModal() {
+  modalGeneration++;
   if (modal) {
     const restoreFocus = restoreModalFocus;
     restoreModalFocus = null;
@@ -20537,6 +20778,7 @@ function captureModalInvoker() {
   };
 }
 function openModal(m, focusCard = false, explicitInvoker) {
+  modalGeneration++;
   mountOverlay((mountHost) => {
     const focused = document.activeElement;
     const invoker = explicitInvoker ?? captureModalInvoker();
@@ -20667,6 +20909,7 @@ function newSession() {
 function openConfirm(action, session, invoker = captureModalInvoker()) {
   if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
+  const dialogGeneration = ++modalGeneration;
   const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest) => {
@@ -20777,21 +21020,34 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
       } else showRefusal();
     });
   };
-  mountConfirmation(
-    confirmModal({
-      action,
-      sessionTitle: target.title,
-      immediateRestore,
-      isRoot: hasRootAcknowledgment,
-      archived: isArchived(session),
-      offBox: isOffBoxWorkspace(session),
-      externalWorktree: session.worktree?.external_worktree === true,
-      branchCreatedByUs: session.worktree?.branch_created_by_us === true,
-      onConfirm,
-      onCancel: closeModal
-    })
-  );
-  if (immediateRestore) onConfirm();
+  const mountWith = (keptBranch) => {
+    mountConfirmation(
+      confirmModal({
+        keptBranch,
+        action,
+        sessionTitle: target.title,
+        immediateRestore,
+        isRoot: hasRootAcknowledgment,
+        archived: isArchived(session),
+        offBox: isOffBoxWorkspace(session),
+        externalWorktree: session.worktree?.external_worktree === true,
+        branchCreatedByUs: session.worktree?.branch_created_by_us === true,
+        onConfirm,
+        onCancel: closeModal
+      })
+    );
+    if (immediateRestore) onConfirm();
+  };
+  if (action === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
+    const ticket = createSelectionIntent.snapshot();
+    const generation = connectionGeneration;
+    void fetchKeptBranch(target.id, target.title, token ?? "").then((kept) => {
+      if (modalGeneration !== dialogGeneration || !createSelectionIntent.isCurrent(ticket) || connectionGeneration !== generation) return;
+      mountWith(kept);
+    });
+  } else {
+    mountWith();
+  }
 }
 function openDeleteProject(root2, label) {
   openModal(
@@ -21664,17 +21920,23 @@ function openEditTask(task) {
     })
   );
 }
-function toggleTask(task) {
+async function toggleTask(task) {
   const tok = token;
   if (tok === null) {
-    return;
+    return false;
   }
-  void updateTask(task, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
-    if (isMutationCommittedError(e)) {
+  try {
+    await updateTask(task, { enabled: !task.enabled }, tok);
+  } catch (e) {
+    const committed = isMutationCommittedError(e);
+    if (committed) {
       refreshTasks();
     }
     surfaceTabError(e);
-  });
+    return committed;
+  }
+  refreshTasks();
+  return true;
 }
 function doTriggerTask(task) {
   const tok = token;
@@ -21687,6 +21949,15 @@ function doTriggerTask(task) {
     }
     surfaceTabError(e);
   });
+}
+function doClearAttention() {
+  const sel = selectedSessionData();
+  const tok = token;
+  const setAt = sel?.attention?.set_at;
+  if (!sel || tok === null || !setAt) {
+    return;
+  }
+  void clearAttention(sel.id ?? "", setAt, tok).catch(surfaceTabError);
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -21837,6 +22108,7 @@ var actions = {
   archive: (session) => openConfirm("archive", session),
   restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  clearAttention: doClearAttention,
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
@@ -22308,6 +22580,7 @@ if (document.readyState === "loading") {
 lucide/dist/esm/icons/archive-restore.mjs:
 lucide/dist/esm/icons/archive.mjs:
 lucide/dist/esm/icons/arrow-right.mjs:
+lucide/dist/esm/icons/bell.mjs:
 lucide/dist/esm/icons/bot.mjs:
 lucide/dist/esm/icons/check.mjs:
 lucide/dist/esm/icons/chevron-down.mjs:

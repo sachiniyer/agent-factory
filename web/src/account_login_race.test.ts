@@ -99,7 +99,7 @@ function stage(): {
 
   const code = ts.transpileModule(
     `
-    let modal = null;
+    let modal = null, modalGeneration = 0;
     let configAssistant = null;
     let accountLogin = null;
     let restoreModalFocus = null;

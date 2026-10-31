@@ -3,6 +3,7 @@
   color-scheme: light;
   --af-accent: #2d6271;
   --af-archived: #4c566a;
+  --af-attention: #856200;
   --af-border: #657084;
   --af-callout-decision: #2c6440;
   --af-callout-question: #8a4600;
@@ -32,6 +33,7 @@
   color-scheme: dark;
   --af-accent: #2296f3;
   --af-archived: #d8dee9;
+  --af-attention: #f5c400;
   --af-border: #3d3d3d;
   --af-callout-decision: #a8d8b4;
   --af-callout-question: #f2b880;
