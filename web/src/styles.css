@@ -4216,11 +4216,7 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 
 .af-docs-status:is([data-state="saving"], [data-state="pending"], [data-state="loading"]) .af-icon {
   display: inline-block;
-  animation: af-working-spin 1s linear infinite;
-}
-
-@keyframes af-working-spin {
-  to { transform: rotate(360deg); }
+  animation: af-working-spin 1s linear infinite; /* the keyframes are the working dot's, defined once above */
 }
 
 /* Reduced motion keeps the glyph and drops the spin. The selector repeats the

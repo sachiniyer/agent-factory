@@ -3675,11 +3675,6 @@ textarea[class] {
   display: inline-block;
   animation: af-working-spin 1s linear infinite;
 }
-@keyframes af-working-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
 @media (prefers-reduced-motion: reduce) {
   .af-docs-status:is([data-state=saving], [data-state=pending], [data-state=loading]) .af-icon {
     animation: none;

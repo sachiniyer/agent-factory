@@ -7846,7 +7846,6 @@ var ICONS = {
   "loader-circle": LoaderCircle,
   "git-branch": GitBranch,
   link: Link,
-  "loader-circle": LoaderCircle,
   menu: Menu,
   "octagon-x": OctagonX,
   panels: PanelsTopLeft,
