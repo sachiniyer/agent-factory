@@ -10,7 +10,9 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/planusage"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 const (
@@ -345,6 +347,12 @@ func (m *Manager) selectStarts(repoID string, b *backlog.Backlog, states map[int
 	for _, id := range b.Runnable(states, len(b.Items), rs.backingOff(repoID, now)) {
 		if len(out) >= free {
 			break
+		}
+		// The budget meters Claude transcripts only: an item that names another
+		// agent runs on an explicit start, never on the runner, which could not
+		// bound its spend (Codex P2 on #6300).
+		if it := b.Item(id); it != nil && it.Program != "" && sessionenv.AgentForCommand(it.Program) != tmux.ProgramClaude {
+			continue
 		}
 		acct := m.continuationAccount(repoID, b, id)
 		if acct == "" {
