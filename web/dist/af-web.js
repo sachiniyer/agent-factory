@@ -7148,6 +7148,14 @@ async function killSession(id, title, token2) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
 }
+async function fetchKeptBranch(id, title, token2) {
+  try {
+    const r = await af("WorkspaceFacts", { id, title, repo_id: "" }, token2);
+    return r.kept_branch ?? {};
+  } catch {
+    return { unreadable: true };
+  }
+}
 async function clearAttention(id, setAt, token2) {
   await af("SetAttention", { id, clear: true, set_at: setAt }, token2);
 }
@@ -13252,7 +13260,21 @@ function handoffSameAgentTarget(catalogValues, currentAgent, recordedProgram, re
   if (matched !== void 0) return matched;
   return resolvedAgents === void 0 ? currentAgent : void 0;
 }
+function keptBranchNote(kept) {
+  if (kept?.name) {
+    return `Branch '${kept.name}' is checked out in the worktree and af does not own it \xB7 the branch and its commits are kept in the repo.`;
+  }
+  if (kept?.unreadable) {
+    return "Could not read the worktree's current branch \xB7 a branch you created there, and its commits, would be kept in the repo.";
+  }
+  return "";
+}
 function deletionConfirmationBody(opts) {
+  const base = deletionBaseBody(opts);
+  const kept = opts.offBox || opts.externalWorktree ? "" : keptBranchNote(opts.keptBranch);
+  return kept ? `${base} ${kept}` : base;
+}
+function deletionBaseBody(opts) {
   if (opts.archived && opts.offBox) {
     return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
   }
@@ -20545,8 +20567,10 @@ function selectedSession2() {
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
 var restoreModalFocus = null;
+var modalGeneration = 0;
 var stopModalProjectionWatch = null;
 function closeModal() {
+  modalGeneration++;
   if (modal) {
     const restoreFocus = restoreModalFocus;
     restoreModalFocus = null;
@@ -20586,6 +20610,7 @@ function captureModalInvoker() {
   };
 }
 function openModal(m, focusCard = false, explicitInvoker) {
+  modalGeneration++;
   mountOverlay((mountHost) => {
     const focused = document.activeElement;
     const invoker = explicitInvoker ?? captureModalInvoker();
@@ -20716,6 +20741,7 @@ function newSession() {
 function openConfirm(action, session, invoker = captureModalInvoker()) {
   if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
+  const dialogGeneration = ++modalGeneration;
   const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest) => {
@@ -20826,21 +20852,34 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
       } else showRefusal();
     });
   };
-  mountConfirmation(
-    confirmModal({
-      action,
-      sessionTitle: target.title,
-      immediateRestore,
-      isRoot: hasRootAcknowledgment,
-      archived: isArchived(session),
-      offBox: isOffBoxWorkspace(session),
-      externalWorktree: session.worktree?.external_worktree === true,
-      branchCreatedByUs: session.worktree?.branch_created_by_us === true,
-      onConfirm,
-      onCancel: closeModal
-    })
-  );
-  if (immediateRestore) onConfirm();
+  const mountWith = (keptBranch) => {
+    mountConfirmation(
+      confirmModal({
+        keptBranch,
+        action,
+        sessionTitle: target.title,
+        immediateRestore,
+        isRoot: hasRootAcknowledgment,
+        archived: isArchived(session),
+        offBox: isOffBoxWorkspace(session),
+        externalWorktree: session.worktree?.external_worktree === true,
+        branchCreatedByUs: session.worktree?.branch_created_by_us === true,
+        onConfirm,
+        onCancel: closeModal
+      })
+    );
+    if (immediateRestore) onConfirm();
+  };
+  if (action === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
+    const ticket = createSelectionIntent.snapshot();
+    const generation = connectionGeneration;
+    void fetchKeptBranch(target.id, target.title, token ?? "").then((kept) => {
+      if (modalGeneration !== dialogGeneration || !createSelectionIntent.isCurrent(ticket) || connectionGeneration !== generation) return;
+      mountWith(kept);
+    });
+  } else {
+    mountWith();
+  }
 }
 function openDeleteProject(root2, label) {
   openModal(

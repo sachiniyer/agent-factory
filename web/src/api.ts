@@ -571,6 +571,18 @@ export async function killSession(id: string, title: string, token: string): Pro
   }
 }
 
+/** Reads, at confirm time, the branch a delete would leave in the repo: the HEAD
+ *  of the session's worktree, not its recorded branch (#6233). A failed read is
+ *  reported as unreadable rather than guessed. */
+export async function fetchKeptBranch(id: string, title: string, token: string): Promise<{ name?: string; unreadable?: boolean }> {
+  try {
+    const r = await af<{ kept_branch?: { name?: string; unreadable?: boolean } }>("WorkspaceFacts", { id, title, repo_id: "" }, token);
+    return r.kept_branch ?? {};
+  } catch {
+    return { unreadable: true };
+  }
+}
+
 /** Clears a session's attention request (`af sessions attention --clear`), but
  *  only while it is still the request set at `setAt`. */
 export async function clearAttention(id: string, setAt: string, token: string): Promise<void> {
