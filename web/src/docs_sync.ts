@@ -35,7 +35,7 @@ export interface DocSyncDeps {
   load(initial?: boolean): Promise<DocText>;
   /** `final` marks the save that dispose or page unload sends; nobody waits
    *  for its reply. */
-  save(text: string, base: string, final?: boolean): Promise<SaveResult>;
+  save(text: string, base: string, final?: boolean, fence?: { writer: string; seq: number }): Promise<SaveResult>;
   /** Replaces the editor buffer. The editor keeps the cursor and scroll. Called
    *  only while the doc is attached. */
   setBuffer(text: string): void;
@@ -54,6 +54,8 @@ export interface DocSyncDeps {
 
 export class DocSync {
   private model: Model = initialModel();
+  /** Names this sync's saves to the daemon, which refuses one that arrives after a later save of ours. */
+  private readonly writer = `s${Math.random().toString(36).slice(2, 12)}${Date.now().toString(36)}`;
   private timer: unknown = null;
   private attached = true;
   private shown: { status: SyncStatus; detail: string } | null = null;
@@ -370,7 +372,7 @@ export class DocSync {
           this.dispatch({ t: "save_fail", seq, error: "the daemon did not answer in time", outstanding: true });
           giveUp = this.deps.setTimer(ended, SAVE_GIVE_UP_MS);
         }, SAVE_TIMEOUT_MS);
-        this.deps.save(fx.text, fx.base, fx.final).then(
+        this.deps.save(fx.text, fx.base, fx.final, { writer: this.writer, seq }).then(
           (result) => {
             if (settled) {
               if (timedOut) ended();

@@ -54,7 +54,7 @@ export interface Draft {
 
 export interface SyncDepsLike {
   load(initial?: boolean): Promise<DocText>;
-  save(text: string, base: string, final?: boolean): Promise<SaveResult>;
+  save(text: string, base: string, final?: boolean, fence?: { writer: string; seq: number }): Promise<SaveResult>;
   setBuffer(text: string): void;
   onStatus(status: string, detail: string): void;
   setTimer(fn: () => void, ms: number): unknown;
@@ -127,8 +127,20 @@ class Daemon {
     return this.commit(lines.join("\n"));
   }
   /** SaveProposalDoc: fast-forward on the head, else a per-line three-way merge. */
-  save(text: string, base: string): SaveResult {
+  /** The daemon's writer fence: a save at or below the highest seq that has committed for its
+   *  writer is refused, and the mark moves only when a save commits. */
+  private readonly fenced = new Map<string, number>();
+  save(text: string, base: string, fence?: { writer: string; seq: number }): SaveResult {
     if (this.deleted) throw new Error("404 doc not found");
+    if (fence && !process.env.AF_NO_FENCE) {
+      const last = this.fenced.get(fence.writer);
+      if (last !== undefined && fence.seq <= last) throw Object.assign(new Error("409 proposal_stale_save"), { status: 409 });
+    }
+    const result = this.saveUnfenced(text, base);
+    if (fence && result.kind === "saved") this.fenced.set(fence.writer, Math.max(this.fenced.get(fence.writer) ?? 0, fence.seq));
+    return result;
+  }
+  private saveUnfenced(text: string, base: string): SaveResult {
     if (base === this.head) {
       return { kind: "saved", text, commit: text === this.text ? this.head : this.commit(text), merged: false };
     }
@@ -297,7 +309,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
           return d.read();
         }, owner);
       },
-      save: (text, base, final) => {
+      save: (text, base, final, fence) => {
         saves.push({ doc, text, bufferHadMarkers: self ? hasConflictMarkers(self.text) : false });
         void final;
         // I12: once a newer tab has loaded the doc, a tab that closed on it writes no more.
@@ -327,7 +339,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
           if (fault === "drop") throw httpErr(503, "503 service unavailable");
           if (fault === "refuse") throw httpErr(413, "413 doc is larger than the limit");
           if (fault === "hang-lost") return new Promise<never>(() => undefined);
-          const result = d.save(text, base);
+          const result = d.save(text, base, fence);
           if (fault === "lose-reply") throw new Error("network error: reply lost");
           if (fault === "hang-applied") return new Promise<never>(() => undefined);
           return result;
@@ -989,6 +1001,43 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
    *  older refresh's reply, which lacks the new doc, arrives last. A doc missing from a list
    *  is taken as deleted, so the old reply must not be used. The roster code is the pane's. */
   const roster = new RosterOrder();
+  /** The pane's use of a list reply: dropped if an older ticket than one used, else a doc it lacks is deleted. */
+  function applyList(ticket: number, listed: string[]): void {
+    if (!process.env.AF_NO_ROSTER_ORDER && !roster.accept(ticket)) return;
+    for (const gone of missingFrom([...syncs.keys()], listed)) syncs.get(gone)?.remoteDeleted?.();
+  }
+
+  /** A doc is deleted under unsaved work (the tab keeps it), a list request goes out and is
+   *  answered while it is gone, the user restores the doc, and only then does the list reply
+   *  arrive: it lacks the restored doc, and must not mark it deleted again. (AF_NO_ROSTER_INVALIDATE
+   *  is the pane before Restore doc invalidated the lists requested earlier.) */
+  async function listAfterRestore(): Promise<void> {
+    const doc = attached;
+    const s = syncs.get(doc);
+    const d = daemons.get(doc)!;
+    if (!doc || !s || !isLoaded(s) || s.ended || d.deleted || userEdit() === null) return;
+    d.deleted = true;
+    d.down = 0;
+    s.remoteDeleted?.();
+    await tick();
+    if (s.currentStatus !== "gone") {
+      d.readd(initialText(doc));
+      return;
+    }
+    const ticket = roster.begin();
+    const staleList = names.filter((n) => !daemons.get(n)!.deleted); // answered while the doc was gone
+    d.readd(initialText(doc)); // Restore doc adds it again...
+    if (!process.env.AF_NO_ROSTER_INVALIDATE) roster.invalidate();
+    let revived = false;
+    void s.revive?.().then(() => { revived = true; }, () => undefined);
+    await drain();
+    await tick();
+    applyList(ticket, staleList); // ...and only now does the older list arrive
+    await tick();
+    // I22: a list from before the restore does not mark the restored doc deleted again.
+    if (revived && s.currentStatus === "gone" && !d.deleted) fail("restored-doc-marked-gone-by-old-list", `${doc}: a doc list from before Restore doc marked the restored doc deleted again`);
+  }
+
   async function listReorder(): Promise<void> {
     const doc = "notes";
     if (!daemons.has(doc)) {
@@ -1003,6 +1052,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       if (!process.env.AF_NO_ROSTER_ORDER && !roster.accept(ticket)) return;
       for (const gone of missingFrom(openDocs(), listed)) syncs.get(gone)?.remoteDeleted?.();
     };
+    void applyList;
     const oldTicket = roster.begin(); // a refresh goes out...
     const oldList = listNow(); // ...and the daemon answers it before the doc exists
     const reorder = rand() < 0.8;
@@ -1268,10 +1318,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   await drain();
 
   for (let step = 0; step < o.steps && !violation; step++) {
-    // The late-landing interleavings are rare by chance. AF_LATE_LANDING_STRESS reaches them on
-    // purpose at fixed steps: it fails today on a known gap (a closed tab's final save merging with
-    // a request that lands late: tracked as a follow-up), so it is not part of the default run.
-    if (process.env.AF_LATE_LANDING_STRESS && o.chaos && (o.faults ?? 0) > 0 && (step === 30 || step === 70 || step === 110)) await lateLanding();
+    // The late-landing interleavings are rare by chance, so they are reached on purpose at fixed steps.
+    if (o.chaos && (o.faults ?? 0) > 0 && (step === 30 || step === 70 || step === 110)) await lateLanding();
     const r = rand();
     trace.push(`step ${step} r=${r.toFixed(3)} attached=${attached} status=${syncs.get(attached)?.currentStatus} text=${JSON.stringify(syncs.get(attached)?.text)}`);
     if (r < 0.28) userEdit();
@@ -1359,7 +1407,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9645 && r < 0.9655) await lateLanding();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9655 && r < 0.966) await undoThenGone();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9660 && r < 0.9665) await closeWhileLoading();
-    else if (o.chaos && r >= 0.9690 && r < 0.9695) await listReorder();
+    else if (o.chaos && r >= 0.9690 && r < 0.9693) await listReorder();
+    else if (o.chaos && r >= 0.9693 && r < 0.9697) await listAfterRestore();
     else if (o.chaos && o.collide && r >= 0.9665 && r < 0.9690) rollbackHead();
     else if (o.chaos && !o.collide && r >= 0.9665 && r < 0.9690) await discardDeleted();
     else if (o.chaos && r >= 0.9695 && r < 0.97) toggleWriteOutage();

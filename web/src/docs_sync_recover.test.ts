@@ -229,3 +229,25 @@ test("an adopted draft that equals the head but names a save that may still be o
   r = run(r.m, { t: "reconcile_ok", doc: { text: "A", commit: "c2" } });
   assert.equal(r.m.buffer, "a", "the undo stands over what landed");
 });
+
+test("a merged save reply that brings in a doubted save keeps the user's revert of it", () => {
+  // B ("A" on the first line) was sent and timed out; the user reverted it and edited the last line; the
+  // daemon had applied B first, so the merge of the later save keeps B's first line, which the revert undid.
+  const a = "a\nb\nc\nd\ne";
+  let r = run(open({ text: a, commit: "c1" }).m, { t: "edit", text: "A\nb\nc\nd\ne" }, { t: "flush" });
+  r = run(r.m, { t: "save_fail", error: "the daemon did not answer in time", outstanding: true });
+  r = run(r.m, { t: "reconcile_ok", doc: { text: a, commit: "c1" } }); // nothing landed yet; the request is still out
+  r = run(r.m, { t: "edit", text: "a\nb\nc\nd\nE" }, { t: "flush" });
+  assert.ok(r.fx.some((f) => f.t === "save"));
+  r = run(r.m, { t: "save_ok", result: { kind: "saved", text: "A\nb\nc\nd\nE", commit: "c3", merged: true } });
+  assert.equal(r.m.buffer, "a\nb\nc\nd\nE", "the revert stands; it is saved again on top");
+  assert.equal(r.m.saved, "A\nb\nc\nd\nE");
+});
+
+test("a restore that completes after its tab was closed does not bring the tab back to write", () => {
+  let r = run(loaded(), { t: "edit", text: "v2" }, { t: "gone" });
+  r = run(r.m, { t: "close" });
+  r = run(r.m, { t: "revive", head: { text: "v1", commit: "c9" } });
+  assert.equal(r.fx.some((f) => f.t === "save" || f.t === "arm"), false);
+  assert.equal(r.m.gone, true, "it stays with the stored draft for the next pane");
+});

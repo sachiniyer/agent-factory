@@ -254,7 +254,7 @@ func (s *controlServer) SaveProposalDoc(req SaveProposalDocRequest, resp *SavePr
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	out, err := s.manager.proposalService().Save(target(req.SessionID, req.RepoID, req.RepoPath), req.Slug, req.Doc, req.Text, req.Base)
+	out, err := s.manager.proposalService().SaveFenced(target(req.SessionID, req.RepoID, req.RepoPath), req.Slug, req.Doc, req.Text, req.Base, req.Writer, req.Seq)
 	if err != nil {
 		return err
 	}

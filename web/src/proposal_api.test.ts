@@ -152,3 +152,12 @@ test("putDoc sends keepalive only when the serialized body fits the browser's 64
   await putDoc("s1", "auth", "api", "short", "c1", "", false);
   assert.equal(calls[2]!.init.keepalive, false, "an ordinary save is not keepalive");
 });
+
+test("putDoc sends the writer fence when it is given, and nothing extra when it is not", async () => {
+  let calls = recordFetch(200, { data: { text: "t", commit: "c2", merged: false }, error: null });
+  await putDoc("s1", "auth", "api", "t", "c1", "", false, { writer: "sync-1", seq: 7 });
+  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1", slug: "auth", doc: "api", text: "t", base: "c1", writer: "sync-1", seq: 7 });
+  calls = recordFetch(200, { data: { text: "t", commit: "c2", merged: false }, error: null });
+  await putDoc("s1", "auth", "api", "t", "c1", "");
+  assert.deepEqual(Object.keys(JSON.parse(calls[0]!.init.body as string)).sort(), ["base", "doc", "session_id", "slug", "text"]);
+});

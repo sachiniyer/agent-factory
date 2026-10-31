@@ -535,7 +535,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SaveProposalDoc",
-		Description: "Save a proposal doc as a human edit against a base commit; merges with git merge-file, and answers 409 proposal_conflict with ours/theirs/base when the edits conflict.",
+		Description: "Save a proposal doc as a human edit against a base commit; merges with git merge-file, and answers 409 proposal_conflict with ours/theirs/base when the edits conflict. A save with writer and seq is refused with 409 proposal_stale_save when the daemon has already seen that seq or a later one from the writer for the doc.",
 		requestType: reflect.TypeOf(SaveProposalDocRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SaveProposalDoc) },
 	},

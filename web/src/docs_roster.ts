@@ -13,6 +13,12 @@ export class RosterOrder {
     return ++this.issued;
   }
 
+  /** The roster is changed from here (Restore doc re-adds a doc): every list requested so far
+   *  predates the change, and none of them may be used. */
+  invalidate(): void {
+    this.applied = ++this.issued;
+  }
+
   /** A reply arrives. It is used only if no reply to a later request has been used. */
   accept(ticket: number): boolean {
     if (ticket < this.applied) return false;

@@ -2,6 +2,7 @@ package proposal
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -647,5 +648,285 @@ func TestScanFollowsAttachChanges(t *testing.T) {
 	svc.Scan(in)
 	if ev := host.takeEvents(); len(ev) != 0 {
 		t.Fatalf("a detached proposal must not be watched, got %+v", ev)
+	}
+}
+
+// The #6310 sequence: a save B times out and is still on the wire, the user undoes, the
+// writer's later save lands, and then B arrives. B merges cleanly against the later head
+// (the undo is invisible to a three-way merge against its base), so only the fence stops it.
+func TestSaveFenceRefusesALateSaveThatWouldMergeCleanly(t *testing.T) {
+	target := Target{SessionID: sessA}
+	for _, tc := range []struct {
+		name   string
+		writer string
+		seq    int64
+		wantOK bool
+	}{
+		{"without a fence the late save merges cleanly and brings B back", "", 0, true},
+		{"with a fence it is refused", "tab-1", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _ := newTestService(t)
+			if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+				t.Fatal(err)
+			}
+			r := readFor(t, svc, "goals")
+			// the writer's save 2 (the undo, plus a tail edit) lands first
+			if _, err := svc.SaveFenced(target, "p", "goals", r.Text+"tail\n", r.Commit, "tab-1", 2); err != nil {
+				t.Fatal(err)
+			}
+			head := readFor(t, svc, "goals")
+			// then its save 1 (B, made against the original base) arrives
+			_, err := svc.SaveFenced(target, "p", "goals", "B edit\n"+r.Text, r.Commit, tc.writer, tc.seq)
+			after := readFor(t, svc, "goals")
+			if tc.wantOK {
+				if err != nil || !strings.HasPrefix(after.Text, "B edit\n") {
+					t.Fatalf("late save = %v, text %q; want it merged in", err, after.Text)
+				}
+				return
+			}
+			var stale *StaleSaveError
+			if !errors.As(err, &stale) || stale.Last != 2 || stale.APIErrorCode() != ErrorCodeStaleSave || stale.HTTPStatus() != 409 {
+				t.Fatalf("late save = %v; want a StaleSaveError fenced by seq 2", err)
+			}
+			if after.Commit != head.Commit || after.Text != head.Text {
+				t.Fatalf("a refused save changed the doc: %+v -> %+v", head, after)
+			}
+		})
+	}
+}
+
+func TestSaveFenceIsPerWriterAndPerDocAndOptional(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	if _, err := svc.Start(sessA, "p", []string{"goals", "api"}); err != nil {
+		t.Fatal(err)
+	}
+	g := readFor(t, svc, "goals")
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", g.Text+"1\n", g.Commit, "w1", 5); err != nil {
+		t.Fatal(err)
+	}
+	head := readFor(t, svc, "goals")
+	// the same seq again (a duplicate delivery) is refused
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", g.Text+"1\n", g.Commit, "w1", 5); !errors.As(err, new(*StaleSaveError)) {
+		t.Fatalf("a duplicate seq = %v; want stale", err)
+	}
+	// another writer, another doc, no writer, and no seq are not fenced by w1's seq 5
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", g.Text+"1\n2\n", head.Commit, "w2", 1); err != nil {
+		t.Fatalf("another writer: %v", err)
+	}
+	a := readFor(t, svc, "api")
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "api", a.Text+"x\n", a.Commit, "w1", 1); err != nil {
+		t.Fatalf("another doc: %v", err)
+	}
+	h2 := readFor(t, svc, "goals")
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", h2.Text+"3\n", h2.Commit, "", 0); err != nil {
+		t.Fatalf("unfenced save: %v", err)
+	}
+	h3 := readFor(t, svc, "goals")
+	if _, err := svc.SaveFenced(Target{SessionID: sessA}, "p", "goals", h3.Text+"4\n", h3.Commit, "w1", 6); err != nil {
+		t.Fatalf("a higher seq: %v", err)
+	}
+}
+
+func TestFenceTableForgetsTheOldestWriter(t *testing.T) {
+	var f fenceTable
+	for i := 0; i < fenceCap+10; i++ {
+		key := fmt.Sprintf("k%d", i)
+		if ok, _ := f.check(key, 1); !ok {
+			t.Fatalf("first save of %s refused", key)
+		}
+		f.advance(key, 1)
+	}
+	if len(f.seen) != fenceCap {
+		t.Fatalf("remembers %d writers, want %d", len(f.seen), fenceCap)
+	}
+	if ok, _ := f.check("k0", 1); !ok {
+		t.Fatal("a forgotten writer is unfenced")
+	}
+	if ok, _ := f.check(fmt.Sprintf("k%d", fenceCap+9), 1); ok {
+		t.Fatal("a remembered writer's repeat seq must be refused")
+	}
+	f.advance("k5000", 7)
+	f.advance("k5000", 3)
+	if ok, last := f.check("k5000", 7); ok || last != 7 {
+		t.Fatalf("the mark must only rise: ok=%v last=%d", ok, last)
+	}
+}
+
+// A save that does not commit leaves the mark where it was, so the writer can send it again
+// with the same seq.
+func TestSaveFenceDoesNotAdvanceOnAConflict(t *testing.T) {
+	svc, _, store := newTestService(t)
+	target := Target{SessionID: sessA}
+	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+		t.Fatal(err)
+	}
+	r := readFor(t, svc, "goals")
+	// an agent edit on the same line makes the next save conflict
+	if _, _, err := store.Write("p", "goals", "agent\n", Committer{Author: AuthorAgent, SessionID: sessA}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SaveFenced(target, "p", "goals", "human\n", r.Commit, "w", 4); err == nil || !errors.As(err, new(*ConflictError)) {
+		t.Fatalf("save = %v; want a conflict", err)
+	}
+	head := readFor(t, svc, "goals")
+	// the same seq goes through once the writer has read the head
+	if _, err := svc.SaveFenced(target, "p", "goals", "human\n", head.Commit, "w", 4); err != nil {
+		t.Fatalf("retry with the same seq after a conflict: %v", err)
+	}
+	if _, err := svc.SaveFenced(target, "p", "goals", "again\n", readFor(t, svc, "goals").Commit, "w", 4); !errors.As(err, new(*StaleSaveError)) {
+		t.Fatalf("a repeat of a committed seq = %v; want stale", err)
+	}
+}
+
+// Saves of one writer racing: each seq marks its own line (spaced out), so every save merges cleanly whatever
+// the head has become. Whatever the interleaving, a refused save commits nothing, and what
+// commits never goes backwards in seq: no commit may add a mark below one already there.
+func TestSaveFenceUnderConcurrentSavesNeverGoesBackwards(t *testing.T) {
+	svc, _, store := newTestService(t)
+	target := Target{SessionID: sessA}
+	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+		t.Fatal(err)
+	}
+	const writers, perWriter = 8, 6
+	lines := make([]string, 4*(writers*perWriter+2)) // marks are 4 lines apart: git merge-file calls neighbours a conflict
+	for i := range lines {
+		lines[i] = "-"
+	}
+	if _, _, err := store.Write("p", "goals", strings.Join(lines, "\n")+"\n", Committer{Author: AuthorAgent, SessionID: sessA}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for k := 0; k < perWriter; k++ {
+				seq := int64(k*writers + w + 1) // interleaved: every goroutine sends ascending seqs
+				head := readFor(t, svc, "goals")
+				ls := strings.Split(head.Text, "\n")
+				ls[4*seq] = "x"
+				_, err := svc.SaveFenced(target, "p", "goals", strings.Join(ls, "\n"), head.Commit, "one-writer", seq)
+				if err != nil && !errors.As(err, new(*StaleSaveError)) {
+					t.Errorf("seq %d: %v", seq, err)
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	log, err := store.gitTrim("log", "--reverse", "--format=%H", "--", "p/goals.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marks := func(text string) map[int]bool {
+		m := map[int]bool{}
+		for i, l := range strings.Split(text, "\n") {
+			if l == "x" {
+				m[i] = true
+			}
+		}
+		return m
+	}
+	have := map[int]bool{}
+	for _, c := range strings.Fields(log) {
+		text, err := store.fileAt(c, "p/goals.md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := marks(text)
+		for i := range now {
+			if have[i] {
+				continue
+			}
+			for j := range have {
+				if j > i {
+					t.Fatalf("history went backwards: mark %d committed after mark %d", i, j)
+				}
+			}
+			have[i] = true
+		}
+	}
+	if len(have) == 0 {
+		t.Fatal("nothing committed")
+	}
+}
+
+// recordingGuard logs when it is asked to admit and told of a commit; the first Admit can be held.
+type recordingGuard struct {
+	name string
+	mu   *sync.Mutex
+	log  *[]string
+	hold chan struct{}
+}
+
+func (g *recordingGuard) Admit() error {
+	g.mu.Lock()
+	*g.log = append(*g.log, "admit-"+g.name)
+	g.mu.Unlock()
+	if g.hold != nil {
+		<-g.hold
+	}
+	return nil
+}
+
+func (g *recordingGuard) Committed() {
+	g.mu.Lock()
+	*g.log = append(*g.log, "committed-"+g.name)
+	g.mu.Unlock()
+}
+
+// The check, the save and the high-water update are one critical section: a second save cannot
+// even be admitted while the first is between its check and its commit, and a save that does not
+// commit never reports a commit.
+func TestSaveGuardRunsInsideTheStoreLock(t *testing.T) {
+	store, _ := newTestStore(t)
+	if err := store.Create("p", []string{"goals"}, agent(sessA)); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var log []string
+	a := &recordingGuard{name: "A", mu: &mu, log: &log, hold: make(chan struct{})}
+	b := &recordingGuard{name: "B", mu: &mu, log: &log}
+	base, err := store.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 2)
+	go func() { _, err := store.SaveGuarded("p", "goals", "A text\\n", base, a); done <- err }()
+	for {
+		mu.Lock()
+		n := len(log)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	go func() { _, err := store.SaveGuarded("p", "goals", "B text\\n", base, b); done <- err }()
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	if got := strings.Join(log, ","); got != "admit-A" {
+		mu.Unlock()
+		t.Fatalf("while A holds the lock, log = %s; B must not be admitted", got)
+	}
+	mu.Unlock()
+	close(a.hold)
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			var c *ConflictError
+			if !errors.As(err, &c) {
+				t.Fatal(err)
+			}
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	got := strings.Join(log, ",")
+	if !strings.HasPrefix(got, "admit-A,committed-A,admit-B") {
+		t.Fatalf("log = %s; want A admitted and committed before B is admitted", got)
+	}
+	// B conflicted with A's text (same line, same base): a save that did not commit reports nothing
+	if strings.Contains(got, "committed-B") {
+		t.Fatalf("log = %s; B did not commit, so it must not report one", got)
 	}
 }

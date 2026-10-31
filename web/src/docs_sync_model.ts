@@ -475,6 +475,9 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       if (m.phase !== "saving" || !m.flight || e.seq !== m.flight.seq) return;
       const sent = m.flight.text;
       const r = e.result;
+      // Saves of ours that were in doubt (timed out, lost reply): the daemon's merge may have
+      // brought one of them into this reply, undoing what the user has reverted since.
+      const doubts = m.inDoubt.map((text) => ({ text, from: m.late.find((l) => l.text === text)?.baseText ?? m.flight!.baseText }));
       m.flight = null;
       m.phase = "idle";
       m.note = null;
@@ -482,6 +485,26 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.inDoubt = m.late.map((l) => l.text);
       m.unknown = false;
       const mergedAgentEdits = r.merged && r.text !== sent;
+      const landed = mergedAgentEdits
+        ? doubts.find((d) => d.text !== d.from && d.text !== sent && mergeWithMarkers(d.from, d.text, r.text) === r.text)
+        : undefined;
+      if (landed) {
+        // Rebase what the user holds now onto the merged text from the doubted save, not from
+        // what was sent: their revert of that save's edit is a real edit, and stays.
+        const kept = mergeWithMarkers(landed.text, m.buffer, r.text);
+        if (hasConflictMarkers(kept) || hasConflictMarkers(m.buffer)) {
+          enterConflict(m, fx, { ours: m.buffer, theirs: r.text, base: landed.text, head: r.commit });
+          return;
+        }
+        m.base = r.commit;
+        m.saved = r.text;
+        if (kept !== m.buffer) {
+          m.buffer = kept;
+          fx.push({ t: "set_buffer", text: kept });
+        }
+        m.note = { kind: "merged", detail: "" };
+        return;
+      }
       if (!mergedAgentEdits) {
         // The commit holds exactly what was sent, so it is the new base; typing
         // since then applies cleanly on top of it.
@@ -590,7 +613,9 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       return;
 
     case "revive":
-      if (!m.gone) return;
+      // A tab closed while its doc was gone has handed the kept work to the next pane (through its
+      // stored draft): a restore that completes after the close must not bring it back to write.
+      if (!m.gone || m.closed) return;
       m.gone = false;
       m.suspended = false;
       m.conflict = null;

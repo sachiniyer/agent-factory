@@ -469,3 +469,24 @@ test("a pumped whenSaved does not turn a failing save into a loop of save and re
     await h.fire();
   }
 });
+
+test("every save names its writer and counts its saves upward", async () => {
+  const fences: { writer: string; seq: number }[] = [];
+  const h = new Harness();
+  const save = h.sync["deps"].save;
+  h.sync["deps"].save = (text, base, final, fence) => {
+    if (fence) fences.push(fence);
+    return save(text, base, final, fence);
+  };
+  await h.sync.start();
+  h.type("v2");
+  await h.fire();
+  h.saves[0]!.reply.resolve({ kind: "saved", text: "v2", commit: "c2", merged: false });
+  await tick();
+  h.type("v3");
+  await h.fire();
+  assert.equal(fences.length, 2);
+  assert.equal(fences[0]!.writer, fences[1]!.writer, "one sync, one writer");
+  assert.ok(fences[1]!.seq > fences[0]!.seq, "and its saves count upward");
+  assert.ok(fences[0]!.writer.length >= 8);
+});
