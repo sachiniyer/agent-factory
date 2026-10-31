@@ -84,8 +84,18 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"xargs -I xargs -I … x", func(n int) string { return "xargs -I" + strings.Repeat(" xargs -I", n) + " x" }, false},
 		{"xargs -n 1 xargs -n 1 … x", func(n int) string { return strings.Repeat("xargs -n 1 ", n) + "x" }, false},
 		{"xargs a env … env x", func(n int) string { return "xargs a" + strings.Repeat(" env", n) + " x" }, false},
-		{"xargs env xargs env … x", func(n int) string { return strings.Repeat("xargs env ", n) + "x" }, false},
-		{"xargs -I{} echo env -u env … x", func(n int) string { return "xargs -I{} echo env" + strings.Repeat(" -u env", n) + " x" }, false},
+		// xargs's child tail is scanned like nohup's (#5034 parity), so a long
+		// nested chain whose verdict positions the xargs input walk does not
+		// pre-cache fails closed past shadowedChildJudgementLimit instead of
+		// staying admitted — the same budget the nohup and taskset families
+		// pin. `xargs env xargs env …` leaves each nested xargs a fresh verdict
+		// position, and `xargs -I{} echo env -u env …` consumes each env as a
+		// `-u` operand rather than a command position, so neither is pre-cached.
+		// The plain `xargs a env … env x` and `xargs -I{} echo env … env x`
+		// chains below stay admitted: the input walk pre-caches every env
+		// position's verdict, so the child-tail scan reuses them for free.
+		{"xargs env xargs env … x", func(n int) string { return strings.Repeat("xargs env ", n) + "x" }, true},
+		{"xargs -I{} echo env -u env … x", func(n int) string { return "xargs -I{} echo env" + strings.Repeat(" -u env", n) + " x" }, true},
 		{"xargs -I{} echo env … env x", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" env", n) + " x" }, false},
 		// #4977: replace-mode xargs copies an argv only when a marker is
 		// substituted (Codex on #4979: every layer of `xargs -i xargs -i …`
@@ -95,10 +105,14 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		// #4978: the xargs input walk follows the chain through env and
 		// strace and scans nested xargs option regions; every scan is
 		// memoized per position (Codex on #4980: `-a xargs -a …` rescanned
-		// the rest of the argv per xargs word, 5.96s at 8,000 words).
+		// the rest of the argv per xargs word, 5.96s at 8,000 words). The
+		// xargs child-tail scan (#5034 parity with nohup/taskset) runs too,
+		// so the long nested chains below whose verdict positions the input
+		// walk does not pre-cache fail closed past shadowedChildJudgementLimit
+		// instead of staying admitted.
 		{"xargs -I{} echo xargs -a … /tmp/f codex", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" xargs -a", n) + " /tmp/f codex" }, false},
-		{"xargs strace -f xargs strace -f … echo x", func(n int) string { return strings.Repeat("xargs strace -f ", n) + "echo x" }, false},
-		{"xargs env A=1 strace xargs … echo x", func(n int) string { return strings.Repeat("xargs env A=1 strace ", n) + "echo x" }, false},
+		{"xargs strace -f xargs strace -f … echo x", func(n int) string { return strings.Repeat("xargs strace -f ", n) + "echo x" }, true},
+		{"xargs env A=1 strace xargs … echo x", func(n int) string { return strings.Repeat("xargs env A=1 strace ", n) + "echo x" }, true},
 		{"xargs strace --fol … echo x", func(n int) string { return "xargs strace" + strings.Repeat(" --fol", n) + " echo x" }, false},
 		{"xargs -I{} strace -o {} … echo x", func(n int) string { return "xargs -I{} strace" + strings.Repeat(" -o {}", n) + " echo x" }, true},
 		{"xargs -I{} strace -f -f … {}", func(n int) string { return "xargs -I{} strace" + strings.Repeat(" -f", n) + " -{} echo" }, true},
