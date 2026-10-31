@@ -14,13 +14,23 @@ type stubPtyBinding struct{ ptyTabBinding }
 
 func (stubPtyBinding) input([]byte) error { return nil }
 
-// syncAttentionClears runs the keyed clear inline, so a test reads the outcome
-// right after the surface returns instead of polling a goroutine.
-func syncAttentionClears(t *testing.T) {
+// queuedAttentionClears collects the keyed clears instead of running them, and
+// returns the function that runs them. The surface that queues one can hold the
+// session operation lock the clear takes (send-prompt does), so the test drains
+// after the surface has returned, as the worker goroutine would.
+func queuedAttentionClears(t *testing.T) (drain func()) {
 	t.Helper()
+	var pending []func()
 	prev := runAttentionClear
-	runAttentionClear = func(clear func()) { clear() }
+	runAttentionClear = func(clear func()) { pending = append(pending, clear) }
 	t.Cleanup(func() { runAttentionClear = prev })
+	return func() {
+		for len(pending) > 0 {
+			next := pending[0]
+			pending = pending[1:]
+			next()
+		}
+	}
 }
 
 func promptTargetWithAttention(t *testing.T, status session.PromptDeliveryStatus) (*Manager, string, *session.Instance) {
@@ -43,13 +53,15 @@ func promptTargetWithAttention(t *testing.T, status session.PromptDeliveryStatus
 // is the PTY binding the web terminal and the TUI attach through. A prompt the
 // system delivers is not the user, and neither is one that never arrived.
 func TestAttentionIsAnsweredByAPromptTheUserSubmits(t *testing.T) {
-	syncAttentionClears(t)
+	drain := queuedAttentionClears(t)
 
 	t.Run("send-prompt and the web/API route", func(t *testing.T) {
 		manager, repoID, inst := promptTargetWithAttention(t, session.PromptDelivered)
 		cs := &controlServer{manager: manager}
 		var resp SendPromptResponse
 		require.NoError(t, cs.SendPrompt(SendPromptRequest{Title: "worker", RepoID: repoID, Prompt: "B"}, &resp))
+		require.True(t, inst.HasAttention(), "the clear is queued behind the send, not run under its lock")
+		drain()
 		require.False(t, inst.HasAttention(), "a user's prompt answers the request")
 	})
 
@@ -62,6 +74,7 @@ func TestAttentionIsAnsweredByAPromptTheUserSubmits(t *testing.T) {
 		require.NoError(t, binding.input([]byte("B")))
 		require.True(t, inst.HasAttention(), "typing alone keeps the request")
 		require.NoError(t, binding.input([]byte("\r")))
+		drain()
 		require.False(t, inst.HasAttention(), "a submitted line answers it")
 	})
 
@@ -69,6 +82,7 @@ func TestAttentionIsAnsweredByAPromptTheUserSubmits(t *testing.T) {
 		manager, repoID, inst := promptTargetWithAttention(t, session.PromptDelivered)
 		_, err := manager.SendPromptWithStatus(SendPromptRequest{Title: "worker", RepoID: repoID, Prompt: "tick", TaskOrigin: true})
 		require.NoError(t, err)
+		drain()
 		require.True(t, inst.HasAttention(), "automation is not the user")
 	})
 
@@ -76,6 +90,7 @@ func TestAttentionIsAnsweredByAPromptTheUserSubmits(t *testing.T) {
 		manager, repoID, inst := promptTargetWithAttention(t, session.PromptNotDelivered)
 		_, err := manager.SendPromptWithStatus(SendPromptRequest{Title: "worker", RepoID: repoID, Prompt: "B"})
 		require.NoError(t, err)
+		drain()
 		require.True(t, inst.HasAttention(), "the answer never arrived")
 	})
 
@@ -85,6 +100,7 @@ func TestAttentionIsAnsweredByAPromptTheUserSubmits(t *testing.T) {
 		_, err := inst.SetAttention("second question", seen.SetAt.Add(time.Second))
 		require.NoError(t, err)
 		manager.queueAttentionClear(inst, seen.SetAt) // the clear the first request's answer queued
+		drain()
 		require.True(t, inst.HasAttention(), "the keyed clear names the request the user saw")
 	})
 }
