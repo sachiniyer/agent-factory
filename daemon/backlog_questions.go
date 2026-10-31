@@ -133,6 +133,13 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 		return
 	}
 	for {
+		// The item may have been restarted in a new session while this answer waited
+		// (to be restored, or behind an attached client): it is no longer the
+		// item's latest run, and sending would leave two sessions working on it.
+		if !backlogSessionIsLatest(repoID, a.ID, a.SessionID) {
+			m.backlogAnswerFailed(repoID, a, "the item was started again in another session", stop)
+			return
+		}
 		err := m.sendBacklogAnswer(repoID, inst, a.Prompt)
 		if err == nil {
 			release() // the armed run marker holds the slot from here
@@ -392,4 +399,16 @@ func (m *Manager) rebuildAskedQuestions(b *backlog.Backlog) {
 		}
 		m.backlog.asked.Store(r.SessionID, session.NormalizeAttentionReason(q))
 	}
+}
+
+// backlogSessionIsLatest reports whether sessionID is still the session of item
+// id's latest run. An unreadable backlog counts as yes: the answer is not failed
+// on a transient read error.
+func backlogSessionIsLatest(repoID string, id int, sessionID string) bool {
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		return true
+	}
+	r := b.LatestRun(id)
+	return r == nil || r.SessionID == sessionID
 }
