@@ -112,7 +112,7 @@ func (b *Backlog) Answer(id, questionID int, text string, deliver bool, now time
 				break
 			}
 		}
-		answer.Delivery, answer.PrevStatus = DeliveryPending, prev
+		answer.Delivery, answer.PrevStatus, answer.RunCount = DeliveryPending, prev, len(it.Runs)
 		it.Status = StatusRunning
 		it.LiveAnswers++
 	}
@@ -177,6 +177,13 @@ func (b *Backlog) AnswerFailed(id, answerID int, reason string, now time.Time) e
 	}
 	prev := m.PrevStatus
 	m.Delivery = DeliveryFailed
+	if m.RunCount != 0 && m.RunCount != len(it.Runs) {
+		// A newer run began since the answer was accepted (the session was killed
+		// and the item restarted): the item's status and live-answer count belong to
+		// that run now, and this failure rolls nothing back.
+		_, err = b.AddNote(id, AuthorAF, "The answer was not delivered: "+reason+". It is kept in the thread.", now)
+		return err
+	}
 	// The item is running for every live answer: pending ones and delivered ones
 	// whose run has not ended. The status this answer replaced comes back only
 	// when its failure leaves no other live answer, whichever order they fail in.

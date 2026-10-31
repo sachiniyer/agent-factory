@@ -129,6 +129,10 @@ type Message struct {
 	// put back if the delivery fails.
 	Delivery   string `json:"delivery,omitempty"`
 	PrevStatus Status `json:"prev_status,omitempty"`
+	// RunCount is how many runs the item had when the answer was accepted: the
+	// answer belongs to the latest of them. A rollback applies only while no newer
+	// run has begun (zero, from before this field, is not fenced).
+	RunCount int `json:"run_count,omitempty"`
 }
 
 type Settings struct {

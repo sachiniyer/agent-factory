@@ -58,6 +58,7 @@ func (b *Backlog) BeginStart(id int, by string, facts Facts, now time.Time) (Sta
 	}
 	run := RunRef{State: RunStarting, PrevStatus: it.Status, StartedBy: by, StartedAt: now}
 	it.Status = StatusRunning
+	it.LiveAnswers = 0 // answers accepted under an earlier run belong to it, not this one
 	it.Runs = append(it.Runs, run)
 	it.UpdatedAt = now
 	return StartPlan{Run: run}, nil
