@@ -94,6 +94,8 @@ test.describe("backlog view stills", () => {
     await expect(panel.getByRole("button", { name: "Close item" })).toBeFocused();
     // The run's session is looked up before it is called Gone; the still waits for the answer.
     await expect(panel.locator(".af-backlog-run")).not.toContainText("Checking…");
+    // The run's plan use arrives with the budget read, after the first paint.
+    await expect(panel.locator(".af-backlog-run")).toContainText("$1.20 at API prices");
     await still(page, info, "backlog-desktop.png");
     await page.keyboard.press("Escape");
     await expect(panel).toBeHidden();
