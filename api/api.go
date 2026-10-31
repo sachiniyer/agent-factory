@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -639,12 +640,29 @@ func jsonOut(v any) error {
 		log.CloseQuiet()
 		return nil
 	}
-	data, err := apiproto.MarshalIndented(v)
+	data, err := marshalHuman(v, "  ")
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintln(os.Stdout, string(data))
 	return err
+}
+
+// marshalHuman is json.Marshal(Indent) without HTML escaping. The default
+// encoder rewrites <, > and & as \u003c, \u003e and \u0026, so a hint such as
+// "run: af sessions create --name x --prompt <prompt>" reached the terminal as
+// "--prompt \u003cprompt\u003e" — valid JSON, but not something a person can
+// paste. Bare (non---json) output is read by people, so it keeps those bytes
+// literal; a JSON parser decodes both spellings to the same string.
+func marshalHuman(v any, indent string) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", indent)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // jsonError writes a JSON error to stderr and returns the error. By default it
@@ -663,7 +681,7 @@ func jsonError(err error) error {
 		_ = apiproto.WriteEnvelope(os.Stderr, apiproto.Failure(err.Error()))
 		return err
 	}
-	msg, _ := json.Marshal(map[string]string{"error": err.Error()})
+	msg, _ := marshalHuman(map[string]string{"error": err.Error()}, "")
 	fmt.Fprintln(os.Stderr, string(msg))
 	return err
 }

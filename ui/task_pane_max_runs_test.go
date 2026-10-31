@@ -298,3 +298,46 @@ func TestTaskPaneMaxRunsRowSurvivesAnEightyCellPane(t *testing.T) {
 		}
 	}
 }
+
+// TestTaskPaneFormLabelsAreSeparatedFromTheirValue pins the label column's
+// width: the widest label, "Max runs:", filled the old 9-cell column exactly,
+// so the cron task's reason ran into it ("Max runs:Cron fires already
+// coalesce."). Every form row must leave at least one space after its label.
+func TestTaskPaneFormLabelsAreSeparatedFromTheirValue(t *testing.T) {
+	tp := editTaskWithCap(t, 0, false, "")
+	tp.SetSize(80, 40)
+
+	out := stripANSI(tp.String())
+	for _, label := range []string{"Target:", "On done:", "Max runs:", "Host:", "Path:", "Program:"} {
+		i := strings.Index(out, label)
+		if assert.GreaterOrEqual(t, i, 0, "label %q must be on screen", label) {
+			assert.Equal(t, " ", out[i+len(label):i+len(label)+1],
+				"label %q must be followed by a space, not touch its value", label)
+		}
+	}
+}
+
+// TestTaskPaneWrappedExplanationFitsNarrowPane: the wrap budget derives from the
+// same label width as the label itself, so at a narrow pane the cron reason
+// wraps whole instead of being cut by the pane's clip (Codex finding on #6387).
+func TestTaskPaneWrappedExplanationFitsNarrowPane(t *testing.T) {
+	for _, width := range []int{30, 33, 34, 36, 37, 40} {
+		tp := editTaskWithCap(t, 0, false, "")
+		tp.SetSize(width, 40)
+		lines := strings.Split(stripANSI(tp.String()), "\n")
+		var joined string
+		for i, ln := range lines {
+			if strings.Contains(ln, "Max runs:") {
+				joined = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ln), "Max runs:"))
+				for _, next := range lines[i+1:] {
+					next = strings.TrimSpace(next)
+					if next == "" || strings.HasSuffix(joined, ".") {
+						break
+					}
+					joined += " " + next
+				}
+			}
+		}
+		assert.Equal(t, "Cron fires already coalesce.", joined, "width %d must show the whole reason", width)
+	}
+}
