@@ -276,10 +276,13 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 // ParseBackendKind rejects those before they reach a runtime.
 func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
 
-// AccountWriteBackRationale is the single operator-facing reason ssh, sandbox
-// and hook cannot safely honour a writable credential account. It states only
+// AccountWriteBackRationale is the single operator-facing reason sandbox and
+// hook cannot safely honour a writable credential account. It states only
 // the guarantee af lacks, without asserting where a hook runs or which
-// mechanism could supply that guarantee.
+// mechanism could supply that guarantee. ssh no longer takes this rationale:
+// a host in the global host list carries the account through the synced
+// scope (W7.4), and an unlisted ssh target is refused by
+// listedHostAccountReason instead.
 const AccountWriteBackRationale = "An account is a writable agent home, so the agent writes refreshed " +
 	"authentication back into it. For sandbox and hook, af cannot establish that those writes come " +
 	"back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also " +
@@ -305,12 +308,16 @@ const AccountWriteBackRationale = "An account is a writable agent home, so the a
 // including a refreshed token, land in the operator's real registry rather than
 // in a copy that teardown deletes.
 //
-// ssh, sandbox and hook answer false for AccountWriteBackRationale — NOT because
-// a copy is the only thing they could ever do. hook's launch_cmd may provision
+// ssh, sandbox and hook answer false for CarriesAccount — NOT because a copy
+// is the only thing they could ever do. hook's launch_cmd may provision
 // anything and only has to hand back an agent-server endpoint, so it could use
 // shared storage or even run on the daemon host; a mount-like transport for ssh
 // or sandbox would qualify too. What is missing is the guarantee, not the
-// possibility (#3103 review).
+// possibility (#3103 review). ssh's kind-level false stands beside the listed
+// host licence: a host the operator listed carries the account through the
+// synced scope the per-target accountCarried check admits, which is why ssh's
+// unlisted-target refusal names listedHostAccountReason rather than
+// AccountWriteBackRationale.
 //
 // Nor is this "every off-box kind": docker is off-box (backendProvisionsOffBox)
 // and answers TRUE, so off-box is the wrong axis to reason on here.
