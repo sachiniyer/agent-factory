@@ -76,8 +76,9 @@ anything. Do not proxy this socket to a network interface.
     (`localhost`, loopback IPs, its own address, or a `network.allowed_hosts` entry) and
     refuses any other with `421 Misdirected Request` before routing — see
     [Host names the daemon answers to](remote-http-auth.md#host-names-the-daemon-answers-to).
-    It also refuses any cross-site browser request and any request body that is
-    not `Content-Type: application/json` — see [Cross-site browser
+    It also refuses any cross-site browser request, and any POST, PUT, PATCH or
+    DELETE that does not send `Content-Type: application/json` (even with no
+    body) — see [Cross-site browser
     requests](remote-http-auth.md#cross-site-browser-requests-are-refused).
     The Unix socket has neither check: a browser cannot reach it, and the
     `curl --unix-socket … -d` examples below keep working.

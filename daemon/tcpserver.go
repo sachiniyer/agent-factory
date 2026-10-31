@@ -675,7 +675,10 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 				// control plane except the preview origin, whose whole path space
 				// belongs to the previewed app (crosssite.go).
 				refuseCrossSite: !live.previewOrigin,
-				previewOrigin:   live.previewOrigin, previewWarmingUp: live.previewWarmingUp}
+				// The control listener's clients all declare JSON, the web client's
+				// bodyless calls included, so it refuses a bodyless request without one.
+				strictBodies:  live.policyFromConfig,
+				previewOrigin: live.previewOrigin, previewWarmingUp: live.previewWarmingUp}
 		}
 		handler = withLivePosture(mux, build)
 	} else {

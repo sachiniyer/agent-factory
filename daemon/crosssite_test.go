@@ -157,21 +157,34 @@ func TestCrossSite_SameOriginAttestationSurvivesAHostRewritingProxy(t *testing.T
 	assert.Equal(t, http.StatusOK, status, body)
 }
 
-// Non-browser clients send no Origin and no fetch metadata: a JSON POST, a POST with
-// no body and no Content-Type, and GETs are all served.
+// Non-browser clients send no Origin and no fetch metadata: a JSON POST (the af CLI,
+// `curl --json`), a JSON-typed POST with no body, and GETs are all served.
 func TestCrossSite_NonBrowserClientsAreAdmitted(t *testing.T) {
 	_, addr, _ := hostGuardListener(t)
 	status, _, body := csDo(t, addr, http.MethodPost, "/v1/Snapshot", `{}`, map[string]string{"Content-Type": "application/json; charset=utf-8"})
 	assert.Equal(t, http.StatusOK, status, body)
-	status, _, body = csDo(t, addr, http.MethodPost, "/v1/Snapshot", "", nil)
-	assert.Equal(t, http.StatusOK, status, "an empty POST with no Content-Type (curl -X POST): %s", body)
+	status, _, body = csDo(t, addr, http.MethodPost, "/v1/Snapshot", "", map[string]string{"Content-Type": "application/json"})
+	assert.Equal(t, http.StatusOK, status, "a JSON-typed POST with no body: %s", body)
 	status, _, body = csDo(t, addr, http.MethodGet, "/v1/health", "", nil)
 	assert.Equal(t, http.StatusOK, status, body)
 }
 
+// The control listener refuses a request that can carry a body but declares no
+// Content-Type, even with no body: that bare POST is the one browser request that
+// carries neither a form type nor, from a browser too old to send Origin on it, any
+// other signal. af's own clients all declare JSON.
+func TestCrossSite_ControlListenerRefusesUntypedBodylessRequests(t *testing.T) {
+	_, addr, _ := hostGuardListener(t)
+	for _, method := range []string{http.MethodPost, http.MethodDelete, http.MethodPut, http.MethodPatch} {
+		status, _, body := csDo(t, addr, method, "/v1/Snapshot", "", nil)
+		assert.Equal(t, http.StatusUnsupportedMediaType, status, "%s with no body and no Content-Type: %s", method, body)
+		assert.Contains(t, body, "--json")
+	}
+}
+
 // The web client's real request shapes are admitted: af() is a same-origin JSON POST
 // carrying X-AF-Client-Version; fetchEditorPortOrigin and the config-assistant reap
-// are same-origin body-less POST/DELETE with no Content-Type.
+// are same-origin POST/DELETE carrying {} as JSON.
 func TestCrossSite_WebClientRequestsAreAdmitted(t *testing.T) {
 	_, addr, _ := hostGuardListener(t)
 	same := func(extra map[string]string) map[string]string {
@@ -188,7 +201,9 @@ func TestCrossSite_WebClientRequestsAreAdmitted(t *testing.T) {
 		{http.MethodPost, "/v1/editor-origin?session=nope"},
 		{http.MethodDelete, "/v1/config-assistant"},
 	} {
-		status, _, body := csDo(t, addr, rt.method, rt.path, "", same(nil))
+		// The web client's two formerly bodyless calls send {} as JSON
+		// (fetchEditorPortOrigin, stopConfigAssistant).
+		status, _, body := csDo(t, addr, rt.method, rt.path, `{}`, same(map[string]string{"Content-Type": "application/json"}))
 		assert.False(t, refusedByGuard(status, body), "%s %s: %d %s", rt.method, rt.path, status, body)
 	}
 }
@@ -268,11 +283,36 @@ func TestCrossSite_WebTabSubtreeIsTheAppsAndDotSegmentsDoNotEscape(t *testing.T)
 	status, _, body := csDo(t, addr, http.MethodPost, "/v1/webtab/sid/tid/api/save", "x", framed)
 	assert.False(t, refusedByGuard(status, body), "a framed app's own request is not the guard's to judge: %d %s", status, body)
 
-	for _, p := range []string{"/v1/Snapshot", "/v1/webtab/../Snapshot", "/v1/webtab/x/../../KillSession", "/v1//KillSession", "/v1/events"} {
-		assert.True(t, isControlPlanePath(p), p)
+	isFramed := func(p string) bool { return isFramedAppPath(httptest.NewRequest(http.MethodGet, p, nil)) }
+	for _, p := range []string{
+		"/v1/webtab/s/t/", "/v1/webtab/s/t/api/save", "/v1/webtab/s%2Fx/t/y",
+		"/v1/web%74ab/s/t/x",   // the mux unescapes each segment before matching
+		"/v1/webtab/s/t//x.js", // redirected to /v1/webtab/s/t/x.js, still the app's
+	} {
+		assert.True(t, isFramed(p), p)
 	}
-	for _, p := range []string{"/v1/webtab/s/t/", "/v1/webtab/s/t/api/save", "/", "/index.html", "/assets/app.js"} {
-		assert.False(t, isControlPlanePath(p), p)
+	for _, p := range []string{
+		"/v1/Snapshot", "/v1/webtab/../Snapshot", "/v1/webtab/x/../../KillSession", "/v1//KillSession",
+		"/v1/events", "/v1/webtab/s/t", "/v1/webtab//t/x",
+		"/v1/..%2Fwebtab/s/t/x",           // decodes into the subtree, routes outside it
+		"/v1/sessions/..%2F..%2Fx/stream", // decodes outside /v1, routes to the stream
+	} {
+		assert.False(t, isFramed(p), p)
+	}
+}
+
+// The guard and the router agree about the path: an escaped dot-segment that the
+// mux routes to a control route is judged as one, whatever it decodes to.
+func TestCrossSite_EscapedPathsAreJudgedLikeTheRouter(t *testing.T) {
+	_, addr, _ := hostGuardListener(t)
+	cross := map[string]string{"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site", "Content-Type": "text/plain"}
+	for _, rt := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/sessions/..%2F..%2Fx/stream"},
+		{http.MethodPost, "/v1/..%2Fwebtab/s/t/x"},
+		{http.MethodPost, "/v1/sessions/..%2Fwebtab%2Fs%2Ft/stream"},
+	} {
+		status, _, body := csDo(t, addr, rt.method, rt.path, "x", cross)
+		assert.Equal(t, http.StatusForbidden, status, "%s %s: %s", rt.method, rt.path, body)
 	}
 }
 
@@ -318,6 +358,13 @@ func TestCrossSite_AgentServerListener(t *testing.T) {
 		"Content-Type": "application/json", "Authorization": "Bearer " + info.Token,
 	})
 	assert.Equal(t, http.StatusOK, status, "the daemon's own agent-server client shape is served: %s", body)
+
+	// The daemon's client sends a body-less call with no Content-Type, and has since
+	// it shipped; an older daemon must keep driving a newer agent-server.
+	status, _, body = csDo(t, info.Addr, http.MethodPost, "/v1/Snapshot", "", map[string]string{
+		"Authorization": "Bearer " + info.Token,
+	})
+	assert.Equal(t, http.StatusOK, status, "a body-less untyped call from the daemon is served: %s", body)
 }
 
 // The unix socket is trusted transport no browser can reach: the guard is off there,
@@ -341,6 +388,26 @@ func TestOriginNamesRequest(t *testing.T) {
 		}
 		return req
 	}
+	// A Host-rewriting same-host proxy: Host is the upstream, X-Forwarded-Host the
+	// browser's, from a loopback peer.
+	fwd := func(peer, xfh string) *http.Request {
+		req := r("127.0.0.1:8443", "https")
+		req.RemoteAddr = peer
+		req.Header.Set("X-Forwarded-Host", xfh)
+		return req
+	}
+	allowed := []string{"af.example.com"}
+	assert.True(t, originNamesRequest("https://af.example.com", fwd("127.0.0.1:50000", "af.example.com"), allowed))
+	assert.True(t, originNamesRequest("https://af.example.com:8443", fwd("127.0.0.1:50000", "af.example.com:8443"), allowed))
+	assert.True(t, originNamesRequest("https://af.example.com", fwd("[::1]:50000", "af.example.com, inner.proxy"), allowed),
+		"a proxy chain lists the browser's name first")
+	assert.False(t, originNamesRequest("https://af.example.com", fwd("192.0.2.7:50000", "af.example.com"), allowed),
+		"X-Forwarded-Host counts only from a loopback peer — a same-host proxy")
+	assert.False(t, originNamesRequest("https://evil.example", fwd("127.0.0.1:50000", "evil.example"), allowed),
+		"a forwarded name must be one this daemon answers to, or a rebinding name could vouch for itself")
+	assert.False(t, originNamesRequest("https://af.example.com:9100", fwd("127.0.0.1:50000", "af.example.com"), allowed))
+	assert.False(t, originNamesRequest("http://af.example.com", fwd("127.0.0.1:50000", "af.example.com"), allowed),
+		"X-Forwarded-Proto: https still demands an https Origin")
 	yes := []struct{ origin, host, xfp string }{
 		{"http://127.0.0.1:8443", "127.0.0.1:8443", ""},
 		{"http://[::1]:8443", "[::1]:8443", ""},
@@ -350,7 +417,7 @@ func TestOriginNamesRequest(t *testing.T) {
 		{"https://box.lan", "box.lan", ""}, // a TLS proxy that sends no X-Forwarded-Proto
 	}
 	for _, tc := range yes {
-		assert.True(t, originNamesRequest(tc.origin, r(tc.host, tc.xfp)), "%+v", tc)
+		assert.True(t, originNamesRequest(tc.origin, r(tc.host, tc.xfp), nil), "%+v", tc)
 	}
 	no := []struct{ origin, host, xfp string }{
 		{"http://127.0.0.1:3000", "127.0.0.1:8443", ""},
@@ -364,7 +431,7 @@ func TestOriginNamesRequest(t *testing.T) {
 		{"http://127.0.0.1:8443", "", ""},
 	}
 	for _, tc := range no {
-		assert.False(t, originNamesRequest(tc.origin, r(tc.host, tc.xfp)), "%+v", tc)
+		assert.False(t, originNamesRequest(tc.origin, r(tc.host, tc.xfp), nil), "%+v", tc)
 	}
 }
 
@@ -383,4 +450,95 @@ func TestKeyedLogLimiter(t *testing.T) {
 	ok, suppressed := l.allow("f")
 	require.True(t, ok)
 	require.Equal(t, 2, suppressed, "the burst capped b..e at two lines; the other two are counted")
+}
+
+// A hand-edited "null" in cors_allowed_origins admits nothing and is never echoed:
+// it is what every sandboxed frame and file:// page sends.
+func TestCrossSite_NullOriginIsNeverAdmitted(t *testing.T) {
+	m, addr, _ := hostGuardListener(t)
+	next := *m.Config()
+	next.CORSAllowedOrigins = []string{"null"}
+	m.storeLivePosture(&next)
+	for _, hdr := range []map[string]string{
+		{"Origin": "null", "Sec-Fetch-Site": "cross-site", "Content-Type": "application/json"},
+		{"Origin": "null", "Content-Type": "application/json"},
+	} {
+		status, h, body := csDo(t, addr, http.MethodPost, "/v1/Snapshot", `{}`, hdr)
+		assert.Equal(t, http.StatusForbidden, status, body)
+		assert.Empty(t, h.Get("Access-Control-Allow-Origin"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, resp, err := websocket.Dial(ctx, "ws://"+loopbackDialAddr(addr)+"/v1/events",
+		&websocket.DialOptions{HTTPClient: loopbackHTTPClient, HTTPHeader: http.Header{"Origin": {"null"}}})
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// Same-origin pages behind a TLS-terminating proxy keep their WebSockets, which
+// Chromium sends without fetch metadata: tailscale serve's shape (Host kept, port
+// implied by the https Origin) and a Host-rewriting proxy that forwards
+// X-Forwarded-Host. A cross-site page's handshake through the same shapes is still
+// refused, and so is a rewritten Host with nothing forwarded.
+func TestCrossSite_WebSocketsBehindAProxy(t *testing.T) {
+	m, addr, _ := hostGuardListener(t)
+	next := *m.Config()
+	next.AllowedHosts = []string{"box.tailnet.ts.net", "af.example.com"}
+	m.storeLivePosture(&next)
+	url := "ws://" + loopbackDialAddr(addr) + "/v1/events"
+	dial := func(host string, hdr http.Header) int {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		conn, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPClient: loopbackHTTPClient, Host: host, HTTPHeader: hdr})
+		if err == nil {
+			_ = conn.Close(websocket.StatusNormalClosure, "")
+			return http.StatusSwitchingProtocols
+		}
+		if resp != nil {
+			return resp.StatusCode
+		}
+		return 0
+	}
+	tailscale := func(origin string) http.Header {
+		return http.Header{"Origin": {origin}, "X-Forwarded-Host": {"box.tailnet.ts.net"}, "X-Forwarded-Proto": {"https"}}
+	}
+	assert.Equal(t, http.StatusSwitchingProtocols, dial("box.tailnet.ts.net", tailscale("https://box.tailnet.ts.net")),
+		"tailscale serve: Host kept, no port, https Origin implies 443")
+	assert.Equal(t, http.StatusForbidden, dial("box.tailnet.ts.net", tailscale("https://evil.example")))
+
+	rewritten := func(origin, xfh string) http.Header {
+		h := http.Header{"Origin": {origin}, "X-Forwarded-Proto": {"https"}}
+		if xfh != "" {
+			h.Set("X-Forwarded-Host", xfh)
+		}
+		return h
+	}
+	assert.Equal(t, http.StatusSwitchingProtocols, dial(addr, rewritten("https://af.example.com", "af.example.com")),
+		"a Host-rewriting proxy that forwards X-Forwarded-Host")
+	assert.Equal(t, http.StatusForbidden, dial(addr, rewritten("https://evil.example", "af.example.com")))
+	assert.Equal(t, http.StatusForbidden, dial(addr, rewritten("https://evil.example", "evil.example")),
+		"a forwarded name the daemon does not answer to vouches for nothing")
+	assert.Equal(t, http.StatusForbidden, dial(addr, rewritten("https://af.example.com", "")),
+		"a rewritten Host with nothing forwarded cannot be told from a foreign page")
+}
+
+// The refusal log %q-quotes every requester-chosen value, so an encoded newline in
+// the path cannot forge a log line.
+func TestCrossSite_LogLineQuotesThePath(t *testing.T) {
+	prev := crossSiteLog
+	crossSiteLog = newKeyedLogLimiter(10*time.Minute, 10, 512)
+	t.Cleanup(func() { crossSiteLog = prev })
+	warnings := captureWarnings(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/x%0AWARNING:%20forged", strings.NewReader("x"))
+	req.Header.Set("Origin", "https://log.example")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	d := crossSiteRefusal(req, nil, nil, true)
+	require.NotNil(t, d)
+	refuseCrossSite(httptest.NewRecorder(), req, d)
+
+	got := warnings.String()
+	require.Contains(t, got, `"/v1/x\nWARNING: forged"`)
+	assert.Equal(t, 1, strings.Count(strings.TrimRight(got, "\n"), "\n")+1, "exactly one log line: %q", got)
 }

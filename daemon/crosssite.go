@@ -86,59 +86,117 @@ type crossSiteDenial struct {
 	logKey string
 }
 
-// isControlPlanePath reports whether a request path is af's own API rather than a
-// framed app's (/v1/webtab/…). The path is cleaned first so a dot-segment cannot
-// wear the web-tab prefix into an RPC route.
-func isControlPlanePath(p string) bool {
-	clean := path.Clean("/" + p)
-	if clean != "/v1" && !strings.HasPrefix(clean, "/v1/") {
+// isFramedAppPath reports whether the daemon's router would hand r to the web-tab
+// proxy (/v1/webtab/{sessionId}/{tabId}/{rest...}) — the one /v1 subtree that is a
+// framed app's rather than af's. It decides that the way net/http.ServeMux does, not
+// on a re-derived path: the mux cleans the ESCAPED path (and answers a path that
+// cleaning changes with a redirect, never a handler) and then matches it segment by
+// segment, unescaping each segment. Judging the decoded path instead lets the two
+// disagree — "/v1/sessions/..%2F..%2Fx/stream" decodes to a path outside /v1 yet
+// routes to the stream handler, and "/v1/..%2Fwebtab/…" decodes into the web-tab
+// subtree yet routes elsewhere. Everything else that reaches servePosture on a TCP
+// listener is control plane: the listener's shell only routes the decoded "/v1/"
+// prefix there (webShellHandler, noWebShellHandler).
+func isFramedAppPath(r *http.Request) bool {
+	// A path that cleaning changes is answered with a redirect to the cleaned one and
+	// runs no handler, so judge it by where it leads: a framed app's sloppy "//asset"
+	// keeps its redirect, and the redirected request is judged again on arrival.
+	escaped := muxCleanPath(r.URL.EscapedPath())
+	segs := strings.Split(strings.TrimPrefix(escaped, "/"), "/")
+	if len(segs) < 5 {
 		return false
 	}
-	return !strings.HasPrefix(clean+"/", webtabPathPrefix)
+	for i, want := range []string{"v1", "webtab"} {
+		seg, err := url.PathUnescape(segs[i])
+		if err != nil || seg != want {
+			return false
+		}
+	}
+	sid, err1 := url.PathUnescape(segs[2])
+	tid, err2 := url.PathUnescape(segs[3])
+	return err1 == nil && err2 == nil && sid != "" && tid != ""
 }
 
-// crossSiteRefusal applies the layers above to r. cors is the posture's
-// cors_allowed_origins (the same once-per-request read as the rest of the posture).
-func crossSiteRefusal(r *http.Request, cors []string) *crossSiteDenial {
-	if r.URL == nil || !isControlPlanePath(r.URL.Path) {
+// muxCleanPath is net/http's cleanPath: the canonical form ServeMux redirects to.
+func muxCleanPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if p[0] != '/' {
+		p = "/" + p
+	}
+	np := path.Clean(p)
+	if p[len(p)-1] == '/' && np != "/" {
+		if len(p) == len(np)+1 && strings.HasPrefix(p, np) {
+			np = p
+		} else {
+			np += "/"
+		}
+	}
+	return np
+}
+
+// crossSiteRefusal applies the layers above to r. cors and allowedHosts are the
+// posture's cors_allowed_origins and allowed_hosts (the same once-per-request read
+// as the rest of the posture); strictBodies is the control listener's rule that
+// every request able to carry a body declares JSON (see jsonBodyRefusal).
+func crossSiteRefusal(r *http.Request, cors, allowedHosts []string, strictBodies bool) *crossSiteDenial {
+	if r.URL == nil || isFramedAppPath(r) {
 		return nil
 	}
 	origin := r.Header.Get("Origin")
-	if origin == "" || !originAllowed(origin, cors) {
+	// "null" is never an operator's origin: it is what a sandboxed frame, a file://
+	// page or a redirect chain sends, so admitting a hand-edited "null" entry would
+	// admit every one of them, WebSockets included.
+	if origin == "" || origin == "null" || !originAllowed(origin, cors) {
 		if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
 			switch strings.ToLower(strings.TrimSpace(site)) {
 			case "same-origin", "none":
 			default:
 				return &crossSiteDenial{
 					status: http.StatusForbidden,
-					err: fmt.Errorf("refused a %s browser request (Sec-Fetch-Site: %s): this API answers only "+
+					err: fmt.Errorf("refused a browser request with Sec-Fetch-Site %q: this API answers only "+
 						"its own web client and non-browser clients. To call it from a web client you host "+
-						"elsewhere, add that origin to network.cors_allowed_origins", echoHost(site), echoHost(site)),
+						"elsewhere, add that origin to network.cors_allowed_origins", echoHost(site)),
 					logKey: "site:" + strings.ToLower(echoHost(site)) + " " + echoHost(origin),
 				}
 			}
-		} else if origin != "" && !originNamesRequest(origin, r) {
+		} else if origin != "" && !originNamesRequest(origin, r, allowedHosts) {
 			return &crossSiteDenial{
 				status: http.StatusForbidden,
 				err: fmt.Errorf("refused a browser request from Origin %q, which is not this daemon's own origin. "+
-					"To call the API from a web client you host elsewhere, add that origin to "+
-					"network.cors_allowed_origins", echoHost(origin)),
+					"Behind a reverse proxy that rewrites Host, forward the browser's with X-Forwarded-Host "+
+					"(and X-Forwarded-Proto) or keep Host; to call the API from a web client you host "+
+					"elsewhere, add that origin to network.cors_allowed_origins", echoHost(origin)),
 				logKey: "origin:" + echoHost(origin),
 			}
 		}
 	}
-	return jsonBodyRefusal(r)
+	return jsonBodyRefusal(r, strictBodies)
 }
 
 // originNamesRequest reports whether a browser Origin is this daemon's own origin as
-// the request was addressed: the same host name as the Host header (canonicalized
-// like the Host guard's), the same port — a Host with no port takes the default port
-// of the Origin's scheme, which is how a browser omits it — and, when the daemon
-// knows the request arrived over HTTPS (TLS, or X-Forwarded-Proto from a TLS proxy
-// such as tailscale serve), the https scheme. A TLS proxy that sends no
-// X-Forwarded-Proto is indistinguishable from plain HTTP, so without that signal
-// either scheme is accepted; the port still has to match.
-func originNamesRequest(origin string, r *http.Request) bool {
+// the browser addressed it. Two names can stand for that address:
+//
+//   - the Host header, as the request arrived;
+//   - X-Forwarded-Host, but only from a LOOPBACK transport peer — a same-host
+//     reverse proxy that rewrote Host (nginx with proxy_pass to 127.0.0.1) — and only
+//     when that name is one the daemon answers to anyway: localhost, a loopback IP,
+//     or a network.allowed_hosts entry. A page cannot set this header on a WebSocket
+//     handshake or a no-cors request, and on a CORS request it is a custom header
+//     that needs a preflight this daemon refuses. The admission requirement keeps a
+//     rebinding name that a default-server proxy happens to route here from
+//     vouching for itself.
+//
+// Against either, the Origin must have the same canonical host name (the Host
+// guard's canonicalization) and the same port — a name with no port takes the
+// default port of the Origin's scheme, which is how a browser omits it: tailscale
+// serve forwards "Host: box.ts.net" for "Origin: https://box.ts.net", both port 443
+// — and, when the daemon knows the request arrived over HTTPS (TLS, or
+// X-Forwarded-Proto: https, which tailscale serve sends), the https scheme. A TLS
+// proxy that sends no X-Forwarded-Proto is indistinguishable from plain HTTP, so
+// without that signal either scheme is accepted; the port still has to match.
+func originNamesRequest(origin string, r *http.Request, allowedHosts []string) bool {
 	u, err := url.Parse(origin)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
 		u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
@@ -148,11 +206,29 @@ func originNamesRequest(origin string, r *http.Request) bool {
 	if !ok {
 		return false
 	}
-	hname, ok := config.RequestHostName(r.Host)
-	if !ok || oname != hname {
+	if requestIsHTTPS(r) && u.Scheme != "https" {
 		return false
 	}
-	if requestIsHTTPS(r) && u.Scheme != "https" {
+	if originMatchesAuthority(u, oname, r.Host) {
+		return true
+	}
+	if !isLoopbackRequest(r) {
+		return false
+	}
+	fwd, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ",")
+	fwd = strings.TrimSpace(fwd)
+	fname, ok := config.RequestHostName(fwd)
+	if !ok || !forwardedNameAdmitted(fname, allowedHosts) {
+		return false
+	}
+	return originMatchesAuthority(u, oname, fwd)
+}
+
+// originMatchesAuthority compares a parsed Origin (u, canonical name oname) with
+// one host[:port] authority.
+func originMatchesAuthority(u *url.URL, oname, authority string) bool {
+	aname, ok := config.RequestHostName(authority)
+	if !ok || aname != oname {
 		return false
 	}
 	defaultPort := "80"
@@ -163,29 +239,50 @@ func originNamesRequest(origin string, r *http.Request) bool {
 	if oport == "" {
 		oport = defaultPort
 	}
-	hport := defaultPort
-	if _, p, err := net.SplitHostPort(r.Host); err == nil && p != "" {
-		hport = p
+	aport := defaultPort
+	if _, p, err := net.SplitHostPort(authority); err == nil && p != "" {
+		aport = p
 	}
-	return oport == hport
+	return oport == aport
+}
+
+// forwardedNameAdmitted reports whether a forwarded host name is one this daemon
+// answers to without the listener's own address: a loopback name, or an operator's
+// network.allowed_hosts entry.
+func forwardedNameAdmitted(name string, allowedHosts []string) bool {
+	if config.IsLoopbackHostName(name) {
+		return true
+	}
+	for _, entry := range allowedHosts {
+		if c, err := config.CanonicalAllowedHost(entry); err == nil && c == name {
+			return true
+		}
+	}
+	return false
 }
 
 // jsonBodyRefusal is layer 4: a request that can carry a body must declare JSON if
-// it declares anything, and must declare it if it has a body.
-func jsonBodyRefusal(r *http.Request) *crossSiteDenial {
+// it declares anything. On the control listener (strict) it must declare JSON even
+// with no body: a bodyless POST with no Content-Type is the one browser request
+// that carries neither a form type nor, in a browser too old to send Origin on it
+// (Firefox before 70), any other signal — af's own clients all declare JSON, the web
+// client included. The agent-server (not strict) admits a bodyless request with no
+// Content-Type, because the daemon that drives it — every version since #1659 —
+// sends exactly that for a body-less call, and its token is mandatory anyway.
+func jsonBodyRefusal(r *http.Request, strict bool) *crossSiteDenial {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return nil
 	}
 	ct := r.Header.Get("Content-Type")
 	if ct == "" {
-		if r.ContentLength == 0 {
+		if !strict && r.ContentLength == 0 {
 			return nil
 		}
 		return &crossSiteDenial{
 			status: http.StatusUnsupportedMediaType,
-			err: errors.New("this API needs Content-Type: application/json on a request body; " +
-				"with curl, add -H 'Content-Type: application/json' (or use --json)"),
+			err: errors.New("this API needs Content-Type: application/json on every POST, PUT, PATCH and DELETE, " +
+				"even with no body; with curl, add -H 'Content-Type: application/json' (or use --json '{}')"),
 			logKey: "content-type:(none)",
 		}
 	}
@@ -210,8 +307,10 @@ func refuseCrossSite(w http.ResponseWriter, r *http.Request, d *crossSiteDenial)
 		if suppressed > 0 {
 			more = fmt.Sprintf(" (%d further refusals not logged)", suppressed)
 		}
-		log.WarningLog.Printf("refused %s %s from %s (Origin %q, Sec-Fetch-Site %q, Content-Type %q): %v%s",
-			r.Method, r.URL.Path, r.RemoteAddr, echoHost(r.Header.Get("Origin")),
+		// Every requester-chosen value is %q-quoted, the path included: a decoded path
+		// can hold a newline (%0A), and an unquoted one forges log lines.
+		log.WarningLog.Printf("refused %s %q from %s (Origin %q, Sec-Fetch-Site %q, Content-Type %q): %v%s",
+			r.Method, echoHost(r.URL.Path), r.RemoteAddr, echoHost(r.Header.Get("Origin")),
 			echoHost(r.Header.Get("Sec-Fetch-Site")), echoHost(r.Header.Get("Content-Type")), d.err, more)
 	}
 	writeHTTPError(w, r, d.status, d.err)

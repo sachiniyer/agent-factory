@@ -618,7 +618,10 @@ request's `Host` to the incoming one), so the daemon sees your
 `<machine>.<tailnet>.ts.net` name, and that name must be allowed. Caddy's
 `reverse_proxy` also forwards the incoming `Host` by default. nginx's
 `proxy_pass` sends its upstream address (`127.0.0.1:8443`) unless you set
-`proxy_set_header Host $host`, in which case add the public name too.
+`proxy_set_header Host $host`, in which case add the public name too. A proxy that
+rewrites `Host` passes this check, but the web UI's terminals and event stream
+also need the browser's name forwarded — see [behind a reverse
+proxy](#behind-a-reverse-proxy) below.
 
 ```bash
 # On the daemon's machine — applies on the next request, no restart
@@ -688,31 +691,59 @@ Before any route runs, the daemon judges each request to `/v1/…` in this order
    is not the daemon's own (the same host name and port the request was addressed
    to, and `https` when the request arrived over HTTPS) is refused, `null`
    included.
-4. **Content type.** A request with a body must send
-   `Content-Type: application/json`, and any declared `Content-Type` must be JSON.
-   A form cannot, and a JSON request from another site needs a preflight the daemon
-   grants only to the origins in step 1. A POST with no body and no `Content-Type`
-   is fine.
+4. **Content type.** Every POST, PUT, PATCH and DELETE must send
+   `Content-Type: application/json`, even with no body. A form cannot, a JSON
+   request from another site needs a preflight the daemon grants only to the
+   origins in step 1, and a bare POST with no type at all is the one shape an old
+   browser can send without any other signal. (The headless agent-server also
+   accepts a body-less call with no `Content-Type`, which is what the daemon driving
+   it sends; its token is mandatory.)
 
 A refusal is `403` (steps 2–3) or `415` (step 4) with the daemon's usual error
 envelope, and the daemon logs it, rate-limited, without the body or the query.
 
 - **`curl` over TCP:** send JSON as JSON —
-  `curl -H 'Content-Type: application/json' -d '{}' …` or `curl --json '{}' …`.
-  Plain `-d` sends a form and gets `415`. The Unix socket is unchanged, so the
-  `curl --unix-socket … -d '{}'` examples in the [HTTP API guide](http-api.md) keep
-  working.
-- **Behind a reverse proxy**, the web UI keeps working: a modern browser marks its
-  own requests `same-origin`. A browser without fetch metadata is judged by
-  `Origin` instead, so if your proxy rewrites the `Host` header (nginx's default
-  `proxy_pass` sends `127.0.0.1:8443`), either forward it (`proxy_set_header Host
-  $host`, plus `X-Forwarded-Proto`) or add your public origin to
-  `network.cors_allowed_origins`.
+  `curl --json '{}' …`, or `curl -H 'Content-Type: application/json' -d '{}' …`.
+  Plain `-d` sends a form and `-X POST` alone sends no type; both get `415`. The
+  Unix socket is unchanged, so the `curl --unix-socket … -d '{}'` examples in the
+  [HTTP API guide](http-api.md) keep working.
 - **Not covered, deliberately:** the web-tab and editor content under
   `/v1/webtab/…`, and the preview listener. That content belongs to the app being
   previewed — its sandboxed frame's own requests are cross-site by definition —
   and it goes to that app's dev server or editor, never to af's API.
 
+### Behind a reverse proxy
+
+The web UI's requests keep working through a TLS-terminating proxy, but its
+**WebSockets** (every terminal, and the event stream) need one thing from the
+proxy. Chromium sends no fetch metadata on a WebSocket handshake, so the daemon
+judges the handshake by its `Origin` alone, and it must be able to see the name the
+browser used:
+
+- **A proxy that keeps `Host`** works as is. `tailscale serve` forwards
+  `Host: box.tailnet.ts.net` with `X-Forwarded-Proto: https`, and
+  `Origin: https://box.tailnet.ts.net` names the same host on the same (implied)
+  port 443. Caddy's `reverse_proxy` behaves the same way. Both need the name in
+  `network.allowed_hosts`, as above.
+- **A proxy that rewrites `Host`** must forward the browser's in
+  `X-Forwarded-Host` (with `X-Forwarded-Proto`). The daemon honours it only from a
+  proxy on the same machine (a loopback connection), and only when it names a host
+  the daemon answers to — so list the public name in `network.allowed_hosts` too:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8443;
+    proxy_http_version 1.1;                       # WebSockets need these three
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Forwarded-Host $host;      # the name the browser used
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+A proxy that rewrites `Host` and forwards nothing (nginx's bare `proxy_pass`)
+leaves a WebSocket handshake indistinguishable from a foreign page's, so it is
+refused with `403`, naming `X-Forwarded-Host`.
 ## CORS (for the browser web client)
 
 Browsers enforce CORS, so a web client served from a different origin than the

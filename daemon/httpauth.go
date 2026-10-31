@@ -263,6 +263,11 @@ type requestPosture struct {
 	// origin (whose path space is the previewed app's); left false by the unix
 	// sockets, which no browser can reach.
 	refuseCrossSite bool
+	// strictBodies makes the guard require Content-Type: application/json on every
+	// request that can carry a body, bodyless ones included (jsonBodyRefusal). The
+	// control web listener sets it; the agent-server, whose daemon client sends
+	// bodyless calls with no Content-Type, does not.
+	strictBodies bool
 	// previewOrigin marks a listener that carries NO control plane and whose whole
 	// path space belongs to the previewed app (#1856 step 3b). It changes three
 	// things below, and all three follow from that one fact:
@@ -293,7 +298,7 @@ func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p r
 	// auth-info shortcuts, and the gate — so a refused request is answered by
 	// nothing but its refusal. It reads only this posture's cors list.
 	if p.refuseCrossSite {
-		if d := crossSiteRefusal(r, p.cors); d != nil {
+		if d := crossSiteRefusal(r, p.cors, p.allowedHosts, p.strictBodies); d != nil {
 			refuseCrossSite(w, r, d)
 			return
 		}
@@ -421,7 +426,9 @@ func writeAuthInfo(w http.ResponseWriter, r *http.Request, gate *authGate) {
 // (TUI/CLI, curl) don't do CORS and are unaffected.
 func applyCORSPolicy(w http.ResponseWriter, r *http.Request, allowedOrigins []string) {
 	origin := r.Header.Get("Origin")
-	if origin == "" || !originAllowed(origin, allowedOrigins) {
+	// "null" is never echoed: it names no origin, and allowing it would hand every
+	// sandboxed frame and file:// page a readable response (crosssite.go).
+	if origin == "" || origin == "null" || !originAllowed(origin, allowedOrigins) {
 		return
 	}
 	h := w.Header()
