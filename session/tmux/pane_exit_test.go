@@ -450,6 +450,26 @@ func TestProbePaneExitRecordsAnUnstampedLegacyPane(t *testing.T) {
 	require.True(t, at.Equal(time.Unix(1726000000, 0)))
 }
 
+// The sibling legacy shape (Codex P2 on #6336): a pane af launched before
+// the incarnation bundle existed carries a BARE-PID @af_pane_pid stamp —
+// readable, but holding none of the proof fields. paneStampPID rules it
+// stampLegacy: unable to name the current incarnation, yet contradicting
+// nothing either. tmux's collected status is still this pane's own last
+// death, so the probe records it; refusing would drop a real exit the
+// pre-gate path kept.
+func TestProbePaneExitRecordsALegacyStampedPane(t *testing.T) {
+	gone := exitedProcess(t).PID
+	legacy := paneState{deaths: "", tty: "/dev/pts/0", stampCmd: "", startCmd: shimStartCommand}
+	ts := NewTmuxSessionWithDeps("pane-exit-legacy-stamp", "true", nil,
+		deadPaneExec(t, strconv.Itoa(gone), strconv.Itoa(gone), legacy, "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead, "a bare-pid stamp predates the incarnation proof; it does not contradict the collected exit")
+	require.True(t, statusKnown)
+	require.Equal(t, 7, status)
+	require.True(t, at.Equal(time.Unix(1726000000, 0)))
+}
+
 // A legacy pane the heal stamped AFTER it died (tmux <3.8 still answers
 // pane_pid then) reads stampPending forever — the pane-died hook cannot count
 // a death that already happened. tmux's collected status is still this pane's

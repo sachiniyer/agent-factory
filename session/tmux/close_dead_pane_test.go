@@ -83,7 +83,12 @@ func startHeldPaneWithHook(t *testing.T, name, command string, hookOverride []st
 	script := filepath.Join(dir, "run.sh")
 	require.NoError(t, os.WriteFile(script, []byte(
 		"while [ ! -f "+release+" ]; do sleep 0.01; done\nexec "+command+"\n"), 0o700))
-	program := "sh " + strconv.Quote(script)
+	// The recorded program must exec into the script: `sh -c 'sh run.sh'`
+	// forks the script as a child, and the -c shell then WAITING on it keeps
+	// the pty slave open — a root that closes its descriptors and keeps
+	// running (DeadPaneWithARunningRootStopsTheRoot) would leave the pane
+	// undead forever.
+	program := "exec sh " + shellquote.Quote(script)
 	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, afPaneLaunch(program),
 		";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
 	require.NoError(t, exec.Command("tmux", panePidStampArgs(exactTarget(name))...).Run())
@@ -688,8 +693,8 @@ func TestParsePaneRowStampedPid(t *testing.T) {
 		{"|1|71726000000|456:0:/dev/pts/0|1|/dev/pts/9|1", 0, true, true, "respawn"},       // pty moved
 		{"|1|71726000000|456:0:/dev/pts/0|0|/dev/pts/0|1", 0, true, true, "pane-died"},     // no death counted — hook still queued
 		{"|1|71726000000|456:0|1|/dev/pts/0|1", 0, true, true, "respawn"},                  // two-part stamp: no pty pin
-		{"|1|71726000000|456|1|/dev/pts/0|1", 0, true, true, "respawn"},                    // pre-proof bare-pid stamp
-		{"|1|71726000000|456", 0, true, true, "respawn"},                                   // no freshness fields at all
+		{"|1|71726000000|456|1|/dev/pts/0|1", 0, true, true, "predates"},                   // pre-proof bare-pid stamp
+		{"|1|71726000000|456", 0, true, true, "predates"},                                  // no freshness fields at all
 		{"|1|71726000000|:0:/dev/pts/0|1|/dev/pts/0|1", 0, true, true, "af sessions kill"}, // torn stamp names nobody — reads as absent
 		{"123|1|71726000000|456:0:/dev/pts/0|9|/dev/pts/9|0", 123, true, true, ""},         // populated pane_pid wins over any stamp
 		{"|1|71726000000|", 0, true, true, "af sessions kill"},

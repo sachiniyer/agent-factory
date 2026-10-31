@@ -115,8 +115,10 @@ func parsePaneRow(field string) (paneRow, error) {
 		pid = stampPID
 	case panePIDRaw == "" && row.dead && verdict == stampPending:
 		return paneRow{}, fmt.Errorf("dead pane carries a %s stamp for root %d whose incarnation proof is one counter short — tmux reports pane_dead before its queued pane-died hook increments the deaths counter, so the hook has not counted the death yet and the process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion: %w", PanePidMarker, stampPID, errPaneStampPending)
-	case panePIDRaw == "" && row.dead && stampPID > 0:
+	case panePIDRaw == "" && row.dead && verdict == stampStale:
 		return paneRow{}, fmt.Errorf("dead pane carries a %s stamp for root %d from an earlier incarnation — the pane was respawned or its stamp write failed, so its process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion", PanePidMarker, stampPID)
+	case panePIDRaw == "" && row.dead && stampPID > 0:
+		return paneRow{}, fmt.Errorf("dead pane carries a %s stamp for root %d that predates the incarnation proof, so its process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion", PanePidMarker, stampPID)
 	case panePIDRaw == "" && row.dead:
 		return paneRow{}, fmt.Errorf("dead pane reports no pane_pid and no %s stamp; it predates pid stamping or was not created by af, so its process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion", PanePidMarker)
 	default:
@@ -135,6 +137,14 @@ const (
 	// stampUnusable means the stamp names nobody: unset, malformed, or a
 	// non-positive pid — the pane reads exactly like an unstamped one.
 	stampUnusable paneStampVerdict = iota
+	// stampLegacy means a readable stamp carrying no incarnation bundle at
+	// all — a bare pid written before the proof fields existed. It cannot
+	// name the current incarnation, but unlike a stale bundle nothing in it
+	// positively contradicts the current run either. Evidence that does not
+	// come from the stamp — tmux's own collected status — may stand beside
+	// it; the stamped pid itself stays unusable, exactly like an unstamped
+	// pane's.
+	stampLegacy
 	// stampStale means a readable stamp that cannot name the pane's current
 	// incarnation: a deaths gap that is not 0-or-1, a moved pty, or a
 	// replaced start command — a respawn, or a stamp write that never
@@ -189,10 +199,12 @@ var errPaneStampPending = errors.New("the pane-died hook has not counted the dea
 //     whose argv happens to contain a launch marker — fails it, while an
 //     identical commandless re-run re-executed the shim and restamped.
 //
-// A stamp written before the incarnation proof existed (a bare pid, or a
-// malformed bundle) has no second colon and fails closed like an unstamped
-// pane. A deaths field left empty at stamp time is the counter's unset
-// state, i.e. zero.
+// A stamp written before the incarnation proof existed — a bare pid with no
+// second colon — is stampLegacy: it fails every proof it was never given
+// rather than contradicting one, so readers choose how much that absence
+// costs. A bundle that did set out to carry the proof and is malformed still
+// fails closed as stale. A deaths field left empty at stamp time is the
+// counter's unset state, i.e. zero.
 func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, paneStampVerdict) {
 	pidRaw, rest, hasRest := strings.Cut(stamp, ":")
 	pid, err := strconv.Atoi(pidRaw)
@@ -201,9 +213,11 @@ func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, paneStampVerd
 	}
 	if !hasRest {
 		// A bare pid is a stamp written before the incarnation proof
-		// existed: readable, but unprovable — it fails closed like an
-		// unstamped pane, only with a nameable pid.
-		return pid, stampStale
+		// existed: readable, but unprovable — it cannot name the current
+		// incarnation, only fail the proofs it was never given. That is
+		// weaker than a stale bundle, which DID carry the proof and
+		// contradicted it.
+		return pid, stampLegacy
 	}
 	deathsRaw, ttyRaw, ok := strings.Cut(rest, ":")
 	if !ok {
@@ -678,12 +692,13 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 	}
 	// pane_start_command already proved this pane ran the recorded command,
 	// so tmux's collected status is the recorded command's exit — it is this
-	// pane's own last death — UNLESS the stamp names an earlier incarnation:
-	// a respawn that moved past the stamp's pins died under a command the row
-	// cannot attribute. A fresh stamp, a pending counter (#5335), or no
-	// stamp at all — a pane af launched before PID stamping existed — all
-	// keep the exit tmux already collected, and a pane that died before its
-	// heal must not wait out a deaths hook that can never land.
+	// pane's own last death — UNLESS the stamp positively names an earlier
+	// incarnation: a respawn that moved past the stamp's pins died under a
+	// command the row cannot attribute. A fresh stamp, a pending counter
+	// (#5335), no stamp at all, or a bare-pid stamp written before the
+	// incarnation fields existed (stampLegacy — unprovable, but contradicting
+	// nothing) all keep the exit tmux already collected, and a pane that died
+	// before its heal must not wait out a deaths hook that can never land.
 	if _, verdict := paneStampPID(field(6), field(7), field(8), field(9)); verdict == stampStale {
 		return paneExit{known: true}, false
 	}
@@ -702,8 +717,28 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 // run the recorded command. startFields is the raw tail of the probe's reply
 // split on the field separator, joined so a command containing the separator
 // still reads whole.
+// unquotePaneStartCommand undoes the quoting tmux applies when it records
+// pane_start_command: a command containing spaces or quote characters is
+// stored as "…" with \, ", $ and ` escaped. The launch marker and the
+// program tail must be matched on the command as af wrote it, so the wrap
+// comes off first; a verbatim recording passes through unchanged.
+func unquotePaneStartCommand(s string) string {
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) - 2)
+	for i := 1; i < len(s)-1; i++ {
+		if s[i] == '\\' && i+1 < len(s)-1 {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
 func (t *TmuxSession) paneLaunchIsRecorded(startFields []string) bool {
-	start := strings.Join(startFields, paneFieldSeparator)
+	start := unquotePaneStartCommand(strings.Join(startFields, paneFieldSeparator))
 	program := t.Program()
 	if program == "" {
 		return false
