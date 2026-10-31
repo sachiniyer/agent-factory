@@ -315,11 +315,11 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance, question seen
 			}
 			nextID, nextText := b.OpenQuestionRef(id)
 			backlogHost{m: m}.SetAttention(repoID, sessionID, nextID, nextText)
-			// The answer typed in the pane is new work: an item in review (the agent
-			// asked after finishing) goes back to running, counts as a live answer
+			// The answer typed in the pane is new work: an open item (in review after
+			// the agent asked, or queued or drafted since) goes back to running, counts as a live answer
 			// for rollbacks of other pending ones, and gets its run armed here, in
 			// the same transaction (Codex P2 on #6295).
-			if it := b.Item(id); (it.Status == backlog.StatusRunning || it.Status == backlog.StatusReview) && !instance.BacklogRunActive() {
+			if it := b.Item(id); it.Status.Open() && !instance.BacklogRunActive() {
 				if armed = instance.ArmBacklogRun(time.Now()); armed {
 					it.Status = backlog.StatusRunning
 					it.LiveAnswers++

@@ -602,6 +602,32 @@ func TestSendPromptAnswersTheOpenBacklogQuestion(t *testing.T) {
 	}
 }
 
+// An item the user queued (or drafted) while its question stayed open still takes
+// the answer typed in the pane as new work: it runs and its run is armed, so the
+// runner cannot send a second continue (Codex P2 on #6295).
+func TestTerminalAnswerOnAQueuedItemRunsAndArmsIt(t *testing.T) {
+	drain := queuedAttentionClears(t)
+	m, repoID, inst := askedItem(t)
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Item(1).Status = backlog.StatusQueued
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SendPromptWithStatus(SendPromptRequest{Title: inst.Title, RepoID: repoID, Prompt: "Postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	m.backgroundMutationWG.Wait()
+	it := loadItem(t, repoID, 1)
+	if it.OpenQuestion() != nil {
+		t.Fatalf("the question stayed open: %+v", it.Thread)
+	}
+	if it.Status != backlog.StatusRunning || !inst.BacklogRunActive() {
+		t.Fatalf("status = %s, run armed = %v: the queued item was left for the runner to continue again", it.Status, inst.BacklogRunActive())
+	}
+}
+
 // An answer waiting to be delivered is not sent once the item was started again in
 // another session (Codex P2 on #6295): two sessions would work on it.
 func TestAnswerIsNotSentToASupersededSession(t *testing.T) {
