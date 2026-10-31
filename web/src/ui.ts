@@ -1349,7 +1349,7 @@ export class AppShell {
     });
     this.backlogPane = new BacklogPane(this.actions.backlog ?? {
       token: () => null,
-      refresh: async () => {},
+      refresh: async () => true,
       started: () => 0,
       notify: () => {},
       confirm: async () => false,

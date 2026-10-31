@@ -3202,7 +3202,7 @@ const actions = {
   retryTasks: refreshTasks,
   backlog: {
     token: () => token,
-    refresh: () => backlogLoader.refresh(),
+    refresh: (root?: string) => backlogLoader.refresh(root),
     started: () => backlogLoader.started(),
     notify: (message: string) => showTransientNotice(message),
     openSession: openBacklogSession,

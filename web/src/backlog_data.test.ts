@@ -194,3 +194,21 @@ test("runSessionIds collects every run's session across projects", () => {
   });
   assert.deepEqual([...ids].sort(), ["s1", "s2"]);
 });
+
+test("refresh settles true only when the named project's read succeeded", async () => {
+  const l = loader(["/a", "/b"]);
+  const ok = l.refresh("/a");
+  await settle();
+  answer("GetBacklog", backlogOf("a"), "/a");
+  pending.find((p) => p.method === "GetBacklog" && p.root === "/b")!.reject("busy");
+  pending.splice(pending.findIndex((p) => p.root === "/b"), 1);
+  answer("GetBudget", budgetOf(1));
+  assert.equal(await ok, true, "/b failing does not fail an edit in /a");
+  const bad = l.refresh("/a");
+  await settle();
+  pending.find((p) => p.method === "GetBacklog" && p.root === "/a")!.reject("down");
+  pending.splice(pending.findIndex((p) => p.method === "GetBacklog" && p.root === "/a"), 1);
+  answer("GetBacklog", backlogOf("b"), "/b");
+  answer("GetBudget", budgetOf(1));
+  assert.equal(await bad, false, "a failed read of the edited project is not a confirmation");
+});

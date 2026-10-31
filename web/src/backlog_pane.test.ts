@@ -88,7 +88,7 @@ function host(over: Partial<BacklogHost> = {}): BacklogHost & { notices: string[
     notices: [] as string[],
     refreshes: 0,
     token: () => "t",
-    refresh: async () => { h.refreshes++; },
+    refresh: async () => { h.refreshes++; return true; },
     started: () => 0,
     notify: (m: string) => { h.notices.push(m); },
     openSession: () => {},
@@ -497,4 +497,24 @@ test("a refused note comes back to the box, ahead of anything typed since", asyn
   await settle();
   assert.equal(note.value, "a long investigation\ntyped meanwhile");
   assert.deepEqual(h.notices, ["busy"]);
+});
+
+test("an edit is not acknowledged by a refresh that failed to read the project", async () => {
+  let readOk = false;
+  const h = host({ refresh: async () => readOk });
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1, { body: "old" })) }), "/a", []);
+  pane.select(1);
+  await settle();
+  editors[0].change("saved");
+  mock.timers.tick(800);
+  await settle();                                   // UpdateBacklogItem succeeded; the read after it failed
+  pane.update(data({ "/a": view(item(1, { body: "old" })) }, 2), "/a", []);   // the cached snapshot renders
+  assert.equal(editors[0].text, "saved", "the draft guard is kept until a read carries the saved value");
+  readOk = true;
+  editors[0].change("saved again");
+  mock.timers.tick(800);
+  await settle();
+  pane.update(data({ "/a": view(item(1, { body: "from agent" })) }, 3), "/a", []);
+  assert.equal(editors[0].text, "from agent", "a confirmed save releases the guard");
 });

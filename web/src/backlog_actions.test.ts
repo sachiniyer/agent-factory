@@ -109,7 +109,7 @@ function host(): TestHost {
     answerConfirm: true,
     gen: 1,
     token: () => "t",
-    refresh: async () => { h.gen++; },
+    refresh: async () => { h.gen++; return true; },
     started: () => h.gen,
     notify: (m: string) => { h.notices.push(m); },
     openSession: () => {},
