@@ -18104,6 +18104,54 @@ async function addNote(root2, id, text, token2) {
   return resp.message;
 }
 
+// src/backlog_serial.ts
+var SerialQueue = class {
+  saving = false;
+  queued = null;
+  /** `run` may return a promise that settles true once the write AND the refresh after
+   *  it have landed; a plain void return counts as settled at once. `done` hears that
+   *  request's own outcome. */
+  submit(run, done2) {
+    if (this.saving) {
+      this.queued = { run, done: done2 };
+      return;
+    }
+    const result = run();
+    if (!result) {
+      done2(true);
+      return;
+    }
+    this.saving = true;
+    const finish = (ok) => {
+      this.saving = false;
+      done2(ok);
+      const next = this.queued;
+      this.queued = null;
+      if (next) this.submit(next.run, next.done);
+    };
+    result.then(finish, () => finish(false));
+  }
+};
+var queues = /* @__PURE__ */ new Map();
+function queueFor(key) {
+  let q = queues.get(key);
+  if (!q) {
+    q = new SerialQueue();
+    queues.set(key, q);
+  }
+  return q;
+}
+var SerialSaver = class {
+  constructor(save, settled, queue = new SerialQueue()) {
+    this.save = save;
+    this.settled = settled;
+    this.queue = queue;
+  }
+  submit(value) {
+    this.queue.submit(() => this.save(value), (ok) => this.settled(value, ok));
+  }
+};
+
 // src/backlog_body.ts
 var SAVE_DELAY_MS = 800;
 function createTextareaEditor(parent, opts) {
@@ -18126,10 +18174,11 @@ var bodyEditorLoader = {
   load: async () => ({ createDocsEditor: createTextareaEditor })
 };
 var BodyEditor = class {
-  /** `save` may return a promise that settles true once the write AND the refresh
-   *  after it have landed; a plain void return acknowledges at once. */
-  constructor(save, label) {
+  /** `queueKey` names the item's body: editors for the same body share one save
+   *  queue, so a save held by a closed panel cannot land after a reopened one's. */
+  constructor(save, label, queueKey) {
     this.save = save;
+    this.queue = queueKey === void 0 ? new SerialQueue() : queueFor(queueKey);
     this.el = document.createElement("div");
     this.el.className = "af-backlog-body";
     const fallback = document.createElement("pre");
@@ -18152,9 +18201,10 @@ var BodyEditor = class {
   // is set is older than the edit and must not replace it. It survives a failed save,
   // so the edit is kept (and the next change saves it again).
   draft = null;
-  saving = false;
-  queued = false;
   disposed = false;
+  /** `save` may return a promise that settles true once the write AND the refresh
+   *  after it have landed; a plain void return acknowledges at once. */
+  queue;
   /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. */
   setText(text) {
     if (this.draft !== null || text === this.text) return;
@@ -18176,34 +18226,10 @@ var BodyEditor = class {
     if (this.timer === null) return;
     clearTimeout(this.timer);
     this.timer = null;
-    this.send();
-  }
-  /** One save at a time: an older request must not commit after a newer one and
-   *  overwrite it, so an edit made while a save is in flight waits for it and
-   *  then goes out as the latest text. */
-  send() {
-    if (this.saving) {
-      this.queued = true;
-      return;
-    }
     const text = this.text;
-    const done2 = this.save(text);
-    const acknowledge = (ok) => {
+    this.queue.submit(() => this.save(text), (ok) => {
       if (ok && this.draft === text) this.draft = null;
-    };
-    if (!done2) {
-      acknowledge(true);
-      return;
-    }
-    this.saving = true;
-    const finish = (ok) => {
-      this.saving = false;
-      acknowledge(ok);
-      if (!this.queued) return;
-      this.queued = false;
-      if (this.draft !== null && this.draft !== text) this.send();
-    };
-    done2.then(finish, () => finish(false));
+    });
   }
   dispose() {
     this.flush();
@@ -18302,39 +18328,6 @@ function waitsOnBlock(b, id, target) {
   return `${a} cannot wait on ${t}: ${t} already waits on ${a} (${formatPath(ids)})`;
 }
 
-// src/backlog_serial.ts
-var SerialSaver = class {
-  /** `save` may return a promise that settles true once the write and the refresh
-   *  after it have landed; a plain void return counts as settled at once. `settled`
-   *  hears each request's own outcome. */
-  constructor(save, settled) {
-    this.save = save;
-    this.settled = settled;
-  }
-  saving = false;
-  queued = null;
-  submit(value) {
-    if (this.saving) {
-      this.queued = { value };
-      return;
-    }
-    const done2 = this.save(value);
-    if (!done2) {
-      this.settled(value, true);
-      return;
-    }
-    this.saving = true;
-    const finish = (ok) => {
-      this.saving = false;
-      this.settled(value, ok);
-      const next = this.queued;
-      this.queued = null;
-      if (next) this.submit(next.value);
-    };
-    done2.then(finish, () => finish(false));
-  }
-};
-
 // src/backlog_panel.ts
 function sameList(a, b) {
   return a.length === b.length && a.every((v, i) => v === b[i]);
@@ -18386,11 +18379,11 @@ var ItemPanel = class {
       if (this.titleDraft !== title) return;
       this.titleDraft = null;
       if (!ok && this.view) this.render(this.view, this.sessions);
-    });
+    }, queueFor(`${root2}\0${id}\0title`));
     this.waits = new SerialSaver((waits_on) => actions2.update(id, { waits_on }), (list, ok) => {
       if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
       if (!ok && this.view) this.render(this.view, this.sessions);
-    });
+    }, queueFor(`${root2}\0${id}\0waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
     this.title.setAttribute("aria-label", "Title");
     const commitTitle = () => {
@@ -18406,7 +18399,7 @@ var ItemPanel = class {
     this.title.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) this.title.blur();
     });
-    this.body = new BodyEditor((text) => actions2.update(id, { body: text }), "Body");
+    this.body = new BodyEditor((text) => actions2.update(id, { body: text }), "Body", `${root2}\0${id}\0body`);
     this.note = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: "Add a note\u2026" });
     this.note.setAttribute("aria-label", "Note");
     const addNote2 = button("Add note", () => {

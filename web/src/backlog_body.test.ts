@@ -134,3 +134,27 @@ test("a failed save does not retry on its own", async () => {
   ed.setText("stored");
   assert.equal(text, "x");
 });
+
+test("a save held by a closed editor cannot land after the reopened editor's", async () => {
+  const sent: string[] = [];
+  const resolvers: ((ok: boolean) => void)[] = [];
+  const save = (t: string) => { sent.push(t); return new Promise<boolean>((r) => { resolvers.push(r); }); };
+  const first = new BodyEditor(save, "Body", "/a\u00001\u0000body");
+  await settle();
+  change("first");
+  mock.timers.tick(SAVE_DELAY_MS);                  // "first" is in flight
+  change("second");
+  first.dispose();                                  // the panel closes with "second" queued behind it
+  const reopened = new BodyEditor(save, "Body", "/a\u00001\u0000body");
+  await settle();
+  change("latest");
+  mock.timers.tick(SAVE_DELAY_MS);                  // the reopened editor saves newer text
+  assert.deepEqual(sent, ["first"], "still one request in flight for this body");
+  resolvers[0](true);
+  await settle();
+  assert.deepEqual(sent, ["first", "latest"], "the stale queued draft was replaced, not sent after it");
+  resolvers[1](true);
+  await settle();
+  assert.equal(sent.at(-1), "latest");
+  reopened.dispose();
+});

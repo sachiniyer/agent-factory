@@ -13,7 +13,7 @@ import {
   childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, neededBy, openQuestion, safeHttpUrl,
 } from "./backlog_model.js";
 import { ROW_KIND_LABELS, isArchived, rowKind } from "./status.js";
-import { SerialSaver } from "./backlog_serial.js";
+import { SerialSaver, queueFor } from "./backlog_serial.js";
 import { formatTime } from "./time.js";
 import type { SessionData } from "./types.js";
 
@@ -111,11 +111,11 @@ export class ItemPanel {
       this.titleDraft = null;
       // A refused rename gives the field back its stored title.
       if (!ok && this.view) this.render(this.view, this.sessions);
-    });
+    }, queueFor(`${root}\u0000${id}\u0000title`));
     this.waits = new SerialSaver((waits_on) => actions.update(id, { waits_on }), (list, ok) => {
       if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
       if (!ok && this.view) this.render(this.view, this.sessions);
-    });
+    }, queueFor(`${root}\u0000${id}\u0000waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
     this.title.setAttribute("aria-label", "Title");
     const commitTitle = (): void => {
@@ -131,7 +131,7 @@ export class ItemPanel {
     this.title.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) this.title.blur();
     });
-    this.body = new BodyEditor((text) => actions.update(id, { body: text }), "Body");
+    this.body = new BodyEditor((text) => actions.update(id, { body: text }), "Body", `${root}\u0000${id}\u0000body`);
     this.note = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: "Add a note…" });
     this.note.setAttribute("aria-label", "Note");
     const addNote = button("Add note", () => {

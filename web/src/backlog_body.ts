@@ -2,6 +2,8 @@
 // seam: today a plain textarea, and the CodeMirror live preview from the lazy Docs
 // bundle can replace it by swapping bodyEditorLoader once that bundle is on master.
 
+import { SerialQueue, queueFor } from "./backlog_serial.js";
+
 export const SAVE_DELAY_MS = 800;
 
 /** The slice of an editor the body needs; the Docs editor satisfies it too. */
@@ -52,13 +54,16 @@ export class BodyEditor {
   // is set is older than the edit and must not replace it. It survives a failed save,
   // so the edit is kept (and the next change saves it again).
   private draft: string | null = null;
-  private saving = false;
-  private queued = false;
   private disposed = false;
 
   /** `save` may return a promise that settles true once the write AND the refresh
    *  after it have landed; a plain void return acknowledges at once. */
-  constructor(private readonly save: (text: string) => Promise<boolean> | void, label: string) {
+  private readonly queue: SerialQueue;
+
+  /** `queueKey` names the item's body: editors for the same body share one save
+   *  queue, so a save held by a closed panel cannot land after a reopened one's. */
+  constructor(private readonly save: (text: string) => Promise<boolean> | void, label: string, queueKey?: string) {
+    this.queue = queueKey === undefined ? new SerialQueue() : queueFor(queueKey);
     this.el = document.createElement("div");
     this.el.className = "af-backlog-body";
     const fallback = document.createElement("pre");
@@ -96,36 +101,11 @@ export class BodyEditor {
     if (this.timer === null) return;
     clearTimeout(this.timer);
     this.timer = null;
-    this.send();
-  }
-
-  /** One save at a time: an older request must not commit after a newer one and
-   *  overwrite it, so an edit made while a save is in flight waits for it and
-   *  then goes out as the latest text. */
-  private send(): void {
-    if (this.saving) {
-      this.queued = true;
-      return;
-    }
     const text = this.text;
-    const done = this.save(text);
-    const acknowledge = (ok: boolean): void => {
+    this.queue.submit(() => this.save(text), (ok) => {
       // Newer typing has replaced the draft; only the edit this save carried is covered.
       if (ok && this.draft === text) this.draft = null;
-    };
-    if (!done) {
-      acknowledge(true);
-      return;
-    }
-    this.saving = true;
-    const finish = (ok: boolean): void => {
-      this.saving = false;
-      acknowledge(ok);
-      if (!this.queued) return;
-      this.queued = false;
-      if (this.draft !== null && this.draft !== text) this.send();
-    };
-    done.then(finish, () => finish(false));
+    });
   }
 
   dispose(): void {
