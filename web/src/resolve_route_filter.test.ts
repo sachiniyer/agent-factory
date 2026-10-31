@@ -13,7 +13,7 @@ import {
   withKind,
   type StatusFilter,
 } from "./filter.js";
-import { operatorKind } from "./status.js";
+import { operatorKind, type OperatorKind } from "./status.js";
 import { Liveness, type SessionData } from "./types.js";
 
 // Pins the deep-link filter-reveal fix in resolveRoute() (web/src/index.ts).
@@ -69,7 +69,7 @@ function workingRow(id: string): SessionData {
 
 interface Stage {
   resolveRoute(): void;
-  setStatusFilter(kind: "archived" | "working", on: boolean): void;
+  setStatusFilter(kind: OperatorKind, on: boolean): void;
   resetStatusFilter(): void;
   readonly state: StoreState;
   readonly sets: Partial<StoreState>[];
@@ -78,6 +78,8 @@ interface Stage {
   readonly switchProjectCalls: string[];
   readonly openFromRailCalls: string[];
   readonly replaceRouteCalls: unknown[];
+  readonly durableFilter: StatusFilter;
+  setDurableFilter(filter: StatusFilter): void;
   restore(): void;
 }
 
@@ -161,6 +163,10 @@ function stage(initial: Partial<StoreState> = {}): Stage {
     projectRoots: () => [],
     // resolveRoute reads location.hash.
     location: locationObj,
+    // The module-level durable filter (mirrors loadFilter() at boot in the real
+    // app). setStatusFilter/resetStatusFilter read and write it; resolveRoute's
+    // deep-link arm reads it for the transient reveal but never writes it.
+    durableFilter: loadFilter(),
   };
 
   const code = ts.transpileModule(handlers, {
@@ -170,7 +176,7 @@ function stage(initial: Partial<StoreState> = {}): Stage {
 
   const app = context as typeof context & {
     resolveRoute(): void;
-    setStatusFilter(kind: "archived" | "working", on: boolean): void;
+    setStatusFilter(kind: OperatorKind, on: boolean): void;
     resetStatusFilter(): void;
   };
 
@@ -185,6 +191,8 @@ function stage(initial: Partial<StoreState> = {}): Stage {
     switchProjectCalls,
     openFromRailCalls,
     replaceRouteCalls,
+    get durableFilter() { return context.durableFilter; },
+    setDurableFilter: (f: StatusFilter) => { context.durableFilter = f; },
     restore: restoreStorage,
   };
 }
@@ -300,6 +308,47 @@ test("resetStatusFilter (the menu's reset) STILL persists the default — no hap
       JSON.stringify(defaultFilter()),
       "the reset is persisted to localStorage",
     );
+  } finally {
+    s.restore();
+  }
+});
+
+test("a menu toggle after a deep-link reveal does NOT persist the transient widening", () => {
+  // Pins the review follow-up to the deep-link fix. A deep link widens the
+  // in-memory statusFilter for the visit (archived:true so the row shows), but
+  // that widening is route-only. A subsequent explicit menu change must base
+  // persistence on the DURABLE filter (the user's saved preference), not the
+  // transiently-widened in-memory one — otherwise the route-only archived:true
+  // becomes durable after an unrelated checkbox edit, and the next reload
+  // still shows Archived despite this PR's intent (#6323).
+  const narrowed = withKind(defaultFilter(), "working", false);
+  const s = stage({ sessions: [archivedRow("s-arch")], statusFilter: narrowed });
+  try {
+    persistFilter(narrowed);
+    // Mirror the user's saved narrow as the durable filter (in the real app,
+    // durableFilter = loadFilter() at boot reads this stored narrow).
+    s.setDurableFilter(narrowed);
+    s.setHash("#/session/s-arch");
+
+    s.resolveRoute();
+
+    // The visit reveals archived in the in-memory filter…
+    assert.equal(s.state.statusFilter.archived, true, "the deep link reveals archived");
+    // …but the durable filter is untouched by the route-only widening.
+    assert.deepEqual(s.durableFilter, narrowed, "the durable filter keeps the saved narrow");
+
+    // Now an explicit menu toggle of an unrelated kind persists from the durable
+    // filter, excluding the transient archived:true.
+    s.setStatusFilter("needs-you", false);
+
+    const stored = s.storage.get("af-status-filter");
+    assert.ok(stored, "the menu toggle persisted");
+    const persisted = JSON.parse(stored) as StatusFilter;
+    assert.equal(persisted.archived, false, "the transient archived widening is NOT persisted");
+    assert.equal(persisted.working, false, "the saved narrow on working is preserved");
+    assert.equal(persisted["needs-you"], false, "the new toggle is applied");
+    // And the in-memory store now matches durable+toggle, dropping the reveal.
+    assert.equal(s.state.statusFilter.archived, false, "the reveal is dropped from the store");
   } finally {
     s.restore();
   }
