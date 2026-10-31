@@ -3003,9 +3003,11 @@ agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
 
 A same-agent account handoff (--account alone, or --to naming the current
-agent) keeps the conversation for claude and codex: af copies the transcript
-into the new account's home and resumes it. If that copy cannot be made, the
-new account starts a fresh conversation, and its brief says why.
+agent) keeps the conversation for claude and codex on a local worktree: af copies
+the transcript into the new account's home and resumes it. If that copy cannot be
+made, the new account starts a fresh conversation, and its brief says why. An
+off-box (listed-host sandbox) account swap cannot reach the previous account's
+transcript and always starts a fresh conversation with a notice saying why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
@@ -3019,10 +3021,13 @@ that, a handoff is recorded — the swap and the branch tip at the moment it
 happened — so a reviewer reading the resulting diff can tell which agent wrote
 which part.
 
-Local-worktree sessions and ssh/sandbox sessions whose agent-server supports it
-can be handed off in place: the sandbox's agent-server swaps the agent in the same
-workspace and resolves the new agent's program on its own host. An account-scoped
-sandbox session, and docker or hook sessions, cannot be handed off yet.
+Local-worktree sessions, ssh/sandbox sessions whose agent-server advertises
+agent-swap, and an already account-scoped listed-host ssh/sandbox session whose
+agent-server advertises account-swap (same-agent --account only, rotating its
+existing scope) can be handed off in place: the sandbox's agent-server swaps the
+agent in the same workspace and resolves the new agent's program on its own host.
+A cross-agent --to on an account-scoped sandbox session, and any handoff on
+docker or hook sessions, cannot be handed off yet.
 
 Examples:
   af sessions handoff fix-auth --account personal
