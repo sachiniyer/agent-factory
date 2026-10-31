@@ -989,7 +989,7 @@
         "pointer": "api/sessions_lifecycle.go:20 sessionsKillCmd"
       },
       "verdict": "parity",
-      "notes": ""
+      "notes": "The delete confirm of every surface names a branch af does not own that the worktree is on and says it is kept (#6233): TUI via assessKillLoss, web via the WorkspaceFacts read (web/src/api.ts fetchKeptBranch), CLI via kept_branch/note in the kill result."
     },
     {
       "id": "session.limit-retry",
@@ -1883,6 +1883,25 @@
       "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; PR 8 adds the web answer box at the top of the item panel. Asking is agent-only (ask --self), so the web only answers. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
+      "id": "backlog.questions",
+      "title": "Ask and answer questions on backlog items",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_self.go backlogAskCmd (ask --self) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; the web answer box arrives in PR 8. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
       "id": "backlog.runner",
       "title": "Show and change a project's backlog runner and the global budget",
       "tui": {
@@ -2176,6 +2195,7 @@
       "ExplainConfig": "config.explain",
       "HandoffSessionV2": "session.handoff",
       "KillSession": "session.kill",
+      "WorkspaceFacts": "session.kill",
       "ListBackends": "backend.list",
       "ListDirectory": "project.browse",
       "ListOnComplete": "task.on-complete",

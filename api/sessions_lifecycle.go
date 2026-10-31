@@ -60,7 +60,7 @@ be lost. Archive instead to keep the session restorable.
 		// is running inside closes the pane's pty under it, and the kernel
 		// hangup would otherwise kill the caller before the reply (#5182).
 		defer ignoreTeardownHangup()()
-		err = killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID})
+		kept, err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
@@ -71,6 +71,12 @@ be lost. Archive instead to keep the session restorable.
 		result := map[string]any{"ok": true}
 		if warning != "" {
 			result["warning"] = warning
+		}
+		// A branch af does not own is left in the repo with its commits; say so
+		// in the result rather than leaving a stray ref unexplained (#6233).
+		if kept.Any() {
+			result["kept_branch"] = kept.Name
+			result["note"] = kept.Note()
 		}
 		return jsonOut(result)
 	},

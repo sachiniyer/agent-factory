@@ -173,6 +173,9 @@ type KillSessionRequest struct {
 
 type KillSessionResponse struct {
 	OK bool `json:"ok"`
+	// KeptBranch is a branch af does not own that the worktree was on when the
+	// kill ran; it and its commits are left in the repo (#6233).
+	KeptBranch session.KeptBranch `json:"kept_branch,omitempty"`
 	MutationOutcome
 }
 

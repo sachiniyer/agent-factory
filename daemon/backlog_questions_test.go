@@ -276,7 +276,7 @@ func TestBacklogAnsweredInSessionOnSubmit(t *testing.T) {
 	// The question the user's line answers is the one open when it is submitted;
 	// the agent posts the next one while the line is in flight.
 	answered := m.backlogSeenQuestion(inst)
-	if answered == "" {
+	if answered.empty() {
 		t.Fatal("no open question to capture")
 	}
 	if _, err := m.backlogService().PostMessage(backlog.PostMessageRequest{RepoID: repoID, ID: 1,
@@ -515,7 +515,7 @@ func TestFailedAnswerReplaysASkippedCompletion(t *testing.T) {
 func TestBacklogSeenQuestionSurvivesADismissedChip(t *testing.T) {
 	m, _, inst := askedItem(t)
 	want := m.backlogSeenQuestion(inst)
-	if want == "" {
+	if want.empty() {
 		t.Fatal("no open question")
 	}
 	a := inst.Attention()
@@ -535,7 +535,7 @@ func TestRebuildAskedQuestionsFromTheBacklog(t *testing.T) {
 	want := m.backlogSeenQuestion(inst)
 	inst.ClearAttention(inst.Attention().SetAt)
 	m.backlog.asked.Delete(inst.ID) // a fresh daemon
-	if m.backlogSeenQuestion(inst) != "" {
+	if !m.backlogSeenQuestion(inst).empty() {
 		t.Fatal("nothing should be remembered yet")
 	}
 	b, err := backlog.Load(repoID)
@@ -576,8 +576,8 @@ func TestLongQuestionIsAnsweredInSessionWithADismissedChip(t *testing.T) {
 			m.rebuildAskedQuestions(b)
 		}
 		seen := m.backlogSeenQuestion(inst)
-		if seen == "" || seen != session.NormalizeAttentionReason(long) {
-			t.Fatalf("rebuilt=%v: seen question %d runes, want the normalized form", rebuilt, len([]rune(seen)))
+		if seen.empty() || seen.Text != session.NormalizeAttentionReason(long) {
+			t.Fatalf("rebuilt=%v: seen question %d runes, want the normalized form", rebuilt, len([]rune(seen.Text)))
 		}
 	}
 	m.noteBacklogSubmitted(inst, m.backlogSeenQuestion(inst))
@@ -599,6 +599,66 @@ func TestSendPromptAnswersTheOpenBacklogQuestion(t *testing.T) {
 	m.backgroundMutationWG.Wait()
 	if it := loadItem(t, repoID, 1); it.OpenQuestion() != nil {
 		t.Fatalf("the question stayed open after a delivered send-prompt: %+v", it.Thread)
+	}
+}
+
+// An item the user queued (or drafted) while its question stayed open still takes
+// the answer typed in the pane as new work: it runs and its run is armed, so the
+// runner cannot send a second continue (Codex P2 on #6295).
+func TestTerminalAnswerOnAQueuedItemRunsAndArmsIt(t *testing.T) {
+	drain := queuedAttentionClears(t)
+	m, repoID, inst := askedItem(t)
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Item(1).Status = backlog.StatusQueued
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SendPromptWithStatus(SendPromptRequest{Title: inst.Title, RepoID: repoID, Prompt: "Postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	m.backgroundMutationWG.Wait()
+	it := loadItem(t, repoID, 1)
+	if it.OpenQuestion() != nil {
+		t.Fatalf("the question stayed open: %+v", it.Thread)
+	}
+	if it.Status != backlog.StatusRunning || !inst.BacklogRunActive() {
+		t.Fatalf("status = %s, run armed = %v: the queued item was left for the runner to continue again", it.Status, inst.BacklogRunActive())
+	}
+}
+
+// The item went to review before its session's idle poll, so the run marker is
+// still active when the answer is typed in the pane: the answer is still new work.
+// The item runs and counts it, and the active marker is not armed a second time
+// (Codex P2 on #6295).
+func TestTerminalAnswerWithAStillActiveMarkerRunsTheReviewedItem(t *testing.T) {
+	drain := queuedAttentionClears(t)
+	m, repoID, inst := askedItem(t)
+	if !inst.ArmBacklogRun(time.Now()) {
+		t.Fatal("could not arm the session's run")
+	}
+	gen := inst.BacklogRunGeneration()
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Item(1).Status = backlog.StatusReview
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SendPromptWithStatus(SendPromptRequest{Title: inst.Title, RepoID: repoID, Prompt: "Postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	m.backgroundMutationWG.Wait()
+	it := loadItem(t, repoID, 1)
+	if it.OpenQuestion() != nil {
+		t.Fatalf("the question stayed open: %+v", it.Thread)
+	}
+	if it.Status != backlog.StatusRunning || it.LiveAnswers != 1 {
+		t.Fatalf("status = %s, live answers = %d: the answered item was left in review", it.Status, it.LiveAnswers)
+	}
+	if got := inst.BacklogRunGeneration(); got != gen || !inst.BacklogRunActive() {
+		t.Fatalf("run generation %d -> %d (active %v): the active marker must be kept, not re-armed", gen, got, inst.BacklogRunActive())
 	}
 }
 
@@ -662,5 +722,27 @@ func TestRecoveryDoesNotRedeliverAnAnswerIntoAReplacementRun(t *testing.T) {
 	}
 	if !failed {
 		t.Fatal("the superseded answer was not recorded as undelivered")
+	}
+}
+
+// A failed continue closes only the run it armed: an answer worker that took the
+// target lock first armed (and delivered) a newer generation, which stays active
+// (Codex P2 on #6295).
+func TestFailedContinueLeavesANewerDeliverysRunArmed(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	inst.DisarmBacklogRun()
+	m.backlogRunEnded(repoID, inst.ID)
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(*Manager, SendPromptRequest) error {
+		inst.ArmBacklogRun(time.Now()) // the answer delivery that got the lock first
+		return errors.New("pane gone")
+	}
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err == nil {
+		t.Fatal("the continue should report the failed send")
+	}
+	m.backgroundMutationWG.Wait()
+	if !inst.BacklogRunActive() {
+		t.Fatal("the failed continue disarmed the answer delivery's run")
 	}
 }

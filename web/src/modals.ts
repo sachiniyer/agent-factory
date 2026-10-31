@@ -677,7 +677,26 @@ export function handoffSameAgentTarget(
   return resolvedAgents === undefined ? currentAgent : undefined;
 }
 
+/** A branch af does not own that a delete leaves in the repo, read from the
+ *  worktree's HEAD when the confirm opens (#6233). */
+export interface KeptBranch {
+  name?: string;
+  unreadable?: boolean;
+}
+
+/** Sentence for a kept branch; mirrors session.KeptBranch.Note on the Go side. */
+export function keptBranchNote(kept: KeptBranch | undefined): string {
+  if (kept?.name) {
+    return `Branch '${kept.name}' is checked out in the worktree and af does not own it · the branch and its commits are kept in the repo.`;
+  }
+  if (kept?.unreadable) {
+    return "Could not read the worktree's current branch · a branch you created there, and its commits, would be kept in the repo.";
+  }
+  return "";
+}
+
 export interface DeletionWorkspace {
+  keptBranch?: KeptBranch;
   archived: boolean;
   offBox: boolean;
   externalWorktree: boolean;
@@ -686,6 +705,12 @@ export interface DeletionWorkspace {
 
 /** Deletion consequences, selected from the same workspace ownership facts as teardown. */
 export function deletionConfirmationBody(opts: DeletionWorkspace): string {
+  const base = deletionBaseBody(opts);
+  const kept = opts.offBox || opts.externalWorktree ? "" : keptBranchNote(opts.keptBranch);
+  return kept ? `${base} ${kept}` : base;
+}
+
+function deletionBaseBody(opts: DeletionWorkspace): string {
   if (opts.archived && opts.offBox) {
     return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
   }
@@ -708,7 +733,7 @@ export function deletionConfirmationBody(opts: DeletionWorkspace): string {
 /** A session-lifecycle confirm modal (kill, archive, or restore). Kill is
  *  destructive; archive/restore are the reversible pair (#1932). */
 export function confirmModal(
-  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; immediateRestore?: boolean; isRoot?: boolean; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; onConfirm: () => void; onCancel: () => void },
+  opts: { action: "kill" | "archive" | "restore"; sessionTitle: string; immediateRestore?: boolean; isRoot?: boolean; archived: boolean; offBox: boolean; externalWorktree: boolean; branchCreatedByUs: boolean; keptBranch?: KeptBranch; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
   // Restore is the reverse of archive (#1932): non-destructive, so it reads as a
   // primary (not danger) confirm, mirroring archive's own class. The web routes it
