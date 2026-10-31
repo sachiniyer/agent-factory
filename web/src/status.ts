@@ -596,11 +596,28 @@ export function callbackUnavailableText(s: SessionData): string {
   return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
 }
 
+/** The cross-surface phrase every surface renders before the list of declared
+ *  agent-config files af could not place (#6337) — kept as one exported
+ *  constant so the rail banner and the row tooltip can never spell it two
+ *  ways. Mirrors session.AgentConfigSkippedPrefix. */
+export const AGENT_CONFIG_SKIPPED_PREFIX = "af agent config skipped: ";
+
+/** The daemon-projected skipped agent-config entries, joined under the shared
+ *  prefix the way the TUI row renders them. "" means every declared file
+ *  landed (or none applied). */
+export function agentConfigSkippedText(s: SessionData): string {
+  const entries = (s.agent_config_skipped ?? [])
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  return entries.length === 0 ? "" : AGENT_CONFIG_SKIPPED_PREFIX + entries.join("; ");
+}
+
 /** Every session-level notice the persistent pane banner carries — the
- *  incomplete-archive warning and the callback-absence advisory — joined so a
- *  row carrying both cannot drop either. "" means there is nothing to show. */
+ *  incomplete-archive warning, the callback-absence advisory, and the skipped
+ *  agent-config list — joined so a row carrying several cannot drop one. ""
+ *  means there is nothing to show. */
 export function sessionWarningText(s: SessionData): string {
-  return [archiveWarningText(s), callbackUnavailableText(s)]
+  return [archiveWarningText(s), callbackUnavailableText(s), agentConfigSkippedText(s)]
     .filter((t) => t !== "")
     .join(" · ");
 }

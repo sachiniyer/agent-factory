@@ -392,6 +392,37 @@ func TestRedactTasksReducesProgramToItsAgent(t *testing.T) {
 	}
 }
 
+// TestRedactInstancesJSONRedactsAgentConfigSkipped covers the session row's
+// skipped agent-config list (#6337). Every entry is "agent:file: <reason>" and
+// the reason quotes the file's absolute path under the operator's agent home —
+// the same class of user-chosen-path text as the tab names above. Each entry
+// takes the marker so the COUNT of skipped files survives for triage while no
+// operator path does.
+func TestRedactInstancesJSONRedactsAgentConfigSkipped(t *testing.T) {
+	out := redactOneInstance(t, &redactor{}, session.InstanceData{
+		ID: "abc123",
+		AgentConfigSkipped: []string{
+			"claude:CLAUDE.md: stat /srv/ConfidentialClient/.claude/CLAUDE.md: no such file or directory",
+			"claude:.claude.json: /srv/ConfidentialClient/.claude.json is 99999999 bytes, over the 67108864-byte bound",
+		},
+	})
+	if strings.Contains(out, "ConfidentialClient") {
+		t.Errorf("a skipped agent-config entry carried the operator's path into the bundle:\n%s", out)
+	}
+	if !strings.Contains(out, `"agent_config_skipped": [`) {
+		t.Fatalf("the skip list itself should survive, count included:\n%s", out)
+	}
+	var decoded []session.InstanceData
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("unmarshal redacted output: %v", err)
+	}
+	want := []string{redactedMarker, redactedMarker}
+	if len(decoded) != 1 || len(decoded[0].AgentConfigSkipped) != len(want) ||
+		decoded[0].AgentConfigSkipped[0] != redactedMarker || decoded[0].AgentConfigSkipped[1] != redactedMarker {
+		t.Errorf("each skipped entry should be the marker, preserving the count %d:\n%s", len(want), out)
+	}
+}
+
 // TestRedactInstancesFallbackDropsTheNewSensitiveKeys mirrors every typed
 // redaction above onto the generic fallback, exactly as the existing entries in
 // sensitiveJSONKeys mirror theirs. A record the typed decode rejects must not be
@@ -404,6 +435,7 @@ func TestRedactInstancesFallbackDropsTheNewSensitiveKeys(t *testing.T) {
 		"account": "AcmeCorp-prod",
 		"program": "/opt/AcmeCorp/bin/inhouse-wrapper --client AcmeCorp",
 		"archive_warning": "archive completed with an incomplete archive: af skipped 1 unreadable file; complete original tree(s) were retained at \"/srv/ConfidentialClient/wt\"; skipped paths: \"customer-ssns.csv\" (permission denied)",
+		"agent_config_skipped": ["claude:CLAUDE.md: stat /srv/ConfidentialClient/.claude/CLAUDE.md: no such file or directory"],
 		"lost_restore_failure": {"attempts": 5, "error": "restore of ProjectKingfisher failed"},
 		"tabs": [{"id": "tab-1", "name": "AcmeCorp migration", "account_scope": "AcmeCorp-retired-acct"}],
 		"worktree": {"relocation_recovery": {"alternate_path": "/srv/ConfidentialClient/wt-relocating"}}
