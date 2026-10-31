@@ -64,7 +64,8 @@ func (s *Service) ask(p *project, req PostMessageRequest) (*MessageResponse, err
 			return nil, err
 		}
 		msg = *m
-		s.host.SetAttention(p.id, req.SessionID, b.OpenQuestionText(req.ID))
+		qid, qtext := b.OpenQuestionRef(req.ID)
+		s.host.SetAttention(p.id, req.SessionID, qid, qtext)
 		return []int{req.ID}, nil
 	})
 	if err != nil {
@@ -99,6 +100,19 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 	var pending PendingAnswer
 	b, err = s.update(p, func(b *Backlog) ([]int, error) {
 		var err error
+		// The target was read outside this transaction. If the item's session changed
+		// in between (a killed session replaced), answering now would close the
+		// question against the wrong target and lose it; refuse before touching the
+		// thread so the retry sees the replacement.
+		current := ""
+		if cur := b.Item(req.ID); cur != nil {
+			if last := cur.lastRun(); last != nil && last.State == RunStarted {
+				current = last.SessionID
+			}
+		}
+		if current != sessionID {
+			return nil, fmt.Errorf("%s changed while answering; retry", FormatID(req.ID))
+		}
 		if out, err = b.Answer(req.ID, req.QuestionID, req.Text, target != TargetGone, s.now()); err != nil {
 			return nil, err
 		}
@@ -108,11 +122,11 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 		if out.SessionID != sessionID {
 			return nil, fmt.Errorf("%s changed while answering; retry", FormatID(req.ID))
 		}
-		next := ""
+		next, nextID := "", 0
 		if out.Next != nil && target == TargetLive {
-			next = out.Next.Text
+			next, nextID = out.Next.Text, out.Next.ID
 		}
-		s.host.SetAttention(p.id, sessionID, next)
+		s.host.SetAttention(p.id, sessionID, nextID, next)
 		pending = PendingAnswer{ID: req.ID, AnswerID: out.Answer.ID, SessionID: sessionID,
 			Prompt: AnswerPrompt(b.Item(req.ID), out.Answer)}
 		return []int{req.ID}, nil

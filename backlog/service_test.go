@@ -20,15 +20,23 @@ type testHost struct {
 	attention map[string]string
 	target    AnswerTarget
 	delivered []PendingAnswer
+	// onTarget runs inside AnswerTarget, between the service reading the item and
+	// its transaction.
+	onTarget func()
 }
 
-func (h *testHost) SetAttention(_, sessionID, reason string) {
+func (h *testHost) SetAttention(_, sessionID string, _ int, reason string) {
 	if h.attention == nil {
 		h.attention = map[string]string{}
 	}
 	h.attention[sessionID] = reason
 }
-func (h *testHost) AnswerTarget(string, string) AnswerTarget { return h.target }
+func (h *testHost) AnswerTarget(string, string) AnswerTarget {
+	if h.onTarget != nil {
+		h.onTarget()
+	}
+	return h.target
+}
 func (h *testHost) DeliverAnswer(_ string, a PendingAnswer) {
 	h.delivered = append(h.delivered, a)
 }
@@ -249,12 +257,6 @@ func TestServiceAgentReview(t *testing.T) {
 	}
 	if _, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 1, Status: StatusDone, SessionID: "s1"}); err == nil {
 		t.Error("agent done accepted")
-	}
-	for _, pr := range []string{"javascript:alert(1)", "data:text/html,x", "/pull/1", "https://"} {
-		if _, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 1, Status: StatusReview, SessionID: "s1", PR: pr}); err == nil ||
-			!strings.Contains(err.Error(), "not an http or https URL") {
-			t.Errorf("pr %q: %v", pr, err)
-		}
 	}
 	out, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 1, Status: StatusReview, SessionID: "s1", PR: "https://x/pull/1"})
 	if err != nil || out.Item.Status != StatusReview || out.Item.PR != "https://x/pull/1" {

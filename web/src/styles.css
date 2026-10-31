@@ -1112,20 +1112,28 @@ button:disabled,
   flex: 0 0 var(--af-type-body);
 }
 
-/* Status icon: every shape is static (#1766). */
+/* Status icon: shapes are static, except the working spinner and the attention
+   blink, both still under reduced motion (#1766). */
 .af-dot {
   flex: 0 0 auto;
   line-height: 1.5;
   font-size: var(--af-type-body);
 }
 
-.af-dot-working .af-icon,
 .af-dot-limit .af-icon {
   fill: currentColor;
 }
 
 .af-dot-working {
   color: var(--af-ink-muted);
+}
+
+.af-dot-working .af-icon {
+  animation: af-working-spin 1s linear infinite;
+}
+
+@keyframes af-working-spin {
+  to { transform: rotate(360deg); }
 }
 
 .af-dot-attention .af-icon {
@@ -1142,10 +1150,11 @@ button:disabled,
   to { opacity: 0.25; }
 }
 
-/* Without the blink, a ring keeps attention distinct from the working circle
+/* Without the blink, a ring keeps attention distinct from the working spinner
    by shape, not only by colour. */
 @media (prefers-reduced-motion: reduce) {
-  .af-dot-attention { animation: none; }
+  .af-dot-attention,
+  .af-dot-working .af-icon { animation: none; }
   .af-dot-attention .af-icon {
     border-radius: 50%;
     outline: calc(var(--af-space-1) / 2) solid currentColor;

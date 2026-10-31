@@ -161,7 +161,7 @@
         "pointer": "commands/configmigratecmd.go config migrate (config.MigrateGlobalConfig)"
       },
       "verdict": "deliberate",
-      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place \u2014 their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling \u2014 so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
+      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place — their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling — so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
     },
     {
       "id": "config.read-project",
@@ -507,7 +507,7 @@
         "pointer": "commands/docs_gen.go:29 (hidden); commands/docs_gen.go:61 (--plugin-root); commands/agentservercmd.go:34; commands/legacy_tmuxguardcmd.go"
       },
       "verdict": "deliberate",
-      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio\u2194TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes \u2014 running it by hand does nothing useful. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
+      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio↔TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes — running it by hand does nothing useful. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
       "id": "task.path-validate",
@@ -750,7 +750,7 @@
       },
       "verdict": "parity",
       "issue": "#3844",
-      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have. #3386 added the `default_accounts` config key \u2014 a per-agent map admitted globally and in the machine-local personal per-project layer, never in a checked-in repo file \u2014 which the DAEMON applies at CreateSession (daemon/accounts_default.go applyDefaultAccount, through agentaccount.Resolve), so explicit > project default > global default > ambient holds on every surface without any of them re-implementing it. A default af cannot honour refuses the create naming the key and its file rather than falling back to the ambient identity, and both pickers PRESELECT the default from ListAccountsResponse.Defaults and mark its row, so a scoped create is visible before it is made."
+      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have. #3386 added the `default_accounts` config key — a per-agent map admitted globally and in the machine-local personal per-project layer, never in a checked-in repo file — which the DAEMON applies at CreateSession (daemon/accounts_default.go applyDefaultAccount, through agentaccount.Resolve), so explicit > project default > global default > ambient holds on every surface without any of them re-implementing it. A default af cannot honour refuses the create naming the key and its file rather than falling back to the ambient identity, and both pickers PRESELECT the default from ListAccountsResponse.Defaults and mark its row, so a scoped create is visible before it is made."
     },
     {
       "id": "session.archive",
@@ -989,7 +989,7 @@
         "pointer": "api/sessions_lifecycle.go:20 sessionsKillCmd"
       },
       "verdict": "parity",
-      "notes": ""
+      "notes": "The delete confirm of every surface names a branch af does not own that the worktree is on and says it is kept (#6233): TUI via assessKillLoss, web via the WorkspaceFacts read (web/src/api.ts fetchKeptBranch), CLI via kept_branch/note in the kill result."
     },
     {
       "id": "session.limit-retry",
@@ -1485,11 +1485,11 @@
       "title": "Inspect whether a task is actually firing on its schedule, and who last changed it",
       "tui": {
         "status": "yes",
-        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue \u00b7 missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
+        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue · missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue \u00b7 missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
+        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue · missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
       },
       "cli": {
         "status": "yes",
@@ -1497,7 +1497,8 @@
       },
       "verdict": "parity",
       "issue": "#3626",
-      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight \u2014 the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see \u2014 so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."    },
+      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight — the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see — so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."
+    },
     {
       "id": "task.list",
       "title": "List tasks",
@@ -1702,7 +1703,7 @@
       "title": "Address a session by its stable id rather than by title",
       "tui": {
         "status": "yes",
-        "pointer": "app/session_action_target.go \u2014 captured sessionActionTarget builds every retained-intent session request {ID,Title,RepoID}; streamAddress (same file) id-addresses both WS stream paths \u2014 the live-pane dialer via liveBindCandidate (app/live_termpane.go) and deferred full-screen attach via attachStreamFn (app/handle_actions.go) \u2014 sending the instance's stable id with an empty repo scope so the daemon's id-first stream resolver applies"
+        "pointer": "app/session_action_target.go — captured sessionActionTarget builds every retained-intent session request {ID,Title,RepoID}; streamAddress (same file) id-addresses both WS stream paths — the live-pane dialer via liveBindCandidate (app/live_termpane.go) and deferred full-screen attach via attachStreamFn (app/handle_actions.go) — sending the instance's stable id with an empty repo scope so the daemon's id-first stream resolver applies"
       },
       "web": {
         "status": "yes",
@@ -1714,7 +1715,7 @@
       },
       "verdict": "deliberate",
       "issue": "#2358",
-      "notes": "#2358 closed as delivered; the action-by-action audit this row reserved is now done and the two residual holes it missed are closed. TUI: every session-targeting request flows through sessionActionTarget \u2014 captured at intent (handle_actions.go, handle_handoff.go, handle_tabs.go, restore_confirm.go, live_termpane.go) and re-resolved by that identity at completion (resolveSessionActionTarget), never by title alone. The interactive WS stream joins the same contract: streamAddress sends the instance's stable id with an EMPTY repo scope \u2014 the daemon reads an unscoped /v1/sessions/{idOrTitle}/stream segment as an id first (authoritativeStreamTarget), while a non-empty repo_id would re-select the title namespace \u2014 for both the live-pane dialer (liveBindCandidate) and the deferred full-screen attach (handle_actions.go). Enumerating every Title+RepoID wire type: all 13 mutation types carry `id`; the only session-targeting type without one is PreviewRequest \u2014 a continuous READ bound to the visible row (its tab axis already carries tab_id), and no mutation can be mistargeted through it. DeliverPromptRequest is scheduler-internal (keyed by repo_path). CLI: one-shot commands remain deliberately {title,repo_id}-scoped \u2014 they resolve the target from their own arguments inside a single dispatch, so no retained boundary exists for an id to protect \u2014 and `sessions archive --self` sends the resolved row's id because the caller's identity cannot come from the arguments. `send-prompt --all` is NOT one-shot: it materializes the target list, then dispatches, so it now carries each enumerated row's id (scopedInstance.ID) or a killed-and-recreated same-title row could inherit the prompt. The five remaining cli `id` field declarations (CreateTab/CloseTab/KillSession/RenameTab/ReorderTab) stay `ok` on the one-shot grounds already accepted on RestoreSession/ResumeFromLimit/HandoffSession; SendPromptRequest's decl was removed outright once the broadcast reached `id`. A user-facing --id selector would be a new CLI contract, not this capability."
+      "notes": "#2358 closed as delivered; the action-by-action audit this row reserved is now done and the two residual holes it missed are closed. TUI: every session-targeting request flows through sessionActionTarget — captured at intent (handle_actions.go, handle_handoff.go, handle_tabs.go, restore_confirm.go, live_termpane.go) and re-resolved by that identity at completion (resolveSessionActionTarget), never by title alone. The interactive WS stream joins the same contract: streamAddress sends the instance's stable id with an EMPTY repo scope — the daemon reads an unscoped /v1/sessions/{idOrTitle}/stream segment as an id first (authoritativeStreamTarget), while a non-empty repo_id would re-select the title namespace — for both the live-pane dialer (liveBindCandidate) and the deferred full-screen attach (handle_actions.go). Enumerating every Title+RepoID wire type: all 13 mutation types carry `id`; the only session-targeting type without one is PreviewRequest — a continuous READ bound to the visible row (its tab axis already carries tab_id), and no mutation can be mistargeted through it. DeliverPromptRequest is scheduler-internal (keyed by repo_path). CLI: one-shot commands remain deliberately {title,repo_id}-scoped — they resolve the target from their own arguments inside a single dispatch, so no retained boundary exists for an id to protect — and `sessions archive --self` sends the resolved row's id because the caller's identity cannot come from the arguments. `send-prompt --all` is NOT one-shot: it materializes the target list, then dispatches, so it now carries each enumerated row's id (scopedInstance.ID) or a killed-and-recreated same-title row could inherit the prompt. The five remaining cli `id` field declarations (CreateTab/CloseTab/KillSession/RenameTab/ReorderTab) stay `ok` on the one-shot grounds already accepted on RestoreSession/ResumeFromLimit/HandoffSession; SendPromptRequest's decl was removed outright once the broadcast reached `id`. A user-facing --id selector would be a new CLI contract, not this capability."
     },
     {
       "id": "worktree.hooks.edit",
@@ -2197,7 +2198,8 @@
       "SuggestSessionName": "-",
       "TriggerTask": "task.trigger",
       "UpdateTask": "task.edit",
-      "config-assistant": "config-agent"
+      "config-assistant": "config-agent",
+      "WorkspaceFacts": "session.kill"
     },
     "cli_flags": {
       "af backlog --help": "meta.discovery",
@@ -2710,7 +2712,7 @@
       "CreateTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           }
         },
         "tui": {
@@ -2734,7 +2736,7 @@
       "CloseTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon only consults when TabName is empty (daemon/control_types.go:248)."
@@ -2752,7 +2754,7 @@
       "KillSessionRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves one session by title under --repo scoping and dispatches it in the same call \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract RestoreSession/ResumeFromLimit/HandoffSession already declare `ok`. `sessions archive --self` is the exception that does send the resolved row's id: the caller's own identity cannot come from the arguments."
+            "ok": "The CLI resolves one session by title under --repo scoping and dispatches it in the same call — a one-shot command has no retained intent boundary for a stable id to protect, the same contract RestoreSession/ResumeFromLimit/HandoffSession already declare `ok`. `sessions archive --self` is the exception that does send the resolved row's id: the caller's own identity cannot come from the arguments."
           }
         }
       },
@@ -2998,7 +3000,7 @@
       "RenameTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_id": {
             "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
@@ -3016,7 +3018,7 @@
       "ReorderTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_id": {
             "ok": "The TAB's stable id (#1971): the web and TUI address tabs by it from their live projections so a reorder can't misroute another client's ordinal; the CLI addresses by --name and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."

@@ -121,12 +121,12 @@ func (b *Backlog) Answer(id, questionID int, text string, deliver bool, now time
 		// to where it was when both fail.
 		prev := it.Status
 		for _, x := range it.Thread {
-			if x.Kind == KindAnswer && x.Delivery == DeliveryPending && x.PrevStatus.Valid() && (x.RunCount == 0 || x.RunCount == len(it.Runs)) {
+			if x.Kind == KindAnswer && x.Delivery == DeliveryPending && x.PrevStatus.Valid() && (x.RunCount == 0 || x.RunCount == len(it.Runs)) && x.LiveEpoch == it.LiveEpoch {
 				prev = x.PrevStatus
 				break
 			}
 		}
-		answer.Delivery, answer.PrevStatus, answer.RunCount = DeliveryPending, prev, len(it.Runs)
+		answer.Delivery, answer.PrevStatus, answer.RunCount, answer.LiveEpoch = DeliveryPending, prev, len(it.Runs), it.LiveEpoch
 		it.Status = StatusRunning
 		it.LiveAnswers++
 	}
@@ -191,10 +191,11 @@ func (b *Backlog) AnswerFailed(id, answerID int, reason string, now time.Time) e
 	}
 	prev := m.PrevStatus
 	m.Delivery = DeliveryFailed
-	if m.RunCount != 0 && m.RunCount != len(it.Runs) {
+	if (m.RunCount != 0 && m.RunCount != len(it.Runs)) || m.LiveEpoch != it.LiveEpoch {
 		// A newer run began since the answer was accepted (the session was killed
-		// and the item restarted): the item's status and live-answer count belong to
-		// that run now, and this failure rolls nothing back.
+		// and the item restarted), or the item left running and was answered again
+		// (a new live-answer epoch): the status and count belong to that work now,
+		// and this failure rolls nothing back.
 		_, err = b.AddNote(id, AuthorAF, "The answer was not delivered: "+reason+". It is kept in the thread.", now)
 		return err
 	}
@@ -259,12 +260,21 @@ func (b *Backlog) PendingAnswers() []PendingAnswer {
 // question's text) before forwarding the line, without touching the backlog
 // file. It closes the oldest open question only if that is the question with this
 // text; a different or newer one is left alone. It returns the item id, or 0.
-func (b *Backlog) AnsweredInSessionText(sessionID, text string, normalize func(string) string, now time.Time) int {
+func (b *Backlog) AnsweredInSessionText(sessionID string, questionID int, text string, normalize func(string) string, now time.Time) int {
 	it := b.ItemForSession(sessionID)
-	if it == nil || it.lastRun().SessionID != sessionID || text == "" {
+	if it == nil || it.lastRun().SessionID != sessionID || (text == "" && questionID == 0) {
 		return 0
 	}
 	open := it.OpenQuestion()
+	if questionID != 0 {
+		// Identity, not display text: two questions can share their first 500 runes.
+		if open == nil || open.ID != questionID {
+			return 0
+		}
+		open.Closed = ClosedAnsweredInSession
+		it.UpdatedAt = now
+		return it.ID
+	}
 	if normalize == nil {
 		normalize = func(s string) string { return s }
 	}
@@ -276,6 +286,16 @@ func (b *Backlog) AnsweredInSessionText(sessionID, text string, normalize func(s
 	open.Closed = ClosedAnsweredInSession
 	it.UpdatedAt = now
 	return it.ID
+}
+
+// OpenQuestionRef is the id and text of the item's oldest open question, or 0 and "".
+func (b *Backlog) OpenQuestionRef(id int) (int, string) {
+	if it := b.Item(id); it != nil {
+		if q := it.OpenQuestion(); q != nil {
+			return q.ID, q.Text
+		}
+	}
+	return 0, ""
 }
 
 // OpenQuestionText is the text of the item's oldest open question, or "".

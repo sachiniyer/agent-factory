@@ -19,11 +19,11 @@ import (
 
 type backlogTestHost struct{}
 
-func (backlogTestHost) Facts(string) backlog.Facts  { return nil }
-func (backlogTestHost) ProjectName(string) string   { return "" }
-func (backlogTestHost) Changed(string, []int)       {}
-func (backlogTestHost) SlotsUsed(string) int        { return 0 }
-func (backlogTestHost) SetAttention(_, _, _ string) {}
+func (backlogTestHost) Facts(string) backlog.Facts                { return nil }
+func (backlogTestHost) ProjectName(string) string                 { return "" }
+func (backlogTestHost) Changed(string, []int)                     {}
+func (backlogTestHost) SlotsUsed(string) int                      { return 0 }
+func (backlogTestHost) SetAttention(_, _ string, _ int, _ string) {}
 func (backlogTestHost) AnswerTarget(_, _ string) backlog.AnswerTarget {
 	return backlog.TargetLive
 }

@@ -2,11 +2,11 @@
 // the TUI renderer, ui/tree/render.go, for how (Liveness, InFlightOp) become a state
 // bucket and the [lost] / [deleting] / [limit] / [remote] / [model changed] title
 // prefixes. The glyphs differ: the web rail has no state words, so an idle Ready
-// row is blank and a working row draws a muted circle. Adding a Liveness value
+// row is blank and a working row draws a muted spinner. Adding a Liveness value
 // forces a deliberate choice here, mirroring the TUI's TOTAL liveness switch
 // (render.go:274-301).
 //
-// Shapes keep the low-contrast/color-blindness discipline: a filled circle for
+// Shapes keep the low-contrast/color-blindness discipline: a spinner for
 // Working, hollow for Dead, dashed for Lost, an archive for Archived, and a filled
 // diamond for LimitReached (see styles.css .af-dot-*).
 
@@ -144,7 +144,7 @@ const LOST_ICON: IconName = "circle-dashed";
 const ARCHIVED_ICON: IconName = "archive";
 const LIMIT_ICON: IconName = "diamond";
 
-const WORKING: RowStatus = { icon: "circle", kind: "working", label: ROW_KIND_LABELS.working };
+const WORKING: RowStatus = { icon: "loader-circle", kind: "working", label: ROW_KIND_LABELS.working };
 
 /**
  * Resolves a session's status dot from its two axes: any in-flight op is a
