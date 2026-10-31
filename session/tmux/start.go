@@ -73,13 +73,15 @@ func tmuxSocketFilesystemDir() (string, error) {
 // the session (ex. claude). workdir is the git worktree directory.
 func (t *TmuxSession) Start(workDir string) error {
 	// A Start that fails AFTER its prepare step minted launch capabilities has
-	// nothing for them to belong to. Counting this session's mints tells the two
-	// apart: a gate refusal before prepare (the name already exists) leaves the
-	// live session's capability alone.
-	minted := t.capabilityMints.Load()
+	// nothing for them to belong to; one that succeeds installs them and retires
+	// what the session held before. A refusal at the existing-session gate minted
+	// nothing and leaves the live session's capability alone.
+	t.beginCapabilityPrepare()
 	err := t.start(workDir)
-	if err != nil && t.capabilityMints.Load() != minted {
-		revokeLaunchCapabilities(t.sanitizedName)
+	if err != nil {
+		t.revokePendingCapabilities()
+	} else {
+		t.commitCapabilities(true)
 	}
 	return err
 }

@@ -50,19 +50,37 @@ func accountSessionForCapabilityTest(t *testing.T, name string, exec cmd_test.Mo
 // A PerPane capability has no clock expiry, so it lives exactly as long as
 // someone revokes it (#4731). Every way a session can end must do so.
 func TestPerPaneLaunchCapabilityDoesNotOutliveItsSession(t *testing.T) {
-	t.Run("prepare supersedes the previous capability", func(t *testing.T) {
-		name := "af_cap_prepare"
-		s := accountSessionForCapabilityTest(t, name, cmd_test.MockCmdExec{}, nil)
-		for i := 0; i < 3; i++ { // a restore refresh re-prepares the session
-			_, _, _, _, _, err := s.prepareLaunchEnvironment("")
-			require.NoError(t, err)
+	t.Run("a restore refresh replaces the previous capability, never accumulates", func(t *testing.T) {
+		name := "af_cap_refresh"
+		exec, _, _ := recordingExec()
+		s := accountSessionForCapabilityTest(t, name, exec, nil)
+		for i := 0; i < 3; i++ { // each daemon restore re-establishes the session
+			require.NoError(t, s.refreshRestoredAccountEnvironment())
 		}
 		total, perPane := launchCapabilities(name)
-		require.Equal(t, 2, total, "the initial pane's single-use capability and the default-command's")
-		require.Equal(t, 1, perPane, "a re-prepared session must not accumulate a per-pane capability per prepare")
+		require.Equal(t, 1, perPane, "a re-established session must hold one per-pane capability, not one per restore")
+		require.Equal(t, 1, total, "and no single-use capability: a refresh launches no pane")
 		revokeLaunchCapabilities(name)
 		total, _ = launchCapabilities(name)
 		require.Zero(t, total)
+	})
+
+	t.Run("a refresh that fails keeps the capability the installed default-command names", func(t *testing.T) {
+		name := "af_cap_refresh_fails"
+		exec, _, _ := recordingExec()
+		s := accountSessionForCapabilityTest(t, name, exec, nil)
+		require.NoError(t, s.refreshRestoredAccountEnvironment()) // installs the first one
+		before := sessionenv.LaunchBrokerIfStarted()
+		require.NotNil(t, before)
+		_, perPaneBefore := launchCapabilities(name)
+		require.Equal(t, 1, perPaneBefore)
+
+		lookupFails.Store(true) // the next refresh fails after minting
+		require.Error(t, s.refreshRestoredAccountEnvironment())
+		total, perPane := launchCapabilities(name)
+		require.Equal(t, 1, perPane, "a failed refresh must not revoke the capability a live window would claim")
+		require.Equal(t, 1, total, "and must revoke only what it minted")
+		revokeLaunchCapabilities(name)
 	})
 
 	t.Run("a failed prepare leaves nothing behind", func(t *testing.T) {

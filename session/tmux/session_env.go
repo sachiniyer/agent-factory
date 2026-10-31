@@ -210,14 +210,14 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 // An account-scoped launch mints its launch capabilities here (#4731): the
 // pane's command carries only where to claim and a bearer token, and the shim
 // runs what the CAPABILITY admitted, not what its own argv or environment say.
-// A failed prepare revokes what it minted.
+// A failed prepare revokes only what it minted.
 func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (wrapped string, launchEnv, importNames, sessionEnv []string, defaultCommand string, err error) {
-	// A prepare supersedes the previous one: the per-pane capability a restored
-	// session's default-command still names is replaced, never accumulated.
-	revokeLaunchCapabilities(t.sanitizedName)
+	// What an earlier prepare installed stays valid until THIS one is installed
+	// (commitCapabilities); a failure revokes only what this one minted.
+	t.beginCapabilityPrepare()
 	wrapped, launchEnv, importNames, sessionEnv, defaultCommand, err = t.prepareLaunchEnvironmentMinting(workDir)
 	if err != nil {
-		revokeLaunchCapabilities(t.sanitizedName)
+		t.revokePendingCapabilities()
 	}
 	return wrapped, launchEnv, importNames, sessionEnv, defaultCommand, err
 }
@@ -376,7 +376,17 @@ func accountSessionBoundaryNames(agent string) []string {
 	return names
 }
 
-func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
+func (t *TmuxSession) refreshRestoredAccountEnvironment() (err error) {
+	// The capability this refresh mints is retired-into only once its
+	// default-command is installed; a failure leaves the one the live session's
+	// default-command already names usable.
+	defer func() {
+		if err != nil {
+			t.revokePendingCapabilities()
+		} else {
+			t.commitCapabilities(false) // a refresh launches no pane: only the per-pane capability is kept
+		}
+	}()
 	_, _, _, account, accountAgent, _, _ := t.launchSnapshot()
 	if account == "" {
 		return nil
@@ -385,9 +395,6 @@ func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
 	if err != nil {
 		return err
 	}
-	// A refresh launches nothing, so the single-use capability prepare minted for
-	// an initial pane has no taker; only the per-pane one is kept.
-	revokeSingleUseLaunchCapabilities(t.sanitizedName)
 	selected := make(map[string]string, len(sessionEnv))
 	for _, entry := range sessionEnv {
 		name, value, ok := strings.Cut(entry, "=")

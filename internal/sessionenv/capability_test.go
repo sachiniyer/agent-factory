@@ -269,6 +269,7 @@ func TestCapability_PerPaneCapabilityOutlivesTheShortExpiryUntilRevoked(t *testi
 	perPane.PerPane = true
 	pt, err := b.Mint(perPane)
 	require.NoError(t, err)
+	b.Activate(pt)               // the launch created its session
 	ot, err := b.Mint(testCap()) // one-shot keeps the short expiry
 	require.NoError(t, err)
 
@@ -281,4 +282,50 @@ func TestCapability_PerPaneCapabilityOutlivesTheShortExpiryUntilRevoked(t *testi
 	b.Revoke("s")
 	_, err = b.Claim(context.Background(), pt, "%2", 1)
 	require.ErrorContains(t, err, "unknown or already used", "ending the session revokes it")
+}
+
+// A PerPane record is minted before its session exists. Until the launch
+// activates it, it keeps the launch TTL (a launch that dies leaves nothing behind)
+// and the lost-session sweep ignores it (its session legitimately is not there yet).
+func TestCapability_PendingPerPaneRecordIsNotSweptAndExpires(t *testing.T) {
+	b := NewCapabilityBroker(paneOf("s", 1))
+	now := time.Now()
+	b.now = func() time.Time { return now }
+	c := perPaneCap("s")
+	pending, err := b.Mint(c)
+	require.NoError(t, err)
+
+	b.Sweep(context.Background(), func(context.Context, string) (bool, bool) { return false, true })
+	_, perPane := b.Capabilities("s")
+	require.Equal(t, 1, perPane, "a launch that has not created its session yet must not be swept")
+
+	now = now.Add(capabilityTTL + time.Minute)
+	_, err = b.Claim(context.Background(), pending, "%1", 1)
+	require.ErrorContains(t, err, "unknown or already used", "a never-activated record dies with the launch window")
+}
+
+// A successful launch retires what it superseded only AFTER its own records are
+// installed, and a failed one revokes only what it minted: the session's
+// installed default-command must keep a valid capability throughout.
+func TestCapability_RevokeTokensAndSessionExceptKeepWhatIsInstalled(t *testing.T) {
+	b := NewCapabilityBroker(paneOf("s", 1))
+	installed, err := b.Mint(perPaneCap("s"))
+	require.NoError(t, err)
+	b.Activate(installed)
+	failed, err := b.Mint(perPaneCap("s"))
+	require.NoError(t, err)
+	b.RevokeTokens(failed)
+	_, perPane := b.Capabilities("s")
+	require.Equal(t, 1, perPane)
+	_, err = b.Claim(context.Background(), installed, "%1", 1)
+	require.NoError(t, err, "a failed refresh must leave the installed capability usable")
+
+	fresh, err := b.Mint(perPaneCap("s"))
+	require.NoError(t, err)
+	b.Activate(fresh)
+	b.RevokeSessionExcept("s", fresh)
+	_, err = b.Claim(context.Background(), installed, "%2", 1)
+	require.ErrorContains(t, err, "unknown or already used")
+	_, err = b.Claim(context.Background(), fresh, "%1", 1)
+	require.NoError(t, err)
 }

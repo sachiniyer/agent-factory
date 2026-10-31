@@ -33,7 +33,11 @@ func TestAccountSessionKeepsOpeningNewWindows(t *testing.T) {
 	}
 	claude := filepath.Join(bin, "claude")
 	writeFile(t, claude, "#!/bin/sh\nprintf '❯ '\nexec cat\n", 0o755)
-	writeConfigWithProgramPath(t, h.home, claude)
+	// An account-scoped agent is refused when its program is written with a path,
+	// so the stand-in is reached the way a real install is: by its bare name, on PATH.
+	// The daemon the first af call starts inherits this environment.
+	writeConfigWithProgramPath(t, h.home, tmux.ProgramClaude)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	accountDir, err := agentaccount.Register(h.home, tmux.ProgramClaude, "work")
 	if err != nil {
 		t.Fatal(err)

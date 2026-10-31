@@ -21,7 +21,6 @@ func (t *TmuxSession) mintLaunchCapability(spec launchSpec) (socket, token strin
 	if err != nil {
 		return "", "", err
 	}
-	t.capabilityMints.Add(1)
 	token, err = broker.Mint(sessionenv.Capability{
 		Session:         t.sanitizedName,
 		Agent:           spec.agent,
@@ -32,7 +31,65 @@ func (t *TmuxSession) mintLaunchCapability(spec launchSpec) (socket, token strin
 		EnvironmentOnly: spec.environmentOnly,
 		PerPane:         spec.perPane,
 	})
+	if err == nil {
+		t.capMu.Lock()
+		t.pendingCapabilities = append(t.pendingCapabilities, pendingCapability{token: token, perPane: spec.perPane})
+		t.capMu.Unlock()
+	}
 	return socket, token, err
+}
+
+// beginCapabilityPrepare starts a prepare's accounting. What an earlier launch
+// installed stays valid until THIS one is installed: retiring it first would leave
+// a live session's default-command naming a revoked capability if the install
+// then fails.
+func (t *TmuxSession) beginCapabilityPrepare() {
+	t.capMu.Lock()
+	t.pendingCapabilities = nil
+	t.capMu.Unlock()
+}
+
+// revokePendingCapabilities ends exactly what this prepare minted, after a
+// failure. An earlier launch's capability is left alone.
+func (t *TmuxSession) revokePendingCapabilities() {
+	t.capMu.Lock()
+	pending := t.pendingCapabilities
+	t.pendingCapabilities = nil
+	t.capMu.Unlock()
+	if b := sessionenv.LaunchBrokerIfStarted(); b != nil && len(pending) > 0 {
+		tokens := make([]string, len(pending))
+		for i, p := range pending {
+			tokens[i] = p.token
+		}
+		b.RevokeTokens(tokens...)
+	}
+}
+
+// commitCapabilities is the success half: the session now exists with this
+// prepare's per-pane capability installed, so it is activated (it no longer
+// expires and is subject to the lost-session sweep) and everything the session
+// held before is retired. keepSingleUse is false for a refresh, which launches no
+// pane, so the single-use capability it minted has no taker. Nothing happens when
+// this prepare minted nothing.
+func (t *TmuxSession) commitCapabilities(keepSingleUse bool) {
+	t.capMu.Lock()
+	pending := t.pendingCapabilities
+	t.pendingCapabilities = nil
+	t.capMu.Unlock()
+	b := sessionenv.LaunchBrokerIfStarted()
+	if b == nil || len(pending) == 0 {
+		return
+	}
+	var keep []string
+	for _, p := range pending {
+		if p.perPane {
+			b.Activate(p.token)
+		}
+		if p.perPane || keepSingleUse {
+			keep = append(keep, p.token)
+		}
+	}
+	b.RevokeSessionExcept(t.sanitizedName, keep...)
 }
 
 // revokeLaunchCapabilities ends every capability bound to a tmux session. Safe to
@@ -40,14 +97,6 @@ func (t *TmuxSession) mintLaunchCapability(spec launchSpec) (socket, token strin
 func revokeLaunchCapabilities(session string) {
 	if b := sessionenv.LaunchBrokerIfStarted(); b != nil {
 		b.Revoke(session)
-	}
-}
-
-// revokeSingleUseLaunchCapabilities ends a session's single-use capabilities and
-// leaves its per-pane one.
-func revokeSingleUseLaunchCapabilities(session string) {
-	if b := sessionenv.LaunchBrokerIfStarted(); b != nil {
-		b.RevokeSingleUse(session)
 	}
 }
 
@@ -83,6 +132,11 @@ func paneLookup(ctx context.Context, paneID string) (sessionenv.PaneInfo, error)
 	return sessionenv.PaneInfo{Session: name, RootPID: root}, nil
 }
 
+// sessionAlive is the sweep's liveness read. It asks as an EXISTING session
+// (probeLiveness), not as a pre-spawn probe: when a tmp cleaner has unlinked the
+// socket a live server still serves, the answer is unknown, never "gone", so the
+// sweep cannot revoke the capability of a session that is still running.
 func sessionAlive(ctx context.Context, session string) (alive, known bool) {
-	return probeSessionContext(ctx, cmd.MakeExecutor(), session)
+	a := probeSessionAs(ctx, cmd.MakeExecutor(), session, probeLiveness)
+	return a.exists, a.known
 }

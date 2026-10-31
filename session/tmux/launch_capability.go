@@ -45,3 +45,9 @@ func ownsLaunchCapabilities() bool { return launchCapabilityOwner.Load() }
 // window outside the account boundary. The daemon replaces it on its next restore
 // of the session.
 const nonOwnerDefaultCommand = `/bin/sh -c 'echo "af: new windows in an account-scoped session are set up by the af daemon; run af daemon restart, then reopen the session" >&2; exit 127'`
+
+// pendingCapability is a capability a launch minted that is not yet installed.
+type pendingCapability struct {
+	token   string
+	perPane bool
+}

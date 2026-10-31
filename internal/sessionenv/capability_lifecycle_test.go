@@ -28,8 +28,9 @@ func perPaneCap(session string) Capability {
 func TestCapability_SweepRevokesPerPaneRecordsOfLostSessions(t *testing.T) {
 	b, _ := startBroker(t, paneOf("live", os.Getpid()))
 	for _, s := range []string{"live", "lost", "unknown"} {
-		_, err := b.Mint(perPaneCap(s))
+		token, err := b.Mint(perPaneCap(s))
 		require.NoError(t, err)
+		b.Activate(token)
 	}
 	oneShot := testCap()
 	oneShot.Session = "lost"

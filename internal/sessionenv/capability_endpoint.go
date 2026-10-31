@@ -107,7 +107,7 @@ func claimSocketDir() (string, error) {
 	return dir, nil
 }
 
-// Sweep drops every PerPane capability whose session tmux reports gone. It is
+// Sweep drops every active PerPane capability whose session tmux reports gone. It is
 // the backstop behind Revoke: a session lost without af asking (the tmux server
 // died, a user killed it) never reaches the teardown that revokes, and a PerPane
 // record has no clock expiry. A session whose liveness is unknown keeps its record.
@@ -115,7 +115,7 @@ func (b *CapabilityBroker) Sweep(ctx context.Context, alive SessionLiveness) {
 	b.mu.Lock()
 	sessions := make(map[string]bool)
 	for _, rec := range b.recs {
-		if rec.cap.PerPane {
+		if rec.cap.PerPane && !rec.pending {
 			sessions[rec.cap.Session] = true
 		}
 	}
@@ -132,18 +132,7 @@ func (b *CapabilityBroker) revokePerPane(session string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for token, rec := range b.recs {
-		if rec.cap.PerPane && rec.cap.Session == session {
-			delete(b.recs, token)
-		}
-	}
-}
-
-// RevokeSingleUse drops a session's single-use records and keeps its PerPane one.
-func (b *CapabilityBroker) RevokeSingleUse(session string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for token, rec := range b.recs {
-		if !rec.cap.PerPane && rec.cap.Session == session {
+		if rec.cap.PerPane && !rec.pending && rec.cap.Session == session {
 			delete(b.recs, token)
 		}
 	}
