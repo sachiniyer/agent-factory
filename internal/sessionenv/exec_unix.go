@@ -178,7 +178,11 @@ func claimedExecInvocation(args []string, environmentOnly bool) error {
 		return err
 	}
 	if len(args) != 3 {
-		return fmt.Errorf("malformed internal session environment invocation")
+		// A window started by an af that predates the capability protocol carries
+		// the old argv (account, proof and counts inline). It is not a corrupt
+		// invocation: the daemon that launched the session has not been replaced
+		// yet. Take the refused-capability path so the window says to restart it.
+		return fmt.Errorf("launch capability refused: this window was started by an older af")
 	}
 	c, err := claimCapability(args[0], args[1])
 	if err != nil {
