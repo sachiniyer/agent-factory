@@ -618,3 +618,29 @@ test("a queued save is acknowledged by a read of its own project, even after ano
   assert.deepEqual(roots, ["/a", "/a"], "both confirmations read /a, the project the saves modified");
   assert.deepEqual(updates().map((c) => c.body.repo_path), ["/a", "/a"]);
 });
+
+test("a dependency edit the daemon took but whose read failed stays shown and is the base of the next change", async () => {
+  const pane = mount(host({ refresh: async () => false }));
+  pane.update(data({ "/a": view(item(1, { waits_on: [2, 3] }), item(2), item(3)) }), "/a", []);
+  pane.select(1);
+  const remove = (n: number): void => {
+    el(pane).querySelector(`button[aria-label="Remove B-${n}"]`)!.click();
+  };
+  remove(2);
+  await settle();
+  remove(3);
+  await settle();
+  assert.deepEqual(updates().map((c) => c.body.waits_on), [[3], []], "B-2 is not restored by the stale list");
+});
+
+test("a rename the daemon took but whose read failed stays in the field until a snapshot carries it", async () => {
+  const pane = mount(host({ refresh: async () => false }));
+  pane.update(data({ "/a": view(item(1, { title: "old" })) }), "/a", []);
+  pane.select(1);
+  submitTitle(pane, "new");
+  await settle();
+  assert.equal(titleInput(pane).value, "new", "not reverted to the old title");
+  pane.update(data({ "/a": view(item(1, { title: "new" })) }, 2), "/a", []);
+  pane.update(data({ "/a": view(item(1, { title: "newer elsewhere" })) }, 3), "/a", []);
+  assert.equal(titleInput(pane).value, "newer elsewhere", "released once a snapshot carried it");
+});

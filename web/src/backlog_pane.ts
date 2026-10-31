@@ -10,7 +10,7 @@ import {
   type Backlog, type BacklogView, type Budget, type DropZone, FILTERS, type Filter, type ListRow, type MoveTarget,
   applyMove, dropMove, formatID, itemByID, keyboardMove, listRows, overlayMove, sources,
 } from "./backlog_model.js";
-import { ItemPanel, entryField, stateChip } from "./backlog_panel.js";
+import { ItemPanel, type WriteOutcome, entryField, stateChip } from "./backlog_panel.js";
 import { h } from "./dom.js";
 import { icon } from "./icon.js";
 import { recoveryScreen } from "./recovery.js";
@@ -159,16 +159,15 @@ export class BacklogPane {
 
   /** `root` is the project the write modifies, bound by the caller: a save the serial queue starts
    *  later must be acknowledged by a read of that project, not of whichever one is selected by then.
-   *  Settles true once the write and the refresh after it have landed, false when the write failed;
-   *  `appendOnly` writes (a note) settle true as soon as the daemon accepted them, since resending one duplicates it. */
-  private write(root: string, run: (token: string) => Promise<unknown>, appendOnly = false): Promise<boolean> {
+   *  Settles "confirmed" once the write and a refresh that read the project have landed, "refused" when
+   *  the write failed, and "unconfirmed" when the daemon took it but the read after it failed (the
+   *  edit may be saved; the caller keeps what it shows until a snapshot says so). */
+  private write(root: string, run: (token: string) => Promise<unknown>): Promise<WriteOutcome> {
     const token = this.host.token();
-    if (token === null) return Promise.resolve(false);
-    // True only when the refresh after the write also read the project: an edit is
-    // acknowledged by a snapshot that carries it, not by a failed read that kept the old one.
-    return run(token).then(() => appendOnly ? this.host.refresh(root).then(() => true) : this.host.refresh(root), (e: unknown) => {
+    if (token === null) return Promise.resolve("refused");
+    return run(token).then(() => this.host.refresh(root).then((read): WriteOutcome => read ? "confirmed" : "unconfirmed"), (e: unknown) => {
       this.host.notify(errorText(e));
-      return this.host.refresh(root).then(() => false);
+      return this.host.refresh(root).then((): WriteOutcome => "refused");
     });
   }
 
@@ -444,7 +443,7 @@ export class BacklogPane {
         if (here()) this.move(id, to);
       },
       // A note is appended once the daemon accepts it, whether or not the read after it landed.
-      note: (id: number, text: string) => this.write(root, (t) => addNote(root, id, text, t), true),
+      note: (id: number, text: string) => this.write(root, (t) => addNote(root, id, text, t)).then((o) => o !== "refused"),
       addChild: (parent: number, title: string) => this.write(root, (t) => addItem(root, { title, parent }, t)),
       select: (id: number) => this.select(id, root),
       close: () => {

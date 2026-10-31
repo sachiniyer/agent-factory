@@ -21,9 +21,17 @@ function sameList(a: readonly number[], b: readonly number[]): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
+/** How a write ended: confirmed by a read of its project, refused by the daemon, or taken by it with the read after it failed. */
+export type WriteOutcome = "confirmed" | "refused" | "unconfirmed";
+
+/** Adapts an update's outcome for a serial saver: true only when confirmed. */
+function outcomeSaver(done: Promise<WriteOutcome> | void, note: (o: WriteOutcome) => void): Promise<boolean> | void {
+  if (!done) return;
+  return done.then((o) => { note(o); return o === "confirmed"; });
+}
+
 export interface PanelActions {
-  /** A promise settles true once the write and the refresh after it have landed (the body editor's acknowledgement). */
-  update(id: number, update: ItemUpdate): Promise<boolean> | void;
+  update(id: number, update: ItemUpdate): Promise<WriteOutcome> | void;
   status(id: number, status: Status): void;
   remove(id: number): void;
   move(id: number, to: MoveTarget): void;
@@ -112,15 +120,19 @@ export class ItemPanel {
   constructor(readonly root: string, readonly id: number, private readonly actions: PanelActions) {
     this.titleKey = `${root}\u0000${id}\u0000title`;
     this.waitsKey = `${root}\u0000${id}\u0000waits`;
-    this.titles = new SerialSaver((title) => actions.update(id, { title }), (title, ok) => {
+    // A refused or confirmed save has an answer, so its draft is released; an unconfirmed one
+    // (the daemon took it, the read after it failed) keeps showing the edit until a snapshot
+    // carries it (see render).
+    let titleOutcome: WriteOutcome = "confirmed";
+    let waitsOutcome: WriteOutcome = "confirmed";
+    this.titles = new SerialSaver((title) => outcomeSaver(actions.update(id, { title }), (o) => { titleOutcome = o; }), (title) => {
       if (this.titleDraft !== title) return;   // a newer submission owns the draft
-      this.titleDraft = null;
-      // A refused rename gives the field back its stored title; an accepted one shows it.
+      if (titleOutcome !== "unconfirmed") this.titleDraft = null;
       this.repaint();
     }, queueFor(`${root}\u0000${id}\u0000title`));
-    this.waits = new SerialSaver((waits_on) => actions.update(id, { waits_on }), (list, ok) => {
-      if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
-      if (!ok) this.repaint();
+    this.waits = new SerialSaver((waits_on) => outcomeSaver(actions.update(id, { waits_on }), (o) => { waitsOutcome = o; }), (list) => {
+      if (this.waitsDraft !== null && sameList(this.waitsDraft, list) && waitsOutcome !== "unconfirmed") this.waitsDraft = null;
+      this.repaint();
     }, queueFor(`${root}\u0000${id}\u0000waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
     this.title.setAttribute("aria-label", "Title");
@@ -137,7 +149,7 @@ export class ItemPanel {
     this.title.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) this.title.blur();
     });
-    this.body = new BodyEditor((text) => actions.update(id, { body: text }), "Body", `${root}\u0000${id}\u0000body`);
+    this.body = new BodyEditor((text) => outcomeSaver(actions.update(id, { body: text }), () => {}), "Body", `${root}\u0000${id}\u0000body`);
     this.note = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: "Add a note…" });
     this.note.setAttribute("aria-label", "Note");
     const addNote = button("Add note", () => {
@@ -212,6 +224,9 @@ export class ItemPanel {
     const it = this.item();
     if (!it) return;
     this.lookUpMissing(it);
+    // A draft whose save was taken but never confirmed is released by a snapshot that carries it.
+    if (this.titleDraft !== null && this.titleDraft === it.title && !queueFor(this.titleKey).busy()) this.titleDraft = null;
+    if (this.waitsDraft !== null && sameList(this.waitsDraft, it.waits_on ?? []) && !queueFor(this.waitsKey).busy()) this.waitsDraft = null;
     if (document.activeElement !== this.title) this.title.value = this.titleDraft ?? it.title;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
