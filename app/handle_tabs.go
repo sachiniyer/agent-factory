@@ -309,7 +309,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		detail = "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available."
 	}
 	if tab.Kind == session.TabKindDocs {
-		detail = "This removes the Docs tab, not the proposal it edits. Hiding a pane leaves the tab available."
+		detail = "This removes the Proposal tab, not the proposal it edits. Hiding a pane leaves the tab available."
 	}
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		current := m.resolveSessionActionTarget(target)

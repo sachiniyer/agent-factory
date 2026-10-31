@@ -76,7 +76,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
 - [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
 - [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
-- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Proposal tab sends the user's edits to this session by itself
 - [`af proposal remove-doc`](#af-proposal-remove-doc) — Remove a doc from a proposal; it stays in the proposal's history
 - [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
 - [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
@@ -2310,7 +2310,7 @@ af proposal
 - [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
 - [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
 - [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
-- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Proposal tab sends the user's edits to this session by itself
 - [`af proposal remove-doc`](#af-proposal-remove-doc) — Remove a doc from a proposal; it stays in the proposal's history
 - [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
 - [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
@@ -2357,7 +2357,7 @@ af proposal add-doc <slug> <name> [flags]
 
 Attach this session to a proposal and print the rules
 
-Attach the session to an existing proposal and print the rules. A session holds one proposal at a time, so this detaches it from any other. With no slug, print the current proposal and the rules again. The session gets a Docs tab for the proposal when it has none, and "tab" names it.
+Attach the session to an existing proposal and print the rules. A session holds one proposal at a time, so this detaches it from any other. With no slug, print the current proposal and the rules again. The session gets a Proposal tab when it has none, and "tab" names it.
 
 ```
 af proposal attach [<slug>] [flags]
@@ -2449,7 +2449,7 @@ af proposal checkpoint [flags]
 
 Remove this session's proposal attachment and cursor
 
-Remove the session's proposal attachment and cursor, and close its Docs tab for the proposal.
+Remove the session's proposal attachment and cursor, and close its Proposal tab.
 
 ```
 af proposal detach [flags]
@@ -2508,9 +2508,9 @@ af proposal path <slug>
 
 ## af proposal push-mode
 
-Set whether the Docs tab sends the user's edits to this session by itself
+Set whether the Proposal tab sends the user's edits to this session by itself
 
-Set the push mode of this session's Docs tab. In auto mode, af sends the user's edits to the agent as a prompt 10 s after the last save, when the agent is idle. In manual mode, af sends them only on "af proposal send" or the tab's Send now button. Prints the push status.
+Set the push mode of this session's Proposal tab. In auto mode, af sends the user's edits to the agent as a prompt 10 s after the last save, when the agent is idle. In manual mode, af sends them only on "af proposal send" or the tab's Send now button. Prints the push status.
 
 ```
 af proposal push-mode auto|manual [flags]
@@ -2558,7 +2558,7 @@ af proposal remove-doc <slug> <doc> [flags]
 
 Send the user's unsent edits to this session now
 
-Send this session the edits to its proposal that it has not seen, as one prompt, the same as the Docs tab's Send now button. When the agent is busy, af sends them when it is next idle. Prints the push status.
+Send this session the edits to its proposal that it has not seen, as one prompt, the same as the Proposal tab's Send now button. When the agent is busy, af sends them when it is next idle. Prints the push status.
 
 ```
 af proposal send [flags]
@@ -2583,7 +2583,7 @@ af proposal send [flags]
 
 Create a proposal from templates, attach this session, and print the rules
 
-Create a proposal from templates, attach the session to it, and print the rules the agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and dashes. A doc with no template starts blank; user templates in <AF_HOME>/templates/proposal/<name>.md override the built-in ones. The session gets a Docs tab for the proposal, and "tab" names it.
+Create a proposal from templates, attach the session to it, and print the rules the agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and dashes. A doc with no template starts blank; user templates in <AF_HOME>/templates/proposal/<name>.md override the built-in ones. The session gets a Proposal tab, and "tab" names it.
 
 ```
 af proposal start <slug> [flags]
@@ -3476,10 +3476,10 @@ af sessions tab-create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a Proposal tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
-| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
+| `--proposal` | `string` | Proposal `slug` the tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
@@ -3664,10 +3664,10 @@ af sessions tabs create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a Proposal tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
-| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
+| `--proposal` | `string` | Proposal `slug` the tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
