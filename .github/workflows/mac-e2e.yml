@@ -90,8 +90,16 @@ jobs:
           echo "--- file"; file "$bin"
           echo "--- lipo"; lipo -info "$bin"
           echo "--- codesign -dv"; codesign -dv --verbose=4 "$bin" 2>&1 || true
-          echo "--- codesign -v"; codesign -v --verbose=2 "$bin"
+          # arm64 refuses to run an unsigned or invalidly signed binary
+          # (`Killed: 9`), so there the signature must be valid. x86_64 runs
+          # unsigned code, and Go's linker only signs arm64: unsigned is reported,
+          # a signature that is present but broken still fails.
           want="$(uname -m)"
+          if codesign -d "$bin" 2>&1 | grep -q "not signed at all" && [ "$want" = x86_64 ]; then
+            echo "--- codesign -v: release binary is unsigned (allowed on x86_64)"
+          else
+            echo "--- codesign -v"; codesign -v --verbose=2 "$bin"
+          fi
           lipo -archs "$bin" | tr ' ' '\n' | grep -qx "$want" || { echo "release binary lacks $want"; exit 1; }
           "$bin" version
           pkill -f "$work" || true
@@ -111,9 +119,13 @@ jobs:
           "$RUNNER_TEMP/afbin/af" daemon status || true
           "$RUNNER_TEMP/afbin/af" daemon uninstall || true
 
+      # `shell: bash` (not the default) adds -o pipefail: without it the exit
+      # status of `| tee` hides a failing journey, and a step that could not even
+      # start the script reported success. /bin/bash is the stock bash 3.2 on a Mac.
       - name: Journey
+        shell: bash
         run: |
-          scripts/mac-smoke.sh --keep --af "$RUNNER_TEMP/afbin/af" 2>&1 | tee "$RUNNER_TEMP/journey.txt"
+          /bin/bash scripts/mac-smoke.sh --keep --af "$RUNNER_TEMP/afbin/af" 2>&1 | tee "$RUNNER_TEMP/journey.txt"
 
       - name: Summarise
         if: always()
