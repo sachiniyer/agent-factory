@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pushcred"
 )
 
@@ -17,15 +18,16 @@ func TestPushCredentialPlacementReadsTheRecordedRuntime(t *testing.T) {
 		ok      bool
 	}{
 		"listed ssh host": {
-			backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1"}},
-			want:    PushPlacement{ListedHost: "box1"}, ok: true,
+			backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1",
+				Config: config.SSHConfig{Host: "box1.example"}, CallbackRef: "ref-1"}},
+			want: PushPlacement{ListedHost: "box1", Destination: config.SSHConfig{Host: "box1.example"}, CallbackRef: "ref-1"}, ok: true,
 		},
 		"repo [ssh] target": {
 			backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s"}},
 		},
 		"free-form sandbox": {
-			backend: &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{SessionDir: "/s", SSHCommand: "ssh box"}},
-			want:    PushPlacement{FreeFormSandbox: true}, ok: true,
+			backend: &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{SessionDir: "/s", SSHCommand: "ssh box", CallbackRef: "ref-2"}},
+			want:    PushPlacement{FreeFormSandbox: true, SandboxSSH: "ssh box", CallbackRef: "ref-2"}, ok: true,
 		},
 		"reaped ssh runtime":     {backend: &sshBackend{}},
 		"reaped sandbox runtime": {backend: &sandboxBackend{}},

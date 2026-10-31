@@ -607,7 +607,7 @@ func TestSandboxTaskDeliveryIsPinnedToTheAuthorizedSessionID(t *testing.T) {
 	idA, err := f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoA, "peer")
 	require.NoError(t, err)
 	require.Equal(t, f.peer.ID, idA, "authorization names the session by ID")
-	guard := f.mgr.sandboxDeliveryGuard(idA, f.repoA)
+	guard := f.mgr.sandboxDeliveryGuard(f.me.ID, idA, f.repoA)
 	require.NoError(t, guard(f.peer, f.repoA), "anti-vacuous: the authorized session passes its own guard")
 
 	// B takes the title "peer" in the same project; A is gone from the map.

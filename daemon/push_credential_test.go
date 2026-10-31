@@ -37,6 +37,12 @@ type pushFixture struct {
 	endpoint   http.Handler
 	placements map[string]session.PushPlacement // by title
 	origins    map[string]pushcred.Origin       // by title
+	// carriers maps a forward's process group to the callback identity its
+	// tunnel carries; forwardOf maps a presented token to the process group the
+	// request arrives through (0: no forward at all).
+	carriers   map[int]string
+	forwardOf  map[string]int
+	nextPGID   int
 	tokenReads atomic.Int32
 	// onTokenRead runs inside the token read, so a test can change the world
 	// between the two authorizations.
@@ -46,14 +52,34 @@ type pushFixture struct {
 
 var ownOrigin = pushcred.Origin{Host: "github.com", Path: "owner/repo"}
 
+// box1 is the listed host the fixture's own session runs on, as recorded at
+// placement and as the live host list names it.
+var box1 = config.SSHConfig{Host: "box1.example"}
+
+// listedOn is a placement on listed host name, recorded at destination, whose
+// runtime's callback identity is ref.
+func listedOn(name string, destination config.SSHConfig, ref string) session.PushPlacement {
+	return session.PushPlacement{ListedHost: name, Destination: destination, CallbackRef: ref}
+}
+
 func newPushFixture(t *testing.T) *pushFixture {
 	t.Helper()
 	f := newScopeFixture(t)
 	pf := &pushFixture{
 		scopeFixture: f,
-		placements:   map[string]session.PushPlacement{"me": {ListedHost: "box1"}},
+		placements:   map[string]session.PushPlacement{"me": listedOn("box1", box1, "ref-me")},
 		origins:      map[string]pushcred.Origin{"me": ownOrigin},
+		carriers:     map[int]string{},
+		forwardOf:    map[string]int{},
+		nextPGID:     41000,
 	}
+	pf.giveForward(f.secret, "ref-me")
+	prevCarrier := callbackCarrierRef
+	callbackCarrierRef = func(pgid int) (string, bool) {
+		ref, ok := pf.carriers[pgid]
+		return ref, ok
+	}
+	t.Cleanup(func() { callbackCarrierRef = prevCarrier })
 	prevPlacement, prevOrigin := instancePushPlacement, instancePushOrigin
 	instancePushPlacement = func(i *session.Instance) (session.PushPlacement, bool) {
 		p, ok := pf.placements[i.Title]
@@ -82,6 +108,15 @@ func newPushFixture(t *testing.T) *pushFixture {
 	return pf
 }
 
+// giveForward gives token its own forward: a tunnel process group carrying
+// callback identity ref, through which token's requests arrive.
+func (pf *pushFixture) giveForward(token, ref string) int {
+	pf.nextPGID++
+	pf.carriers[pf.nextPGID] = ref
+	pf.forwardOf[token] = pf.nextPGID
+	return pf.nextPGID
+}
+
 // setConfig publishes a modified copy of the live config, as an applied
 // `af config set` would.
 func (pf *pushFixture) setConfig(edit func(*config.Config)) {
@@ -99,6 +134,10 @@ func (pf *pushFixture) ask(t *testing.T, token, protocol, host, path string) (in
 	req := httptest.NewRequest(http.MethodPost, "/v1/GitCredential", strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	// What the endpoint's ConnContext records for the connection's peer.
+	if pgid := pf.forwardOf[token]; pgid > 0 {
+		req = req.WithContext(context.WithValue(req.Context(), carrierPGIDKey{}, pgid))
+	}
 	rec := httptest.NewRecorder()
 	pf.endpoint.ServeHTTP(rec, req)
 	var env struct {
@@ -211,10 +250,11 @@ func TestGitCredential_OnlyTheSessionsOwnOrigin(t *testing.T) {
 // its OWN origin with its own credential, and never for the first session's.
 func TestGitCredential_ASecondSessionNeverGetsTheFirstsOrigin(t *testing.T) {
 	pf := newPushFixture(t)
-	pf.placements["foreign"] = session.PushPlacement{ListedHost: "box1"}
+	pf.placements["foreign"] = listedOn("box1", box1, "ref-foreign")
 	pf.origins["foreign"] = pushcred.Origin{Host: "github.com", Path: "owner/other"}
 	other, err := pf.mgr.sandboxTokens.mint(pf.other.ID)
 	require.NoError(t, err)
+	pf.giveForward(other, "ref-foreign")
 
 	code, got, msg := pf.ask(t, other, "https", "github.com", "owner/repo.git")
 	requireRefused(t, code, got, msg, refusePushOtherRepo)
@@ -263,8 +303,8 @@ func TestGitCredential_LicenceIsTheOperatorsAndReadLive(t *testing.T) {
 
 	// The sandbox.ssh switch does not license an ssh row, nor a listed host a
 	// free-form one: the placement must agree with the backend.
-	pf.placements["me"] = session.PushPlacement{FreeFormSandbox: true}
-	pf.setConfig(func(c *config.Config) { c.SandboxPushCredentials = true })
+	pf.placements["me"] = session.PushPlacement{FreeFormSandbox: true, SandboxSSH: "ssh box3", CallbackRef: "ref-me"}
+	pf.setConfig(func(c *config.Config) { c.SandboxPushCredentials, c.SandboxSSH = true, "ssh box3" })
 	code, got, msg = pf.askOwn(t)
 	requireRefused(t, code, got, msg, refusePushNotLicensed)
 }
@@ -272,7 +312,8 @@ func TestGitCredential_LicenceIsTheOperatorsAndReadLive(t *testing.T) {
 func TestGitCredential_FreeFormSandboxNeedsItsOwnOptIn(t *testing.T) {
 	pf := newPushFixture(t)
 	pf.backends["me"] = "sandbox"
-	pf.placements["me"] = session.PushPlacement{FreeFormSandbox: true}
+	pf.placements["me"] = session.PushPlacement{FreeFormSandbox: true, SandboxSSH: "ssh box3", CallbackRef: "ref-me"}
+	pf.setConfig(func(c *config.Config) { c.SandboxSSH = "ssh box3" })
 
 	code, got, msg := pf.askOwn(t)
 	requireRefused(t, code, got, msg, refusePushNotLicensed)
@@ -283,7 +324,7 @@ func TestGitCredential_FreeFormSandboxNeedsItsOwnOptIn(t *testing.T) {
 
 	// A listed host's opt-in does not reach a free-form placement.
 	pf.setConfig(func(c *config.Config) { c.SandboxPushCredentials = false })
-	pf.placements["me"] = session.PushPlacement{ListedHost: "box1"}
+	pf.placements["me"] = listedOn("box1", box1, "ref-me")
 	code, got, msg = pf.askOwn(t)
 	requireRefused(t, code, got, msg, refusePushNotLicensed)
 }
@@ -332,7 +373,7 @@ func TestGitCredential_ReauthorizesAfterTheTokenRead(t *testing.T) {
 		"replaced":    func(pf *pushFixture) { _, _ = pf.mgr.sandboxTokens.mint(pf.me.ID) },
 		"licence off": func(pf *pushFixture) { pf.setConfig(func(c *config.Config) { c.Hosts = nil }) },
 		"auto push": func(pf *pushFixture) {
-			_, _ = pf.mgr.pushCreds.beginAutoPush(pf.me.ID, pf.secret, pf.mgr.sandboxTokens.grantFor)
+			_, _ = pf.mgr.pushCreds.beginAutoPush(pf.me.ID, "ref-me", nil)
 		},
 		"origin moved": func(pf *pushFixture) { pf.origins["me"] = pushcred.Origin{Host: "github.com", Path: "owner/elsewhere"} },
 	} {
@@ -359,7 +400,7 @@ func TestGitCredential_ChangesDuringTheFinalOriginLookupAreCaught(t *testing.T) 
 		"archived":    func(pf *pushFixture) { pf.me.SetStatusForTest(session.Archived) },
 		"licence off": func(pf *pushFixture) { pf.setConfig(func(c *config.Config) { c.Hosts = nil }) },
 		"auto push": func(pf *pushFixture) {
-			_, _ = pf.mgr.pushCreds.beginAutoPush(pf.me.ID, pf.secret, pf.mgr.sandboxTokens.grantFor)
+			_, _ = pf.mgr.pushCreds.beginAutoPush(pf.me.ID, "ref-me", nil)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -386,16 +427,17 @@ func TestGitCredential_ChangesDuringTheFinalOriginLookupAreCaught(t *testing.T) 
 // the daemon runs an automatic preserve-push for a row, that row gets nothing.
 func TestGitCredential_WithheldDuringAnAutomaticPreservePush(t *testing.T) {
 	pf := newPushFixture(t)
-	end, err := pf.mgr.pushCreds.beginAutoPush(pf.me.ID, pf.secret, pf.mgr.sandboxTokens.grantFor)
+	end, err := pf.mgr.pushCreds.beginAutoPush(pf.me.ID, "ref-me", nil)
 	require.NoError(t, err)
 	code, got, msg := pf.askOwn(t)
 	requireRefused(t, code, got, msg, refusePushAutoPreserve)
 
 	// Another session is unaffected by this row's fence.
-	pf.placements["foreign"] = session.PushPlacement{ListedHost: "box1"}
+	pf.placements["foreign"] = listedOn("box1", box1, "ref-foreign")
 	pf.origins["foreign"] = pushcred.Origin{Host: "github.com", Path: "owner/other"}
 	other, err := pf.mgr.sandboxTokens.mint(pf.other.ID)
 	require.NoError(t, err)
+	pf.giveForward(other, "ref-foreign")
 	code, got, msg = pf.ask(t, other, "https", "github.com", "owner/other.git")
 	requireAnswered(t, code, got, msg)
 
@@ -421,12 +463,13 @@ func TestPreserveSandboxBeforeReapFencesPushCredentials(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			manager, repoID, repoPath := newStatusTestManager(t)
 			var inst *session.Instance
-			var grant string
+			const ref = "ref-fenced"
+			placeWithCallbackRef(t, "fenced", ref)
 			var fencedDuringArchive atomic.Bool
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if r.URL.Path == "/v1/agent/archive" {
-					fencedDuringArchive.Store(manager.pushCreds.autoPushFenced(inst.ID, grant))
+					fencedDuringArchive.Store(manager.pushCreds.autoPushFenced(inst.ID, ref))
 					if tc.fail {
 						http.Error(w, "push rejected by origin", http.StatusInternalServerError)
 						return
@@ -438,20 +481,24 @@ func TestPreserveSandboxBeforeReapFencesPushCredentials(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			inst, _ = registerStartedRemote(t, manager, repoID, repoPath, "fenced", srv.URL, session.Ready)
-			var err error
-			grant, err = manager.sandboxTokens.mint(inst.ID)
-			require.NoError(t, err)
+			// Review finding 4: the daemon holds NO token for this row (none was
+			// minted, as for a row not yet reattached after a restart). The fence
+			// keys on the runtime's callback identity, so it holds anyway.
+			manager.sandboxTokens.mu.RLock()
+			_, registered := manager.sandboxTokens.bySession[inst.ID]
+			manager.sandboxTokens.mu.RUnlock()
+			require.False(t, registered, "precondition: no registered token")
 
-			require.False(t, manager.pushCreds.autoPushFenced(inst.ID, grant), "precondition: no fence")
+			require.False(t, manager.pushCreds.autoPushFenced(inst.ID, ref), "precondition: no fence")
 			_ = manager.preserveSandboxBeforeReap(repoID, daemonInstanceKey(repoID, "fenced"), inst, "")
 			assert.True(t, fencedDuringArchive.Load(), "the push ran while push credentials were still answerable for its row")
-			assert.Equal(t, tc.wantFenced, manager.pushCreds.autoPushFenced(inst.ID, grant))
+			assert.Equal(t, tc.wantFenced, manager.pushCreds.autoPushFenced(inst.ID, ref))
+			assert.Equal(t, tc.wantFenced, (&pushCredentialState{}).autoPushFenced(inst.ID, ref),
+				"the fence is on disk for the next daemon too")
 
-			// A replacement runtime's new credential is not fenced by the old one's
-			// abandoned archive.
-			fresh, err := manager.sandboxTokens.mint(inst.ID)
-			require.NoError(t, err)
-			assert.False(t, manager.pushCreds.autoPushFenced(inst.ID, fresh), "the fence follows the credential, not the session forever")
+			// A replacement runtime's new callback identity is not fenced by the old
+			// one's abandoned archive.
+			assert.False(t, manager.pushCreds.autoPushFenced(inst.ID, "ref-replacement"), "the fence follows the runtime, not the session forever")
 		})
 	}
 }
@@ -461,14 +508,25 @@ func TestPreserveSandboxBeforeReapFencesPushCredentials(t *testing.T) {
 // answered.
 func TestGitCredential_AbandonedAutoPushFencesOnlyThatCredential(t *testing.T) {
 	pf := newPushFixture(t)
-	end, err := pf.mgr.pushCreds.beginAutoPush(pf.me.ID, pf.secret, pf.mgr.sandboxTokens.grantFor)
+	end, err := pf.mgr.pushCreds.beginAutoPush(pf.me.ID, "ref-me", nil)
 	require.NoError(t, err)
 	end(false) // timed out, lost, refused: not confirmed
 	code, got, msg := pf.askOwn(t)
 	requireRefused(t, code, got, msg, refusePushAutoPreserve)
 
+	// The SAME runtime re-derives the same credential after a restart: still
+	// fenced.
+	again, err := pf.mgr.sandboxTokens.mint(pf.me.ID)
+	require.NoError(t, err)
+	pf.giveForward(again, "ref-me")
+	code, got, msg = pf.ask(t, again, "https", "github.com", "owner/repo.git")
+	requireRefused(t, code, got, msg, refusePushAutoPreserve)
+
+	// A replacement runtime has a new callback identity and is answered.
+	pf.placements["me"] = listedOn("box1", box1, "ref-me-2")
 	fresh, err := pf.mgr.sandboxTokens.mint(pf.me.ID)
 	require.NoError(t, err)
+	pf.giveForward(fresh, "ref-me-2")
 	code, got, msg = pf.ask(t, fresh, "https", "github.com", "owner/repo.git")
 	requireAnswered(t, code, got, msg)
 }
@@ -480,36 +538,32 @@ func TestGitCredential_AbandonedAutoPushFencesOnlyThatCredential(t *testing.T) {
 func TestPushFencesSurviveADaemonRestart(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), pushFenceFileName)
-	const grant = "sbx-grant-0001"
+	const grant = "ref-runtime-0001" // the runtime's callback identity: not a secret
 
 	first := &pushCredentialState{fencePath: path}
-	end, err := first.beginAutoPush("sess-a", grant, noCurrentGrant)
+	end, err := first.beginAutoPush("sess-a", grant, nil)
 	require.NoError(t, err)
 	// The process dies mid-push: end never runs.
 	_ = end
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.NotContains(t, string(raw), grant, "the record keeps a digest, never the credential")
+	assert.Contains(t, string(raw), grant, "the record names the runtime's callback identity (a non-secret ref)")
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 
 	second := &pushCredentialState{fencePath: path}
 	assert.True(t, second.autoPushFenced("sess-a", grant), "the restarted daemon must still fence the re-derived credential")
-	assert.False(t, second.autoPushFenced("sess-a", "sbx-grant-0002"), "a replacement runtime's credential is not fenced")
+	assert.False(t, second.autoPushFenced("sess-a", "ref-runtime-0002"), "a replacement runtime is not fenced")
 	assert.False(t, second.autoPushFenced("sess-b", grant))
 
 	// A later automatic push that is CONFIRMED lifts it, durably.
-	end, err = second.beginAutoPush("sess-a", grant, noCurrentGrant)
+	end, err = second.beginAutoPush("sess-a", grant, nil)
 	require.NoError(t, err)
 	end(true)
 	third := &pushCredentialState{fencePath: path}
 	assert.False(t, third.autoPushFenced("sess-a", grant))
 }
-
-// noCurrentGrant is a registry that holds no credential for anyone: what a
-// freshly restarted daemon looks like before rows reattach.
-func noCurrentGrant(string) string { return "" }
 
 // An unreadable record may be hiding a fence: every request is refused, and no
 // automatic push starts, until it can be read — and repairing it restores
@@ -519,13 +573,13 @@ func TestPushFencesFailClosedOnAnUnreadableRecord(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
 	s := &pushCredentialState{fencePath: path}
 	assert.True(t, s.autoPushFenced("any", "grant"))
-	_, err := s.beginAutoPush("any", "grant", noCurrentGrant)
+	_, err := s.beginAutoPush("any", "grant", nil)
 	assert.Error(t, err)
 	assert.True(t, s.autoPushFenced("any", "grant"), "still failing closed on the next request")
 
 	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
 	assert.False(t, s.autoPushFenced("any", "grant"), "a repaired record is read on the next use")
-	end, err := s.beginAutoPush("any", "grant", noCurrentGrant)
+	end, err := s.beginAutoPush("any", "grant", nil)
 	require.NoError(t, err)
 	end(true)
 
@@ -533,7 +587,7 @@ func TestPushFencesFailClosedOnAnUnreadableRecord(t *testing.T) {
 	require.NoError(t, os.WriteFile(nullRecord, []byte("null"), 0o600))
 	n := &pushCredentialState{fencePath: nullRecord}
 	assert.False(t, n.autoPushFenced("any", "grant"))
-	end, err = n.beginAutoPush("any", "grant", noCurrentGrant)
+	end, err = n.beginAutoPush("any", "grant", nil)
 	require.NoError(t, err, "a null record reads as empty, not as a panic")
 	end(true)
 }
@@ -543,16 +597,16 @@ func TestPushFencesFailClosedOnAnUnreadableRecord(t *testing.T) {
 // (Codex P2 on #6433).
 func TestPushFencesDoNotExpireByAge(t *testing.T) {
 	path := filepath.Join(t.TempDir(), pushFenceFileName)
-	old := map[string]pushFence{"sess-a": {Grant: grantDigest("g1"), At: time.Now().Add(-60 * 24 * time.Hour)}}
+	old := map[string]pushFence{"sess-a": {CallbackRef: "g1", At: time.Now().Add(-60 * 24 * time.Hour)}}
 	raw, err := json.Marshal(old)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, raw, 0o600))
 
 	s := &pushCredentialState{fencePath: path}
 	assert.True(t, s.autoPushFenced("sess-a", "g1"), "a 60-day-old fence still holds")
-	// Writing the record for another session keeps it: the daemon holds no
-	// credential for sess-a, which proves nothing about whether it can return.
-	end, err := s.beginAutoPush("sess-b", "gb", noCurrentGrant)
+	// Writing the record for another session keeps it: the snapshot names no
+	// runtime for sess-a, which proves nothing about whether it can return.
+	end, err := s.beginAutoPush("sess-b", "gb", nil)
 	require.NoError(t, err)
 	end(false)
 	reread := &pushCredentialState{fencePath: path}
@@ -564,19 +618,17 @@ func TestPushFencesDoNotExpireByAge(t *testing.T) {
 func TestPushFencesArePrunedOnlyWhenTheCredentialWasReplaced(t *testing.T) {
 	path := filepath.Join(t.TempDir(), pushFenceFileName)
 	s := &pushCredentialState{fencePath: path}
-	end, err := s.beginAutoPush("sess-a", "g1", noCurrentGrant)
+	end, err := s.beginAutoPush("sess-a", "g1", nil)
 	require.NoError(t, err)
 	end(false)
 
-	current := map[string]string{"sess-a": "g1"}
-	lookup := func(id string) string { return current[id] }
-	end, err = s.beginAutoPush("sess-b", "gb", lookup)
+	end, err = s.beginAutoPush("sess-b", "gb", map[string]string{"sess-a": "g1"})
 	require.NoError(t, err)
 	end(false)
 	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "g1"), "the same credential is still live: kept")
 
-	current["sess-a"] = "g2" // replaced
-	end, err = s.beginAutoPush("sess-c", "gc", lookup)
+	// Replaced: the session's runtime now has a different callback identity.
+	end, err = s.beginAutoPush("sess-c", "gc", map[string]string{"sess-a": "g2"})
 	require.NoError(t, err)
 	end(false)
 	reread := &pushCredentialState{fencePath: path}
@@ -593,13 +645,12 @@ func TestPreserveSandboxBeforeReapRefusesWhenItsFenceCannotBeRecorded(t *testing
 		writeSandboxProbeEnvelope(w, map[string]any{"branch": "af/x"})
 	}))
 	t.Cleanup(srv.Close)
+	placeWithCallbackRef(t, "unfenceable", "ref-unfenceable")
 	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "unfenceable", srv.URL, session.Ready)
-	_, err := manager.sandboxTokens.mint(inst.ID)
-	require.NoError(t, err)
 	manager.pushCreds.fencePath = filepath.Join(t.TempDir(), "missing-dir", "deeper", pushFenceFileName)
 	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(manager.pushCreds.fencePath))), []byte("a file, not a dir"), 0o600))
 
-	err = manager.preserveSandboxBeforeReap(repoID, daemonInstanceKey(repoID, "unfenceable"), inst, "")
+	err := manager.preserveSandboxBeforeReap(repoID, daemonInstanceKey(repoID, "unfenceable"), inst, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "could not be written")
 	assert.False(t, archived.Load(), "the automatic push must not start without its fence")
@@ -701,4 +752,19 @@ func TestSandboxEndpointMarksItsRequestsAndTheMainGateDoesNot(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, int32(2), reached.Load(), "anti-vacuous: the main gate admitted the sandbox credential")
 	assert.False(t, marked.Load(), "a main-listener request must never read as the dedicated endpoint")
+}
+
+// placeWithCallbackRef makes the row titled title report a placement whose
+// runtime's callback identity is ref, for tests that drive a row built without a
+// real ssh runtime.
+func placeWithCallbackRef(t *testing.T, title, ref string) {
+	t.Helper()
+	prev := instancePushPlacement
+	instancePushPlacement = func(i *session.Instance) (session.PushPlacement, bool) {
+		if i.Title == title {
+			return session.PushPlacement{ListedHost: "box1", Destination: box1, CallbackRef: ref}, true
+		}
+		return prev(i)
+	}
+	t.Cleanup(func() { instancePushPlacement = prev })
 }

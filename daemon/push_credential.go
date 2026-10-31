@@ -2,20 +2,9 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"net/http"
-	"os"
-	"path/filepath"
-	"sync"
-	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pushcred"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -78,191 +67,13 @@ const (
 	refusePushOtherRepo        = "push credentials cover only this session's own origin repository"
 	refusePushAutoPreserve     = "push credentials are withheld while af runs an automatic preserve-push for this session"
 	refusePushNoLogin          = "the daemon box has no GitHub login for this origin's host: run gh auth login there, or set GH_TOKEN for the daemon"
+	refusePushSandboxCreated   = "this session was started by another session's af, and such sessions never receive push credentials"
+	refusePushWrongForward     = "push credentials are answered only through the session's own ssh forward"
 )
 
 // errGitCredentialOperator refuses the operator's own authority. Not a sandbox
 // refusal: the operator is not a sandbox, and its error is not scrubbed.
 var errGitCredentialOperator = errors.New("GitCredential answers only a sandbox session's own callback credential")
-
-// pushCredentialState is the Manager's push-credential state.
-type pushCredentialState struct {
-	// source reads the daemon box's token.
-	source pushcred.Source
-	// tokenFor overrides source.Token in tests; nil in production.
-	tokenFor func(ctx context.Context, o pushcred.Origin) (string, error)
-	// fencePath overrides where the fences persist (tests); "" means
-	// <AF home>/push-credential-fences.json.
-	fencePath string
-
-	mu sync.Mutex
-	// loaded is set only by a SUCCESSFUL read: an unreadable record is retried on
-	// the next use, and until it reads, every request is refused and every
-	// automatic push blocked (fail closed) — an unreadable record may be hiding a
-	// fence. Repairing the file restores service without a restart.
-	loaded bool
-	// autoPushing counts, per session id, the automatic preserve-pushes this
-	// process is running right now (preserveSandboxBeforeReap).
-	autoPushing map[string]int
-	// fences maps a session id to the callback credential it held when an
-	// automatic preserve-push STARTED, until that push is confirmed to have
-	// succeeded. The in-sandbox archive takes no context and runs its git steps
-	// with no deadline, so after a timeout, a lost reply or a daemon restart it
-	// may still reach its push; no elapsed time proves it will not. A fence
-	// therefore lasts as long as that credential does: until a replacement
-	// runtime is minted a new one, or the session ends and revokes it.
-	//
-	// PERSISTED, and written before the push starts: a callback credential
-	// survives a daemon restart (W3.6 re-derives the very same one), so a fence
-	// held only in memory would lift on a restart while the archive ran on. It
-	// keeps a digest of the credential, never the credential.
-	fences map[string]pushFence
-}
-
-// pushFence is one persisted fence.
-type pushFence struct {
-	Grant string    `json:"grant"`
-	At    time.Time `json:"at"`
-}
-
-const pushFenceFileName = "push-credential-fences.json"
-
-func grantDigest(grant string) string {
-	sum := sha256.Sum256([]byte(grant))
-	return hex.EncodeToString(sum[:])
-}
-
-func (s *pushCredentialState) path() (string, error) {
-	if s.fencePath != "" {
-		return s.fencePath, nil
-	}
-	dir, err := config.GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, pushFenceFileName), nil
-}
-
-// loadLocked reads the persisted fences, until one read succeeds. Caller holds
-// s.mu. A failure is returned (and logged) and the next call tries again.
-func (s *pushCredentialState) loadLocked() error {
-	if s.loaded {
-		return nil
-	}
-	path, err := s.path()
-	if err != nil {
-		return err
-	}
-	fences := map[string]pushFence{}
-	data, err := os.ReadFile(path)
-	switch {
-	case os.IsNotExist(err):
-		err = nil
-	case err == nil:
-		err = json.Unmarshal(data, &fences)
-	}
-	if err != nil {
-		err = fmt.Errorf("reading %s: %w", path, err)
-		log.ErrorLog.Printf("push credentials are withheld from every sandbox session until %s can be read (it records which sessions an automatic preserve-push fences): %v", path, err)
-		return err
-	}
-	if fences == nil { // a record holding JSON null
-		fences = map[string]pushFence{}
-	}
-	s.fences, s.loaded = fences, true
-	return nil
-}
-
-// persistLocked writes the fences, 0600, atomically, dropping the entries that
-// can no longer matter. A fence is moot only once its session holds a DIFFERENT
-// credential: a replacement runtime was minted a new one and persisted its ref,
-// so the fenced credential can never be re-derived again. Age is never a reason,
-// because the abandoned archive's git steps have no deadline. current is the
-// session's credential now ("" when the daemon holds none for it, which proves
-// nothing: a restarted daemon re-registers credentials only as rows reattach).
-// Caller holds s.mu.
-func (s *pushCredentialState) persistLocked(current func(sessionID string) string) error {
-	for id, f := range s.fences {
-		if cur := current(id); cur != "" && grantDigest(cur) != f.Grant {
-			delete(s.fences, id)
-		}
-	}
-	path, err := s.path()
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(s.fences)
-	if err != nil {
-		return err
-	}
-	return config.AtomicWriteFileRefusingLink(path, data, 0o600)
-}
-
-// beginAutoPush fences sessionID for an automatic preserve-push, PERSISTED
-// before the push may start. The returned end lifts the fence only when called
-// with confirmed=true; any other ending leaves it, tied to grant. An error means
-// the fence could not be recorded, and the caller must not start the push.
-//
-// current reports a session's credential now (the registry's grantFor); it is
-// what persisting uses to drop fences a replacement made moot.
-func (s *pushCredentialState) beginAutoPush(sessionID, grant string, current func(string) string) (end func(confirmed bool), err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.loadLocked(); err != nil {
-		return nil, err
-	}
-	if s.autoPushing == nil {
-		s.autoPushing = map[string]int{}
-	}
-	if grant != "" {
-		prev, had := s.fences[sessionID]
-		s.fences[sessionID] = pushFence{Grant: grantDigest(grant), At: time.Now()}
-		if err := s.persistLocked(current); err != nil {
-			if had {
-				s.fences[sessionID] = prev
-			} else {
-				delete(s.fences, sessionID)
-			}
-			return nil, err
-		}
-	}
-	s.autoPushing[sessionID]++
-	var once sync.Once
-	return func(confirmed bool) {
-		once.Do(func() { s.endAutoPush(sessionID, grant, confirmed, current) })
-	}, nil
-}
-
-func (s *pushCredentialState) endAutoPush(sessionID, grant string, confirmed bool, current func(string) string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.autoPushing[sessionID]--; s.autoPushing[sessionID] <= 0 {
-		delete(s.autoPushing, sessionID)
-	}
-	if !confirmed || s.autoPushing[sessionID] > 0 || grant == "" {
-		return
-	}
-	if f, ok := s.fences[sessionID]; ok && f.Grant == grantDigest(grant) {
-		delete(s.fences, sessionID)
-		if err := s.persistLocked(current); err != nil {
-			// The fence stays on disk, which only withholds credentials longer:
-			// the safe side to fail on.
-			log.WarningLog.Printf("session %s: could not lift its push-credential fence after a confirmed automatic push: %v", sessionID, err)
-		}
-	}
-}
-
-// autoPushFenced reports whether a request from sessionID, admitted with grant,
-// is inside an automatic preserve-push's fence. An unreadable record fences
-// everything.
-func (s *pushCredentialState) autoPushFenced(sessionID, grant string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.loadLocked() != nil || s.autoPushing[sessionID] > 0 {
-		return true
-	}
-	f, ok := s.fences[sessionID]
-	return ok && grant != "" && f.Grant == grantDigest(grant)
-}
 
 func (s *pushCredentialState) token(ctx context.Context, o pushcred.Origin) (string, error) {
 	if s.tokenFor != nil {
@@ -279,24 +90,6 @@ var (
 	instancePushOrigin    = func(i *session.Instance) (pushcred.Origin, bool) { return i.PushCredentialOrigin() }
 )
 
-// sandboxEndpointKey marks a request that arrived on the dedicated sandbox
-// callback endpoint (W3.4). Unexported zero-size type: nothing outside this
-// package can forge it into a context.
-type sandboxEndpointKey struct{}
-
-// markSandboxEndpoint wraps the dedicated endpoint's handler so every request it
-// serves carries the marker. Nothing else sets it.
-func markSandboxEndpoint(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sandboxEndpointKey{}, true)))
-	})
-}
-
-func viaSandboxEndpoint(ctx context.Context) bool {
-	v, _ := ctx.Value(sandboxEndpointKey{}).(bool)
-	return v
-}
-
 // gitCredential is the /v1/GitCredential handler.
 func (s *controlServer) gitCredential(ctx context.Context, req GitCredentialRequest, resp *GitCredentialResponse) error {
 	owner, isSandbox := sandboxOwner(ctx)
@@ -309,7 +102,8 @@ func (s *controlServer) gitCredential(ctx context.Context, req GitCredentialRequ
 	if err := s.requireManagerReady(); err != nil {
 		return err
 	}
-	token, err := s.manager.pushCredentialFor(ctx, owner, admittedSandboxCredential(ctx), req)
+	ask := pushAsk{owner: owner, grant: admittedSandboxCredential(ctx), carrier: carrierPGID(ctx), req: req}
+	token, err := s.manager.pushCredentialFor(ctx, ask)
 	if err != nil {
 		return err
 	}
@@ -318,12 +112,22 @@ func (s *controlServer) gitCredential(ctx context.Context, req GitCredentialRequ
 	return nil
 }
 
-// pushCredentialFor authorizes owner's request, reads the token, and authorizes
+// pushAsk is one request, as the gate and the endpoint admitted it: the owning
+// session, the very credential it presented, and the process group of the
+// connection's peer (the forward it arrived through).
+type pushAsk struct {
+	owner, grant string
+	carrier      int
+	req          GitCredentialRequest
+}
+
+// pushCredentialFor authorizes the request, reads the token, and authorizes
 // again: the read can take seconds (a gh run), and a session archived, killed,
 // replaced or fenced meanwhile must not be answered with a token its own end was
-// meant to stop. grant is the credential the request was admitted with.
-func (m *Manager) pushCredentialFor(ctx context.Context, owner, grant string, req GitCredentialRequest) (string, error) {
-	origin, err := m.authorizePushCredential(owner, grant, req)
+// meant to stop. The audit line is written before a LAST liveness check, so not
+// even a log write sits between the final check and the reply.
+func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, error) {
+	origin, _, err := m.authorizePushCredential(ask)
 	if err != nil {
 		return "", err
 	}
@@ -334,7 +138,7 @@ func (m *Manager) pushCredentialFor(ctx context.Context, owner, grant string, re
 	if err != nil {
 		return "", err
 	}
-	again, err := m.authorizePushCredential(owner, grant, req)
+	again, inst, err := m.authorizePushCredential(ask)
 	if err != nil {
 		return "", err
 	}
@@ -343,82 +147,79 @@ func (m *Manager) pushCredentialFor(ctx context.Context, owner, grant string, re
 		// read was for a remote this session no longer has.
 		return "", sandboxRefusal(refusePushOtherRepo)
 	}
-	m.info().Printf("push credential: answered session %s for https://%s/%s", owner, origin.Host, origin.Path)
+	m.info().Printf("push credential: answered session %s for https://%s/%s", ask.owner, origin.Host, origin.Path)
+	if err := m.pushStillLive(ask, inst); err != nil {
+		return "", err
+	}
 	return token, nil
 }
 
-// authorizePushCredential applies every rule but the token read and returns the
-// origin the request may be answered for. Its one blocking step, reading the
-// daemon checkout's origin (a git run), sits BETWEEN two passes of the state
-// checks, so the last thing it does before answering is a check that blocks on
-// nothing: no revocation, archive, licence change or fence can land in a gap
-// between its check and the reply.
-func (m *Manager) authorizePushCredential(owner, grant string, req GitCredentialRequest) (pushcred.Origin, error) {
-	inst, err := m.pushCredentialState(owner, grant, nil)
+// authorizePushCredential applies every rule but the token read, and returns the
+// origin the request may be answered for and the row it authorized. Its one
+// blocking step, reading the daemon checkout's origin (a git run), comes FIRST;
+// every rule that can change runs after it, and the liveness of the row and of
+// the very credential presented runs LAST, after every lock and read the others
+// take.
+func (m *Manager) authorizePushCredential(ask pushAsk) (pushcred.Origin, *session.Instance, error) {
+	inst, err := m.pushCredentialRow(ask.owner, nil)
 	if err != nil {
-		return pushcred.Origin{}, err
+		return pushcred.Origin{}, nil, err
 	}
 	origin, originOK := instancePushOrigin(inst)
-	if _, err := m.pushCredentialState(owner, grant, inst); err != nil {
-		return pushcred.Origin{}, err
+	if _, err := m.pushCredentialRow(ask.owner, inst); err != nil {
+		return pushcred.Origin{}, nil, err
+	}
+	if inst.CreatedBySandbox() != "" {
+		return pushcred.Origin{}, nil, sandboxRefusal(refusePushSandboxCreated)
+	}
+	backend := instanceBackendType(inst)
+	if backend != "ssh" && backend != "sandbox" {
+		return pushcred.Origin{}, nil, sandboxRefusal(refusePushNotLicensed)
+	}
+	placement, ok := instancePushPlacement(inst)
+	if !ok || !placement.Licensed(m.Config(), backend) {
+		return pushcred.Origin{}, nil, sandboxRefusal(refusePushNotLicensed)
+	}
+	if m.pushCreds.autoPushFenced(inst.ID, placement.CallbackRef) {
+		return pushcred.Origin{}, nil, sandboxRefusal(refusePushAutoPreserve)
+	}
+	if !carriedByOwnForward(ask.carrier, placement.CallbackRef) {
+		return pushcred.Origin{}, nil, sandboxRefusal(refusePushWrongForward)
 	}
 	if !originOK {
-		return pushcred.Origin{}, sandboxRefusal(refusePushNoOrigin)
+		return pushcred.Origin{}, nil, sandboxRefusal(refusePushNoOrigin)
 	}
-	if !origin.Matches(req.Protocol, req.Host, req.Path) {
-		return pushcred.Origin{}, sandboxRefusal(refusePushOtherRepo)
+	if !origin.Matches(ask.req.Protocol, ask.req.Host, ask.req.Path) {
+		return pushcred.Origin{}, nil, sandboxRefusal(refusePushOtherRepo)
 	}
-	return origin, nil
+	if err := m.pushStillLive(ask, inst); err != nil {
+		return pushcred.Origin{}, nil, err
+	}
+	return origin, inst, nil
 }
 
-// pushCredentialState is the non-blocking half of the authorization: the row is
-// the caller's own, off-box and live; the credential the request was admitted
-// with is still that row's; no automatic preserve-push fences it; and the
-// operator's live config licenses its placement. want, when set, is the row an
-// earlier pass found: a different object under the same id is a replacement, and
+// pushCredentialRow finds the owner's tracked row. want, when set, is the row an
+// earlier step found: a different object under the same id is a replacement, and
 // is refused rather than trusted.
-func (m *Manager) pushCredentialState(owner, grant string, want *session.Instance) (*session.Instance, error) {
+func (m *Manager) pushCredentialRow(owner string, want *session.Instance) (*session.Instance, error) {
 	m.mu.Lock()
 	inst, _ := m.trackedSessionByIDLocked(owner)
 	m.mu.Unlock()
 	if inst == nil || (want != nil && inst != want) {
 		return nil, sandboxRefusal(refusePushNotLive)
 	}
-	backend := instanceBackendType(inst)
-	if backend != "ssh" && backend != "sandbox" {
-		return nil, sandboxRefusal(refusePushNotLicensed)
-	}
-	if inst.IsResting() || inst.GetStatus() == session.Deleting || !m.sandboxTokens.stillGrants(owner, grant) {
-		return nil, sandboxRefusal(refusePushNotLive)
-	}
-	if m.pushCreds.autoPushFenced(inst.ID, grant) {
-		return nil, sandboxRefusal(refusePushAutoPreserve)
-	}
-	if !m.pushCredentialLicensed(inst, backend) {
-		return nil, sandboxRefusal(refusePushNotLicensed)
-	}
 	return inst, nil
 }
 
-// pushCredentialLicensed reports whether the operator's live global config
-// licenses push credentials for where inst runs. The recorded placement must
-// agree with the row's backend: a listed host is an ssh placement, the free-form
-// target a sandbox one.
-func (m *Manager) pushCredentialLicensed(inst *session.Instance, backend string) bool {
-	placement, ok := instancePushPlacement(inst)
-	if !ok {
-		return false
+// pushStillLive is the last check of every pass: the row is still the one
+// authorized, still live, and the credential the request presented is still that
+// row's. It reads in-memory state only.
+func (m *Manager) pushStillLive(ask pushAsk, inst *session.Instance) error {
+	if _, err := m.pushCredentialRow(ask.owner, inst); err != nil {
+		return err
 	}
-	cfg := m.Config()
-	if cfg == nil {
-		return false
+	if inst.IsResting() || inst.GetStatus() == session.Deleting || !m.sandboxTokens.stillGrants(ask.owner, ask.grant) {
+		return sandboxRefusal(refusePushNotLive)
 	}
-	switch {
-	case placement.ListedHost != "" && backend == "ssh":
-		host, listed := cfg.Hosts[placement.ListedHost]
-		return listed && host.PushCredentials
-	case placement.FreeFormSandbox && backend == "sandbox":
-		return cfg.SandboxPushCredentials
-	}
-	return false
+	return nil
 }
