@@ -72,6 +72,11 @@ anything. Do not proxy this socket to a network interface.
     default on loopback; point `network.listen_addr` at a routable host:port). The
     listener is plain HTTP — front it with a TLS-terminating proxy or a private
     network. Both are covered in [Remote daemon access](remote-http-auth.md).
+    The TCP listener answers only requests whose `Host` names this daemon
+    (`localhost`, loopback IPs, its own address, or a `network.allowed_hosts` entry) and
+    refuses any other with `421 Misdirected Request` before routing — see
+    [Host names the daemon answers to](remote-http-auth.md#host-names-the-daemon-answers-to).
+    The Unix socket has no such check: a browser cannot reach it.
 
 ## Response envelope
 

@@ -302,11 +302,35 @@ func (e *editorPortOrigins) serveLocked(cs *controlServer, port int) error {
 		return fmt.Errorf("bind editor origin port %d on loopback: %w", port, err)
 	}
 	srv := &http.Server{
-		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cs.editorPortHandler(port, w, r) }),
+		Handler:           editorPortServerHandler(cs, port, ln.Addr().String()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	e.servers[port] = srv
 	go func() { _ = srv.Serve(ln) }()
+	return nil
+}
+
+// editorPortServerHandler is the whole handler a pool port's server runs. The
+// Host guard (hostguard.go) is its outermost layer: a pool port serves a shell in
+// the worktree, so it answers only Hosts that name this daemon — localhost and
+// loopback IPs, the address the client reached, and network.allowed_hosts (the front-door name
+// tailscale serve forwards, port and all). The allow-list is read per request,
+// like the control listener's, so an edit needs no rebind.
+func editorPortServerHandler(cs *controlServer, port int, boundAddr string) http.Handler {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cs.editorPortHandler(port, w, r) })
+	return withHostGuard(inner, editorPortListenerLabel(port), config.ListenAddrHostName(boundAddr),
+		func() []string { return editorPortAllowedHosts(cs) })
+}
+
+// editorPortAllowedHosts is network.allowed_hosts from the daemon's live config.
+// A control server with no manager allows only this machine's own names.
+func editorPortAllowedHosts(cs *controlServer) []string {
+	if cs == nil || cs.manager == nil {
+		return nil
+	}
+	if cfg := cs.manager.Config(); cfg != nil {
+		return cfg.AllowedHosts
+	}
 	return nil
 }
 

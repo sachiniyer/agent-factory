@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1100b843d640";
+var CLIENT_VERSION = "82f091738061";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -10275,7 +10275,12 @@ var TerminalKeybar = class {
       this.bar.style.left = `${this.viewport?.offsetLeft ?? 0}px`;
       const width = this.viewport?.width ?? window.innerWidth;
       this.bar.style.width = `${width}px`;
-      this.bar.classList.toggle("af-keybar-narrow", width < 348);
+      const narrow = width < 348;
+      this.bar.classList.toggle("af-keybar-narrow", narrow);
+      for (const button of this.bar.querySelectorAll("button[aria-label='More keys']")) {
+        const text = narrow ? "More" : "More keys";
+        if (button.textContent !== text) button.textContent = text;
+      }
       this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
       const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
       this.host.style.maxHeight = `${height}px`;

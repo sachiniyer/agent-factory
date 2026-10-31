@@ -107,6 +107,9 @@ var keyEffectClasses = map[string]EffectClass{
 	// other auth-posture keys.
 	"network.allow_unauthenticated_network": EffectAppliedLive,
 	"network.cors_allowed_origins":          EffectAppliedLive,
+	// Read per request with the rest of the listener posture, like
+	// cors_allowed_origins, so it needs no rebind.
+	"network.allowed_hosts": EffectAppliedLive,
 	// Next daemon start — the daemon reads these once, at startup.
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,
