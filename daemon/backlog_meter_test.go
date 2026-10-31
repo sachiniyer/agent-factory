@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/planusage"
+	"github.com/sachiniyer/agent-factory/session"
 
 	"github.com/stretchr/testify/require"
 )
@@ -177,4 +179,98 @@ func TestRunDirsRecordedDuringAPassAreNotDropped(t *testing.T) {
 	state, err = planusage.LoadMeter()
 	require.NoError(t, err)
 	require.Equal(t, []string{"/x/projects/-w-2"}, state.RunDirs["s-2"], "with no pass running it saves at once")
+}
+
+// meterUsage returns the last metering result a pass published. The meter's
+// usage is written under its own lock; this helper reads it safely.
+func meterUsage(t *testing.T, st *meterState) planusage.Usage {
+	t.Helper()
+	st.usageMu.Lock()
+	defer st.usageMu.Unlock()
+	return st.usage
+}
+
+// meterRepoWithItem writes a single running item to a fresh project's backlog
+// and returns the item used, so each metering test starts from the same shape.
+func meterRepoWithItem(t *testing.T, repoID string, item backlog.Item) {
+	t.Helper()
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = []backlog.Item{item}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A historical (non-latest) run of a running item keeps RunStarted forever:
+// backlog.RunEnded advances only the item's status, not older RunRefs, so a
+// restarted item accumulates RunStarted runs. An archived non-Claude session
+// also stays registered in manager.instances (no path removes it). The meter
+// must flag only the item's CURRENT run as an active-run metering failure: a
+// historical run's non-Claude session must not poison usage.Unmeterable with
+// advice aimed at an item whose current run meters fine (Codex P2 on #6300).
+func TestMeterPassHistoricalNonClaudeRunNotUnmeterable(t *testing.T) {
+	cs, _ := newBacklogTestServer(t)
+	m := cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	now := time.Now().UTC()
+	meterRepoWithItem(t, "meter-repo", backlog.Item{
+		ID: 1, Title: "Item one", Status: backlog.StatusRunning,
+		Runs: []backlog.RunRef{
+			{SessionID: "sess-old", State: backlog.RunStarted, StartedAt: now.Add(-time.Hour)},
+			{SessionID: "sess-new", State: backlog.RunStarted, StartedAt: now},
+		},
+	})
+	// Both sessions are still registered: the historical one is codex, the
+	// current (latest) one is claude and meters clean.
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{
+		"sess-old": {ID: "sess-old", BacklogItem: 1, Program: "codex"},
+		"sess-new": {ID: "sess-new", BacklogItem: 1, Program: "claude"},
+	}
+	m.mu.Unlock()
+
+	st := &m.backlog.meter
+	st.mu.Lock()
+	m.meterPassLocked(now)
+	st.mu.Unlock()
+
+	got := meterUsage(t, st)
+	require.NotContains(t, got.Unmeterable, "sess-old",
+		"a historical run's non-Claude session must not be unmeterable when the current run meters fine")
+	require.NotContains(t, got.Unmeterable, "sess-new", "the current Claude run meters clean")
+	require.Empty(t, got.Unmeterable, "no run of this running item is unmeterable")
+	// Historical runs are still metered for their cost: both runs appear.
+	require.Contains(t, got.Runs, "sess-old")
+	require.Contains(t, got.Runs, "sess-new")
+}
+
+// The fix must not over-narrow: a running item whose CURRENT (latest) run is a
+// non-Claude session is still an active-run metering failure and stays
+// unmeterable. (Positive control for the first Unmeterable producer.)
+func TestMeterPassCurrentNonClaudeRunStillUnmeterable(t *testing.T) {
+	cs, _ := newBacklogTestServer(t)
+	m := cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	now := time.Now().UTC()
+	meterRepoWithItem(t, "meter-repo", backlog.Item{
+		ID: 1, Title: "Item one", Status: backlog.StatusRunning,
+		Runs: []backlog.RunRef{{SessionID: "sess", State: backlog.RunStarted, StartedAt: now}},
+	})
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{
+		"sess": {ID: "sess", BacklogItem: 1, Program: "codex"},
+	}
+	m.mu.Unlock()
+
+	st := &m.backlog.meter
+	st.mu.Lock()
+	m.meterPassLocked(now)
+	st.mu.Unlock()
+
+	got := meterUsage(t, st)
+	require.Equal(t, backlog.UnmeterableProgram(1, "codex"), got.Unmeterable["sess"],
+		"the current run of a non-Claude session is still an active-run metering failure")
 }

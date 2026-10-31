@@ -15,7 +15,10 @@ import {
   type CreateSessionInput,
   createTab,
   errorText,
+  fetchArchivedPage,
   fetchSessionSnapshot,
+  fetchSessionsById,
+  fetchSnapshot,
   fetchEditorPortOrigin,
   fetchPreviewOrigin,
   handoffSession,
@@ -50,18 +53,23 @@ interface Captured {
   url: string;
   body: Record<string, unknown>;
   auth: string | undefined;
+  /** The X-AF-Client-Version header value (undefined if never set), captured so the
+   *  tolerant-decode opt-in can be pinned — see the "marks every request" tests. */
+  clientVersion: string | undefined;
   calls: number;
 }
 
 // Stubs global.fetch, capturing the last request (and a call count) and returning a
 // 200 {data,error} envelope. Returns the capture box the test asserts against.
 function stubFetch(): Captured {
-  const cap: Captured = { url: "", body: {}, auth: undefined, calls: 0 };
+  const cap: Captured = { url: "", body: {}, auth: undefined, clientVersion: undefined, calls: 0 };
   (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
     cap.calls += 1;
     cap.url = url;
     cap.body = JSON.parse(String(init.body));
-    cap.auth = (init.headers as Record<string, string>).Authorization;
+    const h = init.headers as Record<string, string>;
+    cap.auth = h.Authorization;
+    cap.clientVersion = h["X-AF-Client-Version"];
     return {
       ok: true,
       status: 200,
@@ -81,6 +89,63 @@ function stubFetch(): Captured {
 
 afterEach(() => {
   delete (globalThis as { fetch?: unknown }).fetch;
+});
+
+// --- X-AF-Client-Version: opts the browser into the daemon's tolerant decode -------
+//
+// The daemon decodes a header-less body with DisallowUnknownFields and rejects an
+// additive field it does not declare (`unknown field "<name>"`, #1273), so without
+// this header a newer SPA against an older daemon fails on every Snapshot that carries
+// `lazy_archive`/`statuses`/`ids` — the additive fallback the rest of this file's
+// comments presuppose. The header's PRESENCE is the discriminator; the value is
+// diagnostics only. Under tsx the source literal placeholder ("__AF_CLIENT_VERSION__")
+// is what af() reads, since build.mjs stamps the real content hash into dist/af-web.js
+// only at build time; the literal is non-empty so the daemon's presence check still
+// accepts it, exactly as the Go apiclient's "unknown" sentinel does apiclient-side.
+
+test("af() marks every request as an af client via X-AF-Client-Version", async () => {
+  const cap = stubFetch();
+  await fetchSnapshot("tok");
+  // Under tsx the source literal placeholder is the value af() reads (build.mjs stamps
+  // the real content hash into dist/af-web.js); the literal is non-empty, which is the
+  // whole point — the daemon's presence check accepts it pre- or post-stamp.
+  assert.equal(cap.clientVersion, "__AF_CLIENT_VERSION__",
+    "af() must send X-AF-Client-Version so the daemon uses its tolerant decoder, not DisallowUnknownFields");
+  assert.equal(cap.url, "/v1/Snapshot");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("af() sends X-AF-Client-Version on the additive Snapshot-family calls that rely on tolerant decode", async () => {
+  // `/v1/Snapshot` is the route the bug is on: fetchSessionSnapshot sends
+  // `lazy_archive`, fetchArchivedPage sends `statuses`/`newest_first`/`limit`/`before`/
+  // `project_path`, and fetchSessionsById sends `ids` — all additive, all 400 fodder
+  // under strict decode against a pre-#6199 daemon. Each must carry the header.
+  for (const call of [
+    () => fetchSessionSnapshot("tok"),
+    () => fetchArchivedPage("tok", { project: null, before: null }),
+  ]) {
+    const cap = stubFetch();
+    await call();
+    assert.equal(cap.clientVersion, "__AF_CLIENT_VERSION__",
+      `${cap.url} must send X-AF-Client-Version so its additive fields degrade, not 400`);
+  }
+  const cap = stubFetch();
+  await fetchSessionsById("tok", ["id-1", "id-2"]);
+  assert.equal(cap.clientVersion, "__AF_CLIENT_VERSION__",
+    "/v1/Snapshot (by id) must send X-AF-Client-Version so `ids` is tolerated by an older daemon");
+  assert.deepEqual(cap.body.ids, ["id-1", "id-2"]);
+});
+
+test("af() sends X-AF-Client-Version even when no token is set (loopback sentinel)", async () => {
+  // An empty token sends no Authorization (the #1696 sentinel), but the version header
+  // still rides along — a token is orthogonal to which decoder the daemon uses, and a
+  // loopback browser talking to a pre-#6199 daemon needs the tolerant path just as
+  // much as an authed one.
+  const cap = stubFetch();
+  await fetchSnapshot("");
+  assert.equal(cap.clientVersion, "__AF_CLIENT_VERSION__",
+    "af() must send X-AF-Client-Version on the no-token path too");
+  assert.equal(cap.auth, undefined, "the empty-token sentinel still sends no Authorization");
 });
 
 test("Snapshot carries daemon identity and lifecycle admission timing with its rows", async () => {
