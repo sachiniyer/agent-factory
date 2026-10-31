@@ -186,9 +186,14 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const names = ["goals", "api"];
   const daemons = new Map(names.map((n) => [n, new Daemon(Array.from({ length: LINES }, (_, i) => `${n}${i}`).join("\n"))]));
   const kvMap = new Map<string, string>();
+  let storageFull = false;
   const kv: KV = {
     get: (k) => kvMap.get(k) ?? null,
     set: (k, v) => {
+      // A full storage refuses the reopened page a new entry (an existing one is replaced
+      // in place). Only that page is held to it: another pane whose own stash fails
+      // holds its work in memory only, which is not what is being tested.
+      if (storageFull && !kvMap.has(k) && k.endsWith(`\n${storageA.owner}`)) throw new Error("QuotaExceededError");
       if (process.env.AF_KVLOG && v.includes(process.env.AF_KVLOG)) console.log("KV set", k.split("\n").slice(-2).join("/"), v.slice(0, 160).replace(/\n/g, "|"));
       kvMap.set(k, v);
     },
@@ -200,7 +205,11 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   };
   let winSeq = 0;
   let storageA = new DraftStorage(kv, `wA${winSeq}`, () => now, "s\nplan");
-  const ghostStorage = new DraftStorage(kv, "wGhost", () => now, "s\nplan");
+  // The second pane is sometimes in the same window as the first: the same window id
+  // and its own pane id. (AF_SAME_OWNER gives it the first pane's owner too: the
+  // engine before panes had owners of their own.)
+  const sameWindow = !!o.chaos && rand() < 0.5;
+  const ghostStorage = new DraftStorage(kv, sameWindow ? "wA0" : "wGhost", () => now, "s\nplan", process.env.AF_SAME_OWNER && sameWindow ? "0" : "g");
   const storageOf = new Map<SyncLike, DraftStorage>();
   /** Every unsaved buffer held in storage for `doc`, whichever window owns it. */
   const stashedBuffers = (doc: string): string[] =>
@@ -400,9 +409,35 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       if (x.suspend) x.suspend();
       else x.dispose(); // an engine without suspend: the old pane just disposed and deleted
     }
-    d.deleted = true;
+    // The delete can fail (the daemon refuses, or is down): the doc stays, and the work
+    // typed before the delete went out is owed to the tab that reopens it.
+    const failing = !!o.chaos && rand() < 0.4;
+    // The editor is read-only while the delete is in flight, so nothing is typed. (The
+    // pane before that took keystrokes the suspended sync ignored.)
+    if (process.env.AF_EDIT_DURING_DELETE && attached === doc && isLoaded(s!)) {
+      const lines = editor.text.split("\n");
+      if (lines.length === LINES) {
+        const token = `u${++seq}`;
+        lines[0] = token;
+        editor.text = lines.join("\n"); // the editor takes it; the pane's sync is null and never hears of it
+        typed.get(doc)!.set(0, token);
+      }
+    }
+    if (!failing) d.deleted = true;
     await advance(1000);
     await drain();
+    if (failing) {
+      for (const x of [s, ...olds]) x?.abandon?.(true);
+      syncs.delete(doc);
+      closing.delete(doc);
+      if (attached === doc) {
+        attached = "";
+        editor.text = "";
+      }
+      await open(doc);
+      await drain();
+      return;
+    }
     for (const x of [s, ...olds]) x?.abandon?.();
     syncs.delete(doc);
     closing.delete(doc);
@@ -527,8 +562,12 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     storageA.release();
     storageA = new DraftStorage(kv, `wA${++winSeq}`, () => now, "s\nplan");
     const unsaved = [...typed.get(doc)!.values()].filter((tok) => !daemons.get(doc)!.everHad(tok) && !excused.has(tok));
+    // Storage may be full as the new page adopts the old one's draft: the copy does not
+    // fit, and the original must stay (AF_REMOVE_UNSTORED is the store before that).
+    storageFull = !!o.chaos && rand() < 0.3;
     await open(doc);
     await drain();
+    storageFull = false;
     const back = syncs.get(doc)!;
     // I6: unsaved edits that survive only in storage come back, and say so.
     if (unsaved.length && isLoaded(back) && !["recovered", "conflict", "saving", "saved", "merged"].includes(back.currentStatus)) {

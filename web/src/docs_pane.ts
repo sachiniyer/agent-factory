@@ -51,46 +51,43 @@ function draftKey(sessionId: string, slug: string, doc: string): string {
   return `${sessionId}\n${slug}\n${doc}`;
 }
 
-// Unsaved work is kept per window (see docs_draft_store.ts): this window writes and
-// clears only its own entries, and adopts a closed or dead window's.
-const windowDrafts = new Map<string, DraftStorage>();
+// Unsaved work is kept per pane (see docs_draft_store.ts): a pane writes and clears
+// only its own entries, and adopts a closed or dead pane's. Two panes of one window
+// are as separate as two windows.
+const liveDrafts = new Set<DraftStorage>();
 let draftsWired = false;
+let paneSeq = 0;
+let sharedKV: KV | null = null;
 
 function memoryKV(): KV {
   const map = new Map<string, string>();
   return { get: (k) => map.get(k) ?? null, set: (k, v) => void map.set(k, v), remove: (k) => void map.delete(k), keys: () => [...map.keys()] };
 }
 
-let sharedKV: KV | null = null;
-
-function draftStorage(sessionId: string, slug: string): DraftStorage {
-  const scope = `${sessionId}\n${slug}`;
-  let d = windowDrafts.get(scope);
-  if (!d) {
-    if (!sharedKV) {
-      try {
-        sharedKV = localStorageKV(window.localStorage);
-      } catch {
-        sharedKV = memoryKV(); // storage is blocked: drafts then live only in memory
-      }
+/** A new pane's draft storage. Every live pane's heartbeat tells other windows it is
+ *  alive; a window closing releases all its entries at once, and a bfcache restore
+ *  refreshes the live ones. */
+function newPaneDrafts(sessionId: string, slug: string): DraftStorage {
+  if (!sharedKV) {
+    try {
+      sharedKV = localStorageKV(window.localStorage);
+    } catch {
+      sharedKV = memoryKV(); // storage is blocked: drafts then live only in memory
     }
-    d = new DraftStorage(sharedKV, windowId(), () => Date.now(), scope);
-    windowDrafts.set(scope, d);
-    if (!draftsWired) {
-      draftsWired = true;
-      // The heartbeat tells other windows this one is alive; closing releases its
-      // entries at once. A bfcache restore refreshes them.
-      window.setInterval(() => d!.touch(), DRAFT_HEARTBEAT_MS);
-      window.addEventListener("pagehide", () => d!.release());
-      window.addEventListener("pageshow", () => d!.touch());
-    }
+  }
+  const d = new DraftStorage(sharedKV, windowId(), () => Date.now(), `${sessionId}\n${slug}`, String(++paneSeq));
+  liveDrafts.add(d);
+  if (!draftsWired) {
+    draftsWired = true;
+    window.setInterval(() => liveDrafts.forEach((x) => x.touch()), DRAFT_HEARTBEAT_MS);
+    window.addEventListener("pagehide", () => liveDrafts.forEach((x) => x.release()));
+    window.addEventListener("pageshow", () => liveDrafts.forEach((x) => x.touch()));
   }
   return d;
 }
 
 /** A doc's draft storage for DocSync. */
-function draftFor(sessionId: string, slug: string, doc: string): NonNullable<ConstructorParameters<typeof DocSync>[0]["draft"]> {
-  const d = draftStorage(sessionId, slug);
+function draftFor(d: DraftStorage, doc: string): NonNullable<ConstructorParameters<typeof DocSync>[0]["draft"]> {
   return { load: () => d.load(doc), store: (x) => d.store(doc, x), clear: () => d.clear(doc) };
 }
 
@@ -148,6 +145,8 @@ export class DocsPane {
   private generation = 0;
   private refreshTimer: number | null = null;
   private disposed = false;
+  /** This pane's unsaved work in storage. */
+  private readonly drafts: DraftStorage;
   private readonly unsubscribe: () => void;
   private readonly unsubscribePush: () => void;
   private readonly unsubscribeResync: () => void;
@@ -165,6 +164,7 @@ export class DocsPane {
   };
 
   constructor(host: HTMLElement, private readonly opts: DocsPaneOptions) {
+    this.drafts = newPaneDrafts(opts.sessionId, opts.slug);
     this.strip = h("div", { class: "af-docs-strip", role: "tablist" });
     this.strip.setAttribute("aria-label", "Docs");
     this.addButton = h("button", { type: "button", class: "af-ghost af-docs-add", title: "Add doc" }, icon("plus"));
@@ -237,6 +237,9 @@ export class DocsPane {
     this.cancelLongPress();
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     for (const name of [...this.syncs.keys()]) this.closeSync(name, false);
+    // Its entries can be adopted by the pane that takes the docs over.
+    this.drafts.release();
+    liveDrafts.delete(this.drafts);
     this.sync = null;
     this.editor?.destroy();
     this.editor = null;
@@ -251,7 +254,7 @@ export class DocsPane {
     if (this.sync === sync) this.sync = null;
     const key = draftKey(this.opts.sessionId, this.opts.slug, name);
     sync.dispose();
-    if (forget) draftFor(this.opts.sessionId, this.opts.slug, name).clear();
+    if (forget) draftFor(this.drafts, name).clear();
     const set = closing.get(key) ?? new Set<DocSync>();
     set.add(sync);
     closing.set(key, set);
@@ -269,7 +272,13 @@ export class DocsPane {
     const syncs = [this.syncs.get(name), ...(closing.get(key) ?? [])].filter((s): s is DocSync => s !== undefined);
     for (const s of syncs) s.suspend();
     this.syncs.delete(name);
-    if (this.sync && syncs.includes(this.sync)) this.sync = null;
+    if (this.sync && syncs.includes(this.sync)) {
+      this.sync = null;
+      // A suspended sync takes no edits, so the editor must not take keystrokes
+      // either: a failed delete reopens the doc from the stored draft, and typing
+      // that went nowhere would be lost.
+      this.editor?.setEditable(false);
+    }
     return syncs;
   }
 
@@ -279,7 +288,7 @@ export class DocsPane {
     const key = draftKey(this.opts.sessionId, this.opts.slug, name);
     for (const s of suspended) s.abandon(!deleted);
     closing.delete(key);
-    if (deleted) draftFor(this.opts.sessionId, this.opts.slug, name).clear();
+    if (deleted) draftFor(this.drafts, name).clear();
   }
 
   /** The agent or another window deleted the doc. A tab with nothing unsaved ends; one
@@ -687,7 +696,7 @@ export class DocsPane {
       onStatus: (status, detail) => {
         if (this.sync === sync) this.setStatus(status, detail);
       },
-      draft: draftFor(this.opts.sessionId, this.opts.slug, doc.name),
+      draft: draftFor(this.drafts, doc.name),
       setTimer: (fn, ms) => window.setTimeout(fn, ms),
       clearTimer: (handle) => window.clearTimeout(handle as number),
     });
