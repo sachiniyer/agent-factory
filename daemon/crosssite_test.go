@@ -408,6 +408,33 @@ func TestOriginNamesRequest(t *testing.T) {
 	assert.False(t, originNamesRequest("https://af.example.com:9100", fwd("127.0.0.1:50000", "af.example.com"), allowed))
 	assert.False(t, originNamesRequest("http://af.example.com", fwd("127.0.0.1:50000", "af.example.com"), allowed),
 		"X-Forwarded-Proto: https still demands an https Origin")
+
+	// A front door on a NON-default port (nginx `listen 8444 ssl`).
+	withPort := func(req *http.Request, port string) *http.Request {
+		req.Header.Set("X-Forwarded-Port", port)
+		return req
+	}
+	assert.True(t, originNamesRequest("https://af.example.com:8444", fwd("127.0.0.1:50000", "af.example.com:8444"), allowed),
+		"$http_host forwards the port the browser used")
+	assert.False(t, originNamesRequest("https://af.example.com:8444", fwd("127.0.0.1:50000", "af.example.com"), allowed),
+		"$host drops it: a port-less forwarded name never vouches for an Origin that names a port")
+	assert.True(t, originNamesRequest("https://af.example.com:8444", withPort(fwd("127.0.0.1:50000", "af.example.com"), "8444"), allowed),
+		"X-Forwarded-Port restores the dropped port")
+	assert.False(t, originNamesRequest("https://af.example.com", withPort(fwd("127.0.0.1:50000", "af.example.com"), "8444"), allowed),
+		"and then a page on the same host's default port is not this front door")
+	assert.False(t, originNamesRequest("https://af.example.com:8444", withPort(fwd("127.0.0.1:50000", "af.example.com"), "x8444"), allowed),
+		"a malformed port restores nothing")
+	// The same rule on the Host path: a Host-keeping proxy that sent "Host: $host".
+	keep := func(peer string) *http.Request {
+		req := r("af.example.com", "https")
+		req.RemoteAddr = peer
+		return req
+	}
+	assert.False(t, originNamesRequest("https://af.example.com:8444", keep("127.0.0.1:50000"), allowed))
+	assert.True(t, originNamesRequest("https://af.example.com:8444", withPort(keep("127.0.0.1:50000"), "8444"), allowed))
+	assert.False(t, originNamesRequest("https://af.example.com", withPort(keep("127.0.0.1:50000"), "8444"), allowed))
+	assert.False(t, originNamesRequest("https://af.example.com:8444", withPort(keep("192.0.2.7:50000"), "8444"), allowed),
+		"X-Forwarded-Port counts only from a loopback peer")
 	yes := []struct{ origin, host, xfp string }{
 		{"http://127.0.0.1:8443", "127.0.0.1:8443", ""},
 		{"http://[::1]:8443", "[::1]:8443", ""},
@@ -521,6 +548,13 @@ func TestCrossSite_WebSocketsBehindAProxy(t *testing.T) {
 		"a forwarded name the daemon does not answer to vouches for nothing")
 	assert.Equal(t, http.StatusForbidden, dial(addr, rewritten("https://af.example.com", "")),
 		"a rewritten Host with nothing forwarded cannot be told from a foreign page")
+
+	// A front door on a non-default port: $http_host keeps the port; $host drops it
+	// and the handshake fails closed rather than matching the default port.
+	assert.Equal(t, http.StatusSwitchingProtocols, dial(addr, rewritten("https://af.example.com:8444", "af.example.com:8444")))
+	assert.Equal(t, http.StatusForbidden, dial(addr, rewritten("https://af.example.com:8444", "af.example.com")))
+	assert.Equal(t, http.StatusForbidden, dial(addr, rewritten("https://af.example.com", "af.example.com:8444")),
+		"a page on the same host's default port is not the :8444 front door")
 }
 
 // The refusal log %q-quotes every requester-chosen value, so an encoded newline in

@@ -47,24 +47,30 @@ import (
 //     the control API at all — they are served by the preview listener and talk only
 //     to their own origin — so whether a browser classifies them as same-site or
 //     cross-site with localhost makes no difference here.
-//  3. ORIGIN, for a browser that sends no fetch metadata (Safari before 16.4,
-//     Firefox before 90, Chrome before 76). The Fetch standard attaches Origin to
-//     every request whose method is not GET or HEAD, and to every WebSocket
-//     handshake, so an Origin that does not name this daemon — scheme://Host as the
-//     request was addressed — is refused, "null" included. When fetch metadata IS
+//  3. ORIGIN, whenever there is no fetch metadata. That is an older browser (Safari
+//     before 16.4, Firefox before 90, Chrome before 76), but also EVERY Chromium
+//     WebSocket handshake (Chromium sends no Sec-Fetch-* on one) and every request
+//     to a plain-http, non-loopback address (browsers send fetch metadata only to
+//     potentially trustworthy origins). The Fetch standard attaches Origin to every
+//     request whose method is not GET or HEAD, and to every WebSocket handshake, so
+//     an Origin that does not name this daemon is refused, "null" included. "Names
+//     this daemon" means the same host and port as the Host header, or — from a
+//     loopback peer, a same-host proxy that rewrote Host — as X-Forwarded-Host when
+//     that is a name the daemon answers to (originNamesRequest), with
+//     X-Forwarded-Port filling in a port the proxy dropped. When fetch metadata IS
 //     present, a "same-origin" verdict is the browser's own attestation and Origin
-//     is not compared again: a same-host proxy that rewrites Host (nginx's default
-//     proxy_pass sends 127.0.0.1:8443) would otherwise refuse the operator's own web
-//     UI for no gain.
+//     is not compared again: a proxy that rewrites Host would otherwise refuse the
+//     operator's own web UI for no gain.
 //  4. CONTENT TYPE, on any request that can carry a body (not GET, HEAD or OPTIONS):
-//     a declared Content-Type must be application/json, and a body must declare one.
+//     on the control listener it must declare application/json, even with no body.
 //     This is the layer that does not depend on any browser being modern: an HTML
-//     form can only send form-urlencoded, multipart or text/plain, and a JSON content
-//     type from a page needs a CORS preflight, which this daemon grants only to the
-//     origins in layer 1. A POST with no body and no Content-Type (curl -X POST, the
-//     web client's two body-less calls) is admitted: the only browser requests that
-//     can lack a Content-Type are fetch/XHR/beacon calls, and those always carry the
-//     Origin layer 3 judges.
+//     form can only send form-urlencoded, multipart or text/plain, a JSON content
+//     type from a page needs a CORS preflight this daemon grants only to the origins
+//     in layer 1, and a bare untyped POST is the one shape a browser too old to send
+//     Origin on it (Firefox before 70) can send with no other signal. The web
+//     client's two calls that carry nothing send {} as JSON. The agent-server alone
+//     still admits a body-less untyped call, which is what the daemon driving it
+//     sends (jsonBodyRefusal).
 //
 // WHERE. Every TCP listener's control plane: the daemon's web listener and the
 // agent-server (whose Go client has sent application/json with every body since it
@@ -209,19 +215,74 @@ func originNamesRequest(origin string, r *http.Request, allowedHosts []string) b
 	if requestIsHTTPS(r) && u.Scheme != "https" {
 		return false
 	}
-	if originMatchesAuthority(u, oname, r.Host) {
+	loopback := isLoopbackRequest(r)
+	// X-Forwarded-Port restores a port a same-host proxy dropped (nginx's $host has
+	// none). Like X-Forwarded-Host it counts only from a loopback peer.
+	fport := ""
+	if loopback {
+		fport = firstForwardedValue(r.Header.Get("X-Forwarded-Port"))
+		if fport != "" && !isDecimalPort(fport) {
+			fport = ""
+		}
+	}
+	if authority, ok := withForwardedPort(r.Host, fport, u); ok && originMatchesAuthority(u, oname, authority) {
 		return true
 	}
-	if !isLoopbackRequest(r) {
+	if !loopback {
 		return false
 	}
-	fwd, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ",")
-	fwd = strings.TrimSpace(fwd)
+	fwd := firstForwardedValue(r.Header.Get("X-Forwarded-Host"))
 	fname, ok := config.RequestHostName(fwd)
 	if !ok || !forwardedNameAdmitted(fname, allowedHosts) {
 		return false
 	}
-	return originMatchesAuthority(u, oname, fwd)
+	authority, ok := withForwardedPort(fwd, fport, u)
+	return ok && originMatchesAuthority(u, oname, authority)
+}
+
+// withForwardedPort fills in the port of a port-less authority from
+// X-Forwarded-Port, and FAILS CLOSED when there is neither: a port-less authority
+// whose Origin names an explicit port cannot vouch for it. A browser omits only
+// the default port from Origin, so an explicit one is a non-default front door —
+// and a proxy that forwarded "$host" (no port) for it has lost exactly the fact the
+// comparison needs. Inferring the default port there would refuse the operator's
+// own page and admit a page on the same host's default port instead. An authority
+// that carries its own port (Host as the browser sent it, nginx's $http_host) is
+// used as is; it wins over X-Forwarded-Port.
+func withForwardedPort(authority, fport string, origin *url.URL) (string, bool) {
+	if _, p, err := net.SplitHostPort(authority); err == nil && p != "" {
+		return authority, true
+	}
+	if fport != "" {
+		name, ok := config.RequestHostName(authority)
+		if !ok {
+			return "", false
+		}
+		return net.JoinHostPort(name, fport), true
+	}
+	if origin.Port() != "" {
+		return "", false
+	}
+	return authority, true
+}
+
+// firstForwardedValue is the first entry of a comma-separated forwarding header —
+// the one the outermost proxy set from the browser's own request.
+func firstForwardedValue(v string) string {
+	first, _, _ := strings.Cut(v, ",")
+	return strings.TrimSpace(first)
+}
+
+func isDecimalPort(p string) bool {
+	if p == "" || len(p) > 5 {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] < '0' || p[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // originMatchesAuthority compares a parsed Origin (u, canonical name oname) with

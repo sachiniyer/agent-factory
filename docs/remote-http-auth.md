@@ -618,7 +618,9 @@ request's `Host` to the incoming one), so the daemon sees your
 `<machine>.<tailnet>.ts.net` name, and that name must be allowed. Caddy's
 `reverse_proxy` also forwards the incoming `Host` by default. nginx's
 `proxy_pass` sends its upstream address (`127.0.0.1:8443`) unless you set
-`proxy_set_header Host $host`, in which case add the public name too. A proxy that
+`proxy_set_header Host $http_host`, in which case add the public name too. (Use
+`$http_host`, not `$host`: `$host` drops the port, so a front door on a
+non-default port would be forwarded as the wrong one.) A proxy that
 rewrites `Host` passes this check, but the web UI's terminals and event stream
 also need the browser's name forwarded — see [behind a reverse
 proxy](#behind-a-reverse-proxy) below.
@@ -714,11 +716,13 @@ envelope, and the daemon logs it, rate-limited, without the body or the query.
 
 ### Behind a reverse proxy
 
-The web UI's requests keep working through a TLS-terminating proxy, but its
-**WebSockets** (every terminal, and the event stream) need one thing from the
-proxy. Chromium sends no fetch metadata on a WebSocket handshake, so the daemon
-judges the handshake by its `Origin` alone, and it must be able to see the name the
-browser used:
+Some browser requests reach the daemon with no fetch metadata, and the daemon
+then judges them by `Origin` alone, so it must be able to see the name and port
+the browser used. That covers **every WebSocket** (Chromium sends no fetch
+metadata on a handshake), and so every terminal and the event stream. Behind a
+**plain-http** front door it covers **every request**, POSTs included: browsers
+send fetch metadata only to HTTPS and loopback origins. Over HTTPS, the web UI's
+ordinary requests are marked `same-origin` and need nothing more.
 
 - **A proxy that keeps `Host`** works as is. `tailscale serve` forwards
   `Host: box.tailnet.ts.net` with `X-Forwarded-Proto: https`, and
@@ -726,9 +730,10 @@ browser used:
   port 443. Caddy's `reverse_proxy` behaves the same way. Both need the name in
   `network.allowed_hosts`, as above.
 - **A proxy that rewrites `Host`** must forward the browser's in
-  `X-Forwarded-Host` (with `X-Forwarded-Proto`). The daemon honours it only from a
-  proxy on the same machine (a loopback connection), and only when it names a host
-  the daemon answers to — so list the public name in `network.allowed_hosts` too:
+  `X-Forwarded-Host`, port included, with `X-Forwarded-Proto`. The daemon honours
+  them only from a proxy on the same machine (a loopback connection), and only when
+  the forwarded name is one the daemon answers to, so list the public name in
+  `network.allowed_hosts` too:
 
 ```nginx
 location / {
@@ -736,14 +741,24 @@ location / {
     proxy_http_version 1.1;                       # WebSockets need these three
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
-    proxy_set_header X-Forwarded-Host $host;      # the name the browser used
+    proxy_set_header X-Forwarded-Host $http_host; # the name AND port the browser used
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
 
+Use `$http_host`, not `$host`: `$host` has no port. A forwarded name with no port
+never vouches for an `Origin` that names one, so a front door on a non-default port
+(`listen 8444 ssl`) forwarded as `$host` gets its own WebSockets refused rather
+than guessed at — and since the daemon cannot see the port the proxy dropped, a
+page served by another app on the same host's default port could pass for that
+front door. `X-Forwarded-Port` (`proxy_set_header X-Forwarded-Port $server_port;`)
+is also honoured, from the same loopback proxy, as the port of a port-less
+forwarded name, and closes that too.
+
 A proxy that rewrites `Host` and forwards nothing (nginx's bare `proxy_pass`)
-leaves a WebSocket handshake indistinguishable from a foreign page's, so it is
-refused with `403`, naming `X-Forwarded-Host`.
+leaves such a request indistinguishable from a foreign page's, so it is refused
+with `403`, naming `X-Forwarded-Host`.
+
 ## CORS (for the browser web client)
 
 Browsers enforce CORS, so a web client served from a different origin than the
