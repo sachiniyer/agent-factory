@@ -529,6 +529,14 @@ type InstanceData struct {
 	// surfaces never silently drop the explanation, and it is additive +
 	// omitempty so older binaries read and rewrite the row untouched.
 	CallbackUnavailable string `json:"callback_unavailable,omitempty"`
+	// AgentConfigSkipped is one "agent:file: <reason>" entry per declared
+	// sandbox_agent_config file the account-scope placement refused (#6337,
+	// #5571 W7.7) — recorded at provision and refreshed by every reprovision and
+	// account swap that stages a scope. Persisted in the same durability class
+	// as CallbackUnavailable: the skip is still true after a restart, so the
+	// row must keep saying so until positive evidence (a placement that copies
+	// everything) clears it. Additive + omitempty for the same reason.
+	AgentConfigSkipped []string `json:"agent_config_skipped,omitempty"`
 	// ArchiveReport makes a deliberately incomplete archive discoverable across
 	// daemon restarts and at restore time. It lives beside the session record,
 	// never inside the copied tree where a user path could collide with it. Live

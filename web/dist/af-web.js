@@ -6815,8 +6815,13 @@ function callbackUnavailableText(s) {
   const reason = s.callback_unavailable?.trim() ?? "";
   return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
 }
+var AGENT_CONFIG_SKIPPED_PREFIX = "af agent config skipped: ";
+function agentConfigSkippedText(s) {
+  const entries = (s.agent_config_skipped ?? []).map((entry) => entry.trim()).filter((entry) => entry !== "");
+  return entries.length === 0 ? "" : AGENT_CONFIG_SKIPPED_PREFIX + entries.join("; ");
+}
 function sessionWarningText(s) {
-  return [archiveWarningText(s), callbackUnavailableText(s)].filter((t) => t !== "").join(" \xB7 ");
+  return [archiveWarningText(s), callbackUnavailableText(s), agentConfigSkippedText(s)].filter((t) => t !== "").join(" \xB7 ");
 }
 function rootRecreateNote(s) {
   switch (s.root_recreate_context) {
@@ -7030,7 +7035,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "38657857f798";
+var CLIENT_VERSION = "c280cbf0bd23";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -20150,16 +20155,18 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
   const callbackWarning = callbackUnavailableText(s);
+  const agentConfigSkipped = agentConfigSkippedText(s);
   const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
   const reason = attentionReason(s);
   row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}${reason ? `: ${reason}` : ""}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
+  row.dataset.idleTitleAgentConfig = agentConfigSkipped === "" ? "" : `; ${agentConfigSkipped}`;
   row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${row.dataset.idleTitleAgentConfig}${inertReason}`
   );
   if (actionable) {
     row.onclick = () => openSession(s.id);
@@ -20182,7 +20189,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleAgentConfig ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }
@@ -20200,7 +20207,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleAgentConfig ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }

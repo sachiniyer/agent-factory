@@ -40,6 +40,7 @@ import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import { serializeProjectRoute } from "./route.js";
 import { applyProjectColor, applyProjectFavicon, projectColor, projectColorRow } from "./project_color.js";
 import {
+  agentConfigSkippedText,
   archiveWarningText,
   attentionReason,
   hasAttention,
@@ -3537,6 +3538,7 @@ export function sessionRow(
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
   const callbackWarning = callbackUnavailableText(s);
+  const agentConfigSkipped = agentConfigSkippedText(s);
   // A managed-but-inert row keeps its Kill button but cannot be opened; its
   // title says why. The reason rides a dataset fragment like the other title
   // parts so refreshIdleReasonAges preserves it on an idle-age repaint.
@@ -3546,10 +3548,11 @@ export function sessionRow(
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
+  row.dataset.idleTitleAgentConfig = agentConfigSkipped === "" ? "" : `; ${agentConfigSkipped}`;
   row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`,
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${row.dataset.idleTitleAgentConfig}${inertReason}`,
   );
   if (actionable) {
     row.onclick = () => openSession(s.id);
@@ -3579,7 +3582,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`,
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleAgentConfig ?? ""}${row.dataset.idleTitleInert ?? ""}`,
       );
     }
   }
@@ -3597,7 +3600,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`,
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleAgentConfig ?? ""}${row.dataset.idleTitleInert ?? ""}`,
       );
     }
   }

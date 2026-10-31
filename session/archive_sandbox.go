@@ -548,6 +548,11 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 	i.remoteClient = rc
 	i.runtimeTeardown = res.Teardown
 	i.callbackUnavailable = res.CallbackUnavailable
+	// The skip list is provision evidence, installed verbatim like the callback
+	// reason above: a fresh runtime that placed every declared file clears a
+	// skip the old one recorded, and a reattach that provisions nothing passes
+	// its prior list back in (#6337).
+	i.agentConfigSkipped = append([]string(nil), res.AgentConfigSkipped...)
 	i.touchLocked()
 	if i.runtimeCleanupStateUnknown {
 		i.runtimeCleanupStateUnknown = false

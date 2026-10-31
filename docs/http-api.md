@@ -532,6 +532,23 @@ The vocabulary can grow. Treat an unknown value as no reason — the TUI and web
 rows render no idle-reason label for values they don't know, so an older client
 never mislabels a newer daemon's observation.
 
+### Session warnings
+
+Session objects also carry daemon-projected warnings as additive,
+omitted-when-empty fields. Two are single strings — `archive_warning` (an
+incomplete archive's bounded notice) and `callback_unavailable` (why the session
+has no af callback) — and one is a list:
+
+**`agent_config_skipped`** (array of strings, omitted when empty) — one
+`agent:file: <reason>` entry per declared [`sandbox_agent_config`](backends.md#ssh-backend)
+file the session's account-scope placement refused: missing, unreadable, not a
+regular file, unparsable, or pushing the placement archive over its 64 MiB
+bound. Recorded at provision and
+refreshed by every reprovision and account swap that stages a scope, so a clean
+placement clears it and the row never warns about a file the live scope now
+holds. Every surface renders the joined entries under the `af agent config
+skipped:` prefix.
+
 ## Examples
 
 Health check:
