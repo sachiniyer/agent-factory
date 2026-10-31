@@ -18121,6 +18121,21 @@ function applyMove(b, id, to) {
   }
   return moved;
 }
+function overlayMove(fresh, moved, base) {
+  const now = new Map(fresh.items.map((x) => [x.id, x]));
+  const was = new Map(base.items.map((x) => [x.id, x]));
+  const seen = /* @__PURE__ */ new Set();
+  const items = [];
+  for (const m of moved.items) {
+    const f = now.get(m.id);
+    if (!f) continue;
+    seen.add(m.id);
+    const b = was.get(m.id);
+    items.push({ ...f, parent: m.parent, ...b && b.status !== m.status ? { status: m.status } : {} });
+  }
+  for (const f of fresh.items) if (!seen.has(f.id)) items.push(f);
+  return { ...fresh, items };
+}
 function neededBy(b, id) {
   return b.items.filter((it) => (it.waits_on ?? []).includes(id));
 }
@@ -18306,13 +18321,13 @@ function closedGate(b, u, runner, now) {
     for (const k of WINDOWS) {
       const w = u[k];
       if (valid(w, now) && w.backlog >= b.share) {
-        return { key: `share:${k}`, text: `The backlog used its ${pct(b.share)} of ${WINDOW_LABELS[k].gate}.` };
+        return { key: `share:${k}:${w.resets_at}`, text: `The backlog used its ${pct(b.share)} of ${WINDOW_LABELS[k].gate}.` };
       }
     }
     for (const k of WINDOWS) {
       const w = u[k];
       if (valid(w, now) && w.plan >= b.stop_at) {
-        return { key: `stop_at:${k}`, text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[k].gate}.` };
+        return { key: `stop_at:${k}:${w.resets_at}`, text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[k].gate}.` };
       }
     }
   }
@@ -18720,7 +18735,7 @@ var ItemPanel = class {
     this.titles = new SerialSaver((title) => actions2.update(id, { title }), (title, ok) => {
       if (this.titleDraft !== title) return;
       this.titleDraft = null;
-      if (!ok) this.repaint();
+      this.repaint();
     }, queueFor(`${root2}\0${id}\0title`));
     this.waits = new SerialSaver((waits_on) => actions2.update(id, { waits_on }), (list, ok) => {
       if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
@@ -18894,7 +18909,7 @@ ${this.note.value}` : text;
     const it = this.item();
     if (!it) return;
     this.lookUpMissing(it);
-    if (document.activeElement !== this.title && this.titleDraft === null) this.title.value = it.title;
+    if (document.activeElement !== this.title) this.title.value = this.titleDraft ?? it.title;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
@@ -19503,7 +19518,7 @@ var BacklogPane = class {
     const v = this.root ? this.data?.views.get(this.root) : void 0;
     if (!v) return v;
     let out = v;
-    if (this.pending && this.pending.root === this.root) out = { ...out, backlog: this.pending.backlog };
+    if (this.pending && this.pending.root === this.root) out = { ...out, backlog: overlayMove(out.backlog, this.pending.backlog, this.pending.base) };
     const starting = [...this.starts.values()].filter((s) => s.root === this.root);
     if (starting.length > 0) {
       const states = { ...out.states };
@@ -19640,7 +19655,7 @@ ${id}`;
     const root2 = this.root;
     if (!v || !root2) return;
     const next = applyMove(v.backlog, id, to);
-    const pending = next ? { root: root2, backlog: next, gen: Infinity } : null;
+    const pending = next ? { root: root2, backlog: next, base: v.backlog, gen: Infinity } : null;
     if (pending) {
       this.pending = pending;
       this.focusId = id;
@@ -22308,23 +22323,32 @@ var BacklogLoader = class {
     return this.generation;
   }
   /** Refetches every project. A later call wins over one still in flight. Settles true
-   *  when the read of `root` (every project's, when none is named) succeeded: a read
-   *  that failed leaves the old snapshot in place, and a write that was only
-   *  followed by such a read has not been confirmed. */
-  async refresh(root2) {
+   *  when a snapshot that read `root` (every project, when none is named) was committed
+   *  after this call: a read that failed leaves the old snapshot in place, and a write
+   *  that was only followed by such a read has not been confirmed. A refresh that a newer
+   *  one superseded settles with the newer one's outcome, since its own result was
+   *  discarded. */
+  refresh(root2) {
+    const run = this.run();
+    this.tail = run;
+    return run.then((ok) => ok.size === 0 ? false : root2 === void 0 || !ok.has(root2) ? [...ok.values()].every(Boolean) : ok.get(root2) === true);
+  }
+  /** The newest refresh started so far, settled with whether each project's read landed in a committed snapshot. */
+  tail = Promise.resolve(/* @__PURE__ */ new Map());
+  async run() {
     const token2 = this.opts.token();
-    if (token2 === null) return false;
+    if (token2 === null) return /* @__PURE__ */ new Map();
     const gen = ++this.generation;
     const budgetGen = ++this.budgetGeneration;
     const spendGen = this.spendGeneration;
     const roots = [...new Set(this.opts.roots().filter(Boolean))];
     const [results, budget] = await Promise.all([
-      Promise.all(roots.map((root3) => getBacklog(root3, token2).then((view) => ({ root: root3, view, error: "" })).catch((e) => ({ root: root3, view: null, error: errorText(e) })))),
+      Promise.all(roots.map((root2) => getBacklog(root2, token2).then((view) => ({ root: root2, view, error: "" })).catch((e) => ({ root: root2, view: null, error: errorText(e) })))),
       getBudget(token2).catch(() => null)
     ]);
-    const read = root2 === void 0 || !results.some((r) => r.root === root2) ? results.every((r) => r.view !== null) : results.some((r) => r.root === root2 && r.view !== null);
-    if (this.opts.token() !== token2) return false;
-    if (gen !== this.generation) return read;
+    if (this.opts.token() !== token2) return /* @__PURE__ */ new Map();
+    if (gen !== this.generation) return this.tail;
+    const ok = new Map(results.map((r) => [r.root, r.view !== null]));
     const cur = this.opts.current();
     const prev = cur.views;
     const views = /* @__PURE__ */ new Map();
@@ -22346,7 +22370,7 @@ var BacklogLoader = class {
       usage = { ...cur.usage, unmeterable: fresh.usage.unmeterable };
     }
     this.opts.commit({ views, errors, budget: fresh?.budget ?? cur.budget, usage, generation: gen });
-    return read;
+    return ok;
   }
   /** Applies a backlog.spend payload. A GetBudget still in flight was read
    *  before it, so that reply's plan use is dropped. */

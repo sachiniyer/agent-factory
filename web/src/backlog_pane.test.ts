@@ -552,3 +552,25 @@ test("a body save held across a panel reopening shows the saved text, not the st
   await settle();
   assert.equal(editors.at(-1)!.text, "typed");
 });
+
+test("a reopened panel shows the rename that is still unacknowledged", async () => {
+  reply = (method) => method === "UpdateBacklogItem" ? new Promise(() => {}) : Promise.resolve({});
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1, { title: "old" }), item(2)) }), "/a", []);
+  pane.select(1);
+  submitTitle(pane, "new");
+  pane.select(2);
+  pane.select(1);
+  assert.equal(titleInput(pane).value, "new", "not blank, not the stored title");
+});
+
+test("a reorder still in flight keeps the order and parents it made over a fresher list, not its old contents", async () => {
+  reply = (method) => method === "MoveBacklogItem" ? new Promise(() => {}) : Promise.resolve({});
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1), item(2), item(3)) }), "/a", []);
+  key(row(pane, 3), "ArrowUp", { altKey: true });
+  assert.deepEqual(rowIds(pane), [1, 3, 2]);
+  pane.update(data({ "/a": view(item(1, { title: "saved title" }), item(2), item(3)) }, 2), "/a", []);
+  assert.deepEqual(rowIds(pane), [1, 3, 2], "the move still shows");
+  assert.match(row(pane, 1).textContent, /saved title/, "the fresh contents show through it");
+});

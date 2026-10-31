@@ -78,12 +78,23 @@ export class BacklogLoader {
   }
 
   /** Refetches every project. A later call wins over one still in flight. Settles true
-   *  when the read of `root` (every project's, when none is named) succeeded: a read
-   *  that failed leaves the old snapshot in place, and a write that was only
-   *  followed by such a read has not been confirmed. */
-  async refresh(root?: string): Promise<boolean> {
+   *  when a snapshot that read `root` (every project, when none is named) was committed
+   *  after this call: a read that failed leaves the old snapshot in place, and a write
+   *  that was only followed by such a read has not been confirmed. A refresh that a newer
+   *  one superseded settles with the newer one's outcome, since its own result was
+   *  discarded. */
+  refresh(root?: string): Promise<boolean> {
+    const run = this.run();
+    this.tail = run;
+    return run.then((ok) => ok.size === 0 ? false : root === undefined || !ok.has(root) ? [...ok.values()].every(Boolean) : ok.get(root) === true);
+  }
+
+  /** The newest refresh started so far, settled with whether each project's read landed in a committed snapshot. */
+  private tail: Promise<Map<string, boolean>> = Promise.resolve(new Map());
+
+  private async run(): Promise<Map<string, boolean>> {
     const token = this.opts.token();
-    if (token === null) return false;
+    if (token === null) return new Map();
     const gen = ++this.generation;
     const budgetGen = ++this.budgetGeneration;
     const spendGen = this.spendGeneration;
@@ -94,11 +105,10 @@ export class BacklogLoader {
         .catch((e: unknown) => ({ root, view: null, error: errorText(e) })))),
       getBudget(token).catch(() => null),
     ]);
-    const read = root === undefined || !results.some((r) => r.root === root)
-      ? results.every((r) => r.view !== null)
-      : results.some((r) => r.root === root && r.view !== null);
-    if (this.opts.token() !== token) return false;
-    if (gen !== this.generation) return read;   // a newer refresh commits; this read was still after the write
+    if (this.opts.token() !== token) return new Map();
+    // A newer refresh commits instead; this one is acknowledged only by what that one reads.
+    if (gen !== this.generation) return this.tail;
+    const ok = new Map(results.map((r) => [r.root, r.view !== null] as [string, boolean]));
     const cur = this.opts.current();
     const prev = cur.views;
     const views = new Map<string, BacklogView>();
@@ -120,7 +130,7 @@ export class BacklogLoader {
       usage = { ...cur.usage, unmeterable: fresh.usage.unmeterable };
     }
     this.opts.commit({ views, errors, budget: fresh?.budget ?? cur.budget, usage, generation: gen });
-    return read;
+    return ok;
   }
 
   /** Applies a backlog.spend payload. A GetBudget still in flight was read

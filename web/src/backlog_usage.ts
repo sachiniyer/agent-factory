@@ -190,7 +190,8 @@ export function runUse(sessionId: string, u: Usage, now: number, account = ""): 
 }
 
 export interface Gate {
-  /** The gate and window, stable while the numbers move: "stop_at:five_hour". */
+  /** The gate and the window it closed, stable while the numbers move but new for the
+   *  next window: "stop_at:five_hour:2000-01-03T14:00:00Z". */
   key: string;
   text: string;
 }
@@ -203,13 +204,13 @@ export function closedGate(b: Budget | null, u: Usage | null, runner: RunnerView
     for (const k of WINDOWS) {
       const w = u[k];
       if (valid(w, now) && w.backlog >= b.share) {
-        return { key: `share:${k}`, text: `The backlog used its ${pct(b.share)} of ${WINDOW_LABELS[k].gate}.` };
+        return { key: `share:${k}:${w.resets_at}`, text: `The backlog used its ${pct(b.share)} of ${WINDOW_LABELS[k].gate}.` };
       }
     }
     for (const k of WINDOWS) {
       const w = u[k];
       if (valid(w, now) && w.plan >= b.stop_at) {
-        return { key: `stop_at:${k}`, text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[k].gate}.` };
+        return { key: `stop_at:${k}:${w.resets_at}`, text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[k].gate}.` };
       }
     }
   }

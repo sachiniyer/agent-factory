@@ -414,6 +414,25 @@ export function applyMove(b: Backlog, id: number, to: MoveTarget): Backlog | nul
   return moved;
 }
 
+/** Shows an optimistic move over a fresher list: the order and parents `moved`
+ *  settled on (and the statuses the move itself changed from `base`), with every
+ *  other field, and any item the move never saw, taken from `fresh`. */
+export function overlayMove(fresh: Backlog, moved: Backlog, base: Backlog): Backlog {
+  const now = new Map(fresh.items.map((x) => [x.id, x]));
+  const was = new Map(base.items.map((x) => [x.id, x]));
+  const seen = new Set<number>();
+  const items: Item[] = [];
+  for (const m of moved.items) {
+    const f = now.get(m.id);
+    if (!f) continue;
+    seen.add(m.id);
+    const b = was.get(m.id);
+    items.push({ ...f, parent: m.parent, ...(b && b.status !== m.status ? { status: m.status } : {}) });
+  }
+  for (const f of fresh.items) if (!seen.has(f.id)) items.push(f);
+  return { ...fresh, items };
+}
+
 /** Items that wait on id. */
 export function neededBy(b: Backlog, id: number): Item[] {
   return b.items.filter((it) => (it.waits_on ?? []).includes(id));

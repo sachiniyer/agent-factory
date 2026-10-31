@@ -129,11 +129,14 @@ test("closedGate names the first closed budget gate, keyed by gate and window", 
   const runner: RunnerView = { state: "off", used: 0, max: 1 };
   const g = (b: Budget | null, u: Usage | null, r: RunnerView = runner) => closedGate(b, u, r, NOW);
   assert.equal(g(budget(), usage()), null);
-  assert.deepEqual(g(budget({ share: 15 }), usage()), { key: "share:seven_day", text: "The backlog used its 15% of the week." });
-  assert.deepEqual(g(budget({ share: 10 }), usage()), { key: "share:five_hour", text: "The backlog used its 10% of the 5-hour window." });
-  assert.deepEqual(g(budget({ stop_at: 40 }), usage()), { key: "stop_at:five_hour", text: "The plan is at 41% of the 5-hour window." });
-  assert.equal(g(budget({ stop_at: 40 }), usage({ five_hour: { plan: 44, backlog: 12, resets_at: SOON } }))?.key, "stop_at:five_hour",
+  assert.deepEqual(g(budget({ share: 15 }), usage()), { key: `share:seven_day:${MONDAY}`, text: "The backlog used its 15% of the week." });
+  assert.deepEqual(g(budget({ share: 10 }), usage()), { key: `share:five_hour:${SOON}`, text: "The backlog used its 10% of the 5-hour window." });
+  assert.deepEqual(g(budget({ stop_at: 40 }), usage()), { key: `stop_at:five_hour:${SOON}`, text: "The plan is at 41% of the 5-hour window." });
+  assert.equal(g(budget({ stop_at: 40 }), usage({ five_hour: { plan: 44, backlog: 12, resets_at: SOON } }))?.key, `stop_at:five_hour:${SOON}`,
     "the key holds while the numbers move");
+  const NEXT = at("2000-01-03T19:00:00");
+  assert.notEqual(g(budget({ stop_at: 40 }), usage({ five_hour: { plan: 44, backlog: 12, resets_at: NEXT } }))?.key, g(budget({ stop_at: 40 }), usage())?.key,
+    "a new window is a new gate, so a start asks again");
   assert.deepEqual(g(budget({ share: 0 }), null), { key: "share:zero", text: "The backlog share is 0%." });
   assert.equal(g(budget({ share: 10 }), usage({ five_hour: { plan: 41, backlog: 12, resets_at: at("2000-01-03T09:00:00") },
     seven_day: { plan: 0, backlog: 0, resets_at: null } })), null);
