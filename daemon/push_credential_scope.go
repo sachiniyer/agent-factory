@@ -8,6 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/internal/peercred"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -98,6 +99,24 @@ func carriedByOwnForward(pgid int, ownerRef string) bool {
 	}
 	ref, ok := callbackCarrierRef(pgid)
 	return ok && ref == ownerRef
+}
+
+// sandboxCredentialCarried is the gate's binding: owner's credential arrived
+// through owner's own forward, the tunnel carrying the ref that credential
+// derives from. A refusal is logged, because the one legitimate way to hit it —
+// a sandbox.ssh multiplexing sessions through one shared ControlMaster, whose
+// master delivers every session's forwards — would otherwise read as a bare 401.
+func sandboxCredentialCarried(ctx context.Context, reg *sandboxTokenRegistry, owner string) bool {
+	pgid := carrierPGID(ctx)
+	if carriedByOwnForward(pgid, reg.refFor(owner)) {
+		return true
+	}
+	how := "a listener with no ssh forward"
+	if pgid > 0 {
+		how = "a connection that is not that session's own ssh forward"
+	}
+	log.WarningLog.Printf("refused session %s's af callback credential: it arrived through %s. Each session's credential is accepted only through its own forward; a sandbox.ssh that multiplexes sessions through one shared ControlMaster connection cannot carry af callbacks", owner, how)
+	return false
 }
 
 // --- eligibility ------------------------------------------------------------------

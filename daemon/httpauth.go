@@ -171,7 +171,7 @@ func (g *authGate) authorizeSandbox(r *http.Request, presented string) (string, 
 	// directory and sent through another session's forward — or to a listener
 	// with no forward at all, which records no carrier — is refused before any
 	// handler sees it.
-	if !carriedByOwnForward(carrierPGID(r.Context()), g.sandboxTokens.refFor(owner)) {
+	if !sandboxCredentialCarried(r.Context(), g.sandboxTokens, owner) {
 		return "", false
 	}
 	return owner, true
