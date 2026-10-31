@@ -1056,18 +1056,33 @@ What the sandbox host needs, and what af does to it:
   depends on the row:
   - **Reattach succeeds.** The row is live again with the same agent-server.
     Nothing is pushed, replaced or restarted.
+  - **The agent-server crashed but its host is still up** (the host answered
+    over a working transport but the agent-server did not, leaving the
+    worktree and tmux server the agent runs in alive). When the row recorded
+    its launch command and the host proves its recorded agent-server PID is
+    gone or has been reused by another program, the daemon reruns that
+    persisted command (the token and callback credential it sources are
+    unchanged, so the restarted process keeps the session's identity),
+    re-dials to the new port, and re-adopts the surviving tmux session
+    through the ordinary restore path (reattaching a live agent, respawning
+    one whose tmux session is gone), so the agent is not re-run and unpushed
+    work is preserved. A row that cannot be proven empty — no recorded
+    launch command or PID, the recorded PID still alive, or the host
+    cannot tell — is reported and left alone, so a slow agent-server is
+    never doubled.
   - **Reattach is not attempted or fails** (no persisted runtime identity, the
-    host does not answer, or the agent-server does not answer). The row stays
-    Lost and holds *no* agent-server client: it carries the "not provisioned"
-    sentinel (`ErrRemoteSandboxNotProvisioned`), which restore reads as
-    *absent* (`probeAbsent` in `daemon/restore.go` and `daemon/lostrestore.go`),
-    not as a sandbox that answered dead. Absent means replacement is
-    unconditional: the old runtime is torn down and a fresh sandbox is
-    provisioned from the session's branch on `origin`. **Nothing is pushed
-    first, so work the sandbox never pushed is not preserved on this path**;
-    only what already reached `origin` comes back. Provisioning needs the
-    host, so a host that is still unreachable fails that attempt and the row
-    stays Lost, but that is the provision failing, not a guard.
+    host does not answer, or the agent-server is not restartable above). The
+    row stays Lost and holds *no* agent-server client: it carries the "not
+    provisioned" sentinel (`ErrRemoteSandboxNotProvisioned`), which restore
+    reads as *absent* (`probeAbsent` in `daemon/restore.go` and
+    `daemon/lostrestore.go`), not as a sandbox that answered dead. Absent
+    means replacement is unconditional: the old runtime is torn down and a
+    fresh sandbox is provisioned from the session's branch on `origin`.
+    **Nothing is pushed first, so work the sandbox never pushed is not
+    preserved on this path**; only what already reached `origin` comes back.
+    Provisioning needs the host, so a host that is still unreachable fails
+    that attempt and the row stays Lost, but that is the provision failing,
+    not a guard.
   - **A live client sees the agent die** (no restart involved, or the row was
     reattached first). If the agent-server answers that the agent is gone, the
     sandbox is still there, so recovery (and a manual restore) pushes its work
