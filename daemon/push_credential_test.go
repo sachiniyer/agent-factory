@@ -323,8 +323,11 @@ func TestGitCredential_GoneOnceTheCallbackIsRevoked(t *testing.T) {
 // it runs is not answered with the token its own end was meant to stop.
 func TestGitCredential_ReauthorizesAfterTheTokenRead(t *testing.T) {
 	for name, change := range map[string]func(pf *pushFixture){
-		"revoked":      func(pf *pushFixture) { pf.mgr.sandboxTokens.revoke(pf.me.ID) },
-		"archived":     func(pf *pushFixture) { pf.me.SetStatusForTest(session.Archived) },
+		"revoked":  func(pf *pushFixture) { pf.mgr.sandboxTokens.revoke(pf.me.ID) },
+		"archived": func(pf *pushFixture) { pf.me.SetStatusForTest(session.Archived) },
+		// Codex P1 on #6433: a REPLACEMENT credential minted mid-read leaves the
+		// session holding a credential, just not the one this request presented.
+		"replaced":     func(pf *pushFixture) { _, _ = pf.mgr.sandboxTokens.mint(pf.me.ID) },
 		"licence off":  func(pf *pushFixture) { pf.setConfig(func(c *config.Config) { c.Hosts = nil }) },
 		"auto push":    func(pf *pushFixture) { pf.mgr.pushCreds.beginAutoPush(pf.me.ID) },
 		"origin moved": func(pf *pushFixture) { pf.origins["me"] = pushcred.Origin{Host: "github.com", Path: "owner/elsewhere"} },
@@ -337,6 +340,38 @@ func TestGitCredential_ReauthorizesAfterTheTokenRead(t *testing.T) {
 			assert.Empty(t, got.Password)
 			assert.NotEmpty(t, msg)
 			assert.Equal(t, int32(1), pf.tokenReads.Load(), "anti-vacuous: the first authorization passed and the token was read")
+		})
+	}
+}
+
+// The final authorization's one blocking step is the origin lookup (a git run in
+// production). Whatever changes DURING it is still caught, because every state
+// check runs again after it and nothing blocks between that and the reply (Codex
+// P1 on #6433).
+func TestGitCredential_ChangesDuringTheFinalOriginLookupAreCaught(t *testing.T) {
+	for name, change := range map[string]func(pf *pushFixture){
+		"revoked":     func(pf *pushFixture) { pf.mgr.sandboxTokens.revoke(pf.me.ID) },
+		"replaced":    func(pf *pushFixture) { _, _ = pf.mgr.sandboxTokens.mint(pf.me.ID) },
+		"archived":    func(pf *pushFixture) { pf.me.SetStatusForTest(session.Archived) },
+		"licence off": func(pf *pushFixture) { pf.setConfig(func(c *config.Config) { c.Hosts = nil }) },
+		"auto push":   func(pf *pushFixture) { pf.mgr.pushCreds.beginAutoPush(pf.me.ID) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			pf := newPushFixture(t)
+			var lookups atomic.Int32
+			lookup := instancePushOrigin
+			instancePushOrigin = func(i *session.Instance) (pushcred.Origin, bool) {
+				// The second pass's lookup: the token has been read.
+				if lookups.Add(1) == 2 {
+					change(pf)
+				}
+				return lookup(i)
+			}
+			code, got, msg := pf.askOwn(t)
+			assert.NotEqualf(t, http.StatusOK, code, "answered after %s during the final origin lookup", name)
+			assert.Empty(t, got.Password)
+			assert.NotEmpty(t, msg)
+			assert.Equal(t, int32(2), lookups.Load(), "anti-vacuous: the change landed in the final pass's lookup")
 		})
 	}
 }
@@ -364,28 +399,69 @@ func TestGitCredential_WithheldDuringAnAutomaticPreservePush(t *testing.T) {
 }
 
 // preserveSandboxBeforeReap holds the fence across the in-sandbox archive (where
-// the push runs) and beyond its return, since that work outlives the daemon's
-// wait.
+// the push runs). A CONFIRMED success lifts it. Anything else may leave that
+// archive running (it takes no context and its git steps have no deadline), so
+// the row stays fenced for as long as the credential it held — elapsed time is
+// never read as completion (Codex P2 on #6433).
 func TestPreserveSandboxBeforeReapFencesPushCredentials(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
-	var inst *session.Instance
-	var fencedDuringArchive atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/v1/agent/archive" {
-			fencedDuringArchive.Store(manager.pushCreds.autoPushInFlight(inst.ID))
-			writeSandboxProbeEnvelope(w, map[string]any{"branch": "af/fenced"})
-			return
-		}
-		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
-	inst, _ = registerStartedRemote(t, manager, repoID, repoPath, "fenced", srv.URL, session.Ready)
+	for name, tc := range map[string]struct {
+		fail       bool
+		wantFenced bool
+	}{
+		"confirmed success lifts the fence": {fail: false, wantFenced: false},
+		"a failure keeps it for the grant":  {fail: true, wantFenced: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			var inst *session.Instance
+			var grant string
+			var fencedDuringArchive atomic.Bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/v1/agent/archive" {
+					fencedDuringArchive.Store(manager.pushCreds.autoPushFenced(inst.ID, grant))
+					if tc.fail {
+						http.Error(w, "push rejected by origin", http.StatusInternalServerError)
+						return
+					}
+					writeSandboxProbeEnvelope(w, map[string]any{"branch": "af/fenced"})
+					return
+				}
+				http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			}))
+			t.Cleanup(srv.Close)
+			inst, _ = registerStartedRemote(t, manager, repoID, repoPath, "fenced", srv.URL, session.Ready)
+			var err error
+			grant, err = manager.sandboxTokens.mint(inst.ID)
+			require.NoError(t, err)
 
-	require.False(t, manager.pushCreds.autoPushInFlight(inst.ID), "precondition: no fence")
-	_ = manager.preserveSandboxBeforeReap(repoID, daemonInstanceKey(repoID, "fenced"), inst, "")
-	assert.True(t, fencedDuringArchive.Load(), "the push ran while push credentials were still answerable for its row")
-	assert.True(t, manager.pushCreds.autoPushInFlight(inst.ID), "the fence must outlive the call: the in-sandbox archive takes no context")
+			require.False(t, manager.pushCreds.autoPushFenced(inst.ID, grant), "precondition: no fence")
+			_ = manager.preserveSandboxBeforeReap(repoID, daemonInstanceKey(repoID, "fenced"), inst, "")
+			assert.True(t, fencedDuringArchive.Load(), "the push ran while push credentials were still answerable for its row")
+			assert.Equal(t, tc.wantFenced, manager.pushCreds.autoPushFenced(inst.ID, grant))
+
+			// A replacement runtime's new credential is not fenced by the old one's
+			// abandoned archive.
+			fresh, err := manager.sandboxTokens.mint(inst.ID)
+			require.NoError(t, err)
+			assert.False(t, manager.pushCreds.autoPushFenced(inst.ID, fresh), "the fence follows the credential, not the session forever")
+		})
+	}
+}
+
+// An abandoned automatic push fences the route for exactly the credential that
+// was live then; the session's next credential (a replacement runtime) is
+// answered.
+func TestGitCredential_AbandonedAutoPushFencesOnlyThatCredential(t *testing.T) {
+	pf := newPushFixture(t)
+	pf.mgr.pushCreds.abandonAutoPush(pf.me.ID, pf.secret)
+	code, got, msg := pf.askOwn(t)
+	requireRefused(t, code, got, msg, refusePushAutoPreserve)
+
+	fresh, err := pf.mgr.sandboxTokens.mint(pf.me.ID)
+	require.NoError(t, err)
+	code, got, msg = pf.ask(t, fresh, "https", "github.com", "owner/repo.git")
+	requireAnswered(t, code, got, msg)
 }
 
 func TestGitCredential_NoLoginOnTheDaemonBoxIsNamed(t *testing.T) {

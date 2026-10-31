@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"sync"
@@ -87,6 +89,15 @@ type pushCredentialState struct {
 	// autoPushing counts, per session id, the automatic preserve-pushes the
 	// daemon is running right now (preserveSandboxBeforeReap).
 	autoPushing map[string]int
+	// abandoned maps a session id to the callback credential it held when one of
+	// its automatic preserve-pushes ended WITHOUT a confirmed success. The
+	// in-sandbox archive takes no context and runs its git steps with no
+	// deadline, so after a timeout or a lost reply it may still reach its push;
+	// no amount of elapsed time proves it will not. The fence therefore holds for
+	// as long as that credential does: until a replacement runtime is minted a
+	// new one, or the session ends and revokes it. It keeps a digest of the
+	// credential, never the credential.
+	abandoned map[string]string
 }
 
 // beginAutoPush fences sessionID off from push credentials for the duration of
@@ -110,10 +121,36 @@ func (s *pushCredentialState) beginAutoPush(sessionID string) func() {
 	}
 }
 
-func (s *pushCredentialState) autoPushInFlight(sessionID string) bool {
+// abandonAutoPush keeps sessionID fenced for as long as grant is its callback
+// credential: an automatic preserve-push ended without a confirmed success.
+func (s *pushCredentialState) abandonAutoPush(sessionID, grant string) {
+	if grant == "" {
+		return // no credential, so nothing it could ever be answered with
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.autoPushing[sessionID] > 0
+	if s.abandoned == nil {
+		s.abandoned = map[string]string{}
+	}
+	s.abandoned[sessionID] = grantDigest(grant)
+}
+
+func grantDigest(grant string) string {
+	sum := sha256.Sum256([]byte(grant))
+	return hex.EncodeToString(sum[:])
+}
+
+// autoPushFenced reports whether a request from sessionID, admitted with grant,
+// falls inside an automatic preserve-push's fence: one is running now, or one was
+// abandoned while this same credential was the session's.
+func (s *pushCredentialState) autoPushFenced(sessionID, grant string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.autoPushing[sessionID] > 0 {
+		return true
+	}
+	fenced, ok := s.abandoned[sessionID]
+	return ok && grant != "" && fenced == grantDigest(grant)
 }
 
 func (s *pushCredentialState) token(ctx context.Context, o pushcred.Origin) (string, error) {
@@ -161,7 +198,7 @@ func (s *controlServer) gitCredential(ctx context.Context, req GitCredentialRequ
 	if err := s.requireManagerReady(); err != nil {
 		return err
 	}
-	token, err := s.manager.pushCredentialFor(ctx, owner, req)
+	token, err := s.manager.pushCredentialFor(ctx, owner, admittedSandboxCredential(ctx), req)
 	if err != nil {
 		return err
 	}
@@ -171,11 +208,11 @@ func (s *controlServer) gitCredential(ctx context.Context, req GitCredentialRequ
 }
 
 // pushCredentialFor authorizes owner's request, reads the token, and authorizes
-// again: the read can take seconds (a gh run), and a session archived, killed or
-// fenced meanwhile must not be answered with a token its own revocation was meant
-// to stop.
-func (m *Manager) pushCredentialFor(ctx context.Context, owner string, req GitCredentialRequest) (string, error) {
-	origin, err := m.authorizePushCredential(owner, req)
+// again: the read can take seconds (a gh run), and a session archived, killed,
+// replaced or fenced meanwhile must not be answered with a token its own end was
+// meant to stop. grant is the credential the request was admitted with.
+func (m *Manager) pushCredentialFor(ctx context.Context, owner, grant string, req GitCredentialRequest) (string, error) {
+	origin, err := m.authorizePushCredential(owner, grant, req)
 	if err != nil {
 		return "", err
 	}
@@ -186,7 +223,7 @@ func (m *Manager) pushCredentialFor(ctx context.Context, owner string, req GitCr
 	if err != nil {
 		return "", err
 	}
-	again, err := m.authorizePushCredential(owner, req)
+	again, err := m.authorizePushCredential(owner, grant, req)
 	if err != nil {
 		return "", err
 	}
@@ -199,36 +236,57 @@ func (m *Manager) pushCredentialFor(ctx context.Context, owner string, req GitCr
 	return token, nil
 }
 
-// authorizePushCredential applies every rule but the token read, and returns the
-// origin the request may be answered for.
-func (m *Manager) authorizePushCredential(owner string, req GitCredentialRequest) (pushcred.Origin, error) {
-	m.mu.Lock()
-	inst, _ := m.trackedSessionByIDLocked(owner)
-	m.mu.Unlock()
-	if inst == nil {
-		return pushcred.Origin{}, sandboxRefusal(refusePushNotLive)
+// authorizePushCredential applies every rule but the token read and returns the
+// origin the request may be answered for. Its one blocking step, reading the
+// daemon checkout's origin (a git run), sits BETWEEN two passes of the state
+// checks, so the last thing it does before answering is a check that blocks on
+// nothing: no revocation, archive, licence change or fence can land in a gap
+// between its check and the reply.
+func (m *Manager) authorizePushCredential(owner, grant string, req GitCredentialRequest) (pushcred.Origin, error) {
+	inst, err := m.pushCredentialState(owner, grant, nil)
+	if err != nil {
+		return pushcred.Origin{}, err
 	}
-	backend := instanceBackendType(inst)
-	if backend != "ssh" && backend != "sandbox" {
-		return pushcred.Origin{}, sandboxRefusal(refusePushNotLicensed)
+	origin, originOK := instancePushOrigin(inst)
+	if _, err := m.pushCredentialState(owner, grant, inst); err != nil {
+		return pushcred.Origin{}, err
 	}
-	if inst.IsResting() || inst.GetStatus() == session.Deleting || !m.sandboxTokens.holds(owner) {
-		return pushcred.Origin{}, sandboxRefusal(refusePushNotLive)
-	}
-	if m.pushCreds.autoPushInFlight(inst.ID) {
-		return pushcred.Origin{}, sandboxRefusal(refusePushAutoPreserve)
-	}
-	if !m.pushCredentialLicensed(inst, backend) {
-		return pushcred.Origin{}, sandboxRefusal(refusePushNotLicensed)
-	}
-	origin, ok := instancePushOrigin(inst)
-	if !ok {
+	if !originOK {
 		return pushcred.Origin{}, sandboxRefusal(refusePushNoOrigin)
 	}
 	if !origin.Matches(req.Protocol, req.Host, req.Path) {
 		return pushcred.Origin{}, sandboxRefusal(refusePushOtherRepo)
 	}
 	return origin, nil
+}
+
+// pushCredentialState is the non-blocking half of the authorization: the row is
+// the caller's own, off-box and live; the credential the request was admitted
+// with is still that row's; no automatic preserve-push fences it; and the
+// operator's live config licenses its placement. want, when set, is the row an
+// earlier pass found: a different object under the same id is a replacement, and
+// is refused rather than trusted.
+func (m *Manager) pushCredentialState(owner, grant string, want *session.Instance) (*session.Instance, error) {
+	m.mu.Lock()
+	inst, _ := m.trackedSessionByIDLocked(owner)
+	m.mu.Unlock()
+	if inst == nil || (want != nil && inst != want) {
+		return nil, sandboxRefusal(refusePushNotLive)
+	}
+	backend := instanceBackendType(inst)
+	if backend != "ssh" && backend != "sandbox" {
+		return nil, sandboxRefusal(refusePushNotLicensed)
+	}
+	if inst.IsResting() || inst.GetStatus() == session.Deleting || !m.sandboxTokens.stillGrants(owner, grant) {
+		return nil, sandboxRefusal(refusePushNotLive)
+	}
+	if m.pushCreds.autoPushFenced(inst.ID, grant) {
+		return nil, sandboxRefusal(refusePushAutoPreserve)
+	}
+	if !m.pushCredentialLicensed(inst, backend) {
+		return nil, sandboxRefusal(refusePushNotLicensed)
+	}
+	return inst, nil
 }
 
 // pushCredentialLicensed reports whether the operator's live global config

@@ -29,11 +29,6 @@ import (
 // bounded either way, which is what the poll needs.
 const sandboxPushTimeout = session.AgentArchiveCallTimeout + 30*time.Second
 
-// autoPushFenceGrace is how long push credentials stay withheld from a row after
-// its automatic preserve-push returns: one more archive-call budget, the longest
-// the abandoned in-sandbox work is expected to run on (#5571 W7.8).
-const autoPushFenceGrace = session.AgentArchiveCallTimeout
-
 // The force-reap suggestion renders the per-session escape hatch the refusals below
 // must name. A guard that blocks without naming its own release is #2917, so
 // every refusal in this file ends with this string.
@@ -133,12 +128,18 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 	// This push is af's own decision, not the user's, so it must not start
 	// succeeding just because the host can now get push credentials (#5571 W7.8,
 	// the owner's answer to Q4): the credential route refuses this row while the
-	// push runs. The fence outlives the call by autoPushFenceGrace because the
-	// in-sandbox archive takes no context and keeps working after the daemon
-	// stops waiting (sandboxPushTimeout's comment).
+	// push runs. Only a CONFIRMED success lifts the fence. Any other ending — a
+	// timeout, a lost reply, a refusal — may leave the in-sandbox archive running
+	// (it takes no context, and its git steps have no deadline), so the row stays
+	// fenced for as long as its current callback credential lives: until a
+	// replacement runtime gets a new one, or the session ends.
+	grant := m.sandboxTokens.grantFor(instance.ID)
 	release := m.pushCreds.beginAutoPush(instance.ID)
-	defer time.AfterFunc(autoPushFenceGrace, release)
 	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
+	if err != nil {
+		m.pushCreds.abandonAutoPush(instance.ID, grant)
+	}
+	release()
 	if err != nil {
 		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its
 		// push fails. The session stays Lost and the retry loop keeps trying, which

@@ -37,6 +37,22 @@ func withSandboxOwner(ctx context.Context, sessionID string) context.Context {
 	return context.WithValue(ctx, sandboxOwnerKey{}, sessionID)
 }
 
+// admittedSandboxCredentialKey carries the sandbox credential a request was admitted with.
+type admittedSandboxCredentialKey struct{}
+
+// withAdmittedSandboxCredential records the credential the gate admitted,
+// beside its owner.
+func withAdmittedSandboxCredential(ctx context.Context, secret string) context.Context {
+	return context.WithValue(ctx, admittedSandboxCredentialKey{}, secret)
+}
+
+// admittedSandboxCredential returns the credential the request was admitted
+// with, "" for the operator's authority.
+func admittedSandboxCredential(ctx context.Context) string {
+	secret, _ := ctx.Value(admittedSandboxCredentialKey{}).(string)
+	return secret
+}
+
 // sandboxOwner returns the session owning the credential this request
 // authenticated with, and whether the request came from a sandbox at all.
 //
