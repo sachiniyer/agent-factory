@@ -2280,6 +2280,9 @@ body[data-project-color] [data-af-theme="dark"] {
 /* Modal overlay layer (#1592 Phase 5 PR5): a dimmed backdrop centering a surface
  * card. The host is a passive layer — empty and non-interactive until a modal
  * mounts into it. */
+/* Published by viewport-insets.ts; 0 means the visual viewport fills the layout one. */
+:root { --af-vv-top: 0; --af-vv-bottom: 0; }
+
 .af-modal-host {
   position: relative;
   z-index: var(--af-z-modal);
@@ -2287,7 +2290,10 @@ body[data-project-color] [data-af-theme="dark"] {
 
 .af-modal-backdrop {
   position: fixed;
-  inset: 0;
+  /* The visible area: a soft keyboard shrinks the visual viewport, not the layout
+   * one, so a plain inset: 0 would centre the card partly under it (#6431). Both
+   * variables are 0 on desktop and with the keyboard closed. */
+  inset: var(--af-vv-top) 0 var(--af-vv-bottom) 0;
   background: var(--af-surface);
   display: flex;
   align-items: center;
@@ -2299,7 +2305,7 @@ body[data-project-color] [data-af-theme="dark"] {
 .af-modal-card {
   width: 100%;
   max-width: calc(var(--af-space-1) * 120);
-  max-height: 90vh;
+  max-height: min(90vh, 100%);
   overflow-y: auto;
   /* Keep a scroll inside the modal from chaining into the page behind it (#2493). */
   overscroll-behavior: contain;
@@ -3180,7 +3186,8 @@ body[data-project-color] [data-af-theme="dark"] {
   }
 
   .af-modal-card {
-    max-height: 92vh;
+    /* Never taller than the visible area above a soft keyboard (#6431). */
+    max-height: min(92vh, 100%);
   }
 }
 
@@ -3912,7 +3919,10 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-session-first .af-term-title { order: 1; flex: 1; }
   .af-session-first .af-term-attention { order: 2; flex-shrink: 0; }
   .af-session-first .af-term-attention-label { display: none; }
-  .af-session-first .af-term-new-group { order: 3; flex-shrink: 0; }
+  /* The strip of Proposal shortcuts can be as long as the session has Proposal tabs: the group gives way
+   * (its shortcuts scroll) so the app menu behind it, which holds the tab bar, never leaves the screen. */
+  .af-session-first .af-term-new-group { order: 3; flex-shrink: 1; min-width: 0; }
+  .af-session-first .af-term-new-group > .af-term-new { flex-shrink: 0; }
   .af-session-first .af-appbar-tools-wrap { order: 4; flex-shrink: 0; }
   .af-session-first .af-term-head { display: none; }
   .af-session-first .af-appbar-tools { width: calc(100vw - var(--af-space-3)); }
@@ -3926,6 +3936,26 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-session-first .af-tabbar { flex: none; width: 100%; }
   .af-session-first .af-tabbar:not(:has(.af-tab:nth-of-type(2))) { display: none; }
   .af-session-first .af-appbar-tools a { min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)); }
+}
+
+/* Docs shortcuts: the phone header's one-tap way to a Docs tab while the tab bar
+ * sits in the app menu. Desktop keeps the tab bar. */
+.af-term-docs-group { display: none; }
+@media (max-width: 768px) {
+  .af-session-first .af-term-docs-group:not(:empty) {
+    display: flex;
+    align-items: center;
+    gap: var(--af-space-1);
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .af-session-first .af-term-docs {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));
+  }
 }
 
 .af-phone-pane-close { display: none; }
@@ -4035,10 +4065,17 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   color: var(--af-ink);
 }
 
+/* One row at split width. The strip shrinks first (it scrolls), then the save
+ * status, then the push text; both texts ellipsize. Only a very narrow pane moves
+ * the tools to their own row. */
+.af-docs {
+  container-type: inline-size;
+}
+
 .af-docs-head {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--af-space-1) var(--af-space-2);
   padding: var(--af-space-1) var(--af-space-2);
   border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
@@ -4049,8 +4086,8 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   position: relative;
   display: flex;
   align-items: center;
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 1 8 auto;
+  min-width: calc(var(--af-space-3) * 7);
   gap: var(--af-space-1);
 }
 
@@ -4182,7 +4219,8 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 .af-docs-tools {
   display: flex;
   align-items: center;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   gap: var(--af-space-2);
   margin-left: auto;
 }
@@ -4196,7 +4234,7 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 .af-docs-push {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex: 0 1 auto;
   gap: var(--af-space-1) var(--af-space-2);
   min-width: 0;
 }
@@ -4211,13 +4249,27 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 .af-docs-chip {
   display: inline-flex;
   align-items: center;
+  flex: 0 1 auto;
   gap: var(--af-space-1);
   min-width: 0;
   white-space: nowrap;
 }
 
+.af-docs-chip-text,
+.af-docs-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .af-docs-chip-text {
   font-variant-numeric: tabular-nums;
+}
+
+.af-docs-chip-action,
+.af-docs-push .af-docs-sep,
+.af-docs-questions {
+  flex: none;
 }
 
 .af-docs-chip-action:disabled {
@@ -4458,12 +4510,28 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   vertical-align: top;
 }
 
+@container (max-width: 440px) {
+  .af-docs-head {
+    flex-wrap: wrap;
+  }
+
+  .af-docs-tools {
+    flex: 1 1 100%;
+    min-width: 0;
+    margin-left: 0;
+  }
+}
+
 .af-docs-editor .cm-md-table th {
   background: var(--af-surface-raised);
   font-weight: 600;
 }
 
 @media (max-width: 768px) {
+  .af-docs-head {
+    flex-wrap: wrap;
+  }
+
   .af-docs-tools {
     flex: 1 1 100%;
     flex-wrap: wrap;
@@ -4480,4 +4548,47 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 .af-docs-tab-gone {
   font-style: italic;
   color: var(--af-ink-muted);
+}
+
+/* "Reconnecting…" (#6430): shown only after a socket has been down for the grace
+ * period. Static glyph plus words in the existing "lost" colour: nothing animates,
+ * so reduced motion needs no separate fallback. */
+.af-term-conn {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--af-space-1);
+  padding: 0 var(--af-space-2);
+  border: calc(var(--af-space-1) / 4) solid var(--af-lost);
+  border-radius: var(--af-radius-control);
+  color: var(--af-lost);
+  font-size: var(--af-type-body);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.af-term-conn[hidden] { display: none; }
+.af-rail-conn {
+  padding: var(--af-space-1) var(--af-space-3);
+  color: var(--af-lost);
+  font-size: var(--af-type-body);
+}
+.af-rail-conn[hidden] { display: none; }
+@media (max-width: 768px) {
+  /* The compact row has no spare width, so while the chip shows it takes the
+   * title's slot (same order, same flex) instead of squeezing the title to "p…"
+   * or growing the header, which would shift the terminal and the keybar. */
+  .af-session-first .af-term-conn {
+    order: 1;
+    flex: 1 1 0;
+    min-width: 0;
+    justify-content: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0;
+    font-size: var(--af-type-caption);
+  }
+  .af-session-first .af-term-conn-glyph { display: none; }
+  .af-session-first .af-appbar:has(.af-term-conn:not([hidden])) .af-term-title { display: none; }
+  /* The rail copy is for the desktop rail; on a phone the header chip is the signal. */
+  .af-rail-conn { display: none; }
 }

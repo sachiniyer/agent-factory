@@ -670,6 +670,11 @@ func (t *TmuxSession) captureTargetLiveness(gen *tmuxGeneration) (alive, known b
 // after an unanswered one pays the same full timeout for the same outcome
 // (Codex on #4473).
 func (t *TmuxSession) confirmedGeneration() (*tmuxGeneration, bool) {
+	// A restore pass primes one server-wide listing (#6423) that carries the same
+	// "#{session_id} #{pid} #{session_created}" for every session it contains.
+	if gen, ok := currentSnapshot().generation(t.sanitizedName); ok {
+		return gen, true
+	}
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := t.outputTmuxBounded(ctx, "display-message", "-p",

@@ -37,7 +37,8 @@ export interface EventStreamCallbacks {
    *  Snapshot and this open; on reconnects, the events dropped while down. */
   onResync(): void;
   /** Fired on every connection-state change, for the header indicator. */
-  onStatus(status: EventStreamStatus): void;
+  /** `retryAt` (epoch ms) accompanies a "reconnecting" that has an attempt scheduled (#6430). */
+  onStatus(status: EventStreamStatus, retryAt?: number): void;
   /** Fired when a streak of reconnect attempts has closed before `onopen`
    *  ever fired, and again every AUTH_FAILURE_THRESHOLD further failures while
    *  the streak lasts (so an inconclusive probe is retried) — the only visible signature that the daemon rejected the WS
@@ -211,8 +212,8 @@ export class EventStream {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay = Math.min(BACKOFF_BASE_MS * 2 ** this.retry, BACKOFF_MAX_MS);
+    this.cb.onStatus("reconnecting", Date.now() + delay);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;

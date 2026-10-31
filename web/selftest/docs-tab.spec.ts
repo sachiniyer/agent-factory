@@ -3,9 +3,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 
-// Proposal mode, step 2: `af proposal start` gives a session a Docs tab, the web
-// renders it with the lazy editor bundle, and an edit in the browser saves through
-// the daemon to the doc on disk.
+// Proposal mode, step 2: `af proposal start` gives the session being viewed a Docs
+// tab, the web splits it to the right of the Agent pane with the lazy editor bundle,
+// and an edit in the browser saves through the daemon to the doc on disk.
 test("docs tab: af proposal start opens a Docs pane whose edits save to disk", async ({ page, request }) => {
   const afBin = process.env.AF_BIN;
   const mockRepo = process.env.AF_MOCK_REPO;
@@ -16,10 +16,6 @@ test("docs tab: af proposal start opens a Docs pane whose edits save to disk", a
   const title = "docs-probe";
   const slug = "docs-probe-plan";
   af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
-  const started = JSON.parse(af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title,
-    "--docs", "goals,api")) as { path: string; tab?: string; tab_error?: string };
-  expect(started.tab_error ?? "", "start must create the Docs tab").toBe("");
-  expect(started.tab).toBeTruthy();
 
   const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
   const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
@@ -31,11 +27,23 @@ test("docs tab: af proposal start opens a Docs pane whose edits save to disk", a
   });
   await page.goto(`/#/session/${session.id}`);
   await expect(page.locator(".af-tab-label", { hasText: "Agent" })).toBeVisible();
+  await expect(page.locator(".af-pane")).toHaveCount(1);
   expect(editorLoads, "the editor bundle must not load before a Docs tab opens").toHaveLength(0);
 
-  await page.locator(".af-tab", { hasText: "Docs" }).click();
+  const started = JSON.parse(af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title,
+    "--docs", "goals,api")) as { path: string; tab?: string; tab_error?: string };
+  expect(started.tab_error ?? "", "start must create the Docs tab").toBe("");
+  expect(started.tab).toBeTruthy();
+
   const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
   await expect(pane.locator(".cm-content")).toBeVisible();
+  const panes = page.locator(".af-pane");
+  await expect(panes, "Agent and Docs open side by side").toHaveCount(2);
+  await expect(panes.nth(0).locator(".xterm")).toBeVisible();
+  await expect(panes.nth(1).locator(".af-docs")).toBeVisible();
+  const agentBox = await panes.nth(0).boundingBox();
+  const docsBox = await panes.nth(1).boundingBox();
+  expect(docsBox!.x, "Docs sits to the right of Agent").toBeGreaterThan(agentBox!.x);
   await expect(pane.locator(".af-docs-tab")).toHaveText(["goals", "api"]);
   await expect(pane.locator('.af-docs-tab[aria-selected="true"]')).toHaveText("goals");
   await expect(pane.locator(".af-docs-status"), "a saved doc shows no status").toBeHidden();
@@ -47,6 +55,14 @@ test("docs tab: af proposal start opens a Docs pane whose edits save to disk", a
   await page.keyboard.type(`\n\n${marker}\n`);
   await expect(pane.locator(".af-docs-status")).toBeHidden({ timeout: 15_000 });
   await expect.poll(() => readFileSync(join(started.path, "goals.md"), "utf8")).toContain(marker);
+
+  await page.locator(".af-tab-label", { hasText: /^Agent$/ }).click();
+  await expect(panes, "a tab click leaves the proposal view for that tab alone").toHaveCount(1);
+  await expect(panes.nth(0).locator(".xterm")).toBeVisible();
+  await page.locator(".af-tab-label", { hasText: /^Proposal$/ }).click();
+  await expect(panes, "the Proposal tab brings back Agent and the proposal").toHaveCount(2);
+  await expect(panes.nth(0).locator(".xterm")).toBeVisible();
+  await expect(panes.nth(1).locator(".af-docs")).toBeVisible();
 });
 
 // Proposal mode, step 3: the tab has no Auto / Manual switch, but a session set to
@@ -71,10 +87,10 @@ test("docs tab: Manual mode holds edits until Send now delivers them to the agen
   expect(session).toBeTruthy();
 
   await page.goto(`/#/session/${session.id}`);
-  await page.locator(".af-tab", { hasText: "Docs" }).click();
+  await expect(page.locator(".af-pane"), "a session opened with a Docs tab shows it split").toHaveCount(2);
   const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
   await expect(pane.locator(".cm-content")).toBeVisible();
-  await expect(pane.locator(".af-docs-status"), "a saved doc shows no status").toBeHidden();
+  await expect(pane.locator(".af-docs-status")).toBeHidden();
 
   const push = pane.locator(".af-docs-push");
   await expect(push.getByRole("button", { name: "Auto", exact: true })).toHaveCount(0);
@@ -116,7 +132,6 @@ test("docs tab: right-click Delete removes a doc", async ({ page, request }) => 
   const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
   expect(session).toBeTruthy();
   await page.goto(`/#/session/${session.id}`);
-  await page.locator(".af-tab", { hasText: "Docs" }).click();
   const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
   await expect(pane.locator(".cm-content")).toBeVisible();
   await expect(pane.locator(".af-docs-tab")).toHaveText(["goals", "api"]);
@@ -160,7 +175,6 @@ test("docs tab: a doc whose delete is pending does not open from its tab", async
   });
 
   await page.goto(`/#/session/${session.id}`);
-  await page.locator(".af-tab", { hasText: "Docs" }).click();
   const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
   await expect(pane.locator(".cm-content")).toBeVisible();
   const goalsTab = pane.locator(".af-docs-tab", { hasText: "goals" });
@@ -198,7 +212,6 @@ test("docs tab: switching docs mid-edit keeps what was typed", async ({ page, re
   const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
   const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
   await page.goto(`/#/session/${session.id}`);
-  await page.locator(".af-tab", { hasText: "Docs" }).click();
   const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
   await expect(pane.locator(".cm-content")).toBeVisible();
 
@@ -212,4 +225,76 @@ test("docs tab: switching docs mid-edit keeps what was typed", async ({ page, re
   await pane.locator(".af-docs-tab", { hasText: "goals" }).click();
   await expect(pane.locator(".cm-content")).toContainText(marker);
   await expect.poll(() => readFileSync(join(started.path, "goals.md"), "utf8")).toContain(marker);
+});
+
+// A Proposal tab that arrives while the user is typing in the Agent terminal adds the split, which
+// rebuilds the pane wrappers and reparents the Agent container: the keyboard must stay in the terminal
+// for a user who had it, and must not be handed to one who had left it.
+for (const attached of [true, false]) {
+  test(`docs tab: a proposal arriving ${attached ? "keeps the keyboard in the Agent terminal" : "does not take a detached user into it"}`, async ({ page, request }) => {
+    const afBin = process.env.AF_BIN;
+    const mockRepo = process.env.AF_MOCK_REPO;
+    test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+    const af = (...args: string[]): string =>
+      execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+    const title = attached ? "docs-focus-kept-probe" : "docs-focus-detached-probe";
+    const slug = attached ? "docs-focus-kept-plan" : "docs-focus-detached-plan";
+    af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
+    const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+    const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
+    expect(session).toBeTruthy();
+    await page.goto(`/#/session/${session.id}`);
+    await expect(page.locator(".af-tab-label", { hasText: /^Agent$/ })).toBeVisible();
+    const textarea = page.locator(".af-pane-host .xterm-helper-textarea").first();
+    await page.locator(".af-pane-host .xterm").first().click();
+    await expect(textarea).toBeFocused();
+    if (!attached) {
+      await textarea.evaluate((el) => (el as HTMLElement).blur());
+      await expect(textarea).not.toBeFocused();
+    }
+
+    af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title, "--docs", "goals");
+    await expect(page.locator(`.af-docs[data-proposal="${slug}"] .cm-content`)).toBeVisible({ timeout: 20_000 });
+    if (attached) {
+      await expect(page.locator(".af-pane-host .xterm-helper-textarea").first(), "the Agent terminal keeps the keyboard").toBeFocused();
+    } else {
+      await expect(page.locator(".af-pane-host .xterm-helper-textarea").first(), "a detached user is not pulled into it").not.toBeFocused();
+    }
+  });
+}
+
+// On a phone the session header carries one shortcut per Proposal tab; with several of them the strip
+// must not push the app menu out of the viewport, because the tab bar lives behind that menu.
+test("docs tab: several Proposal shortcuts keep the app menu on screen at phone width", async ({ page, request }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const af = (...args: string[]): string =>
+    execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+  const title = "docs-phone-strip-probe";
+  af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
+  af("proposal", "start", "phone-strip-plan", "--repo", mockRepo as string, "--session", title, "--docs", "goals");
+  for (const n of [2, 3, 4]) {
+    af("sessions", "tabs", "create", title, "--repo", mockRepo as string, "--kind", "docs", "--proposal", "phone-strip-plan", "--name", `phone-${n}`);
+  }
+  const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
+  expect(session).toBeTruthy();
+
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.goto(`/#/session/${session.id}`);
+  const shortcuts = page.locator(".af-session-first .af-term-docs");
+  await expect(shortcuts).toHaveCount(4, { timeout: 20_000 });
+  const more = page.locator(".af-appbar-more");
+  await expect(more).toBeVisible();
+  const box = (await more.boundingBox())!;
+  expect(box.x, "the app menu starts inside the viewport").toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width, "and ends inside it").toBeLessThanOrEqual(320);
+  const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+  expect(noOverflow, "the page does not scroll sideways").toBe(true);
+  // Every shortcut stays reachable: the strip scrolls, it does not clip them.
+  await shortcuts.last().scrollIntoViewIfNeeded();
+  await expect(shortcuts.last()).toBeVisible();
 });

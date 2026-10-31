@@ -11,8 +11,8 @@ import (
 
 var proposalPushModeCmd = &cobra.Command{
 	Use:   "push-mode auto|manual",
-	Short: "Set whether the Docs tab sends the user's edits to this session by itself",
-	Long: "Set the push mode of this session's Docs tab. In auto mode, af sends the user's " +
+	Short: "Set whether the Proposal tab sends the user's edits to this session by itself",
+	Long: "Set the push mode of this session's Proposal tab. In auto mode, af sends the user's " +
 		"edits to the agent as a prompt 10 s after the last save, when the agent is idle. In " +
 		"manual mode, af sends them only on \"af proposal send\" or the tab's Send now button. " +
 		"Prints the push status.",
@@ -38,7 +38,7 @@ var proposalSendCmd = &cobra.Command{
 	Use:   "send",
 	Short: "Send the user's unsent edits to this session now",
 	Long: "Send this session the edits to its proposal that it has not seen, as one prompt, " +
-		"the same as the Docs tab's Send now button. When the agent is busy, af sends them " +
+		"the same as the Proposal tab's Send now button. When the agent is busy, af sends them " +
 		"when it is next idle. Prints the push status.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {

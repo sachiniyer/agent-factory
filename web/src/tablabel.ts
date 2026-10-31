@@ -76,7 +76,7 @@ export function tabLabel(tab: NamedTab): string {
     case TabKind.VSCode:
       return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     case TabKind.Docs:
-      return tab.name && tab.name !== "docs" ? tab.name : "Docs";
+      return tab.name && tab.name !== "docs" ? tab.name : "Proposal";
     default:
       return tab.name || "Tab";
   }

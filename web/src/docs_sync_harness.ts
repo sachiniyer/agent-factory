@@ -1227,7 +1227,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   async function lateLanding(): Promise<void> {
     const doc = attached;
     const s = syncs.get(doc);
-    if (!doc || !s || !isLoaded(s) || s.ended || o.collide || ghostBox.cur || daemons.get(doc)!.deleted) return;
+    if (!doc || !s || !isLoaded(s) || s.ended || ghostBox.cur || daemons.get(doc)!.deleted) return;
     const line = userEdit();
     if (line === null) return;
     nextSaveFault = "slow";
@@ -1237,6 +1237,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       nextSaveFault = null;
       return;
     }
+    const landedToken = typed.get(doc)!.get(line);
     userUndo(line);
     const want = typed.get(doc)!.get(line);
     await advance(31_000); // the client's timeout fires; its read of the head runs and finds nothing changed
@@ -1283,7 +1284,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     const after = syncs.get(doc);
     if (!reopened && after && !after.ended && ["saved", "pending", "merged", "recovered", "saving"].includes(after.currentStatus)) {
       const got = after.text.split("\n")[line];
-      if (got !== want) fail("late-landing-save-overwrote-undo", `${doc} line ${line}: expected ${want}, the tab shows ${got} (status ${after.currentStatus})`);
+      // (With an agent editing too, its edit of that line may win the merge; the landed save's own text must not.)
+      if (got !== want && (!o.collide || got === landedToken)) fail("late-landing-save-overwrote-undo", `${doc} line ${line}: expected ${want}, the tab shows ${got} (status ${after.currentStatus})`);
     }
   }
 
@@ -1428,7 +1430,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   for (let step = 0; step < o.steps && !violation; step++) {
     // The late-landing interleavings are rare by chance, so they are reached on purpose at fixed steps.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 30 || step === 70 || step === 110)) await lateLanding();
-    if (o.chaos && (o.faults ?? 0) > 0 && (step === 60 || step === 100) && !o.collide) await dropThenLand();
+    if (o.chaos && (o.faults ?? 0) > 0 && (step === 60 || step === 100)) await dropThenLand();
     // The page holds adopted drafts, then goes through the back-forward cache.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 40 || step === 80 || step === 120)) {
       bfcacheReturn(true);
@@ -1624,7 +1626,11 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   for (let k = 0; k < 2; k++) {
     await advance(310_000);
     await drain();
+    // (A request that commits when its time comes, like a dropped save, tells the tabs as any commit does.)
+    while (events.length) deliverEvent();
+    await drain();
     for (const s of syncs.values()) s.reconnect?.();
+    ghostBox.cur?.sync.reconnect?.(); // the second window's events were lost with the outage too
     await drain();
     await advance(6000);
     await drain();

@@ -19,7 +19,7 @@ export function confirmDeleteTabModal(opts: {
   body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web
     ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available."
     : opts.kind === TabKind.Docs
-      ? "This removes the Docs tab. The proposal and its docs stay. Hiding a pane leaves the tab available."
+      ? "This removes the Proposal tab. The proposal and its docs stay. Hiding a pane leaves the tab available."
       : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
   asForm(handle.el.firstElementChild as HTMLElement, opts.onConfirm);
   queueMicrotask(() => cancelBtn.focus());

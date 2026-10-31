@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "50aedcdad6c0";
+var CLIENT_VERSION = "79d10f3c0af8";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7835,6 +7835,17 @@ var TriangleAlert = [
   ["path", { d: "M12 17h.01" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/wifi-off.mjs
+var WifiOff = [
+  ["path", { d: "M12 20h.01" }],
+  ["path", { d: "M8.5 16.429a5 5 0 0 1 7 0" }],
+  ["path", { d: "M5 12.859a10 10 0 0 1 5.17-2.69" }],
+  ["path", { d: "M19 12.859a10 10 0 0 0-2.007-1.523" }],
+  ["path", { d: "M2 8.82a15 15 0 0 1 4.177-2.643" }],
+  ["path", { d: "M22 8.82a15 15 0 0 0-11.288-3.764" }],
+  ["path", { d: "m2 2 20 20" }]
+];
+
 // node_modules/lucide/dist/esm/icons/x.mjs
 var X = [
   ["path", { d: "M18 6 6 18" }],
@@ -7852,6 +7863,7 @@ var ICONS = {
   "chevron-down": ChevronDown,
   circle: Circle,
   "circle-dashed": CircleDashed,
+  "wifi-off": WifiOff,
   "circle-question": CircleQuestionMark,
   diamond: Diamond,
   ellipsis: Ellipsis,
@@ -8062,7 +8074,8 @@ function terminalChrome(opts) {
   };
   const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
   const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
-  const newTabs = h("div", { class: "af-term-new-group" }, newTerminal, newVSCode);
+  const docsShortcuts2 = h("div", { class: "af-term-docs-group" });
+  const newTabs = h("div", { class: "af-term-new-group" }, docsShortcuts2, newTerminal, newVSCode);
   const title = h("span", { class: "af-term-title" });
   applyTerminalTitle(title, opts.title);
   const placement = h("span", { class: "af-term-placement" });
@@ -8094,7 +8107,7 @@ function terminalChrome(opts) {
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
   const attention = attentionChip(opts.clearAttention);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, docsShortcuts: docsShortcuts2, tabUnavailable, menu, dispose: menu.dispose };
 }
 function attentionChip(onDismiss) {
   const label = h("span", { class: "af-term-attention-label" }, "Attention");
@@ -11832,8 +11845,8 @@ var AttachTerminal = class {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay2 = Math.min(BACKOFF_BASE_MS * 2 ** this.retry, BACKOFF_MAX_MS);
+    this.cb.onStatus("reconnecting", Date.now() + delay2);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -12664,8 +12677,8 @@ var EventStream = class {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay2 = Math.min(BACKOFF_BASE_MS2 * 2 ** this.retry, BACKOFF_MAX_MS2);
+    this.cb.onStatus("reconnecting", Date.now() + delay2);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -13565,7 +13578,7 @@ function confirmDeleteTabModal(opts) {
     confirmClass: "af-danger",
     onCancel: opts.onCancel
   });
-  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : opts.kind === TabKind.Docs ? "This removes the Docs tab. The proposal and its docs stay. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
+  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : opts.kind === TabKind.Docs ? "This removes the Proposal tab. The proposal and its docs stay. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
   asForm(handle.el.firstElementChild, opts.onConfirm);
   queueMicrotask(() => cancelBtn.focus());
   return handle;
@@ -14303,6 +14316,63 @@ function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
   return tab;
 }
 
+// src/docs_autosplit.ts
+var AGENT_TAB = 0;
+function placeNewDocsTabs(tree, tabIds, tabKinds, seen, key, narrow) {
+  let out = tree;
+  tabKinds.forEach((kind, tab) => {
+    const k = key(tabIds[tab] ?? "");
+    if (kind !== TabKind.Docs || seen.has(k)) {
+      return;
+    }
+    seen.add(k);
+    if (narrow || leaves(out).some((l) => tabKinds[l.tab] === TabKind.Web || tabKinds[l.tab] === TabKind.VSCode)) {
+      return;
+    }
+    out = placeDocs(out, tab, tabKinds);
+  });
+  return out;
+}
+function placeDocs(tree, docs, tabKinds) {
+  const panes = leaves(tree);
+  if (panes.some((l) => l.tab === docs)) {
+    return tree;
+  }
+  const docsPane = panes.find((l) => tabKinds[l.tab] === TabKind.Docs);
+  if (docsPane) {
+    return replaceTab(tree, docsPane.id, docs);
+  }
+  const target = panes.find((l) => l.tab === AGENT_TAB) ?? (tree.kind === "leaf" ? tree : null);
+  return target ? splitLeaf(tree, target.id, "right", docs) : tree;
+}
+function isProposalView(tree, tabKinds) {
+  return tree.kind === "split" && tree.dir === "row" && tree.a.kind === "leaf" && tree.a.tab === AGENT_TAB && tree.b.kind === "leaf" && tabKinds[tree.b.tab] === TabKind.Docs;
+}
+function showTab(tree, focusedId, tab, tabKinds, narrow, ratio) {
+  if (tabKinds[tab] === TabKind.Docs && !narrow && tab !== AGENT_TAB) {
+    if (isProposalView(tree, tabKinds) && tree.kind === "split" && tree.b.kind === "leaf" && tree.b.tab === tab) {
+      return { tree, focus: tree.b.id };
+    }
+    const shown = leaves(tree).find((l) => l.tab === AGENT_TAB);
+    const agent = shown ? { kind: "leaf", id: shown.id, tab: AGENT_TAB } : singleLeaf(AGENT_TAB);
+    const view = splitLeaf(agent, agent.id, "right", tab);
+    const sized = view.kind === "split" ? setRatio(view, view.id, ratio) : view;
+    return { tree: sized, focus: leaves(sized).find((l) => l.tab === tab)?.id ?? agent.id };
+  }
+  if (isProposalView(tree, tabKinds) && tree.kind === "split") {
+    const keep = tab === AGENT_TAB ? tree.a.id : focusedId;
+    return { tree: { kind: "leaf", id: keep, tab }, focus: keep };
+  }
+  const next = replaceTab(tree, focusedId, tab);
+  return { tree: next, focus: leaves(next).find((l) => l.tab === tab)?.id ?? focusedId };
+}
+function rebindTab(tree, focusedId, tab, tabKinds, narrow, ratio) {
+  if (leaves(tree).find((l) => l.id === focusedId)?.tab === tab) {
+    return { tree, focus: focusedId };
+  }
+  return showTab(tree, focusedId, tab, tabKinds, narrow, ratio);
+}
+
 // src/docs_tab.ts
 var docsModule = null;
 function loadDocsModule() {
@@ -14522,7 +14592,7 @@ function tabLabel(tab) {
     case TabKind.VSCode:
       return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     case TabKind.Docs:
-      return tab.name && tab.name !== "docs" ? tab.name : "Docs";
+      return tab.name && tab.name !== "docs" ? tab.name : "Proposal";
     default:
       return tab.name || "Tab";
   }
@@ -14536,6 +14606,9 @@ function isRenameableTab(kind) {
 
 // src/split.ts
 var EDGE_BAND = 0.3;
+function phoneWidth() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia("(max-width: 768px)").matches : false;
+}
 function el(tag, cls) {
   const node = document.createElement(tag);
   node.className = cls;
@@ -14634,9 +14707,10 @@ function probeFallbackMsg(health, host) {
   return health === "unreachable" ? `Could not reach the daemon to check ${host}.` : `No dev server is answering at ${host} yet.`;
 }
 var SplitView = class {
-  constructor(host, cb) {
+  constructor(host, cb, narrow = phoneWidth) {
     this.host = host;
     this.cb = cb;
+    this.narrow = narrow;
   }
   // Retained layout per session id (in-memory; a nice-to-have to persist across
   // reload is out of scope for v1). Keyed by the stable session id.
@@ -14727,6 +14801,12 @@ var SplitView = class {
   // ordinal later would ask the current roster about a past position and get the wrong
   // tab, so the id is captured at the same moment as the ordinal.
   lastFocusedTabId = "";
+  // Docs tabs already auto-split once this page load, keyed by session and tab
+  // identity, so a split the user closes is not put back.
+  docsPlaced = /* @__PURE__ */ new Set();
+  // The divider ratio of each session's proposal view, so the view comes back as
+  // the user left it.
+  proposalRatios = /* @__PURE__ */ new Map();
   /**
    * Shows `sessionId`'s layout, building/rebuilding terminals as needed. Called on
    * every selection/tab change: a NEW session rebuilds from its retained tree (or a
@@ -14762,7 +14842,7 @@ var SplitView = class {
       this.tabCount = tabCount;
       const before = this.tree;
       const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds, nextSynth);
-      this.tree = validate(settled, tabCount);
+      this.tree = this.placeDocs(sessionId, validate(settled, tabCount), tabIds, tabKinds);
       this.retain(sessionId, this.tree, tabIds);
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
       const renamed = !sameTabs(prevNames, tabNames);
@@ -14777,7 +14857,12 @@ var SplitView = class {
     this.forgetFocusHistory();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
-    this.tree = validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount);
+    this.tree = this.placeDocs(
+      sessionId,
+      validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount),
+      tabIds,
+      tabKinds
+    );
     this.retain(sessionId, this.tree, tabIds);
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
@@ -14815,6 +14900,10 @@ var SplitView = class {
     }
     return remapByIdentity(rec.tree, rec.ids, tabIds, nextSynth);
   }
+  placeDocs(sessionId, tree, tabIds, tabKinds) {
+    const key = (identity) => `${sessionId}\0${identity}`;
+    return placeNewDocsTabs(tree, tabIds, tabKinds, this.docsPlaced, key, this.narrow());
+  }
   /** Retains `tree` for `sessionId` together with the identities it is bound against. */
   retain(sessionId, tree, ids) {
     this.trees.set(sessionId, { tree, ids });
@@ -14822,11 +14911,9 @@ var SplitView = class {
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
    *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
   setFocusedTab(tab) {
-    if (!this.tree || !this.focusedId) {
-      return;
+    if (this.showTab(tab)) {
+      this.commit();
     }
-    this.tree = replaceTab(this.tree, this.focusedId, tab);
-    this.commit();
   }
   /** setFocusedTab for the post-await apply of an awaited tab mutation
    *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
@@ -14839,11 +14926,22 @@ var SplitView = class {
    *  overlapping awaited gestures by issue order, so a stale apply still refuses
    *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
   setFocusedTabAwaited(tab) {
-    if (!this.tree || !this.focusedId) {
-      return;
+    if (this.showTab(tab, true)) {
+      this.land();
     }
-    this.tree = replaceTab(this.tree, this.focusedId, tab);
-    this.land();
+  }
+  /** Applies docs_autosplit's showTab rule to the tree and focus; false without a
+   *  focused pane. */
+  showTab(tab, awaited = false) {
+    if (!this.tree || !this.focusedId) {
+      return false;
+    }
+    const ratio = this.sessionId && this.proposalRatios.get(this.sessionId) || 0.5;
+    const apply = awaited ? rebindTab : showTab;
+    const next = apply(this.tree, this.focusedId, tab, this.tabKinds, this.narrow(), ratio);
+    this.tree = next.tree;
+    this.focusedId = next.focus;
+    return true;
   }
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
@@ -15036,6 +15134,8 @@ var SplitView = class {
     const desired = leaves(this.tree);
     const wanted = new Set(desired.map((l) => l.id));
     const focusedDropped = this.focusedId !== null && !wanted.has(this.focusedId);
+    const heldPane = this.focusedId !== null && wanted.has(this.focusedId) ? this.panes.get(this.focusedId) : void 0;
+    const heldKeyboard = this.termHoldsFocus && !!heldPane?.term && heldPane.container.contains(document.activeElement);
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
         pane.term?.dispose();
@@ -15125,7 +15225,7 @@ var SplitView = class {
           this.token,
           sessionStreamEndpoint(this.sessionId, realId, leaf.tab),
           {
-            onStatus: (s) => this.onPaneStatus(leaf.id, s),
+            onStatus: (s, retryAt) => this.onPaneStatus(leaf.id, s, retryAt),
             onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
             // Only the AGENT tab (#3025 review): an automated DeliverPrompt reaches
             // the session through its agent server, so a half-typed command in an
@@ -15146,6 +15246,9 @@ var SplitView = class {
     }
     this.applyFocusClass();
     this.reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped);
+    if (heldKeyboard && !focusedRebuilt && !focusedDropped && heldPane && !heldPane.container.contains(document.activeElement)) {
+      this.refocus();
+    }
   }
   /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, or closed it
    *  and re-pointed focus at a survivor, correcting the desync where `store.focus`
@@ -15510,6 +15613,9 @@ var SplitView = class {
         document.body.classList.remove("af-resizing-col", "af-resizing-row");
         if (this.tree) {
           this.tree = setRatio(this.tree, node.id, node.ratio);
+          if (this.sessionId && this.tree.kind === "split" && isProposalView(this.tree, this.tabKinds)) {
+            this.proposalRatios.set(this.sessionId, this.tree.ratio);
+          }
           if (this.sessionId) {
             this.retain(this.sessionId, this.tree, this.tabIds);
           }
@@ -15704,7 +15810,7 @@ var SplitView = class {
     this.applyFocusClass();
     const pane = this.panes.get(leafId);
     if (pane) {
-      this.cb.onStatus(pane.status);
+      this.cb.onStatus(pane.status, pane.status === "reconnecting" ? pane.retryAt : void 0);
     }
     this.report();
   }
@@ -15745,14 +15851,15 @@ var SplitView = class {
     void pauseStatusPoll(sessionID, token2).catch(() => {
     });
   }
-  onPaneStatus(leafId, status) {
+  onPaneStatus(leafId, status, retryAt) {
     const pane = this.panes.get(leafId);
     if (pane) {
       pane.status = status;
+      pane.retryAt = status === "reconnecting" ? retryAt : void 0;
     }
     this.report();
     if (leafId === this.focusedId) {
-      this.cb.onStatus(status);
+      this.cb.onStatus(status, retryAt);
     }
   }
   onPaneFocus(leafId, focused) {
@@ -16753,12 +16860,12 @@ function triggerSummary(t) {
 function canTrigger(t) {
   return t.enabled && !!t.cron_expr && t.cron_expr.trim() !== "" && !(t.watch_cmd && t.watch_cmd.trim() !== "");
 }
-function lastRunSummary(t) {
+function lastRunSummary(t, now = /* @__PURE__ */ new Date()) {
   if (!t.last_run_at) {
     return "never run";
   }
   const status = t.last_run_status ? ` (${t.last_run_status})` : "";
-  return `last run ${t.last_run_at}${status}`;
+  return `last run ${formatTime(t.last_run_at, now)}${status}`;
 }
 function taskNeedsAttention(t) {
   return !!t.overdue || !!t.unschedulable || notArmed(t);
@@ -17662,6 +17769,40 @@ function hostSelection(touched, current, seed) {
   return touched ? current : seed;
 }
 
+// src/connection.ts
+var RECONNECT_GRACE_MS = 2e3;
+function connectionInput(state) {
+  return {
+    live: state.live,
+    liveRetryAt: state.liveRetryAt,
+    termStatus: state.selectedId === null ? "open" : state.termStatus,
+    termRetryAt: state.selectedId === null ? null : state.termRetryAt
+  };
+}
+function isDown(input) {
+  return input.live === "reconnecting" || input.termStatus === "reconnecting";
+}
+function nextRetryAt(input) {
+  const at = [];
+  if (input.live === "reconnecting" && typeof input.liveRetryAt === "number") at.push(input.liveRetryAt);
+  if (input.termStatus === "reconnecting" && typeof input.termRetryAt === "number") at.push(input.termRetryAt);
+  return at.length ? Math.min(...at) : null;
+}
+function connectionNotice(input, downSince, now) {
+  if (!isDown(input) || downSince === null || now - downSince < RECONNECT_GRACE_MS) return null;
+  const at = nextRetryAt(input);
+  const remaining = at === null ? null : Math.max(0, Math.ceil((at - now) / 1e3));
+  return { down: true, retryInS: remaining === 0 ? null : remaining };
+}
+function connectionWords(notice) {
+  const retry = notice.retryInS === null ? "" : `retry in ${notice.retryInS}s`;
+  return {
+    label: "Reconnecting\u2026",
+    retry,
+    full: retry ? `Reconnecting\u2026 ${retry}` : "Reconnecting\u2026"
+  };
+}
+
 // src/project-menu-focus.ts
 function replaceProjectMenuChildren(menu, children, fallback) {
   const active = menu.ownerDocument.activeElement;
@@ -17895,6 +18036,33 @@ function projectColorRow(current, label, onPick) {
   row.setAttribute("role", "group");
   row.setAttribute("aria-label", `Color for ${label}`);
   return row;
+}
+
+// src/docs_shortcut.ts
+function docsTabIndexes(tabs) {
+  const out = [];
+  tabs.forEach((tab, i) => {
+    if (tab.kind === TabKind.Docs) out.push(i);
+  });
+  return out;
+}
+function docsShortcuts(tabs, open) {
+  return docsTabIndexes(tabs).map((index) => {
+    const tab = tabs[index];
+    const name = `Open ${tabDisplayLabel(tab)}`;
+    const button = h(
+      "button",
+      { type: "button", class: "af-ghost af-term-action af-term-docs", title: name },
+      icon(tabIcon(tab.kind))
+    );
+    button.setAttribute("aria-label", name);
+    button.dataset.tabIndex = String(index);
+    button.addEventListener("click", () => {
+      button.blur();
+      open(index);
+    });
+    return button;
+  });
 }
 
 // src/tabreorder.ts
@@ -18436,13 +18604,24 @@ var AppShell = class {
       this.railCount,
       h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn)
     );
+    this.connRetry = h("span", { class: "af-term-conn-retry" });
+    this.connNotice = h(
+      "div",
+      { class: "af-term-conn", role: "status" },
+      icon("wifi-off", "af-term-conn-glyph"),
+      h("span", { class: "af-term-conn-label" }, "Reconnecting\u2026"),
+      this.connRetry
+    );
+    this.connNotice.hidden = true;
+    this.railConn = h("div", { class: "af-rail-conn", role: "status" });
+    this.railConn.hidden = true;
     this.railAttention = h("div", { class: "af-rail-attention" });
     this.railAttention.setAttribute("role", "status");
     this.railAttention.hidden = true;
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railAttention, this.railList);
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railConn, this.railAttention, this.railList);
     this.main = h("section", { class: "af-main" });
     this.navScrim = h("div", { class: "af-nav-scrim" });
     this.navScrim.setAttribute("aria-hidden", "true");
@@ -18632,6 +18811,13 @@ var AppShell = class {
   lastSessions = null;
   lastSelectedId = null;
   lastLive = null;
+  /** The "Reconnecting…" chip in the session header and its rail twin (#6430). */
+  connNotice;
+  connRetry;
+  railConn;
+  connState = null;
+  connDownSince = null;
+  connTimer = null;
   lastKb = null;
   lastError = null;
   // The last value written to document.title, so an unrelated update doesn't
@@ -18655,6 +18841,9 @@ var AppShell = class {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose() {
     window.clearInterval(this.idleAgeTimer);
+    if (this.connTimer !== null) window.clearInterval(this.connTimer);
+    this.connTimer = null;
+    this.connState = null;
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
@@ -18748,6 +18937,7 @@ var AppShell = class {
       this.lastLive = state.live;
       this.el.dataset.live = state.live;
     }
+    this.patchConnection(state);
     if (this.lastView !== state.view) {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
@@ -19525,6 +19715,7 @@ var AppShell = class {
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
     const head = chrome.head;
+    head.insertBefore(this.connNotice, chrome.attention.el);
     const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -19545,6 +19736,7 @@ var AppShell = class {
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
       [chrome.newTabs, this.header],
+      [this.connNotice, this.header],
       [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
@@ -19607,6 +19799,7 @@ var AppShell = class {
       const offered = offeredNewTabKinds(selected);
       chrome.newTerminal.hidden = !offered.includes("shell");
       chrome.newVSCode.hidden = !offered.includes("vscode");
+      chrome.docsShortcuts.replaceChildren(...docsShortcuts(tabs, (i) => this.openTab(i)));
       chrome.tabUnavailable.hidden = unavailable === null;
       chrome.tabUnavailable.textContent = unavailable ?? "";
       chrome.tabUnavailable.title = unavailable ?? "";
@@ -19945,6 +20138,38 @@ var AppShell = class {
     if (this.tabInsert) {
       this.tabInsert.hidden = true;
     }
+  }
+  /** The "Reconnecting…" state (#6430): drawn once a socket has been down for the
+   *  grace period (a blink of reconnect stays invisible), with the time of the next
+   *  attempt, and cleared on reconnect. Static glyph plus words, so reduced motion
+   *  needs no fallback. The 1s tick runs only while a drop is in progress. */
+  patchConnection(state) {
+    this.connState = state;
+    const down = isDown(connectionInput(state));
+    if (!down) {
+      this.connDownSince = null;
+    } else if (this.connDownSince === null) {
+      this.connDownSince = Date.now();
+    }
+    this.renderConnection();
+    if (down && this.connTimer === null) {
+      this.connTimer = window.setInterval(() => this.renderConnection(), 1e3);
+    } else if (!down && this.connTimer !== null) {
+      window.clearInterval(this.connTimer);
+      this.connTimer = null;
+    }
+  }
+  renderConnection() {
+    const state = this.connState;
+    const notice = state ? connectionNotice(connectionInput(state), this.connDownSince, Date.now()) : null;
+    const words = notice ? connectionWords(notice) : null;
+    this.connNotice.hidden = !words;
+    this.railConn.hidden = !words;
+    if (!words) return;
+    this.connRetry.textContent = words.retry ? ` ${words.retry.replace("retry in ", "")}` : "";
+    this.connNotice.setAttribute("aria-label", words.full);
+    this.connNotice.title = words.full;
+    if (this.railConn.textContent !== words.full) this.railConn.textContent = words.full;
   }
   /** Surface other sessions' attention requests without opening the drawer: a count
    *  on the toggle, the state in words on the toggle's label and at the top of the
@@ -20371,6 +20596,32 @@ function parseProposalChange(ev) {
   return { repoId: str(d.repo_id), slug, doc: str(d.doc), commit: str(d.commit), author: str(d.author) };
 }
 
+// src/viewport-insets.ts
+function viewportInsets(innerHeight, vv) {
+  const top = Math.max(0, vv.offsetTop);
+  const bottom = Math.max(0, innerHeight - (top + vv.height));
+  return { top: Math.round(top), bottom: Math.round(bottom) };
+}
+function trackViewportInsets(root2, win = window) {
+  const vv = win.visualViewport;
+  const apply = () => {
+    const { top, bottom } = vv ? viewportInsets(win.innerHeight, vv) : { top: 0, bottom: 0 };
+    root2.style.setProperty("--af-vv-top", `${top}px`);
+    root2.style.setProperty("--af-vv-bottom", `${bottom}px`);
+  };
+  apply();
+  if (!vv) return () => {
+  };
+  vv.addEventListener("resize", apply);
+  vv.addEventListener("scroll", apply);
+  win.addEventListener("resize", apply);
+  return () => {
+    vv.removeEventListener("resize", apply);
+    vv.removeEventListener("scroll", apply);
+    win.removeEventListener("resize", apply);
+  };
+}
+
 // src/index.ts
 var initialThemeChoice = bootStampTheme();
 registerServiceWorker();
@@ -20447,8 +20698,9 @@ var modal = null;
 var configAssistant = null;
 var accountLogin = null;
 var installAffordance = new InstallAffordance();
+trackViewportInsets(document.documentElement);
 var splitView = new SplitView(termHost, {
-  onStatus: (s) => store.set({ termStatus: s }),
+  onStatus: (s, retryAt) => store.set({ termStatus: s, termRetryAt: retryAt ?? null }),
   // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
   // pane, so a click straight into a pane enters terminal mode (and clicking/tabbing
   // away from all panes returns to rail mode) without going through Enter/Escape.
@@ -22286,9 +22538,9 @@ function startStream(tok) {
       requestResync();
       publishProposalResync();
     },
-    onStatus: (s) => {
+    onStatus: (s, retryAt) => {
       if (s !== "open") markArchiveDirty();
-      store.set({ live: s });
+      store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
@@ -22703,6 +22955,7 @@ lucide/dist/esm/icons/square.mjs:
 lucide/dist/esm/icons/terminal.mjs:
 lucide/dist/esm/icons/trash-2.mjs:
 lucide/dist/esm/icons/triangle-alert.mjs:
+lucide/dist/esm/icons/wifi-off.mjs:
 lucide/dist/esm/icons/x.mjs:
 lucide/dist/esm/lucide.mjs:
   (**

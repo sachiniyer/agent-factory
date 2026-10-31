@@ -85,6 +85,8 @@ When your system asks for reduced motion, neither the circle nor the favicon bli
 the circle has a ring around it, the working spinner does not turn, and the chip's bell is still. The TUI rail does not show the
 request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
 
+When the browser loses its connection to the daemon (the event stream or the focused terminal's socket) for more than about two seconds, the pane header shows **Reconnecting…** with the time of the next retry, and the rail says the same on desktop. It is a static glyph plus words, with no animation, and it clears when the connection returns. Keystrokes typed meanwhile are queued, in order, and delivered on reconnect; only past a 64 KiB backlog does the terminal say "typing was not delivered".
+
 The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting
 on a limit · Broken · Archived**. Archived sessions start hidden. The filter applies inside the
 selected project and is remembered by this browser; a dot on the funnel marks a
