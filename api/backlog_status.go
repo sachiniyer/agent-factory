@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -222,63 +223,85 @@ var (
 	backlogBudgetUSDLimit  string
 )
 
+// backlogNow is the clock for reading ages. A var so tests can pin it.
+var backlogNow = time.Now
+
+// backlogBudgetView is what af backlog budget prints.
+type backlogBudgetView struct {
+	daemon.GetBudgetResponse
+	// ReadingAge is how old the newest plan reading is.
+	ReadingAge string `json:"reading_age,omitempty"`
+}
+
 var backlogBudgetCmd = &cobra.Command{
-	Use:   "budget",
+	Use:   "budget [--share <pct>] [--stop-at <pct>] [--max-per-run <pct>] [--usd-limit <usd>]",
 	Short: "Show or change the global budget",
-	Long: "The budget is the share of your Claude plan the backlog may use, for all projects. " +
-		"--share is the percent of each plan window (5-hour and weekly) the backlog may use. " +
-		"--stop-at is the plan percent, from any use, at which the runner stops. --max-per-run " +
-		"is the percent of the 5-hour window one run may use. --usd-limit is a dollar limit at " +
-		"API prices for accounts with no plan readings (an API key); 0 turns it off. With no " +
-		"flags, print the settings.",
+	Long: "The budget is the share of your Claude plan the backlog may use, in each plan window " +
+		"(5-hour and weekly), for all projects. With no flags, print it with each window's plan %, " +
+		"the backlog's part of it, the reset time and the age of the newest reading. --share sets " +
+		"the backlog's % of each window (default 50). --stop-at sets the plan % at which the runner " +
+		"stops (default 90). --max-per-run sets the % of the 5-hour window one run may use (default " +
+		"10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 " +
+		"turns it off.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
-			f := cmd.Flags()
-			var share, stopAt, maxPerRun, usdLimit *float64
-			for _, pct := range []struct {
-				name string
-				v    string
-				dst  **float64
-			}{{"share", backlogBudgetShare, &share}, {"stop-at", backlogBudgetStopAt, &stopAt}, {"max-per-run", backlogBudgetMaxPerRun, &maxPerRun}} {
-				if !f.Changed(pct.name) {
-					continue
-				}
-				v, err := parsePercent(pct.name, pct.v)
-				if err != nil {
-					return nil, err
-				}
-				*pct.dst = &v
+			share, err := budgetFlag(cmd, "share", backlogBudgetShare, false)
+			if err != nil {
+				return nil, err
 			}
-			if f.Changed("usd-limit") {
-				v, err := parseUSD(backlogBudgetUSDLimit)
-				if err != nil {
-					return nil, err
-				}
-				usdLimit = &v
+			stopAt, err := budgetFlag(cmd, "stop-at", backlogBudgetStopAt, false)
+			if err != nil {
+				return nil, err
 			}
+			maxPerRun, err := budgetFlag(cmd, "max-per-run", backlogBudgetMaxPerRun, false)
+			if err != nil {
+				return nil, err
+			}
+			usdLimit, err := budgetFlag(cmd, "usd-limit", backlogBudgetUSDLimit, true)
+			if err != nil {
+				return nil, err
+			}
+			var req daemon.SetBudgetRequest
+			req.Share = share
+			req.StopAt = stopAt
+			req.MaxPerRun = maxPerRun
+			req.USDLimit = usdLimit
 			change := share != nil || stopAt != nil || maxPerRun != nil || usdLimit != nil
+			var resp daemon.GetBudgetResponse
 			if change {
 				if err := refuseControlsFromItemSession(); err != nil {
 					return nil, err
 				}
-			}
-			if !change {
-				var resp daemon.GetBudgetResponse
-				if err := callBacklogRoute("GetBudget", daemon.GetBudgetRequest{}, &resp); err != nil {
+				if err := callBacklogRoute("SetBudget", req, &resp); err != nil {
 					return nil, err
 				}
-				return resp.Budget, nil
-			}
-			var resp daemon.SetBudgetResponse
-			if err := callBacklogRoute("SetBudget", daemon.SetBudgetRequest{
-				Share: share, StopAt: stopAt, MaxPerRun: maxPerRun, USDLimit: usdLimit,
-			}, &resp); err != nil {
+			} else if err := callBacklogRoute("GetBudget", daemon.GetBudgetRequest{}, &resp); err != nil {
 				return nil, err
 			}
-			return resp.Budget, nil
+			view := backlogBudgetView{GetBudgetResponse: resp}
+			if resp.ReadingAt != nil {
+				view.ReadingAge = backlogNow().Sub(*resp.ReadingAt).Round(time.Second).String()
+			}
+			return view, nil
 		})
 	},
+}
+
+// budgetFlag parses one budget flag; nil when it was not given.
+func budgetFlag(cmd *cobra.Command, name, val string, usd bool) (*float64, error) {
+	if !cmd.Flags().Changed(name) {
+		return nil, nil
+	}
+	parse := func(s string) (float64, error) { return parsePercent(name, s) }
+	if usd {
+		parse = parseUSD
+	}
+	v, err := parse(val)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
 
 func parsePercent(flag, s string) (float64, error) {

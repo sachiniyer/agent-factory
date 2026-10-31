@@ -616,10 +616,10 @@ af backlog ask --self <text> [flags]
 
 Show or change the global budget
 
-The budget is the share of your Claude plan the backlog may use, for all projects. --share is the percent of each plan window (5-hour and weekly) the backlog may use. --stop-at is the plan percent, from any use, at which the runner stops. --max-per-run is the percent of the 5-hour window one run may use. --usd-limit is a dollar limit at API prices for accounts with no plan readings (an API key); 0 turns it off. With no flags, print the settings.
+The budget is the share of your Claude plan the backlog may use, in each plan window (5-hour and weekly), for all projects. With no flags, print it with each window's plan %, the backlog's part of it, the reset time and the age of the newest reading. --share sets the backlog's % of each window (default 50). --stop-at sets the plan % at which the runner stops (default 90). --max-per-run sets the % of the 5-hour window one run may use (default 10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 turns it off.
 
 ```
-af backlog budget [flags]
+af backlog budget [--share <pct>] [--stop-at <pct>] [--max-per-run <pct>] [--usd-limit <usd>] [flags]
 ```
 
 **Flags**

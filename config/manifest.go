@@ -473,6 +473,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "backlog",
+		Type:       "table",
+		Default:    "plan_usage = false · the built-in prices are used",
+		Purpose:    "Backlog plan-usage metering · plan_usage = true adds a status line tap to the Claude sessions af launches and lets af read the Claude transcripts it meters (off by default) · [backlog.prices.\"<model>\"] takes input, cache_write_5m, cache_write_1h, cache_read and output in US dollars per million tokens.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "limit_auto_resume",
 		Type:       "bool",
 		Default:    "false",
