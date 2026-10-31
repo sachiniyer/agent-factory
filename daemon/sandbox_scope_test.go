@@ -54,7 +54,7 @@ func TestSandboxScopeTableIsPinned(t *testing.T) {
 		"/v1/DeliverPrompt", "/v1/KillSession", "/v1/RestoreSession", "/v1/RestoreArchived",
 		"/v1/HandoffSession", "/v1/ResumeFromLimit", "/v1/PruneSessions",
 		// Proposals, previews, daemon lifecycle.
-		"/v1/StartProposal", "/v1/Preview", "/v1/PauseStatusPoll", "/v1/health",
+		"/v1/StartProposal", "/v1/Preview", "/v1/PreviewSession", "/v1/PauseStatusPoll", "/v1/health",
 	} {
 		assert.Falsef(t, sandboxAllowedPath(path), "%s must never be reachable with a sandbox credential", path)
 	}
