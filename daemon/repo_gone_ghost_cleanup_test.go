@@ -519,6 +519,14 @@ func TestValidateGhostCleanupAdmission_AbsentArchiveDischargesCleanupReady(t *te
 		"a cleanup_ready ghost over a conclusively absent archive must discharge at admission")
 	assert.Nil(t, stored.Worktree.RelocationRecovery,
 		"the discharge must propagate to the persisted row so ghost cleanup settles the absent path")
+	assert.False(t, stored.Worktree.ExternalWorktree,
+		"the discharge must restore the decoded ownership so ghostCleanupWorktree does not bail at ghostRestoredWorktreeRemovable and orphan the branch")
+	if stored.Worktree.BranchCreatedByUs != nil {
+		assert.True(t, *stored.Worktree.BranchCreatedByUs,
+			"the discharge must restore the decoded BranchCreatedByUs so ghost cleanup reaps the AF-created branch")
+	} else {
+		t.Fatal("the discharge must restore a non-nil BranchCreatedByUs so ghost cleanup authorizes branch deletion")
+	}
 }
 
 func retainedProjectionFixture(root string) *sessiongit.ArchiveReport {

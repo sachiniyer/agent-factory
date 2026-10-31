@@ -442,6 +442,13 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 	// this, the ghost kill would have no live instance to retry through and the
 	// discharged admission would leave the durable record untouched.
 	if _, _, stillUnresolved := gw.RelocationSnapshot(); !stillUnresolved {
+		data.Worktree.ExternalWorktree = restored.Worktree.ExternalWorktree
+		if restored.Worktree.BranchCreatedByUs != nil {
+			branchCreatedByUs := *restored.Worktree.BranchCreatedByUs
+			data.Worktree.BranchCreatedByUs = &branchCreatedByUs
+		} else {
+			data.Worktree.BranchCreatedByUs = nil
+		}
 		data.Worktree.RelocationRecovery = nil
 	}
 	return nil
