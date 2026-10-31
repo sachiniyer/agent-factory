@@ -366,7 +366,7 @@ func (s *MeterState) ScanAll(sources map[string][]string, backlogDirs []string, 
 		if known && mark.Skipped != "" && anyPriced(mark.Skipped, overrides) {
 			mark, known = FileMark{}, false // price the messages that were read past
 		}
-		if known && c.info.Size() >= mark.Offset && (c.info.Size() == mark.Offset || c.info.ModTime().UnixNano() == mark.ModTime) {
+		if known && c.info.Size() >= mark.Offset && (c.info.Size() == mark.Offset || (c.info.ModTime().UnixNano() == mark.ModTime && c.info.Size() == mark.Size)) {
 			continue
 		}
 		foreign := func(key string) bool {
