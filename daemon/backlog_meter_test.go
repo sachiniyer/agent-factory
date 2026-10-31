@@ -485,6 +485,7 @@ func TestMeterPassRunWindowScopesSwappedRunToCurrentAccount(t *testing.T) {
 	inst.SetGitWorktreeForTest(gw)
 	inst.BacklogItem = 1
 	inst.Account = "work"
+	cs.manager.instances = make(map[string]*session.Instance)
 	cs.manager.instances[daemonInstanceKey(repoID, title)] = inst
 	cs.manager.rememberRunDirs("s-swapped", []string{defaultProj, swappedProj})
 
