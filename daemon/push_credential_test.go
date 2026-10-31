@@ -622,13 +622,13 @@ func TestPushFencesArePrunedOnlyWhenTheCredentialWasReplaced(t *testing.T) {
 	require.NoError(t, err)
 	end(false)
 
-	end, err = s.beginAutoPush("sess-b", "gb", map[string]string{"sess-a": "g1"})
+	end, err = s.beginAutoPush("sess-b", "gb", &pushRefSnapshot{refs: map[string]string{"sess-a": "g1"}, upTo: s.writeMark()})
 	require.NoError(t, err)
 	end(false)
 	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "g1"), "the same credential is still live: kept")
 
 	// Replaced: the session's runtime now has a different callback identity.
-	end, err = s.beginAutoPush("sess-c", "gc", map[string]string{"sess-a": "g2"})
+	end, err = s.beginAutoPush("sess-c", "gc", &pushRefSnapshot{refs: map[string]string{"sess-a": "g2"}, upTo: s.writeMark()})
 	require.NoError(t, err)
 	end(false)
 	reread := &pushCredentialState{fencePath: path}
@@ -767,4 +767,34 @@ func placeWithCallbackRef(t *testing.T, title, ref string) {
 		return prev(i)
 	}
 	t.Cleanup(func() { instancePushPlacement = prev })
+}
+
+// Codex P2 on #6433 at 6272bfd: two sessions recovering at once. B's snapshot is
+// taken before A's replacement runtime is fenced; neither B's begin nor B's
+// confirmed end may delete A's NEWER fence on that stale evidence. A fence read
+// back from disk predates every snapshot, so a moot one is still pruned.
+func TestPushFencesAreNeverPrunedOnAStaleSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), pushFenceFileName)
+	s := &pushCredentialState{fencePath: path}
+	stale := &pushRefSnapshot{refs: map[string]string{"sess-a": "ref-a-old"}, upTo: s.writeMark()}
+
+	endA, err := s.beginAutoPush("sess-a", "ref-a-new", &pushRefSnapshot{refs: map[string]string{"sess-a": "ref-a-new"}, upTo: s.writeMark()})
+	require.NoError(t, err)
+	endA(false) // A's automatic archive timed out: its fence must stay
+
+	endB, err := s.beginAutoPush("sess-b", "ref-b", stale)
+	require.NoError(t, err)
+	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "ref-a-new"), "B's begin pruned A's newer fence from a stale snapshot")
+	endB(true)
+	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "ref-a-new"), "B's confirmed end pruned A's newer fence")
+	assert.False(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-b", "ref-b"), "B's own fence is lifted")
+
+	// After a restart, A's fence is read back (write number 0): a snapshot that
+	// shows A on yet another runtime does make it moot.
+	restarted := &pushCredentialState{fencePath: path}
+	endC, err := restarted.beginAutoPush("sess-c", "ref-c", &pushRefSnapshot{refs: map[string]string{"sess-a": "ref-a-third"}, upTo: restarted.writeMark()})
+	require.NoError(t, err)
+	endC(false)
+	assert.False(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-a", "ref-a-new"), "a fence a replacement made moot is pruned")
+	assert.True(t, (&pushCredentialState{fencePath: path}).autoPushFenced("sess-c", "ref-c"))
 }
