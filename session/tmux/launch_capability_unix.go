@@ -21,6 +21,9 @@ func (t *TmuxSession) mintLaunchCapability(spec launchSpec) (socket, token strin
 	if err != nil {
 		return "", "", err
 	}
+	if launchSpecObserver != nil {
+		launchSpecObserver(spec)
+	}
 	token, err = broker.Mint(sessionenv.Capability{
 		Session:         t.sanitizedName,
 		Agent:           spec.agent,

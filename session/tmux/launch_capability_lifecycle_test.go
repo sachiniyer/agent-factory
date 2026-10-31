@@ -18,12 +18,6 @@ import (
 
 var lookupFails atomic.Bool
 
-func forceLaunchCapabilityOwner(t *testing.T, owner bool) {
-	t.Helper()
-	prev := launchCapabilityOwner.Swap(owner)
-	t.Cleanup(func() { launchCapabilityOwner.Store(prev) })
-}
-
 // accountSessionForCapabilityTest is an account-scoped codex session whose
 // prepare step mints a per-pane (default-command) capability.
 func accountSessionForCapabilityTest(t *testing.T, name string, exec cmd_test.MockCmdExec, pty PtyFactory) *TmuxSession {

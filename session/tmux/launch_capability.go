@@ -39,6 +39,17 @@ func SetLaunchCapabilityOwner() { launchCapabilityOwner.Store(true) }
 
 func ownsLaunchCapabilities() bool { return launchCapabilityOwner.Load() }
 
+// SetLaunchCapabilityOwnerForTest sets the owner flag and returns what undoes it,
+// for tests in other packages that stand in for the daemon.
+func SetLaunchCapabilityOwnerForTest(owner bool) (restore func()) {
+	prev := launchCapabilityOwner.Swap(owner)
+	return func() { launchCapabilityOwner.Store(prev) }
+}
+
+// launchSpecObserver, when set, sees every launch spec at mint: a test seam for
+// asserting what a launch admitted now that none of it travels in argv.
+var launchSpecObserver func(launchSpec)
+
 // nonOwnerDefaultCommand is what a process that does not own capabilities
 // installs for a NEW session's default-command. It refuses with a message instead
 // of leaving tmux's login shell, which would start an account session's new
