@@ -127,6 +127,9 @@ export function landedIn(base: string, text: string, head: string): boolean {
   let changes = 0;
   let i = 0;
   let oi = 0;
+  // Where in the head the next change may be found: after the lines the previous one matched, so each
+  // inserted line is a distinct line of the head and the changes appear in document order.
+  let cursor = 0;
   const check = (bEnd: number, oEnd: number): boolean => {
     const inserted = o.slice(oi, oEnd);
     if (i === bEnd && inserted.length === 0) return true; // nothing between these two matches
@@ -136,10 +139,19 @@ export function landedIn(base: string, text: string, head: string): boolean {
     while (left >= 0 && mt[left]! < 0) left--;
     let right = bEnd;
     while (right < b.length && mt[right]! < 0) right++;
-    const window = t.slice(left >= 0 ? mt[left]! + 1 : 0, right < b.length ? mt[right]! : t.length);
+    const from = Math.max(cursor, left >= 0 ? mt[left]! + 1 : 0);
+    const to = right < b.length ? mt[right]! : t.length;
     let at = 0;
-    for (const line of window) if (at < inserted.length && line === inserted[at]) at++;
-    return at === inserted.length;
+    let last = -1;
+    for (let j = from; j < to && at < inserted.length; j++) {
+      if (t[j] === inserted[at]) {
+        at++;
+        last = j;
+      }
+    }
+    if (at !== inserted.length) return false;
+    cursor = last + 1;
+    return true;
   };
   for (let k = 0; k < b.length; k++) {
     if (mo[k]! < 0) continue;

@@ -54,3 +54,12 @@ test("landedIn recognises a save whose changes the head holds beside edits to th
   assert.equal(landedIn("a\nb", "a\nnew\nb", "a\nnew\nx\nb"), true);
   assert.equal(landedIn("a\nb", "a\nnew\nb", "a\nx\nb"), false);
 });
+
+test("landedIn needs each changed chunk to match its own, later, lines of the head", () => {
+  // The head removed the base lines that separated the two edits, so their search windows overlap: one
+  // head line must not satisfy both, and the edits must match in document order.
+  assert.equal(landedIn("a\nb\nc", "X\nb\nX", "X"), false, "one X cannot be both edits");
+  assert.equal(landedIn("a\nb\nc", "X\nb\nX", "X\nX"), true, "two Xs in order are both edits");
+  assert.equal(landedIn("a\nb\nc", "P\nb\nQ", "Q\nP"), false, "in the wrong order they are not");
+  assert.equal(landedIn("a\nb\nc", "P\nb\nQ", "P\nQ"), true);
+});
