@@ -53,12 +53,15 @@ func (w *sandboxWorkspace) sandboxAgentConfigEntries() []string {
 
 // agentConfigMaxFileBytes bounds one operator-declared personalization read, one
 // way: from the operator's own agent home on the daemon box, the transfer this
-// feature makes. It is NOT the credential-sync bound (accountSyncMaxFileBytes),
-// which defends a write-back FROM an untrusted host's archive: claude's
-// .claude.json keeps per-project prompt history and grows past a megabyte for an
-// active operator, so the file this feature exists to carry was silently dropped
-// under the credential bound. Sized for that growth, and still bounded so a
-// runaway or hostile operator file cannot fill the daemon's memory.
+// feature makes — and, because every selected file lands in the single retained
+// archive buffer in syncAgentConfigInto, it bounds the archive total as well (a
+// file that would overflow it is skipped like an unreadable one). It is NOT the
+// credential-sync bound (accountSyncMaxFileBytes), which defends a write-back
+// FROM an untrusted host's archive: claude's .claude.json keeps per-project
+// prompt history and grows past a megabyte for an active operator, so the file
+// this feature exists to carry was silently dropped under the credential bound.
+// Sized for that growth, and still bounded so runaway or hostile operator files
+// cannot fill the daemon's memory.
 const agentConfigMaxFileBytes = 64 << 20
 
 // syncAgentConfigIn places the declared files in the session's account scope. A
@@ -86,10 +89,15 @@ func (w *sandboxWorkspace) syncAgentConfigInto(timeout time.Duration, scopeDir s
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	sent := 0
+	total := 0
 	for _, file := range files {
 		data, err := readOperatorAgentFile(agent, home, file)
 		if err != nil {
 			log.WarningLog.Printf("sandbox_agent_config: skipping %s:%s: %v", agent, file, err)
+			continue
+		}
+		if total+len(data) > agentConfigMaxFileBytes {
+			log.WarningLog.Printf("sandbox_agent_config: skipping %s:%s: %d bytes would take the archive over the %d-byte bound", agent, file, len(data), agentConfigMaxFileBytes)
 			continue
 		}
 		if err := tw.WriteHeader(&tar.Header{Name: file, Mode: 0o600, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
@@ -98,6 +106,7 @@ func (w *sandboxWorkspace) syncAgentConfigInto(timeout time.Duration, scopeDir s
 		if _, err := tw.Write(data); err != nil {
 			return err
 		}
+		total += len(data)
 		sent++
 	}
 	if err := tw.Close(); err != nil {

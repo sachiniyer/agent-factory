@@ -119,6 +119,21 @@ func TestAgentConfigPlacesAClaudeJsonOverTheOldCredentialBound(t *testing.T) {
 	assert.Len(t, got, len(big), "the whole file travels, byte for byte")
 }
 
+// The bound is the archive's total, not only each file's: the whole selection is
+// staged into one retained buffer, so two files each under the per-file cap but
+// over it together place the first and skip the second — the closed claude set
+// near the cap cannot hold ~192 MiB in the daemon's memory at once.
+func TestAgentConfigSkipsAFileThatWouldOverflowTheArchiveBound(t *testing.T) {
+	operatorHome(t)
+	big := bytes.Repeat([]byte(" "), agentConfigMaxFileBytes/2+1) // each under the cap; two together exceed it
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), ".claude", "settings.json"), big, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), ".claude.json"), big, 0o600))
+	w := configWorkspace(t, "claude", "box1", "claude:settings.json", "claude:.claude.json")
+	require.NoError(t, w.syncAgentConfigIn(time.Minute))
+	assert.FileExists(t, filepath.Join(w.AccountDir(), "settings.json"))
+	assert.NoFileExists(t, filepath.Join(w.AccountDir(), ".claude.json"), "over the aggregate bound it is skipped, not placed")
+}
+
 // A copied codex config.toml must not override the session's account: the
 // keyring credential store would make codex use the machine-wide identity.
 func TestAgentConfigForcesTheCodexFileCredentialStore(t *testing.T) {
