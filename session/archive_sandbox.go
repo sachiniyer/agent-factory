@@ -299,6 +299,9 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	// pre-reap returns (missing backend, bad kind, unresolvable account,
 	// runtime resolution failure, config/drift check) only this defer runs.
 	defer i.takeOnSandboxRetired()
+	// Until the replacement runtime is recorded, its machine is Unknown to the
+	// push-credential host rule (#5571 W7.8), which fails closed on it.
+	defer i.beginProvisioning()()
 	i.mu.RLock()
 	backend := i.backend
 	accountName := i.Account

@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
+	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -115,8 +118,75 @@ func sandboxCredentialCarried(ctx context.Context, reg *sandboxTokenRegistry, ow
 	if pgid > 0 {
 		how = "a connection that is not that session's own ssh forward"
 	}
-	log.WarningLog.Printf("refused session %s's af callback credential: it arrived through %s. Each session's credential is accepted only through its own forward; a sandbox.ssh that multiplexes sessions through one shared ControlMaster connection cannot carry af callbacks", owner, how)
+	crossForwardRefusals.record(owner, how)
 	return false
+}
+
+// Rate limits for the cross-forward refusal log, as the Host guard's
+// (hostRefusalLog): one line per session per interval, and at most
+// crossForwardLogBurst lines a minute across all of them, since whoever holds a
+// credential can repeat the request at will. Suppressed refusals are counted
+// into the next line.
+const (
+	crossForwardLogInterval = 10 * time.Minute
+	crossForwardLogBurst    = 10
+	crossForwardLogMaxKeys  = 512
+)
+
+type crossForwardLog struct {
+	mu          sync.Mutex
+	now         func() time.Time
+	logf        func(format string, args ...any)
+	lastLogged  map[string]time.Time
+	windowStart time.Time
+	windowLines int
+	suppressed  int
+}
+
+var crossForwardRefusals = &crossForwardLog{
+	now:        time.Now,
+	logf:       func(format string, args ...any) { log.WarningLog.Printf(format, args...) },
+	lastLogged: map[string]time.Time{},
+}
+
+func (l *crossForwardLog) record(owner, how string) {
+	l.mu.Lock()
+	now := l.now()
+	if t, ok := l.lastLogged[owner]; ok && now.Sub(t) < crossForwardLogInterval {
+		l.suppressed++
+		l.mu.Unlock()
+		return
+	}
+	if now.Sub(l.windowStart) >= time.Minute {
+		l.windowStart, l.windowLines = now, 0
+	}
+	if l.windowLines >= crossForwardLogBurst {
+		l.suppressed++
+		l.mu.Unlock()
+		return
+	}
+	if len(l.lastLogged) >= crossForwardLogMaxKeys {
+		for k, t := range l.lastLogged {
+			if now.Sub(t) >= crossForwardLogInterval {
+				delete(l.lastLogged, k)
+			}
+		}
+		if len(l.lastLogged) >= crossForwardLogMaxKeys {
+			l.suppressed++
+			l.mu.Unlock()
+			return
+		}
+	}
+	l.lastLogged[owner] = now
+	l.windowLines++
+	suppressed := l.suppressed
+	l.suppressed = 0
+	l.mu.Unlock()
+	more := ""
+	if suppressed > 0 {
+		more = fmt.Sprintf(" (%d further refusals not logged)", suppressed)
+	}
+	l.logf("refused session %s's af callback credential: it arrived through %s. Each session's credential is accepted only through its own forward; a sandbox.ssh that multiplexes sessions through one shared ControlMaster connection cannot carry af callbacks%s", owner, how, more)
 }
 
 // --- eligibility ------------------------------------------------------------------

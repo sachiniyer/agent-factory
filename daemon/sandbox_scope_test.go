@@ -122,6 +122,11 @@ func newScopeFixture(t *testing.T) *scopeFixture {
 	require.NoError(t, err)
 	f.secret = secret
 	f.forwards = installOwnForwards(t, &mgr.sandboxTokens)
+	// A sandbox creates only on a listed host (refuseSandboxCreateOnLicensedHost):
+	// list the ones these tests create on.
+	cfg := *mgr.Config()
+	cfg.Hosts = map[string]config.HostConfig{"h1": {Host: "h1.example"}, "box1": {Host: "box1.example"}}
+	mgr.storeLivePosture(&cfg)
 	mux := newHTTPMux(&controlServer{manager: mgr})
 	f.gated = withAuth(mux, &authGate{
 		expectedToken: func() (string, error) { return "operator-token", nil },

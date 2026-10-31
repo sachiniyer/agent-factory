@@ -110,6 +110,16 @@ func newPushFixture(t *testing.T) *pushFixture {
 	pf.setConfig(func(c *config.Config) {
 		c.Hosts = map[string]config.HostConfig{"box1": {Host: "box1.example", PushCredentials: true}}
 	})
+	// Machine names resolve here, never in DNS (session.RuntimeMachine.Shares).
+	t.Cleanup(session.SetMachineLookupForTest(map[string][]string{
+		"box1.example":  {"198.51.100.7"},
+		"alias.example": {"198.51.100.7"},
+		"box2.example":  {"198.51.100.8"},
+		"box9.example":  {"198.51.100.9"},
+		"h1.example":    {"198.51.100.11"},
+		"peerbox":       {"198.51.100.20"},
+		"freebox":       {"198.51.100.21"},
+	}))
 	pf.endpoint = markSandboxEndpoint(withAuth(newHTTPMux(&controlServer{manager: f.mgr}), sandboxOnlyGate(&f.mgr.sandboxTokens), nil))
 	return pf
 }
