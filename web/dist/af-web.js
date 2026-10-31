@@ -18592,8 +18592,17 @@ var ItemPanel = class {
       const it = this.item();
       const t = this.title.value.trim();
       if (!it) return;
-      if (t && t !== it.title) actions2.update(id, { title: t });
-      else this.title.value = it.title;
+      if (t && t !== it.title) {
+        this.titleDraft = t;
+        const done2 = actions2.update(id, { title: t });
+        const settle = (ok) => {
+          if (this.titleDraft !== t) return;
+          this.titleDraft = null;
+          if (!ok && this.view) this.render(this.view, this.sessions);
+        };
+        if (done2) done2.then(settle, () => settle(false));
+        else settle(true);
+      } else this.title.value = this.titleDraft ?? it.title;
     };
     this.title.addEventListener("change", commitTitle);
     this.title.addEventListener("keydown", (e) => {
@@ -18679,6 +18688,9 @@ var ItemPanel = class {
   usage = null;
   // Run sessions the rail did not hold, by id: asked for, answered, or unanswerable.
   lookups = /* @__PURE__ */ new Map();
+  // The title the user submitted that no confirming response has covered yet: a
+  // refresh that read the old item must not put the old title back over it.
+  titleDraft = null;
   focus() {
     this.closeButton.focus({ preventScroll: true });
   }
@@ -18714,7 +18726,7 @@ var ItemPanel = class {
     const it = this.item();
     if (!it) return;
     this.lookUpMissing(it);
-    if (document.activeElement !== this.title) this.title.value = it.title;
+    if (document.activeElement !== this.title && this.titleDraft === null) this.title.value = it.title;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
@@ -19249,6 +19261,9 @@ var BacklogPane = class {
   // A reorder shown before the daemon has it. It stays until data from a refresh
   // started after the move committed arrives; gen is Infinity until then.
   pending = null;
+  // Reorder writes go out one at a time: each target is computed from the previous
+  // optimistic order, so they must commit in the order they were made.
+  moves = Promise.resolve();
   panel = null;
   dragId = null;
   focusId = null;
@@ -19464,7 +19479,7 @@ ${id}`;
     }
     const token2 = this.host.token();
     if (token2 === null) return;
-    moveItem(root2, id, to, token2).then(() => {
+    this.moves = this.moves.then(() => moveItem(root2, id, to, token2).then(() => {
       if (pending) pending.gen = this.host.started();
       return this.host.refresh();
     }, (e) => {
@@ -19474,8 +19489,9 @@ ${id}`;
         this.render();
       }
       this.host.notify(errorText(e));
-      void this.host.refresh();
-    });
+      return this.host.refresh();
+    }).catch(() => {
+    }));
   }
   render() {
     this.pruneStarts();

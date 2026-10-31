@@ -331,6 +331,7 @@ func TestBacklogDoneClearsAttention(t *testing.T) {
 // (Codex P2 on #6295): the backlog mirrors attention itself, so its sends are
 // not "the user answering whatever is set". A plain send still clears it.
 func TestBacklogSendKeepsTheNextQuestionsAttention(t *testing.T) {
+	drain := queuedAttentionClears(t)
 	for _, tc := range []struct {
 		name          string
 		backlogOrigin bool
@@ -349,10 +350,9 @@ func TestBacklogSendKeepsTheNextQuestionsAttention(t *testing.T) {
 			if _, err := manager.SendPromptWithStatus(SendPromptRequest{Title: "worker", RepoID: repoID, Prompt: "answer", BacklogOrigin: tc.backlogOrigin}); err != nil {
 				t.Fatal(err)
 			}
-			deadline := time.Now().Add(2 * time.Second)
-			for time.Now().Before(deadline) && inst.HasAttention() == tc.wantKept {
-				time.Sleep(20 * time.Millisecond)
-			}
+			// The clear a delivered user prompt queues runs after the send returns
+			// (a goroutine in production); drain it as the worker would.
+			drain()
 			if inst.HasAttention() != tc.wantKept {
 				t.Fatalf("attention kept = %v, want %v", inst.HasAttention(), tc.wantKept)
 			}
@@ -548,5 +548,41 @@ func TestRebuildAskedQuestionsFromTheBacklog(t *testing.T) {
 	}
 	if inst.Attention() != nil {
 		t.Fatal("the dismissed chip must stay dismissed")
+	}
+}
+
+// A question longer than the attention cap is remembered, and compared, in the one
+// normalized form: with the chip dismissed (and after a restart's rebuild) a
+// terminal answer still closes it.
+func TestLongQuestionIsAnsweredInSessionWithADismissedChip(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	inst.DisarmBacklogRun()
+	long := strings.Repeat("Which database should the migration target? ", 20)
+	if len([]rune(long)) <= session.MaxAttentionReasonLen {
+		t.Fatal("fixture question is not over the cap")
+	}
+	if _, err := m.backlogService().PostMessage(backlog.PostMessageRequest{RepoID: repoID, ID: 1,
+		Kind: backlog.KindQuestion, Text: long, SessionID: inst.ID}); err != nil {
+		t.Fatal(err)
+	}
+	inst.ClearAttention(inst.Attention().SetAt)
+	for _, rebuilt := range []bool{false, true} {
+		if rebuilt {
+			m.backlog.asked.Delete(inst.ID)
+			b, err := backlog.Load(repoID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.rebuildAskedQuestions(b)
+		}
+		seen := m.backlogSeenQuestion(inst)
+		if seen == "" || seen != session.NormalizeAttentionReason(long) {
+			t.Fatalf("rebuilt=%v: seen question %d runes, want the normalized form", rebuilt, len([]rune(seen)))
+		}
+	}
+	m.noteBacklogSubmitted(inst, m.backlogSeenQuestion(inst))
+	m.backgroundMutationWG.Wait()
+	if it := loadItem(t, repoID, 1); it.OpenQuestion() != nil {
+		t.Fatalf("the long question stayed open: %+v", it.Thread)
 	}
 }

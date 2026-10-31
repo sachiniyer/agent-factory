@@ -384,3 +384,57 @@ test("a drag ends at the list, and a foreign drag is not a reorder", () => {
   row(pane, 2).dispatchEvent(new FakeEvent("dragleave", { relatedTarget: null }));
   assert.equal(row(pane, 2).classList.contains("af-backlog-drop-after"), false);
 });
+
+test("reorders go out one at a time, in the order they were made", async () => {
+  const finish: (() => void)[] = [];
+  reply = (method) => method === "MoveBacklogItem" ? new Promise((r) => { finish.push(() => r({})); }) : Promise.resolve({});
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1), item(2), item(3)) }), "/a", []);
+  key(row(pane, 3), "ArrowUp", { altKey: true });
+  key(row(pane, 3), "ArrowUp", { altKey: true });
+  assert.deepEqual(rowIds(pane), [3, 1, 2], "both moves show at once");
+  await settle();
+  const moves = (): Call[] => calls.filter((c) => c.method === "MoveBacklogItem");
+  assert.equal(moves().length, 1, "the second request waits for the first");
+  finish[0]();
+  await settle();
+  assert.equal(moves().length, 2);
+  assert.notDeepEqual(moves()[0].body, moves()[1].body);
+  finish[1]();
+  await settle();
+});
+
+const titleInput = (pane: BacklogPane): FakeElement => el(pane).querySelector(".af-backlog-title-input")!;
+function submitTitle(pane: BacklogPane, value: string): void {
+  const input = titleInput(pane);
+  input.value = value;
+  input.dispatchEvent(new FakeEvent("change"));
+}
+
+test("a refresh that read the old item does not put the old title back over an unacknowledged rename", async () => {
+  let finish: () => void = () => {};
+  reply = (method) => method === "UpdateBacklogItem" ? new Promise((r) => { finish = () => r({}); }) : Promise.resolve({});
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1, { title: "old" })) }), "/a", []);
+  pane.select(1);
+  submitTitle(pane, "new");
+  pane.update(data({ "/a": view(item(1, { title: "old" })) }, 2), "/a", []);
+  assert.equal(titleInput(pane).value, "new", "the stale snapshot does not revert the field");
+  submitTitle(pane, "new revised");
+  assert.equal(calls.filter((c) => c.method === "UpdateBacklogItem").at(-1)?.body.title, "new revised",
+    "the next edit builds on the draft, not the reverted text");
+  finish();
+  await settle();
+  pane.update(data({ "/a": view(item(1, { title: "new revised" })) }, 3), "/a", []);
+  assert.equal(titleInput(pane).value, "new revised");
+});
+
+test("a refused rename gives the field back its stored title", async () => {
+  reply = async (method) => { if (method === "UpdateBacklogItem") throw new Error("no"); return {}; };
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1, { title: "old" })) }), "/a", []);
+  pane.select(1);
+  submitTitle(pane, "rejected");
+  await settle();
+  assert.equal(titleInput(pane).value, "old");
+});
