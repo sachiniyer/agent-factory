@@ -104,3 +104,48 @@ func TestCapability_KeepClaimEndpointFreshRefreshesAgedSocketAndDir(t *testing.T
 	// A path that is already gone must not panic or error out the sweep goroutine.
 	keepClaimEndpointFresh(filepath.Join(dir, "missing.sock"), filepath.Join(dir, "missing"), now)
 }
+
+// The system can remove the claim socket, even its whole directory, from under a
+// live daemon (macOS prunes the temp dir by age, and a Mac that slept through the
+// window runs the cleanup on wake, before any keep-alive can touch the socket). A
+// session's default-command names that exact path, so the endpoint must come back
+// AT THAT PATH and keep serving claims, with no new token handed out (#6384).
+func TestCapability_EndpointRecreatesItsSocketAndDirAtTheSamePath(t *testing.T) {
+	t.Setenv("TMPDIR", shortSocketDir(t))
+	prev := capabilityEnsureInterval
+	capabilityEnsureInterval = 20 * time.Millisecond
+	t.Cleanup(func() { capabilityEnsureInterval = prev })
+
+	b, socket, err := startLaunchEndpoint(paneOf("s", os.Getpid()), nil)
+	require.NoError(t, err)
+	t.Cleanup(ShutdownLaunchCapabilities)
+	dir := filepath.Dir(socket)
+
+	claims := func(stage string) {
+		t.Helper()
+		token, err := b.Mint(testCap())
+		require.NoError(t, err, stage)
+		require.Eventually(t, func() bool {
+			// A fresh token per attempt is unnecessary: an unreachable endpoint
+			// consumes nothing.
+			_, err := claimAs(t, socket, token, "%1")
+			return err == nil
+		}, 5*time.Second, 25*time.Millisecond, "%s: claim through the ORIGINAL path %s", stage, socket)
+	}
+
+	claims("fresh endpoint")
+
+	require.NoError(t, os.Remove(socket))
+	_, err = claimAs(t, socket, "x", "%1")
+	require.ErrorContains(t, err, "unreachable", "the deleted socket must really be gone")
+	claims("after the socket was deleted")
+
+	require.NoError(t, os.RemoveAll(dir))
+	_, err = claimAs(t, socket, "x", "%1")
+	require.ErrorContains(t, err, "unreachable", "the deleted directory must really be gone")
+	claims("after the whole directory was deleted")
+
+	fi, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), fi.Mode().Perm(), "a recreated directory keeps the private mode")
+}
