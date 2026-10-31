@@ -293,7 +293,6 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	}
 	appliedDirs := st.applyPending(state)
 	usage := planusage.Usage{Runs: map[string]float64{}, RunWindow: map[string]float64{}, Unmeterable: map[string]string{}, Accounts: map[string]planusage.AccountUsage{}}
-	runAccount := map[string]string{}
 	updates := map[string]map[string]map[string]backlog.Meter{}
 	var backlogDirs []string
 	metered := map[string]bool{}
@@ -377,7 +376,6 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		}
 		if configDir != "" {
 			account := planusage.AccountForConfigDir(home, configDir)
-			runAccount[r.run.SessionID] = account
 			if !containsDir(runConfigs[account], configDir) {
 				runConfigs[account] = append(runConfigs[account], configDir)
 			}
@@ -414,8 +412,19 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	}
 	state.PruneRunBuckets(now)
 	m.meterAccounts(home, state, backlogDirs, runConfigs, overrides, now, &usage)
-	for sessionID, account := range runAccount {
-		usage.RunWindow[sessionID] = state.RunWindowCost(sessionID, account, usage.Accounts[account].Windows.FiveHour)
+	// Every session in usage.Runs gets a run_window entry: a run whose current
+	// config dir is unknown (killed between passes or after a daemon restart, or
+	// a cross-agent handoff metered from remembered transcripts) is still in
+	// usage.Runs, so its window cost is summed from the run buckets keyed by
+	// session|account — the same buckets AddRunEntries filed its messages under.
+	// 0 covers a run with no buckets (none metered yet) or no valid window, the
+	// documented contract ("0 without a valid window").
+	for sessionID := range usage.Runs {
+		var total float64
+		for _, account := range state.RunWindowAccounts(sessionID) {
+			total += state.RunWindowCost(sessionID, account, usage.Accounts[account].Windows.FiveHour)
+		}
+		usage.RunWindow[sessionID] = total
 	}
 	// Save the dedupe keys and buckets BEFORE the offsets and costs that depend
 	// on them advance in backlog.json: the other order leaves a failed save with

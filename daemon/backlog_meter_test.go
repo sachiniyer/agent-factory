@@ -274,3 +274,154 @@ func TestMeterPassCurrentNonClaudeRunStillUnmeterable(t *testing.T) {
 	require.Equal(t, backlog.UnmeterableProgram(1, "codex"), got.Unmeterable["sess"],
 		"the current run of a non-Claude session is still an active-run metering failure")
 }
+
+// A metered run whose current config dir cannot be resolved — a session killed
+// between passes (no live instance), after a daemon restart, or handed to another
+// agent and metered from remembered transcripts — is still in usage.Runs, so it
+// must also appear in usage.RunWindow (the documented contract: "0 without a
+// valid window", never a missing key). A started run with no transcripts at all
+// likewise gets a 0 entry, so the runs and run_window key sets never diverge
+// (Codex P2 on #6299: the runs/run_window key-set divergence was the bug).
+func TestMeterPassRunWindowCoversRunsMeteredFromRememberedDirs(t *testing.T) {
+	cs, _ := newBacklogTestServer(t)
+	cs.manager.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now := time.Now().UTC()
+	// One assistant message of 1M input tokens at the opus price = $4 of usage.
+	line := `{"type":"assistant","timestamp":"` + now.Add(-time.Minute).Format(time.RFC3339) +
+		`","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
+	projectDir := filepath.Join(claudeDir, "projects", "-home-me-x")
+	transcript := filepath.Join(projectDir, "s-killed.jsonl")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+	require.NoError(t, os.WriteFile(transcript, []byte(line), 0o644))
+	reset := now.Add(2 * time.Hour).Truncate(time.Hour)
+	require.NoError(t, planusage.WriteReading(planusage.DefaultAccount, planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 30, ResetsAt: reset.Unix()}, ReadAt: now,
+	}))
+	// A started run whose session is gone (killed) but whose transcript dirs were
+	// remembered, and a second started run with no transcripts at all: both stay in
+	// usage.Runs; the metering pass reaches MeterRun only for the remembered one.
+	const repoID = "meter-test-repo"
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = append(b.Items, backlog.Item{ID: 1, Title: "t", Status: backlog.StatusRunning})
+		b.Item(1).Runs = []backlog.RunRef{
+			{State: backlog.RunStarted, SessionID: "s-killed", StartedAt: now.Add(-2 * time.Minute)},
+			{State: backlog.RunStarted, SessionID: "s-nodirs", StartedAt: now.Add(-time.Minute)},
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	// No instance for either session: simulate killed sessions. Remember the
+	// transcript's project dir for the killed run so the pass meters it.
+	cs.manager.rememberRunDirs("s-killed", []string{projectDir})
+
+	id, ch, _ := cs.manager.events.subscribeWithOverflow()
+	defer cs.manager.events.unsubscribe(id)
+	st := &cs.manager.backlog.meter
+	st.mu.Lock()
+	cs.manager.meterPassLocked(now)
+	st.mu.Unlock()
+
+	// The run_window entry exists and equals the metered cost; the run with no
+	// transcripts gets a 0 entry, so runs and run_window have the same keys.
+	st.usageMu.Lock()
+	usage := st.usage
+	st.usageMu.Unlock()
+	require.InDelta(t, 4.0, usage.Runs["s-killed"], 1e-9, "the killed run is metered from its remembered transcripts")
+	require.Contains(t, usage.RunWindow, "s-killed", "a metered killed session must have a run_window entry, not a missing key")
+	require.InDelta(t, 4.0, usage.RunWindow["s-killed"], 1e-9, "the killed run's window cost is its metered cost")
+	require.Contains(t, usage.RunWindow, "s-nodirs", "a started run with no transcripts still has a run_window entry (0)")
+	require.InDelta(t, 0.0, usage.RunWindow["s-nodirs"], 1e-9)
+	require.Len(t, usage.RunWindow, len(usage.Runs), "run_window must have one entry per run")
+	for k := range usage.Runs {
+		require.Contains(t, usage.RunWindow, k, "run %q missing from run_window", k)
+	}
+
+	// The same shape reaches a JSON consumer of /v1/GetBudget: run_window[s-killed]
+	// is a number, not a missing key.
+	code, env := postProposalRoute(t, cs, "GetBudget", GetBudgetRequest{})
+	require.Equal(t, http.StatusOK, code, env)
+	data := env["data"].(map[string]any)
+	runs := data["runs"].(map[string]any)
+	runWindow := data["run_window"].(map[string]any)
+	require.Contains(t, runWindow, "s-killed", "JSON run_window must include the metered killed session")
+	require.Equal(t, runs["s-killed"], runWindow["s-killed"])
+	require.Contains(t, runWindow, "s-nodirs")
+	for k := range runs {
+		require.Contains(t, runWindow, k, "JSON runs key %q missing from run_window", k)
+	}
+
+	// The backlog.spend event carries the same runs/run_window key set.
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Type != agentproto.EventBacklogSpend {
+				continue
+			}
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal(ev.Data, &payload))
+			er := payload["runs"].(map[string]any)
+			ew := payload["run_window"].(map[string]any)
+			require.Contains(t, ew, "s-killed", "spend event run_window must include the metered killed session")
+			require.Equal(t, er["s-killed"], ew["s-killed"])
+			require.Contains(t, ew, "s-nodirs")
+			for k := range er {
+				require.Contains(t, ew, k, "spend event runs key %q missing from run_window", k)
+			}
+			return
+		case <-deadline:
+			t.Fatal("no backlog.spend event")
+		}
+	}
+}
+
+// A run metered this pass under the same account it always ran under keeps its
+// run_window from the current config dir (no regression for the live-session
+// path): the window cost comes out of the buckets AddRunEntries filed, summed
+// across the accounts state.RunWindowAccounts reports.
+func TestMeterPassRunWindowCoversLiveRunFromCurrentConfigDir(t *testing.T) {
+	cs, _ := newBacklogTestServer(t)
+	cs.manager.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now := time.Now().UTC()
+	line := `{"type":"assistant","timestamp":"` + now.Add(-time.Minute).Format(time.RFC3339) +
+		`","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
+	projectDir := filepath.Join(claudeDir, "projects", "-home-me-x")
+	transcript := filepath.Join(projectDir, "s-live.jsonl")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+	require.NoError(t, os.WriteFile(transcript, []byte(line), 0o644))
+	reset := now.Add(2 * time.Hour).Truncate(time.Hour)
+	require.NoError(t, planusage.WriteReading(planusage.DefaultAccount, planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 30, ResetsAt: reset.Unix()}, ReadAt: now,
+	}))
+	const repoID = "meter-live-repo"
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = append(b.Items, backlog.Item{ID: 1, Title: "t", Status: backlog.StatusRunning})
+		b.Item(1).Runs = []backlog.RunRef{{State: backlog.RunStarted, SessionID: "s-live", StartedAt: now.Add(-2 * time.Minute)}}
+		return nil
+	})
+	require.NoError(t, err)
+	// No instance here either: the transcript dirs are remembered, so the pass
+	// meters from them. With a live instance the config dir would resolve to the
+	// same account, so the window cost this computes is identical.
+	cs.manager.rememberRunDirs("s-live", []string{projectDir})
+
+	st := &cs.manager.backlog.meter
+	st.mu.Lock()
+	cs.manager.meterPassLocked(now)
+	st.mu.Unlock()
+
+	st.usageMu.Lock()
+	usage := st.usage
+	st.usageMu.Unlock()
+	require.InDelta(t, 4.0, usage.Runs["s-live"], 1e-9)
+	require.InDelta(t, 4.0, usage.RunWindow["s-live"], 1e-9, "the live run's window cost is its metered cost")
+	require.Len(t, usage.RunWindow, len(usage.Runs), "run_window must have one entry per run")
+	for k := range usage.Runs {
+		require.Contains(t, usage.RunWindow, k, "run %q missing from run_window", k)
+	}
+}
+}
