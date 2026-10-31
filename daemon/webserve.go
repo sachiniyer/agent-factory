@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,6 +108,7 @@ func noWebShellHandler(api http.Handler, message string) http.Handler {
 // the shell loads with no token.
 func webShellHandler(api http.Handler) http.Handler {
 	assets := web.Dist()
+	gz := &web.GzipCache{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The API namespace (REST mirror, WS stream, WS events) is entirely under
 		// /v1/. Route it to the authed handler so token enforcement, CORS, and the
@@ -116,7 +118,7 @@ func webShellHandler(api http.Handler) http.Handler {
 			api.ServeHTTP(w, r)
 			return
 		}
-		serveSPA(assets, w, r)
+		serveSPA(assets, gz, w, r)
 	})
 }
 
@@ -126,7 +128,7 @@ func webShellHandler(api http.Handler) http.Handler {
 // /path deep-link renders the app, not a 404). The static shell is
 // unauthenticated by design (§1.2); the CSP header is set on every response so
 // the self-contained guarantee is enforced by the browser.
-func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
+func serveSPA(assets fs.FS, gz *web.GzipCache, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeHTTPError(w, r, http.StatusMethodNotAllowed,
 			fmt.Errorf("method %s not allowed for %q; use GET", r.Method, r.URL.Path))
@@ -150,7 +152,7 @@ func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
 		name = "index.html"
 	}
 
-	if serveAsset(assets, name, w, r) {
+	if serveAsset(assets, gz, name, w, r) {
 		return
 	}
 	// A path that NAMES A FILE but matches no embedded asset is not a client-side
@@ -180,7 +182,7 @@ func serveSPA(assets fs.FS, w http.ResponseWriter, r *http.Request) {
 	}
 	// SPA fallback: the path names no embedded asset, so serve the app shell for
 	// client-side routing.
-	serveAsset(assets, "index.html", w, r)
+	serveAsset(assets, gz, "index.html", w, r)
 }
 
 // isEscapedAssetName reports whether a name that matched no embedded asset is a
@@ -227,7 +229,7 @@ var contentTypeByExt = map[string]string{
 // small (a bundle + a page), so reading them whole and handing http.ServeContent
 // a bytes.Reader is simpler than plumbing a Seeker and gives correct
 // Content-Type/HEAD/Range handling for free.
-func serveAsset(assets fs.FS, name string, w http.ResponseWriter, r *http.Request) bool {
+func serveAsset(assets fs.FS, gz *web.GzipCache, name string, w http.ResponseWriter, r *http.Request) bool {
 	f, err := assets.Open(name)
 	if err != nil {
 		return false
@@ -249,6 +251,26 @@ func serveAsset(assets fs.FS, name string, w http.ResponseWriter, r *http.Reques
 	// negotiation; it still infers Content-Type from the extension and handles
 	// HEAD. The assets are embedded and versioned with the binary, so per-file
 	// modtimes carry no meaning.
-	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
+	//
+	// Text assets are served gzipped when the request allows it (#6417): the shell
+	// is ~1 MB raw and ~250 KB compressed, which is the difference between a usable
+	// page and 20+ s of "Connecting…" on a 3G link. The compressed form is built
+	// once per process (web.GzipCache), never per request. Vary is set on every
+	// compressible response, whichever form this client gets, so a shared cache
+	// cannot hand the compressed bytes to a client that did not ask for them. The
+	// body is still ServeContent's, so Content-Type, HEAD and Range work as before
+	// (a Range addresses the encoded bytes, as for any Content-Encoding).
+	body := data
+	if web.Compressible(name, len(data)) {
+		w.Header().Add("Vary", "Accept-Encoding")
+		if gz != nil && web.AcceptsGzip(r.Header.Get("Accept-Encoding")) {
+			body = gz.Get(name, data)
+			w.Header().Set("Content-Encoding", "gzip")
+			// ServeContent omits Content-Length when Content-Encoding is set;
+			// the length is known, so say it rather than fall back to chunking.
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		}
+	}
+	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(body))
 	return true
 }
