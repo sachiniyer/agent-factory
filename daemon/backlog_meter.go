@@ -184,10 +184,10 @@ type itemRun struct {
 	inst   *session.Instance
 }
 
-func (m *Manager) startedItemRuns(home string) []itemRun {
+func (m *Manager) startedItemRuns(home string) ([]itemRun, bool) {
 	paths, _ := filepath.Glob(filepath.Join(home, "repos", "*", backlog.BacklogFileName))
 	if len(paths) == 0 {
-		return nil
+		return nil, true
 	}
 	sessions := map[string]*session.Instance{}
 	m.mu.Lock()
@@ -198,11 +198,13 @@ func (m *Manager) startedItemRuns(home string) []itemRun {
 	}
 	m.mu.Unlock()
 	var out []itemRun
+	complete := true
 	for _, p := range paths {
 		repoID := filepath.Base(filepath.Dir(p))
 		b, err := backlog.Load(repoID)
 		if err != nil {
 			m.warn().Printf("plan meter: backlog of project %s: %v", repoID, err)
+			complete = false
 			continue
 		}
 		for _, it := range b.Items {
@@ -213,7 +215,7 @@ func (m *Manager) startedItemRuns(home string) []itemRun {
 			}
 		}
 	}
-	return out
+	return out, complete
 }
 
 // meterPassLocked meters every item run and every Claude transcript, stores
@@ -251,7 +253,8 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	backlogDirs = append(backlogDirs, m.itemSessionTranscriptDirs()...)
 	runSnaps := map[string]planusage.RunSnapshot{}
 	runConfigs := map[string][]string{}
-	for _, r := range m.startedItemRuns(home) {
+	itemRuns, runsComplete := m.startedItemRuns(home)
+	for _, r := range itemRuns {
 		usage.Runs[r.run.SessionID] = r.run.Cost()
 		running := r.item.Status == backlog.StatusRunning
 		var configDir string
@@ -312,7 +315,12 @@ func (m *Manager) meterPassLocked(now time.Time) {
 			updates[r.repoID][r.run.SessionID] = rm.Meter
 		}
 	}
-	state.KeepRunSeen(metered)
+	// A project whose backlog could not be read has runs this pass never saw:
+	// dropping their dedupe keys, buckets and directories now would lose them for
+	// good once it is readable again (Codex P2 on #6299).
+	if runsComplete {
+		state.KeepRunSeen(metered)
+	}
 	state.PruneRunBuckets(now)
 	m.meterAccounts(home, state, backlogDirs, runConfigs, overrides, now, &usage)
 	for sessionID, account := range runAccount {
