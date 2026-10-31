@@ -63,8 +63,8 @@ export interface TaskActions {
   /** Opens the edit modal seeded from this task; submits the changed fields via
    *  UpdateTask (the field-level patch, #1935). */
   edit(task: TaskData): void;
-  /** Flips enabled via UpdateTask. */
-  toggle(task: TaskData): void;
+  /** Flips enabled via UpdateTask. Resolves true when the new value was applied. */
+  toggle(task: TaskData): Promise<boolean>;
   /** Fires the task now via TriggerTask (enabled cron tasks only). */
   trigger(task: TaskData): void;
   /** Removes the task via RemoveTask. */
@@ -352,6 +352,114 @@ export function taskVerbs(t: TaskData, actions: Pick<TaskActions, "edit" | "trig
   ];
 }
 
+/** The slice of a switch button the pending state paints, so the rule is testable without a DOM. */
+export interface SwitchEl {
+  title: string;
+  classList: { toggle(name: string, on: boolean): unknown };
+  setAttribute(name: string, value: string): void;
+  removeAttribute(name: string): void;
+}
+
+// aria-disabled, not disabled: a disabled button drops keyboard focus, and the
+// rebuild after the refetch restores focus only from the active element.
+export function paintSwitch(el: SwitchEl, on: boolean, busy: boolean): void {
+  el.classList.toggle("af-task-switch-on", on);
+  el.setAttribute("aria-checked", on ? "true" : "false");
+  el.title = on ? "Enabled · click to disable" : "Disabled · click to enable";
+  if (busy) {
+    el.setAttribute("aria-busy", "true");
+    el.setAttribute("aria-disabled", "true");
+  } else {
+    el.removeAttribute("aria-busy");
+    el.removeAttribute("aria-disabled");
+  }
+}
+
+/** One in-flight (or applied-but-unreconciled) switch flip: the value it is moving to. */
+export interface PendingFlip { value: boolean; settled: boolean; timer: unknown }
+
+/** The timer seam of the backstop: window timers in the pane, a fake in tests. */
+export interface Backstop {
+  ms: number;
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+  /** Called when no list reconciled the flip in time; the flip is already released. */
+  expire(id: string): void;
+}
+
+/**
+ * Runs one switch flip: shows the requested value and busy at once and ignores a
+ * second click while it is in flight. A failed or refused request puts back the LATEST
+ * known value (`latest`: a list may have changed the task while the request was in
+ * flight, and the rebuilt click handler toggles from that one). An applied one stays busy, showing the new value, until the list refetch has
+ * reconciled it (releaseSettled): the click handler toggles from the task it was
+ * rendered with, so the switch accepts a click only when what it displays and what
+ * the handler will toggle from are the same reconciled value.
+ */
+export function flipSwitch(
+  pending: Map<string, PendingFlip>,
+  t: Pick<TaskData, "id" | "enabled">,
+  toggle: () => Promise<boolean>,
+  paint: (on: boolean, busy: boolean) => void,
+  latest: () => boolean,
+  backstop?: Backstop,
+): void {
+  if (pending.has(t.id)) return;
+  const next = !t.enabled;
+  const flip: PendingFlip = { value: next, settled: false, timer: null };
+  pending.set(t.id, flip);
+  paint(next, true);
+  void toggle().then((applied) => applied, () => false).then((applied) => {
+    if (applied) {
+      flip.settled = true;
+      // The backstop belongs to THIS flip: it fires only while this exact flip is
+      // still the pending one, and releaseSettled cancels it on reconcile.
+      if (backstop) {
+        flip.timer = backstop.set(() => {
+          flip.timer = null;
+          if (pending.get(t.id) !== flip) return;
+          pending.delete(t.id);
+          backstop.expire(t.id);
+        }, backstop.ms);
+      }
+      return;
+    }
+    pending.delete(t.id);
+    paint(latest(), false);
+  });
+}
+
+/** Drops the applied flips a newly arrived task list reflects: the list carries the
+ *  value the next render and the next click handler are both built from. A flip whose
+ *  task still shows the old value (a list fetched before the update landed) stays
+ *  pending; the backstop is its way out. A task the list no longer holds has nothing
+ *  left to reconcile. */
+export function releaseSettled(
+  pending: Map<string, PendingFlip>,
+  tasks: readonly Pick<TaskData, "id" | "enabled">[],
+  backstop?: Pick<Backstop, "clear">,
+): void {
+  const enabled = new Map(tasks.map((t) => [t.id, t.enabled]));
+  for (const [id, flip] of pending) {
+    if (!flip.settled) continue;
+    if (enabled.has(id) && enabled.get(id) !== flip.value) continue;
+    if (flip.timer !== null) backstop?.clear(flip.timer);
+    flip.timer = null;
+    pending.delete(id);
+  }
+}
+
+/** Only a NEW list reconciles a flip: a project switch re-renders the same array, which
+ *  carries no news about an update still being refetched. */
+export function reconcileOnUpdate(
+  pending: Map<string, PendingFlip>,
+  previous: readonly Pick<TaskData, "id" | "enabled">[] | null,
+  tasks: readonly Pick<TaskData, "id" | "enabled">[],
+  backstop?: Pick<Backstop, "clear">,
+): void {
+  if (previous !== tasks) releaseSettled(pending, tasks, backstop);
+}
+
 /**
  * The tasks pane: build once (its `el` mounts into the app body), then
  * update(tasks) re-renders on a change. A small stateful class like the projects
@@ -366,6 +474,9 @@ export class TasksPane {
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
   // next-run recalculation) keeps the reader's place (#2933).
   private lastToken: string | null = null;
+  // Task id -> the value an in-flight toggle is moving to. Rebuilds re-apply it so
+  // a refetch mid-request cannot hand back an enabled switch for the same task.
+  private readonly pending = new Map<string, PendingFlip>();
 
   constructor(private readonly actions: TaskActions) {
     this.el = h("section", { class: "af-tasks" });
@@ -380,6 +491,7 @@ export class TasksPane {
       return;
     }
     this.lastError = error;
+    reconcileOnUpdate(this.pending, this.lastTasks, tasks, { clear: (h) => window.clearTimeout(h as number) });
     const token = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token;
@@ -403,6 +515,28 @@ export class TasksPane {
         .find((button) => sameControlKey(controlKey(button), focused));
       control?.focus({ preventScroll: true });
     }
+  }
+
+  /** If no list ever arrives to reconcile an applied flip, fall back to the last one. */
+  private backstop(paint: (id: string, on: boolean, busy: boolean) => void): Backstop {
+    return {
+      ms: 5000,
+      set: (fn, ms) => window.setTimeout(fn, ms),
+      clear: (handle) => window.clearTimeout(handle as number),
+      expire: (id) => {
+        const known = this.lastTasks?.find((x) => x.id === id);
+        if (known) paint(id, known.enabled, false);
+      },
+    };
+  }
+
+  private flip(t: TaskData): void {
+    const paint = (id: string, on: boolean, busy: boolean): void => {
+      const el = this.el.querySelector<HTMLButtonElement>(`[data-task-id="${CSS.escape(id)}"] .af-task-switch`);
+      if (el) paintSwitch(el, on, busy);
+    };
+    flipSwitch(this.pending, t, () => this.actions.toggle(t), (on, busy) => paint(t.id, on, busy),
+      () => this.lastTasks?.find((x) => x.id === t.id)?.enabled ?? t.enabled, this.backstop(paint));
   }
 
   private render(tasks: TaskData[]): void {
@@ -498,7 +632,11 @@ export class TasksPane {
     toggle.setAttribute("aria-checked", t.enabled ? "true" : "false");
     toggle.setAttribute("aria-label", `Enabled: ${t.name}`);
     toggle.title = t.enabled ? "Enabled · click to disable" : "Disabled · click to enable";
-    toggle.addEventListener("click", () => this.actions.toggle(t));
+    const inFlight = this.pending.get(t.id);
+    if (inFlight !== undefined) {
+      paintSwitch(toggle, inFlight.value, true);
+    }
+    toggle.addEventListener("click", () => this.flip(t));
 
     const verbs = taskVerbs(t, this.actions);
 
