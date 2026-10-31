@@ -187,16 +187,16 @@ func routedRestartTask(id string, expect task.ProjectExpectation) error {
 	return nil
 }
 
-func routedTriggerTask(id string, expect task.ProjectExpectation) error {
+func routedTriggerTask(id string, expect task.ProjectExpectation, actor task.Actor) error {
 	if !apiclient.IsRemoteTarget() {
-		return daemonTriggerTask(id, expect)
+		return daemonTriggerTask(id, expect, actor)
 	}
 	client, err := remoteTaskClient()
 	if err != nil {
 		return err
 	}
 	defer client.CloseIdleConnections()
-	if err := client.TriggerTask(id, expect); err != nil {
+	if err := client.TriggerTask(id, expect, actor); err != nil {
 		return remoteTaskError(client, "af tasks trigger", "TriggerTask", err, remoteNothingFired)
 	}
 	return nil

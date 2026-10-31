@@ -189,6 +189,9 @@ var backlogNoteCmd = &cobra.Command{
 			if len(args) < 2 {
 				return nil, errors.New("af backlog note needs an id and text, or --self and text")
 			}
+			if err := refuseFromItemSession("note <id>"); err != nil {
+				return nil, err
+			}
 			id, err := backlog.ParseID(args[0])
 			if err != nil {
 				return nil, err

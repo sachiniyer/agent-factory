@@ -1,6 +1,11 @@
 package task
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
+)
 
 // The per-task audit trail (#3623).
 //
@@ -58,6 +63,12 @@ const (
 	AuditUpdated  = "updated"
 	AuditEnabled  = "enabled"
 	AuditDisabled = "disabled"
+	// AuditTriggered records a MANUAL fire (#6318): `af tasks trigger`, the
+	// TUI's run-now, the web's trigger, or the shared HTTP route, each naming
+	// its surface in Actor. Scheduled cron and watch-line fires are not actor
+	// actions and never produce this entry — the daemon records it only on the
+	// control path a client can reach.
+	AuditTriggered = "triggered"
 )
 
 // AuditEntry is one recorded mutation.
@@ -91,15 +102,72 @@ func ParseActor(s string) Actor {
 	}
 }
 
-// appendAudit records one entry on t, keeping only the most recent AuditLimit.
-// The trim keeps the TAIL: the newest entries are the ones that explain the
-// state a reader is looking at.
+// appendAudit records one entry on t, bounded to AuditLimit by auditTrim.
 func appendAudit(t *Task, actor Actor, action string, fields []string, at time.Time) {
 	entry := AuditEntry{At: at, Actor: ParseActor(string(actor)), Action: action, Fields: fields}
-	t.Audit = append(t.Audit, entry)
-	if len(t.Audit) > AuditLimit {
-		t.Audit = append([]AuditEntry(nil), t.Audit[len(t.Audit)-AuditLimit:]...)
+	t.Audit = auditTrim(append(t.Audit, entry))
+}
+
+// auditTrim keeps at most AuditLimit entries, and its eviction order is the
+// answer to "a task triggered in a loop must not push its own history out"
+// (#6318): `triggered` entries — routine fires, not configuration history —
+// are evicted first, oldest before newest. A non-triggered entry drops only
+// when the over-limit trail holds nothing else, which preserves the plain
+// keep-the-tail behavior for a trail made entirely of config changes, and
+// means `created` in particular survives any number of triggers.
+func auditTrim(audit []AuditEntry) []AuditEntry {
+	if len(audit) <= AuditLimit {
+		return audit
 	}
+	drop := len(audit) - AuditLimit
+	kept := make([]AuditEntry, 0, AuditLimit)
+	for _, e := range audit {
+		if drop > 0 && e.Action == AuditTriggered {
+			drop--
+			continue
+		}
+		kept = append(kept, e)
+	}
+	// Ran out of triggered entries before covering the overflow: fall back to
+	// the plain tail-trim on what survived.
+	return append([]AuditEntry(nil), kept[drop:]...)
+}
+
+// RecordTaskTrigger appends a `triggered` audit entry naming the surface that
+// fired the task (#6318). It is the STORE-side write behind the daemon's
+// manual-trigger control path — `af tasks trigger`, the TUI's run-now, the
+// web's trigger, and the shared HTTP route all converge there — recorded the
+// same way every other audit entry is: inside the locked write that commits
+// it, so the trail cannot describe a fire that did not land.
+//
+// It is deliberately NOT inside RunTask: the scheduler's cron fires and a
+// watch task's line fires go through that same path and are not actor actions.
+// Only the daemon's client-facing trigger handler calls this, so nothing but a
+// manual trigger can write the entry.
+func RecordTaskTrigger(taskID string, actor Actor) error {
+	if err := ValidateTaskID(taskID); err != nil {
+		return err
+	}
+	path, err := getTasksPathFn()
+	if err != nil {
+		return err
+	}
+	if err := ensureTasksSchemaMigrated(path); err != nil {
+		return err
+	}
+	return config.WithFileLock(path, func() error {
+		tasks, err := loadTasksLocked(path)
+		if err != nil {
+			return err
+		}
+		for i := range tasks {
+			if tasks[i].ID == taskID {
+				appendAudit(&tasks[i], actor, AuditTriggered, nil, nowFn())
+				return saveTasks(tasks)
+			}
+		}
+		return fmt.Errorf("task with id %q not found", taskID)
+	})
 }
 
 // auditUpdate records the difference between the stored record and the record

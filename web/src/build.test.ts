@@ -61,3 +61,36 @@ test("the Docs editor is a separate lazy bundle that the shell does not import",
   assert.ok(lazy.includes("cm-scroller"), "CodeMirror must be in the Docs bundle");
   assert.match(lazy, /export\s*\{[^}]*DocsPane/, "the Docs bundle must export DocsPane");
 });
+
+// af() (src/api.ts) sends X-AF-Client-Version on every /v1/ request so the daemon
+// decodes the body with its tolerant (additive-field) decoder instead of the strict
+// DisallowUnknownFields path reserved for hand-authored curl (daemon/httpserver.go).
+// The header's PRESENCE is the discriminator; the value is a content hash build.mjs
+// stamps into the bundle at build time. This pins both halves of that contract on the
+// built artifact the daemon embeds.
+test("the build stamps af()'s X-AF-Client-Version into the bundle and is reproducible", () => {
+  const apiSource = readFileSync(join(webRoot, "src", "api.ts"), "utf8");
+  assert.ok(
+    apiSource.includes("__AF_CLIENT_VERSION__"),
+    "src/api.ts must carry the __AF_CLIENT_VERSION__ placeholder af() sends pre-stamp (and the build replaces)",
+  );
+
+  // Two consecutive builds must reproduce dist/af-web.js byte-for-byte: esbuild is
+  // deterministic and the stamp is sha256 of the placeholder bundle (stable per
+  // source), so a rebuild reproduces the committed bytes — the property the
+  // `make web-build && git status --porcelain -- web/dist` gate relies on.
+  execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
+  const first = readFileSync(join(webRoot, "dist", "af-web.js"), "utf8");
+  execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
+  const second = readFileSync(join(webRoot, "dist", "af-web.js"), "utf8");
+
+  assert.equal(first, second, "a rebuild must reproduce dist/af-web.js byte-for-byte (deterministic stamp)");
+  assert.ok(
+    !first.includes("__AF_CLIENT_VERSION__"),
+    "build.mjs must replace the placeholder in dist/af-web.js — the browser must never send the literal sentinel",
+  );
+  assert.ok(
+    first.includes("X-AF-Client-Version"),
+    "the bundle must carry the header name so af() opts the browser into the daemon's tolerant decode",
+  );
+});

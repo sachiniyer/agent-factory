@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -114,8 +115,10 @@ func parsePaneRow(field string) (paneRow, error) {
 		pid = stampPID
 	case panePIDRaw == "" && row.dead && verdict == stampPending:
 		return paneRow{}, fmt.Errorf("dead pane carries a %s stamp for root %d whose incarnation proof is one counter short — tmux reports pane_dead before its queued pane-died hook increments the deaths counter, so the hook has not counted the death yet and the process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion: %w", PanePidMarker, stampPID, errPaneStampPending)
-	case panePIDRaw == "" && row.dead && stampPID > 0:
+	case panePIDRaw == "" && row.dead && verdict == stampStale:
 		return paneRow{}, fmt.Errorf("dead pane carries a %s stamp for root %d from an earlier incarnation — the pane was respawned or its stamp write failed, so its process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion", PanePidMarker, stampPID)
+	case panePIDRaw == "" && row.dead && stampPID > 0:
+		return paneRow{}, fmt.Errorf("dead pane carries a %s stamp for root %d that predates the incarnation proof, so its process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion", PanePidMarker, stampPID)
 	case panePIDRaw == "" && row.dead:
 		return paneRow{}, fmt.Errorf("dead pane reports no pane_pid and no %s stamp; it predates pid stamping or was not created by af, so its process tree cannot be proven — the workspace is left intact; the recorded kill is retried automatically once the session is gone from tmux, and `af sessions kill` re-run drives the same teardown to completion", PanePidMarker)
 	default:
@@ -134,6 +137,14 @@ const (
 	// stampUnusable means the stamp names nobody: unset, malformed, or a
 	// non-positive pid — the pane reads exactly like an unstamped one.
 	stampUnusable paneStampVerdict = iota
+	// stampLegacy means a readable stamp carrying no incarnation bundle at
+	// all — a bare pid written before the proof fields existed. It cannot
+	// name the current incarnation, but unlike a stale bundle nothing in it
+	// positively contradicts the current run either. Evidence that does not
+	// come from the stamp — tmux's own collected status — may stand beside
+	// it; the stamped pid itself stays unusable, exactly like an unstamped
+	// pane's.
+	stampLegacy
 	// stampStale means a readable stamp that cannot name the pane's current
 	// incarnation: a deaths gap that is not 0-or-1, a moved pty, or a
 	// replaced start command — a respawn, or a stamp write that never
@@ -188,10 +199,12 @@ var errPaneStampPending = errors.New("the pane-died hook has not counted the dea
 //     whose argv happens to contain a launch marker — fails it, while an
 //     identical commandless re-run re-executed the shim and restamped.
 //
-// A stamp written before the incarnation proof existed (a bare pid, or a
-// malformed bundle) has no second colon and fails closed like an unstamped
-// pane. A deaths field left empty at stamp time is the counter's unset
-// state, i.e. zero.
+// A stamp written before the incarnation proof existed — a bare pid with no
+// second colon — is stampLegacy: it fails every proof it was never given
+// rather than contradicting one, so readers choose how much that absence
+// costs. A bundle that did set out to carry the proof and is malformed still
+// fails closed as stale. A deaths field left empty at stamp time is the
+// counter's unset state, i.e. zero.
 func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, paneStampVerdict) {
 	pidRaw, rest, hasRest := strings.Cut(stamp, ":")
 	pid, err := strconv.Atoi(pidRaw)
@@ -200,9 +213,11 @@ func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, paneStampVerd
 	}
 	if !hasRest {
 		// A bare pid is a stamp written before the incarnation proof
-		// existed: readable, but unprovable — it fails closed like an
-		// unstamped pane, only with a nameable pid.
-		return pid, stampStale
+		// existed: readable, but unprovable — it cannot name the current
+		// incarnation, only fail the proofs it was never given. That is
+		// weaker than a stale bundle, which DID carry the proof and
+		// contradicted it.
+		return pid, stampLegacy
 	}
 	deathsRaw, ttyRaw, ok := strings.Cut(rest, ":")
 	if !ok {
@@ -471,6 +486,14 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 // dead. When tmux reports none of status, signal or death time, the pane pid
 // decides.
 //
+// The reading comes from the session's active pane, but under remain-on-exit a
+// user who attaches can split the window and end up focused on a pane af did
+// not launch. Only a pane whose recorded start command carries af's launch
+// marker — and whose stamp, when it exists, still names the current
+// incarnation — is the recorded command's pane; a foreign pane's death is not
+// the command's exit and reports not-dead, so a split pane the user killed can
+// never be stamped as how the command ended (readPaneExit).
+//
 // A root that has exited but that tmux has not collected yet is dead, and tmux
 // will report how it ended as soon as it collects it: tmux marks the pane dead
 // when its terminal closes, which can come first (#4682). The probe waits for
@@ -596,6 +619,31 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 	if field(0) != "1" {
 		return paneExit{known: true}, false
 	}
+	// The reading comes from the session's ACTIVE pane — what `=name:`
+	// resolves to (see exactTarget) — and under remain-on-exit a user who
+	// attaches can split the window and end up focused on a pane af did not
+	// launch. That pane inherits remain-on-exit, exits, and is held dead as
+	// the active pane, so tmux reports its death — collected status or bare
+	// pid — on the very target the recorded command never ran on. What proves
+	// the recorded command ran there is pane_start_command (the last field):
+	// af's launch wrapper leaves a sessionenv exec marker AND the recorded
+	// command as its last argument, immutable across respawn and older than
+	// the stamp. The marker alone does not suffice — an account-scoped
+	// session's default-command wraps an interactive account shell through
+	// the same sessionenv marker, so a user's split pane can carry a genuine
+	// af marker without ever having run the recorded command — and the stamp
+	// alone cannot prove launch either, because restoreProcessTab's
+	// remain-on-exit heal (ApplyRemainOnExit) stamps whatever pane is ACTIVE,
+	// which under a user split is the foreign pane, and once the hook counts
+	// that death the healed stamp reads stampFresh. The first-wins guard on
+	// Tab.Exit makes a wrongly attributed exit permanent — the same
+	// active-pane hazard the session-wide scan PaneRootProcessMatches exists
+	// to reject (#5066 review: "the user can split the window or focus a
+	// shell tab, moving the active-pane pointer") — so a pane whose recorded
+	// launch is not this session's command never supplies a Tab.Exit at all.
+	if !t.paneLaunchIsRecorded(fields[10:]) {
+		return paneExit{known: true}, false
+	}
 	exit = paneExit{dead: true, known: true, version: field(5)}
 	if code, perr := strconv.Atoi(field(1)); perr == nil {
 		exit.status, exit.statusKnown = code, true
@@ -642,7 +690,71 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 		}
 		return exit, true
 	}
+	// pane_start_command already proved this pane ran the recorded command,
+	// so tmux's collected status is the recorded command's exit — it is this
+	// pane's own last death — UNLESS the stamp positively names an earlier
+	// incarnation: a respawn that moved past the stamp's pins died under a
+	// command the row cannot attribute. A fresh stamp, a pending counter
+	// (#5335), no stamp at all, or a bare-pid stamp written before the
+	// incarnation fields existed (stampLegacy — unprovable, but contradicting
+	// nothing) all keep the exit tmux already collected, and a pane that died
+	// before its heal must not wait out a deaths hook that can never land.
+	if _, verdict := paneStampPID(field(6), field(7), field(8), field(9)); verdict == stampStale {
+		return paneExit{known: true}, false
+	}
 	return exit, false
+}
+
+// paneLaunchIsRecorded reports whether the pane's recorded pane_start_command
+// is THIS session's recorded launch — the pane the recorded process belongs
+// to, not merely a pane running under an af environment wrapper. af wraps
+// every pane it launches in a sessionenv exec marker and leaves the recorded
+// command as the wrapper's last argument, so the binding is marker AND the
+// recorded program's quoted form at the tail. The marker alone is not launch
+// provenance: an account-scoped session's default-command wraps an
+// interactive account shell through the same marker (prepareLaunchEnvironment),
+// so a split pane created from that default carries it without ever having
+// run the recorded command. startFields is the raw tail of the probe's reply
+// split on the field separator, joined so a command containing the separator
+// still reads whole.
+// unquotePaneStartCommand undoes the quoting tmux applies when it records
+// pane_start_command: a command containing spaces or quote characters is
+// stored as "…" with \, ", $ and ` escaped. The launch marker and the
+// program tail must be matched on the command as af wrote it, so the wrap
+// comes off first; a verbatim recording passes through unchanged.
+func unquotePaneStartCommand(s string) string {
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) - 2)
+	for i := 1; i < len(s)-1; i++ {
+		if s[i] == '\\' && i+1 < len(s)-1 {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func (t *TmuxSession) paneLaunchIsRecorded(startFields []string) bool {
+	start := unquotePaneStartCommand(strings.Join(startFields, paneFieldSeparator))
+	program := t.Program()
+	if program == "" {
+		return false
+	}
+	for _, marker := range []string{
+		sessionenv.ExecMarker,
+		sessionenv.AccountExecMarker,
+		sessionenv.AccountEnvironmentExecMarker,
+		sessionenv.AgentServerExecMarker,
+		sessionenv.AgentServerAccountExecMarker,
+	} {
+		if strings.Contains(start, marker) {
+			return strings.HasSuffix(start, " "+shellquote.Quote(program))
+		}
+	}
+	return false
 }
 
 // exitedUncollected reports whether pid is a process that has exited and waits
@@ -666,7 +778,7 @@ const paneExitFormat = "#{pane_dead}" + paneFieldSeparator + "#{pane_dead_status
 	"#{pane_dead_time}" + paneFieldSeparator + "#{pane_dead_signal}" + paneFieldSeparator + "#{pane_pid}" +
 	paneFieldSeparator + "#{version}" + paneFieldSeparator + "#{" + PanePidMarker + "}" +
 	paneFieldSeparator + "#{" + paneDeathsMarker + "}" + paneFieldSeparator + "#{pane_tty}" +
-	paneFieldSeparator + paneCommandMatchField
+	paneFieldSeparator + paneCommandMatchField + paneFieldSeparator + "#{pane_start_command}"
 
 // LaunchPending reports whether the pane's root is still af's launch shim, the
 // environment filter that execs the pane command, so the command itself has

@@ -388,7 +388,7 @@ func TestTriggerTask_RealControlSocket_CommittedOutcomeReachesCLIClassifier(t *t
 	// socket -> TriggerTask -> RunTask -> the deliver path -> a committed
 	// auto-create, which the handler must record in the envelope rather than
 	// return directly.
-	triggerErr := TriggerTask("ffff0050", task.ProjectExpectation{})
+	triggerErr := TriggerTask("ffff0050", task.ProjectExpectation{}, task.ActorCLI)
 	if triggerErr == nil {
 		t.Fatal("expected TriggerTask over the control socket to surface the committed auto-create failure")
 	}
@@ -452,7 +452,7 @@ func TestTriggerTask_RealControlSocket_HappyPathStartsAndNotCommitted(t *testing
 	}
 	t.Cleanup(func() { _ = closeServer() })
 
-	if err := TriggerTask("ffff0051", task.ProjectExpectation{}); err != nil {
+	if err := TriggerTask("ffff0051", task.ProjectExpectation{}, task.ActorCLI); err != nil {
 		t.Fatalf("happy-path TriggerTask over the control socket: %v", err)
 	}
 }
