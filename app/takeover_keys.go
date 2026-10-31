@@ -4,9 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"os/exec"
-	"strings"
 	"sync"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -127,10 +127,8 @@ func (r takeoverRoute) mirrorRootScript() string {
 // (prefix, prefix2, key-table, status-right), so the takeover's own values win
 // over a copied one. A failed copy must not abort the takeover.
 func (r takeoverRoute) mirrorSessionOptionsScript() string {
-	return "tmux show-options -t " + shellQuote("="+r.session) + " | sed -E 's/^/set-option -t " + r.group + " /' | tmux source-file - || true"
+	return "tmux show-options -t " + config.ShellQuotePath("="+r.session) + " | sed -E 's/^/set-option -t " + r.group + " /' | tmux source-file - || true"
 }
-
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // cleanupArgs are the commands that retire this client's routing: its own table
 // and its own private session, never the shared one.
