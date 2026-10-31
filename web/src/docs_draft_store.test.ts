@@ -117,3 +117,30 @@ test("a full storage keeps a legacy draft too", () => {
   assert.equal(new DraftStorage(quota, "wB", () => now, "s\nplan").load("goals")?.buffer, "legacy");
   assert.equal(kv.keys().length, 1);
 });
+
+test("a closed pane's late write is released at once, and the heartbeat does not revive it", () => {
+  const kv = memory();
+  let now = 1000;
+  const a = new DraftStorage(kv, "wA", () => now, "s\nplan", "1");
+  a.store("goals", draft("first"));
+  a.close(); // the pane is gone; a save of its is still in flight
+  a.store("goals", draft("conflict draft written by the closing sync")); // the reply came back
+  a.touch();
+  now += 1000; // far inside the 30 s a live owner would be waited for
+  assert.equal(new DraftStorage(kv, "wA", () => now, "s\nplan", "2").load("goals")?.buffer, "conflict draft written by the closing sync");
+});
+
+test("docs() lists every doc with a draft this pane may take over, deleted or not; peek adopts nothing", () => {
+  const kv = memory();
+  const now = 1000;
+  const a = new DraftStorage(kv, "wA", () => now, "s\nplan", "1");
+  a.store("goals", draft("goals work"));
+  a.store("old", draft("work on a doc the daemon no longer has"));
+  const live = new DraftStorage(kv, "wB", () => now, "s\nplan", "1");
+  live.store("theirs", draft("another live pane's"));
+  a.release();
+  const next = new DraftStorage(kv, "wA", () => now, "s\nplan", "2");
+  assert.deepEqual(next.docs().sort(), ["goals", "old"], "a live pane's draft is not offered");
+  assert.equal(next.peek("old")?.buffer, "work on a doc the daemon no longer has");
+  assert.equal(kv.keys().length, 3, "peek and docs adopted nothing");
+});

@@ -209,8 +209,12 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   // and its own pane id. (AF_SAME_OWNER gives it the first pane's owner too: the
   // engine before panes had owners of their own.)
   const sameWindow = !!o.chaos && rand() < 0.5;
-  const ghostStorage = new DraftStorage(kv, sameWindow ? "wA0" : "wGhost", () => now, "s\nplan", process.env.AF_SAME_OWNER && sameWindow ? "0" : "g");
+  let ghostSeq = 0;
+  const newGhostStorage = (): DraftStorage => new DraftStorage(kv, sameWindow ? "wA0" : "wGhost", () => now, "s\nplan", process.env.AF_SAME_OWNER && sameWindow ? "0" : `g${++ghostSeq}`);
+  let ghostStorage = newGhostStorage();
   const storageOf = new Map<SyncLike, DraftStorage>();
+  /** The owners of panes that have closed. */
+  const closedOwners = new Set<string>();
   /** Every unsaved buffer held in storage for `doc`, whichever window owns it. */
   const stashedBuffers = (doc: string): string[] =>
     [...kvMap.entries()]
@@ -249,16 +253,21 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
 
   const httpErr = (status: number, message: string): Error => Object.assign(new Error(message), { status });
 
-  function newSync(doc: string, storage: () => DraftStorage = () => storageA, register = true): SyncLike {
+  function newSync(doc: string, storage: () => DraftStorage = () => storageA, register = true, synthetic?: () => { text: string; commit: string } | null): SyncLike {
     const isGhost = !register;
     const owner: "a" | "g" = isGhost ? "g" : "a";
     const d = daemons.get(doc)!;
+    // The pane's own storage: a pane that closes keeps writing to it while its syncs
+    // finish, whatever page is open by then.
+    const st = storage();
     let self: SyncLike | null = null; // the sync these deps belong to, not whatever is current for the doc
     const deps: SyncDepsLike = {
       load: async (initial) => {
         // A reopened tab loads only after the closing tab's final save has landed.
         const priors = initial ? [...(closing.get(doc) ?? [])].filter((p) => p !== self) : [];
         await Promise.all(priors.map((p) => p.whenQuiet?.()));
+        const stored = initial && synthetic ? synthetic() : null;
+        if (stored) return stored;
         return call(() => {
           if (d.down > 0) {
             d.down--;
@@ -315,14 +324,14 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         (h as { live: boolean }).live = false;
       },
       draft: {
-        load: () => storage().load(doc),
-        store: (x) => storage().store(doc, x),
-        clear: () => storage().clear(doc),
+        load: () => st.load(doc),
+        store: (x) => st.store(doc, x),
+        clear: () => st.clear(doc),
       },
     };
     const s = o.makeSync(deps);
     self = s;
-    storageOf.set(s, storage());
+    storageOf.set(s, st);
     if (register) syncs.set(doc, s);
     return s;
   }
@@ -559,14 +568,38 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     // The window is gone: it releases its drafts; the page that opens next is a new
     // window with a new id, and adopts them.
     if (ghostBox.cur) pageWorkTransferred = true;
-    storageA.release();
+    closedOwners.add(storageA.owner);
+    if (process.env.AF_RELEASE_ONLY) storageA.release(); // (the store before a closed pane kept its late writes released)
+    else storageA.close();
     storageA = new DraftStorage(kv, `wA${++winSeq}`, () => now, "s\nplan");
     const unsaved = [...typed.get(doc)!.values()].filter((tok) => !daemons.get(doc)!.everHad(tok) && !excused.has(tok));
     // Storage may be full as the new page adopts the old one's draft: the copy does not
-    // fit, and the original must stay (AF_REMOVE_UNSTORED is the store before that).
+    // fit, and the original must stay.
     storageFull = !!o.chaos && rand() < 0.3;
+    // The pane lists the daemon's docs, so a doc the daemon no longer has is not opened:
+    // the unsaved work stored for it comes back as a deleted doc instead.
+    if (daemons.get(doc)!.deleted) {
+      recoverStoredGone();
+      for (let i = 0; i < 5; i++) await tick();
+      await drain();
+      storageFull = false;
+      // I13: work stored for a doc the daemon no longer has is reachable: the new pane
+      // shows it as a deleted doc, to restore or discard. Stored and shown nowhere is lost.
+      const d = daemons.get(doc)!;
+      const stored = stashedBuffers(doc).join("\n").split("\n");
+      const stranded = [...typed.get(doc)!.values()].filter((tok) => !excused.has(tok) && !d.everHad(tok) && stored.includes(tok));
+      if (stranded.length && syncs.get(doc)?.currentStatus !== "gone") {
+        fail("stored-draft-of-deleted-doc-unreachable", `${doc}: ${stranded.join(",")} is stored for a doc the daemon no longer has, and the reopened pane shows ${syncs.get(doc)?.currentStatus ?? "nothing"}`);
+      }
+      for (let i = 0; i < 3; i++) {
+        await advance(6000);
+        await drain();
+      }
+      return;
+    }
     await open(doc);
     await drain();
+    recoverStoredGone();
     storageFull = false;
     const back = syncs.get(doc)!;
     // I6: unsaved edits that survive only in storage come back, and say so.
@@ -579,6 +612,22 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     for (let i = 0; i < 3; i++) {
       await advance(6000);
       await drain();
+    }
+  }
+
+  /** A newly opened pane finds stored drafts of docs the daemon no longer has, and
+   *  opens each as a deleted doc from its draft. (AF_NO_RECOVER_GONE is the pane that
+   *  never looked.) */
+  function recoverStoredGone(): void {
+    if (process.env.AF_NO_RECOVER_GONE) return;
+    for (const doc of storageA.docs()) {
+      if (!daemons.get(doc)?.deleted || syncs.has(doc)) continue;
+      const pane = storageA;
+      const s = newSync(doc, () => pane, true, () => {
+        const stored = pane.peek(doc);
+        return stored ? { text: stored.base, commit: "" } : null;
+      });
+      void s.start().then(() => s.remoteDeleted?.()).catch(() => undefined);
     }
   }
 
@@ -658,7 +707,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     if (g.sync.currentStatus !== "saved" && g.sync.currentStatus !== "merged") ghostWorkTransferred = true;
     const before = g.sync.text;
     g.sync.dispose();
-    ghostStorage.release();
+    closedOwners.add(ghostStorage.owner);
+    if (process.env.AF_RELEASE_ONLY) ghostStorage.release();
+    else ghostStorage.close();
+    ghostStorage = newGhostStorage();
     ghostBox.cur = null;
     await tick();
     if (wasConflict) {
@@ -686,6 +738,18 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       syncs.get(doc)?.remoteDeleted?.();
       if (doc === "goals") ghostBox.cur?.sync.remoteDeleted?.();
     }
+  }
+
+  /** The user types, the doc is deleted under them, and the page closes before anything
+   *  is restored or discarded: the work must come back when the page reopens. */
+  async function deleteThenClose(): Promise<void> {
+    const doc = attached;
+    if (!doc || daemons.get(doc)!.deleted || userEdit() === null) return;
+    const d = daemons.get(doc)!;
+    d.deleted = true;
+    for (const tok of typed.get(doc)!.values()) if (d.everHad(tok)) excused.add(tok);
+    if (rand() < 0.5) syncs.get(doc)?.remoteDeleted?.();
+    await pageClose();
   }
 
   function remoteReadd(): void {
@@ -866,6 +930,12 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   void syncEditorFromEngine;
 
   function checkEveryStep(): void {
+    // I14: a pane that has closed owns no entry that looks alive: whatever its syncs write
+    // while they finish, the pane that opens next can adopt at once.
+    for (const [key, raw] of kvMap) {
+      if (!closedOwners.has(key.split("\n").pop()!)) continue;
+      if (!(JSON.parse(raw) as { released: boolean }).released) fail("closed-pane-entry-looks-live", `${key.split("\n").slice(-2).join("/")} was written after its pane closed, and is not released`);
+    }
     const s = syncs.get(attached);
     if (!s || !isLoaded(s) || hasConflictMarkers(editor.text)) return;
     const lines = editor.text.split("\n");
@@ -966,7 +1036,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     else if (o.chaos && r >= 0.945 && r < 0.95) remoteDelete();
     else if (o.chaos && r >= 0.95 && r < 0.955) remoteReadd();
     else if (o.chaos && r >= 0.955 && r < 0.96) await reviveGone();
-    else if (o.chaos && r >= 0.96 && r < 0.966) daemonRestart();
+    else if (o.chaos && r >= 0.96 && r < 0.9625) daemonRestart();
+    else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9625 && r < 0.966) await deleteThenClose();
     else if (o.chaos && o.collide && r >= 0.966 && r < 0.97) rollbackHead();
     else if (o.chaos && r >= 0.97 && r < 0.98) {
       if (!ghostBox.cur) ghostOpen();

@@ -40,6 +40,9 @@ export class DraftStorage {
   /** Where each doc's adopted draft came from, until this pane's own copy is the
    *  only one that matters. */
   private readonly adopted = new Map<string, string>();
+  /** The pane is gone for good: whatever its still-closing syncs write later is
+   *  released at once. */
+  private closed = false;
 
   /** `scope` names the proposal ("session\nslug"); docs are keyed within it. `pane`
    *  tells apart two panes of one window. */
@@ -89,6 +92,47 @@ export class DraftStorage {
     }
   }
 
+  /** The entries of `doc` this pane may take over: its own, and the orphans of closed
+   *  or dead panes. */
+  private takeable(doc: string): { key: string; entry: Entry }[] {
+    const t = this.now();
+    const out: { key: string; entry: Entry }[] = [];
+    const prefix = `${PREFIX}\n${this.scope}\n${doc}\n`;
+    for (const key of this.kv.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      const entry = this.read(key);
+      if (!entry) continue;
+      if (entry.owner === this.owner || entry.released || t - entry.at > DRAFT_STALE_MS) out.push({ key, entry });
+    }
+    return out;
+  }
+
+  /** The docs of this proposal that have a stored draft this pane may take over,
+   *  whether or not the doc still exists. Nothing is adopted. */
+  docs(): string[] {
+    const prefix = `${PREFIX}\n${this.scope}\n`;
+    const names = new Set<string>();
+    for (const key of this.kv.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      const doc = key.slice(prefix.length).split("\n")[0]!;
+      if (names.has(doc)) continue;
+      if (key === this.legacyKey(doc) || this.takeable(doc).length > 0) names.add(doc);
+    }
+    return [...names];
+  }
+
+  /** The draft `load` would return, without adopting it. */
+  peek(doc: string): Draft | null {
+    const best = this.takeable(doc).sort((a, b) => Number(b.entry.owner === this.owner) - Number(a.entry.owner === this.owner) || b.entry.at - a.entry.at)[0];
+    if (best) return best.entry.draft;
+    try {
+      const raw = this.kv.get(this.legacyKey(doc));
+      return raw === null ? null : (JSON.parse(raw) as Draft);
+    } catch {
+      return null;
+    }
+  }
+
   /** This window's draft for `doc`, else an orphan adopted from a closed or dead
    *  window, else null. */
   load(doc: string): Draft | null {
@@ -125,7 +169,7 @@ export class DraftStorage {
   }
 
   store(doc: string, draft: Draft): void {
-    if (!this.write(this.key(doc, this.owner), { owner: this.owner, at: this.now(), released: false, draft })) return;
+    if (!this.write(this.key(doc, this.owner), { owner: this.owner, at: this.now(), released: this.closed, draft })) return;
     this.dropAdopted(doc); // this pane's copy now holds the work
   }
 
@@ -150,11 +194,20 @@ export class DraftStorage {
 
   /** The heartbeat: tells other panes this one is alive and still holds its entries. */
   touch(): void {
+    if (this.closed) return;
     const t = this.now();
     for (const key of this.owned()) {
       const e = this.read(key);
       if (e) this.write(key, { ...e, at: t, released: false });
     }
+  }
+
+  /** The pane is gone for good. Its entries can be adopted at once, and what its syncs
+   *  still write while they finish is released too (a late conflict draft must not
+   *  look like a live pane's for the next 30 seconds). */
+  close(): void {
+    this.closed = true;
+    this.release();
   }
 
   /** The pane is closing, or its window is: its entries can be adopted at once. */
