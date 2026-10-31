@@ -249,7 +249,13 @@ function restoreDraft(m: Model, fx: Effect[], draft: Draft): void {
   const unsent = draft.kind === "unsent";
   // If the daemon holds a text one of our saves may have left there, the edits were
   // made against that text (an undo back to the old one is only visible that way).
-  const base = unsent ? (draft.maybe?.find((t) => t === m.saved) ?? draft.base) : draft.base;
+  // A save of ours landed if the head already contains its edits (merging them onto the
+  // head changes nothing), even when the agent edited other lines since; the edits then
+  // rebase from that text, which is how an undo back to the old one survives.
+  const landed = unsent
+    ? [...(draft.maybe ?? [])].reverse().find((t) => t !== draft.base && mergeWithMarkers(draft.base, t, m.saved) === m.saved)
+    : undefined;
+  const base = unsent ? (landed ?? draft.base) : draft.base;
   const rebased = unsent ? mergeWithMarkers(base, draft.buffer, m.saved) : draft.buffer;
   const clean = unsent && !hasConflictMarkers(rebased);
   m.buffer = clean ? rebased : draft.buffer;
@@ -670,6 +676,9 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
  *  queued final save goes out; an idle, clean, stale document reloads; an idle,
  *  dirty one without markers arms autosave. */
 function settle(m: Model, fx: Effect[]): void {
+  // An abandoned sync is finished: mirroring its buffer would write back the draft
+  // that Discard (or a landed delete) just removed.
+  if (m.dead) return;
   syncStash(m, fx);
   if (m.phase !== "idle" || !m.loaded || m.suspended || m.gone) return;
   // A read is waiting out a backoff: something must wake it. Whatever cancelled the

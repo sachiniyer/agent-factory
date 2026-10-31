@@ -125,8 +125,6 @@ export class DocsPane {
   private readonly chipSep: HTMLElement;
   private readonly chipAction: HTMLButtonElement;
   private readonly chip: PushChip;
-  /** Counts push statuses applied, so a GetProposal reply older than one is not applied. */
-  private pushSeq = 0;
 
   private info: ProposalInfo | null = null;
   private ordered: ProposalDocRef[] = [];
@@ -380,7 +378,7 @@ export class DocsPane {
 
   private async loadProposal(): Promise<void> {
     const gen = ++this.generation;
-    const seq = this.pushSeq;
+    const seq = this.chip.version;
     let info: ProposalInfo;
     try {
       info = await getProposal(this.opts.sessionId, this.opts.slug, this.opts.token);
@@ -424,9 +422,9 @@ export class DocsPane {
     this.renderStrip();
   }
 
-  /** `pushSeq` is this.pushSeq when the GetProposal request went out. */
+  /** `pushSeq` is the chip's version when the GetProposal request went out. */
   private applyInfo(info: ProposalInfo, pushSeq: number): void {
-    if (pushSeq === this.pushSeq) this.applyPush(info.push);
+    this.chip.applyReply(info.push, pushSeq);
     this.info = info;
     this.ordered = orderDocs(info.docs);
     if (this.current) {
@@ -623,7 +621,7 @@ export class DocsPane {
   private async createDoc(name: string, errorEl?: HTMLElement): Promise<void> {
     try {
       await addDoc(this.opts.sessionId, this.opts.slug, name, this.opts.token);
-      const seq = this.pushSeq;
+      const seq = this.chip.version;
       const info = await getProposal(this.opts.sessionId, this.opts.slug, this.opts.token);
       if (this.disposed) return;
       this.closeMenu();
@@ -781,7 +779,7 @@ export class DocsPane {
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = null;
-      const seq = this.pushSeq;
+      const seq = this.chip.version;
       void getProposal(this.opts.sessionId, this.opts.slug, this.opts.token).then((info) => {
         if (this.disposed) return;
         const known = new Set(this.ordered.map((d) => d.name));
@@ -814,7 +812,6 @@ export class DocsPane {
   }
 
   private applyPush(status: PushStatus | null): void {
-    this.pushSeq++;
     this.chip.apply(status);
   }
 
@@ -860,11 +857,15 @@ export class DocsPane {
 
   private runPush(what: string, call: () => Promise<PushStatus>): void {
     this.chip.setBusy(true);
+    const sentAt = this.chip.version;
     call().then(
       (status) => {
         if (this.disposed) return;
         this.chip.setBusy(false);
-        this.applyPush(status);
+        // A status that arrived while the request was out (the agent became ready and
+        // delivered) is newer than this reply: the reply is dropped, and a fetch settles
+        // the chip on what the daemon says now.
+        if (!this.chip.applyReply(status, sentAt)) this.scheduleListRefresh();
       },
       (e: unknown) => {
         if (this.disposed) return;

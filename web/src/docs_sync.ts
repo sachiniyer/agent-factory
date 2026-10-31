@@ -267,6 +267,9 @@ export class DocSync {
     const m = this.model;
     if (m.dead) return true;
     if (m.phase === "saving" || m.leaving) return false;
+    // A closed tab whose first read is still out will restore its stored draft when it
+    // arrives, and send it: a tab that reopens the doc must wait for that too.
+    if (m.closed && !m.loaded && m.loadFailed === null && !m.gone) return false;
     // A closed tab that is still retrying (unsent edits, a save whose outcome is
     // unknown, a read in flight) is not quiet: a tab that reopens the doc must not
     // load, or write, while the old one can still write.

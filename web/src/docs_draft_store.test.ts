@@ -144,3 +144,15 @@ test("docs() lists every doc with a draft this pane may take over, deleted or no
   assert.equal(next.peek("old")?.buffer, "work on a doc the daemon no longer has");
   assert.equal(kv.keys().length, 3, "peek and docs adopted nothing");
 });
+
+test("a closed pane's check of its own entry adopts nothing", () => {
+  const kv = memory();
+  const now = 1000;
+  const orphan = new DraftStorage(kv, "wA", () => now, "s\nplan", "1");
+  orphan.store("goals", draft("someone else's released draft"));
+  orphan.release();
+  const closed = new DraftStorage(kv, "wA", () => now, "s\nplan", "2");
+  closed.close();
+  assert.equal(closed.load("goals"), null);
+  assert.equal(kv.keys().length, 1, "the orphan stays where it is for the pane that opens next");
+});

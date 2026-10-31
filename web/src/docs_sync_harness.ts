@@ -829,6 +829,13 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       });
     }
     const want = typed.get(attached)!.get(line);
+    // Sometimes the page closes now, with the reply still lost, and the agent has edited
+    // another line meanwhile: the draft's maybe-text is no longer the head, only contained
+    // in it. (AF_REOPEN_EXACT_ONLY is the restore that needed an exact match.)
+    if (!o.collide && rand() < 0.4) {
+      agentEdit();
+      await pageClose();
+    }
     await drain();
     for (let i = 0; i < 2; i++) {
       await advance(6000);
@@ -841,6 +848,32 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       const got = after.text.split("\n")[line];
       if (got !== want) fail("ambiguous-save-overwrote-undo", `${attached} line ${line}: expected ${want}, the tab shows ${got} (status ${after.currentStatus})`);
     }
+  }
+
+  /** The doc is deleted under unsaved work and the user discards it: nothing may write
+   *  the discarded work back into storage, now or on any later event. */
+  async function discardDeleted(): Promise<void> {
+    const doc = attached;
+    const s = syncs.get(doc);
+    if (!doc || !s || !isLoaded(s) || s.ended || daemons.get(doc)!.deleted || userEdit() === null) return;
+    const d = daemons.get(doc)!;
+    d.deleted = true;
+    s.remoteDeleted?.();
+    await drain();
+    if (s.currentStatus !== "gone") return;
+    const owner = storageOf.get(s)!.owner;
+    s.abandon?.(false);
+    syncs.delete(doc);
+    attached = "";
+    editor.text = "";
+    typed.get(doc)!.clear();
+    lineStack.get(doc)!.clear();
+    s.edit(s.text + "x"); // a late keystroke or event reaching the dead sync
+    await tick();
+    await advance(6000);
+    await drain();
+    const written = [...kvMap.keys()].filter((k) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`) && k.endsWith(`\n${owner}`));
+    if (written.length) fail("discarded-draft-written-back", `${doc}: discarded work is in storage again (${written.length} entry)`);
   }
 
   /** The user types and the doc is deleted in the same breath, before any save. */
@@ -1039,6 +1072,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     else if (o.chaos && r >= 0.96 && r < 0.9625) daemonRestart();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9625 && r < 0.966) await deleteThenClose();
     else if (o.chaos && o.collide && r >= 0.966 && r < 0.97) rollbackHead();
+    else if (o.chaos && !o.collide && r >= 0.966 && r < 0.97) await discardDeleted();
     else if (o.chaos && r >= 0.97 && r < 0.98) {
       if (!ghostBox.cur) ghostOpen();
       else if (rand() < 0.5) ghostEdit();
