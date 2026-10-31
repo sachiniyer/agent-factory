@@ -699,6 +699,21 @@ func findingRemediation(f Finding, fixMode bool) string {
 		return "run the listed hook command by hand and fix the remote connection"
 	case "agent-program":
 		return "install the agent binary or set the matching program_overrides entry"
+	// The first-run (--setup) checks. Each one's detail already names the
+	// cause, so the fix line says what to do next and how to re-check rather
+	// than sending the reader back to the line above it.
+	case "git":
+		return "install git, then rerun `af doctor --setup`"
+	case "git-repo":
+		return "cd into a git repository (or run `git init` in your project), then rerun `af doctor --setup`"
+	case "git-identity":
+		return "run the git config commands above, then rerun `af doctor --setup`"
+	case "tmux":
+		return "install tmux as described above, then rerun `af doctor --setup`"
+	case "af-home", "state-dir", "repo-state-dir", "log-storage":
+		return "make the directory writable or set AGENT_FACTORY_HOME to one that is, then rerun `af doctor --setup`"
+	case "config":
+		return "apply the fix named above (or delete the config file to regenerate defaults), then rerun `af doctor --setup`"
 	default:
 		return "inspect the message above and rerun `af doctor`"
 	}
