@@ -63,7 +63,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/AddProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `name`, `author` | Add a doc to a proposal from a template, or blank, and commit it as the given author. |
 | `POST` | `/v1/RemoveProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `author` | Remove a doc from a proposal and commit the deletion as the given author; the doc stays in the proposal's history. |
 | `POST` | `/v1/ReadProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc` | Read a proposal doc and the commit it is at, after committing its uncommitted edits as external. |
-| `POST` | `/v1/SaveProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `base` | Save a proposal doc as a human edit against a base commit; merges with git merge-file, and answers 409 proposal_conflict with ours/theirs/base when the edits conflict. |
+| `POST` | `/v1/SaveProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `base`, `writer`, `seq` | Save a proposal doc as a human edit against a base commit; merges with git merge-file, and answers 409 proposal_conflict with ours/theirs/base when the edits conflict. A save with writer and seq is refused with 409 proposal_stale_save when the daemon has already seen that seq or a later one from the writer for the doc. |
 | `POST` | `/v1/WriteProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `author` | Replace a proposal doc and commit it as the given author, with no merge. |
 | `POST` | `/v1/PullProposalChanges` | `session_id` | Return the edits to the session's proposal that it has not seen, then move its cursor. |
 | `POST` | `/v1/CheckpointProposal` | `session_id` | Commit the session's edits to its proposal as its own and move its cursor past them. |
@@ -79,15 +79,15 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/PostBacklogMessage` | `repo_id`, `repo_path`, `id`, `kind`, `text`, `session_id`, `question_id` | Add a note to an item's thread; notes are not delivered to a session. |
 | `POST` | `/v1/StartBacklogItem` | `repo_id`, `repo_path`, `id` | Start an item now, ignoring the runner switch and budget: send "continue" to its live session, or create a session for it; returns the run, which is starting until the session exists. |
 | `POST` | `/v1/SetBacklogSettings` | `repo_id`, `repo_path`, `runner`, `max_running`, `on_done` | Change a project's runner switch, max running, or what happens to an item's session when the item is done. |
-| `POST` | `/v1/GetBudget` | — | Read the global backlog budget: the share of each Claude plan window the backlog may use, the plan percent at which the runner stops, the cap per run, and the dollar limit for accounts with no plan readings. |
-| `POST` | `/v1/SetBudget` | `share`, `stop_at`, `max_per_run`, `usd_limit` | Change the global backlog budget: share, stop_at and max_per_run as percents from 0 to 100, and usd_limit in US dollars at API prices (0 turns it off). |
+| `POST` | `/v1/GetBudget` | — | Read the global backlog budget: the share of each Claude plan window the backlog may use, the plan percent at which the runner stops, the cap per run, and the dollar limit for accounts with no plan readings, with each plan window's plan %, the backlog's part of it, the metered cost of everything in it (all_cost) and its reset time, per Claude account, and each item session's cost in total (runs) and within its account's current 5-hour window (run_window). Usage comes from the last metering pass; before the first one ends, metering is true. |
+| `POST` | `/v1/SetBudget` | `share`, `stop_at`, `max_per_run`, `usd_limit` | Change the global backlog budget: share, stop_at and max_per_run as percents from 0 to 100, and usd_limit in US dollars at API prices (0 turns it off). Returns the budget with the plan windows. |
 | `POST` | `/v1/ListOnComplete` | — | List task spawned-session lifecycle choices and consequences, least destructive first. |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
 | `POST` | `/v1/AddTask` | `task`, `actor`, `validate_path` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
 | `POST` | `/v1/UpdateTask` | `id`, `update`, `expect`, `actor`, `validate_path` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |
 | `POST` | `/v1/RemoveTask` | `id`, `expect` | Remove a task by ID. |
 | `POST` | `/v1/RestartTask` | `id`, `expect` | Stop and replace one enabled watch task without overlapping its process tree. |
-| `POST` | `/v1/TriggerTask` | `id`, `expect` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |
+| `POST` | `/v1/TriggerTask` | `id`, `expect`, `actor` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |
 
 ## Nested request payloads
 

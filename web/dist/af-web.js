@@ -7029,8 +7029,13 @@ function isProjectReboundError(e) {
 function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
+var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
+var CLIENT_VERSION = "02fbb8d70894";
 async function af(method, body, token2, signal) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = {
+    "Content-Type": "application/json",
+    [CLIENT_VERSION_HEADER]: CLIENT_VERSION
+  };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }
@@ -18202,6 +18207,10 @@ async function addNote(root2, id, text, token2) {
 var SerialQueue = class {
   saving = false;
   queued = null;
+  /** True while a request is in flight or waiting: an older write could still land. */
+  busy() {
+    return this.saving || this.queued !== null;
+  }
   /** `run` may return a promise that settles true once the write AND the refresh after
    *  it have landed; a plain void return counts as settled at once. `done` hears that
    *  request's own outcome. */
@@ -18317,11 +18326,13 @@ var BodyEditor = class {
   /** `save` may return a promise that settles true once the write AND the refresh
    *  after it have landed; a plain void return acknowledges at once. */
   queue;
-  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept, until a
-   *  stored body that is exactly that edit shows the server has it: the draft is then
-   *  released (a save whose confirming read failed is acknowledged by a later one). */
+  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. Once
+   *  every write has settled and nothing is waiting to be saved, a stored body that is
+   *  exactly the draft releases it (a save whose confirming read failed is acknowledged
+   *  by a later one); while a write is in flight or the debounce is running, a matching
+   *  snapshot may be stale and proves nothing. */
   setText(text) {
-    if (this.draft !== null && this.draft === text) this.draft = null;
+    if (this.draft !== null && this.draft === text && this.timer === null && !this.queue.busy()) this.draft = null;
     if (this.draft !== null || text === this.text) return;
     this.text = text;
     if (this.editor) {
@@ -21806,6 +21817,7 @@ var store = new Store({
   // state but archived — when nothing is stored.
   statusFilter: loadFilter()
 });
+var durableFilter = loadFilter();
 var token = null;
 var backlogLoader = new BacklogLoader({
   token: () => token,
@@ -22099,7 +22111,7 @@ function resolveRoute() {
     lookup = !session && route !== null && store.get().archive.lazy && store.get().archive.total > 0;
     if (session?.id) {
       if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
-      setStatusFilter(operatorKind(session), true);
+      store.set({ statusFilter: withKind(durableFilter, operatorKind(session), true) });
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
@@ -22233,12 +22245,14 @@ function switchView(view) {
   }
 }
 function setStatusFilter(kind, on) {
-  const next = withKind(store.get().statusFilter, kind, on);
+  const next = withKind(durableFilter, kind, on);
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }
 function resetStatusFilter() {
   const next = defaultFilter();
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }

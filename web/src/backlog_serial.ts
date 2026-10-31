@@ -10,6 +10,11 @@ export class SerialQueue {
   private saving = false;
   private queued: { run: () => Promise<boolean> | void; done: (ok: boolean) => void } | null = null;
 
+  /** True while a request is in flight or waiting: an older write could still land. */
+  busy(): boolean {
+    return this.saving || this.queued !== null;
+  }
+
   /** `run` may return a promise that settles true once the write AND the refresh after
    *  it have landed; a plain void return counts as settled at once. `done` hears that
    *  request's own outcome. */

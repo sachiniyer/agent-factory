@@ -126,6 +126,12 @@ type RestartTaskResponse struct {
 type TriggerTaskRequest struct {
 	ID     string                  `json:"id"`
 	Expect task.ProjectExpectation `json:"expect,omitempty"`
+	// Actor is the surface this manual fire came from — see
+	// AddTaskRequest.Actor. The daemon records it as a `triggered` entry in the
+	// task's audit trail (#6318), which is what makes "who ran this
+	// off-schedule?" answerable. Scheduled cron and watch-line fires carry no
+	// actor and write no entry — they are not actor actions.
+	Actor string `json:"actor,omitempty"`
 }
 
 // TriggerTask fires a task through RunTask, whose deliver path can reach

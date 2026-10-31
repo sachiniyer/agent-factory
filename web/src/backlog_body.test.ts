@@ -177,3 +177,28 @@ test("a later snapshot that carries a saved body whose confirming read failed re
   ed.setText("edited elsewhere again");
   assert.equal(text, "typing", "new typing is still protected");
 });
+
+test("a stale snapshot that matches the draft does not release it while a write is in flight or unsaved typing is waiting", async () => {
+  const finish: ((ok: boolean) => void)[] = [];
+  const ed = new BodyEditor(() => new Promise<boolean>((r) => { finish.push(r); }), "Body", "k2");
+  ed.setText("stored");
+  await settle();
+  change("first");
+  mock.timers.tick(SAVE_DELAY_MS);
+  await settle();
+  change("stored");                       // typed back to the old text; the debounce is running
+  ed.setText("stored");                   // a stale refresh carrying the stored text
+  ed.setText("first");                    // then the first save's confirming refresh
+  assert.equal(text, "stored", "the newer typing was not reverted");
+  mock.timers.tick(SAVE_DELAY_MS);
+  finish[0](true);
+  await settle();
+  assert.equal(finish.length, 2, "the latest text is saved");
+  ed.setText("first");
+  assert.equal(text, "stored", "still protected while that save is in flight");
+  finish[1](true);
+  await settle();
+  ed.setText("stored");
+  ed.setText("remote");
+  assert.equal(text, "remote", "released once everything settled");
+});

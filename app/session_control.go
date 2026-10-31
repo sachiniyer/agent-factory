@@ -402,7 +402,7 @@ func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (daemon.Hando
 // daemon.
 var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectation) error {
 	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
-		return c.TriggerTask(taskID, expect)
+		return c.TriggerTask(taskID, expect, task.ActorTUI)
 	})
 }
 

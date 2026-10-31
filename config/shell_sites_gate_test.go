@@ -163,6 +163,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "the same watch task command as startWithLifeline, on the direct-spawn path used when no " +
 			"lifeline binary is available or it does not speak the protocol (#5329).",
 	}},
+	"planusage/tap.go:Tap": {{
+		class: operatorOther,
+		note: "the user's own Claude Code statusLine command, read from their Claude settings files, run " +
+			"exactly as Claude Code would run it. No af config load sees it.",
+	}},
 
 	// ---- af-authored scripts ----
 	"daemon/watcher_lifeline.go:startWatchGroupAnchor": {{

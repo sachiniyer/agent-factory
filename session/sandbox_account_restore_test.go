@@ -133,3 +133,106 @@ func TestSandboxCleanupHandleCarriesTheAccountHost(t *testing.T) {
 	require.NotNil(t, p.account)
 	assert.Equal(t, "box1", p.account.spec.AccountSyncHost)
 }
+
+// #5948/#6176: a reattached session's workspace is rebuilt from the row alone, so
+// it carries no provision-time spec.AgentConfigFiles — the operator's
+// sandbox_agent_config selection. An off-box swap would stage the incoming
+// account WITHOUT that personalization (a bare agent) and then rotate away the
+// outgoing scope that held the provision-time copy. The swap re-derives the
+// selection from the repo config — exactly the closed, repo-tamper-safe
+// sandbox_agent_config key, licence-recorded by the durable AccountSyncHost — so
+// the swapped-in account runs with the operator's model settings and
+// instructions, as it did at provision.
+func TestAgentConfigSurvivesAnOffBoxAccountSwapOnAReattachedSession(t *testing.T) {
+	f := newSwapFixture(t)
+	// The operator's global sandbox_agent_config — the closed, repo-tamper-safe
+	// selection provision copies into spec.AgentConfigFiles. restoreAccountWorkspace
+	// has no repo config to copy it from, so the reattached session re-derives it
+	// at swap admission instead.
+	cfg := config.DefaultConfig()
+	cfg.Hosts = oneListedHost
+	cfg.SandboxAgentConfig = []string{"claude:settings.json", "claude:CLAUDE.md"}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	opHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(opHome, "settings.json"), []byte(`{"model":"opus"}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(opHome, "CLAUDE.md"), []byte("be terse"), 0o600))
+
+	inst := restartedFrom(t, f, "box1")
+	w := inst.sandboxProvisioner().account
+	require.NotNil(t, w)
+	assert.Empty(t, w.spec.AgentConfigFiles, "restoreAccountWorkspace repopulates no AgentConfigFiles from the row (#5948)")
+
+	// This process is both the daemon box (reads the operator home) and the sandbox
+	// (rotates the live scope): the operator home is CLAUDE_CONFIG_DIR while af
+	// stages, the host's live scope while the (in-process) agent-server rotates.
+	hostScope := os.Getenv("CLAUDE_CONFIG_DIR")
+	t.Setenv("CLAUDE_CONFIG_DIR", opHome)
+	inst.agentSrv = hostEnvServer{f.srv, t, hostScope}
+
+	_, err := inst.SwapOffBoxAccount("alt", false)
+	require.NoError(t, err)
+
+	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the new account is live")
+	assert.Equal(t, `{"model":"opus"}`, readOrEmpty(filepath.Join(f.dir, "account", "settings.json")),
+		"the operator's model settings were re-derived and staged for the swapped-in account")
+	assert.Equal(t, "be terse", readOrEmpty(filepath.Join(f.dir, "account", "CLAUDE.md")),
+		"and the instructions")
+	assert.Equal(t, []string{"claude:settings.json", "claude:CLAUDE.md"},
+		inst.sandboxProvisioner().account.spec.AgentConfigFiles,
+		"the re-derived selection is retained on the workspace for any later swap")
+}
+
+// A reattached session whose operator declared no sandbox_agent_config gets none,
+// as before: the re-derivation mirrors provision, which sets AgentConfigFiles
+// only from the operator's global selection.
+func TestNoAgentConfigIsStagedOnAReattachedSessionWhenNoneIsDeclared(t *testing.T) {
+	f := newSwapFixture(t)
+	opHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(opHome, "settings.json"), []byte(`{"model":"opus"}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(opHome, "CLAUDE.md"), []byte("be terse"), 0o600))
+
+	inst := restartedFrom(t, f, "box1")
+	w := inst.sandboxProvisioner().account
+	require.NotNil(t, w)
+	assert.Empty(t, w.spec.AgentConfigFiles, "the reattached session carries no provision-time selection")
+
+	hostScope := os.Getenv("CLAUDE_CONFIG_DIR")
+	t.Setenv("CLAUDE_CONFIG_DIR", opHome)
+	inst.agentSrv = hostEnvServer{f.srv, t, hostScope}
+
+	_, err := inst.SwapOffBoxAccount("alt", false)
+	require.NoError(t, err)
+
+	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the new account is live")
+	assert.NoFileExists(t, filepath.Join(f.dir, "account", "settings.json"), "no operator config was declared to carry")
+	assert.NoFileExists(t, filepath.Join(f.dir, "account", "CLAUDE.md"))
+	assert.Empty(t, inst.sandboxProvisioner().account.spec.AgentConfigFiles,
+		"no selection is fabricated when the operator declared none")
+}
+
+// The re-derivation is gated on the durable account-sync licence, exactly as
+// provision pairs AgentConfigFiles with AccountSyncHost: a reattached session
+// that was never licensed to sync an account (no recorded host) is not handed
+// one by the swap.
+func TestAgentConfigIsNotReDerivedForAReattachedSessionWithoutAnAccountLicence(t *testing.T) {
+	f := newSwapFixture(t)
+	cfg := config.DefaultConfig()
+	cfg.Hosts = oneListedHost
+	cfg.SandboxAgentConfig = []string{"claude:settings.json"}
+	require.NoError(t, config.SaveConfig(cfg))
+	opHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(opHome, "settings.json"), []byte(`{}`), 0o600))
+
+	inst := restartedFrom(t, f, "box1")
+	inst.sandboxProvisioner().account.spec.AccountSyncHost = "" // unlicensed: no recorded host
+	hostScope := os.Getenv("CLAUDE_CONFIG_DIR")
+	t.Setenv("CLAUDE_CONFIG_DIR", opHome)
+	inst.agentSrv = hostEnvServer{f.srv, t, hostScope}
+
+	// Without the licence the swap is refused before staging, so no operator config
+	// is read or sent — the re-derivation does not reach past the gate.
+	_, err := inst.SwapOffBoxAccount("alt", false)
+	require.ErrorContains(t, err, "not synced")
+	assert.NoFileExists(t, filepath.Join(f.dir, "account", "settings.json"))
+}

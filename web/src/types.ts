@@ -341,7 +341,10 @@ export interface SnapshotResponse {
 	skipped_repos?: SkippedRepo[];
 	/** Archived rows in the request's repo scope, present only when the request set
 	 *  `lazy_archive` AND the daemon understands it (#6178). Its absence on such a
-	 *  request means the daemon predates the shape and `instances` is the whole list. */
+	 *  request means the daemon predates the shape and `instances` is the whole list.
+	 *  The web relies on this additive fallback by sending X-AF-Client-Version
+	 *  (web/src/api.ts af()), which routes the body through the daemon's tolerant
+	 *  decoder; a header-less client would instead get a 400 `unknown field`. */
 	archived_total?: number;
 	/** Those archived rows per worktree repo path (the key projects are grouped by). */
 	archived_by_project?: Record<string, number>;

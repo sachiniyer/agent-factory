@@ -213,6 +213,9 @@ func (m *Manager) finishBacklogStart(ref backlog.ProjectRef, id int, startedAt t
 			if gen, held := m.backlog.takeEnd(data.ID); held && createErr == nil {
 				m.settleRunEnd(ref.ID, data.ID, gen, stop)
 			}
+			if createErr == nil {
+				m.rememberItemRunDirs(ref.ID, data.ID)
+			}
 			return
 		}
 		if !errors.Is(err, backlog.ErrBusy) {

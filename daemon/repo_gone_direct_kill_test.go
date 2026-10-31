@@ -841,6 +841,128 @@ func TestKillSession_StalledFenceOverAbsentArchiveClearsAndSettles(t *testing.T)
 		"the settled kill must delete the permanently-stuck row")
 }
 
+// TestKillSession_CleanupReadyOverAbsentArchiveDischargesAndSettles is the
+// daemon-level regression for the repo-gone cleanup_ready strand: a failed
+// repo-gone restore leaves a durable identity-qualified cleanup_ready record
+// as an indefinite resting state so a later explicit kill can delete the
+// archived directory. If that directory is deleted outside af during the
+// window, the row used to be permanently undeletable — kill, restore, ghost
+// cleanup, and prune all refused forever on the same ENOENT wrapped in
+// ErrRelocateStateUnknown, and the in-memory claim_stale downgrade the
+// admission made was never persisted (#5102). The kill admission must now
+// discharge the record on conclusive absence (no alternate), persist the
+// record-free state through its tombstone, and settle the missing path the
+// way it already does for a record-free archive.
+func TestKillSession_CleanupReadyOverAbsentArchiveDischargesAndSettles(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	title := "direct-cleanup-ready-absent"
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, title)
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	gw, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	require.Nil(t, recordFor(t, repoID, title).Worktree.RelocationRecovery,
+		"the archive must start record-free")
+
+	// Install the durable cleanup_ready record a failed repo-gone restore leaves
+	// behind, using af's own machinery: stage a claim_stale fence, resolve it
+	// to a claim, and prepare the fsynced xattr cleanup generation.
+	info, err := os.Stat(archivedPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	claim, err := inst.ClaimWorktreeRelocationForRetry()
+	require.NoError(t, err)
+	require.NoError(t, inst.PrepareWorktreeRelocationClaimForCleanup(claim))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	// Preconditions: the durable record is non-nil on disk, and the live instance
+	// carries an identity-qualified cleanup_ready authorization over the intact
+	// single archive (no alternate) — the exact shape a failed repo-gone restore
+	// leaves behind.
+	require.NotNil(t, recordFor(t, repoID, title).Worktree.RelocationRecovery,
+		"the cleanup_ready record must be durable")
+	recovery, unresolved := inst.WorktreeRelocationRecovery()
+	require.True(t, unresolved, "the live instance must carry the cleanup_ready record")
+	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+	require.Empty(t, recovery.AlternatePath, "the repo-gone restore shape carries no alternate")
+
+	// The origin repo is gone (the precondition for the cleanup authorization),
+	// and the archived directory is deleted outside af during the indefinite
+	// window the cleanup_ready record sits waiting for an explicit kill.
+	require.NoError(t, os.RemoveAll(repoPath))
+	require.NoError(t, os.RemoveAll(archivedPath))
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoID})
+	require.NoError(t, err,
+		"a cleanup_ready record over a conclusively absent archive must discharge and let the kill settle")
+	assert.True(t, inst.UserKilled(), "the discharged admission must reach the kill tombstone")
+	assert.Nil(t, recordFor(t, repoID, title),
+		"the settled kill must delete the permanently-stuck row")
+	assert.False(t, exists(archivedPath), "nothing recreated the archived directory")
+}
+
+// TestKillSession_CleanupReadyOverAbsentArchiveRetainsWithAlternate pins the
+// scope of the fix at the daemon level: a cleanup_ready record carrying an
+// alternate candidate is NOT discharged when the primary is absent. The kill
+// must keep refusing pre-tombstone so ordinary claim resolution can arbitrate
+// the alternate, instead of dropping the alternate durably on a primary ENOENT.
+func TestKillSession_CleanupReadyOverAbsentArchiveRetainsWithAlternate(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	title := "direct-cleanup-ready-alternate"
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, title)
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	gw, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	info, err := os.Stat(archivedPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	alternate := archivedPath + "-alternate"
+	require.NoError(t, os.Rename(archivedPath, alternate),
+		"the alternate candidate holds the real archived directory; the primary is now absent")
+	// Install a cleanup_ready record carrying the alternate — the shape a
+	// two-candidate stalled move leaves behind. The generation is a non-empty
+	// literal: the admission's discharge guard checks the alternate before any
+	// generation validation, so the durable xattr need not exist for this refusal.
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:             sessiongit.RelocationRecoveryCleanupReady,
+		IdentityKnown:     true,
+		Device:            uint64(stat.Dev),
+		Inode:             uint64(stat.Ino),
+		FileType:          uint32(stat.Mode & syscall.S_IFMT),
+		CleanupGeneration: "0123456789abcdef0123456789abcdef",
+		AlternatePath:     alternate,
+	}))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	require.NotNil(t, recordFor(t, repoID, title).Worktree.RelocationRecovery,
+		"the cleanup_ready+alternate record must be durable")
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err = manager.KillSession(KillSessionRequest{Title: title, RepoID: repoID})
+	require.Error(t, err, "a cleanup_ready record with an alternate must not discharge on a primary ENOENT")
+	assert.False(t, inst.UserKilled(), "the refusal must land before the kill tombstone")
+	assert.True(t, exists(alternate), "the alternate archive must remain for claim arbitration")
+	// The record is retained (not discharged): the in-memory claim_stale downgrade
+	// the admission makes is not a discharge, and the alternate survives for
+	// ordinary claim resolution to arbitrate on a later retry.
+	recovery, unresolved := inst.WorktreeRelocationRecovery()
+	require.True(t, unresolved, "a cleanup_ready record with an alternate must not discharge")
+	require.NotEmpty(t, recovery.AlternatePath, "the alternate candidate must survive the refusal")
+}
+
 // TestKillSession_FailedSettleRestoresIdentityQualifiedFence is the daemon-level
 // regression for the failed-settle restore bug. The reclaim gate passes any
 // stalled record regardless of identity, so an identity-qualified stalled

@@ -616,10 +616,10 @@ af backlog ask --self <text> [flags]
 
 Show or change the global budget
 
-The budget is the share of your Claude plan the backlog may use, for all projects. --share is the percent of each plan window (5-hour and weekly) the backlog may use. --stop-at is the plan percent, from any use, at which the runner stops. --max-per-run is the percent of the 5-hour window one run may use. --usd-limit is a dollar limit at API prices for accounts with no plan readings (an API key); 0 turns it off. With no flags, print the settings.
+The budget is the share of your Claude plan the backlog may use, in each plan window (5-hour and weekly), for all projects. With no flags, print it with each window's plan %, the backlog's part of it, the reset time and the age of the newest reading. --share sets the backlog's % of each window (default 50). --stop-at sets the plan % at which the runner stops (default 90). --max-per-run sets the % of the 5-hour window one run may use (default 10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 turns it off.
 
 ```
-af backlog budget [flags]
+af backlog budget [--share <pct>] [--stop-at <pct>] [--max-per-run <pct>] [--usd-limit <usd>] [flags]
 ```
 
 **Flags**
@@ -4090,7 +4090,7 @@ af tasks restart <id-or-name>
 
 Show one task's schedule health and audit trail
 
-Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, or disabled it.
+Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, disabled, or manually triggered it.
 
 Overdue is derived, never stored: a cron task is overdue when it has gone more than one period (or five minutes, whichever is larger) past its most recent scheduled occurrence, measured from the latest of its last run, its last enable, and its creation — so a task paused and switched back on does not report the occurrences it missed while it was off. Watch tasks have no schedule and are never overdue — their arming state is the signal.
 

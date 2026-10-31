@@ -137,7 +137,15 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 // it as it judges a double-quoted "$y" in the same place. This pins both
 // directions over a generated corpus: the marker is never refused where "$y"
 // would be accepted, and it is never accepted where "$y" would be refused,
-// except after a literal env's command slot, which envCallArgvParse admits.
+// except after a literal env's command slot (which envCallArgvParse admits) and
+// after a strace in a buried child-tail position. The xargs child-tail scan
+// (#5034 parity with nohup/taskset) judges a buried strace through
+// straceOptionsRefused: a following "$y" opens with an expansion and is
+// refused (it could spell -E/--env), while a following marker — an xargs
+// input position — is special-cased (straceOptionStep/isXargsItemWord) as
+// "judged by the xargs input walk", so it stays admitted. The two genuinely
+// differ: a shadowed xargs execs the literal marker text (inert), but execs
+// the expansion's value, which can spell a mutating strace option.
 func TestCommandMutatesAccountEnvironment_XargsMarkerMatchesDynamicWord(t *testing.T) {
 	names := xargsItemTestNames()
 	// "xargs --replace=" attaches an explicitly empty marker, which defaults
@@ -159,6 +167,21 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerMatchesDynamicWord(t *testi
 		}
 		return head + " " + strings.Join(words, " "), head + " " + strings.Join(dynamic, " ")
 	}
+	// buriedTailSentence widens a token list with surrounding spaces so a
+	// substring test matches whole xargs-child-tail tokens (strace/env) the
+	// buried-suffix scan judges, the way the existing env exception does.
+	buriedTailSentence := func(words []string) string {
+		return " " + strings.Join(words, " ") + " "
+	}
+	// envExcept and straceExcept are the buried-suffix-scan positions whose
+	// marker/dynamic verdict can legitimately differ: the input walk owns the
+	// marker there, the buried-suffix scan owns "$y".
+	envExcept := func(words []string) bool {
+		return strings.Contains(buriedTailSentence(words), " env ")
+	}
+	straceExcept := func(words []string) bool {
+		return strings.Contains(buriedTailSentence(words), " strace ")
+	}
 	checked := 0
 	for _, head := range heads {
 		for _, a := range tokens {
@@ -171,7 +194,7 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerMatchesDynamicWord(t *testi
 					if got && !want {
 						t.Errorf("%q is refused but %q is accepted", marker, dynamic)
 					}
-					if !got && want && !strings.Contains(" "+strings.Join(words, " ")+" ", " env ") {
+					if !got && want && !envExcept(words) && !straceExcept(words) {
 						t.Errorf("%q is accepted but %q is refused", marker, dynamic)
 					}
 					checked++

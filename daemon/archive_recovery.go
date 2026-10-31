@@ -189,6 +189,45 @@ func (m *Manager) persistAndInstallRepoGoneCleanup(
 	return nil
 }
 
+// admitWorktreeDestruction runs the live-instance destruction admission and
+// reports the recovery record it discharged, if any. The admission may
+// DISCHARGE a cleanup-ready record whose one authorized directory is
+// conclusively absent: the record leaves the live worktree's memory now, but
+// leaves the durable row only when the kill tombstone persists the discharge.
+// The caller keeps the returned record so a failed tombstone can put the fence
+// back — an aborted kill must not leave this process's instance holding
+// record-free state against a row that still guards the path by identity, or a
+// directory appearing there later is adopted without the identity check the
+// row would have imposed (#6333).
+func admitWorktreeDestruction(instance *session.Instance) (*sessiongit.RelocationRecovery, error) {
+	admissionRecovery, admissionHeld := instance.WorktreeRelocationRecovery()
+	if err := instance.ValidateWorktreeDestructionAdmission(); err != nil {
+		return nil, err
+	}
+	if admissionHeld {
+		if _, stillHeld := instance.WorktreeRelocationRecovery(); !stillHeld {
+			discharged := admissionRecovery
+			return &discharged, nil
+		}
+	}
+	return nil, nil
+}
+
+// rollbackDischargedAdmission reinstates a record admitWorktreeDestruction
+// discharged in memory when the kill's tombstone write fails — the discharge
+// never reached disk, so the durable row still carries the record and this
+// process's instance must keep the identity fence with it. A failure means
+// something re-established lifecycle state in the gap, which is itself the
+// protection needed; it is logged, not retried.
+func (m *Manager) rollbackDischargedAdmission(instance *session.Instance, recovery *sessiongit.RelocationRecovery, title string) {
+	if recovery == nil {
+		return
+	}
+	if err := instance.RestoreWorktreeRelocation(*recovery); err != nil {
+		m.warn().Printf("kill of session %q aborted on a failed tombstone write, and reinstating its discharged worktree recovery record also failed: %v", title, err)
+	}
+}
+
 // prepareDirectRepoGoneKillCleanup is the admission producer for a kill that
 // never went through a failed restore (#3176). The failed-restore route leaves
 // a durable cleanup authorization behind for the destruction admission to

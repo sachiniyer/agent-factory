@@ -44,8 +44,10 @@ import (
 // The wrappers are listed under the surface whose calls they serve; a file may
 // appear under both when both surfaces route through it.
 var goSurfaces = map[string][]string{
-	// daemon/control_client.go is the CLI's gob control-socket path.
-	"cli": {"api", "daemon/control_client.go"},
+	// daemon/control_client.go is the CLI's gob control-socket path. The task
+	// verbs live beside it in control_client_tasks.go (the file-length split),
+	// so both files name the surface's construction sites.
+	"cli": {"api", "daemon/control_client.go", "daemon/control_client_tasks.go"},
 	// apiclient/ is the TUI's HTTP path to the daemon, and ui/ is where the
 	// config editor's remote target builds its read/write/explain requests
 	// directly (#3708, #4803) — a surface scan that skipped it would let those
