@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DRAFT_STALE_MS, DraftStorage, type KV } from "./docs_draft_store.js";
+import { DRAFT_STALE_MS, DraftStorage, newWindowId, type KV } from "./docs_draft_store.js";
 import type { Draft } from "./docs_sync_model.js";
 
 function memory(): KV & { map: Map<string, string> } {
@@ -169,4 +169,14 @@ test("pagehide releases first and the final saves that follow stay released, unt
   a.touch(); // bfcache restore
   a.store("goals", draft("typed more"));
   assert.equal(new DraftStorage(kv, "wA", () => now, "s\nplan", "3").peek("goals"), null, "alive again");
+});
+
+test("a duplicated browser tab gets its own window id even with a copy of the first tab's sessionStorage", () => {
+  // The id never comes from storage, so there is nothing for a copy to carry over.
+  const first = newWindowId(() => 0.123456789, () => 1000);
+  const dup = newWindowId(() => 0.987654321, () => 1000);
+  assert.notEqual(first, dup);
+  const a = new DraftStorage(memory(), first, () => 0, "s\nplan", "1");
+  const b = new DraftStorage(memory(), dup, () => 0, "s\nplan", "1");
+  assert.notEqual(a.owner, b.owner, "the same pane number in both pages is still two owners");
 });
