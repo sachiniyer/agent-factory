@@ -142,3 +142,14 @@ test("PushChip renders null without a status and dispose stops its timer", () =>
   c.chip.dispose();
   assert.equal(c.live(), 0);
 });
+
+test("PushChip drops a reply older than a status that arrived while the request was out", () => {
+  const c = new Clock();
+  c.chip.apply(status({ state: "waiting_agent", unsent: 2, mode: "manual" }));
+  const sentAt = c.chip.version; // Send now is clicked: the daemon queues delivery
+  c.chip.apply(status({ state: "sent", unsent: 0, mode: "manual" })); // the agent became ready and got it
+  assert.equal(c.chip.applyReply(status({ state: "waiting_agent", unsent: 2, mode: "manual" }), sentAt), false);
+  assert.equal(c.chip.current?.state, "sent", "the newer status stands");
+  const later = c.chip.version;
+  assert.equal(c.chip.applyReply(status({ state: "sent", unsent: 0, mode: "manual" }), later), true, "a reply nothing overtook is applied");
+});

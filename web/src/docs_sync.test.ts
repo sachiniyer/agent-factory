@@ -399,3 +399,19 @@ test("whenSaved stays pending while a lost-reply save is unreconciled, even when
   await tick();
   assert.equal(verdict, "saved");
 });
+
+test("a tab closed while its first read is out is not quiet until that read has answered", async () => {
+  const h = new Harness();
+  h.holdLoad = deferred<DocText>();
+  const started = h.sync.start();
+  await tick();
+  h.sync.dispose(); // closed before the doc has loaded: it will restore its draft and send it
+  let quiet = false;
+  void h.sync.whenQuiet().then(() => (quiet = true));
+  await tick();
+  assert.equal(quiet, false, "a reopened tab must not read yet");
+  h.holdLoad.resolve({ ...h.head });
+  await started;
+  await tick();
+  assert.equal(quiet, true);
+});

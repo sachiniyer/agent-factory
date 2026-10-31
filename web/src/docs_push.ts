@@ -82,12 +82,26 @@ export class PushChip {
     return this.status;
   }
 
+  /** Counts statuses applied. A reply to a request that went out at version v is
+   *  older than any status applied since: the daemon's events and a later fetch
+   *  already say more than it does. */
+  version = 0;
+
   apply(status: PushStatus | null): void {
+    this.version++;
     this.status = status;
     this.receivedAt = this.deps.now();
     this.sentVisible = true;
     this.error = "";
     this.update();
+  }
+
+  /** Applies the reply to a request sent at `sentAt` (a `version` read before it went
+   *  out) unless a newer status arrived meanwhile. Returns whether it was applied. */
+  applyReply(status: PushStatus | null, sentAt: number): boolean {
+    if (sentAt !== this.version) return false;
+    this.apply(status);
+    return true;
   }
 
   setBusy(busy: boolean): void {

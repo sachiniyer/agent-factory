@@ -151,3 +151,29 @@ test("a failed delete keeps the draft for the tab that reopens the doc", () => {
   r = run(r.m, { t: "abandon", keepDraft: true });
   assert.equal(r.fx.some((f) => f.t === "unstash"), false);
 });
+
+test("a stored draft whose save landed beside an unrelated agent edit keeps the undo", () => {
+  // The user saved A over a, undid to a, and the page closed before the reply: the draft
+  // holds the buffer a and the text that may have landed. The agent has since edited line e.
+  const draft = { buffer: "a\nb\nc\nd\ne", base: "a\nb\nc\nd\ne", theirs: "", head: "", kind: "unsent" as const, maybe: ["A\nb\nc\nd\ne"] };
+  const r = open({ text: "A\nb\nc\nd\nE", commit: "c9" }, draft);
+  assert.equal(r.m.buffer, "a\nb\nc\nd\nE", "the undo is applied on top of what landed, and the agent's edit stays");
+  assert.ok(!r.fx.some((f) => f.t === "unstash"), "the draft is not dropped");
+  assert.equal(statusOf(r.m).status, "recovered");
+});
+
+test("a stored draft whose maybe-text did not land is rebased from its base", () => {
+  const draft = { buffer: "a\nb\nc\nd\ne2", base: "a\nb\nc\nd\ne", theirs: "", head: "", kind: "unsent" as const, maybe: ["a\nb\nc\nd\ne2"] };
+  const r = open({ text: "A\nb\nc\nd\ne", commit: "c9" }, draft);
+  assert.equal(r.m.buffer, "A\nb\nc\nd\ne2");
+});
+
+test("Discard on a deleted doc leaves no draft behind: an abandoned sync does not mirror its buffer", () => {
+  let r = run(loaded(), { t: "edit", text: "v1 edited" }, { t: "gone" });
+  assert.equal(statusOf(r.m).status, "gone");
+  r = run(r.m, { t: "abandon", keepDraft: false });
+  assert.deepEqual(r.fx.map((f) => f.t).filter((t) => t === "stash" || t === "unstash"), ["unstash"], "removed, and not written back");
+  assert.equal(r.m.stashed, null);
+  r = run(r.m, { t: "edit", text: "v1 edited again" });
+  assert.equal(r.fx.some((f) => f.t === "stash"), false, "and later edits are inert");
+});

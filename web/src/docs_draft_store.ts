@@ -138,6 +138,9 @@ export class DraftStorage {
   load(doc: string): Draft | null {
     const own = this.read(this.key(doc, this.owner));
     if (own) return own.draft;
+    // A pane that is gone takes nothing over: its closing syncs only check whether what
+    // they last wrote is still stored, and must not move another pane's draft here.
+    if (this.closed) return null;
     const t = this.now();
     let best: { key: string; entry: Entry } | null = null;
     const prefix = `${PREFIX}\n${this.scope}\n${doc}\n`;
