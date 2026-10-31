@@ -160,3 +160,20 @@ test("a save held by a closed editor cannot land after the reopened editor's", a
   assert.equal(sent.at(-1), "latest");
   reopened.dispose();
 });
+
+test("a later snapshot that carries a saved body whose confirming read failed releases the draft", async () => {
+  const ed = new BodyEditor(() => Promise.resolve(false), "Body", "k");
+  ed.setText("old");
+  await settle();
+  change("edited");
+  mock.timers.tick(SAVE_DELAY_MS);
+  await settle();
+  ed.setText("old");
+  assert.equal(text, "edited", "the unconfirmed edit is still shown over the stale body");
+  ed.setText("edited");
+  ed.setText("edited elsewhere");
+  assert.equal(text, "edited elsewhere", "the draft was released, so a newer remote body shows");
+  change("typing");
+  ed.setText("edited elsewhere again");
+  assert.equal(text, "typing", "new typing is still protected");
+});

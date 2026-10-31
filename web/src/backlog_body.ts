@@ -84,8 +84,11 @@ export class BodyEditor {
     });
   }
 
-  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. */
+  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept, until a
+   *  stored body that is exactly that edit shows the server has it: the draft is then
+   *  released (a save whose confirming read failed is acknowledged by a later one). */
   setText(text: string): void {
+    if (this.draft !== null && this.draft === text) this.draft = null;
     if (this.draft !== null || text === this.text) return;
     this.text = text;
     if (this.editor) {
