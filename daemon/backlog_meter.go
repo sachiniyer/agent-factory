@@ -414,8 +414,28 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	}
 	state.PruneRunBuckets(now)
 	m.meterAccounts(home, state, backlogDirs, runConfigs, overrides, now, &usage)
-	for sessionID, account := range runAccount {
-		usage.RunWindow[sessionID] = state.RunWindowCost(sessionID, account, usage.Accounts[account].Windows.FiveHour)
+	// Every session in usage.Runs gets a run_window entry. A run with a
+	// resolved current config dir reports only that account's window cost —
+	// the documented "cost within its account's current 5-hour window", which
+	// the per-run percentage compares against that account's all_cost; a run
+	// that switched accounts still holds pre-swap buckets and summing them in
+	// would overstate the current window. Only a run whose current config dir
+	// is unknown (killed between passes or after a daemon restart, or a
+	// cross-agent handoff metered from remembered transcripts) falls back to
+	// summing every run bucket keyed session|account — the same buckets
+	// AddRunEntries filed its messages under. 0 covers a run with no buckets
+	// (none metered yet) or no valid window, the documented contract ("0
+	// without a valid window").
+	for sessionID := range usage.Runs {
+		if account, ok := runAccount[sessionID]; ok {
+			usage.RunWindow[sessionID] = state.RunWindowCost(sessionID, account, usage.Accounts[account].Windows.FiveHour)
+			continue
+		}
+		var total float64
+		for _, account := range state.RunWindowAccounts(sessionID) {
+			total += state.RunWindowCost(sessionID, account, usage.Accounts[account].Windows.FiveHour)
+		}
+		usage.RunWindow[sessionID] = total
 	}
 	// Save the dedupe keys and buckets BEFORE the offsets and costs that depend
 	// on them advance in backlog.json: the other order leaves a failed save with
