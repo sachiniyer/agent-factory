@@ -104,9 +104,9 @@ func TestListenAddrHostName(t *testing.T) {
 		"[::1]:8443":      "::1",
 		"Box.Lan:8443":    "box.lan",
 		"100.64.1.2:8443": "100.64.1.2",
-		"0.0.0.0:8443":    "", // a wildcard names no host
-		"[::]:8443":       "",
-		":8443":           "",
+		"0.0.0.0:8443":    "0.0.0.0", // a wildcard keeps its literal
+		"[::]:8443":       "::",
+		":8443":           "::", // every interface, dual-stack
 		"":                "",
 		"not-an-address":  "",
 	}

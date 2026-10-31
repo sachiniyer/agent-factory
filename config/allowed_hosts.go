@@ -196,18 +196,22 @@ func IsLoopbackHostName(canonical string) bool {
 }
 
 // ListenAddrHostName is the canonical host of a listen address — the name the
-// listener bound from it answers to as itself — or "" when the address names no
-// single host: empty (every interface), an unspecified IP (0.0.0.0, ::), or
-// unparseable. A wildcard bind is still answered on the address a client actually
-// reached, which the daemon judges from the connection itself rather than from
-// this.
+// listener bound from it answers to as itself — or "" when it is unparseable. A
+// wildcard bind keeps its literal: "0.0.0.0" or "::", and an empty host (Go binds
+// every interface, dual-stack) is "::". A browser that sends Host: 0.0.0.0 typed
+// the bind address itself — an IP literal, which no DNS can rebind — so a wildcard
+// listener admits it (see IsUnspecifiedHostName); every interface address it is
+// reached on is admitted from the connection itself rather than from this.
 func ListenAddrHostName(addr string) string {
 	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
-	if err != nil || host == "" {
+	if err != nil {
 		return ""
 	}
+	if host == "" {
+		return "::"
+	}
 	if ip, perr := netip.ParseAddr(host); perr == nil {
-		if ip.Zone() != "" || ip.IsUnspecified() {
+		if ip.Zone() != "" {
 			return ""
 		}
 		return ip.Unmap().String()
@@ -217,6 +221,13 @@ func ListenAddrHostName(addr string) string {
 		return ""
 	}
 	return name
+}
+
+// IsUnspecifiedHostName reports whether a canonical host is an unspecified IP
+// (0.0.0.0 or ::) — the spelling of a wildcard bind.
+func IsUnspecifiedHostName(canonical string) bool {
+	addr, err := netip.ParseAddr(canonical)
+	return err == nil && addr.IsUnspecified()
 }
 
 func allDigits(s string) bool {

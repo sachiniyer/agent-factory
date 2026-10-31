@@ -299,8 +299,13 @@ func TestAdmitHost(t *testing.T) {
 		refusal, ok := admitHost(req("192.0.2.11:8443", "192.0.2.1:1", lan), "", nil)
 		assert.False(t, ok, "another IP is not this connection's address")
 		assert.Equal(t, "192.0.2.11", refusal.suggest)
-		_, ok = admitHost(req("0.0.0.0:8443", "127.0.0.1:1", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8443}), "", nil)
-		assert.False(t, ok, "the unspecified address names no daemon unless the operator lists it")
+		loop := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8443}
+		_, ok = admitHost(req("0.0.0.0:8443", "127.0.0.1:1", loop), "127.0.0.1", nil)
+		assert.False(t, ok, "the unspecified address does not name a loopback-bound listener")
+		_, ok = admitHost(req("0.0.0.0:8443", "127.0.0.1:1", loop), "0.0.0.0", nil)
+		assert.True(t, ok, "it is a wildcard listener's own spelling — the operator typed the bind address")
+		_, ok = admitHost(req("[::]:8443", "127.0.0.1:1", loop), "0.0.0.0", nil)
+		assert.True(t, ok, "either family's unspecified address names a wildcard bind")
 	})
 	t.Run("allow-list entries are canonicalized even when hand-built", func(t *testing.T) {
 		_, ok := admitHost(req("box.ts.net", "127.0.0.1:1", nil), "", []string{"BOX.ts.net."})

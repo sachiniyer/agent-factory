@@ -604,7 +604,8 @@ A page cannot choose the `Host` its browser sends, so checking it closes that.
 These always work, on any port:
 
 - `localhost` and loopback IPs such as `127.0.0.1` and `[::1]`;
-- the host of the address the listener was bound from (`network.listen_addr`);
+- the host of the address the listener was bound from (`network.listen_addr`) —
+  for a wildcard bind such as `0.0.0.0:8443`, that is `http://0.0.0.0:8443` itself;
 - the IP address the client actually connected to — so a wildcard bind
   (`0.0.0.0:8443`) reached as `http://192.168.1.5:8443` works with no entry;
 - a request with **no** `Host` header from this same machine (HTTP/1.0 tools;

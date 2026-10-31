@@ -40,7 +40,9 @@ import (
 //     credential the preview listener checks — and nothing needs it: af's
 //     *.localhost origins are all served by the preview listener.
 //   - the host of the address this listener was bound from (network.listen_addr's
-//     host when it names one), any port.
+//     host), any port — for a wildcard bind that is the unspecified address a
+//     browser sends when the operator types http://0.0.0.0:8443, an IP literal
+//     no DNS can rebind.
 //   - an IP literal equal to the address the client's connection actually reached
 //     (http.LocalAddrContextKey). That is what covers a wildcard bind reached by its
 //     LAN or tailnet IP. It cannot be steered by a page: an IP-literal URL has no
@@ -96,8 +98,8 @@ type hostRefusal struct {
 }
 
 // admitHost decides whether r is addressed to this daemon. listenHost is the
-// canonical host of the address the listener was bound from ("" for a wildcard or
-// unset bind, config.ListenAddrHostName); allowed is network.allowed_hosts. It
+// canonical host of the address the listener was bound from
+// (config.ListenAddrHostName; "" when unparseable); allowed is network.allowed_hosts. It
 // reads nothing but its arguments and the request, so a caller decides where the
 // allow-list comes from — for the control listener, the same once-per-request
 // config read as the rest of its posture.
@@ -113,6 +115,11 @@ func admitHost(r *http.Request, listenHost string, allowed []string) (hostRefusa
 		return hostRefusal{host: r.Host}, false
 	}
 	if config.IsLoopbackHostName(canon) || (listenHost != "" && canon == listenHost) {
+		return hostRefusal{}, true
+	}
+	// A wildcard listener's own spelling, in either family: Host: 0.0.0.0 on a
+	// [::] dual-stack bind still names the bind the browser typed.
+	if config.IsUnspecifiedHostName(canon) && config.IsUnspecifiedHostName(listenHost) {
 		return hostRefusal{}, true
 	}
 	if hostIsConnLocalAddr(r, canon) {
