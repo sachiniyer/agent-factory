@@ -487,7 +487,7 @@ type Config struct {
 	// are unaffected. Global-only, like listen_addr.
 	CORSAllowedOrigins []string `json:"cors_allowed_origins,omitempty" toml:"cors_allowed_origins,omitempty"`
 	// AllowedHosts names the extra hosts the daemon's browser-facing listeners
-	// answer for, beyond this machine's own names (loopback, *.localhost, the
+	// answer for, beyond this machine's own names (localhost, loopback IPs, the
 	// listener's own address). Every other Host is refused before routing, which
 	// is what stops a DNS-rebinding page from reaching the tokenless loopback API.
 	// An entry is a bare DNS name or IP literal, matched on any port — e.g.

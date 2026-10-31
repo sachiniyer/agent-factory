@@ -129,22 +129,49 @@ func TestHostGuard_RefusesForeignHostOnWebSocketUpgrade(t *testing.T) {
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 }
 
-// Loopback names work on any port, in any case, with one trailing root dot —
-// including the *.localhost names af mints for preview and editor origins.
+// Loopback names work on any port, in any case, with one trailing root dot.
 func TestHostGuard_AdmitsLoopbackNamesOnAnyPort(t *testing.T) {
 	_, addr, _ := hostGuardListener(t)
-	previewLabel := previewTabHostLabel("secret", "sid", "tid") + previewHostSuffix
-	editorLabel := editorOriginLabel("secret", "sid") + previewHostSuffix
 	for _, host := range []string{
 		"localhost", "localhost:1", "LOCALHOST:65535", "localhost.:8443", "Localhost.",
 		"127.0.0.1", "127.0.0.1:9", "127.8.9.10:8443",
 		"[::1]", "[::1]:8443", "[::ffff:127.0.0.1]:80",
-		"x.localhost:8443", "Editor.LOCALHOST",
-		previewLabel + ":8444", editorLabel + ":8444",
 	} {
 		status, _, body := hostDo(t, addr, http.MethodGet, host, "/v1/health", "")
 		assert.Equal(t, http.StatusOK, status, "Host %q must be admitted: %s", host, body)
 	}
+}
+
+// A *.localhost SUBDOMAIN is refused on the control listener — including one in
+// the exact shape af mints for its preview and editor origins. Safari before
+// macOS 26 resolves *.localhost through the network's DNS (WebKit bug 160504), so
+// a hostile resolver can serve a page under such a name and rebind it to
+// 127.0.0.1; the af label shape is public, and this listener does not check the
+// per-label credential, so admitting the shape would admit an attacker's label.
+// af's own *.localhost origins live on the preview listener (pinned below). An
+// operator who wants one here can still list it.
+func TestHostGuard_RefusesLocalhostSubdomains(t *testing.T) {
+	m, addr, port := hostGuardListener(t)
+	forged := "af" + strings.Repeat("a", previewLabelEncoding.EncodedLen(previewLabelBytes)) + previewHostSuffix
+	require.True(t, isPreviewLabel(strings.TrimSuffix(forged, previewHostSuffix)), "the forged label must have af's exact shape")
+	for _, host := range []string{
+		"x.localhost:" + port,
+		"Editor.LOCALHOST",
+		"evil.localhost.",
+		forged + ":" + port,
+		previewTabHostLabel("secret", "sid", "tid") + previewHostSuffix + ":8444",
+		editorOriginLabel("secret", "sid") + previewHostSuffix,
+		previewProbeLabel + previewHostSuffix,
+	} {
+		status, _, body := hostDo(t, addr, http.MethodPost, host, "/v1/Snapshot", "{}")
+		assert.Equal(t, http.StatusMisdirectedRequest, status, "Host %q must be refused: %s", host, body)
+	}
+
+	next := *m.Config()
+	next.AllowedHosts = []string{"dev.localhost"}
+	m.storeLivePosture(&next)
+	status, _, body := hostDo(t, addr, http.MethodPost, "dev.localhost:"+port, "/v1/Snapshot", "{}")
+	assert.Equal(t, http.StatusOK, status, "an operator may list a *.localhost name on purpose: %s", body)
 }
 
 // Every spelling a browser never sends is refused on purpose, and the empty Host
@@ -205,7 +232,9 @@ func TestHostGuard_ConfiguredNameAppliesLiveWithoutRebind(t *testing.T) {
 // A second read could pair an old allow-list with a newer, relaxed token posture.
 func TestHostGuard_SharesThePostureReadWithTheGate(t *testing.T) {
 	var reads int32
-	strict := &authGate{} // the zero gate demands a token from everyone
+	// What a second read would see: a gate demanding a token nobody presents. It
+	// must fail with 401, not panic, so a regression reads as a clean failure.
+	strict := &authGate{expectedToken: func() (string, error) { return "unpresented", nil }}
 	build := func() requestPosture {
 		if atomic.AddInt32(&reads, 1) == 1 {
 			return requestPosture{allowedHosts: []string{"box.example"}} // nil gate: authorized
@@ -311,6 +340,7 @@ func TestHostGuard_EditorOriginPort(t *testing.T) {
 	front := fmt.Sprintf("box.tailnet.ts.net:%d", f.portA)
 	assert.Equal(t, http.StatusMisdirectedRequest, do(front), "the front-door name is refused until it is allowed")
 	assert.Equal(t, http.StatusMisdirectedRequest, do(fmt.Sprintf("attacker.example:%d", f.portA)))
+	assert.Equal(t, http.StatusMisdirectedRequest, do(fmt.Sprintf("x.localhost:%d", f.portA)), "no *.localhost subdomain here either")
 	assert.NotEqual(t, http.StatusMisdirectedRequest, do(fmt.Sprintf("localhost:%d", f.portA)))
 
 	next := *f.m.Config()
@@ -323,8 +353,18 @@ func TestHostGuard_EditorOriginPort(t *testing.T) {
 // The preview listener keeps its own, stricter Host rule: only af-minted
 // *.localhost labels are served, and a rebound name gets the fixed 404 on every
 // kind of route — static, /v1 read, /v1 mutating, WS upgrade — before the gate.
+// af's minted preview origin keeps working there; a forged label of af's exact
+// shape reaches the gate and never a tab.
 func TestHostGuard_PreviewListenerRefusesForeignHosts(t *testing.T) {
-	_, previewAddr, _, _, _ := startPreviewDaemon(t)
+	m, previewAddr, _, sid, tid := startPreviewDaemon(t)
+	client := previewHTTPClient()
+	minted := previewHostOf(t, m, previewAddr, sid, tid)
+	require.Equal(t, http.StatusOK, previewHostStatus(t, client, previewAddr, minted, "/"),
+		"the minted per-tab *.localhost origin is served")
+	forgedResp := previewHostGet(t, client, previewAddr,
+		"af"+strings.Repeat("a", previewLabelEncoding.EncodedLen(previewLabelBytes))+previewHostSuffix, "/")
+	forgedBody := readAllString(t, forgedResp)
+	assert.NotContains(t, forgedBody, "server=auth", "a shape-valid label af never minted must not reach a dev server")
 	_, port, err := net.SplitHostPort(previewAddr)
 	require.NoError(t, err)
 	foreign := "attacker.example:" + port

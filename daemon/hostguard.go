@@ -31,10 +31,14 @@ import (
 //
 // WHAT NAMES THIS DAEMON (admitHost). In order:
 //
-//   - loopback names on any port: localhost, *.localhost (af's per-tab preview and
-//     per-session editor origins live there; browsers resolve the whole tree to
-//     loopback internally, with no DNS an attacker could answer), and loopback IP
-//     literals. config.IsLoopbackHostName.
+//   - bare localhost and loopback IP literals, on any port
+//     (config.IsLoopbackHostName). NOT a *.localhost subdomain: Safari before
+//     macOS 26 resolves those through the system resolver and so the network's
+//     DNS (WebKit bug 160504), where a hostile resolver can point one at an
+//     attacker and rebind it. Admitting only af's own label SHAPE would not help
+//     here — the shape is public, and these listeners do not hold the per-label
+//     credential the preview listener checks — and nothing needs it: af's
+//     *.localhost origins are all served by the preview listener.
 //   - the host of the address this listener was bound from (network.listen_addr's
 //     host when it names one), any port.
 //   - an IP literal equal to the address the client's connection actually reached
@@ -67,10 +71,12 @@ import (
 // with withWebShell) and every per-session editor-origin port (editor_port_origin.go)
 // — the two surfaces that serve a browser anything worth reaching. The web-tab
 // preview listener has its own, stricter Host rule that predates this one:
-// previewShellHandler, its outermost wrapper, answers only af-minted
+// previewShellHandler, its outermost wrapper, answers only af-shaped
 // af<label>.localhost names and the probe name and gives every other Host a fixed,
-// address-free 404 before any gate or route, so no allowed_hosts entry could ever
-// make a foreign name useful there. The agent-server listener is not a browser
+// address-free 404 before any gate or route; behind it the gate admits a label only
+// if this daemon minted it (the label IS the credential), so a shape-valid label an
+// attacker invented gets the expired notice, never a tab. No allowed_hosts entry
+// could make a foreign name useful there. The agent-server listener is not a browser
 // surface and its bearer token is mandatory for every peer, so a rebound page
 // reaches nothing but 401s; a Host rule there would only break remotes addressed
 // by a name.

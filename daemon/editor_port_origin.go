@@ -312,8 +312,8 @@ func (e *editorPortOrigins) serveLocked(cs *controlServer, port int) error {
 
 // editorPortServerHandler is the whole handler a pool port's server runs. The
 // Host guard (hostguard.go) is its outermost layer: a pool port serves a shell in
-// the worktree, so it answers only Hosts that name this daemon — loopback names,
-// the address the client reached, and network.allowed_hosts (the front-door name
+// the worktree, so it answers only Hosts that name this daemon — localhost and
+// loopback IPs, the address the client reached, and network.allowed_hosts (the front-door name
 // tailscale serve forwards, port and all). The allow-list is read per request,
 // like the control listener's, so an edit needs no rebind.
 func editorPortServerHandler(cs *controlServer, port int, boundAddr string) http.Handler {

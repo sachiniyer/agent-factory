@@ -696,8 +696,8 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 	// Each shell also decides the listener's Host rule (hostguard.go), outermost so
 	// it runs before the static shell, every /v1 route and every WS upgrade:
 	//   - withWebShell, the control plane, answers only Hosts that name this daemon:
-	//     loopback names, the bind address's own host, the address the client
-	//     reached, and network.allowed_hosts — read with the live posture.
+	//     localhost and loopback IPs, the bind address's own host, the address the
+	//     client reached, and network.allowed_hosts — read with the live posture.
 	//   - previewShell keeps its own stricter rule: previewShellHandler serves only
 	//     af-minted *.localhost labels and 404s every other Host before the gate.
 	//   - withoutWebShell (the agent-server) has none: its token is mandatory for

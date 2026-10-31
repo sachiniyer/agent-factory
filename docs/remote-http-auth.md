@@ -603,9 +603,7 @@ A page cannot choose the `Host` its browser sends, so checking it closes that.
 
 These always work, on any port:
 
-- `localhost`, any `*.localhost` name (af's per-tab preview and per-session
-  editor origins live there; browsers resolve them to loopback without DNS), and
-  loopback IPs such as `127.0.0.1` and `[::1]`;
+- `localhost` and loopback IPs such as `127.0.0.1` and `[::1]`;
 - the host of the address the listener was bound from (`network.listen_addr`);
 - the IP address the client actually connected to — so a wildcard bind
   (`0.0.0.0:8443`) reached as `http://192.168.1.5:8443` works with no entry;
@@ -648,10 +646,16 @@ allowed_hosts = ["box.tailnet.ts.net"]
 - If you see a refusal for a name you do **not** recognise, do not add it: that is
   the check doing its job against a page that tried to reach af under its own
   name.
+- A `*.localhost` **subdomain** is not allowed by default. Chromium and Firefox
+  resolve every `*.localhost` name to loopback themselves, but Safari before macOS
+  26 asks the ordinary macOS resolver, which falls through to the network's DNS
+  servers ([WebKit bug 160504](https://bugs.webkit.org/show_bug.cgi?id=160504)), so
+  a hostile network could point such a name at a page of its own and then rebind
+  it. Nothing in af needs one here; list it in `network.allowed_hosts` if you do.
 - The web-tab preview listener (`network.preview_listen_addr`) keeps its own,
   stricter rule: it answers only the per-tab `af….localhost` names the web UI hands
-  out, and every other `Host` gets a plain 404, so `network.allowed_hosts` does not
-  apply there. The headless agent-server is not a browser surface; its token is
+  out — each one a credential the daemon minted — and every other `Host` gets a
+  plain 404, so `network.allowed_hosts` does not apply there. The headless agent-server is not a browser surface; its token is
   mandatory for every peer, and it has no `Host` rule.
 
 ## CORS (for the browser web client)
@@ -716,7 +720,7 @@ plaintext backend.
   `network.allow_unauthenticated_network`. See [the unauthenticated network
   listener](#the-unauthenticated-network-listener).
 - **The daemon answers only its own names.** A request whose `Host` is not
-  loopback, the listener's own address, the address the client reached, or a
+  `localhost`, a loopback IP, the listener's own address, the address the client reached, or a
   `network.allowed_hosts` entry is refused with `421` before any route runs, so a
   DNS-rebinding page cannot reach the tokenless loopback API. Add a name only if you
   reach af through it on purpose. See [Host names the daemon answers

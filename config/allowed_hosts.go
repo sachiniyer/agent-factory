@@ -16,7 +16,7 @@ import (
 // The daemon refuses any request whose Host does not name it, before routing (see
 // daemon/hostguard.go). Without that, a web page whose hostname later resolves to
 // 127.0.0.1 (DNS rebinding) is same-origin with the daemon in the browser and can
-// read and drive the whole tokenless loopback API. Loopback names, *.localhost, and
+// read and drive the whole tokenless loopback API. localhost, loopback IPs, and
 // the listener's own address are always allowed; this key adds the names a
 // same-host reverse proxy forwards, such as the https://<machine>.<tailnet>.ts.net
 // name `tailscale serve` passes through unchanged as the Host.
@@ -173,13 +173,22 @@ func RequestHostName(host string) (string, bool) {
 }
 
 // IsLoopbackHostName reports whether a canonical host (RequestHostName's output)
-// can only ever mean this machine to a browser: "localhost", any "*.localhost"
-// name (RFC 6761 — Chromium and Firefox resolve these to loopback internally,
-// without a DNS query, so no attacker can point one elsewhere; af mints its
-// per-tab preview and per-session editor origins under it), or a loopback IP
+// can only ever mean this machine to a browser: bare "localhost" or a loopback IP
 // literal (127.0.0.0/8, ::1).
+//
+// A "*.localhost" SUBDOMAIN is deliberately not one. RFC 6761 asks resolvers to
+// answer the whole tree with loopback, and Chromium and Firefox do so internally,
+// with no DNS query — but Safari before macOS 26 hands such a name to the ordinary
+// macOS resolver, which consults /etc/hosts and then the network's DNS servers
+// (WebKit bug 160504; macOS 26 moved loopback resolution into the OS frameworks
+// below WebKit). On those systems a hostile network's resolver can answer
+// foo.localhost with an attacker's address and later rebind it, which is exactly
+// the attack this check exists to stop. Bare "localhost" does not share the
+// problem in the same way: /etc/hosts maps it on a default install and is
+// consulted before DNS, and Chromium and Firefox never resolve it at all. af's own *.localhost names (per-tab preview and editor origins) are
+// served by the preview listener, whose rule admits only labels af minted.
 func IsLoopbackHostName(canonical string) bool {
-	if canonical == "localhost" || strings.HasSuffix(canonical, ".localhost") {
+	if canonical == "localhost" {
 		return true
 	}
 	addr, err := netip.ParseAddr(canonical)

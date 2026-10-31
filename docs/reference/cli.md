@@ -1442,7 +1442,7 @@ Settable keys:
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   network.allowed_hosts      comma-separated extra host names (no scheme or port) the web UI and API answer to, e.g. the
                              name tailscale serve forwards, or "" for none — the whole list is replaced. localhost,
-                             *.localhost and the listener's own address always work; any other Host is refused.
+                             loopback IPs and the listener's own address always work; any other Host is refused.
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
   hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config} (global-only)
   default_host               name of the listed host used when a session does not pick one (global-only)

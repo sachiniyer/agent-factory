@@ -88,10 +88,12 @@ func TestRequestHostName(t *testing.T) {
 }
 
 func TestIsLoopbackHostName(t *testing.T) {
-	for _, h := range []string{"localhost", "x.localhost", "af2345.localhost", "127.0.0.1", "127.8.9.10", "::1"} {
+	for _, h := range []string{"localhost", "127.0.0.1", "127.8.9.10", "::1"} {
 		assert.True(t, IsLoopbackHostName(h), h)
 	}
-	for _, h := range []string{"localhost.evil.example", "evillocalhost", "0.0.0.0", "::", "10.0.0.1", "example.com"} {
+	// A *.localhost subdomain is not: Safari before macOS 26 resolves it through
+	// the network's DNS (WebKit bug 160504), so a hostile resolver can rebind it.
+	for _, h := range []string{"x.localhost", "af2345.localhost", "localhost.evil.example", "evillocalhost", "0.0.0.0", "::", "10.0.0.1", "example.com"} {
 		assert.False(t, IsLoopbackHostName(h), h)
 	}
 }
