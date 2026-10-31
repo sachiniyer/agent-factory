@@ -37,6 +37,7 @@ import {
 } from "./proposal_api.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
 import { ClosingTabs } from "./docs_closing.js";
+import { missingFrom, RosterOrder } from "./docs_roster.js";
 import { diffText } from "./text_diff.js";
 
 // The doc each proposal last showed, so a rebuilt pane opens where it was.
@@ -149,6 +150,8 @@ export class DocsPane {
   private disposed = false;
   /** This pane's unsaved work in storage. */
   private readonly drafts: DraftStorage;
+  /** Orders the replies to the doc-list requests: an older list is never used after a newer one. */
+  private readonly roster = new RosterOrder();
   private readonly unsubscribe: () => void;
   private readonly unsubscribePush: () => void;
   private readonly unsubscribeResync: () => void;
@@ -375,6 +378,7 @@ export class DocsPane {
     const gen = ++this.generation;
     const seq = this.chip.version;
     let info: ProposalInfo;
+    const ticket = this.roster.begin();
     try {
       info = await getProposal(this.opts.sessionId, this.opts.slug, this.opts.token);
     } catch (e) {
@@ -384,7 +388,7 @@ export class DocsPane {
       return;
     }
     if (this.disposed || gen !== this.generation) return;
-    this.applyInfo(info, seq);
+    if (this.roster.accept(ticket)) this.applyInfo(info, seq);
     this.findStoredGone();
     const remembered = lastDoc.get(this.memoryKey());
     const first = this.ordered.find((d) => d.name === remembered) ?? this.ordered[0] ?? null;
@@ -617,10 +621,13 @@ export class DocsPane {
     try {
       await addDoc(this.opts.sessionId, this.opts.slug, name, this.opts.token);
       const seq = this.chip.version;
+      const ticket = this.roster.begin();
       const info = await getProposal(this.opts.sessionId, this.opts.slug, this.opts.token);
       if (this.disposed) return;
       this.closeMenu();
-      this.applyInfo(info, seq);
+      // (An older list that arrived after this one has been dropped by the roster; and this
+      // one is dropped if a later request's list already was used.)
+      if (this.roster.accept(ticket)) this.applyInfo(info, seq);
       const doc = this.ordered.find((d) => d.name === name);
       if (doc) await this.openDoc(doc);
     } catch (e) {
@@ -775,17 +782,19 @@ export class DocsPane {
     this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = null;
       const seq = this.chip.version;
+      const ticket = this.roster.begin();
       void getProposal(this.opts.sessionId, this.opts.slug, this.opts.token).then((info) => {
         if (this.disposed) return;
+        // A list older than one already used can lack a doc added since: a doc missing from
+        // it is not evidence of a delete.
+        if (!this.roster.accept(ticket)) return;
         const known = new Set(this.ordered.map((d) => d.name));
         this.applyInfo(info, seq);
         for (const doc of this.ordered) {
           if (!known.has(doc.name)) void this.refreshText(doc);
         }
         const current = this.current;
-        for (const name of [...this.syncs.keys()]) {
-          if (!this.ordered.some((d) => d.name === name)) this.docDeletedRemotely(name);
-        }
+        for (const name of missingFrom(this.syncs.keys(), this.ordered.map((d) => d.name))) this.docDeletedRemotely(name);
         for (const name of [...this.goneDocs.keys()]) {
           // The doc is back (restored, or added again): its kept work saves onto it.
           if (this.ordered.some((d) => d.name === name) && this.syncs.get(name)?.currentStatus !== "gone") {

@@ -8,6 +8,7 @@
 import type { DocText, SaveResult } from "./proposal_api.js";
 import { DraftStorage, type KV } from "./docs_draft_store.js";
 import { ClosingTabs } from "./docs_closing.js";
+import { missingFrom, RosterOrder } from "./docs_roster.js";
 import { CONFLICT_MINE, CONFLICT_SPLIT, CONFLICT_THEIRS, hasConflictMarkers } from "./text_diff.js";
 
 export interface SyncLike {
@@ -975,6 +976,57 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     writesBroken = !writesBroken;
   }
 
+  /** The doc list reaches the pane by several routes whose replies can arrive in any order:
+   *  a refresh goes out, the user adds a doc (its own fetch goes out and is used), and the
+   *  older refresh's reply, which lacks the new doc, arrives last. A doc missing from a list
+   *  is taken as deleted, so the old reply must not be used. The roster code is the pane's. */
+  const roster = new RosterOrder();
+  async function listReorder(): Promise<void> {
+    const doc = "notes";
+    if (!daemons.has(doc)) {
+      daemons.set(doc, new Daemon(initialText(doc)));
+      daemons.get(doc)!.deleted = true;
+    }
+    const d = daemons.get(doc)!;
+    if (!d.deleted || syncs.has(doc)) return;
+    const listNow = (): string[] => names.filter((n) => !daemons.get(n)!.deleted).concat(d.deleted ? [] : [doc]);
+    const openDocs = (): string[] => [...syncs.keys()];
+    const apply = (ticket: number, listed: string[]): void => {
+      if (!process.env.AF_NO_ROSTER_ORDER && !roster.accept(ticket)) return;
+      for (const gone of missingFrom(openDocs(), listed)) syncs.get(gone)?.remoteDeleted?.();
+    };
+    const oldTicket = roster.begin(); // a refresh goes out...
+    const oldList = listNow(); // ...and the daemon answers it before the doc exists
+    const reorder = rand() < 0.8;
+    if (!reorder) apply(oldTicket, oldList);
+    d.readd(initialText(doc)); // the user adds the doc
+    const newTicket = roster.begin();
+    apply(newTicket, listNow());
+    const s = newSync(doc); // and opens it, and types
+    void s.start().catch(() => undefined);
+    await drain();
+    for (let i = 0; i < 5; i++) await tick();
+    if (!isLoaded(s)) {
+      s.dispose();
+      syncs.delete(doc);
+      return;
+    }
+    s.edit(`${s.text}\nu${++seq}`);
+    if (reorder) apply(oldTicket, oldList); // the older reply arrives last
+    await tick();
+    // I21: a doc the daemon has is not marked deleted by an older list.
+    if (s.currentStatus === "gone") fail("list-reply-marked-live-doc-deleted", `${doc}: an older doc list, arriving after the add, marked the new doc deleted`);
+    s.dispose();
+    syncs.delete(doc);
+    await drain();
+    for (let i = 0; i < 3; i++) {
+      await advance(6000);
+      await drain();
+    }
+    d.deleted = true; // the doc is not part of the scenario's other docs: the next run adds it afresh
+    storageA.clear(doc);
+  }
+
   /** A save is in flight, the user undoes back to the acknowledged text, and the doc is
    *  deleted before the reply: the deleted doc's tab keeps the undone buffer in storage,
    *  because the daemon may hold the text that was sent. */
@@ -1269,8 +1321,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9645 && r < 0.9655) await lateLanding();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9655 && r < 0.966) await undoThenGone();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9660 && r < 0.9665) await closeWhileLoading();
-    else if (o.chaos && o.collide && r >= 0.9665 && r < 0.9695) rollbackHead();
-    else if (o.chaos && !o.collide && r >= 0.9665 && r < 0.9695) await discardDeleted();
+    else if (o.chaos && r >= 0.9690 && r < 0.9695) await listReorder();
+    else if (o.chaos && o.collide && r >= 0.9665 && r < 0.9690) rollbackHead();
+    else if (o.chaos && !o.collide && r >= 0.9665 && r < 0.9690) await discardDeleted();
     else if (o.chaos && r >= 0.9695 && r < 0.97) toggleWriteOutage();
     else if (o.chaos && r >= 0.97 && r < 0.98) {
       if (!ghostBox.cur) ghostOpen();
