@@ -90,7 +90,7 @@ test("rail mode: ctrl+] is inert, never a view cycle (#2517 review P3)", () => {
   // After detaching with ctrl+], a habitual second press in rail mode must NOT fall
   // through to the [ / ] view cycle and lose the rail. A bare ] still cycles.
   assert.deepEqual(decideKey("]", ctx(), { ctrl: true }), { kind: "none" }, "ctrl+] in rail is inert");
-  assert.deepEqual(decideKey("]", ctx()), { kind: "switchView", view: "tasks" }, "a bare ] still cycles the view");
+  assert.deepEqual(decideKey("]", ctx()), { kind: "switchView", view: "backlog" }, "a bare ] still cycles the view");
 });
 
 test("modal mode: the modal owns the keyboard — only Escape (to cancel) is ours", () => {
@@ -194,20 +194,24 @@ test("terminal mode: tab keys reach the agent, not the tab bar", () => {
 
 // --- view switching (redesign PR2: sessions ⇄ tasks; Projects folded away) --
 
-test("cycleView: ] advances and [ reverses, wrapping the sessions/tasks/config cycle", () => {
-  assert.equal(cycleView("sessions", 1), "tasks");
+test("cycleView: ] advances and [ reverses, wrapping the sessions/backlog/tasks/config cycle", () => {
+  assert.equal(cycleView("sessions", 1), "backlog");
+  assert.equal(cycleView("backlog", 1), "tasks");
   assert.equal(cycleView("tasks", 1), "config");
   assert.equal(cycleView("config", 1), "sessions", "] past the last view wraps to the first");
   assert.equal(cycleView("sessions", -1), "config", "[ before the first view wraps to the last");
   assert.equal(cycleView("config", -1), "tasks");
-  assert.equal(cycleView("tasks", -1), "sessions");
+  assert.equal(cycleView("tasks", -1), "backlog");
+  assert.equal(cycleView("backlog", -1), "sessions");
 });
 
 test("view switch: ] / [ cycle the top-level view in rail mode of any view", () => {
-  assert.deepEqual(decideKey("]", ctx({ view: "sessions" })), { kind: "switchView", view: "tasks" });
+  assert.deepEqual(decideKey("]", ctx({ view: "sessions" })), { kind: "switchView", view: "backlog" });
   assert.deepEqual(decideKey("[", ctx({ view: "sessions" })), { kind: "switchView", view: "config" });
+  assert.deepEqual(decideKey("]", ctx({ view: "backlog" })), { kind: "switchView", view: "tasks" });
+  assert.deepEqual(decideKey("[", ctx({ view: "backlog" })), { kind: "switchView", view: "sessions" });
   assert.deepEqual(decideKey("]", ctx({ view: "tasks" })), { kind: "switchView", view: "config" });
-  assert.deepEqual(decideKey("[", ctx({ view: "tasks" })), { kind: "switchView", view: "sessions" });
+  assert.deepEqual(decideKey("[", ctx({ view: "tasks" })), { kind: "switchView", view: "backlog" });
   assert.deepEqual(decideKey("]", ctx({ view: "config" })), { kind: "switchView", view: "sessions" });
   assert.deepEqual(decideKey("[", ctx({ view: "config" })), { kind: "switchView", view: "tasks" });
 });
@@ -230,7 +234,7 @@ test("non-sessions views: the session keys pass through, only view switching is 
   assert.deepEqual(decideKey("t", tasksView), { kind: "none" }, "no tab management outside the sessions view");
   assert.deepEqual(decideKey("2", tasksView), { kind: "none" });
   assert.deepEqual(decideKey("]", tasksView), { kind: "switchView", view: "config" });
-  assert.deepEqual(decideKey("[", tasksView), { kind: "switchView", view: "sessions" });
+  assert.deepEqual(decideKey("[", tasksView), { kind: "switchView", view: "backlog" });
 
   // The config view is the same kind of surface: a mouse/keyboard form, not a
   // terminal. Its own text fields are real DOM inputs, so the shell's key model

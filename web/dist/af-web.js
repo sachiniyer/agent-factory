@@ -7030,7 +7030,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "0211b04a5cd9";
+var CLIENT_VERSION = "02fbb8d70894";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7493,7 +7493,7 @@ async function startAccountLogin(agent, name, token2) {
 }
 
 // src/nav.ts
-var VIEWS = ["sessions", "tasks", "config"];
+var VIEWS = ["sessions", "backlog", "tasks", "config"];
 function cycleView(current, delta) {
   const i = VIEWS.indexOf(current);
   const n = VIEWS.length;
@@ -7670,6 +7670,20 @@ var ExternalLink = [
   ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/file-text.mjs
+var FileText = [
+  [
+    "path",
+    {
+      d: "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"
+    }
+  ],
+  ["path", { d: "M14 2v5a1 1 0 0 0 1 1h5" }],
+  ["path", { d: "M10 9H8" }],
+  ["path", { d: "M16 13H8" }],
+  ["path", { d: "M16 17H8" }]
+];
+
 // node_modules/lucide/dist/esm/icons/folder-git-2.mjs
 var FolderGit2 = [
   ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
@@ -7832,6 +7846,7 @@ var ICONS = {
   "external-link": ExternalLink,
   folder: Folder,
   "folder-git": FolderGit2,
+  "file-text": FileText,
   funnel: Funnel,
   "git-branch": GitBranch,
   link: Link,
@@ -8006,32 +8021,32 @@ function terminalChrome(opts) {
   menu.trigger.replaceChildren(icon("ellipsis"));
   menu.trigger.title = "More session actions";
   const action = (label, className, run) => {
-    const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
-    button.addEventListener("click", () => {
+    const button2 = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
+    button2.addEventListener("click", () => {
       menu.close();
       run();
     });
-    return button;
+    return button2;
   };
   const newTabButton = (kind, label, glyph, name) => {
-    const button = h(
+    const button2 = h(
       "button",
       { type: "button", class: `af-ghost af-term-action af-term-new af-term-new-${kind}`, title: name },
       icon(glyph),
       h("span", { class: "af-term-new-label" }, label)
     );
-    button.setAttribute("aria-label", name);
-    button.hidden = true;
-    button.addEventListener("mousedown", (event) => {
+    button2.setAttribute("aria-label", name);
+    button2.hidden = true;
+    button2.addEventListener("mousedown", (event) => {
       if (event.detail > 1) event.preventDefault();
     });
-    button.addEventListener("click", (event) => {
+    button2.addEventListener("click", (event) => {
       if (event.detail > 1) return;
       menu.close();
-      button.blur();
+      button2.blur();
       opts.newTab(kind);
     });
-    return button;
+    return button2;
   };
   const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
   const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
@@ -8118,7 +8133,7 @@ function viewNavigation(onSelect) {
   const el2 = h("div", { class: "af-viewnav", role: "tablist" });
   el2.setAttribute("aria-label", "Views");
   const tabs = /* @__PURE__ */ new Map();
-  const labels = { sessions: "Sessions", tasks: "Tasks", config: "Config" };
+  const labels = { sessions: "Sessions", backlog: "Backlog", tasks: "Tasks", config: "Config" };
   for (const view of VIEWS) {
     const tab = h("button", { type: "button", class: "af-viewtab", role: "tab" }, labels[view]);
     tab.dataset.view = view;
@@ -8224,11 +8239,11 @@ function emptyAccountsState() {
 var ACCOUNT_INPUT_ATTR = "data-account-input";
 var ACCOUNTS_NOTE = "Sign in with the agent\u2019s login flow. Follow the URL in the pane.";
 function renderAccountsSection(state, actions2, registration = { open: false, agent: "" }) {
-  const section = h("section", { class: "af-accounts" });
-  section.setAttribute("aria-label", "Accounts");
+  const section2 = h("section", { class: "af-accounts" });
+  section2.setAttribute("aria-label", "Accounts");
   if (state.loaded === false && !state.error) {
-    section.append(h("p", {}, "Connecting\u2026"));
-    return section;
+    section2.append(h("p", {}, "Connecting\u2026"));
+    return section2;
   }
   const head = h(
     "div",
@@ -8236,22 +8251,22 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
     h("span", { class: "af-accounts-title" }, "Accounts"),
     h("span", { class: "af-view-count" }, String(state.entries.length))
   );
-  section.append(head, h("p", { class: "af-accounts-note" }, ACCOUNTS_NOTE));
+  section2.append(head, h("p", { class: "af-accounts-note" }, ACCOUNTS_NOTE));
   if (state.error !== "") {
-    section.append(
+    section2.append(
       h("p", { class: "af-accounts-error", role: "alert" }, `Accounts could not be read: ${state.error}`)
     );
-    return section;
+    return section2;
   }
   if (state.agents.length === 0) {
-    section.append(
+    section2.append(
       h(
         "p",
         { class: "af-accounts-empty" },
         "No agents support accounts."
       )
     );
-    return section;
+    return section2;
   }
   const list = h("div", { class: "af-accounts-list" });
   for (const agent of state.agents) {
@@ -8281,7 +8296,7 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
   agentSelect.addEventListener("change", sync);
   sync();
   add.append(h("summary", {}, "Add account"), h("label", { class: "af-modal-field" }, "Agent", agentSelect), ...forms);
-  section.append(list, add);
+  section2.append(list, add);
   if (state.entries.length === 0 && !registration.open) {
     add.hidden = true;
     const empty = recoveryScreen({ condition: "No accounts", action: "Add account", run: () => {
@@ -8291,9 +8306,9 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
       registration.open = true;
       add.querySelector(".af-accounts-register:not([hidden]) input")?.focus();
     } });
-    section.prepend(empty);
+    section2.prepend(empty);
   }
-  return section;
+  return section2;
 }
 function renderAccountRow(entry, status, actions2) {
   const row = h("div", { class: "af-accounts-row" });
@@ -8311,13 +8326,13 @@ function renderAccountRow(entry, status, actions2) {
       h("span", { class: "af-accounts-dir" }, entry.dir)
     )
   );
-  const button = h(
+  const button2 = h(
     "button",
     { type: "button", class: "af-ghost af-accounts-login" },
     entry.logged_in ? "Log in again" : "Log in"
   );
-  button.addEventListener("click", () => actions2.login(entry.agent, entry.name));
-  row.append(button);
+  button2.addEventListener("click", () => actions2.login(entry.agent, entry.name));
+  row.append(button2);
   if (entry.registration_only) {
     row.append(
       h(
@@ -8352,9 +8367,9 @@ function renderRegisterRow(agent, status, actions2) {
       submit();
     }
   });
-  const button = h("button", { type: "button", class: "af-ghost af-accounts-add" }, "Register");
-  button.addEventListener("click", submit);
-  row.append(h("div", { class: "af-accounts-label" }, field("Name", input)), button);
+  const button2 = h("button", { type: "button", class: "af-ghost af-accounts-add" }, "Register");
+  button2.addEventListener("click", submit);
+  row.append(h("div", { class: "af-accounts-label" }, field("Name", input)), button2);
   appendStatus(row, status, agent, "");
   return row;
 }
@@ -8375,11 +8390,11 @@ function emptyQuotaState() {
 }
 var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
 function renderQuotaSection(state) {
-  const section = h("section", { class: "af-quota" });
-  section.setAttribute("aria-label", "Usage");
+  const section2 = h("section", { class: "af-quota" });
+  section2.setAttribute("aria-label", "Usage");
   if (state.loaded === false && !state.error) {
-    section.append(h("p", {}, "Connecting\u2026"));
-    return section;
+    section2.append(h("p", {}, "Connecting\u2026"));
+    return section2;
   }
   const head = h(
     "div",
@@ -8387,21 +8402,21 @@ function renderQuotaSection(state) {
     h("span", { class: "af-quota-title" }, "Usage"),
     h("span", { class: "af-view-count" }, String(state.agents.length))
   );
-  section.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
+  section2.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
   if (state.error !== "") {
-    section.append(
+    section2.append(
       h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`)
     );
-    return section;
+    return section2;
   }
   for (const warning of state.warnings) {
-    section.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
+    section2.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
   }
   if (state.agents.length === 0) {
-    section.append(
+    section2.append(
       h("p", { class: "af-quota-empty" }, "No agent CLIs are configured, so there is nothing to report.")
     );
-    return section;
+    return section2;
   }
   const list = h("div", { class: "af-quota-list" });
   for (const agent of state.agents) {
@@ -8418,8 +8433,8 @@ function renderQuotaSection(state) {
     );
     list.append(row, h("p", { class: "af-quota-detail" }, agent.detail));
   }
-  section.append(list);
-  return section;
+  section2.append(list);
+  return section2;
 }
 
 // src/scrollkeep.ts
@@ -8683,20 +8698,20 @@ var ConfigPane = class {
   }
   /** Every register field's current text, keyed by agent. */
   readAccountDrafts() {
-    const drafts = /* @__PURE__ */ new Map();
+    const drafts2 = /* @__PURE__ */ new Map();
     for (const field2 of this.el.querySelectorAll(`input[${ACCOUNT_INPUT_ATTR}]`)) {
       const agent = field2.getAttribute(ACCOUNT_INPUT_ATTR);
       if (agent !== null && field2.value !== "") {
-        drafts.set(agent, field2.value);
+        drafts2.set(agent, field2.value);
       }
     }
-    return drafts;
+    return drafts2;
   }
   /** Puts them back on the freshly rendered fields. An agent whose row is gone —
    *  a roster that shrank between renders — simply drops its draft; there is no
    *  field left to hold it. */
-  restoreAccountDrafts(drafts) {
-    for (const [agent, value] of drafts) {
+  restoreAccountDrafts(drafts2) {
+    for (const [agent, value] of drafts2) {
       const field2 = this.accountInput(agent);
       if (field2) {
         field2.value = value;
@@ -8861,9 +8876,9 @@ var ConfigPane = class {
    *  a layer did. Rendered only while the row's key trigger is open, so a closed
    *  row carries no trace chrome. */
   renderExplainSection(e) {
-    const section = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
-    section.append(this.renderExplainBody());
-    return section;
+    const section2 = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
+    section2.append(this.renderExplainBody());
+    return section2;
   }
   toggleExplain(key) {
     if (this.explainKey === key) {
@@ -9894,11 +9909,11 @@ var TerminalKeybar = class {
       row.className = "af-keybar-row";
       this.rows.push(row);
       for (const key of keys) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = key;
+        const button2 = document.createElement("button");
+        button2.type = "button";
+        button2.textContent = key;
         const zoom = FONT_ZOOM_LABELS[key];
-        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
+        button2.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
         const act = (event) => {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
@@ -9912,29 +9927,29 @@ var TerminalKeybar = class {
         };
         const onRelease = key === "Paste";
         let pressedId;
-        button.addEventListener("pointerdown", (event) => {
+        button2.addEventListener("pointerdown", (event) => {
           if (onRelease) pressedId = event.pointerId;
           keybarPointerDown(event, onRelease ? void 0 : act);
         });
         if (onRelease) {
-          button.addEventListener("pointerup", (event) => {
+          button2.addEventListener("pointerup", (event) => {
             if (event.pointerId !== pressedId) return;
             pressedId = void 0;
-            const rect = button.getBoundingClientRect();
+            const rect = button2.getBoundingClientRect();
             if (event.clientX >= rect.left && event.clientX < rect.right && event.clientY >= rect.top && event.clientY < rect.bottom) act(event);
           });
-          button.addEventListener("pointercancel", (event) => {
+          button2.addEventListener("pointercancel", (event) => {
             if (event.pointerId === pressedId) pressedId = void 0;
           });
-          button.addEventListener("pointerleave", () => {
+          button2.addEventListener("pointerleave", () => {
             pressedId = void 0;
           });
         }
-        button.addEventListener("click", (event) => {
+        button2.addEventListener("click", (event) => {
           if (keybarClickIsPointerless(event)) act();
         });
-        if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button);
-        row.append(button);
+        if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button2);
+        row.append(button2);
       }
       this.bar.append(row);
     }
@@ -10224,13 +10239,13 @@ var TerminalKeybar = class {
     this.rows.forEach((row, index) => {
       row.hidden = index !== (this.arrows ? 1 : 0);
     });
-    for (const [key, button] of this.buttons) {
+    for (const [key, button2] of this.buttons) {
       const state = this.modifiers.state(key);
-      button.dataset.state = state;
-      button.setAttribute("aria-pressed", String(state !== "off"));
-      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next key" : "Double tap to lock");
-      button.title = state === "locked" ? `${key} locked \xB7 Tap to release` : `${key} \xB7 Double tap to lock`;
-      button.textContent = state === "locked" ? `\u25B8 ${key}` : key;
+      button2.dataset.state = state;
+      button2.setAttribute("aria-pressed", String(state !== "off"));
+      button2.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next key" : "Double tap to lock");
+      button2.title = state === "locked" ? `${key} locked \xB7 Tap to release` : `${key} \xB7 Double tap to lock`;
+      button2.textContent = state === "locked" ? `\u25B8 ${key}` : key;
     }
   }
   layout = () => {
@@ -10702,15 +10717,15 @@ function wordRangeAtColumn(cells, col) {
   if (!partOfWord(col)) {
     return null;
   }
-  let start = col;
-  while (start > 0 && partOfWord(start - 1)) {
-    start -= 1;
+  let start2 = col;
+  while (start2 > 0 && partOfWord(start2 - 1)) {
+    start2 -= 1;
   }
   let end = col;
   while (end + 1 < cells.length && partOfWord(end + 1)) {
     end += 1;
   }
-  return { start, length: end - start + 1 };
+  return { start: start2, length: end - start2 + 1 };
 }
 function lineContentColumns(cells) {
   let last = -1;
@@ -13742,9 +13757,9 @@ function projectSummaries(sessions, tasks, registeredRoots = []) {
     if (!root2) {
       continue;
     }
-    const arr = byRoot.get(root2) ?? [];
-    arr.push(s);
-    byRoot.set(root2, arr);
+    const arr2 = byRoot.get(root2) ?? [];
+    arr2.push(s);
+    byRoot.set(root2, arr2);
   }
   const taskCounts = /* @__PURE__ */ new Map();
   for (const t of tasks) {
@@ -13959,16 +13974,16 @@ function rebindTargetAfterAwait(inputs) {
   return { kind: "rebind", idx: inputs.targetIdx };
 }
 function tabRebindRefusalNotice(reason, verb) {
-  const done = verb === "create" ? "Tab created" : "Tab closed";
+  const done2 = verb === "create" ? "Tab created" : "Tab closed";
   switch (reason) {
     case "session-gone":
-      return `${done} \xB7 its session is gone now`;
+      return `${done2} \xB7 its session is gone now`;
     case "selection-moved":
-      return `${done} on the session you left \xB7 this pane kept its tab`;
+      return `${done2} on the session you left \xB7 this pane kept its tab`;
     case "layout-moved":
-      return `${done} \xB7 the layout changed meanwhile, so the pane kept its tab`;
+      return `${done2} \xB7 the layout changed meanwhile, so the pane kept its tab`;
     case "tab-gone":
-      return verb === "create" ? `${done}, but it is no longer in the tab list \xB7 the pane kept its tab` : `${done} \xB7 the tab the pane would have moved to is gone too`;
+      return verb === "create" ? `${done2}, but it is no longer in the tab list \xB7 the pane kept its tab` : `${done2} \xB7 the tab the pane would have moved to is gone too`;
   }
 }
 
@@ -14050,17 +14065,17 @@ function siblingSubtreeOf(root2, leafId) {
   return siblingSubtreeOf(root2.b, leafId);
 }
 function focusSuccessorAfterDrop(prev, droppedId, survivors) {
-  const siblings = [];
+  const siblings2 = [];
   let node = prev;
   while (node && node.kind === "split") {
     const inA = findLeaf(node.a, droppedId);
     if (!inA && !findLeaf(node.b, droppedId)) {
       return null;
     }
-    siblings.unshift(inA ? node.b : node.a);
+    siblings2.unshift(inA ? node.b : node.a);
     node = inA ? node.a : node.b;
   }
-  for (const sib of siblings) {
+  for (const sib of siblings2) {
     const hit = leaves(sib).find((l) => survivors.has(l.id));
     if (hit) {
       return hit.id;
@@ -14485,12 +14500,12 @@ function framedReachable(port, probeSrc, probeMessage, fresh) {
     frame.setAttribute("referrerpolicy", "no-referrer");
     frame.setAttribute("aria-hidden", "true");
     frame.style.display = "none";
-    let done = false;
+    let done2 = false;
     const finish = (ok) => {
-      if (done) {
+      if (done2) {
         return;
       }
-      done = true;
+      done2 = true;
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
@@ -16785,7 +16800,7 @@ var TasksPane = class {
     }
     if (focusedId && focused?.name) {
       const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
-      const control = [...row?.querySelectorAll("button") ?? []].find((button) => sameControlKey(controlKey(button), focused));
+      const control = [...row?.querySelectorAll("button") ?? []].find((button2) => sameControlKey(controlKey(button2), focused));
       control?.focus({ preventScroll: true });
     }
   }
@@ -17839,6 +17854,1472 @@ function orderChildren(parent, children) {
   }
 }
 
+// src/backlog_model.ts
+var STATE_LABELS = {
+  done: "Done",
+  dropped: "Dropped",
+  needs_you: "Needs you",
+  in_review: "In review",
+  working: "Working",
+  starting: "Starting",
+  stopped: "Stopped",
+  waiting: "Waiting",
+  queued: "Queued",
+  draft: "Draft"
+};
+var STATE_GLYPHS = {
+  done: "\u2713",
+  dropped: "\xD7",
+  needs_you: "?",
+  in_review: "\u270E",
+  working: "\u25CF",
+  starting: "\u25CC",
+  stopped: "\u25A0",
+  waiting: "\u23F8",
+  queued: "\u25B8",
+  draft: "\u25CB"
+};
+var FILTERS = [
+  { filter: "all", label: "All" },
+  { filter: "needs_you", label: "Needs you" },
+  { filter: "in_review", label: "In review" },
+  { filter: "working", label: "Working" },
+  { filter: "queued", label: "Queued" },
+  { filter: "waiting", label: "Waiting" },
+  { filter: "draft", label: "Draft" }
+];
+var FILTER_STATES = {
+  needs_you: ["needs_you"],
+  in_review: ["in_review"],
+  working: ["working", "starting"],
+  queued: ["queued"],
+  waiting: ["waiting"],
+  draft: ["draft"]
+};
+function formatID(id) {
+  return `B-${id}`;
+}
+function isRecord(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function arr(v) {
+  return Array.isArray(v) ? v : [];
+}
+function parseItem(v) {
+  const it = isRecord(v) ? v : {};
+  return { ...it, waits_on: arr(it.waits_on), runs: arr(it.runs), thread: arr(it.thread) };
+}
+function parseBacklogView(d) {
+  const v = isRecord(d) ? d : {};
+  const b = isRecord(v.backlog) ? v.backlog : {};
+  const settings = isRecord(b.settings) ? b.settings : { runner: false, max_running: 1, on_done: "keep" };
+  const runner = isRecord(v.runner) ? v.runner : { state: "off", used: 0, max: 1 };
+  return {
+    backlog: {
+      schema_version: Number(b.schema_version) || 0,
+      next_id: Number(b.next_id) || 1,
+      settings,
+      items: arr(b.items).map(parseItem)
+    },
+    states: isRecord(v.states) ? v.states : {},
+    runner
+  };
+}
+function itemByID(b, id) {
+  return b.items.find((it) => it.id === id);
+}
+function childrenOf(b, id) {
+  return b.items.filter((it) => (it.parent ?? 0) === id);
+}
+function isParent(b, id) {
+  return b.items.some((it) => it.parent === id);
+}
+function isAncestor(b, anc, id) {
+  const seen = /* @__PURE__ */ new Set();
+  for (let it = itemByID(b, id); it && it.parent && !seen.has(it.id); it = itemByID(b, it.parent)) {
+    seen.add(it.id);
+    if (it.parent === anc) return true;
+  }
+  return false;
+}
+function derivedOf(view, id) {
+  return view.states[String(id)] ?? { state: "draft" };
+}
+function openQuestion(it) {
+  const thread = it.thread ?? [];
+  const answered = new Set(thread.filter((m) => m.kind === "answer" && m.answers).map((m) => m.answers));
+  return thread.find((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
+}
+function needsYouCount(views) {
+  let n = 0;
+  for (const v of views) n += v.backlog.items.filter((it) => openQuestion(it)).length;
+  return n;
+}
+function sources(b) {
+  return [...new Set(b.items.map((it) => it.source?.proposal ?? "").filter(Boolean))];
+}
+function sessionItems(views) {
+  const out = /* @__PURE__ */ new Map();
+  for (const [root2, v] of views) {
+    for (const it of v.backlog.items) {
+      for (const run of it.runs ?? []) {
+        if (run.session_id) out.set(run.session_id, { root: root2, id: it.id, title: it.title });
+      }
+    }
+  }
+  return out;
+}
+function closedState(s) {
+  return s === "done" || s === "dropped";
+}
+function listRows(view, opts) {
+  const b = view.backlog;
+  const kids = /* @__PURE__ */ new Map();
+  for (const it of b.items) {
+    const p = it.parent ?? 0;
+    kids.set(p, [...kids.get(p) ?? [], it.id]);
+  }
+  const wanted = opts.filter === "all" ? null : FILTER_STATES[opts.filter];
+  const matchMemo = /* @__PURE__ */ new Map();
+  const matches = (id) => {
+    const memo = matchMemo.get(id);
+    if (memo !== void 0) return memo;
+    matchMemo.set(id, false);
+    const it = itemByID(b, id);
+    const own = (wanted === null || wanted.includes(derivedOf(view, id).state)) && (!opts.source || it?.source?.proposal === opts.source);
+    const r = own || (kids.get(id) ?? []).some(matches);
+    matchMemo.set(id, r);
+    return r;
+  };
+  const needsBelow = (id) => (kids.get(id) ?? []).reduce((n, c) => {
+    const it = itemByID(b, c);
+    return n + (it && openQuestion(it) ? 1 : 0) + needsBelow(c);
+  }, 0);
+  const rows = [];
+  const walk = (parent, depth) => {
+    for (const id of kids.get(parent) ?? []) {
+      const item = itemByID(b, id);
+      if (!item) continue;
+      const derived = derivedOf(view, id);
+      if (!opts.showDone && closedState(derived.state)) continue;
+      if (!matches(id)) continue;
+      const hasKids = (kids.get(id) ?? []).length > 0;
+      const folded = hasKids && opts.folded.has(id);
+      let reason = derived.reason ?? "";
+      if (hasKids) {
+        const n = needsBelow(id);
+        if (n > 0) reason = reason ? `${reason} \xB7 ${n} needs you` : `${n} needs you`;
+      }
+      rows.push({ item, depth, derived, parent: hasKids, folded, reason });
+      if (hasKids && !folded) walk(id, depth + 1);
+    }
+  };
+  walk(0, 0);
+  return rows;
+}
+function siblings(b, id) {
+  const it = itemByID(b, id);
+  return it ? childrenOf(b, it.parent ?? 0) : [];
+}
+function canBeParent(it) {
+  return it.status !== "running" && (it.runs ?? []).length === 0;
+}
+function keyboardMove(b, id, dir) {
+  const it = itemByID(b, id);
+  if (!it) return null;
+  const sibs = siblings(b, id);
+  const i = sibs.findIndex((s) => s.id === id);
+  switch (dir) {
+    case "up":
+      return i > 0 ? { before: sibs[i - 1].id } : null;
+    case "down":
+      return i >= 0 && i < sibs.length - 1 ? { after: sibs[i + 1].id } : null;
+    case "in": {
+      const prev = i > 0 ? sibs[i - 1] : void 0;
+      return prev && canBeParent(prev) ? { into: prev.id } : null;
+    }
+    case "out":
+      return it.parent ? { after: it.parent } : null;
+  }
+}
+function dropMove(b, dragId, targetId, zone) {
+  const target = itemByID(b, targetId);
+  if (!target || !itemByID(b, dragId) || dragId === targetId || isAncestor(b, dragId, targetId)) return null;
+  if (zone === "into") return canBeParent(target) ? { into: targetId } : null;
+  return zone === "before" ? { before: targetId } : { after: targetId };
+}
+function subtreeEnd(items, i, b) {
+  const root2 = items[i].id;
+  let j = i + 1;
+  while (j < items.length && isAncestor(b, root2, items[j].id)) j++;
+  return j;
+}
+function applyMove(b, id, to) {
+  const it = itemByID(b, id);
+  if (!it) return null;
+  let parent = it.parent ?? 0;
+  let anchor = 0;
+  if ("before" in to || "after" in to) {
+    anchor = "before" in to ? to.before : to.after;
+    const a = itemByID(b, anchor);
+    if (!a) return null;
+    parent = a.parent ?? 0;
+  } else if ("into" in to) {
+    anchor = to.into;
+    parent = to.into;
+  }
+  if (anchor === id || anchor !== 0 && isAncestor(b, id, anchor)) return null;
+  if (parent !== 0) {
+    const p = itemByID(b, parent);
+    if (!p || !canBeParent(p)) return null;
+  }
+  const items = b.items.map((x) => ({ ...x }));
+  const start2 = items.findIndex((x) => x.id === id);
+  const end = subtreeEnd(items, start2, b);
+  const block = items.splice(start2, end - start2);
+  block[0].parent = parent || void 0;
+  const moved = { ...b, items };
+  const indexOf = (x) => items.findIndex((y) => y.id === x);
+  const bottomOf = (p) => p === 0 ? items.length : subtreeEnd(items, indexOf(p), moved);
+  let at;
+  if ("before" in to) at = indexOf(to.before);
+  else if ("after" in to) at = subtreeEnd(items, indexOf(to.after), moved);
+  else if ("top" in to) at = parent === 0 ? 0 : indexOf(parent) + 1;
+  else at = bottomOf(parent);
+  items.splice(at, 0, ...block);
+  if (parent !== 0) {
+    const p = items.find((x) => x.id === parent);
+    if (p) p.status = "draft";
+  }
+  return moved;
+}
+function overlayMove(fresh, moved, base) {
+  const now = new Map(fresh.items.map((x) => [x.id, x]));
+  const was = new Map(base.items.map((x) => [x.id, x]));
+  const seen = /* @__PURE__ */ new Set();
+  const items = [];
+  for (const m of moved.items) {
+    const f = now.get(m.id);
+    if (!f) continue;
+    seen.add(m.id);
+    const b = was.get(m.id);
+    items.push({ ...f, parent: m.parent, ...b && b.status !== m.status ? { status: m.status } : {} });
+  }
+  for (const f of fresh.items) if (!seen.has(f.id)) items.push(f);
+  return { ...fresh, items };
+}
+function neededBy(b, id) {
+  return b.items.filter((it) => (it.waits_on ?? []).includes(id));
+}
+var ACTION_LABELS = {
+  queue: "Queue",
+  draft: "Back to draft",
+  done: "Mark done",
+  drop: "Drop",
+  reopen: "Reopen",
+  delete: "Delete"
+};
+function itemActions(b, it, derived) {
+  if (isParent(b, it.id)) {
+    const out2 = [];
+    if (b.items.some((c) => isAncestor(b, it.id, c.id) && c.status === "draft" && !isParent(b, c.id))) out2.push("queue");
+    if (!closedState(derived.state)) out2.push("drop");
+    return out2;
+  }
+  const out = [];
+  const s = it.status;
+  if (s === "draft" || s === "review") out.push("queue");
+  if (s === "queued" || s === "review") out.push("draft");
+  if (s !== "done" && s !== "dropped") out.push("done", "drop");
+  else out.push("reopen");
+  if (s === "draft" && (it.runs ?? []).length === 0 && (it.thread ?? []).length === 0) out.push("delete");
+  return out;
+}
+function safeHttpUrl2(raw) {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return (u.protocol === "http:" || u.protocol === "https:") && u.host ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+function needsYouLabel(n) {
+  return n === 1 ? "1 needs you" : `${n} need you`;
+}
+
+// src/backlog_api.ts
+async function getBacklog(root2, token2) {
+  return parseBacklogView(await af("GetBacklog", { repo_path: root2 }, token2));
+}
+async function getBudget(token2) {
+  const resp = await af("GetBudget", {}, token2);
+  const b = resp?.budget;
+  return {
+    share: Number(b?.share) || 0,
+    stop_at: Number(b?.stop_at) || 0,
+    max_per_run: Number(b?.max_per_run) || 0,
+    usd_limit: Number(b?.usd_limit) || 0,
+    usd_spent: Number(b?.usd_spent) || 0
+  };
+}
+async function addItem(root2, input, token2) {
+  const resp = await af("AddBacklogItems", {
+    repo_path: root2,
+    items: [{ key: "new", title: input.title, parent: input.parent || void 0 }]
+  }, token2);
+  return resp?.ids?.new ?? 0;
+}
+async function updateItem(root2, id, update, token2) {
+  const resp = await af("UpdateBacklogItem", {
+    repo_path: root2,
+    id,
+    title: update.title,
+    body: update.body,
+    waits_on: update.waits_on,
+    sequential: update.sequential
+  }, token2);
+  return resp.item;
+}
+async function moveItem(root2, id, to, token2) {
+  await af("MoveBacklogItem", {
+    repo_path: root2,
+    id,
+    before: "before" in to ? to.before : void 0,
+    after: "after" in to ? to.after : void 0,
+    into: "into" in to ? to.into : void 0,
+    top: "top" in to ? true : void 0,
+    bottom: "bottom" in to ? true : void 0
+  }, token2);
+}
+async function setItemStatus(root2, id, status, token2) {
+  await af("SetBacklogItemStatus", { repo_path: root2, id, status }, token2);
+}
+async function deleteItem(root2, id, token2) {
+  await af("DeleteBacklogItem", { repo_path: root2, id }, token2);
+}
+async function addNote(root2, id, text, token2) {
+  const resp = await af("PostBacklogMessage", { repo_path: root2, id, kind: "note", text }, token2);
+  return resp.message;
+}
+
+// src/backlog_serial.ts
+var SerialQueue = class {
+  saving = false;
+  queued = null;
+  /** True while a request is in flight or waiting: an older write could still land. */
+  busy() {
+    return this.saving || this.queued !== null;
+  }
+  /** `run` may return a promise that settles true once the write AND the refresh after
+   *  it have landed; a plain void return counts as settled at once. `done` hears that
+   *  request's own outcome. */
+  submit(run, done2) {
+    if (this.saving) {
+      this.queued = { run, done: done2 };
+      return;
+    }
+    const result = run();
+    if (!result) {
+      done2(true);
+      return;
+    }
+    this.saving = true;
+    const finish = (ok) => {
+      this.saving = false;
+      done2(ok);
+      const next = this.queued;
+      this.queued = null;
+      if (next) this.submit(next.run, next.done);
+    };
+    result.then(finish, () => finish(false));
+  }
+};
+var queues = /* @__PURE__ */ new Map();
+function queueFor(key) {
+  let q = queues.get(key);
+  if (!q) {
+    q = new SerialQueue();
+    queues.set(key, q);
+  }
+  return q;
+}
+var SerialSaver = class {
+  constructor(save, settled, queue = new SerialQueue()) {
+    this.save = save;
+    this.settled = settled;
+    this.queue = queue;
+  }
+  submit(value) {
+    this.queue.submit(() => this.save(value), (ok) => this.settled(value, ok));
+  }
+};
+var drafts = /* @__PURE__ */ new Map();
+function getDraft(key) {
+  return drafts.has(key) ? drafts.get(key) : null;
+}
+function setDraft(key, value) {
+  if (value === null) drafts.delete(key);
+  else drafts.set(key, value);
+}
+
+// src/backlog_body.ts
+var SAVE_DELAY_MS = 800;
+function createTextareaEditor(parent, opts) {
+  const area = document.createElement("textarea");
+  area.className = "af-backlog-body-input";
+  area.value = opts.text;
+  area.rows = 6;
+  area.setAttribute("aria-label", opts.label);
+  area.addEventListener("input", () => opts.onChange(area.value));
+  parent.append(area);
+  return {
+    getText: () => area.value,
+    setText: (t) => {
+      area.value = t;
+    },
+    destroy: () => area.remove()
+  };
+}
+var bodyEditorLoader = {
+  load: async () => ({ createDocsEditor: createTextareaEditor })
+};
+var BodyEditor = class {
+  /** `queueKey` names the item's body: editors for the same body share one save
+   *  queue, so a save held by a closed panel cannot land after a reopened one's. */
+  constructor(save, label, queueKey) {
+    this.save = save;
+    this.queue = queueKey === void 0 ? new SerialQueue() : queueFor(queueKey);
+    this.draftKey = queueKey;
+    if (this.draft !== null) this.text = this.draft;
+    this.el = document.createElement("div");
+    this.el.className = "af-backlog-body";
+    const fallback = document.createElement("pre");
+    fallback.className = "af-backlog-body-text";
+    this.el.append(fallback);
+    bodyEditorLoader.load().then((mod) => {
+      if (this.disposed) return;
+      this.el.replaceChildren();
+      this.editor = mod.createDocsEditor(this.el, { text: this.text, label, onChange: (t) => this.changed(t) });
+    }, () => {
+      fallback.textContent = this.text;
+    });
+  }
+  el;
+  editor = null;
+  text = "";
+  timer = null;
+  // The edit the user made that no confirming response has covered yet: typed (the
+  // debounce is running) or saved and still in flight. Stored text arriving while it
+  // is set is older than the edit and must not replace it. It survives a failed save,
+  // so the edit is kept (and the next change saves it again).
+  localDraft = null;
+  draftKey;
+  get draft() {
+    return this.draftKey === void 0 ? this.localDraft : getDraft(this.draftKey);
+  }
+  set draft(v) {
+    if (this.draftKey === void 0) this.localDraft = v;
+    else setDraft(this.draftKey, v);
+  }
+  disposed = false;
+  /** `save` may return a promise that settles true once the write AND the refresh
+   *  after it have landed; a plain void return acknowledges at once. */
+  queue;
+  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. Once
+   *  every write has settled and nothing is waiting to be saved, a stored body that is
+   *  exactly the draft releases it (a save whose confirming read failed is acknowledged
+   *  by a later one); while a write is in flight or the debounce is running, a matching
+   *  snapshot may be stale and proves nothing. */
+  setText(text) {
+    if (this.draft !== null && this.draft === text && this.timer === null && !this.queue.busy()) this.draft = null;
+    if (this.draft !== null || text === this.text) return;
+    this.text = text;
+    if (this.editor) {
+      if (this.editor.getText() !== text) this.editor.setText(text);
+    } else {
+      const pre = this.el.querySelector("pre");
+      if (pre) pre.textContent = text;
+    }
+  }
+  changed(text) {
+    this.text = text;
+    this.draft = text;
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.flush(), SAVE_DELAY_MS);
+  }
+  flush() {
+    if (this.timer === null) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+    const text = this.text;
+    this.queue.submit(() => this.save(text), (ok) => {
+      if (ok && this.draft === text) this.draft = null;
+    });
+  }
+  dispose() {
+    this.flush();
+    this.disposed = true;
+    this.editor?.destroy();
+  }
+};
+
+// src/backlog_cycle.ts
+var start = (id) => `${id}s`;
+var done = (id) => `${id}d`;
+var nodeID = (n) => Number(n.slice(0, -1));
+var isDone = (n) => n.endsWith("d");
+function edges(b) {
+  const g = /* @__PURE__ */ new Map();
+  const add = (from, to) => {
+    g.set(from, [...g.get(from) ?? [], to]);
+  };
+  const exists = new Set(b.items.map((it) => it.id));
+  const prevChild = /* @__PURE__ */ new Map();
+  for (const it of b.items) {
+    for (const w of it.waits_on ?? []) {
+      if (exists.has(w)) add(start(it.id), done(w));
+    }
+    const p = it.parent ?? 0;
+    if (p !== 0 && exists.has(p)) {
+      add(start(it.id), start(p));
+      const prev = prevChild.get(p);
+      if (prev !== void 0 && itemByID(b, p)?.sequential) add(start(it.id), done(prev));
+      prevChild.set(p, it.id);
+      add(done(p), done(it.id));
+    }
+  }
+  for (const it of b.items) {
+    if (!isParent(b, it.id)) add(done(it.id), start(it.id));
+  }
+  return g;
+}
+function findPath(g, from, to) {
+  const prev = /* @__PURE__ */ new Map([[from, from]]);
+  const queue = [from];
+  while (queue.length > 0) {
+    let n = queue.shift();
+    if (n === to) {
+      const path = [];
+      for (; n !== from; n = prev.get(n)) path.push(n);
+      path.push(from);
+      return path.reverse();
+    }
+    for (const m of g.get(n) ?? []) {
+      if (!prev.has(m)) {
+        prev.set(m, n);
+        queue.push(m);
+      }
+    }
+  }
+  return null;
+}
+function collapse(path) {
+  const ids = [];
+  for (const n of path) {
+    const id = nodeID(n);
+    if (ids.length === 0 || ids[ids.length - 1] !== id) ids.push(id);
+  }
+  return ids;
+}
+function isWaitEdge(b, from, to) {
+  if (isDone(from) || !isDone(to) || nodeID(from) === nodeID(to)) return false;
+  return (itemByID(b, nodeID(from))?.waits_on ?? []).includes(nodeID(to));
+}
+function allWaitEdges(b, path) {
+  for (let k = 0; k + 1 < path.length; k++) {
+    const from = path[k];
+    const to = path[k + 1];
+    if (nodeID(from) === nodeID(to) && isDone(from) && !isDone(to)) continue;
+    if (!isWaitEdge(b, from, to)) return false;
+  }
+  return true;
+}
+var formatPath = (ids) => ids.map(formatID).join(" \u2192 ");
+function waitsOnBlock(b, id, target) {
+  if (!itemByID(b, id) || !itemByID(b, target)) return `${formatID(target)} not found`;
+  const a = formatID(id);
+  const t = formatID(target);
+  if (id === target) return `${a} cannot wait on itself`;
+  if (isAncestor(b, target, id)) return `${a} cannot wait on ${t}: ${t} contains it`;
+  if (isAncestor(b, id, target)) return `${a} cannot wait on ${t}: ${t} is inside it`;
+  const g = edges(b);
+  const from = done(target);
+  const to = start(id);
+  g.set(to, [...g.get(to) ?? [], from]);
+  const path = findPath(g, from, to);
+  if (path === null) return null;
+  const ids = [id, ...collapse(path)];
+  if (!allWaitEdges(b, path)) return `${a} cannot wait on ${t}: that would make a wait cycle (${formatPath(ids)})`;
+  return `${a} cannot wait on ${t}: ${t} already waits on ${a} (${formatPath(ids)})`;
+}
+
+// src/backlog_panel.ts
+function sameList(a, b) {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+var ACTION_STATUS = {
+  queue: "queued",
+  draft: "draft",
+  done: "done",
+  drop: "dropped",
+  reopen: "draft"
+};
+function stateChip(view, id, reason = derivedOf(view, id).reason ?? "") {
+  const d = derivedOf(view, id);
+  const chip = h(
+    "span",
+    { class: `af-backlog-chip af-backlog-state-${d.state}` },
+    h("span", { class: "af-backlog-glyph", ariaHidden: "true" }, STATE_GLYPHS[d.state]),
+    STATE_LABELS[d.state]
+  );
+  return reason ? h("span", { class: "af-backlog-state" }, chip, h("span", { class: "af-backlog-reason" }, reason)) : chip;
+}
+function section(title, ...children) {
+  return h("section", { class: "af-backlog-section" }, h("h3", { class: "af-backlog-section-title" }, title), ...children);
+}
+function button(label, run, cls = "af-ghost") {
+  const b = h("button", { type: "button", class: cls }, label);
+  b.addEventListener("click", run);
+  return b;
+}
+function entryField(placeholder, label, submit) {
+  const input = h("input", { type: "text", class: "af-backlog-entry", placeholder });
+  input.setAttribute("aria-label", label);
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.isComposing) return;
+    const text = input.value.trim();
+    if (!text) return;
+    e.preventDefault();
+    input.value = "";
+    submit(text);
+  });
+  return input;
+}
+var ItemPanel = class {
+  constructor(root2, id, actions2) {
+    this.root = root2;
+    this.id = id;
+    this.actions = actions2;
+    this.titleKey = `${root2}\0${id}\0title`;
+    this.waitsKey = `${root2}\0${id}\0waits`;
+    this.titles = new SerialSaver((title) => actions2.update(id, { title }), (title, ok) => {
+      if (this.titleDraft !== title) return;
+      this.titleDraft = null;
+      this.repaint();
+    }, queueFor(`${root2}\0${id}\0title`));
+    this.waits = new SerialSaver((waits_on) => actions2.update(id, { waits_on }), (list, ok) => {
+      if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
+      if (!ok) this.repaint();
+    }, queueFor(`${root2}\0${id}\0waits`));
+    this.title = h("input", { type: "text", class: "af-backlog-title-input" });
+    this.title.setAttribute("aria-label", "Title");
+    const commitTitle = () => {
+      const it = this.item();
+      const t = this.title.value.trim();
+      if (!it) return;
+      if (t && t !== (this.titleDraft ?? it.title)) {
+        this.titleDraft = t;
+        this.titles.submit(t);
+      } else this.title.value = this.titleDraft ?? it.title;
+    };
+    this.title.addEventListener("change", commitTitle);
+    this.title.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) this.title.blur();
+    });
+    this.body = new BodyEditor((text) => actions2.update(id, { body: text }), "Body", `${root2}\0${id}\0body`);
+    this.note = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: "Add a note\u2026" });
+    this.note.setAttribute("aria-label", "Note");
+    const addNote2 = button("Add note", () => {
+      const text = this.note.value.trim();
+      if (!text) return;
+      this.note.value = "";
+      const done2 = actions2.note(id, text);
+      if (done2) done2.then((ok) => {
+        if (!ok) this.note.value = this.note.value ? `${text}
+${this.note.value}` : text;
+      }, () => {
+      });
+    });
+    this.head = h("div", { class: "af-backlog-panel-state" });
+    this.above = h("div", { class: "af-backlog-panel-rest" });
+    this.below = h("div", { class: "af-backlog-panel-rest" });
+    this.threadList = h("ol", { class: "af-backlog-thread" });
+    const close = h("button", { type: "button", class: "af-ghost af-backlog-close", title: "Close" }, icon("x"));
+    close.setAttribute("aria-label", "Close item");
+    close.addEventListener("click", () => actions2.close());
+    this.closeButton = close;
+    const top = h(
+      "div",
+      { class: "af-backlog-panel-top" },
+      h("span", { class: "af-backlog-id" }, formatID(id)),
+      this.title,
+      close
+    );
+    this.el = h(
+      "aside",
+      { class: "af-backlog-panel" },
+      top,
+      this.head,
+      this.above,
+      section("Body", this.body.el),
+      this.below,
+      section("Thread", this.threadList, h("div", { class: "af-backlog-note-row" }, this.note, addNote2))
+    );
+    this.el.setAttribute("aria-label", `Item ${formatID(id)}`);
+    this.el.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
+      e.preventDefault();
+      actions2.close();
+    });
+  }
+  el;
+  title;
+  body;
+  note;
+  head;
+  above;
+  below;
+  threadList;
+  closeButton;
+  pickerQuery = "";
+  pickerOpen = false;
+  moveOpen = false;
+  view = null;
+  sessions = [];
+  // Run sessions the rail did not hold, by id: asked for, answered, or unanswerable.
+  lookups = /* @__PURE__ */ new Map();
+  // The title the user submitted that no confirming response has covered yet: a
+  // refresh that read the old item must not put the old title back over it.
+  get titleDraft() {
+    return getDraft(this.titleKey);
+  }
+  set titleDraft(v) {
+    setDraft(this.titleKey, v);
+  }
+  // The waits-on list the user last submitted, likewise held until acknowledged, so
+  // a second change builds on it instead of on the stored list.
+  get waitsDraft() {
+    return getDraft(this.waitsKey);
+  }
+  set waitsDraft(v) {
+    setDraft(this.waitsKey, v);
+  }
+  titleKey;
+  waitsKey;
+  titles;
+  waits;
+  focus() {
+    this.closeButton.focus({ preventScroll: true });
+  }
+  /** An absent run session is not proof it is gone: the rail pages archived rows in
+   *  only when the archive filter is on. Ask the daemon for them by id once. */
+  lookUpMissing(it) {
+    const missing = (it.runs ?? []).map((r) => r.session_id).filter((id) => !!id && !this.lookups.has(id) && !this.sessions.some((s) => s.id === id));
+    if (missing.length === 0) return;
+    for (const id of missing) this.lookups.set(id, "pending");
+    const settle = (state) => {
+      for (const id of missing) this.lookups.set(id, state);
+      this.repaint();
+    };
+    this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
+  }
+  /** The waits-on list as the user sees it: their last submission until it is acknowledged. */
+  waitsOf(it) {
+    return this.waitsDraft ?? it.waits_on ?? [];
+  }
+  setWaits(it, list) {
+    this.waitsDraft = list;
+    this.waits.submit(list);
+    this.repaint();
+  }
+  /** Draws again from what the panel last rendered, for a change that arrives on its own (a lookup, a write's outcome). */
+  repaint() {
+    if (this.view) this.render(this.view, this.sessions);
+  }
+  item() {
+    return this.view ? itemByID(this.view.backlog, this.id) : void 0;
+  }
+  render(view, sessions) {
+    this.view = view;
+    this.sessions = sessions;
+    const it = this.item();
+    if (!it) return;
+    this.lookUpMissing(it);
+    if (document.activeElement !== this.title) this.title.value = this.titleDraft ?? it.title;
+    this.body.setText(it.body ?? "");
+    const restore = this.keepField();
+    this.head.replaceChildren(stateChip(view, it.id));
+    const q = openQuestion(it);
+    const above = [];
+    if (q) above.push(h("div", { class: "af-backlog-question", role: "status" }, icon("circle-question"), h("span", {}, q.text)));
+    above.push(this.actionsRow(view, it));
+    this.above.replaceChildren(...above);
+    const below = [this.waitsSection(view, it)];
+    const children = this.childrenSection(view, it);
+    if (children) below.push(children);
+    below.push(this.runsSection(it));
+    if (it.source?.proposal) below.push(h("p", { class: "af-backlog-source" }, icon("file-text"), `From proposal ${it.source.proposal}`));
+    this.below.replaceChildren(...below);
+    this.threadList.replaceChildren(...(it.thread ?? []).map((m) => h(
+      "li",
+      { class: `af-backlog-msg af-backlog-msg-${m.kind}` },
+      h("div", { class: "af-backlog-msg-meta" }, [
+        m.kind === "note" ? "Note" : m.kind === "question" ? "Question" : "Answer",
+        m.author === "user" ? "you" : m.author.startsWith("agent:") ? "agent" : m.author,
+        formatTime(m.at),
+        ...m.closed ? [m.closed === "answered in session" ? "Answered in session" : `Closed \xB7 ${m.closed}`] : []
+      ].join(" \xB7 ")),
+      h("div", { class: "af-backlog-msg-text" }, m.text)
+    )));
+    restore();
+  }
+  /** Keeps the focus, and a field's value, across a rebuild: the same control
+   *  is found again by its tag, label and text. */
+  keepField() {
+    const active = document.activeElement;
+    const box = [this.above, this.below].find((b) => active && b.contains(active));
+    if (!box || !active) return () => {
+    };
+    const tag = active.tagName;
+    const label = active.getAttribute("aria-label");
+    const text = active.textContent;
+    const field2 = tag === "INPUT" || tag === "SELECT";
+    const value = field2 ? active.value : "";
+    return () => {
+      const next = [...box.querySelectorAll(tag.toLowerCase())].find((el2) => el2.getAttribute("aria-label") === label && (field2 || el2.textContent === text));
+      if (!next) return;
+      if (field2) next.value = value;
+      next.focus({ preventScroll: true });
+    };
+  }
+  actionsRow(view, it) {
+    const row = h("div", { class: "af-backlog-actions" });
+    for (const a of itemActions(view.backlog, it, derivedOf(view, it.id))) {
+      row.append(button(ACTION_LABELS[a], () => {
+        if (a === "delete") this.actions.remove(it.id);
+        else this.actions.status(it.id, ACTION_STATUS[a]);
+      }, a === "queue" ? "af-primary" : "af-ghost"));
+    }
+    row.append(this.moveMenu(view, it));
+    return row;
+  }
+  moveMenu(view, it) {
+    const b = view.backlog;
+    const others = b.items.filter((o) => o.id !== it.id && !isAncestor(b, it.id, o.id));
+    const pick = (label, opts, to) => {
+      const sel = h(
+        "select",
+        { class: "af-backlog-move-select" },
+        h("option", { value: "" }, label),
+        ...opts.map((o) => h("option", { value: String(o.id) }, `${formatID(o.id)} ${o.title}`))
+      );
+      sel.setAttribute("aria-label", label);
+      sel.addEventListener("change", () => {
+        if (sel.value) this.actions.move(it.id, to(Number(sel.value)));
+      });
+      return sel;
+    };
+    const panel = h(
+      "div",
+      { class: "af-backlog-move-panel" },
+      button("Top", () => this.actions.move(it.id, { top: true })),
+      button("Bottom", () => this.actions.move(it.id, { bottom: true })),
+      pick("Above\u2026", others, (id) => ({ before: id })),
+      pick(
+        "Into\u2026",
+        others.filter((o) => o.id !== it.parent && o.status !== "running" && (o.runs ?? []).length === 0),
+        (id) => ({ into: id })
+      )
+    );
+    const details = h("details", { class: "af-backlog-move", open: this.moveOpen }, h("summary", { class: "af-ghost" }, "Move\u2026"), panel);
+    details.addEventListener("toggle", () => {
+      this.moveOpen = details.open;
+    });
+    return details;
+  }
+  waitsSection(view, it) {
+    const b = view.backlog;
+    const chips = h("div", { class: "af-backlog-chips" });
+    for (const w of this.waitsOf(it)) {
+      const target = itemByID(b, w);
+      const remove = h("button", { type: "button", class: "af-backlog-chip-x", title: `Remove ${formatID(w)}` }, icon("x"));
+      remove.setAttribute("aria-label", `Remove ${formatID(w)}`);
+      remove.addEventListener("click", () => this.setWaits(it, this.waitsOf(it).filter((x) => x !== w)));
+      const state = target ? STATE_LABELS[derivedOf(view, w).state] : "missing";
+      chips.append(h(
+        "span",
+        { class: "af-backlog-link" },
+        h("span", {}, `${formatID(w)} ${target?.title ?? ""}`),
+        h("span", { class: "af-backlog-reason" }, state),
+        remove
+      ));
+    }
+    const add = button("Add", () => {
+      this.pickerOpen = !this.pickerOpen;
+      this.render(view, this.sessions);
+      this.el.querySelector(".af-backlog-picker input")?.focus();
+    });
+    add.classList.add("af-backlog-wait-add");
+    add.setAttribute("aria-expanded", String(this.pickerOpen));
+    chips.append(add);
+    const parts = [chips];
+    if (this.pickerOpen) parts.push(this.picker(view, it));
+    const needed = neededBy(b, it.id);
+    if (needed.length > 0) {
+      parts.push(h(
+        "div",
+        { class: "af-backlog-needed" },
+        h("span", { class: "af-backlog-label" }, "Needed by"),
+        ...needed.map((n) => this.itemLink(n))
+      ));
+    }
+    return section("Waits on", ...parts);
+  }
+  picker(view, it) {
+    const b = view.backlog;
+    const input = h("input", { type: "search", class: "af-backlog-entry", placeholder: "Search by id or title\u2026", value: this.pickerQuery });
+    input.setAttribute("aria-label", "Search items to wait on");
+    const list = h("ul", { class: "af-backlog-picker-list" });
+    const fill = () => {
+      const q = this.pickerQuery.trim().toLowerCase().replace(/^b-/, "");
+      const options = b.items.filter((o) => o.id !== it.id && !this.waitsOf(it).includes(o.id) && (q === "" || String(o.id).startsWith(q) || o.title.toLowerCase().includes(q)));
+      list.replaceChildren(...options.map((o) => {
+        const block = waitsOnBlock(b, it.id, o.id);
+        const opt = h(
+          "button",
+          { type: "button", class: "af-backlog-option", disabled: block !== null },
+          h("span", {}, `${formatID(o.id)} ${o.title}`),
+          ...block ? [h("span", { class: "af-backlog-reason" }, block)] : []
+        );
+        opt.addEventListener("click", () => {
+          this.pickerOpen = false;
+          this.pickerQuery = "";
+          this.setWaits(it, [...this.waitsOf(it), o.id]);
+        });
+        return h("li", {}, opt);
+      }));
+      if (options.length === 0) list.append(h("li", { class: "af-backlog-reason" }, "No matching items"));
+    };
+    input.addEventListener("input", () => {
+      this.pickerQuery = input.value;
+      fill();
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.pickerOpen = false;
+        this.render(view, this.sessions);
+        this.below.querySelector(".af-backlog-wait-add")?.focus();
+      }
+    });
+    fill();
+    return h("div", { class: "af-backlog-picker" }, input, list);
+  }
+  itemLink(o) {
+    const b = h("button", { type: "button", class: "af-backlog-item-link" }, `${formatID(o.id)} ${o.title}`);
+    b.addEventListener("click", () => this.actions.select(o.id));
+    return b;
+  }
+  childrenSection(view, it) {
+    const b = view.backlog;
+    const parent = isParent(b, it.id);
+    if (!parent && (it.status === "running" || (it.runs ?? []).length > 0)) return null;
+    const parts = [];
+    if (parent) {
+      parts.push(h(
+        "ul",
+        { class: "af-backlog-children" },
+        ...childrenOf(b, it.id).map((c) => h("li", {}, this.itemLink(c), stateChip(view, c.id, "")))
+      ));
+      const sw = h("input", { type: "checkbox", checked: it.sequential === true });
+      sw.setAttribute("role", "switch");
+      sw.addEventListener("change", () => this.actions.update(it.id, { sequential: sw.checked }));
+      parts.push(h("label", { class: "af-backlog-switch" }, sw, "Run children in order"));
+    }
+    parts.push(entryField("Add child\u2026", `Add a child to ${formatID(it.id)}`, (title) => this.actions.addChild(it.id, title)));
+    return section("Children", ...parts);
+  }
+  runsSection(it) {
+    const runs = it.runs ?? [];
+    const parts = [];
+    const pr = safeHttpUrl2(it.pr);
+    if (pr) parts.push(h("a", { class: "af-backlog-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, icon("external-link"), "Pull request"));
+    if (runs.length === 0) parts.push(h("p", { class: "af-backlog-reason" }, "No runs yet"));
+    const list = h("ul", { class: "af-backlog-runs" });
+    for (const run of [...runs].reverse()) {
+      const s = run.session_id ? this.sessions.find((x) => x.id === run.session_id) : void 0;
+      const asked = run.session_id ? this.lookups.get(run.session_id) : void 0;
+      const absent = asked === "pending" ? "Checking\u2026" : asked === "failed" ? "Unavailable" : "Gone";
+      const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : absent;
+      const by = run.started_by === "runner" ? "runner" : "you";
+      const meta = [`Started by ${by}`, formatTime(run.started_at), live].join(" \xB7 ");
+      const btns = h("div", { class: "af-backlog-run-actions" });
+      if (s?.id) {
+        const sid = s.id;
+        btns.append(button("Open", () => this.actions.openSession(sid)));
+        const kind = rowKind(s);
+        if (kind === "archived" || kind === "lost" || kind === "dead") btns.append(button("Restore", () => this.actions.restoreSession(sid)));
+        if (!isArchived(s)) btns.append(button("Archive", () => this.actions.archiveSession(sid)));
+      }
+      list.append(h(
+        "li",
+        { class: "af-backlog-run" },
+        h(
+          "div",
+          { class: "af-backlog-run-main" },
+          h("div", { class: "af-backlog-run-title" }, run.title || run.session_id),
+          h("div", { class: "af-backlog-reason" }, meta)
+        ),
+        btns
+      ));
+    }
+    parts.push(list);
+    return section("Runs", ...parts);
+  }
+  dispose() {
+    this.body.dispose();
+  }
+};
+
+// src/backlog_pane.ts
+var DRAG_TYPE = "application/x-af-backlog-item";
+var EMPTY_COPY = "No items yet \xB7 Add one below, or ask an agent to make items from a proposal.";
+function usd(v) {
+  return `$${v.toFixed(2)}`;
+}
+var RUNNER_STATES = {
+  off: "Runner off",
+  idle: "Runner on",
+  waiting: "Runner waiting",
+  stopped: "Runner paused"
+};
+function runnerText(view, budget) {
+  const r = view.runner;
+  const parts = [(r.reason ?? "").replace(/\.$/, ""), `${r.used} of ${r.max} working`];
+  if (budget) {
+    parts.push(`Backlog share ${budget.share}% \xB7 stop at plan ${budget.stop_at}%`);
+    if (budget.usd_limit > 0) parts.push(`${usd(budget.usd_spent)} of ${usd(budget.usd_limit)}`);
+  }
+  return { state: RUNNER_STATES[r.state] ?? "Runner on", warn: r.state === "stopped", parts: parts.filter(Boolean) };
+}
+var BacklogPane = class {
+  constructor(host) {
+    this.host = host;
+    this.el = h("section", { class: "af-backlog" });
+    this.el.setAttribute("aria-label", "Backlog");
+    this.newItem = entryField("New item\u2026", "New item title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
+    const listWrap = h(
+      "div",
+      { class: "af-backlog-listwrap" },
+      this.filterSlot,
+      this.listSlot,
+      this.emptySlot,
+      h("div", { class: "af-backlog-new" }, icon("plus"), this.newItem)
+    );
+    this.main = h("div", { class: "af-backlog-main" }, listWrap);
+    const endDrag = () => {
+      this.dragId = null;
+    };
+    this.listSlot.addEventListener("dragend", endDrag);
+    this.listSlot.addEventListener("drop", endDrag);
+  }
+  el;
+  data = null;
+  root = null;
+  sessions = [];
+  selected = null;
+  filter = "all";
+  source = null;
+  showDone = false;
+  folded = /* @__PURE__ */ new Set();
+  // A reorder shown before the daemon has it. It stays until data from a refresh
+  // started after the move committed arrives; gen is Infinity until then.
+  pending = null;
+  // Reorder writes go out one at a time: each target is computed from the previous
+  // optimistic order, so they must commit in the order they were made.
+  moves = Promise.resolve();
+  panel = null;
+  dragId = null;
+  focusId = null;
+  cursor = null;
+  focusPanel = false;
+  want = null;
+  requested = /* @__PURE__ */ new Set();
+  rowEls = /* @__PURE__ */ new Map();
+  newItem;
+  headSlot = h("div", { class: "af-backlog-head" });
+  filterSlot = h("div", {});
+  listSlot = h("div", {});
+  emptySlot = h("div", {});
+  main;
+  update(data, root2, sessions) {
+    if (data === this.data && root2 === this.root) {
+      if (sessions === this.sessions) return;
+      const before = this.runSig(this.sessions);
+      this.sessions = sessions;
+      if (this.runSig(sessions) === before) return;
+      this.render();
+      return;
+    }
+    if (root2 !== this.root) {
+      this.closePanel();
+      this.selected = this.want?.root === root2 ? this.want.id : null;
+      this.focusPanel = this.selected !== null;
+      this.want = null;
+      this.source = null;
+      this.cursor = null;
+      this.folded.clear();
+    }
+    if (this.pending && data.generation > this.pending.gen) this.pending = null;
+    this.data = data;
+    this.root = root2;
+    this.sessions = sessions;
+    this.render();
+  }
+  /** The selected item's runs as the panel shows them, to skip unrelated session events. */
+  runSig(sessions) {
+    const it = this.selected !== null ? this.view()?.backlog.items.find((x) => x.id === this.selected) : void 0;
+    return JSON.stringify((it?.runs ?? []).map((r) => {
+      const s = sessions.find((x) => x.id === r.session_id);
+      return s ? [s.id, rowKind(s)] : null;
+    }));
+  }
+  /** Opens an item's panel. The Sessions view's item chip names the project it
+   *  is switching to, which may not have reached update() yet. */
+  select(id, root2 = this.root) {
+    if (root2 !== this.root) {
+      this.want = root2 ? { root: root2, id } : null;
+      return;
+    }
+    this.selected = id;
+    this.cursor = id;
+    this.focusPanel = true;
+    this.render();
+  }
+  view() {
+    const v = this.root ? this.data?.views.get(this.root) : void 0;
+    if (v && this.pending && this.pending.root === this.root) return { ...v, backlog: overlayMove(v.backlog, this.pending.backlog, this.pending.base) };
+    return v;
+  }
+  mutate(run) {
+    if (this.root) this.write(run);
+  }
+  /** Settles true once the write and the refresh after it have landed, false when the write failed. */
+  write(run) {
+    const token2 = this.host.token();
+    if (token2 === null) return Promise.resolve(false);
+    const root2 = this.root ?? void 0;
+    return run(token2).then(() => this.host.refresh(root2), (e) => {
+      this.host.notify(errorText(e));
+      return this.host.refresh(root2).then(() => false);
+    });
+  }
+  move(id, to) {
+    const v = this.view();
+    const root2 = this.root;
+    if (!v || !root2) return;
+    const next = applyMove(v.backlog, id, to);
+    const pending = next ? { root: root2, backlog: next, base: v.backlog, gen: Infinity } : null;
+    if (pending) {
+      this.pending = pending;
+      this.focusId = id;
+      this.render();
+    }
+    const token2 = this.host.token();
+    if (token2 === null) return;
+    this.moves = this.moves.then(() => moveItem(root2, id, to, token2).then(() => {
+      if (pending) pending.gen = this.host.started();
+      return this.host.refresh();
+    }, (e) => {
+      if (pending && this.pending === pending) {
+        this.pending = null;
+        this.focusId = id;
+        this.render();
+      }
+      this.host.notify(errorText(e));
+      return this.host.refresh();
+    }).catch(() => {
+    }));
+  }
+  render() {
+    const v = this.view();
+    const error = this.root ? this.data?.errors.get(this.root) : void 0;
+    if (this.root === null || !v) {
+      this.closePanel();
+      this.el.classList.remove("af-backlog-has-panel");
+      if (this.root === null) {
+        this.el.replaceChildren(recoveryScreen({ condition: "No project registered", action: "Add project", run: () => this.host.addProject?.() }));
+      } else if (error) {
+        this.el.replaceChildren(recoveryScreen({
+          condition: "Backlog unavailable",
+          detail: error,
+          failed: true,
+          action: "Retry",
+          run: () => void this.host.refresh()
+        }));
+      } else {
+        this.el.replaceChildren(h("p", { class: "af-backlog-empty" }, "Loading backlog\u2026"));
+        if (!this.requested.has(this.root)) {
+          this.requested.add(this.root);
+          void this.host.refresh();
+        }
+      }
+      return;
+    }
+    this.requested.delete(this.root);
+    if (this.el.firstChild !== this.headSlot) this.el.replaceChildren(this.headSlot, this.main);
+    if (this.selected !== null && !itemByID(v.backlog, this.selected)) this.selected = null;
+    const focusedRow = document.activeElement?.closest(".af-backlog-row");
+    if (focusedRow && this.focusId === null && this.listSlot.contains(focusedRow)) this.focusId = Number(focusedRow.dataset.itemId);
+    const rows = listRows(v, { filter: this.filter, showDone: this.showDone, folded: this.folded, source: this.source });
+    const shown = (id) => id !== null && rows.some((r) => r.item.id === id);
+    this.cursor = [this.focusId, this.cursor, this.selected].find(shown) ?? rows[0]?.item.id ?? null;
+    const list = h("ul", { class: "af-backlog-list", role: "tree" });
+    list.setAttribute("aria-label", "Items");
+    this.rowEls = /* @__PURE__ */ new Map();
+    for (const row of rows) list.append(this.row(v, row));
+    this.headSlot.replaceChildren(...this.runnerBar(v).childNodes);
+    this.filterSlot.replaceChildren(this.filters(v));
+    this.listSlot.replaceChildren(list);
+    this.emptySlot.replaceChildren();
+    if (v.backlog.items.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, EMPTY_COPY));
+    else if (rows.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, "No items match this filter"));
+    if (this.selected !== null) {
+      if (this.panel?.id !== this.selected) {
+        this.closePanel();
+        this.panel = new ItemPanel(this.root, this.selected, this.panelActions(this.root));
+        this.main.append(this.panel.el);
+      }
+      this.panel.render(v, this.sessions);
+    } else {
+      this.closePanel();
+    }
+    this.el.classList.toggle("af-backlog-has-panel", this.selected !== null);
+    if (this.focusPanel && this.panel) this.panel.focus();
+    else if (this.focusId !== null) {
+      (this.rowEls.get(this.focusId) ?? (this.cursor !== null ? this.rowEls.get(this.cursor) : void 0))?.focus({ preventScroll: true });
+    }
+    this.focusPanel = false;
+    this.focusId = null;
+  }
+  closePanel() {
+    this.panel?.dispose();
+    this.panel?.el.remove();
+    this.panel = null;
+  }
+  runnerBar(v) {
+    const r = runnerText(v, this.data?.budget ?? null);
+    const bar = h(
+      "div",
+      { class: "af-backlog-runner" },
+      h("span", { class: `af-backlog-runner-state${r.warn ? " af-backlog-warn" : ""}` }, r.state),
+      ...r.parts.flatMap((p) => [" \xB7 ", p])
+    );
+    const budget = this.data?.budget;
+    if (budget && budget.usd_limit > 0) {
+      const fill = h("span", { class: "af-backlog-meter-fill" });
+      fill.style.width = `${Math.min(100, budget.usd_spent / budget.usd_limit * 100)}%`;
+      const meter = h("span", { class: "af-backlog-meter", role: "img" }, fill);
+      meter.setAttribute("aria-label", `${usd(budget.usd_spent)} of ${usd(budget.usd_limit)} spent`);
+      bar.append(" ", meter);
+    }
+    if (budget) bar.title = `All projects \xB7 cap per run ${budget.max_per_run}% of the plan window`;
+    return h("div", {}, h("span", { class: "af-backlog-heading" }, "Backlog"), bar);
+  }
+  filters(v) {
+    const row = h("div", { class: "af-backlog-filters", role: "group" });
+    row.setAttribute("aria-label", "Filter items");
+    const chip = (label, on, click) => {
+      const b = h("button", { type: "button", class: `af-backlog-filter${on ? " af-backlog-filter-on" : ""}` }, label);
+      b.setAttribute("aria-pressed", String(on));
+      b.addEventListener("click", () => {
+        click();
+        this.render();
+      });
+      return b;
+    };
+    for (const f of FILTERS) row.append(chip(f.label, this.filter === f.filter, () => {
+      this.filter = f.filter;
+    }));
+    for (const s of sources(v.backlog)) {
+      row.append(chip(`From ${s}`, this.source === s, () => {
+        this.source = this.source === s ? null : s;
+      }));
+    }
+    row.append(chip("Show done", this.showDone, () => {
+      this.showDone = !this.showDone;
+    }));
+    return row;
+  }
+  row(v, row) {
+    const it = row.item;
+    const li = h("li", {
+      class: `af-backlog-row${it.id === this.selected ? " af-backlog-row-selected" : ""}`,
+      tabIndex: it.id === this.cursor ? 0 : -1,
+      draggable: true
+    });
+    this.rowEls.set(it.id, li);
+    li.dataset.itemId = String(it.id);
+    li.style.paddingLeft = `calc(var(--af-space-2) + var(--af-space-4) * ${row.depth})`;
+    li.setAttribute("role", "treeitem");
+    li.setAttribute("aria-level", String(row.depth + 1));
+    li.setAttribute("aria-selected", String(it.id === this.selected));
+    if (row.parent) li.setAttribute("aria-expanded", String(!row.folded));
+    const handle = h("span", { class: "af-backlog-handle", ariaHidden: "true", title: "Drag to reorder" }, "\u283F");
+    const fold = h("button", { type: "button", class: "af-backlog-fold", hidden: !row.parent, tabIndex: -1 }, row.folded ? "\u25B8" : "\u25BE");
+    fold.setAttribute("aria-label", row.folded ? `Expand ${formatID(it.id)}` : `Collapse ${formatID(it.id)}`);
+    fold.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleFold(it.id, !this.folded.has(it.id));
+    });
+    li.append(
+      handle,
+      fold,
+      h("span", { class: "af-backlog-id" }, formatID(it.id)),
+      h("span", { class: "af-backlog-row-title" }, it.title),
+      stateChip(v, it.id, row.reason)
+    );
+    li.addEventListener("click", () => this.select(it.id));
+    li.addEventListener("focus", () => this.setCursor(it.id));
+    li.addEventListener("keydown", (e) => this.rowKey(e, v, row, li));
+    this.wireDrag(li, v.backlog, it.id);
+    return li;
+  }
+  setCursor(id) {
+    this.cursor = id;
+    for (const [rid, el2] of this.rowEls) el2.tabIndex = rid === id ? 0 : -1;
+  }
+  toggleFold(id, fold) {
+    if (fold) this.folded.add(id);
+    else this.folded.delete(id);
+    this.focusId = id;
+    this.render();
+  }
+  rowKey(e, v, row, li) {
+    if (e.target !== li) return;
+    const id = row.item.id;
+    const dirs = { ArrowUp: "up", ArrowDown: "down", ArrowRight: "in", ArrowLeft: "out" };
+    if (e.altKey && dirs[e.key]) {
+      e.preventDefault();
+      const to = keyboardMove(v.backlog, id, dirs[e.key]);
+      if (to) this.move(id, to);
+      return;
+    }
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const els = [...this.rowEls.values()];
+    const at = els.indexOf(li);
+    let next;
+    switch (e.key) {
+      case "Enter":
+      case " ":
+        e.preventDefault();
+        this.select(id);
+        return;
+      case "ArrowDown":
+        next = els[at + 1];
+        break;
+      case "ArrowUp":
+        next = els[at - 1];
+        break;
+      case "Home":
+        next = els[0];
+        break;
+      case "End":
+        next = els[els.length - 1];
+        break;
+      case "ArrowRight":
+        if (row.parent && row.folded) {
+          e.preventDefault();
+          this.toggleFold(id, false);
+          return;
+        }
+        if (row.parent && els[at + 1] && Number(els[at + 1].getAttribute("aria-level")) > row.depth + 1) next = els[at + 1];
+        break;
+      case "ArrowLeft":
+        if (row.parent && !row.folded) {
+          e.preventDefault();
+          this.toggleFold(id, true);
+          return;
+        }
+        next = row.item.parent ? this.rowEls.get(row.item.parent) : void 0;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    next?.focus();
+  }
+  wireDrag(li, b, id) {
+    const zoneAt = (e) => {
+      const r = li.getBoundingClientRect();
+      const y = (e.clientY - r.top) / Math.max(1, r.height);
+      const target = itemByID(b, id);
+      const nestable = target && target.status !== "running" && (target.runs ?? []).length === 0;
+      if (nestable && y > 0.3 && y < 0.7) return "into";
+      return y < 0.5 ? "before" : "after";
+    };
+    const clear = () => li.classList.remove("af-backlog-drop-before", "af-backlog-drop-after", "af-backlog-drop-into");
+    const ours = (e) => this.dragId !== null && (e.dataTransfer?.types ?? []).includes(DRAG_TYPE);
+    li.addEventListener("dragstart", (e) => {
+      this.dragId = id;
+      e.dataTransfer?.setData(DRAG_TYPE, String(id));
+      e.dataTransfer?.setData("text/plain", formatID(id));
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+    });
+    li.addEventListener("dragend", () => {
+      this.dragId = null;
+    });
+    li.addEventListener("dragover", (e) => {
+      if (!ours(e) || dropMove(b, this.dragId ?? 0, id, zoneAt(e)) === null) return;
+      e.preventDefault();
+      clear();
+      li.classList.add(`af-backlog-drop-${zoneAt(e)}`);
+    });
+    li.addEventListener("dragleave", (e) => {
+      if (!li.contains(e.relatedTarget)) clear();
+    });
+    li.addEventListener("drop", (e) => {
+      clear();
+      const drag = ours(e) ? this.dragId : null;
+      this.dragId = null;
+      if (drag === null) return;
+      e.preventDefault();
+      const to = dropMove(b, drag, id, zoneAt(e));
+      if (to) this.move(drag, to);
+    });
+  }
+  /** Actions bound to one project, so a panel never writes to another. */
+  panelActions(root2) {
+    const here = () => this.root === root2;
+    return {
+      update: (id, u) => this.write((t) => updateItem(root2, id, u, t)),
+      status: (id, s) => this.write((t) => setItemStatus(root2, id, s, t)),
+      remove: (id) => {
+        if (here()) this.selected = null;
+        this.write((t) => deleteItem(root2, id, t));
+      },
+      move: (id, to) => {
+        if (here()) this.move(id, to);
+      },
+      note: (id, text) => this.write((t) => addNote(root2, id, text, t)),
+      addChild: (parent, title) => this.write((t) => addItem(root2, { title, parent }, t)),
+      select: (id) => this.select(id, root2),
+      close: () => {
+        if (!here()) return;
+        const id = this.selected;
+        this.selected = null;
+        this.focusId = id;
+        this.render();
+      },
+      openSession: (id) => this.host.openSession(id),
+      archiveSession: (id) => this.host.archiveSession(id),
+      restoreSession: (id) => this.host.restoreSession(id),
+      loadSessions: (ids) => this.host.loadSessions(ids)
+    };
+  }
+};
+
 // src/ui.ts
 var SKIPPED_REPO_REASON = {
   corrupted: "corrupted-instances-json",
@@ -17892,11 +19373,11 @@ function retryActionForSession(s) {
   }
   return null;
 }
-function patchRetryButton(button, action) {
-  button.hidden = action === null;
+function patchRetryButton(button2, action) {
+  button2.hidden = action === null;
   if (action) {
-    button.textContent = action.label;
-    button.title = action.title;
+    button2.textContent = action.label;
+    button2.title = action.title;
   }
 }
 function markDeliveredActionForSession(s) {
@@ -18044,7 +19525,7 @@ function loginView(state, actions2) {
     disabled: state.connecting
   });
   input.setAttribute("aria-label", "Daemon bearer token");
-  const button = h(
+  const button2 = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
     state.connecting ? "Connecting\u2026" : "Connect"
@@ -18054,7 +19535,7 @@ function loginView(state, actions2) {
     { class: "af-login-form" },
     h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
     input,
-    button
+    button2
   );
   form.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -18094,12 +19575,12 @@ function noAuthLoginView(state, actions2) {
   if (state.loginCondition === "expired") {
     return expiredTokenlessView(state, actions2);
   }
-  const button = h(
+  const button2 = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
     state.connecting ? "Connecting\u2026" : "Connect"
   );
-  const form = h("form", { class: "af-login-form" }, button);
+  const form = h("form", { class: "af-login-form" }, button2);
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     actions2.connect("");
@@ -18127,7 +19608,7 @@ function expiredTokenlessView(state, actions2) {
     disabled: state.connecting
   });
   input.setAttribute("aria-label", "Daemon bearer token");
-  const button = h(
+  const button2 = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
     state.connecting ? "Connecting\u2026" : "Connect"
@@ -18137,7 +19618,7 @@ function expiredTokenlessView(state, actions2) {
     { class: "af-login-form" },
     h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
     input,
-    button
+    button2
   );
   form.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -18171,6 +19652,7 @@ var AppShell = class {
     const { el: viewNav, tabs } = viewNavigation((view) => this.switchView(view));
     this.viewTabs = tabs;
     this.viewNav = viewNav;
+    tabs.get("backlog")?.append(this.backlogBadge);
     this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "\u2014");
     const switchGlyph = icon("folder-git", "af-project-glyph");
     const switchCaret = icon("chevron-down", "af-project-caret");
@@ -18282,6 +19764,22 @@ var AppShell = class {
       trigger: (task) => this.actions.triggerTask(task),
       remove: (task) => this.actions.removeTask(task)
     });
+    this.backlogPane = new BacklogPane(this.actions.backlog ?? {
+      token: () => null,
+      refresh: async () => true,
+      started: () => 0,
+      notify: () => {
+      },
+      openSession: () => {
+      },
+      archiveSession: () => {
+      },
+      restoreSession: () => {
+      },
+      loadSessions: async () => {
+      }
+    });
+    this.backlogPane.el.hidden = true;
     this.configPane = new ConfigPane({
       save: (key, value) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
@@ -18293,7 +19791,7 @@ var AppShell = class {
       setTheme: (choice) => this.actions.setTheme(choice),
       disconnect: () => this.actions.disconnect()
     });
-    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
+    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.backlogPane.el, this.tasksPane.el, this.configPane.el);
     this.toast = h("div", { class: "af-toast" });
     this.toast.setAttribute("role", "alert");
     this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
@@ -18351,6 +19849,12 @@ var AppShell = class {
   appControls;
   sessionsBody;
   tasksPane;
+  backlogPane;
+  backlogBadge = h("span", { class: "af-viewtab-badge", hidden: true });
+  sessionItemMap = /* @__PURE__ */ new Map();
+  sessionItemSig = "[]";
+  chipsChanged = false;
+  lastBacklog;
   configPane;
   lastView = null;
   lastTasks = null;
@@ -18571,6 +20075,7 @@ var AppShell = class {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
       this.tasksPane.el.hidden = state.view !== "tasks";
+      this.backlogPane.el.hidden = state.view !== "backlog";
       this.configPane.el.hidden = state.view !== "config";
       for (const [v, tab] of this.viewTabs) {
         tab.classList.toggle("af-viewtab-active", v === state.view);
@@ -18585,6 +20090,21 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
+    if (state.backlog && state.backlog !== this.lastBacklog) {
+      this.lastBacklog = state.backlog;
+      const items = sessionItems(state.backlog.views);
+      const sig = JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title]));
+      if (sig !== this.sessionItemSig) {
+        this.sessionItemSig = sig;
+        this.sessionItemMap = items;
+        this.chipsChanged = true;
+      }
+      const n = needsYouCount(state.backlog.views.values());
+      this.backlogBadge.hidden = n === 0;
+      this.backlogBadge.textContent = String(n);
+      this.backlogBadge.setAttribute("aria-label", needsYouLabel(n));
+    }
+    if (state.backlog) this.backlogPane.update(state.backlog, state.selectedProject, state.sessions);
     this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
@@ -18604,7 +20124,9 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged) {
+    const chipsChanged = this.chipsChanged;
+    this.chipsChanged = false;
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged || chipsChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -18704,7 +20226,13 @@ var AppShell = class {
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [],
       sessionKey,
-      (s) => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
+      (s) => JSON.stringify([
+        s,
+        s.id === state.selectedId,
+        this.pendingRestores?.has(s.id ?? "") === true,
+        this.sessionItemMap.get(s.id ?? "")?.id ?? 0,
+        this.sessionItemMap.get(s.id ?? "")?.title ?? ""
+      ]),
       (s, previous) => {
         const key = sessionKey(s);
         const oldMenu = this.railMenus.get(key);
@@ -18718,7 +20246,8 @@ var AppShell = class {
           s.id === state.selectedId,
           (id) => this.runRailExit(() => this.actions.open(id)),
           (target) => this.rowActions(target, s.id === state.selectedId),
-          previous
+          previous,
+          this.itemChip(s.id ?? "")
         );
         const menu = wasOpen ? this.railMenus.get(key) : void 0;
         if (menu) {
@@ -19195,6 +20724,24 @@ var AppShell = class {
     if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
     else this.terminalChrome?.menu.dismiss();
   }
+  /** The B-12 chip of an item session; a click opens the item in the Backlog view. */
+  itemChip(sessionId) {
+    const item = this.sessionItemMap.get(sessionId);
+    if (!item) return void 0;
+    const chip = h(
+      "button",
+      { type: "button", class: "af-backlog-session-chip", title: `Open ${formatID(item.id)} ${item.title}` },
+      formatID(item.id)
+    );
+    chip.setAttribute("aria-label", `Open item ${formatID(item.id)}`);
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.actions.switchProject(item.root);
+      this.backlogPane.select(item.id, item.root);
+      this.switchView("backlog");
+    });
+    return chip;
+  }
   /** One user-owned view transition for both appbar tabs and document shortcuts. */
   switchView(view) {
     this.dismissCarriedActions();
@@ -19631,8 +21178,8 @@ var AppShell = class {
       "click",
       (e) => {
         const target = e.target instanceof Element ? e.target.closest(".af-tab") : null;
-        const button = target && bar.contains(target) ? target : null;
-        const targetIntent = button ? tabRenameIntents.get(button) : void 0;
+        const button2 = target && bar.contains(target) ? target : null;
+        const targetIntent = button2 ? tabRenameIntents.get(button2) : void 0;
         if (e.detail === 1) {
           firstIdentity = targetIntent?.identity() ?? null;
           return;
@@ -19916,12 +21463,12 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, ope
 function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
   const input = h("input", { type: "text", class: "af-tab-edit", value: tab.name });
   input.setAttribute("aria-label", `Rename tab ${tabLabel(tab)}`);
-  let done = false;
+  let done2 = false;
   const finish = (commit) => {
-    if (done) {
+    if (done2) {
       return;
     }
-    done = true;
+    done2 = true;
     const next = input.value.trim();
     input.replaceWith(btn);
     if (commit && next !== "" && next !== tab.name) {
@@ -19960,14 +21507,14 @@ function archiveFooterSignature(state) {
   const a = state.archive;
   return JSON.stringify([a.lazy, a.loading, a.error ?? "", archiveHasMore(a, state.selectedProject), state.statusFilter.archived]);
 }
-function sessionRow(s, selected, openSession, buildActions, previous) {
+function sessionRow(s, selected, openSession, buildActions, previous, itemChip) {
   const status = rowStatus(s);
   const operator = operatorKind(s);
   const creating = isCreating(s);
   const actionable = isOpenableSession(s);
   const killable = isKillableSession(s);
   const managed = isActionableSession(s) || killable;
-  const title = h("div", { class: "af-row-title" }, rowTitle(s));
+  const title = h("div", { class: "af-row-title" }, ...itemChip ? [itemChip] : [], rowTitle(s));
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
   const branchParts = [];
@@ -20121,6 +21668,112 @@ function captureTabDeleteTarget(target) {
   return (tabs) => tabs.findIndex((tab) => tabIdentity(tab) === identity && (!legacy || tab === target));
 }
 
+// src/backlog_data.ts
+var EMPTY_BACKLOG_DATA = { views: /* @__PURE__ */ new Map(), errors: /* @__PURE__ */ new Map(), budget: null, generation: 0 };
+var DEBOUNCE_MS = 150;
+function runSessionIds(data) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const view of data.views.values()) {
+    for (const it of view.backlog.items) {
+      for (const run of it.runs ?? []) if (run.session_id) ids.add(run.session_id);
+    }
+  }
+  return ids;
+}
+var SESSION_EVENTS = /* @__PURE__ */ new Set(["session.updated", "session.killed", "session.archived", "session.restored"]);
+function backlogEventAction(type, sessionId, runSessions) {
+  if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
+  if (type === "backlog.spend") return "budget";
+  if (SESSION_EVENTS.has(type) && sessionId && runSessions?.has(sessionId)) return "refresh";
+  return null;
+}
+var BacklogLoader = class {
+  constructor(opts) {
+    this.opts = opts;
+  }
+  generation = 0;
+  timer = null;
+  budgetTimer = null;
+  budgetGeneration = 0;
+  /** The newest refresh started so far. */
+  started() {
+    return this.generation;
+  }
+  /** Refetches every project. A later call wins over one still in flight. Settles true
+   *  when a snapshot that read `root` (every project, when none is named) was committed
+   *  after this call: a read that failed leaves the old snapshot in place, and a write
+   *  that was only followed by such a read has not been confirmed. A refresh that a newer
+   *  one superseded settles with the newer one's outcome, since its own result was
+   *  discarded. */
+  refresh(root2) {
+    const run = this.run();
+    this.tail = run;
+    return run.then((ok) => ok.size === 0 ? false : root2 === void 0 || !ok.has(root2) ? [...ok.values()].every(Boolean) : ok.get(root2) === true);
+  }
+  /** The newest refresh started so far, settled with whether each project's read landed in a committed snapshot. */
+  tail = Promise.resolve(/* @__PURE__ */ new Map());
+  async run() {
+    const token2 = this.opts.token();
+    if (token2 === null) return /* @__PURE__ */ new Map();
+    const gen = ++this.generation;
+    const budgetGen = ++this.budgetGeneration;
+    const roots = [...new Set(this.opts.roots().filter(Boolean))];
+    const [results, budget] = await Promise.all([
+      Promise.all(roots.map((root2) => getBacklog(root2, token2).then((view) => ({ root: root2, view, error: "" })).catch((e) => ({ root: root2, view: null, error: errorText(e) })))),
+      getBudget(token2).catch(() => null)
+    ]);
+    if (this.opts.token() !== token2) return /* @__PURE__ */ new Map();
+    if (gen !== this.generation) return this.tail;
+    const ok = new Map(results.map((r) => [r.root, r.view !== null]));
+    const cur = this.opts.current();
+    const prev = cur.views;
+    const views = /* @__PURE__ */ new Map();
+    const errors = /* @__PURE__ */ new Map();
+    for (const r of results) {
+      if (r.view) views.set(r.root, r.view);
+      else {
+        errors.set(r.root, r.error);
+        const old = prev.get(r.root);
+        if (old) views.set(r.root, old);
+      }
+    }
+    this.opts.commit({ views, errors, budget: budgetGen === this.budgetGeneration ? budget ?? cur.budget : cur.budget, generation: gen });
+    return ok;
+  }
+  /** Refetches only the budget, for backlog.spend. */
+  async refreshBudget() {
+    const token2 = this.opts.token();
+    if (token2 === null) return;
+    const gen = ++this.budgetGeneration;
+    const budget = await getBudget(token2).catch(() => null);
+    if (gen !== this.budgetGeneration || this.opts.token() !== token2 || !budget) return;
+    this.opts.commit({ ...this.opts.current(), budget });
+  }
+  /** Coalesces a burst of events into one refetch. */
+  request() {
+    if (this.timer !== null) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.refresh();
+    }, DEBOUNCE_MS);
+  }
+  requestBudget() {
+    if (this.budgetTimer !== null) return;
+    this.budgetTimer = setTimeout(() => {
+      this.budgetTimer = null;
+      void this.refreshBudget();
+    }, DEBOUNCE_MS);
+  }
+  reset() {
+    this.generation++;
+    this.budgetGeneration++;
+    if (this.timer !== null) clearTimeout(this.timer);
+    if (this.budgetTimer !== null) clearTimeout(this.budgetTimer);
+    this.timer = null;
+    this.budgetTimer = null;
+  }
+};
+
 // src/index.ts
 var initialThemeChoice = bootStampTheme();
 registerServiceWorker();
@@ -20156,6 +21809,7 @@ var store = new Store({
   tabError: null,
   tasks: [],
   registeredProjects: [],
+  backlog: EMPTY_BACKLOG_DATA,
   themeChoice: initialThemeChoice,
   // Resume the persisted filter (feat: hide archived by default) before first paint,
   // for the same reason the theme is boot-stamped: rendering the default set first
@@ -20165,6 +21819,27 @@ var store = new Store({
 });
 var durableFilter = loadFilter();
 var token = null;
+var backlogLoader = new BacklogLoader({
+  token: () => token,
+  roots: () => {
+    const state = store.get();
+    const roots = projectSummaries(state.sessions, state.tasks, projectRoots(state.registeredProjects)).map((p) => p.root);
+    return state.selectedProject ? [state.selectedProject, ...roots] : roots;
+  },
+  current: () => store.get().backlog ?? EMPTY_BACKLOG_DATA,
+  commit: (backlog) => store.set({ backlog })
+});
+var backlogPhase = store.get().phase;
+store.subscribe((state) => {
+  if (state.phase === backlogPhase) return;
+  backlogPhase = state.phase;
+  if (state.phase === "app") {
+    void backlogLoader.refresh();
+  } else {
+    backlogLoader.reset();
+    if (state.backlog !== EMPTY_BACKLOG_DATA) store.set({ backlog: EMPTY_BACKLOG_DATA });
+  }
+});
 var connectionGeneration = 0;
 var pendingRestoreResync = false;
 var stream = null;
@@ -20491,6 +22166,28 @@ async function resolveArchivedRoute(id, ticket) {
     missing
   });
 }
+async function adoptSessionsById(ids) {
+  const tok = token;
+  if (tok === null) return;
+  const known = new Set(store.get().sessions.map((s) => s.id));
+  const want = ids.filter((id) => !known.has(id));
+  if (want.length === 0) return;
+  const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
+  const rows = await fetchSessionsById(tok, want);
+  if (token !== tok || connectionGeneration !== generation) return;
+  if (optimisticSessions.adopt(rows, fence).length > 0) applySessions(optimisticSessions.project());
+}
+function openBacklogSession(id) {
+  const session = store.get().sessions.find((s) => s.id === id);
+  if (!session?.id) {
+    showTransientNotice("That session is gone");
+    return;
+  }
+  if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
+  setStatusFilter(operatorKind(session), true);
+  openFromRail(session.id);
+}
 function moveSelection(id) {
   createSelectionIntent.navigate();
   clearTabError();
@@ -20537,6 +22234,9 @@ function switchView(view) {
   store.set({ view, focus: "rail" });
   if (view === "tasks") {
     refreshTasks();
+  }
+  if (view === "backlog") {
+    void backlogLoader.refresh();
   }
   if (view === "config") {
     refreshConfig();
@@ -21971,6 +23671,23 @@ var actions = {
     void bootstrap();
   },
   retryTasks: refreshTasks,
+  backlog: {
+    token: () => token,
+    refresh: (root2) => backlogLoader.refresh(root2),
+    started: () => backlogLoader.started(),
+    notify: (message) => showTransientNotice(message),
+    openSession: openBacklogSession,
+    archiveSession: (id) => {
+      const s = store.get().sessions.find((x) => x.id === id);
+      if (s && isActionableSession(s)) openConfirm("archive", s);
+    },
+    restoreSession: (id) => {
+      const s = store.get().sessions.find((x) => x.id === id);
+      if (s && isActionableSession(s)) openConfirm("restore", s);
+    },
+    loadSessions: adoptSessionsById,
+    addProject: () => openAddProject()
+  },
   notice: surfaceNotice,
   paneDropHintAt: (x, y) => splitView.showTabDropHintAt(x, y),
   clearPaneDropHint: () => splitView.clearTabDropHint(),
@@ -22034,6 +23751,7 @@ function startStream(tok) {
     onResync: () => {
       markArchiveDirty();
       requestResync();
+      backlogLoader.request();
     },
     onStatus: (s) => {
       if (s !== "open") markArchiveDirty();
@@ -22079,6 +23797,15 @@ function stopStream() {
   }
 }
 function onEvent(ev) {
+  const backlogAction = backlogEventAction(ev.type, ev.data?.id, runSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
+  if (backlogAction === "budget") {
+    backlogLoader.requestBudget();
+    return;
+  }
+  if (backlogAction === "refresh") {
+    backlogLoader.request();
+    if (ev.type.startsWith("backlog.")) return;
+  }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
     requestTaskResync();
     return;
@@ -22159,11 +23886,11 @@ async function loadArchivedPage() {
   if (tok === null) return;
   const project = store.get().selectedProject;
   const key = archiveKey(project);
-  const start = store.get().archive;
-  if (!start.lazy || start.loading || start.cursors[key] === null) return;
+  const start2 = store.get().archive;
+  if (!start2.lazy || start2.loading || start2.cursors[key] === null) return;
   const generation = connectionGeneration;
-  const before = start.cursors[key] ?? null;
-  store.set({ archive: { ...start, loading: true, error: void 0 } });
+  const before = start2.cursors[key] ?? null;
+  store.set({ archive: { ...start2, loading: true, error: void 0 } });
   try {
     const fence = optimisticSessions.snapshotFence();
     const page = await fetchArchivedPage(tok, { project, before });
@@ -22423,6 +24150,7 @@ lucide/dist/esm/icons/circle.mjs:
 lucide/dist/esm/icons/diamond.mjs:
 lucide/dist/esm/icons/ellipsis.mjs:
 lucide/dist/esm/icons/external-link.mjs:
+lucide/dist/esm/icons/file-text.mjs:
 lucide/dist/esm/icons/folder-git-2.mjs:
 lucide/dist/esm/icons/folder.mjs:
 lucide/dist/esm/icons/funnel.mjs:
