@@ -69,6 +69,9 @@ export class BacklogPane {
   // A reorder shown before the daemon has it. It stays until data from a refresh
   // started after the move committed arrives; gen is Infinity until then.
   private pending: { root: string; backlog: Backlog; gen: number } | null = null;
+  // Reorder writes go out one at a time: each target is computed from the previous
+  // optimistic order, so they must commit in the order they were made.
+  private moves: Promise<void> = Promise.resolve();
   private panel: ItemPanel | null = null;
   private dragId: number | null = null;
   private focusId: number | null = null;
@@ -176,7 +179,7 @@ export class BacklogPane {
     }
     const token = this.host.token();
     if (token === null) return;
-    moveItem(root, id, to, token).then(() => {
+    this.moves = this.moves.then(() => moveItem(root, id, to, token).then(() => {
       if (pending) pending.gen = this.host.started();
       return this.host.refresh();
     }, (e: unknown) => {
@@ -186,8 +189,8 @@ export class BacklogPane {
         this.render();
       }
       this.host.notify(errorText(e));
-      void this.host.refresh();
-    });
+      return this.host.refresh();
+    }).catch(() => {}));
   }
 
   private render(): void {

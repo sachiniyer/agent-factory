@@ -90,6 +90,9 @@ export class ItemPanel {
   private sessions: SessionData[] = [];
   // Run sessions the rail did not hold, by id: asked for, answered, or unanswerable.
   private readonly lookups = new Map<string, "pending" | "done" | "failed">();
+  // The title the user submitted that no confirming response has covered yet: a
+  // refresh that read the old item must not put the old title back over it.
+  private titleDraft: string | null = null;
 
   constructor(readonly root: string, readonly id: number, private readonly actions: PanelActions) {
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
@@ -98,8 +101,18 @@ export class ItemPanel {
       const it = this.item();
       const t = this.title.value.trim();
       if (!it) return;
-      if (t && t !== it.title) actions.update(id, { title: t });
-      else this.title.value = it.title;
+      if (t && t !== it.title) {
+        this.titleDraft = t;
+        const done = actions.update(id, { title: t });
+        const settle = (ok: boolean): void => {
+          if (this.titleDraft !== t) return;   // a newer submission owns the draft
+          this.titleDraft = null;
+          // A refused rename gives the field back its stored title.
+          if (!ok && this.view) this.render(this.view, this.sessions);
+        };
+        if (done) done.then(settle, () => settle(false));
+        else settle(true);
+      } else this.title.value = this.titleDraft ?? it.title;
     };
     this.title.addEventListener("change", commitTitle);
     this.title.addEventListener("keydown", (e) => {
@@ -162,7 +175,7 @@ export class ItemPanel {
     const it = this.item();
     if (!it) return;
     this.lookUpMissing(it);
-    if (document.activeElement !== this.title) this.title.value = it.title;
+    if (document.activeElement !== this.title && this.titleDraft === null) this.title.value = it.title;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
