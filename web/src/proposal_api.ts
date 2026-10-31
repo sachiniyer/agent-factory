@@ -185,6 +185,22 @@ export function fitsKeepalive(body: string): boolean {
  *  conflict, which af() would drop, so this call reads the envelope itself.
  *  `keepalive` asks for a request that outlives the page; it is dropped when the
  *  serialized body is too large for one, so the save is still sent. */
+/** Set once a daemon has refused `writer` and `seq` as unknown fields (it predates the save fence,
+ *  or a downgrade put an older one under a page that is still open): saves then go without them. */
+let fenceUnsupported = false;
+
+/** For tests: forget what an earlier daemon refused. */
+export function resetFenceSupport(): void {
+  fenceUnsupported = false;
+}
+
+/** Whether the daemon refused the save because it does not know the fence's fields. */
+function refusesFenceFields(status: number, body: unknown): boolean {
+  const err = isRecord(body) && isRecord(body.error) ? body.error : null;
+  const message = err && typeof err.message === "string" ? err.message : "";
+  return status === 400 && /unknown field "(writer|seq)"/.test(message);
+}
+
 export async function putDoc(
   sessionId: string,
   slug: string,
@@ -195,32 +211,44 @@ export async function putDoc(
   keepalive = false,
   /** Names this editor and counts its saves upward: the daemon refuses (409 proposal_stale_save) a
    *  save at or below one it has already seen from the same writer, so a request that outlived
-   *  its client cannot land after that client's later saves. */
+   *  its client cannot land after that client's later saves. A daemon that does not know the
+   *  fields refuses the save as malformed; the save is then sent again without them, and the
+   *  fence is dropped for this daemon (the save still merges against its base, as before). */
   fence?: { writer: string; seq: number },
 ): Promise<SaveResult> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token !== "") {
     headers.Authorization = `Bearer ${token}`;
   }
-  let resp: Response;
-  const payload = JSON.stringify({ session_id: sessionId, slug, doc, text, base, ...(fence ? { writer: fence.writer, seq: fence.seq } : {}) });
-  try {
-    resp = await fetch("/v1/SaveProposalDoc", {
-      method: "POST",
-      headers,
-      body: payload,
-      keepalive: keepalive && fitsKeepalive(payload),
-    });
-  } catch (e) {
-    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
+  const send = async (withFence: boolean): Promise<{ status: number; body: unknown }> => {
+    const payload = JSON.stringify({ session_id: sessionId, slug, doc, text, base, ...(withFence && fence ? { writer: fence.writer, seq: fence.seq } : {}) });
+    let resp: Response;
+    try {
+      resp = await fetch("/v1/SaveProposalDoc", {
+        method: "POST",
+        headers,
+        body: payload,
+        keepalive: keepalive && fitsKeepalive(payload),
+      });
+    } catch (e) {
+      throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
+    }
+    let body: unknown = null;
+    try {
+      body = await resp.json();
+    } catch {
+      // A body that is not JSON leaves only the status to report.
+    }
+    return { status: resp.status, body };
+  };
+  const useFence = fence !== undefined && !fenceUnsupported;
+  let reply = await send(useFence);
+  if (useFence && refusesFenceFields(reply.status, reply.body)) {
+    fenceUnsupported = true;
+    console.warn("the daemon does not know the save fence (writer, seq): saving without it");
+    reply = await send(false);
   }
-  let body: unknown = null;
-  try {
-    body = await resp.json();
-  } catch {
-    // A body that is not JSON leaves only the status to report.
-  }
-  return parseSaveResponse(resp.status, body);
+  return parseSaveResponse(reply.status, reply.body);
 }
 
 export async function addDoc(sessionId: string, slug: string, name: string, token: string): Promise<void> {
