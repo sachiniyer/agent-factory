@@ -302,6 +302,48 @@ func TestRunWindowCostPartitionsByAccount(t *testing.T) {
 	}
 }
 
+// RunWindowAccounts lists the distinct accounts a run has window buckets under,
+// so a run handed across accounts keeps each account's spend in its own series
+// and a window total can be summed across them even when the run's current
+// config dir is unknown (a killed session or a cross-agent handoff metered from
+// remembered transcripts). A run with no buckets yields no accounts, so the
+// caller fills its run_window entry with 0 (Codex P2 on #6299).
+func TestRunWindowAccounts(t *testing.T) {
+	s := NewMeterState()
+	if got := s.RunWindowAccounts("s-none"); len(got) != 0 {
+		t.Fatalf("a session with no buckets: %v", got)
+	}
+	at := time.Date(2026, 10, 20, 10, 1, 0, 0, time.UTC)
+	s.AddRunEntries("s1", "source", []Entry{{At: at, Cost: 5}})
+	s.AddRunEntries("s1", "dest", []Entry{{At: at.Add(time.Minute), Cost: 2}})
+	s.AddRunEntries("s2", "source", []Entry{{At: at, Cost: 9}})
+	got := s.RunWindowAccounts("s1")
+	if len(got) != 2 {
+		t.Fatalf("s1 has buckets under two accounts: %v", got)
+	}
+	have := map[string]bool{}
+	for _, a := range got {
+		have[a] = true
+	}
+	if !have["source"] || !have["dest"] {
+		t.Fatalf("s1 accounts missing source or dest: %v", got)
+	}
+	if got := s.RunWindowAccounts("s2"); len(got) != 1 || got[0] != "source" {
+		t.Fatalf("s2 accounts = %v, want [source]", got)
+	}
+	// The accounts partition the window: RunWindowCost summed over
+	// RunWindowAccounts is the run's whole spend in the window.
+	reset := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	w := PlanWindow{ResetsAt: &reset}
+	var total float64
+	for _, a := range s.RunWindowAccounts("s1") {
+		total += s.RunWindowCost("s1", a, w)
+	}
+	if !near(total, 7) {
+		t.Fatalf("sum over RunWindowAccounts = %v, want 7 (source 5 + dest 2)", total)
+	}
+}
+
 // A transcript that grew without its modification time moving (a coarse-timestamp
 // filesystem) is still read (Codex P2 on #6299).
 func TestScanReadsAGrownFileWithAnUnchangedModTime(t *testing.T) {

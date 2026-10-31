@@ -101,6 +101,39 @@ func sessionOfBucketKey(key string) string {
 	return key
 }
 
+// accountOfBucketKey is the account half of a runBucketKey. Account names come
+// from agentaccount (filenames) or DefaultAccount, neither of which contains "|",
+// so a single LastIndex split is exact.
+func accountOfBucketKey(key string) string {
+	if i := strings.LastIndex(key, "|"); i >= 0 {
+		return key[i+1:]
+	}
+	return ""
+}
+
+// RunWindowAccounts returns the distinct accounts under which the session has
+// run-window buckets. A run's window cost is summed across these so a session
+// whose current config dir is unknown — killed between passes or after a daemon
+// restart, or handed to another agent and metered from remembered transcripts —
+// still gets a run_window entry from the buckets its messages were filed under.
+// The order is unspecified. An absent account (a session with no buckets, e.g.
+// one whose transcripts never produced a metered message) yields no accounts, so
+// the caller fills the entry with 0.
+func (s *MeterState) RunWindowAccounts(sessionID string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for key := range s.RunBuckets {
+		if sessionOfBucketKey(key) != sessionID {
+			continue
+		}
+		if a := accountOfBucketKey(key); !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // RunSnapshot is a session's run metering state, to put back when the cost it
 // produced could not be committed.
 type RunSnapshot struct {

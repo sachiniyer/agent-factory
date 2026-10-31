@@ -14,6 +14,7 @@
 // copied here, and the service worker is copied verbatim, so the same source always
 // yields the same dist.
 import { build } from "esbuild";
+import { createHash } from "node:crypto";
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -58,6 +59,42 @@ await build({
   legalComments: "none",
   logLevel: "info",
 });
+
+// Stamp the web client's X-AF-Client-Version value into the bundle.
+//
+// af() (src/api.ts) sends that header on every /v1/ request so the daemon decodes the
+// body with its tolerant (additive-field) decoder rather than the strict
+// DisallowUnknownFields path reserved for hand-authored curl (daemon/httpserver.go).
+// The daemon keys only on the header's PRESENCE — the value is diagnostics — but a
+// content hash is the honest "which web build is this" answer, and it changes exactly
+// when the bundle the browser runs changes. Unlike the service-worker cache name,
+// which web/embed.go stamps at SERVE time from the embedded bytes (so two branches
+// that both change the shell never conflict on a committed hash), this is stamped at
+// BUILD time and committed inside dist/af-web.js. That does not reintroduce the
+// #4116 conflict: dist/af-web.js is already a committed generated file that changes
+// wholesale on every web edit, so a single line inside it neither adds a new conflict
+// surface nor a new reproducibility hazard — a rebuild reproduces the bytes (esbuild
+// is deterministic, the placeholder bundle it hashes is stable, so the hash is too).
+//
+// The placeholder stays in the source literal (src/api.ts CLIENT_VERSION) so the
+// header is non-empty everywhere the build has NOT run — under tsx (the unit tests),
+// where no stamp is applied — and the daemon's presence check still accepts it, the
+// same graceful fallback the Go apiclient gets from its "unknown" sentinel.
+const CLIENT_VERSION_PLACEHOLDER = "__AF_CLIENT_VERSION__";
+const bundlePath = "dist/af-web.js";
+const bundle = await readFile(bundlePath, "utf8");
+if (!bundle.includes(CLIENT_VERSION_PLACEHOLDER)) {
+  // The stamp is what opts the browser into the daemon's tolerant decode, and the
+  // placeholder is where af() reads the value from. If src/api.ts ever stops carrying
+  // it, fail the build rather than ship a bundle the daemon would strict-decode.
+  throw new Error(`build: ${bundlePath} has no ${CLIENT_VERSION_PLACEHOLDER} placeholder for af() to send as X-AF-Client-Version`);
+}
+// Hash the bundle WITH the placeholder still in place, then substitute. The hash is
+// over the pre-stamp bytes so it is a pure function of src/ and is reproduced by every
+// rebuild (the bundle esbuild emits is byte-identical each time); a build that hashed
+// the already-stamped bytes would be circular and self-inconsistent.
+const clientVersion = createHash("sha256").update(bundle).digest("hex").slice(0, 12);
+await writeFile(bundlePath, bundle.split(CLIENT_VERSION_PLACEHOLDER).join(clientVersion));
 
 // The HTML shell is not an esbuild input (it references the bundle by URL), so
 // copy it into the embed root alongside the built JS/CSS.

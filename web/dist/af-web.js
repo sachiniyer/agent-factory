@@ -7029,8 +7029,13 @@ function isProjectReboundError(e) {
 function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
+var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
+var CLIENT_VERSION = "38657857f798";
 async function af(method, body, token2, signal) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = {
+    "Content-Type": "application/json",
+    [CLIENT_VERSION_HEADER]: CLIENT_VERSION
+  };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }
@@ -20322,6 +20327,7 @@ var store = new Store({
   // state but archived — when nothing is stored.
   statusFilter: loadFilter()
 });
+var durableFilter = loadFilter();
 var token = null;
 var connectionGeneration = 0;
 var pendingRestoreResync = false;
@@ -20594,7 +20600,7 @@ function resolveRoute() {
     lookup = !session && route !== null && store.get().archive.lazy && store.get().archive.total > 0;
     if (session?.id) {
       if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
-      setStatusFilter(operatorKind(session), true);
+      store.set({ statusFilter: withKind(durableFilter, operatorKind(session), true) });
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
@@ -20703,12 +20709,14 @@ function switchView(view) {
   }
 }
 function setStatusFilter(kind, on) {
-  const next = withKind(store.get().statusFilter, kind, on);
+  const next = withKind(durableFilter, kind, on);
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }
 function resetStatusFilter() {
   const next = defaultFilter();
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }

@@ -180,5 +180,14 @@ func xargsReplaceChild(words []*syntax.Word, state xargsLoopState, names map[str
 		// Nothing was substituted: argv is words, which xargsChild peeled.
 		return tail, false
 	}
+	// A marker that is itself a verdict word is replaced in argv by the
+	// synthetic nonliteral item word, which the literal-boundary tail scan
+	// deliberately skips — `xargs -Iunset echo a unset CODEX_HOME` reads as
+	// `echo a $xargs_item CODEX_HOME`, hiding `unset CODEX_HOME` from
+	// childTailBuriesMutation even though a shadowed xargs shifts to that
+	// original literal tail. Judge the pre-substitution tail too (#6320).
+	if childTailBuriesMutation(tail, names, memo) {
+		return nil, true
+	}
 	return argv, false
 }

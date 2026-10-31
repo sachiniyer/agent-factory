@@ -501,6 +501,100 @@ func TestCleanupClaimedRepoGone_RestartDoesNotTreatAbsentPathAsCompletedDelete(t
 	}
 }
 
+// TestValidateRelocationCleanupAdmission_AbsentPathDischargesCleanupReadyNoAlternate
+// pins the fix for the repo-gone cleanup_ready strand: when the single
+// authorized directory is conclusively absent (no alternate candidate), the
+// admission must discharge the durable record instead of downgrading it to an
+// in-memory claim_stale that no caller ever persists. Before the fix every
+// consumer wrapped the same ENOENT in ErrRelocateStateUnknown and refused
+// forever, leaving the row permanently undeletable (#5102).
+func TestValidateRelocationCleanupAdmission_AbsentPathDischargesCleanupReadyNoAlternate(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	recovery, retained := gw.GetRelocationRecovery()
+	if !retained || recovery.State != RelocationRecoveryCleanupReady {
+		t.Fatalf("setup must install a durable cleanup_ready record; retained=%v recovery=%+v", retained, recovery)
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the authorized archive outside af: %v", err)
+	}
+	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+		t.Fatalf("a cleanup_ready record over a conclusively absent archive (no alternate) must discharge: %v", err)
+	}
+	if _, retained := gw.GetRelocationRecovery(); retained {
+		t.Fatal("the discharge must clear the durable cleanup_ready record, not just downgrade it in memory")
+	}
+	// A subsequent claim behaves as record-free: a plain ENOENT (not the
+	// ErrRelocateStateUnknown that used to strand every consumer) that restore
+	// routes to its rebuild-from-branch rescue.
+	_, claimErr := gw.ClaimRelocationSource()
+	if !errors.Is(claimErr, os.ErrNotExist) || errors.Is(claimErr, ErrRelocateStateUnknown) {
+		t.Fatalf("after discharge the absent archive must give a record-free plain ENOENT, got: %v", claimErr)
+	}
+}
+
+// TestValidateRelocationCleanupAdmission_AbsentPathRetainsCleanupReadyWithAlternate
+// pins the scope of the fix: a cleanup_ready record that carries an alternate
+// candidate is NOT discharged when the primary is conclusively absent. The
+// alternate may still identify the archived directory, and ordinary claim
+// resolution must arbitrate the two candidates rather than have this gate drop
+// the alternate durably.
+func TestValidateRelocationCleanupAdmission_AbsentPathRetainsCleanupReadyWithAlternate(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the authorized archive outside af: %v", err)
+	}
+	// Reload a cleanup_ready record carrying an alternate candidate — the shape
+	// a two-candidate stalled move leaves after PrepareRelocationClaimForCleanup.
+	altGW, err := NewGitWorktreeFromStorage(
+		gw.GetRepoPath(), worktree, "repo-gone", "af/repo-gone", "", false, true,
+	)
+	if err != nil {
+		t.Fatalf("rebuild worktree handle with an alternate: %v", err)
+	}
+	if err := altGW.RestoreRelocationRecovery(RelocationRecovery{
+		State:             RelocationRecoveryCleanupReady,
+		IdentityKnown:     true,
+		Device:            claim.identity.device,
+		Inode:             claim.identity.inode,
+		FileType:          claim.identity.fileType,
+		CleanupGeneration: claim.cleanupGeneration,
+		AlternatePath:     worktree + "-alternate",
+	}); err != nil {
+		t.Fatalf("restore cleanup_ready record with an alternate: %v", err)
+	}
+	if err := altGW.ValidateRelocationCleanupAdmission(); !errors.Is(err, ErrRelocateStateUnknown) {
+		t.Fatalf("a cleanup_ready record with an alternate must NOT discharge on a primary ENOENT: %v", err)
+	}
+	recovery, retained := altGW.GetRelocationRecovery()
+	if !retained {
+		t.Fatal("the alternate candidate must remain for claim arbitration")
+	}
+	if recovery.AlternatePath == "" {
+		t.Fatal("the admission must not erase the alternate candidate")
+	}
+}
+
+// TestValidateRelocationCleanupAdmission_NonENOENTPathFailureRetainsAuthorization
+// pins the other half of the discharge guard: a path probe that fails for a
+// non-ENOENT reason (a timeout or an unreadable mount) is unknown rather than
+// absent, so the cleanup_ready record must stay retryable — the admission must
+// not discharge on evidence that is not conclusive absence.
+func TestValidateRelocationCleanupAdmission_NonENOENTPathFailureRetainsAuthorization(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	restoreIdentity := SetRelocationIdentityErrorForTest(worktree, context.DeadlineExceeded)
+	t.Cleanup(restoreIdentity)
+
+	if err := gw.ValidateRelocationCleanupAdmission(); !errors.Is(err, ErrRelocateStateUnknown) {
+		t.Fatalf("a non-ENOENT path probe failure must keep the cleanup_ready record retryable: %v", err)
+	}
+	recovery, retained := gw.GetRelocationRecovery()
+	if !retained || recovery.State != RelocationRecoveryCleanupReady {
+		t.Fatalf("a timeout must not discharge or downgrade the cleanup_ready authorization; retained=%v recovery=%+v", retained, recovery)
+	}
+}
+
 func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorization(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	gw.PreserveRelocationClaim(claim)

@@ -103,7 +103,7 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		calls.lastExpect = expect
 		return calls.restartErr
 	}
-	daemonTriggerTask = func(id string, expect task.ProjectExpectation) error {
+	daemonTriggerTask = func(id string, expect task.ProjectExpectation, _ task.Actor) error {
 		calls.triggered = append(calls.triggered, id)
 		calls.lastExpect = expect
 		return calls.runErr
