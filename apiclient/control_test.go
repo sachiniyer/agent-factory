@@ -355,11 +355,12 @@ func TestTaskMutationsCarryProjectExpectation(t *testing.T) {
 			_ = json.Unmarshal(b, &got)
 			return apiproto.Success(daemon.TriggerTaskResponse{OK: true})
 		})
-		if err := c.TriggerTask("t-1", expect); err != nil {
+		if err := c.TriggerTask("t-1", expect, task.ActorTUI); err != nil {
 			t.Fatalf("TriggerTask: %v", err)
 		}
-		if got.ID != "t-1" || got.Expect != expect {
-			t.Fatalf("daemon saw id=%q expect=%+v; want id=t-1 expect=%+v", got.ID, got.Expect, expect)
+		if got.ID != "t-1" || got.Expect != expect || got.Actor != string(task.ActorTUI) {
+			t.Fatalf("daemon saw id=%q expect=%+v actor=%q; want id=t-1 expect=%+v actor=%q",
+				got.ID, got.Expect, got.Actor, expect, task.ActorTUI)
 		}
 	})
 }

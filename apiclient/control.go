@@ -317,8 +317,9 @@ func (c *Client) RemoveTask(id string, expect task.ProjectExpectation) error {
 // TriggerTask asks the daemon to fire a task now through the shared RunTask
 // firing path (the same entrypoint the scheduler uses). expect is the same
 // required project compare-and-swap as UpdateTask's (#3230).
-func (c *Client) TriggerTask(id string, expect task.ProjectExpectation) error {
-	return c.call("TriggerTask", daemon.TriggerTaskRequest{ID: id, Expect: expect}, &daemon.TriggerTaskResponse{})
+// actor names the calling surface for the task's audit trail (#6318).
+func (c *Client) TriggerTask(id string, expect task.ProjectExpectation, actor task.Actor) error {
+	return c.call("TriggerTask", daemon.TriggerTaskRequest{ID: id, Expect: expect, Actor: string(actor)}, &daemon.TriggerTaskResponse{})
 }
 
 // RestartTask asks the daemon to stop one enabled watch command and start a
