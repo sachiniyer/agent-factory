@@ -48,6 +48,8 @@ var verbTargetClass = map[string]string{
 
 	// The backlog verbs talk to the daemon the client targets (api/backlog.go).
 	"af backlog add":    classRouted,
+	"af backlog answer": classRouted,
+	"af backlog ask":    classRouted,
 	"af backlog budget": classRouted,
 	"af backlog delete": classRouted,
 	"af backlog done":   classRouted,
@@ -121,19 +123,20 @@ var verbTargetClass = map[string]string{
 
 	// Client-local by design: the binary, its terminal, its own saved target,
 	// static catalogs and daemon-consumed plumbing.
-	"af target set":      classLocal,
-	"af target show":     classLocal,
-	"af target clear":    classLocal,
-	"af upgrade":         classLocal, // replaces THIS client's binary
-	"af bug-report":      classLocal, // a bundle of THIS client's diagnostics
-	"af version":         classLocal,
-	"af keys":            classLocal,
-	"af debug":           classLocal,
-	"af api":             classLocal, // this build's route catalog
-	"af agent-server":    classLocal,
-	"af ssh-relay":       classLocal,
-	"af gen-docs":        classLocal,
-	"af hook-guard-tmux": classLocal,
+	"af target set":        classLocal,
+	"af target show":       classLocal,
+	"af target clear":      classLocal,
+	"af upgrade":           classLocal, // replaces THIS client's binary
+	"af bug-report":        classLocal, // a bundle of THIS client's diagnostics
+	"af version":           classLocal,
+	"af keys":              classLocal,
+	"af debug":             classLocal,
+	"af api":               classLocal, // this build's route catalog
+	"af agent-server":      classLocal,
+	"af ssh-relay":         classLocal,
+	"af gen-docs":          classLocal,
+	"af hook-guard-tmux":   classLocal,
+	"af internal plan-tap": classLocal, // Claude Code's status line command, run on THIS machine
 }
 
 func collectLeaves(c *cobra.Command, out *[]string) {

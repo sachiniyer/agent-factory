@@ -165,12 +165,15 @@ af backlog reopen 12
 af backlog delete 12            # a draft with no runs and no thread
 af backlog note 12 "text"       # a note on the item's thread
 af backlog note --self "text"   # from inside an item session: a note on my own item
+af backlog ask --self "question?"   # from inside an item session: ask the user, then stop
+af backlog answer 12 "text"     # answer the item's oldest open question (--question n picks one)
 af backlog runner               # show or change this project's runner switch
 af backlog budget               # show or change the global budget
 ```
 
 - Items live in `$AF_HOME/repos/<repo-id>/backlog.json`; the budget in `$AF_HOME/budget.json`. `af reset` removes the budget and keeps each project's backlog.
 - `start` ignores the runner switch and the budget. An item with a live session gets `continue` in that session; any other item gets a new session on a new branch from the default branch. The command returns at once and the run reads *starting* until the session exists. Item sessions are ordinary sessions: they archive, restore and hand off like any other, but they are kept out of `limit_auto_resume`'s account swap and park at a usage limit instead. `--self` commands act on the item of the session they run in; they are for the agent, and the user-facing commands refuse to run from inside an item session.
+- A question (`ask --self`) sits on the item's thread and sets the session's attention (the agent-set request from `af sessions attention`); the item reads *Needs you* until it is answered. `answer` adds the answer to the thread and sends it to the item's session: it restores the session first if it is archived, waits while a client is attached or the session is at a usage limit, and, if the session is gone, leaves the answer in the thread. A line the user submits in the session's own pane also closes the oldest open question as answered in session. Done and dropped close an item's open questions.
 - Notes are stored on the item; they are not delivered to a session.
 - `budget` takes `--share`, `--stop-at`, `--max-per-run` (percents from 0 to 100) and `--usd-limit` (finite, 0 or more; 0 turns it off). With no flags it shows the settings.
 

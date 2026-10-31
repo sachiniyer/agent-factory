@@ -57,7 +57,7 @@ func inItemSession() *session.InstanceData {
 	return s
 }
 
-const backlogSelfNoteHint = "leave the user a note with \"af backlog note --self <text>\""
+const backlogSelfAskHint = "ask the user with \"af backlog ask --self\""
 
 // refuseFromItemSession stops an agent in an item session from running a
 // command that changes the backlog's plan. It stops a confused agent, not a
@@ -66,14 +66,14 @@ func refuseFromItemSession(command string) error {
 	if inItemSession() == nil {
 		return nil
 	}
-	return fmt.Errorf("item sessions cannot run \"af backlog %s\"; %s", command, backlogSelfNoteHint)
+	return fmt.Errorf("item sessions cannot run \"af backlog %s\"; %s", command, backlogSelfAskHint)
 }
 
 func refuseControlsFromItemSession() error {
 	if inItemSession() == nil {
 		return nil
 	}
-	return errors.New("item sessions cannot change the runner or budget; " + backlogSelfNoteHint)
+	return errors.New("item sessions cannot change the runner or budget; " + backlogSelfAskHint)
 }
 
 var backlogStartCmd = &cobra.Command{
@@ -183,7 +183,7 @@ var backlogNoteCmd = &cobra.Command{
 				if err != nil {
 					return nil, err
 				}
-				return postBacklogNote(daemon.PostBacklogMessageRequest{RepoID: t.repoID, RepoPath: t.repoPath,
+				return postBacklogMessage(daemon.PostBacklogMessageRequest{RepoID: t.repoID, RepoPath: t.repoPath,
 					ID: it.ID, Kind: backlog.KindNote, Text: strings.Join(args, " "), SessionID: sessionID})
 			}
 			if len(args) < 2 {
@@ -193,13 +193,13 @@ var backlogNoteCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
-			return postBacklogNote(daemon.PostBacklogMessageRequest{RepoID: t.repoID, RepoPath: t.repoPath,
+			return postBacklogMessage(daemon.PostBacklogMessageRequest{RepoID: t.repoID, RepoPath: t.repoPath,
 				ID: id, Kind: backlog.KindNote, Text: strings.Join(args[1:], " ")})
 		})
 	},
 }
 
-func postBacklogNote(req daemon.PostBacklogMessageRequest) (any, error) {
+func postBacklogMessage(req daemon.PostBacklogMessageRequest) (any, error) {
 	var resp daemon.PostBacklogMessageResponse
 	if err := callBacklogRoute("PostBacklogMessage", req, &resp); err != nil {
 		return nil, err
@@ -207,9 +207,68 @@ func postBacklogNote(req daemon.PostBacklogMessageRequest) (any, error) {
 	return resp.Message, nil
 }
 
+var backlogAskSelf bool
+
+var backlogAskCmd = &cobra.Command{
+	Use:   "ask --self <text>",
+	Short: "From an item session, ask the user a question",
+	Long: "Run from inside an item session: add a question to the item's thread and set the " +
+		"session's attention to it. The item shows Needs you until the user answers; the " +
+		"answer arrives in this session. Stop working after you ask.",
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runBacklog(func() (any, error) {
+			if !backlogAskSelf {
+				return nil, errors.New("af backlog ask needs --self; an agent asks from inside its item session")
+			}
+			t, err := backlogProject()
+			if err != nil {
+				return nil, err
+			}
+			sessionID, it, err := t.selfItem()
+			if err != nil {
+				return nil, err
+			}
+			return postBacklogMessage(daemon.PostBacklogMessageRequest{RepoID: t.repoID, RepoPath: t.repoPath,
+				ID: it.ID, Kind: backlog.KindQuestion, Text: strings.Join(args, " "), SessionID: sessionID})
+		})
+	},
+}
+
+var backlogAnswerQuestion int
+
+var backlogAnswerCmd = &cobra.Command{
+	Use:   "answer <id> [--question <n>] <text>",
+	Short: "Answer an item's open question",
+	Long: "Answer the item's oldest open question, or the one --question names. af adds the " +
+		"answer to the thread and sends it to the item's session, restoring the session first " +
+		"if it is archived, and waiting while a client is attached to it. If the session is " +
+		"gone, the answer stays in the thread.",
+	Args: cobra.MinimumNArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runBacklog(func() (any, error) {
+			if err := refuseFromItemSession("answer"); err != nil {
+				return nil, err
+			}
+			id, err := backlog.ParseID(args[0])
+			if err != nil {
+				return nil, err
+			}
+			t, err := backlogProject()
+			if err != nil {
+				return nil, err
+			}
+			return postBacklogMessage(daemon.PostBacklogMessageRequest{RepoID: t.repoID, RepoPath: t.repoPath,
+				ID: id, Kind: backlog.KindAnswer, Text: strings.Join(args[1:], " "), QuestionID: backlogAnswerQuestion})
+		})
+	},
+}
+
 func init() {
+	backlogAnswerCmd.Flags().IntVar(&backlogAnswerQuestion, "question", 0, "The `id` of the question to answer, from \"af backlog show\"; default the oldest open one")
+	backlogAskCmd.Flags().BoolVar(&backlogAskSelf, "self", false, "Ask on the item of the session this runs in")
 	backlogDoneCmd.Flags().BoolVar(&backlogDoneSelf, "self", false, "From inside an item session: the work is finished; send the item to review")
 	backlogDoneCmd.Flags().StringVar(&backlogDonePR, "pr", "", "With --self, the `url` of the pull request for the work")
 	backlogNoteCmd.Flags().BoolVar(&backlogNoteSelf, "self", false, "Note on the item of the session this runs in")
-	BacklogCmd.AddCommand(backlogStartCmd, backlogDoneCmd, backlogNoteCmd)
+	BacklogCmd.AddCommand(backlogStartCmd, backlogDoneCmd, backlogNoteCmd, backlogAskCmd, backlogAnswerCmd)
 }

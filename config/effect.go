@@ -80,6 +80,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"limit_account_candidates":       EffectAppliedLive,
 	"limit_retry_interval":           EffectAppliedLive,
 	"limit_patterns":                 EffectAppliedLive,
+	"backlog":                        EffectAppliedLive,
 	"global_agent_skills":            EffectAppliedLive,
 	"docker.mount_agent_credentials": EffectAppliedLive,
 	"ssh.host_key_verification":      EffectAppliedLive,

@@ -214,3 +214,22 @@ func TestParseState(t *testing.T) {
 		t.Fatal("blocked accepted")
 	}
 }
+
+// An answer on its way to the session is work in progress even before its run is
+// armed (a held delivery arms the run only when it sends).
+func TestDeriveAPendingAnswerShowsWorking(t *testing.T) {
+	b := mk(t, Item{ID: 1, Status: StatusRunning,
+		Runs: []RunRef{{SessionID: "s1", State: RunStarted}},
+		Thread: []Message{
+			{ID: 1, Kind: KindQuestion, Text: "?"},
+			{ID: 2, Kind: KindAnswer, Answers: 1, Delivery: DeliveryPending},
+		}})
+	facts := func(string) SessionFacts { return SessionFacts{Live: true} }
+	if got := b.Derive(1, facts); got.State != StateWorking || !got.HoldsSlot {
+		t.Fatalf("pending answer: %+v", got)
+	}
+	b.Item(1).Thread[1].Delivery = DeliveryDelivered
+	if got := b.Derive(1, facts); got.State != StateStopped {
+		t.Fatalf("delivered answer, no active run: %+v", got)
+	}
+}
