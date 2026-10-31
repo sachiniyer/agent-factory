@@ -188,7 +188,7 @@ func RequestHostName(host string) (string, bool) {
 // consulted before DNS, and Chromium and Firefox never resolve it at all. af's own *.localhost names (per-tab preview and editor origins) are
 // served by the preview listener, whose rule admits only labels af minted.
 func IsLoopbackHostName(canonical string) bool {
-	if canonical == "localhost" {
+	if canonical == "localhost" || strings.HasSuffix(canonical, ".localhost") { // PROBE: old rule
 		return true
 	}
 	addr, err := netip.ParseAddr(canonical)
