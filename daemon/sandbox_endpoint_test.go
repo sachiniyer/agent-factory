@@ -35,6 +35,7 @@ func TestSandboxEndpointAdmitsOnlySandboxCredentials(t *testing.T) {
 	var reg sandboxTokenRegistry
 	token, err := reg.mint("sess-a")
 	require.NoError(t, err)
+	thisProcessCarries(t, &reg, "sess-a") // this test's connections are sess-a's own forward
 
 	var gotOwner string
 	var gotIsSandbox bool
@@ -96,6 +97,7 @@ func TestSandboxEndpointRefusesTheOperatorToken(t *testing.T) {
 	var reg sandboxTokenRegistry
 	sandboxToken, err := reg.mint("sess-a")
 	require.NoError(t, err)
+	thisProcessCarries(t, &reg, "sess-a")
 
 	reached := false
 	mux := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -150,6 +152,7 @@ func TestSandboxEndpointCredentialIsBoundToItsOwnSession(t *testing.T) {
 	tokenB, err := reg.mint("sess-b")
 	require.NoError(t, err)
 	require.NotEqual(t, tokenA, tokenB)
+	carrier := thisProcessCarries(t, &reg, "sess-a")
 
 	rows := []session.InstanceData{{ID: "sess-a", Title: "a", Path: "/host/a"}, {ID: "sess-b", Title: "b", Path: "/host/b"}}
 	var seen []string
@@ -186,13 +189,27 @@ func TestSandboxEndpointCredentialIsBoundToItsOwnSession(t *testing.T) {
 	call(tokenA)
 	require.Equal(t, "sess-a", seenOwner)
 	require.Equal(t, []string{"sess-a"}, seen, "session A's credential must see only session A")
+
+	// Through B's forward, A's credential is not accepted at all (#5571 W7.8).
+	carrier.carry("sess-b")
+	wrong, err := http.NewRequest(http.MethodPost, "http://sandbox"+allowed, nil)
+	require.NoError(t, err)
+	wrong.Header.Set("Authorization", "Bearer "+tokenA)
+	wrongResp, err := client.Do(wrong)
+	require.NoError(t, err)
+	_ = wrongResp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, wrongResp.StatusCode, "a credential sent through another session's forward")
+
 	call(tokenB)
 	require.Equal(t, "sess-b", seenOwner)
 	require.Equal(t, []string{"sess-b"}, seen, "session B's credential must see only session B")
 
-	// Re-minting for A voids A's old credential and leaves B's alone.
+	// Re-minting for A voids A's old credential and leaves B's alone. Asked
+	// through A's own forward, so the refusal is the revocation's, not the
+	// forward's.
 	newA, err := reg.mint("sess-a")
 	require.NoError(t, err)
+	carrier.carry("sess-a")
 	req, err := http.NewRequest(http.MethodPost, "http://sandbox"+allowed, nil)
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+tokenA)
@@ -201,5 +218,6 @@ func TestSandboxEndpointCredentialIsBoundToItsOwnSession(t *testing.T) {
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	call(newA)
+	carrier.carry("sess-b")
 	call(tokenB)
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // The gate admits a sandbox credential only through its owner's own forward
@@ -88,4 +90,39 @@ func (o *ownForwards) through(r *http.Request, sessionID string) *http.Request {
 
 func withCarrier(r *http.Request, pgid int) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), carrierPGIDKey{}, pgid))
+}
+
+// processCarrier stands in for one session's forward when a test connects to the
+// real endpoint from this process: the endpoint records this process's own
+// group as the carrier, and the stand-in reports that group as carrying the
+// chosen session's current callback identity.
+type processCarrier struct {
+	mu      sync.Mutex
+	session string
+}
+
+func thisProcessCarries(t *testing.T, reg *sandboxTokenRegistry, sessionID string) *processCarrier {
+	t.Helper()
+	pc := &processCarrier{session: sessionID}
+	self := unix.Getpgrp()
+	prev := callbackCarrierRef
+	callbackCarrierRef = func(pgid int) (string, bool) {
+		if pgid != self {
+			return prev(pgid)
+		}
+		pc.mu.Lock()
+		owner := pc.session
+		pc.mu.Unlock()
+		ref := reg.refFor(owner)
+		return ref, ref != ""
+	}
+	t.Cleanup(func() { callbackCarrierRef = prev })
+	return pc
+}
+
+// carry makes this process the forward of sessionID from now on.
+func (pc *processCarrier) carry(sessionID string) {
+	pc.mu.Lock()
+	pc.session = sessionID
+	pc.mu.Unlock()
 }

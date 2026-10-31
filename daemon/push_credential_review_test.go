@@ -59,6 +59,7 @@ func TestSandboxEndpointRecordsEachConnectionsPeerGroup(t *testing.T) {
 	var reg sandboxTokenRegistry
 	token, err := reg.mint("sess-a")
 	require.NoError(t, err)
+	thisProcessCarries(t, &reg, "sess-a")
 	var got atomic.Int64
 	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got.Store(int64(carrierPGID(r.Context())))
@@ -68,7 +69,7 @@ func TestSandboxEndpointRecordsEachConnectionsPeerGroup(t *testing.T) {
 	ep, err := startSandboxEndpoint(mux, &reg, sock)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ep.close() })
-	do := func() {
+	do := func() int {
 		t.Helper()
 		client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
@@ -80,16 +81,18 @@ func TestSandboxEndpointRecordsEachConnectionsPeerGroup(t *testing.T) {
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 		client.CloseIdleConnections()
+		return resp.StatusCode
 	}
-	do()
+	require.Equal(t, http.StatusOK, do())
 	// The client is this test process, so the peer's group is ours.
 	assert.Equal(t, int64(unix.Getpgrp()), got.Load(), "the endpoint must record the peer's process group")
 
 	prev := connPeerPGID
 	connPeerPGID = func(net.Conn) (int, error) { return 0, assert.AnError }
 	t.Cleanup(func() { connPeerPGID = prev })
-	do()
-	assert.Zero(t, got.Load(), "an unreadable peer records no carrier")
+	got.Store(-1)
+	assert.Equal(t, http.StatusUnauthorized, do(), "an unreadable peer records no carrier, so the gate refuses it")
+	assert.Equal(t, int64(-1), got.Load(), "before any handler runs")
 }
 
 // --- finding 1: eligibility comes only from an operator decision --------------

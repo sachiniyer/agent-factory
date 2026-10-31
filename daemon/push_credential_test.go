@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pushcred"
@@ -721,6 +722,7 @@ func TestSandboxEndpointMarksItsRequestsAndTheMainGateDoesNot(t *testing.T) {
 	var reg sandboxTokenRegistry
 	token, err := reg.mint("sess-a")
 	require.NoError(t, err)
+	thisProcessCarries(t, &reg, "sess-a")
 	var marked atomic.Bool
 	var reached atomic.Int32
 	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -758,8 +760,19 @@ func TestSandboxEndpointMarksItsRequestsAndTheMainGateDoesNot(t *testing.T) {
 	mreq := httptest.NewRequest(http.MethodPost, "/v1/GitCredential", strings.NewReader(`{}`))
 	mreq.Header.Set("Authorization", "Bearer "+token)
 	main.ServeHTTP(rec, mreq)
+	// A main-listener connection is no session's forward, so the gate refuses
+	// the credential outright (#5571 W7.8, second review of #6433).
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, int32(1), reached.Load(), "the main gate must not admit a sandbox credential with no forward")
+
+	// Even a request that somehow carried the owner's own forward to the main
+	// gate is admitted there unmarked: only the dedicated endpoint sets the mark.
+	rec = httptest.NewRecorder()
+	mreq = httptest.NewRequest(http.MethodPost, "/v1/GitCredential", strings.NewReader(`{}`))
+	mreq.Header.Set("Authorization", "Bearer "+token)
+	main.ServeHTTP(rec, withCarrier(mreq, unix.Getpgrp()))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, int32(2), reached.Load(), "anti-vacuous: the main gate admitted the sandbox credential")
+	require.Equal(t, int32(2), reached.Load(), "anti-vacuous: the main gate admitted it")
 	assert.False(t, marked.Load(), "a main-listener request must never read as the dedicated endpoint")
 }
 
