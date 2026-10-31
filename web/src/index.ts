@@ -163,6 +163,7 @@ import { captureTabDeleteTarget } from "./tab_delete_target.js";
 import { type AccountsResponse, type SessionData, type SkippedRepo, TabKind, type TaskData, type WireEvent } from "./types.js";
 import { publishProposalChange, publishProposalPush, publishProposalResync } from "./docs_tab.js";
 import { parseProposalChange, parseProposalPush } from "./proposal_api.js";
+import { trackViewportInsets } from "./viewport-insets.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
 // mounts (before first paint), so an explicit light/dark choice shows no flash. This
@@ -319,6 +320,10 @@ let accountLogin: AccountLoginController | null = null;
 // beforeinstallprompt on a discarded copy. It stays hidden unless the browser says
 // the app is installable; see install.ts.
 const installAffordance = new InstallAffordance();
+
+// Overlays lay out against the visible area above a soft keyboard, not the layout
+// viewport the keyboard does not shrink (#6431).
+trackViewportInsets(document.documentElement);
 
 // The split-pane view bound to termHost: it owns the per-instance layout tree and one
 // live AttachTerminal per pane, rebuilt/reconciled as the selection, tab list, or
