@@ -121,7 +121,9 @@ export type Event =
   | { t: "reconcile_fail"; seq: number; error: string }
   | { t: "reconnect" }
   /** The doc no longer exists on the daemon (a 404, or the doc list says so). */
-  | { t: "gone" }
+  /** The doc is gone: told by the doc list (no request id), or by a 404 to the read or
+   *  save with this id, which counts only while that request is still the active one. */
+  | { t: "gone"; of?: "read" | "save"; seq?: number }
   /** The user restored a deleted doc: `head` is the new doc's state. */
   | { t: "revive"; head: DocText }
   /** The doc is being deleted by this window: stop retrying and arming; the draft stays stored. */
@@ -505,6 +507,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       return;
 
     case "gone":
+      if (e.seq !== undefined && e.seq !== (e.of === "save" ? m.flight?.seq : m.readSeq)) return; // a late 404 of a request nobody is waiting on
       goneEvent(m, fx);
       return;
 
