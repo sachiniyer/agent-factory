@@ -213,6 +213,14 @@ const store = new Store<AppState>({
   statusFilter: loadFilter(),
 });
 
+// The durable status filter: the user's last explicit choice, mirrored from
+// localStorage at boot. A deep link widens the in-memory `statusFilter` for the
+// visit only (a transient reveal), so it must NOT contaminate this durable
+// copy. setStatusFilter / resetStatusFilter rebase persistence on it, so a
+// route-only override (e.g. revealing Archived) can never become the saved
+// preference through a later unrelated menu edit. See resolveRoute() / #6323.
+let durableFilter = loadFilter();
+
 // The credential and the push stream are process-local singletons: one token
 // drives the REST resync fetch, the events WS, and the PTY stream; one events
 // stream is live at a time (started on connect, stopped on disconnect).
@@ -645,7 +653,7 @@ function resolveRoute(): void {
     lookup = !session && route !== null && store.get().archive.lazy && store.get().archive.total > 0;
     if (session?.id) {
       if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
-      setStatusFilter(operatorKind(session), true);
+      store.set({ statusFilter: withKind(durableFilter, operatorKind(session), true) });
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
@@ -832,7 +840,8 @@ function switchView(view: View): void {
  * keeps streaming, and the rail re-highlights it when its state is shown again.
  */
 function setStatusFilter(kind: OperatorKind, on: boolean): void {
-  const next = withKind(store.get().statusFilter, kind, on);
+  const next = withKind(durableFilter, kind, on);
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }
@@ -840,6 +849,7 @@ function setStatusFilter(kind: OperatorKind, on: boolean): void {
 /** Restores the default filter — every state but archived. */
 function resetStatusFilter(): void {
   const next = defaultFilter();
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }
