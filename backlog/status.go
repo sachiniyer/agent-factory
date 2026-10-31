@@ -180,7 +180,7 @@ func verb(s Status) string {
 
 func (b *Backlog) applyStatus(it *Item, to Status, now time.Time) {
 	if to != StatusRunning {
-		it.LiveAnswers = 0
+		it.resetLiveAnswers()
 	}
 	it.Status = to
 	it.UpdatedAt = now
