@@ -58,6 +58,12 @@ export class BodyEditor {
   private get draft(): string | null { return this.draftKey === undefined ? this.localDraft : getDraft<string>(this.draftKey); }
   private set draft(v: string | null) { if (this.draftKey === undefined) this.localDraft = v; else setDraft(this.draftKey, v); }
   private disposed = false;
+  // Counts the item's edits, shared with every editor of it like the draft: a save's
+  // acknowledgement covers the edit it carried only if no edit has been made since,
+  // whatever text that edit left (typing A, B, A again is three edits, not none).
+  private get rev(): number { return this.draftKey === undefined ? this.localRev : getDraft<number>(`${this.draftKey}\u0000rev`) ?? 0; }
+  private set rev(v: number) { if (this.draftKey === undefined) this.localRev = v; else setDraft(`${this.draftKey}\u0000rev`, v); }
+  private localRev = 0;
 
   /** `save` may return a promise that settles true once the write AND the refresh
    *  after it have landed; a plain void return acknowledges at once. */
@@ -104,6 +110,7 @@ export class BodyEditor {
   private changed(text: string): void {
     this.text = text;
     this.draft = text;
+    this.rev++;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.flush(), SAVE_DELAY_MS);
   }
@@ -113,9 +120,10 @@ export class BodyEditor {
     clearTimeout(this.timer);
     this.timer = null;
     const text = this.text;
+    const rev = this.rev;
     this.queue.submit(() => this.save(text), (ok) => {
-      // Newer typing has replaced the draft; only the edit this save carried is covered.
-      if (ok && this.draft === text) this.draft = null;
+      // Later typing has made a newer edit; only the edit this save carried is covered.
+      if (ok && this.rev === rev && this.draft === text) this.draft = null;
     });
   }
 

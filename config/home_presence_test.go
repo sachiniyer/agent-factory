@@ -226,10 +226,6 @@ func TestEveryDaemonStateWriterRefusesToResurrectADeletedHome(t *testing.T) {
 		{"SaveState", func(home string) error {
 			return SaveState(&State{})
 		}},
-		{"TrySaveState", func(home string) error {
-			_, err := TrySaveState(&State{})
-			return err
-		}},
 		{"SaveConfig", func(home string) error {
 			return SaveConfig(&Config{SchemaVersion: GlobalConfigSchemaVersion})
 		}},

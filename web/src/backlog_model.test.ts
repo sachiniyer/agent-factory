@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   type Backlog, type BacklogView, type Item, type ListOptions, type State,
   applyMove, dropMove, itemActions, keyboardMove, listRows, needsYouCount, needsYouLabel, neededBy, parseBacklogView, safeHttpUrl,
-  sessionItems, sources,
+  sessionItems, sessionItemsSig, sources,
 } from "./backlog_model.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
 
@@ -214,4 +214,11 @@ test("safeHttpUrl keeps http and https links only", () => {
 test("needsYouLabel agrees with its count", () => {
   assert.equal(needsYouLabel(1), "1 needs you");
   assert.equal(needsYouLabel(3), "3 need you");
+});
+
+test("a rebound project's chips are redrawn: the signature includes the root", () => {
+  const b = backlog(item(1, { runs: [{ session_id: "s1", title: "B-1 a", state: "started", prev_status: "queued", started_by: "user", started_at: "" }] }));
+  const at = (root: string): string => sessionItemsSig(sessionItems(new Map([[root, view(b)]])));
+  assert.notEqual(at("/old"), at("/new"));
+  assert.equal(at("/old"), at("/old"));
 });

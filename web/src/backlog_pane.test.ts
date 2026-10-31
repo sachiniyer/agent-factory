@@ -588,3 +588,15 @@ test("a reorder still in flight keeps the order and parents it made over a fresh
   assert.deepEqual(rowIds(pane), [1, 3, 2], "the move still shows");
   assert.match(row(pane, 1).textContent, /saved title/, "the fresh contents show through it");
 });
+
+test("an accepted note is not restored to the box when the read after it fails", async () => {
+  const pane = mount(host({ refresh: async () => false }));
+  pane.update(data({ "/a": view(item(1)) }), "/a", []);
+  pane.select(1);
+  const box = el(pane).querySelector('textarea[aria-label="Note"]')!;
+  box.value = "hello";
+  [...el(pane).querySelectorAll("button")].find((b) => b.textContent === "Add note")!.click();
+  await settle();
+  assert.equal(box.value, "", "the daemon has it; resending would duplicate it");
+  assert.equal(calls.filter((c) => c.method === "PostBacklogMessage").length, 1);
+});

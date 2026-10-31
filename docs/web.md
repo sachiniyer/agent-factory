@@ -78,12 +78,14 @@ Agents learn `af sessions attention --self` from the af skill, and run it only w
 they are blocked on a decision or question that only you can answer. The yellow
 circle clears when you submit a line in the agent pane, dismiss it with the **×** on
 the **Attention** chip in the session header, or when the agent starts work again
-after it went idle. Typing a draft or just viewing the tab does not clear it. While
+after it went idle. Typing a draft or just viewing the tab does not clear it. On a phone, a count on **Toggle sessions** shows how many *other* sessions need attention, and the open drawer says so in words ("1 session needs attention"), so you do not need hover to find out. While
 any session in the selected project needs attention, the browser tab's favicon also
 swaps its tile and mark colors every second, so you can see it from another tab.
 When your system asks for reduced motion, neither the circle nor the favicon blinks,
 the circle has a ring around it, the working spinner does not turn, and the chip's bell is still. The TUI rail does not show the
 request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
+
+When the browser loses its connection to the daemon (the event stream or the focused terminal's socket) for more than about two seconds, the pane header shows **Reconnecting…** with the time of the next retry, and the rail says the same on desktop. It is a static glyph plus words, with no animation, and it clears when the connection returns. Keystrokes typed meanwhile are queued, in order, and delivered on reconnect; only past a 64 KiB backlog does the terminal say "typing was not delivered".
 
 The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting
 on a limit · Broken · Archived**. Archived sessions start hidden. The filter applies inside the
@@ -504,10 +506,10 @@ How the target is rendered depends on whether it is **local** or **external**:
 
 - **Local (`--port`, `localhost`, `127.0.0.1`, `::1`):** the **daemon
   reverse-proxies** it under a same-origin path (`/v1/webtab/…`), and the web UI
-  iframes that. Because the daemon shares the machine with the dev server, the
-  preview works **even when you view the web UI remotely** (over Tailscale or an
-  SSH-forwarded port) — a raw `localhost` iframe would otherwise hit *your*
-  machine, not the daemon's. Same-origin also sidesteps the dev server's
+  iframes that. Because the daemon, not your browser, reaches the dev server,
+  the preview works **even when you view the web UI remotely** (over Tailscale
+  or an SSH-forwarded port) — a raw `localhost` iframe would otherwise hit
+  *your* machine, not the daemon's. Same-origin also sidesteps the dev server's
   `X-Frame-Options`. Only loopback targets are proxied — the daemon never proxies
   an external host, so it can't be turned into an open proxy.
 - **External (`https://…`):** the web UI iframes it **directly** (never through the
@@ -694,7 +696,7 @@ its own origin is what partitions that store.
 
 Two consequences worth knowing:
 
-- **Editor origins require a LOOPBACK, fixed preview port.** With
+- **`*.localhost` editor origins require a LOOPBACK, fixed preview port.** With
   `network.preview_listen_addr` bound to a network interface (or to an ephemeral `:0`), web
   tabs still get per-tab origins but **editors do not** — they stay on the same-origin
   mirror. On that listener the hostname is the only credential, and a remote client can
@@ -822,3 +824,30 @@ tab survives a restart and simply starts a new editor when you next open it.
 
 In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
 editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.
+
+### Docs tabs
+
+A **Docs tab** edits a proposal: a set of markdown docs that you and the agent
+write together. `af proposal start` and `af proposal attach` create it. From the
+CLI:
+
+```bash
+af sessions tab-create my-session --kind docs --proposal auth-rework
+```
+
+- The strip at the top has one tab for each doc. **+** adds a doc from a template
+  that the proposal does not use yet, or a blank doc.
+- The editor shows markdown rendered. The line with the cursor shows its source.
+  Callouts `> [!question]`, `> [!todo]` and `> [!decision]` each get a colour.
+- Your edits save 500 ms after you stop typing. The header shows "Saved",
+  "Saving…" or "Merged agent edits". The question count in the header goes to
+  the next open question, in any doc.
+- When the agent changes a doc that you have not edited, the tab reloads it and
+  keeps your cursor. When you both changed the same lines, a banner asks you to
+  keep yours, take the agent's, or show both. "Show both" puts both versions
+  between conflict markers, and autosave waits until you remove them. If you
+  close the tab or the page first, the doc saves with the markers in it, so no
+  edit is lost and the agent sees both sides.
+
+The editor loads the first time a Docs tab opens. In the **TUI** a Docs tab
+shows a placeholder.

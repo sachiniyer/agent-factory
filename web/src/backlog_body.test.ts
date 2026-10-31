@@ -202,3 +202,28 @@ test("a stale snapshot that matches the draft does not release it while a write 
   ed.setText("remote");
   assert.equal(text, "remote", "released once everything settled");
 });
+
+test("an acknowledgement does not clear a draft that was typed back to the acknowledged text", async () => {
+  const sent: string[] = [];
+  const finish: ((ok: boolean) => void)[] = [];
+  const ed = new BodyEditor((t) => { sent.push(t); return new Promise<boolean>((r) => { finish.push(r); }); }, "Body", "k3");
+  ed.setText("stored");
+  await settle();
+  change("A");
+  mock.timers.tick(SAVE_DELAY_MS);          // A is in flight
+  change("B");
+  mock.timers.tick(SAVE_DELAY_MS);          // B waits behind it
+  change("A");                              // the user's final edit is A again, unsaved
+  finish[0](true);                          // A's acknowledgement
+  await settle();
+  ed.setText("A");
+  assert.equal(text, "A");
+  ed.setText("B");                          // B's confirming snapshot must not replace the typing
+  assert.equal(text, "A", "the draft survived A's acknowledgement");
+  mock.timers.tick(SAVE_DELAY_MS);
+  finish[1]?.(true);
+  await settle();
+  finish[2]?.(true);
+  await settle();
+  assert.equal(sent.at(-1), "A", "the last write is the user's final edit");
+});

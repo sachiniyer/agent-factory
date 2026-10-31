@@ -75,7 +75,7 @@ they execute, while read-only listings like `af sessions list` deliberately
 do not spawn one — they fall back to disk. With `--daemon-url`/`AF_DAEMON_URL`,
 nearly every verb dials the remote daemon, which must already be running:
 `af sessions` (with a few per-verb exceptions), `af tasks`,
-`af projects add`/`rebind`/`delete`/`list`, `af quota`, and global `config`
+`af projects`, `af quota`, and global `config`
 writes all follow the target and never fall back to the local socket (see
 [remote daemons](cli.md#remote-daemons)).
 For interactive use you usually don't have to think about it at all.

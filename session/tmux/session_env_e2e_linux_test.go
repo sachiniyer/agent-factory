@@ -220,6 +220,9 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 	testguard.IsolateTmux(t)
 	forceNewSessionEnvMarkers(t, true)
+	// This process stands in for the daemon: it owns the capability the new
+	// windows claim, and serves the claim socket they connect to (#4731).
+	forceLaunchCapabilityOwner(t, true)
 
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)

@@ -501,3 +501,24 @@ func TestMeterPassRunWindowScopesSwappedRunToCurrentAccount(t *testing.T) {
 	require.InDelta(t, 2.0, usage.RunWindow["s-swapped"], 1e-9,
 		"a live run's window is scoped to its current account, not the sum of every bucket")
 }
+
+// No test can observe another test's metering pass: a pass a test starts is
+// joined when that test ends, before its AF home goes away (#6380).
+func TestBacklogTestServerJoinsItsMeteringPass(t *testing.T) {
+	var m *Manager
+	var released chan struct{}
+	t.Run("starts a pass", func(t *testing.T) {
+		cs, _ := newBacklogTestServer(t)
+		m = cs.manager
+		m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+		t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+		st := &m.backlog.meter
+		st.mu.Lock() // the pass blocks here, so it is still running when the test returns
+		released = make(chan struct{})
+		t.Cleanup(func() { st.mu.Unlock(); close(released) }) // runs before the server's join
+		m.startMeterPass()
+		require.True(t, st.inFlight.Load(), "the pass is in flight")
+	})
+	<-released
+	require.False(t, m.backlog.meter.inFlight.Load(), "the pass was joined before the test returned")
+}

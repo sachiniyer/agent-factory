@@ -660,8 +660,8 @@ inherit it. A local token is never copied to the SSH host implicitly.
 - An SSH server you can log into with a key, permitting **TCP forwarding**
   (`AllowTcpForwarding yes` — the default on most distros; the runtime reaches the
   remote agent-server through an SSH local-forward tunnel).
-- `git`, `tmux`, `sh`, and a platform af ships a binary for (Linux/Darwin on
-  amd64/arm64; the linux release artifact streamed to a host is a separate
+- `git`, `tmux` (3.2 or newer), `sh`, and a platform af ships a binary for
+  (Linux/Darwin on amd64/arm64; the linux release artifact streamed to a host is a separate
   static `CGO_ENABLED=0` build, so the host's libc is not a constraint there). The `af` binary is installed onto the remote for you — the
   daemon's own build on a same-platform host, the matching release artifact
   (`agent-factory-linux-<arch>-static` on linux) otherwise, always version-checked against the daemon — so there is nothing to
@@ -965,7 +965,13 @@ personalization af places in that same scope — read from the operator's own ag
 home on the daemon machine, written beside the synced credentials, one way, and
 removed with them. It applies only on a listed host and only to an account-scoped
 session; a repository can never set it. A copied codex `config.toml` is rewritten to
-the file credential store so it cannot override the session's account.
+the file credential store so it cannot override the session's account. A declared
+file af cannot place — missing, unreadable, not a regular file, unparsable, or
+pushing the placement archive over its 64 MiB bound — is skipped rather than
+failing the provision, and the
+skip is not silent: the session row carries one `agent:file: <reason>` entry per
+skipped file in `agent_config_skipped`, surfaced on `af sessions get`, the TUI row,
+and the web view until a later provision or account swap places every file.
 
 Not yet built: fanning a refresh out to every live session on the same account
 (providers that rotate refresh tokens log the others out), write-back on a timer or
@@ -973,24 +979,38 @@ after a daemon restart.
 
 ## Archive & restore
 
-For the disposable sandbox backends (`docker`, `ssh`, and `sandbox`), archive and restore
-are **push/pull of the session branch** — the durable workspace is the branch on
-GitHub (`origin`), not the sandbox:
+For the disposable sandbox backends (`docker`, `ssh`, and `sandbox`), a **push**
+archive (`docker`/`hook` by default; `ssh`/`sandbox` with `--push`) is **push/pull
+of the session branch** — the durable workspace is the branch on GitHub
+(`origin`), not the sandbox:
 
-- **Archive** (`af sessions archive`) pushes the session branch to `origin`, then
-  tears the sandbox down (reaps the container / removes the remote session dir +
-  closes the tunnel). The session record is preserved as an inert **Archived**
-  row — restorable, but consuming no container or remote process.
+- **Archive** (`af sessions archive` for `docker`/`hook`, or `af sessions
+  archive --push` for `ssh`/`sandbox`) pushes the session branch to `origin`,
+  then tears the sandbox down (reaps the container / removes the remote session
+  dir + closes the tunnel). The session record is preserved as an inert
+  **Archived** row — restorable, but consuming no container or remote process.
 - **Restore** (`af sessions restore`) re-provisions a **fresh** sandbox that
   clones the pushed branch back, restarts the `af agent-server`, and relaunches
   the agent. The session resumes from the pushed branch state.
 
-This is the same flow for every off-box backend (it is written once against the runtime
-seam), and it is why `docker`/`ssh`/`sandbox`/`hook` match `local` on the lifecycle
-capabilities — `Archive` and `Recover` are both supported. All four are declared
-off-box in one place (`backendProvisionsOffBox`), and all four share a single
-capability declaration, so none of them can differ from the others here without
-that being a deliberate change. Parity is not total: they declare
+The `ssh`/`sandbox` `af sessions archive` default instead **preserves the
+workspace on its host** (W8.5): the agent stops and the session directory is kept
+where it is — nothing is pushed, committed or reaped — and restore **reattaches**
+that workspace (W8.6), so the branch, worktree, index and ignored files come back
+exactly as archived. The agent resumes its conversation only when its provider
+store survives the archive: a session run under a synced account has that account
+directory removed on archive (the credential teardown the reap would do), so
+restore finds no transcript and starts a fresh conversation, while a session
+with no synced account keeps its provider store in place and resumes.
+
+The **push archive** is the same flow for every off-box backend (it is written once
+against the runtime seam); the preserve/reattach path is an `ssh`/`sandbox`-specific
+alternative *implementation* of the same capabilities. Either way
+`docker`/`ssh`/`sandbox`/`hook` match `local` on the lifecycle capabilities —
+`Archive` and `Recover` are both supported. All four are declared off-box in one
+place (`backendProvisionsOffBox`), and all four share a single capability
+declaration, so none of them can differ from the others in those capabilities
+without that being a deliberate change. Parity is not total: they declare
 `TabManagement` off (and `Handoff`, which an ssh or sandbox session's agent-server lifts when it advertises `agent-swap`). The static declaration is the floor: an
 off-box session whose agent-server advertises `tab-api` lifts `TabManagement` and
 serves shell and process tabs off-box too. Without that advertisement an off-box
@@ -1021,7 +1041,7 @@ sandbox it cannot reach.
 
 What the sandbox host needs, and what af does to it:
 
-- **Tools.** `git`, `tmux` and a POSIX `sh` on the
+- **Tools.** `git`, `tmux` (3.2 or newer) and a POSIX `sh` on the
   non-interactive `PATH` of the ssh login (af sends its provisioning scripts as
   one ssh argument that the remote login shell parses). The static `af` binary
   af copies over also has to run there: see the glibc rule under
@@ -1056,18 +1076,39 @@ What the sandbox host needs, and what af does to it:
   depends on the row:
   - **Reattach succeeds.** The row is live again with the same agent-server.
     Nothing is pushed, replaced or restarted.
+  - **The agent-server crashed but its host is still up** (the host answered
+    over a working transport but the agent-server did not, leaving the
+    worktree and tmux server the agent runs in alive). When the row recorded
+    its launch command and the host proves its recorded agent-server PID is
+    gone or has been reused by another program, the daemon reruns that
+    persisted command (the token and callback credential it sources are
+    unchanged, so the restarted process keeps the session's identity),
+    re-dials to the new port, and re-adopts the surviving workspace
+    through the ordinary restore path — the existing worktree is kept,
+    not re-cloned, so uncommitted and unpushed work on the host is
+    preserved either way. When the surviving tmux session reattaches a
+    live agent the agent is not re-run at all. When the tmux session is
+    gone, a row that recorded no exact conversation id respawns the agent
+    in that same workspace (re-running startup on a fresh conversation),
+    while a row that did is refused instead — af will not resume the
+    agent onto a guessed conversation — and stays needing attention.
+    A row that cannot be proven empty — no recorded
+    launch command or PID, the recorded PID still alive, or the host
+    cannot tell — is reported and left alone, so a slow agent-server is
+    never doubled.
   - **Reattach is not attempted or fails** (no persisted runtime identity, the
-    host does not answer, or the agent-server does not answer). The row stays
-    Lost and holds *no* agent-server client: it carries the "not provisioned"
-    sentinel (`ErrRemoteSandboxNotProvisioned`), which restore reads as
-    *absent* (`probeAbsent` in `daemon/restore.go` and `daemon/lostrestore.go`),
-    not as a sandbox that answered dead. Absent means replacement is
-    unconditional: the old runtime is torn down and a fresh sandbox is
-    provisioned from the session's branch on `origin`. **Nothing is pushed
-    first, so work the sandbox never pushed is not preserved on this path**;
-    only what already reached `origin` comes back. Provisioning needs the
-    host, so a host that is still unreachable fails that attempt and the row
-    stays Lost, but that is the provision failing, not a guard.
+    host does not answer, or the agent-server is not restartable above). The
+    row stays Lost and holds *no* agent-server client: it carries the "not
+    provisioned" sentinel (`ErrRemoteSandboxNotProvisioned`), which restore
+    reads as *absent* (`probeAbsent` in `daemon/restore.go` and
+    `daemon/lostrestore.go`), not as a sandbox that answered dead. Absent
+    means replacement is unconditional: the old runtime is torn down and a
+    fresh sandbox is provisioned from the session's branch on `origin`.
+    **Nothing is pushed first, so work the sandbox never pushed is not
+    preserved on this path**; only what already reached `origin` comes back.
+    Provisioning needs the host, so a host that is still unreachable fails
+    that attempt and the row stays Lost, but that is the provision failing,
+    not a guard.
   - **A live client sees the agent die** (no restart involved, or the row was
     reattached first). If the agent-server answers that the agent is gone, the
     sandbox is still there, so recovery (and a manual restore) pushes its work
@@ -1085,8 +1126,8 @@ archived session does not depend on a push at all.
 
 ### What survives, and what doesn't
 
-Because the sandbox is thrown away, **only what reaches `origin` survives** an
-archive:
+For a push archive (`docker`/`hook` by default, or `ssh`/`sandbox` with
+`--push`), the sandbox is thrown away, so **only what reaches `origin` survives**:
 
 - **Committed work** on the session branch is pushed, so it is fully preserved.
 - **Uncommitted work** is snapshotted into a WIP commit
@@ -1096,13 +1137,22 @@ archive:
   carry that WIP commit, commit your work yourself before archiving.
 - **The agent's conversation history** lived only in the disposed sandbox and is
   **not** restored — a fresh agent runs on the restored branch. (The `local`
-  backend, which relocates the worktree in place, does resume the conversation;
-  this is the one place the disposable model differs.)
+  backend, which relocates the worktree in place, does resume the conversation,
+  as does an `ssh`/`sandbox` session archived by default **whose provider store
+  survives the archive** — restore reattaches the preserved workspace and resumes
+  from the kept transcript (W8.5/W8.6). A default `ssh`/`sandbox` archive of a
+  session run under a synced account removes that account directory on archive,
+  so the transcript does not survive and restore starts a fresh conversation;
+  losing the history is otherwise the difference the push/clone flow has and the
+  preserve path does not.)
 
 ### Requirements
 
-The sandbox must be able to **push** to the repo's `origin` — the same remote it
-cloned from. For a real repo that means the container/remote has git credentials
-for `origin` (an HTTPS token or an SSH deploy key); for a self-contained test a
-read-write `file://` remote works. If the push fails, the archive fails and the
-session is left running (nothing is torn down), so no work is lost.
+A push archive (`docker`/`hook`, or `ssh`/`sandbox` with `--push`) needs the
+sandbox to **push** to the repo's `origin` — the same remote it cloned from. For
+a real repo that means the container/remote has git credentials for `origin` (an
+HTTPS token or an SSH deploy key); for a self-contained test a read-write
+`file://` remote works. If the push fails, the archive fails and the session is
+left running (nothing is torn down), so no work is lost. The `ssh`/`sandbox`
+default archive (W8.5) does not push — the workspace stays on its host — so it
+imposes no such requirement.

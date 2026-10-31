@@ -72,6 +72,21 @@ func tmuxSocketFilesystemDir() (string, error) {
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
 func (t *TmuxSession) Start(workDir string) error {
+	// A Start that fails AFTER its prepare step minted launch capabilities has
+	// nothing for them to belong to; one that succeeds installs them and retires
+	// what the session held before. A refusal at the existing-session gate minted
+	// nothing and leaves the live session's capability alone.
+	t.beginCapabilityPrepare()
+	err := t.start(workDir)
+	if err != nil {
+		t.revokePendingCapabilities()
+	} else {
+		t.commitCapabilities(true)
+	}
+	return err
+}
+
+func (t *TmuxSession) start(workDir string) error {
 	// A fresh attempt supersedes any earlier proof: whatever an aborted Start
 	// established about this name, it is about to be re-established or replaced.
 	t.setProvenNoPane(false)

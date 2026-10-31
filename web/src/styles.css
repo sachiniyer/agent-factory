@@ -1,4 +1,4 @@
-/* Product chrome uses the generated 24-token contract in tokens.css. */
+/* Product chrome uses the generated 27-token contract in tokens.css. */
 :root {
  --af-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, sans-serif;
  --af-font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -250,6 +250,32 @@ button:disabled,
   line-height: 1;
   cursor: pointer;
 }
+
+/* Other sessions asking for the user (#6405): the existing attention colour, as a
+ * count pill on the toggle. A number, not a blink, so reduced motion needs no
+ * separate fallback; the same state is also in words in the drawer and the label. */
+.af-nav-toggle { position: relative; }
+.af-nav-badge {
+  position: absolute;
+  top: calc(var(--af-space-1) / -2);
+  right: calc(var(--af-space-1) / -2);
+  min-width: calc(var(--af-space-3) + var(--af-space-1));
+  padding: 0 var(--af-space-1);
+  border-radius: var(--af-radius-control);
+  background: var(--af-attention);
+  color: var(--af-surface);
+  font-size: var(--af-type-caption);
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+}
+.af-nav-badge[hidden] { display: none; }
+.af-rail-attention {
+  padding: var(--af-space-1) var(--af-space-3);
+  color: var(--af-attention);
+  font-size: var(--af-type-body);
+}
+.af-rail-attention[hidden] { display: none; }
 
 .af-nav-toggle:hover {
   background: var(--af-surface-raised);
@@ -3845,22 +3871,30 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   }
 }
 
-/* Seven primary keys need 348px (7×44px targets + 4px gaps + padding). Below
-   that — the 320px phones the keybar still serves — the keys narrow to a 40px
-   floor so the whole row stays inside the viewport; the 44px height never
-   changes (#5380). layout() sets af-keybar-narrow from visualViewport.width —
-   a media query would read the layout viewport and miss a pinch zoom. The
-   bar's auto grid column would size the row to its max-content, so the track
-   is pinned too, letting flex-shrink actually engage. The floor is capped at
-   the row's fair share — (row width − six 4px gaps) ÷ 7 — so a viewport
-   narrower than 320px keeps fitting instead of clipping Arrows; at 320px and
-   up the share is ≥40px and the 40px floor governs. Without the class both
-   rules are inert. */
-.af-terminal-keybar.af-keybar-narrow { grid-template-columns: minmax(0, 1fr); }
+/* Seven 44px targets need 308px. Below 348px of visual viewport (the 320px phones
+   the keybar still serves) the bar's 4px gaps and 8px side padding no longer fit
+   them, so the narrow state trades that spacing — not the targets — for width:
+   1px gaps, 2px side padding, a caption-size label, and "More" for "More keys"
+   (terminal-keybar.ts; the accessible name stays "More keys"). 7×44 + 6×1 + 2×2
+   = 318px ≤ 320px (#6407; before, the keys shrank to a 40px floor and "Paste",
+   "Arrows" and "More keys" were ellipsised). layout() sets af-keybar-narrow from
+   visualViewport.width — a media query would read the layout viewport and miss
+   a pinch zoom. The bar's auto grid column would size the row to its
+   max-content, so the track is pinned too, letting flex-shrink engage. Under
+   320px (pinch-zoomed) the target is capped at the row's fair share so the row
+   still fits rather than clipping Arrows. Without the class every rule is inert. */
+.af-terminal-keybar.af-keybar-narrow {
+  grid-template-columns: minmax(0, 1fr);
+  gap: calc(var(--af-space-1) / 4);
+  padding-inline: max(calc(var(--af-space-1) / 2), env(safe-area-inset-left)) max(calc(var(--af-space-1) / 2), env(safe-area-inset-right));
+}
+.af-terminal-keybar.af-keybar-narrow .af-keybar-row { gap: calc(var(--af-space-1) / 4); }
 .af-terminal-keybar.af-keybar-narrow .af-keybar-row button {
   min-width: min(
-    calc(var(--af-space-4) + var(--af-space-3)),
-    calc((100% - 6 * var(--af-space-1)) / 7));
+    calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)),
+    calc((100% - 6 * var(--af-space-1) / 4) / 7));
+  padding-inline: 0;
+  font-size: var(--af-type-caption);
 }
 
 /* Focused phone sessions reserve one 48px chrome row and one 44px key row. */
@@ -4425,4 +4459,508 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
     border-left: none;
     padding: var(--af-space-3);
   }
+}
+
+/* Docs tab (proposal mode): a doc strip and status header over a markdown editor.
+ * The strip reuses the tab recipe (body ink, bold active tab with an accent
+ * underline). Callout colours are the three callout tokens, used only for the
+ * callout's left rule and its label. */
+.af-docs {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  background: var(--af-surface);
+  color: var(--af-ink);
+}
+
+.af-docs-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--af-space-1) var(--af-space-2);
+  padding: var(--af-space-1) var(--af-space-2);
+  border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  font-size: var(--af-type-body);
+}
+
+.af-docs-stripwrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: var(--af-space-1);
+}
+
+.af-docs-strip {
+  display: flex;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.af-docs-tab {
+  flex: 0 0 auto;
+  padding: var(--af-space-1) var(--af-space-2);
+  background: var(--af-surface);
+  color: var(--af-ink);
+  border: none;
+  border-bottom: calc(var(--af-space-1) / 2) solid transparent;
+  border-radius: 0;
+  font: inherit;
+  font-size: var(--af-type-body);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.af-docs-tab[aria-selected="true"] {
+  border-bottom-color: var(--af-accent);
+  font-weight: 600;
+}
+
+.af-docs-tab:focus-visible {
+  outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
+  outline-offset: calc(var(--af-space-1) * -0.5);
+}
+
+.af-docs-add,
+.af-docs-questions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-space-1);
+  padding: var(--af-space-1) var(--af-space-2);
+  font-size: var(--af-type-body);
+}
+
+.af-docs-add svg,
+.af-docs-questions svg {
+  width: var(--af-space-3);
+  height: var(--af-space-3);
+}
+
+.af-docs-questions svg {
+  color: var(--af-callout-question);
+}
+
+.af-docs-addwrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.af-docs-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: var(--af-z-popover);
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: calc(var(--af-space-3) * 10);
+  max-width: calc(var(--af-space-3) * 18);
+  padding: var(--af-space-1);
+  background: var(--af-surface-raised);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  border-radius: var(--af-radius-dialog);
+}
+
+.af-docs-docmenu {
+  top: 0;
+  gap: var(--af-space-1);
+}
+
+.af-docs-menu[hidden],
+.af-docs-status[hidden],
+.af-docs-questions[hidden],
+.af-docs-banner[hidden],
+.af-docs-notice[hidden],
+.af-docs-editor[hidden],
+.af-docs-menu-error[hidden] {
+  display: none;
+}
+
+.af-docs-menuitem {
+  padding: var(--af-space-1) var(--af-space-2);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+  border: none;
+  border-radius: var(--af-radius-control);
+  font: inherit;
+  font-size: var(--af-type-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.af-docs-menuitem:hover,
+.af-docs-menuitem:focus-visible {
+  outline: calc(var(--af-space-1) / 2) solid var(--af-accent);
+  outline-offset: calc(var(--af-space-1) * -0.5);
+}
+
+.af-docs-newform {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--af-space-2);
+  padding: var(--af-space-1);
+}
+
+.af-docs-newname {
+  flex: 1 1 calc(var(--af-space-3) * 8);
+  min-width: 0;
+  font-family: var(--af-font-mono);
+}
+
+.af-docs-menu-error {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--af-dead);
+  font-size: var(--af-type-body);
+}
+
+.af-docs-tools {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--af-space-2);
+  margin-left: auto;
+}
+
+.af-docs-slot:empty {
+  display: none;
+}
+
+/* The push switch and chip (proposal mode, step 3). The countdown has no
+ * animation: only its number changes, once a second. */
+.af-docs-push {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--af-space-1) var(--af-space-2);
+  min-width: 0;
+}
+
+.af-docs-push[hidden],
+.af-docs-chip-text[hidden],
+.af-docs-chip-action[hidden],
+.af-docs-push .af-docs-sep[hidden] {
+  display: none;
+}
+
+.af-docs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-space-1);
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.af-docs-chip-text {
+  font-variant-numeric: tabular-nums;
+}
+
+.af-docs-chip-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.af-docs-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-space-1);
+  flex: 0 4 auto;
+  color: var(--af-ink);
+  white-space: nowrap;
+}
+
+.af-docs-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.af-docs-status .af-icon {
+  display: none;
+  flex: none;
+  width: var(--af-space-3);
+  height: var(--af-space-3);
+  color: var(--af-ink-muted);
+}
+
+.af-docs-status:is([data-state="saving"], [data-state="pending"], [data-state="loading"]) .af-icon {
+  display: inline-block;
+  animation: af-working-spin 1s linear infinite; /* the keyframes are the working dot's, defined once above */
+}
+
+/* Reduced motion keeps the glyph and drops the spin. The selector repeats the
+ * animated rule's, or its higher specificity would win over this one. */
+@media (prefers-reduced-motion: reduce) {
+  .af-docs-status:is([data-state="saving"], [data-state="pending"], [data-state="loading"]) .af-icon { animation: none; }
+}
+
+.af-docs-status[data-state="conflict"],
+.af-docs-status[data-state="error"] {
+  color: var(--af-dead);
+}
+
+.af-docs-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--af-space-1);
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  font-size: var(--af-type-body);
+}
+
+.af-docs-banner-action {
+  padding: var(--af-space-1) var(--af-space-2);
+  font-size: var(--af-type-body);
+}
+
+.af-docs-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.af-docs-notice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--af-space-2);
+  padding: var(--af-space-3);
+  font-size: var(--af-type-body);
+}
+
+.af-docs-notice-text {
+  margin: 0;
+}
+
+.af-docs-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.af-docs-editor .cm-editor {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  background: var(--af-surface);
+  color: var(--af-ink);
+  font-size: var(--af-type-body);
+}
+
+.af-docs-editor .cm-editor.cm-focused {
+  outline: none;
+}
+
+.af-docs-editor .cm-scroller {
+  font-family: var(--af-font-ui);
+  line-height: 1.6;
+}
+
+.af-docs-editor .cm-content {
+  max-width: 80ch;
+  padding: var(--af-space-3);
+  caret-color: var(--af-ink);
+}
+
+.af-docs-editor .cm-line {
+  padding: 0;
+}
+
+.af-docs-editor .cm-cursor {
+  border-left-color: var(--af-ink);
+}
+
+.af-docs-editor .cm-md-h {
+  font-weight: 600;
+}
+
+.af-docs-editor .cm-md-h1 {
+  font-size: var(--af-type-display);
+}
+
+.af-docs-editor .cm-md-h2 {
+  font-size: var(--af-type-title);
+}
+
+.af-docs-editor .cm-md-h3 {
+  font-size: var(--af-type-heading);
+}
+
+.af-docs-editor .cm-md-em {
+  font-style: italic;
+}
+
+.af-docs-editor .cm-md-strong {
+  font-weight: 600;
+}
+
+.af-docs-editor .cm-md-strike {
+  text-decoration: line-through;
+}
+
+.af-docs-editor .cm-md-code,
+.af-docs-editor .cm-md-codeblock,
+.af-docs-editor .cm-md-table-source {
+  font-family: var(--af-font-mono);
+}
+
+.af-docs-editor .cm-md-code,
+.af-docs-editor .cm-md-codeblock {
+  background: var(--af-surface-raised);
+}
+
+.af-docs-editor .cm-md-link {
+  color: var(--af-accent);
+  text-decoration: underline;
+}
+
+.af-docs-editor .cm-md-bullet,
+.af-docs-editor .cm-md-listmark {
+  color: var(--af-ink);
+}
+
+.af-docs-editor .cm-md-quote {
+  padding-left: var(--af-space-2);
+  border-left: calc(var(--af-space-1) / 2) solid var(--af-border);
+}
+
+.af-docs-editor .cm-md-hr {
+  border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+}
+
+.af-docs-editor .cm-callout {
+  padding-left: var(--af-space-2);
+  border-left: var(--af-space-1) solid var(--af-border);
+}
+
+.af-docs-editor .cm-callout-first {
+  padding-top: var(--af-space-1);
+}
+
+.af-docs-editor .cm-callout-last {
+  padding-bottom: var(--af-space-1);
+}
+
+.af-docs-editor .cm-callout-question {
+  border-left-color: var(--af-callout-question);
+}
+
+.af-docs-editor .cm-callout-todo {
+  border-left-color: var(--af-callout-todo);
+}
+
+.af-docs-editor .cm-callout-decision {
+  border-left-color: var(--af-callout-decision);
+}
+
+.af-docs-editor .cm-callout-label {
+  margin-right: var(--af-space-2);
+  font-weight: 600;
+}
+
+.af-docs-editor .cm-callout-label-question {
+  color: var(--af-callout-question);
+}
+
+.af-docs-editor .cm-callout-label-todo {
+  color: var(--af-callout-todo);
+}
+
+.af-docs-editor .cm-callout-label-decision {
+  color: var(--af-callout-decision);
+}
+
+.af-docs-editor .cm-md-table-wrap {
+  overflow-x: auto;
+  padding: var(--af-space-1) 0;
+  cursor: text;
+}
+
+.af-docs-editor .cm-md-table {
+  border-collapse: collapse;
+  font-size: var(--af-type-body);
+}
+
+.af-docs-editor .cm-md-table th,
+.af-docs-editor .cm-md-table td {
+  padding: var(--af-space-1) var(--af-space-2);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.af-docs-editor .cm-md-table th {
+  background: var(--af-surface-raised);
+  font-weight: 600;
+}
+
+@media (max-width: 768px) {
+  .af-docs-tools {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    min-width: 0;
+    margin-left: 0;
+  }
+
+  .af-docs-editor .cm-content {
+    padding: var(--af-space-2);
+  }
+}
+
+/* A doc deleted under unsaved work stays in the strip, marked, until it is restored or discarded. */
+.af-docs-tab-gone {
+  font-style: italic;
+  color: var(--af-ink-muted);
+}
+
+/* "Reconnecting…" (#6430): shown only after a socket has been down for the grace
+ * period. Static glyph plus words in the existing "lost" colour: nothing animates,
+ * so reduced motion needs no separate fallback. */
+.af-term-conn {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--af-space-1);
+  padding: 0 var(--af-space-2);
+  border: calc(var(--af-space-1) / 4) solid var(--af-lost);
+  border-radius: var(--af-radius-control);
+  color: var(--af-lost);
+  font-size: var(--af-type-body);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.af-term-conn[hidden] { display: none; }
+.af-rail-conn {
+  padding: var(--af-space-1) var(--af-space-3);
+  color: var(--af-lost);
+  font-size: var(--af-type-body);
+}
+.af-rail-conn[hidden] { display: none; }
+@media (max-width: 768px) {
+  /* The compact row has no spare width, so while the chip shows it takes the
+   * title's slot (same order, same flex) instead of squeezing the title to "p…"
+   * or growing the header, which would shift the terminal and the keybar. */
+  .af-session-first .af-term-conn {
+    order: 1;
+    flex: 1 1 0;
+    min-width: 0;
+    justify-content: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0;
+    font-size: var(--af-type-caption);
+  }
+  .af-session-first .af-term-conn-glyph { display: none; }
+  .af-session-first .af-appbar:has(.af-term-conn:not([hidden])) .af-term-title { display: none; }
+  /* The rail copy is for the desktop rail; on a phone the header chip is the signal. */
+  .af-rail-conn { display: none; }
 }

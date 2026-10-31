@@ -27,7 +27,7 @@ export interface PanelActions {
   status(id: number, status: Status): void;
   remove(id: number): void;
   move(id: number, to: MoveTarget): void;
-  /** A promise settles true once the note and the refresh after it have landed; false when it was refused. */
+  /** A promise settles true once the daemon accepted the note (a failed read after it does not undo it); false when it was refused. */
   note(id: number, text: string): Promise<boolean> | void;
   addChild(parent: number, title: string): void;
   select(id: number): void;

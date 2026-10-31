@@ -216,6 +216,15 @@ type ProvisionResult struct {
 	// can render it rather than leaving the agent to discover af silently
 	// fails. Empty when a credential was delivered (or the kind injects none).
 	CallbackUnavailable string
+	// AgentConfigSkipped carries one "agent:file: <reason>" entry per declared
+	// sandbox_agent_config file the runtime could not place in the session's
+	// account scope (#6337, #5571 W7.7): missing, unreadable, non-regular,
+	// unparsable, or over agentConfigMaxFileBytes. Like CallbackUnavailable the
+	// provision deliberately still succeeded — a session missing personalization
+	// is more useful than none — but the row must name the skip on every
+	// surface rather than only in a daemon log the user never reads. Empty when
+	// every declared file landed (or none applied).
+	AgentConfigSkipped []string
 }
 
 // Runtime is the provision-and-expose seam (#1592 Phase 4 PR3): given a session
@@ -276,12 +285,15 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 // ParseBackendKind rejects those before they reach a runtime.
 func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
 
-// AccountWriteBackRationale is the single operator-facing reason ssh, sandbox
-// and hook cannot safely honour a writable credential account. It states only
+// AccountWriteBackRationale is the single operator-facing reason sandbox and
+// hook cannot safely honour a writable credential account. It states only
 // the guarantee af lacks, without asserting where a hook runs or which
-// mechanism could supply that guarantee.
+// mechanism could supply that guarantee. ssh no longer takes this rationale:
+// a host in the global host list carries the account through the synced
+// scope (W7.4), and an unlisted ssh target is refused by
+// listedHostAccountReason instead.
 const AccountWriteBackRationale = "An account is a writable agent home, so the agent writes refreshed " +
-	"authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come " +
+	"authentication back into it. For sandbox and hook, af cannot establish that those writes come " +
 	"back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also " +
 	"invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could " +
 	"break it."
@@ -305,12 +317,16 @@ const AccountWriteBackRationale = "An account is a writable agent home, so the a
 // including a refreshed token, land in the operator's real registry rather than
 // in a copy that teardown deletes.
 //
-// ssh, sandbox and hook answer false for AccountWriteBackRationale — NOT because
-// a copy is the only thing they could ever do. hook's launch_cmd may provision
+// ssh, sandbox and hook answer false for CarriesAccount — NOT because a copy
+// is the only thing they could ever do. hook's launch_cmd may provision
 // anything and only has to hand back an agent-server endpoint, so it could use
 // shared storage or even run on the daemon host; a mount-like transport for ssh
 // or sandbox would qualify too. What is missing is the guarantee, not the
-// possibility (#3103 review).
+// possibility (#3103 review). ssh's kind-level false stands beside the listed
+// host licence: a host the operator listed carries the account through the
+// synced scope the per-target accountCarried check admits, which is why ssh's
+// unlisted-target refusal names listedHostAccountReason rather than
+// AccountWriteBackRationale.
 //
 // Nor is this "every off-box kind": docker is off-box (backendProvisionsOffBox)
 // and answers TRUE, so off-box is the wrong axis to reason on here.

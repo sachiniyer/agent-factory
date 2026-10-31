@@ -157,14 +157,15 @@ export class BacklogPane {
     if (this.root) this.write(run);
   }
 
-  /** Settles true once the write and the refresh after it have landed, false when the write failed. */
-  private write(run: (token: string) => Promise<unknown>): Promise<boolean> {
+  /** Settles true once the write and the refresh after it have landed, false when the write failed;
+   *  `appendOnly` writes (a note) settle true as soon as the daemon accepted them, since resending one duplicates it. */
+  private write(run: (token: string) => Promise<unknown>, appendOnly = false): Promise<boolean> {
     const token = this.host.token();
     if (token === null) return Promise.resolve(false);
     const root = this.root ?? undefined;
     // True only when the refresh after the write also read the project: an edit is
     // acknowledged by a snapshot that carries it, not by a failed read that kept the old one.
-    return run(token).then(() => this.host.refresh(root), (e: unknown) => {
+    return run(token).then(() => appendOnly ? this.host.refresh(root).then(() => true) : this.host.refresh(root), (e: unknown) => {
       this.host.notify(errorText(e));
       return this.host.refresh(root).then(() => false);
     });
@@ -441,7 +442,8 @@ export class BacklogPane {
       move: (id: number, to: MoveTarget) => {
         if (here()) this.move(id, to);
       },
-      note: (id: number, text: string) => this.write((t) => addNote(root, id, text, t)),
+      // A note is appended once the daemon accepts it, whether or not the read after it landed.
+      note: (id: number, text: string) => this.write((t) => addNote(root, id, text, t), true),
       addChild: (parent: number, title: string) => this.write((t) => addItem(root, { title, parent }, t)),
       select: (id: number) => this.select(id, root),
       close: () => {

@@ -72,6 +72,11 @@ anything. Do not proxy this socket to a network interface.
     default on loopback; point `network.listen_addr` at a routable host:port). The
     listener is plain HTTP — front it with a TLS-terminating proxy or a private
     network. Both are covered in [Remote daemon access](remote-http-auth.md).
+    The TCP listener answers only requests whose `Host` names this daemon
+    (`localhost`, loopback IPs, its own address, or a `network.allowed_hosts` entry) and
+    refuses any other with `421 Misdirected Request` before routing — see
+    [Host names the daemon answers to](remote-http-auth.md#host-names-the-daemon-answers-to).
+    The Unix socket has no such check: a browser cannot reach it.
 
 ## Response envelope
 
@@ -173,9 +178,8 @@ legitimately sends fields the daemon has never heard of. Fields are additive and
 never renamed, so ignoring an unknown one is always safe, whereas rejecting it
 would turn every version skew into a hard failure.
 
-The bundled web UI does not send the header and is decoded strictly. Its service
-worker and an already-open tab can outlive a daemon restart, so request fields that
-need legacy support are emitted conditionally. In particular,
+The bundled web UI sends the header too and is decoded leniently. Its service
+worker and an already-open tab can outlive a daemon restart, so
 `RestoreSession.expected_daemon_boot_id` is sent only after a Snapshot supplies a
 `boot_id`; a current daemon refuses a mismatch before restore admission, while a
 legacy Snapshot keeps the older request shape.
@@ -285,6 +289,17 @@ not list. They fall into three groups:
   it is off. Its handlers are `net/http/pprof`'s, mounted with the same `GET`-only
   method qualification the stdlib uses. See
   [Profiling the daemon](dev/daemon-memory.md#profiling-the-daemon).
+
+**Reading a session's screen.** `PreviewSession` takes
+`{ "id": "<session-id>", "lines": <1-40> }` and returns `{ "text": "…" }`: the last
+`lines` lines (default 40) of the session's agent tab as plain text. Escape sequences
+and control characters other than newline and tab are removed, and trailing blank
+rows are dropped. It is read only and sits behind the same authentication as every
+other route; it does not accept the scoped sandbox credential. `id` is the session's
+stable id (`id` in a `Snapshot` row); a title does not resolve. An unknown id, an
+archived session, a session that is not running, and one being deleted are errors,
+never empty text. For other tabs, scrollback, or raw escapes, use
+`af sessions preview`.
 
 **Response shapes.** These are not part of the generated request-field catalog,
 so they are documented here. `CreateSession` returns `{ "instance": <session> }`;
@@ -532,6 +547,23 @@ or there is no delivery evidence yet), not "all clear".
 The vocabulary can grow. Treat an unknown value as no reason — the TUI and web
 rows render no idle-reason label for values they don't know, so an older client
 never mislabels a newer daemon's observation.
+
+### Session warnings
+
+Session objects also carry daemon-projected warnings as additive,
+omitted-when-empty fields. Two are single strings — `archive_warning` (an
+incomplete archive's bounded notice) and `callback_unavailable` (why the session
+has no af callback) — and one is a list:
+
+**`agent_config_skipped`** (array of strings, omitted when empty) — one
+`agent:file: <reason>` entry per declared [`sandbox_agent_config`](backends.md#ssh-backend)
+file the session's account-scope placement refused: missing, unreadable, not a
+regular file, unparsable, or pushing the placement archive over its 64 MiB
+bound. Recorded at provision and
+refreshed by every reprovision and account swap that stages a scope, so a clean
+placement clears it and the row never warns about a file the live scope now
+holds. Every surface renders the joined entries under the `af agent config
+skipped:` prefix.
 
 ## Examples
 

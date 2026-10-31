@@ -43,6 +43,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -327,6 +328,15 @@ type scanContext struct {
 	tmuxNames   []string
 	tmuxErr     error
 	tmuxScanned bool
+	// The run's ONE AMBIENT tmux session listing, memoized by
+	// ambientTmuxSessions. Distinct from tmuxNames: the pinned listing is the
+	// one a name's absence corroborates a kill against, while this one only
+	// feeds the rm -rf home guards through unionLiveTmuxHomes — a stale home's
+	// live session can sit on a socket other than the recorded one, and the
+	// union can only over-preserve a home, never over-remove one.
+	tmuxAmbientNames   []string
+	tmuxAmbientErr     error
+	tmuxAmbientScanned bool
 	// daemons memoizes the run's daemon scan (see daemonProcs); daemonsScanned
 	// distinguishes "scanned, found none" from "not scanned yet".
 	daemons        []daemonProc
@@ -363,6 +373,14 @@ type scanContext struct {
 	autostartInstalled bool
 	autostartScopeErr  error
 	autostartScoped    bool
+	// The daemon's recorded tmux server socket, memoized once per run so the
+	// session listing, pane-tree capture, and home-marker reads all pin to
+	// the server that actually hosts this home's sessions — not the one
+	// doctor's own $TMUX/$TMUX_TMPDIR resolves. See recordedSocket.
+	recordedServerState         tmux.ServerState
+	recordedServerStateOK       bool
+	recordedServerStateErr      error
+	recordedServerStateResolved bool
 }
 
 // applyDefaults resolves every zero-valued option to its production default.

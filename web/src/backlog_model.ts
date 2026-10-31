@@ -235,6 +235,12 @@ export function sources(b: Backlog): string[] {
   return [...new Set(b.items.map((it) => it.source?.proposal ?? "").filter(Boolean))];
 }
 
+/** What a rail chip draws and navigates by: a change in any part redraws it. The project
+ *  root is part of it, since a rebound project keeps its items' ids and titles. */
+export function sessionItemsSig(items: ReadonlyMap<string, SessionItem>): string {
+  return JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title, it.root]));
+}
+
 export function sessionItems(views: ReadonlyMap<string, BacklogView>): Map<string, SessionItem> {
   const out = new Map<string, SessionItem>();
   for (const [root, v] of views) {

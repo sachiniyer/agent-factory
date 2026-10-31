@@ -25,6 +25,9 @@ var readWrapperMethods = map[string]bool{
 	// workspace and counts: no side effects, so a replayed request measures again
 	// (#5571 W8.2).
 	"WorkspaceFacts": true,
+	// Health is GET /v1/health: the daemon's Ping snapshot, read-only. The web
+	// listener notice polls it (#6386).
+	"Health": true,
 }
 
 // TestReadWrapperCallsOnlyReads parses the package's production source and

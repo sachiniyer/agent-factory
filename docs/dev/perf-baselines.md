@@ -96,8 +96,10 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1209337.000 | 1209337.000–1209337.000 | 0.000 | 1269803.850 |
-| gzip_bytes | 276027.000 | 276027.000–276027.000 | 0.000 | 289828.350 |
+| raw_bytes | 1234144.000 | 1234144.000–1234144.000 | 0.000 | 1295851.200 |
+| gzip_bytes | 281155.000 | 281155.000–281155.000 | 0.000 | 295212.750 |
+| lazy_raw_bytes | 368912.000 | 368912.000–368912.000 | 0.000 | 387357.600 |
+| lazy_gzip_bytes | 119387.000 | 119387.000–119387.000 | 0.000 | 125356.350 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -123,9 +125,19 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
 
+### Lazy bundle provenance (proposal Docs tab)
+
+The Docs tab (proposal mode, step 2) ships its CodeMirror editor as
+`web/dist/lazy/docs-editor.js`, a separate esbuild build that `af-web.js` imports
+only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
+`lazy_*` entries measure it on its own, with the same 5% margin. Both lazy values
+were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
+`report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
+so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,149,376 raw and 260,459 gzip bytes over `web/dist` without `lazy/`. Both are inside the existing shell budgets (raw 1,182,374; gzip 268,549), so those baselines are not moved. Lazy bundle: 368,912 raw / 119,387 gzip.
+
 ### Bundle refresh provenance (#6297)
 
-Master's committed bundle is 1,126,071 raw / 255,761 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,209,337 raw / 276,027 gzip, +82,433 raw / +19,993 gzip. The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the daemon stack branch (#6295) and master, which carry the attention-dot rail work (#5581). Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
+Master's committed bundle is 1,159,036 raw / 262,733 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,234,144 raw / 281,155 gzip, +75,108 raw / +18,422 gzip (the shell metrics; the lazy Docs editor is unchanged by this PR). The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the daemon stack branch (#6295) and master, which carry the attention-dot rail work (#5581). Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6289)
 
