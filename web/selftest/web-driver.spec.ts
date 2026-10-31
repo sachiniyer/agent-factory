@@ -1527,7 +1527,7 @@ test("sidebar lists the seeded sessions from the Snapshot/events plane", REAL_FI
   await expect(page.locator(".af-app")).toHaveAttribute("data-live", "open");
 });
 
-test("status semantics (#1766, #3220): action groups are legible and glyphs stay static", REAL_FIXTURE, async ({
+test("status semantics (#1766, #3220): action groups are legible and only the working glyph spins", REAL_FIXTURE, async ({
   browser,
 }) => {
   // The daemon can't be coerced to Running/Lost/Dead/Limit on demand, so pin the
@@ -1603,7 +1603,11 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(p.locator(".af-rail-list .af-operator-state")).toHaveCount(0);
   const workingDot = row(p, "probe-working").locator(".af-dot");
   await expect(workingDot).toHaveClass(/af-dot-working/);
-  await expect(workingDot.locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
+  await expect(workingDot.locator('.af-icon[data-icon="loader-circle"]')).toHaveCount(1);
+  expect(
+    await workingDot.locator(".af-icon").evaluate((el) => getComputedStyle(el).animationName),
+    "the working glyph spins",
+  ).toBe("af-working-spin");
   await expect(row(p, "probe-working")).toHaveClass(/af-row-operator-working/);
   // An idle Ready row is blank, but keeps its fixed status cell so titles align.
   await expect(row(p, "probe-needs-you").locator(".af-dot")).toHaveCount(0);
@@ -1625,6 +1629,12 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await expect(promptBroken.locator(".af-idle-reason")).toContainText("prompt not delivered");
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
   // Error/terminal states keep distinct STATIC shapes.
+  for (const title of ["probe-lost", "probe-dead", "probe-limit", "probe-broken-prompt"]) {
+    expect(
+      await row(p, title).locator(".af-dot .af-icon").evaluate((el) => getComputedStyle(el).animationName),
+      `${title} glyph is static`,
+    ).toBe("none");
+  }
   await expect(row(p, "probe-lost").locator('.af-icon[data-icon="circle-dashed"]')).toHaveCount(1);
   await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
   await expect(row(p, "probe-lost")).toHaveClass(/af-row-operator-broken/);
@@ -12925,7 +12935,10 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
         playState: animation.playState,
       };
     };
-    const animations = rail.getAnimations({ subtree: true });
+    // The working spinner and attention blink repeat forever and never finish.
+    const animations = rail
+      .getAnimations({ subtree: true })
+      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity);
     const waitedAnimations = animations.map(describeAnimation);
     await Promise.allSettled(animations.map((animation) => animation.finished));
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -12954,7 +12967,10 @@ async function settledMobileDrawerGeometry(p: Page, title: string) {
       appOpen: app?.classList.contains("af-nav-open") ?? false,
       toggleExpanded: toggle?.getAttribute("aria-expanded") ?? null,
       waitedAnimations,
-      remainingAnimations: rail.getAnimations({ subtree: true }).map(describeAnimation),
+      remainingAnimations: rail
+        .getAnimations({ subtree: true })
+        .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+        .map(describeAnimation),
       rail: {
         connected: rail.isConnected,
         rect: rect(rail),

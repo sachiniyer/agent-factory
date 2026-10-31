@@ -117,8 +117,8 @@ test("liveness → dot kind follows render.go's TOTAL switch", () => {
     [Liveness.Dead, "dead", "circle"],
     [Liveness.Archived, "archived", "archive"],
     [Liveness.LimitReached, "limit", "diamond"],
-    [Liveness.Running, "working", "circle"],
-    [Liveness.Unset, "working", "circle"], // stray zero renders like Running (render.go:297)
+    [Liveness.Running, "working", "loader-circle"],
+    [Liveness.Unset, "working", "loader-circle"], // stray zero renders like Running (render.go:297)
   ];
   for (const [lv, kind, icon] of cases) {
     const st = rowStatus(sess({ liveness: lv }));
@@ -133,7 +133,7 @@ test("an idle Ready row is blank; a working row draws a circle", () => {
   assert.equal(isWorking(sess({ liveness: Liveness.Ready })), false);
   assert.equal(isWorking(sess({ liveness: Liveness.Lost })), false);
   assert.equal(rowDot(sess({ liveness: Liveness.Ready })), null);
-  assert.deepEqual(rowDot(sess({ liveness: Liveness.Running })), { icon: "circle", kind: "working" });
+  assert.deepEqual(rowDot(sess({ liveness: Liveness.Running })), { icon: "loader-circle", kind: "working" });
 });
 
 test("a Ready row whose idle reason is Broken or a limit keeps a glyph", () => {
