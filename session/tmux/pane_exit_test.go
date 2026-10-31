@@ -517,7 +517,7 @@ func TestProbePaneExitRefusesAnAccountScopedDefaultCommandSplit(t *testing.T) {
 	// The account-scoped default command prepareLaunchEnvironment installs:
 	// a sessionenv-wrapped interactive account shell — marker present, but
 	// the last word is the shell, not the recorded program "true".
-	defaultShell := "/usr/bin/af " + sessionenv.AccountEnvironmentExecMarker + " codex 0 work '' 0 /bin/sh"
+	defaultShell := "/usr/bin/af " + sessionenv.AccountEnvironmentExecMarker + " /tmp/af-claim/claim.sock tok /bin/sh"
 	split := paneState{deaths: "1", tty: "/dev/pts/3", stampCmd: defaultShell, startCmd: defaultShell}
 	ts := NewTmuxSessionWithDeps("pane-exit-account-split", "true", nil,
 		deadPaneExec(t, strconv.Itoa(gone), strconv.Itoa(gone)+":0:/dev/pts/3", split, "7", "", "1726000000", nil))

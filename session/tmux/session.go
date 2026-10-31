@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -311,6 +312,10 @@ type TmuxSession struct {
 	// (#6258). Guarded by programMu with the other launch settings. Empty for
 	// sessions that are not an instance's agent (siblings, login panes).
 	instanceID string
+
+	// capabilityMints counts launch capabilities this session has minted, so a
+	// failed Start can tell whether its own prepare step ran (#4731).
+	capabilityMints atomic.Int64
 	// account is the credential account this session runs its agent as, or empty
 	// for the ambient identity. Guarded by programMu with envPassthrough (#3051).
 	account string

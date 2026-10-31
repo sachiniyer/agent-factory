@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 )
 
 type captureLaunchEnvPty struct {
@@ -239,8 +240,8 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(wrapped, sessionenv.AccountEnvironmentExecMarker) || !strings.Contains(wrapped, "work") {
-		t.Fatalf("process sibling launch is not scoped to the parent account: %q", wrapped)
+	if !strings.Contains(wrapped, sessionenv.AccountEnvironmentExecMarker) {
+		t.Fatalf("process sibling launch is not scoped through the account boundary: %q", wrapped)
 	}
 	for _, name := range []string{"CODEX_HOME", "OPENAI_API_KEY"} {
 		if !slices.Contains(imports, name) {
@@ -272,8 +273,8 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(wrapped, sessionenv.AccountEnvironmentExecMarker) || !strings.Contains(wrapped, "work") {
-		t.Fatalf("shell sibling launch is not scoped to the parent account: %q", wrapped)
+	if !strings.Contains(wrapped, sessionenv.AccountEnvironmentExecMarker) {
+		t.Fatalf("shell sibling launch is not scoped through the account boundary: %q", wrapped)
 	}
 	for _, name := range []string{"CODEX_HOME", "OPENAI_API_KEY"} {
 		if !slices.Contains(imports, name) {
@@ -296,8 +297,9 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if got, ok := launchEnvironmentValue(shellSessionEnv, "CODEX_HOME"); !ok || got != accountDir {
 		t.Fatalf("shell sibling session CODEX_HOME = %q, %v; want selected root %q", got, ok, accountDir)
 	}
-	if shellDefault != wrapped {
-		t.Fatalf("account shell default window command = %q, want initial scoped shell %q", shellDefault, wrapped)
+	// Same shell, but its own per-pane capability: the initial pane's is single-use.
+	if shellDefault == wrapped || !strings.HasSuffix(shellDefault, " "+shellquote.Quote(shell.Program())) {
+		t.Fatalf("account shell default window command = %q, want the scoped shell with its own capability (initial %q)", shellDefault, wrapped)
 	}
 }
 

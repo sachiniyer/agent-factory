@@ -206,7 +206,23 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 // "" form leaves that check open for callers that only need the launch
 // pieces an absolute-inside-tree answer cannot change (account session env,
 // the scoped default command).
-func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string, []string, []string, string, error) {
+//
+// An account-scoped launch mints its launch capabilities here (#4731): the
+// pane's command carries only where to claim and a bearer token, and the shim
+// runs what the CAPABILITY admitted, not what its own argv or environment say.
+// A failed prepare revokes what it minted.
+func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (wrapped string, launchEnv, importNames, sessionEnv []string, defaultCommand string, err error) {
+	// A prepare supersedes the previous one: the per-pane capability a restored
+	// session's default-command still names is replaced, never accumulated.
+	revokeLaunchCapabilities(t.sanitizedName)
+	wrapped, launchEnv, importNames, sessionEnv, defaultCommand, err = t.prepareLaunchEnvironmentMinting(workDir)
+	if err != nil {
+		revokeLaunchCapabilities(t.sanitizedName)
+	}
+	return wrapped, launchEnv, importNames, sessionEnv, defaultCommand, err
+}
+
+func (t *TmuxSession) prepareLaunchEnvironmentMinting(workDir string) (string, []string, []string, []string, string, error) {
 	program, proof, extra, account, accountAgent, accountEnvironmentOnly, loginEnv := t.launchSnapshot()
 	source := os.Environ()
 	// Two different questions, two classifiers: the credential GRANT is bound
@@ -263,11 +279,10 @@ func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string
 				"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
 					"and af refuses rather than starting the session on the ambient account", account)
 		}
-		if accountEnvironmentOnly {
-			wrapped, err = sessionenv.WrapAccountEnvironmentCommand(executable, accountAgent, account, extra, program)
-		} else {
-			wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, proof, extra, program)
-		}
+		wrapped, err = t.wrapClaimedLaunch(executable, launchSpec{
+			agent: accountAgent, account: account, command: program, extras: extra,
+			proof: proof, environmentOnly: accountEnvironmentOnly,
+		})
 	} else {
 		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
 	}
@@ -322,17 +337,31 @@ func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string
 			if err != nil {
 				return "", nil, nil, nil, "", err
 			}
-			defaultCommand, err = sessionenv.WrapAccountEnvironmentCommand(
-				executable, accountAgent, account, extra, defaultProgram,
-			)
-			if err != nil {
-				return "", nil, nil, nil, "", err
-			}
-		} else {
-			defaultCommand = wrapped
+		}
+		// The initial pane's capability is one-shot; the default-command runs for
+		// every later window, so it gets its own per-pane one.
+		defaultCommand, err = t.wrapClaimedLaunch(executable, launchSpec{
+			agent: accountAgent, account: account, command: defaultProgram, extras: extra,
+			environmentOnly: true, perPane: true,
+		})
+		if err != nil {
+			return "", nil, nil, nil, "", err
 		}
 	}
 	return wrapped, launchEnv, importNames, sessionEnv, defaultCommand, nil
+}
+
+// wrapClaimedLaunch mints spec's capability and returns the pane command that
+// claims it.
+func (t *TmuxSession) wrapClaimedLaunch(executable string, spec launchSpec) (string, error) {
+	socket, token, err := t.mintLaunchCapability(spec)
+	if err != nil {
+		return "", err
+	}
+	if spec.environmentOnly {
+		return sessionenv.WrapAccountEnvironmentCommand(executable, socket, token, spec.command)
+	}
+	return sessionenv.WrapAccountCommand(executable, socket, token, spec.command)
 }
 
 func accountSessionBoundaryNames(agent string) []string {
