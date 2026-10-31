@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,9 +41,50 @@ type meterState struct {
 	finished time.Time
 	usage    planusage.Usage
 
+	// pendingDirs are run directories recorded at a start but not yet saved to
+	// meter.json: a start that finds a pass running leaves them here, and the pass
+	// (or the next one) saves them. Dropping one would leave a killed session's
+	// spend unmetered for good.
+	pendingMu   sync.Mutex
+	pendingDirs map[string][]string
+
 	inFlight atomic.Bool
 	startMu  sync.Mutex
 	started  time.Time
+}
+
+func (s *meterState) addPending(sessionID string, dirs []string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if s.pendingDirs == nil {
+		s.pendingDirs = map[string][]string{}
+	}
+	s.pendingDirs[sessionID] = append([]string(nil), dirs...)
+}
+
+// applyPending puts the pending directories into state and returns what it
+// applied, for clearPending once state is saved.
+func (s *meterState) applyPending(state *planusage.MeterState) map[string][]string {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	applied := make(map[string][]string, len(s.pendingDirs))
+	for id, dirs := range s.pendingDirs {
+		state.RememberRunDirs(id, dirs)
+		applied[id] = dirs
+	}
+	return applied
+}
+
+// clearPending forgets what a successful save has made durable; a record added
+// again meanwhile stays.
+func (s *meterState) clearPending(applied map[string][]string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	for id, dirs := range applied {
+		if cur, ok := s.pendingDirs[id]; ok && slices.Equal(cur, dirs) {
+			delete(s.pendingDirs, id)
+		}
+	}
 }
 
 func (s *meterState) due(now time.Time) bool {
@@ -139,8 +181,8 @@ func (m *Manager) itemSessionTranscriptDirs() []string {
 
 // rememberItemRunDirs records where a new item session's transcripts will be,
 // right after its start is committed and before it can be archived (which moves
-// the worktree they are derived from). It skips when a pass is running: that
-// pass, or the next, records them from the live session.
+// the worktree they are derived from). When a pass is running the record waits
+// in memory, and that pass or the next saves it: a record is never dropped.
 func (m *Manager) rememberItemRunDirs(repoID, sessionID string) {
 	if !m.planUsageOn() {
 		return
@@ -153,19 +195,28 @@ func (m *Manager) rememberItemRunDirs(repoID, sessionID string) {
 	if err != nil {
 		return
 	}
+	m.rememberRunDirs(sessionID, dirs)
+}
+
+// rememberRunDirs queues the directories and saves them now unless a pass holds
+// the meter.
+func (m *Manager) rememberRunDirs(sessionID string, dirs []string) {
 	st := &m.backlog.meter
+	st.addPending(sessionID, dirs)
 	if !st.mu.TryLock() {
-		return
+		return // a pass is running: it or the next one saves the pending record
 	}
 	defer st.mu.Unlock()
 	state, err := planusage.LoadMeter()
 	if err != nil {
 		return
 	}
-	state.RememberRunDirs(sessionID, dirs)
+	applied := st.applyPending(state)
 	if err := state.Save(); err != nil {
 		m.warn().Printf("plan meter: %v", err)
+		return
 	}
+	st.clearPending(applied)
 }
 
 // accountOfRun is the account key a run's cost is incurred under: the account of
@@ -239,6 +290,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		m.warn().Printf("plan meter: %v", err)
 		return
 	}
+	appliedDirs := st.applyPending(state)
 	usage := planusage.Usage{Runs: map[string]float64{}, RunWindow: map[string]float64{}, Unmeterable: map[string]string{}, Accounts: map[string]planusage.AccountUsage{}}
 	runAccount := map[string]string{}
 	updates := map[string]map[string]map[string]backlog.Meter{}
@@ -361,6 +413,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		m.warn().Printf("plan meter: %v", err)
 		return
 	}
+	st.clearPending(appliedDirs)
 	failed := false
 	for repoID, meters := range updates {
 		if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
