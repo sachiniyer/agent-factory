@@ -624,3 +624,45 @@ func TestErrBoxRenderedStatusBarFitsContractMeasure(t *testing.T) {
 		})
 	}
 }
+
+// A standing condition (#6386: the daemon's web listener is unbound) stays on
+// the bar until retracted, yields to a notice while one is up, never lands in
+// the retained slot `E details` reads, and never overflows the bar.
+func TestErrBoxStandingConditionPersistsAndYieldsToNotices(t *testing.T) {
+	e := NewErrBox()
+	e.SetSize(60, 1)
+	e.SetStanding("web UI not served: 127.0.0.1:8443 is not bound")
+
+	if got := stripANSI(e.String()); !strings.Contains(got, "web UI not served") {
+		t.Fatalf("standing text missing from the bar: %q", got)
+	}
+	// Expire is what fades a transient notice; the standing text must outlive it.
+	e.Expire()
+	if got := stripANSI(e.String()); !strings.Contains(got, "web UI not served") {
+		t.Fatalf("standing text must survive Expire: %q", got)
+	}
+	if text, _ := e.RetainedNotice(); text != "" {
+		t.Fatalf("standing text must not be retained for `E details`, got %q", text)
+	}
+
+	e.SetNotice(errors.New("session created"))
+	if got := stripANSI(e.String()); !strings.Contains(got, "session created") || strings.Contains(got, "web UI") {
+		t.Fatalf("a notice must take the bar over the standing text: %q", got)
+	}
+	e.Expire()
+	if got := stripANSI(e.String()); !strings.Contains(got, "web UI not served") {
+		t.Fatalf("standing text must return when the notice fades: %q", got)
+	}
+
+	e.SetSize(20, 1)
+	for _, line := range strings.Split(e.String(), "\n") {
+		if w := runewidth.StringWidth(stripANSI(line)); w > 20 {
+			t.Fatalf("standing line width %d exceeds the bar (20): %q", w, line)
+		}
+	}
+
+	e.SetStanding("")
+	if got := strings.TrimSpace(stripANSI(e.String())); got != "" {
+		t.Fatalf("retracted standing text must leave the bar empty, got %q", got)
+	}
+}

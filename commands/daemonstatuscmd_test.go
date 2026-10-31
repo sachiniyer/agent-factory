@@ -509,3 +509,33 @@ func TestPrintDaemonStatusHumanMarksUnverifiablePID(t *testing.T) {
 		"a live af daemon with an unproven home is inconclusive, not stale-unverified")
 	require.NotContains(t, got, "(verified)")
 }
+
+// #6386: the README sends a first-run user to the web listener's address. When
+// the bind failed, `af daemon status` must say that URL is not served and what
+// to do, not just "(not bound …)".
+func TestPrintDaemonStatusHumanUnboundWebListenerSaysNotServed(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	printDaemonStatusHuman(cmd, daemonStatusInfo{
+		Running: true,
+		Listeners: &daemon.DaemonListenerStatus{
+			HTTPUnixBound: true,
+			TCPConfigured: true,
+			TCPListenAddr: "127.0.0.1:8443",
+			TCPBindError:  "listen tcp 127.0.0.1:8443: bind: address already in use",
+			BindRetrying:  true,
+		},
+	})
+	got := out.String()
+	for _, want := range []string{
+		"address already in use",
+		"web UI:       not served at http://127.0.0.1:8443",
+		"network.listen_addr",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status output missing %q:\n%s", want, got)
+		}
+	}
+}

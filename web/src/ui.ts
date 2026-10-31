@@ -44,6 +44,8 @@ import {
   agentConfigSkippedText,
   archiveWarningText,
   attentionReason,
+  attentionWords,
+  otherAttentionCount,
   hasAttention,
   callbackUnavailableText,
   canHandoff,
@@ -1176,6 +1178,9 @@ export class AppShell {
 
   // Drawer state is local UI ephemera; closing it restores session-first chrome.
   private readonly navToggle: HTMLButtonElement;
+  /** Count pill on the drawer toggle, and the words line in the drawer (#6405). */
+  private readonly navBadge: HTMLElement;
+  private readonly railAttention: HTMLElement;
   private readonly navScrim: HTMLElement;
   private navOpen = false;
 
@@ -1246,6 +1251,10 @@ export class AppShell {
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
+    this.navBadge = h("span", { class: "af-nav-badge" });
+    this.navBadge.setAttribute("aria-hidden", "true");
+    this.navBadge.hidden = true;
+    this.navToggle.append(this.navBadge);
 
     // Share one MediaQueryList so app-controls closes its old layout before
     // syncPhone reparents the session controls.
@@ -1344,10 +1353,13 @@ export class AppShell {
     this.connNotice.hidden = true;
     this.railConn = h("div", { class: "af-rail-conn", role: "status" });
     this.railConn.hidden = true;
+    this.railAttention = h("div", { class: "af-rail-attention" });
+    this.railAttention.setAttribute("role", "status");
+    this.railAttention.hidden = true;
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railConn, this.railList);
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railConn, this.railAttention, this.railList);
 
     this.main = h("section", { class: "af-main" });
     // The drawer scrim: a tap-to-dismiss layer over the terminal while the mobile rail
@@ -1470,6 +1482,7 @@ export class AppShell {
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
+    this.patchNavAttention(state);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -3083,6 +3096,21 @@ export class AppShell {
     this.connNotice.setAttribute("aria-label", words.full);
     this.connNotice.title = words.full;
     if (this.railConn.textContent !== words.full) this.railConn.textContent = words.full;
+  }
+
+  /** Surface other sessions' attention requests without opening the drawer: a count
+   *  on the toggle, the state in words on the toggle's label and at the top of the
+   *  drawer (#6405). Words, not hover: a touch screen has no hover. */
+  private patchNavAttention(state: AppState): void {
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const count = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
+    const words = attentionWords(count);
+    this.navBadge.hidden = count === 0;
+    if (this.navBadge.textContent !== String(count)) this.navBadge.textContent = count ? String(count) : "";
+    this.navToggle.setAttribute("aria-label", words ? `Toggle sessions, ${words}` : "Toggle sessions");
+    this.navToggle.toggleAttribute("data-attention", count > 0);
+    this.railAttention.hidden = count === 0;
+    if (this.railAttention.textContent !== words) this.railAttention.textContent = words;
   }
 
   private patchMainHead(state: AppState): void {

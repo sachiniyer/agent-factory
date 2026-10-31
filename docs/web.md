@@ -78,7 +78,7 @@ Agents learn `af sessions attention --self` from the af skill, and run it only w
 they are blocked on a decision or question that only you can answer. The yellow
 circle clears when you submit a line in the agent pane, dismiss it with the **×** on
 the **Attention** chip in the session header, or when the agent starts work again
-after it went idle. Typing a draft or just viewing the tab does not clear it. While
+after it went idle. Typing a draft or just viewing the tab does not clear it. On a phone, a count on **Toggle sessions** shows how many *other* sessions need attention, and the open drawer says so in words ("1 session needs attention"), so you do not need hover to find out. While
 any session in the selected project needs attention, the browser tab's favicon also
 swaps its tile and mark colors every second, so you can see it from another tab.
 When your system asks for reduced motion, neither the circle nor the favicon blinks,
