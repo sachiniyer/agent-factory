@@ -14,7 +14,10 @@ func TestTaskEditorRendersLeadingZeroEveryNHoursAsPreset(t *testing.T) {
 	for _, size := range []struct {
 		width  int
 		height int
-	}{{width: 80, height: 24}, {width: 72, height: 20}} {
+		// Both sizes must leave the rail room to draw an item row — the
+		// rail is unfocusable when it cannot (#6317), and this test reaches
+		// the editor through it. 72x20 is compact (width < 80).
+	}{{width: 80, height: 24}, {width: 80, height: 20}} {
 		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
 			h := newTestHome(t)
 			tasks := []task.Task{{

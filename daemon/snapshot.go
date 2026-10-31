@@ -52,7 +52,12 @@ type SnapshotRequest struct {
 	// a request that sets none of them is answered exactly as before, and a daemon
 	// that predates them ignores them and answers with every row, so a client
 	// that asked for LazyArchive detects the absence of ArchivedTotal in the reply
-	// and treats the rows it got as the complete list.
+	// and treats the rows it got as the complete list. That ignores-them fallback
+	// is the daemon's tolerant-decode branch (daemon/httpserver.go decodeHTTPRequest),
+	// which applies only to a request carrying agentproto.ClientVersionHeader — the
+	// path every af client (TUI/CLI/web) takes. A header-less (strict) caller instead
+	// 400s with `unknown field "…"` (#1273), so the additive contract is the header's
+	// to buy, not a property of the wire shape alone.
 
 	// LazyArchive asks for the live (non-archived) rows only, with ArchivedTotal
 	// and ArchivedByProject standing in for the archived rows left out — counted
@@ -667,9 +672,22 @@ func onlyOwnedBySandbox(instances []session.InstanceData, owner string) []sessio
 // reflectively so a newly populated field has to be an explicit decision.
 //
 // What is included is the agent's own operational state: who it is, what it is
-// running, what state it is in. What is excluded is anything describing the HOST,
-// anything about other sessions, and the conversation/prompt payloads a sandbox
-// already has locally and does not need served back.
+// running, what state it is in. What is excluded is anything describing the
+// daemon HOST'S LAYOUT — the absolute repository path, the worktree, the tmux
+// session name — anything about other sessions, and the conversation/prompt
+// payloads a sandbox already has locally and does not need served back.
+//
+// Host is deliberately NOT here. This projection is shared by the Snapshot path
+// (projectRowsForSandbox), which projects EVERY session in the owner's project,
+// not only the one just created: a sibling session's Host is an operator-chosen
+// listed-host alias that this sandbox did not supply, so returning it here would
+// leak operator host picks across sessions and would contradict the classCaller
+// rationale (caller text is what THIS sandbox sent). The picked host is preserved
+// ONLY by the create-specific projection (projectSandboxCreateResponse), where the
+// row is the session the sandbox itself just started with --host, and the create's
+// post-create guard (api/sessions.go) audits what came BACK against that pick.
+// Withholding it from ordinary snapshots does not reintroduce the version-skew
+// failure, because the guard reads the create response, not Snapshot.
 //
 // Program is deliberately NOT here: it is text the sandbox itself supplied (a full
 // command, possibly naming a path), the sandbox does not need it served back, and

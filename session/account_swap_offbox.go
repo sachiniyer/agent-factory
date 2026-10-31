@@ -243,8 +243,11 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 	}
 	// The rotation replaces the whole live scope with this one, so the operator's
 	// selected agent config (model settings, MCP, instructions) is placed here too,
-	// before the agent restarts, as it was at provision.
-	if err := w.syncAgentConfigInto(timeout, w.NextAccountDir()); err != nil {
+	// before the agent restarts, as it was at provision. The upload can be tens of
+	// MiB (agentConfigMaxFileBytes is per file), so it gets the provision-scale
+	// budget the provision call site already passes — not the caller's 30-second
+	// control-step deadline, under which a valid config cannot cross a slow link.
+	if err := w.syncAgentConfigInto(sshProvisionStepTimeout, w.NextAccountDir()); err != nil {
 		return nil, err
 	}
 	return versions, nil
