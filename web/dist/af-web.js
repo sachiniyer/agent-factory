@@ -7035,7 +7035,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "7543a273c4c0";
+var CLIENT_VERSION = "05de1ee5c38e";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -17665,6 +17665,14 @@ function hostSelection(touched, current, seed) {
 
 // src/connection.ts
 var RECONNECT_GRACE_MS = 2e3;
+function connectionInput(state) {
+  return {
+    live: state.live,
+    liveRetryAt: state.liveRetryAt,
+    termStatus: state.selectedId === null ? "open" : state.termStatus,
+    termRetryAt: state.selectedId === null ? null : state.termRetryAt
+  };
+}
 function isDown(input) {
   return input.live === "reconnecting" || input.termStatus === "reconnecting";
 }
@@ -18674,6 +18682,9 @@ var AppShell = class {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose() {
     window.clearInterval(this.idleAgeTimer);
+    if (this.connTimer !== null) window.clearInterval(this.connTimer);
+    this.connTimer = null;
+    this.connState = null;
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
@@ -19963,7 +19974,7 @@ var AppShell = class {
    *  needs no fallback. The 1s tick runs only while a drop is in progress. */
   patchConnection(state) {
     this.connState = state;
-    const down = isDown(state);
+    const down = isDown(connectionInput(state));
     if (!down) {
       this.connDownSince = null;
     } else if (this.connDownSince === null) {
@@ -19979,7 +19990,7 @@ var AppShell = class {
   }
   renderConnection() {
     const state = this.connState;
-    const notice = state ? connectionNotice(state, this.connDownSince, Date.now()) : null;
+    const notice = state ? connectionNotice(connectionInput(state), this.connDownSince, Date.now()) : null;
     const words = notice ? connectionWords(notice) : null;
     this.connNotice.hidden = !words;
     this.railConn.hidden = !words;

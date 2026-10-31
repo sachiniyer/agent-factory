@@ -23,6 +23,18 @@ export interface ConnectionNotice {
   retryInS: number | null;
 }
 
+/** The connection facts out of an app state. The PTY socket only counts while a
+ *  session is selected: deselecting (switching project, for one) disposes the
+ *  terminal without it ever reporting recovery, so its last status is stale. */
+export function connectionInput(state: ConnectionInput & { selectedId: string | null }): ConnectionInput {
+  return {
+    live: state.live,
+    liveRetryAt: state.liveRetryAt,
+    termStatus: state.selectedId === null ? "open" : state.termStatus,
+    termRetryAt: state.selectedId === null ? null : state.termRetryAt,
+  };
+}
+
 /** Is any watched socket in its reconnect loop? `connecting` is the first
  *  connect, not a drop, and `exited` is a finished PTY, so neither counts. */
 export function isDown(input: ConnectionInput): boolean {

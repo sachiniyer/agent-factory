@@ -21,7 +21,7 @@ import { renderMutationOutcome, recoveryScreen, scopeRecovery, type MutationOutc
 
 import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
-import { connectionNotice, connectionWords, isDown } from "./connection.js";
+import { connectionInput, connectionNotice, connectionWords, isDown } from "./connection.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
 import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, applyTerminalTitle, applyTerminalPlacement, actionsDisclosure, placeMenu } from "./components.js";
@@ -1399,6 +1399,11 @@ export class AppShell {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose(): void {
     window.clearInterval(this.idleAgeTimer);
+    // The reconnect countdown tick would otherwise outlive a shell that is dropped
+    // mid-outage (logout, auth failure), retaining its DOM and last snapshot.
+    if (this.connTimer !== null) window.clearInterval(this.connTimer);
+    this.connTimer = null;
+    this.connState = null;
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
@@ -3052,7 +3057,7 @@ export class AppShell {
    *  needs no fallback. The 1s tick runs only while a drop is in progress. */
   private patchConnection(state: AppState): void {
     this.connState = state;
-    const down = isDown(state);
+    const down = isDown(connectionInput(state));
     if (!down) {
       this.connDownSince = null;
     } else if (this.connDownSince === null) {
@@ -3069,7 +3074,7 @@ export class AppShell {
 
   private renderConnection(): void {
     const state = this.connState;
-    const notice = state ? connectionNotice(state, this.connDownSince, Date.now()) : null;
+    const notice = state ? connectionNotice(connectionInput(state), this.connDownSince, Date.now()) : null;
     const words = notice ? connectionWords(notice) : null;
     this.connNotice.hidden = !words;
     this.railConn.hidden = !words;

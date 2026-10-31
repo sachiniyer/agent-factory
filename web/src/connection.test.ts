@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { connectionNotice, connectionWords, isDown, nextRetryAt, RECONNECT_GRACE_MS } from "./connection.js";
+import { connectionInput, connectionNotice, connectionWords, isDown, nextRetryAt, RECONNECT_GRACE_MS } from "./connection.js";
 
 const up = { live: "open", termStatus: "open" };
 
@@ -37,4 +37,13 @@ test("the words name the retry time only when one is scheduled (#6430)", () => {
   assert.equal(connectionWords({ down: true, retryInS: 4 }).full, "Reconnecting… retry in 4s");
   assert.equal(connectionWords({ down: true, retryInS: null }).full, "Reconnecting…");
   assert.equal(connectionWords({ down: true, retryInS: 4 }).retry, "retry in 4s");
+});
+
+test("a stale PTY status is ignored once no session is selected (#6434 review)", () => {
+  const stale = { live: "open", termStatus: "reconnecting", termRetryAt: 12_000, selectedId: null as string | null };
+  assert.equal(isDown(connectionInput(stale)), false);
+  assert.equal(connectionNotice(connectionInput(stale), 0, 10_000), null);
+  assert.equal(isDown(connectionInput({ ...stale, selectedId: "abc" })), true);
+  // The event stream still counts with nothing selected.
+  assert.equal(isDown(connectionInput({ ...stale, live: "reconnecting" })), true);
 });
