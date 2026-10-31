@@ -159,7 +159,7 @@ Shapes:
   `""`. Detach, and an attach that moves the session to another slug, close the
   old Docs tabs first. When that close fails, the request fails and the
   attachment does not change, so a retry closes them.
-- `docs` in `StartProposal` is a list of doc names. Empty means all five
+- `docs` in `StartProposal` is a list of doc names. Empty means all
   built-in templates.
 - `author` is `human`, `agent` or `external`. `agent` needs `session_id`, and
   the commit records that session. The Docs tab sends `human`.
