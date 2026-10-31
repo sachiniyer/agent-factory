@@ -65,6 +65,22 @@ func TestGuidanceFollowsTheCapabilityProjection(t *testing.T) {
 			selfArchive := tc.caps.Archive && !tc.callbackUnavailable
 			assert.Equal(t, selfArchive, strings.Contains(ref, "archive --self"), "self-archive")
 			assert.Equal(t, !tc.callbackUnavailable, strings.Contains(ref, "af sessions whoami"), "callback verbs")
+
+			// The proposal and backlog routes admit no sandbox credential
+			// (TestSandboxScopeTableIsPinned in daemon), so only an agent in a
+			// local worktree, which calls af over the host's own socket, is
+			// taught their verbs or given the proposal skill.
+			hostStores := !tc.callbackUnavailable && tc.caps.Workspace == WorkspaceLocalWorktree
+			g := guidanceCapsFor(tc.callbackUnavailable, tc.caps)
+			for _, verb := range []string{"af proposal start", "af backlog list", "af backlog add --file", "af backlog done --self", "af backlog ask --self"} {
+				assert.Equal(t, hostStores, strings.Contains(ref, verb), "%s", verb)
+			}
+			assert.Equal(t, hostStores, len(pluginSkills(g)) > 0, "the proposal skill")
+			if !hostStores && !tc.callbackUnavailable {
+				assert.NotContains(t, ref, "\n\n\n", "a dropped section must take its separating blank line with it")
+				assert.Contains(t, ref, "manage its login autostart.\n\nRoot-agent configuration", "tasks then root agent, one blank line")
+				assert.Contains(t, ref, "no code changes\".\n\nAsking for the user:", "body then attention, one blank line")
+			}
 		})
 	}
 }
@@ -80,6 +96,9 @@ func TestInSandboxInstanceRendersFromTheRemoteProjection(t *testing.T) {
 	assert.False(t, caps.Shell, "the daemon refuses shell tabs on a remote workspace")
 	assert.True(t, caps.VSCode, "the host runs the editor for a remote workspace (W5.4)")
 	assert.True(t, caps.Web, "an external HTTPS web tab works on a remote workspace")
+	assert.False(t, caps.HostStores, "the sandbox credential reaches no proposal or backlog route")
+	assert.NotContains(t, caps.Reference(), "af backlog")
+	assert.NotContains(t, caps.Reference(), "af proposal")
 
 	local := (&Instance{}).guidanceCaps()
 	assert.Equal(t, fullGuidanceCaps, local)
@@ -112,15 +131,17 @@ func TestGuidanceVariantsNeverShareAFile(t *testing.T) {
 			for _, sh := range []bool{false, true} {
 				for _, w := range []bool{false, true} {
 					for _, vs := range []bool{false, true} {
-						g := guidanceCaps{Callback: cb, SelfArchive: sa, Shell: sh, Web: w, VSCode: vs}
-						if !cb && g != noCallbackGuidanceCaps {
-							continue // no callback renders one doc whatever else is set
+						for _, hs := range []bool{false, true} {
+							g := guidanceCaps{Callback: cb, SelfArchive: sa, Shell: sh, Web: w, VSCode: vs, HostStores: hs}
+							if !cb && g != noCallbackGuidanceCaps {
+								continue // no callback renders one doc whatever else is set
+							}
+							k := g.key()
+							if prev, dup := seen[k]; dup {
+								t.Fatalf("variants %+v and %+v share key %q", prev, g, k)
+							}
+							seen[k] = g
 						}
-						k := g.key()
-						if prev, dup := seen[k]; dup {
-							t.Fatalf("variants %+v and %+v share key %q", prev, g, k)
-						}
-						seen[k] = g
 					}
 				}
 			}
