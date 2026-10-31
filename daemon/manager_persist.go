@@ -428,7 +428,23 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 			normalized.State != git.RelocationRecoveryCleanupFinalizing) {
 		return fmt.Errorf("persisted cleanup recovery normalized to non-admissible state %q", normalized.State)
 	}
-	return gw.ValidateRelocationCleanupAdmission()
+	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+		return err
+	}
+	// ValidateRelocationCleanupAdmission runs on a throwaway GitWorktree built
+	// from this row. When it discharges an identity-qualified cleanup_ready record
+	// whose archived directory is conclusively absent (no alternate), the
+	// discharge lives only in the throwaway. Propagate it to the row the ghost
+	// kill is about to tombstone and clean up, so ghost cleanup settles the
+	// missing path instead of refusing on a record the admission already proved
+	// guards nothing — and so the tombstone persists the discharged record-free
+	// state instead of stranding a cleanup_ready row forever (#5102). Without
+	// this, the ghost kill would have no live instance to retry through and the
+	// discharged admission would leave the durable record untouched.
+	if _, _, stillUnresolved := gw.RelocationSnapshot(); !stillUnresolved {
+		data.Worktree.RelocationRecovery = nil
+	}
+	return nil
 }
 
 var ghostCleanupWorktree = func(

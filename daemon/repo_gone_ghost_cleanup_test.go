@@ -124,6 +124,40 @@ func TestKillSession_GhostCleanupReadyRevalidatesBeforeTombstone(t *testing.T) {
 	assert.Nil(t, recordFor(t, repoID, "ghost-ready"), "successful ghost cleanup must consume the durable row")
 }
 
+// TestKillSession_GhostCleanupReadyOverAbsentArchiveAdmitsAndSettles is the
+// ghost end-to-end regression for the repo-gone cleanup_ready strand: a
+// cleanup_ready ghost whose archived directory was deleted outside af must
+// still be killable. Before the fix the ghost admission refused pre-tombstone
+// on the same ENOENT wrapped in ErrRelocateStateUnknown, and a ghost has no
+// live instance for finishUserKill to retry, so the row was permanently
+// undeletable (#5102). The admission must now discharge the throwaway record
+// and propagate the discharge to the row, so the kill writes a record-free
+// tombstone and the cleanup settles the missing path.
+func TestKillSession_GhostCleanupReadyOverAbsentArchiveAdmitsAndSettles(t *testing.T) {
+	manager, repoID := newCleanupReadyGhost(t, "ghost-ready-absent")
+	// readRepoInstanceData projects through ForStorage, so the disk
+	// cleanup_ready record reads back as its inert claim-stale projection — the
+	// same projection the existing GhostCleanupReadyRevalidatesBeforeTombstone
+	// test loads and admits. The record must carry a relocation recovery handle;
+	// the admission decodes it back to cleanup_ready before validating.
+	record := recordFor(t, repoID, "ghost-ready-absent")
+	require.NotNil(t, record)
+	require.NotNil(t, record.Worktree.RelocationRecovery,
+		"setup must persist a relocation recovery handle")
+	archivePath := record.Worktree.WorktreePath
+	require.True(t, exists(archivePath), "the archived directory starts intact")
+	require.NoError(t, os.RemoveAll(archivePath),
+		"the archived directory is deleted outside af during the cleanup_ready window")
+	cleanupCalls := stubGhostWorktree(t, sessiongit.CleanupSettled, nil)
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-ready-absent", RepoID: repoID})
+	require.NoError(t, err,
+		"a cleanup_ready ghost over a conclusively absent archive must discharge and let the kill settle")
+	assert.Equal(t, 1, *cleanupCalls, "an admitted cleanup-ready ghost must reach its claimed cleanup")
+	assert.Nil(t, recordFor(t, repoID, "ghost-ready-absent"),
+		"the settled ghost kill must consume the permanently-stuck row")
+}
+
 // The #3206 companion the success-path test above cannot provide (#3225): the
 // pre-tombstone revalidation must actually refuse when the origin has returned.
 // A persisted cleanup-ready row can outlive its authorization — the origin path
@@ -439,6 +473,52 @@ func TestValidateGhostCleanupAdmission_RestoresArchiveRollbackRecoveryFirst(t *t
 
 	require.NoError(t, validateGhostWorktreeDestructionAdmission(&stored),
 		"current admission must decode cleanup_ready before interpreting the projected state")
+}
+
+// TestValidateGhostCleanupAdmission_AbsentArchiveDischargesCleanupReady pins the
+// ghost half of the repo-gone cleanup_ready strand fix: a cleanup_ready ghost
+// whose archived directory was deleted outside af has nothing left for the
+// authorization to delete. validateGhostWorktreeDestructionAdmission runs
+// ValidateRelocationCleanupAdmission on a throwaway GitWorktree, so the
+// discharge would live only in the throwaway; the admission must propagate it
+// to the row the ghost kill is about to tombstone and clean up, or the ghost
+// kill would write a tombstone over a still-cleanup_ready row and strand it
+// forever (a ghost has no live instance for finishUserKill to retry) (#5102).
+func TestValidateGhostCleanupAdmission_AbsentArchiveDischargesCleanupReady(t *testing.T) {
+	root := t.TempDir()
+	archive := filepath.Join(root, "archive")
+	require.NoError(t, os.Mkdir(archive, 0o755))
+	repoPath := filepath.Join(root, "missing-repo")
+	recovery := preparedCleanupRecovery(t, repoPath, archive, "ghost-ready-absent")
+	require.NoError(t, os.RemoveAll(archive),
+		"the archived directory is deleted outside af during the cleanup_ready window")
+
+	originalExternal := false
+	originalBranchCreated := true
+	originalStartupUnknown := false
+	branchCreated := true
+	data := session.InstanceData{
+		ID: "ghost-ready-absent-id", Title: "ghost-ready-absent",
+		Status: session.Archived, Liveness: session.LiveArchived, BackendType: "local",
+		Worktree: session.GitWorktreeData{
+			RepoPath: repoPath, WorktreePath: archive, SessionName: "ghost-ready-absent",
+			BranchName: "af/ghost-ready-absent", BranchCreatedByUs: &branchCreated,
+			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
+				State: sessiongit.RelocationRecoveryCleanupReady, IdentityKnown: true,
+				Device: recovery.Device, Inode: recovery.Inode, FileType: recovery.FileType,
+				CleanupGeneration:        recovery.CleanupGeneration,
+				OriginalExternalWorktree: &originalExternal, OriginalBranchCreatedByUs: &originalBranchCreated,
+				OriginalStartupStateUnknown: &originalStartupUnknown,
+			},
+		},
+	}
+	stored := data.ForStorage()
+	require.NotNil(t, stored.Worktree.RelocationRecovery,
+		"setup must persist a cleanup_ready record")
+	require.NoError(t, validateGhostWorktreeDestructionAdmission(&stored),
+		"a cleanup_ready ghost over a conclusively absent archive must discharge at admission")
+	assert.Nil(t, stored.Worktree.RelocationRecovery,
+		"the discharge must propagate to the persisted row so ghost cleanup settles the absent path")
 }
 
 func retainedProjectionFixture(root string) *sessiongit.ArchiveReport {
