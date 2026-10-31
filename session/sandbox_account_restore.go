@@ -50,5 +50,5 @@ func (p *sandboxProvisioner) restoreAccountWorkspace(account restoredAccount, ho
 	p.spec.Account = acct
 	p.spec.Program = account.Program
 	p.spec.AccountSyncHost = host
-	p.account = &sandboxWorkspace{shell: p, spec: p.spec, SessionDir: p.sessionDir}
+	p.account = &sandboxWorkspace{shell: p, spec: p.spec, SessionDir: p.sessionDir, restored: true}
 }

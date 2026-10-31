@@ -417,9 +417,11 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	// AccountSyncHost — durable in the row — is the licence that provision set both
 	// under. Reusing the admission snapshot (rather than re-opening the config here)
 	// closes the race where a read failure between admission and the swap silently
-	// stages a bare scope and reproduces the bug. The gate leaves a freshly
-	// provisioned workspace's provision-time selection untouched.
-	if len(w.spec.AgentConfigFiles) == 0 && strings.TrimSpace(w.spec.AccountSyncHost) != "" {
+	// stages a bare scope and reproduces the bug. The restored gate leaves a
+	// freshly provisioned workspace's provision-time selection untouched — even
+	// an explicitly empty one, so enabling the global setting later never pushes
+	// new files onto an old host (Codex P2 on this PR).
+	if w.restored && len(w.spec.AgentConfigFiles) == 0 && strings.TrimSpace(w.spec.AccountSyncHost) != "" {
 		w.spec.AgentConfigFiles = append([]string(nil), agentConfigFiles...)
 	}
 	res := OffBoxAccountSwap{From: w.spec.Account.Name, To: next.Name}

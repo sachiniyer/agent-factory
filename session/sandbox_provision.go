@@ -57,6 +57,15 @@ type sandboxWorkspace struct {
 	// only — a process with no baseline writes nothing back.
 	syncedVersion map[string]string
 
+	// restored marks a workspace rebuilt from the session row by
+	// restoreAccountWorkspace after a daemon restart rather than provisioned
+	// this process's life: its spec carries only the durable fields the row
+	// kept, so AgentConfigFiles is empty even when provision had a selection —
+	// which an off-box swap may re-derive (#6322). A freshly provisioned
+	// workspace is never restored, so its (possibly empty) provision-time
+	// selection stays untouched.
+	restored bool
+
 	// SessionDir is the mktemp'd per-session dir on the target; the workspace,
 	// binary, and banner all live under it, so one `rm -rf` reaps the session.
 	SessionDir string

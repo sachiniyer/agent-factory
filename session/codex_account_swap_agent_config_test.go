@@ -76,7 +76,12 @@ func TestCodexAgentConfigSurvivesFreshSwap(t *testing.T) {
 	p := &sandboxProvisioner{sessionDir: dir}
 	p.runCommandFn = localShell{}.Run
 	acct := sessionenv.Account{Agent: tmux.ProgramCodex, Name: "work", Dir: workDir}
-	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", Program: tmux.ProgramCodex}}
+	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{
+		Account: acct, AccountSyncHost: "box1", Program: tmux.ProgramCodex,
+		// Provision records the operator's selection on the spec; the swap
+		// stages it from there, never by re-reading the global config.
+		AgentConfigFiles: []string{"codex:config.toml"},
+	}}
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 
@@ -102,6 +107,65 @@ func TestCodexAgentConfigSurvivesFreshSwap(t *testing.T) {
 	assert.Contains(t, got, "cli_auth_credentials_store = 'file'", "file credential store forced through the swap")
 	assert.NotContains(t, got, "keyring")
 	assert.Equal(t, secretAlt, readOrEmpty(filepath.Join(dir, "account", codexCredFile)), "codex credential swapped in")
+}
+
+// The other half of the restored-workspace gate (Codex P2): a session that was
+// provisioned with an EMPTY sandbox_agent_config selection is not a restored
+// workspace — its spec legitimately carries no files. Enabling the global
+// setting afterwards must not push newly selected files onto that old host at
+// swap time: the provision-time selection is authoritative for the session's
+// life.
+func TestCodexFreshSwapKeepsAnEmptyProvisionSelection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.Hosts = oneListedHost
+	cfg.SandboxAgentConfig = []string{"codex:config.toml"} // enabled AFTER provision
+	require.NoError(t, config.SaveConfig(cfg))
+
+	workDir, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+	altDir, err := agentaccount.Register(home, tmux.ProgramCodex, "alt")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, codexCredFile), []byte(secretWork), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(altDir, codexCredFile), []byte(secretAlt), 0o600))
+
+	repo := initTempGitRepo(t)
+	runGit(t, repo, "remote", "add", "origin", "https://example.invalid/fixture.git")
+
+	dir := t.TempDir()
+	p := &sandboxProvisioner{sessionDir: dir}
+	p.runCommandFn = localShell{}.Run
+	acct := sessionenv.Account{Agent: tmux.ProgramCodex, Name: "work", Dir: workDir}
+	// Provision ran while the global selection was empty: no files on the spec
+	// and restored=false — indistinguishable from a restored workspace before
+	// the restored flag existed, which is the conflation being tested here.
+	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", Program: tmux.ProgramCodex}}
+	require.NoError(t, w.syncAccountIn(time.Minute))
+	p.account = w
+
+	srv := &codexSwapServer{live: w.AccountDir(), next: w.NextAccountDir(), scope: w.AccountDir(), can: true}
+	t.Setenv("CODEX_HOME", w.AccountDir())
+	inst := &Instance{
+		Title: "codexswap", Path: repo, Program: tmux.ProgramCodex, Host: "box1",
+		Account: "work", accountAgent: tmux.ProgramCodex,
+		backend: &sshBackend{provisioner: p, cleanup: &SSHRuntimeCleanupData{SessionDir: dir, HostName: "box1"}},
+		started: true, Tabs: []*Tab{newRemoteAgentTab()},
+	}
+	inst.agentSrv = srv
+
+	opHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(opHome, "config.toml"),
+		[]byte(`model = "o3"`+"\n"+`cli_auth_credentials_store = "keyring"`+"\n"), 0o600))
+	t.Setenv("CODEX_HOME", opHome)
+
+	_, err = inst.SwapOffBoxAccount("alt", false)
+	require.NoError(t, err)
+
+	assert.Empty(t, readOrEmpty(filepath.Join(dir, "account", "config.toml")),
+		"a fresh workspace with an empty provision-time selection gains no files from a later global setting")
+	assert.Empty(t, p.account.spec.AgentConfigFiles, "the provision-time selection stays empty")
+	assert.Equal(t, secretAlt, readOrEmpty(filepath.Join(dir, "account", codexCredFile)), "codex credential still swapped in")
 }
 
 // The restore-then-swap regression for codex: a reattached session re-derives
