@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,7 +44,10 @@ func pushSessionDir(t *testing.T, fake *fakePushClient) string {
 		fake.gotURL, fake.gotToken = url, token
 		return fake, nil
 	}
-	t.Cleanup(func() { newPushCredentialClient = prev })
+	// Never the developer's or runner's real git login.
+	prevFill := hostCredentialFill
+	hostCredentialFill = func(pushcred.CredentialRequest) (string, string, bool) { return "", "", false }
+	t.Cleanup(func() { newPushCredentialClient, hostCredentialFill = prev, prevFill })
 	return dir
 }
 
@@ -72,7 +76,7 @@ func TestGitCredentialHelperQuitsOnEveryRefusal(t *testing.T) {
 		"no callback": {fake: &fakePushClient{}, noEnv: true, in: "protocol=https\nhost=github.com\npath=o/r\n\n", why: "no af callback"},
 		"malformed":   {fake: &fakePushClient{}, in: "protocol https\n\n", why: "no '='"},
 		"bad answer": {fake: &fakePushClient{resp: daemon.GitCredentialResponse{Username: "x-access-token", Password: "tok\nurl=https://evil.example"}},
-			in: "protocol=https\nhost=github.com\npath=o/r\n\n", why: "not a single printable line"},
+			in: "protocol=https\nhost=github.com\npath=o/r\n\n", why: "not a single printable credential"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := pushSessionDir(t, tc.fake)
@@ -177,4 +181,65 @@ func TestGHShimRefusesWhenOnlyItselfOrARelativeGHIsOnPath(t *testing.T) {
 	assert.Empty(t, got.exe, "nothing was executed")
 	assert.Empty(t, fake.reqs, "and no credential was fetched")
 	assert.Contains(t, errw.String(), "gh is not installed on this host")
+}
+
+// When af cannot supply the credential, the host's own login is used exactly as
+// before af was wired in (Codex P2 on #6442: af's automatic preserve-push, which
+// is fenced from the operator's token, must keep the host-only login it had).
+func TestGitCredentialHelperFallsBackToTheHostsOwnLogin(t *testing.T) {
+	fake := &fakePushClient{err: errors.New("not permitted for a sandbox credential: push credentials are withheld while af runs an automatic preserve-push for this session")}
+	dir := pushSessionDir(t, fake)
+	var asked pushcred.CredentialRequest
+	hostCredentialFill = func(req pushcred.CredentialRequest) (string, string, bool) {
+		asked = req
+		return "host-user", "host-own-token", true
+	}
+	var out, errw bytes.Buffer
+	require.NoError(t, runGitCredential(strings.NewReader("protocol=https\nhost=github.com\npath=owner/repo.git\n\n"), &out, &errw, dir, "get"))
+	assert.Equal(t, "username=host-user\npassword=host-own-token\n", out.String())
+	assert.Contains(t, errw.String(), "using the host's own git login")
+	assert.Contains(t, errw.String(), "automatic preserve-push")
+	assert.Equal(t, pushcred.CredentialRequest{Protocol: "https", Host: "github.com", Path: "owner/repo.git"}, asked)
+}
+
+func TestGitCredentialHelperAnswersNothingInsideTheFallback(t *testing.T) {
+	fake := &fakePushClient{resp: daemon.GitCredentialResponse{Username: "x-access-token", Password: shimTestToken}}
+	dir := pushSessionDir(t, fake)
+	t.Setenv(hostCredentialDelegatedEnv, "1")
+	var out, errw bytes.Buffer
+	require.NoError(t, runGitCredential(strings.NewReader("protocol=https\nhost=github.com\npath=o/r\n\n"), &out, &errw, dir, "get"))
+	assert.Empty(t, out.String(), "no recursion and no operator token inside the host-login fallback")
+	assert.Empty(t, fake.reqs)
+}
+
+// The real fallback: the host user's global helper answers, and the workspace's
+// own config (here a helper that would answer WRONG) is never read.
+func TestHostCredentialFillAsksOnlyTheHostsOwnHelpers(t *testing.T) {
+	home := t.TempDir()
+	stored := filepath.Join(home, "creds")
+	require.NoError(t, os.WriteFile(stored, []byte("https://host-user:host-own-token@github.com\n"), 0o600))
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential]\n\thelper = store --file="+stored+"\n"), 0o644))
+
+	ws := t.TempDir()
+	require.NoError(t, exec.Command("git", "init", "-q", ws).Run())
+	wrong := filepath.Join(ws, "wrong.sh")
+	require.NoError(t, os.WriteFile(wrong, []byte("#!/bin/sh\nprintf 'username=WRONG\\npassword=WRONG\\n'\n"), 0o755))
+	require.NoError(t, exec.Command("git", "-C", ws, "config", "--local", "credential.helper", "!"+wrong).Run())
+	t.Setenv("GIT_DIR", filepath.Join(ws, ".git"))
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'credential.helper=!"+wrong+"'")
+	t.Chdir(ws)
+
+	user, pass, ok := hostCredentialFill(pushcred.CredentialRequest{Protocol: "https", Host: "github.com", Path: "owner/repo.git"})
+	require.True(t, ok)
+	assert.Equal(t, "host-user", user)
+	assert.Equal(t, "host-own-token", pass)
+
+	// Nothing on the host: no answer, and no prompt.
+	require.NoError(t, os.Remove(stored))
+	_, _, ok = hostCredentialFill(pushcred.CredentialRequest{Protocol: "https", Host: "github.com", Path: "owner/repo.git"})
+	assert.False(t, ok)
 }

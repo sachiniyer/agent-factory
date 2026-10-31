@@ -3,10 +3,13 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -70,29 +73,95 @@ func fetchPushCredential(sessionDir string, req pushcred.CredentialRequest) (dae
 
 // runGitCredential is the git credential helper. Only "get" is answered: git's
 // "store" and "erase" are no-ops, because there is nothing on the host to store
-// into or erase from. Every refusal answers quit=1, so git fails at once instead
-// of prompting in the agent's terminal, and says why on stderr, which git shows.
+// into or erase from.
+//
+// When af cannot supply the credential — the switch is off, the daemon box has
+// no login, the daemon is unreachable, or an automatic preserve-push fences it —
+// the host user's OWN credential helpers are asked instead, exactly as git would
+// have asked them before af was wired in. A host login therefore keeps working as
+// it did (af's own automatic pushes included, which must not start using the
+// operator's token), and af's token still never reaches those helpers: the
+// workspace's empty reset keeps git from calling them with it. Only when they
+// have nothing either is git told to quit=1, so it fails at once instead of
+// prompting in the agent's terminal. stderr says why, and git shows it.
 func runGitCredential(in io.Reader, out, errw io.Writer, sessionDir, op string) error {
 	if op != "get" {
 		_, _ = io.Copy(io.Discard, io.LimitReader(in, 1<<16))
 		return nil
 	}
-	quit := func(reason string) error {
-		fmt.Fprintf(errw, "af: no push credential: %s\n", reason)
-		return pushcred.WriteQuit(out)
+	if os.Getenv(hostCredentialDelegatedEnv) != "" {
+		// Asked from inside a host-login fallback: answer nothing, never recurse.
+		_, _ = io.Copy(io.Discard, io.LimitReader(in, 1<<16))
+		return nil
 	}
 	req, err := pushcred.ReadCredentialRequest(in)
 	if err != nil {
-		return quit(err.Error())
+		fmt.Fprintf(errw, "af: no push credential: %v\n", err)
+		return pushcred.WriteQuit(out)
 	}
 	resp, err := fetchPushCredential(sessionDir, req)
+	if err == nil {
+		if werr := pushcred.WriteCredential(out, resp.Username, resp.Password); werr == nil {
+			return nil
+		}
+		err = errors.New("the daemon's answer is not a single printable credential")
+	}
+	if user, pass, ok := hostCredentialFill(req); ok {
+		if werr := pushcred.WriteCredential(out, user, pass); werr == nil {
+			fmt.Fprintf(errw, "af: no push credential (%v); using the host's own git login\n", err)
+			return nil
+		}
+	}
+	fmt.Fprintf(errw, "af: no push credential: %v\n", err)
+	return pushcred.WriteQuit(out)
+}
+
+// hostCredentialDelegatedEnv marks the fallback's own git run, so a helper it
+// reaches (af's, were it ever configured outside the workspace) answers nothing.
+const hostCredentialDelegatedEnv = "AF_PUSH_CREDENTIAL_HOST_FALLBACK"
+
+// hostOnlyGitEnvDrop are the variables that would let the fallback's git see this
+// workspace or a caller's -c overrides, or prompt someone.
+var hostOnlyGitEnvDrop = map[string]bool{
+	"GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_COMMON_DIR": true, "GIT_INDEX_FILE": true,
+	"GIT_CONFIG_PARAMETERS": true, "GIT_CONFIG_COUNT": true, "GIT_CONFIG": true,
+	"GIT_ASKPASS": true, "SSH_ASKPASS": true, "GIT_TERMINAL_PROMPT": true, "GCM_INTERACTIVE": true,
+}
+
+// hostCredentialFill asks the host user's own git credential helpers, from the
+// system and global config only, for what git asked af for: `git credential
+// fill` run from "/" with every repository and command-line override stripped,
+// prompts off, bounded in time. A seam so tests never reach a real login.
+var hostCredentialFill = func(req pushcred.CredentialRequest) (username, password string, ok bool) {
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if hostOnlyGitEnvDrop[name] || strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env, "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "GCM_INTERACTIVE=never", hostCredentialDelegatedEnv+"=1")
+	ctx, cancel := context.WithTimeout(context.Background(), pushCredentialTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "credential", "fill")
+	cmd.Dir = "/"
+	cmd.Env = env
+	cmd.Stdin = strings.NewReader("protocol=" + req.Protocol + "\nhost=" + req.Host + "\npath=" + req.Path + "\n\n")
+	cmd.Stderr = io.Discard
+	out, err := cmd.Output()
 	if err != nil {
-		return quit(err.Error())
+		return "", "", false
 	}
-	if err := pushcred.WriteCredential(out, resp.Username, resp.Password); err != nil {
-		return quit(err.Error())
+	for _, line := range strings.Split(string(out), "\n") {
+		switch k, v, _ := strings.Cut(line, "="); k {
+		case "username":
+			username = v
+		case "password":
+			password = v
+		}
 	}
-	return nil
+	return username, password, username != "" && password != ""
 }
 
 // readPushOrigin reads the origin record provisioning wrote beside the shim.

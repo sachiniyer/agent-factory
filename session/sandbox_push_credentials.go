@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -108,13 +109,14 @@ func (w *sandboxWorkspace) wirePushCredentials(timeout time.Duration, origin pus
 	ws := shellQuote(w.WorkspacePath())
 	helperKey := "credential.https://" + origin.Host + ".helper"
 	pathKey := "credential.https://" + origin.Host + ".useHttpPath"
-	script := strings.Join([]string{
+	steps := w.clearRecordedOriginSteps(timeout, origin.Host)
+	steps = append(steps,
 		unsetAll(ws, helperKey),
-		"git -C " + ws + " config --local --add " + shellQuote(helperKey) + " ''",
-		"git -C " + ws + " config --local --add " + shellQuote(helperKey) + " " + shellQuote(w.pushHelperValue()),
-		"git -C " + ws + " config --local " + shellQuote(pathKey) + " true",
-	}, " && ")
-	if out, err := w.shell.Run(timeout, script, nil, true); err != nil {
+		"git -C "+ws+" config --local --add "+shellQuote(helperKey)+" ''",
+		"git -C "+ws+" config --local --add "+shellQuote(helperKey)+" "+shellQuote(w.pushHelperValue()),
+		"git -C "+ws+" config --local "+shellQuote(pathKey)+" true",
+	)
+	if out, err := w.shell.Run(timeout, strings.Join(steps, " && "), nil, true); err != nil {
 		return fmt.Errorf("configuring the workspace's credential helper failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	record, err := json.Marshal(origin)
@@ -133,20 +135,72 @@ func (w *sandboxWorkspace) wirePushCredentials(timeout time.Duration, origin pus
 
 // unwirePushCredentials removes af's helper, useHttpPath, the shim and the origin
 // record, and restores the value-free clone helper a fresh workspace has, so an
-// unlicensed restore looks exactly like an unlicensed create.
+// unlicensed restore looks exactly like an unlicensed create. It clears the host
+// the wiring was RECORDED for as well as the current origin's: an adopted
+// workspace keeps its remote, while the daemon checkout's origin may have moved
+// since the archive.
 func (w *sandboxWorkspace) unwirePushCredentials(timeout time.Duration) error {
 	ws := shellQuote(w.WorkspacePath())
-	steps := []string{"rm -f " + shellQuote(w.PushShimPath()) + " " + shellQuote(w.PushOriginPath())}
+	current := ""
 	if origin, ok := pushOriginFor(w.spec); ok {
+		current = origin.Host
+	}
+	steps := w.clearRecordedOriginSteps(timeout, current)
+	if current != "" {
 		steps = append(steps,
-			unsetAll(ws, "credential.https://"+origin.Host+".helper"),
-			unsetAll(ws, "credential.https://"+origin.Host+".useHttpPath"))
+			unsetAll(ws, "credential.https://"+current+".helper"),
+			unsetAll(ws, "credential.https://"+current+".useHttpPath"))
 		if restore := gitPersistCredentialCommand(w.spec.CloneURL, w.WorkspacePath()); restore != "" {
 			steps = append(steps, restore)
 		}
 	}
+	steps = append(steps, "rm -f "+shellQuote(w.PushShimPath())+" "+shellQuote(w.PushOriginPath()))
 	if out, err := w.shell.Run(timeout, strings.Join(steps, " && "), nil, true); err != nil {
 		return fmt.Errorf("removing push credential wiring failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// recordedHostRE and recordedPathRE bound what a host-written origin record may
+// name before any of it reaches a git config key: a hostname with an optional
+// port, and owner/repo.
+var (
+	recordedHostRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$`)
+	recordedPathRE = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
+)
+
+// recordedPushOrigin reads the origin an earlier provision wired, from the record
+// it left in the session directory. The host wrote nothing there that af did not,
+// but the file is the host's, so it is validated, never trusted: a record that is
+// missing, oversized, unparsable or names anything but a plain host and
+// owner/repo is ignored.
+func (w *sandboxWorkspace) recordedPushOrigin(timeout time.Duration) (pushcred.Origin, bool) {
+	out, err := w.shell.Run(timeout, "cat "+shellQuote(w.PushOriginPath())+" 2>/dev/null || true", nil, false)
+	if err != nil || len(out) == 0 || len(out) > 4096 {
+		return pushcred.Origin{}, false
+	}
+	var o pushcred.Origin
+	if json.Unmarshal(out, &o) != nil || !recordedHostRE.MatchString(o.Host) || !recordedPathRE.MatchString(o.Path) {
+		return pushcred.Origin{}, false
+	}
+	return o, true
+}
+
+// clearRecordedOriginSteps unwires the host a previous provision recorded, when
+// it is not keepHost: its helper list and useHttpPath go, and that remote gets
+// back the value-free clone helper a fresh workspace has for it.
+func (w *sandboxWorkspace) clearRecordedOriginSteps(timeout time.Duration, keepHost string) []string {
+	recorded, ok := w.recordedPushOrigin(timeout)
+	if !ok || strings.EqualFold(recorded.Host, keepHost) {
+		return nil
+	}
+	ws := shellQuote(w.WorkspacePath())
+	steps := []string{
+		unsetAll(ws, "credential.https://"+recorded.Host+".helper"),
+		unsetAll(ws, "credential.https://"+recorded.Host+".useHttpPath"),
+	}
+	if restore := gitPersistCredentialCommand("https://"+recorded.Host+"/"+recorded.Path+".git", w.WorkspacePath()); restore != "" {
+		steps = append(steps, restore)
+	}
+	return steps
 }

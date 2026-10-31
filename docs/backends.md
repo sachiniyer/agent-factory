@@ -1000,7 +1000,8 @@ push_credentials = true
 
 Both are off by default, so listing a host never opts it in. The daemon reads them
 on every request: turn one off, or remove the host, and the next request is
-refused. This covers https GitHub origins, meaning `github.com` or the enterprise
+refused. Turning one on wires the sessions created or restored after it; a session
+already running keeps the wiring it was provisioned with until its next restore. This covers https GitHub origins, meaning `github.com` or the enterprise
 host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh keys.
 
 - **Where the token comes from.** It's the daemon machine's own login: its `GH_TOKEN` /
@@ -1028,8 +1029,14 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
 - **What git gets.** A credential for the session's **own origin repository**
   only, checked against the daemon's checkout, never against anything the host
   says. A submodule, a re-pointed `origin`, or a script pushing to another
-  repository gets nothing. When git can't get a credential, the helper tells it
-  to stop rather than prompt, and says why.
+  repository gets nothing.
+- **When af can't supply it**, because the switch is off, the daemon machine
+  has no login, the daemon is unreachable, or one of af's own pushes is
+  running, the helper asks the host user's **own** git credential helpers
+  instead. It asks them from outside the workspace, with prompts off, exactly
+  as git would have before af was wired in. A host login therefore keeps
+  working, and af's token still never reaches those helpers. If they have
+  nothing either, git stops rather than prompting, and says why.
 - **What gh gets.** The shim runs the host's real `gh`, found on absolute `PATH`
   entries only. The token goes into that one process's environment: `GH_TOKEN`,
   or `GH_HOST` plus `GH_ENTERPRISE_TOKEN`. So **gh carries the daemon machine's
@@ -1046,8 +1053,9 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
 - **af's own pushes don't get it.** The automatic preserve-push that Lost recovery
   and limit failover run is refused the credential while it runs. If that push
   doesn't confirm success, the refusal stays for as long as that runtime's
-  callback credential lives, a daemon restart included, so this feature changes
-  no push af makes on its own. `af sessions archive --push` and the agent's own
+  callback credential lives, a daemon restart included. Those pushes keep using
+  whatever login the host has of its own, so this feature changes no push af
+  makes on its own. `af sessions archive --push` and the agent's own
   pushes are answered.
 
 **What this protects against, and what it doesn't:**

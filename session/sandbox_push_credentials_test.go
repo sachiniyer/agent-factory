@@ -207,3 +207,52 @@ func TestListedHostPushCredentialsIsTheOperatorsOptIn(t *testing.T) {
 	assert.False(t, listedHostPushCredentials(cfg, ""), "a repository's own [ssh] target never is")
 	assert.False(t, listedHostPushCredentials(nil, "on"))
 }
+
+// An adopted workspace keeps its remote while the daemon checkout's origin may
+// have moved since the archive (Codex P2 on #6442): the wiring is removed for the
+// host it was RECORDED for, not only the current origin's.
+func TestPushWiringIsRemovedForTheRecordedOriginWhenTheCurrentOneMoved(t *testing.T) {
+	f := newPushWiringFixture(t, "https://github.com/owner/repo.git", true)
+	fresh := f.localConfig(t, "credential.https://github.com.helper")
+	f.w.reconcilePushCredentials(time.Minute, false)
+	require.Contains(t, f.localConfig(t, "credential.https://github.com.helper"), f.w.pushHelperValue())
+
+	f.w.spec.CloneURL = "git@github.com:owner/repo.git" // the checkout moved to ssh
+	f.w.spec.PushCredentials = false
+	f.w.reconcilePushCredentials(time.Minute, true)
+	assert.Equal(t, fresh, f.localConfig(t, "credential.https://github.com.helper"),
+		"af's helper and the reset are gone for the recorded host; the value-free helper is back")
+	assert.Nil(t, f.localConfig(t, "credential.https://github.com.useHttpPath"))
+	assert.NoFileExists(t, f.w.PushShimPath())
+	assert.NoFileExists(t, f.w.PushOriginPath())
+}
+
+// A re-wire for a different https host unwires the old one.
+func TestPushWiringMovesWithTheOriginsHost(t *testing.T) {
+	f := newPushWiringFixture(t, "https://github.com/owner/repo.git", true)
+	t.Setenv("GH_HOST", "ghe.example") // after the fixture, which clears it
+	f.w.reconcilePushCredentials(time.Minute, false)
+	f.w.spec.CloneURL = "https://ghe.example/team/svc.git"
+	f.w.reconcilePushCredentials(time.Minute, true)
+	assert.NotContains(t, f.localConfig(t, "credential.https://github.com.helper"), f.w.pushHelperValue())
+	assert.Nil(t, f.localConfig(t, "credential.https://github.com.useHttpPath"))
+	assert.Equal(t, []string{"", f.w.pushHelperValue()}, f.localConfig(t, "credential.https://ghe.example.helper"))
+}
+
+// The record is the host's file: one naming anything but a plain host and
+// owner/repo is ignored, never spliced into a command.
+func TestPushWiringIgnoresAMalformedRecord(t *testing.T) {
+	f := newPushWiringFixture(t, "https://github.com/owner/repo.git", false)
+	canary := filepath.Join(f.dir, "pwned")
+	for _, bad := range []string{
+		`{"host":"x'; touch ` + canary + `; '","path":"o/r"}`,
+		`{"host":"github.com","path":"o/r/../../x"}`,
+		`not json`,
+	} {
+		require.NoError(t, os.WriteFile(f.w.PushOriginPath(), []byte(bad), 0o600))
+		_, ok := f.w.recordedPushOrigin(time.Minute)
+		assert.False(t, ok, "record %q", bad)
+		f.w.reconcilePushCredentials(time.Minute, true)
+		assert.NoFileExists(t, canary)
+	}
+}
