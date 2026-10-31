@@ -261,6 +261,23 @@ jobs:
         .github/scripts/release-bump.sh "$NEW_VERSION"
         echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+    # The web-bundle job above checked github.sha, but the bump's rebase-retry can
+    # land the tag on a NEWER master. If the bundle's inputs (or the bundle) moved in
+    # between, the freshness check says nothing about the tagged tree, so refuse to
+    # publish and let the release be restarted. No npm here: this job can write. The
+    # failure leaves at most an untagged bump commit, like any failure of the step above.
+    - name: Refuse a tag whose web bundle inputs moved during the build
+      if: vars.WEB_DIST_SYNC == 'true'
+      env:
+        BUILT_SHA: ${{ github.sha }}
+        TAG_SHA: ${{ steps.bump.outputs.sha }}
+      run: |
+        if ! git diff --quiet "$BUILT_SHA" "$TAG_SHA" -- web design; then
+          echo "::error::web/ or design/ changed between the validated commit ($BUILT_SHA) and the tag target ($TAG_SHA), so the web/dist freshness check does not cover the tag. Re-run the release."
+          git diff --stat "$BUILT_SHA" "$TAG_SHA" -- web design | tail -5
+          exit 1
+        fi
+
     # Immutable releases require all assets to be attached before the release
     # is published: create as draft, upload assets into the draft, then
     # publish. A draft creates no git ref; publishing creates the tag at the
