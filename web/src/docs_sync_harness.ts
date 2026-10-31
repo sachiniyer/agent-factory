@@ -543,7 +543,20 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
    *  adopts them and resolves its copy, and the page comes back. What it held unsaved must be in
    *  storage again, because its sync stashed it once and will not store it a second time.
    *  (AF_NO_BFCACHE_REVIVE is the pane that only refreshes the entries that still exist.) */
-  function bfcacheReturn(): void {
+  function bfcacheReturn(adopted = false): void {
+    if (adopted) {
+      // The page holds these as drafts it adopted from a closed window, not ones it stored: the
+      // sync restored them without storing them again.
+      for (const doc of names) {
+        const key = `af.docs.draft\ns\nplan\n${doc}\n`;
+        const raw = kvMap.get(key + storageA.owner);
+        if (!raw) continue;
+        const e = JSON.parse(raw) as { owner: string; released: boolean };
+        kvMap.delete(key + storageA.owner);
+        kvMap.set(key + "wGONE", JSON.stringify({ ...e, owner: "wGONE", released: true }));
+        storageA.load(doc);
+      }
+    }
     const mine = names.flatMap((doc) => {
       const own = kvMap.get(`af.docs.draft\ns\nplan\n${doc}\n${storageA.owner}`);
       return own ? [{ doc, buffer: (JSON.parse(own) as { draft: Draft }).draft.buffer }] : [];
@@ -1342,6 +1355,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   for (let step = 0; step < o.steps && !violation; step++) {
     // The late-landing interleavings are rare by chance, so they are reached on purpose at fixed steps.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 30 || step === 70 || step === 110)) await lateLanding();
+    // The page holds adopted drafts, then goes through the back-forward cache.
+    if (o.chaos && (o.faults ?? 0) > 0 && (step === 40 || step === 80 || step === 120)) {
+      bfcacheReturn(true);
+    }
     const r = rand();
     trace.push(`step ${step} r=${r.toFixed(3)} attached=${attached} status=${syncs.get(attached)?.currentStatus} text=${JSON.stringify(syncs.get(attached)?.text)}`);
     if (r < 0.28) userEdit();

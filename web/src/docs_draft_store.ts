@@ -140,6 +140,14 @@ export class DraftStorage {
   /** This window's draft for `doc`, else an orphan adopted from a closed or dead
    *  window, else null. */
   load(doc: string): Draft | null {
+    const draft = this.find(doc);
+    // What a pane loads or adopts is as much its work as what it stores: the sync restores it
+    // without storing it again, so a bfcache restore needs it here to write it back.
+    if (draft) this.held.set(doc, draft);
+    return draft;
+  }
+
+  private find(doc: string): Draft | null {
     const own = this.read(this.key(doc, this.owner));
     if (own) return own.draft;
     // A pane that is gone takes nothing over: its closing syncs only check whether what

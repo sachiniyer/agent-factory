@@ -197,3 +197,31 @@ test("a bfcache restore writes back a draft another window adopted and removed",
   a.revive();
   assert.equal(a.load("goals"), null, "a draft the sync cleared is not written back");
 });
+
+test("a bfcache restore writes back a draft the pane adopted, not only one it stored", () => {
+  const kv = memory();
+  const now = 1000;
+  const first = new DraftStorage(kv, "wA", () => now, "s\nplan");
+  first.store("goals", draft("conflict from before"));
+  first.release();
+  const a = new DraftStorage(kv, "wB", () => now, "s\nplan");
+  assert.equal(a.load("goals")?.buffer, "conflict from before", "the pane adopts it and never stores it again");
+  a.release(); // pagehide into the back-forward cache
+  const other = new DraftStorage(kv, "wC", () => now, "s\nplan");
+  assert.ok(other.load("goals"), "another window adopts it");
+  other.clear("goals");
+  assert.equal(a.load("goals"), null);
+  a.revive();
+  assert.equal(a.load("goals")?.buffer, "conflict from before");
+});
+
+test("a bfcache restore writes back a legacy-adopted draft", () => {
+  const kv = memory();
+  kv.set("af.docs.draft\ns\nplan\ngoals", JSON.stringify(draft("legacy work")));
+  const a = new DraftStorage(kv, "wA", () => 1000, "s\nplan");
+  assert.equal(a.load("goals")?.buffer, "legacy work");
+  a.release();
+  for (const k of kv.keys()) kv.remove(k);
+  a.revive();
+  assert.equal(a.load("goals")?.buffer, "legacy work");
+});
