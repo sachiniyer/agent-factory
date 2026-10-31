@@ -175,7 +175,6 @@ test("docs tab: a doc whose delete is pending does not open from its tab", async
   });
 
   await page.goto(`/#/session/${session.id}`);
-  await page.locator(".af-tab", { hasText: "Docs" }).click();
   const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
   await expect(pane.locator(".cm-content")).toBeVisible();
   const goalsTab = pane.locator(".af-docs-tab", { hasText: "goals" });
