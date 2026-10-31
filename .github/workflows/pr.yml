@@ -666,9 +666,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # The pull_request checkout is a merge commit; HEAD^1 (the base tip) is
-          # what the bundle check below diffs against.
-          fetch-depth: 2
+          # Full history: the bundle check below diffs against HEAD^1 on a
+          # pull_request (a merge commit) and against the merge base with master on a
+          # branch dispatch.
+          fetch-depth: 0
 
       # Pinned major, matching the toolchain the lockfile was resolved against.
       # `cache: npm` caches ~/.npm (the download cache), not node_modules — `npm ci`
@@ -716,14 +717,32 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           stale="$(git status --porcelain -- web/dist)"
 
+          # Which rules apply. A pull_request is the obvious case. The other is a
+          # workflow_dispatch on a PR BRANCH: auto-gate.js dispatches pr.yml on
+          # headRefName when a head has no run (recovery after an update-branch), and
+          # the merger accepts that run's Build as the PR's. It must enforce the same
+          # rules, so only a run on master itself (push, nightly, dispatch, queue)
+          # gets the warn-only staleness handling below.
+          base=""
           if [ "$EVENT" = "pull_request" ]; then
             # The checkout is the merge commit: HEAD^1 is the base tip, so this is
             # exactly the PR's own change.
-            changed="$(git diff --name-only HEAD^1 HEAD)"
+            base="HEAD^1"
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ "$REF" != "refs/heads/master" ]; then
+            git fetch -q --no-tags origin master
+            base="$(git merge-base origin/master HEAD)"
+            HEAD_REF="$REF_NAME"
+            HEAD_REPO="$REPO"
+          fi
+
+          if [ -n "$base" ]; then
+            changed="$(git diff --name-only "$base" HEAD)"
             touches="$(printf '%s\n' "$changed" | grep '^web/dist/' || true)"
             if [ "$HEAD_REF" = "web-dist-sync" ] && [ "$HEAD_REPO" = "$REPO" ]; then
               outside="$(printf '%s\n' "$changed" | grep -v '^web/dist/' | grep . || true)"

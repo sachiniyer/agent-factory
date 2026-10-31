@@ -10,8 +10,15 @@ import (
 	"golang.org/x/net/html"
 )
 
-// Read the actual embedded artifacts, without Generate, a browser, or theme.ts.
+// Read the web client's served chrome without Generate, a browser, or theme.ts.
 // This runs in the existing Go suite that gates Build, and explicitly in Lint.
+//
+// It reads web/src/index.html and web/src/manifest.webmanifest, not web/dist: build.mjs
+// copies both into dist verbatim, and since #6447 a PR does not carry web/dist (the
+// sync PR commits it after the source lands), so a token change would otherwise fail
+// here with no way to satisfy it. That dist equals a fresh build of web/src is proved
+// where it can be, by the Web job in pr.yml (PRs and the sync PR) and the release
+// workflows.
 func TestDesignWebChromeServedBytes(t *testing.T) {
 	read := func(path string) []byte {
 		t.Helper()
@@ -25,7 +32,7 @@ func TestDesignWebChromeServedBytes(t *testing.T) {
 	if err := json.Unmarshal(read("design/tokens.json"), &tokens); err != nil {
 		t.Fatal(err)
 	}
-	doc, err := html.Parse(strings.NewReader(string(read("web/dist/index.html"))))
+	doc, err := html.Parse(strings.NewReader(string(read("web/src/index.html"))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +64,7 @@ func TestDesignWebChromeServedBytes(t *testing.T) {
 		}
 	}
 	var manifest map[string]json.RawMessage
-	if err := json.Unmarshal(read("web/dist/manifest.webmanifest"), &manifest); err != nil {
+	if err := json.Unmarshal(read("web/src/manifest.webmanifest"), &manifest); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"theme_color", "background_color"} {

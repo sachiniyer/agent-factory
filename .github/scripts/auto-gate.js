@@ -149,6 +149,7 @@ const MASTER_PUSH_WORKFLOWS = [
   "pr.yml",
   "sandbox-e2e.yml",
   "tui-driver-selftest.yml",
+  "web-dist-sync.yml",
   "web-selftest.yml",
 ];
 // docs.yml is the one entry that also *publishes*, and it decides WHETHER to
