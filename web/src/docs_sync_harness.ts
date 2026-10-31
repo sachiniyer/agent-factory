@@ -248,7 +248,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const stashedBuffers = (doc: string): string[] =>
     [...kvMap.entries()]
       .filter(([k]) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`))
-      .map(([, v]) => (JSON.parse(v) as { draft: Draft }).draft.buffer);
+      .flatMap(([, v]) => {
+        const e = JSON.parse(v) as { draft: Draft; more?: Draft[] };
+        return [e.draft.buffer, ...(e.more ?? []).map((d) => d.buffer)]; // drafts a pane took over with its own
+      });
   const initialText = (n: string): string => Array.from({ length: LINES }, (_, i) => `${n}${i}`).join("\n");
   // The values each line had before the user typed over it, for undo.
   const lineStack = new Map<string, Map<number, string[]>>(names.map((n) => [n, new Map()]));
@@ -721,7 +724,11 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       // I13: work stored for a doc the daemon no longer has is reachable: the new pane
       // shows it as a deleted doc, to restore or discard. Stored and shown nowhere is lost.
       const d = daemons.get(doc)!;
-      const stored = stashedBuffers(doc).join("\n").split("\n");
+      // (A live second window's own entry is not the reopened pane's to take: that window holds the work.)
+      const ghostSuffix = ghostBox.cur ? `\n${ghostStorage.owner}` : null;
+      const stored = [...kvMap.entries()]
+        .filter(([k]) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`) && !(ghostSuffix && k.endsWith(ghostSuffix)))
+        .flatMap(([, v]) => (JSON.parse(v) as { draft: Draft }).draft.buffer.split("\n"));
       const stranded = [...typed.get(doc)!.values()].filter((tok) => !excused.has(tok) && !d.everHad(tok) && stored.includes(tok));
       if (stranded.length && syncs.get(doc)?.currentStatus !== "gone") {
         fail("stored-draft-of-deleted-doc-unreachable", `${doc}: ${stranded.join(",")} is stored for a doc the daemon no longer has, and the reopened pane shows ${syncs.get(doc)?.currentStatus ?? "nothing"}`);
@@ -1428,6 +1435,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   for (let step = 0; step < o.steps && !violation; step++) {
     // The late-landing interleavings are rare by chance, so they are reached on purpose at fixed steps.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 30 || step === 70 || step === 110)) await lateLanding();
+    // The page closes and reopens on the same doc at fixed steps, as the random pageClose event does.
+    if (o.chaos && (o.faults ?? 0) > 0 && (step === 40 || step === 80 || step === 120)) await pageClose();
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 60 || step === 100) && !o.collide) await dropThenLand();
     // The page holds adopted drafts, then goes through the back-forward cache.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 40 || step === 80 || step === 120)) {

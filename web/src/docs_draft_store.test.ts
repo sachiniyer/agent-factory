@@ -242,3 +242,63 @@ test("a heartbeat that resumes after a stall writes back a draft another window 
   a.touch();
   assert.equal(a.load("goals"), null, "a draft the sync cleared is not written back");
 });
+
+const ownersLeft = (kv: ReturnType<typeof memory>, owners: string[]): string[] =>
+  kv.keys().filter((k) => owners.some((o) => k.endsWith(`\n${o}`)));
+
+test("a page that opens a doc takes over every draft the closed pages left, and leaves none under their ids", () => {
+  const kv = memory();
+  let now = 1000;
+  const closed = new DraftStorage(kv, "wClosed", () => now, "s\nplan");
+  closed.store("goals", draft("the closed page's unsent work"));
+  closed.release(); // pagehide
+  const crashed = new DraftStorage(kv, "wCrashed", () => now, "s\nplan");
+  now += 5;
+  crashed.store("goals", draft("a second window's conflict"));
+  now += DRAFT_STALE_MS + 1; // its heartbeat stopped: it looks dead
+  const next = new DraftStorage(kv, "wNext", () => now, "s\nplan");
+  assert.equal(next.load("goals")?.buffer, "a second window's conflict", "the newest orphan is the draft");
+  assert.deepEqual(ownersLeft(kv, ["wClosed.0", "wCrashed.0"]), [], "nothing is left under the ids of the closed pages");
+  // The other draft was not dropped: it comes forward when this one is dealt with.
+  next.clear("goals");
+  assert.equal(next.load("goals")?.buffer, "the closed page's unsent work");
+  next.clear("goals");
+  assert.equal(next.load("goals"), null, "and then nothing is left");
+});
+
+test("a draft the new page already holds does not keep a closed page's draft behind", () => {
+  const kv = memory();
+  let now = 1000;
+  const closed = new DraftStorage(kv, "wClosed", () => now, "s\nplan");
+  closed.store("goals", draft("old unsent work"));
+  closed.release();
+  now += 5;
+  const next = new DraftStorage(kv, "wNext", () => now, "s\nplan");
+  next.store("goals", draft("work typed in the new page")); // it has its own entry before it ever loads
+  assert.equal(next.load("goals")?.buffer, "work typed in the new page", "its own draft stays the draft");
+  assert.deepEqual(ownersLeft(kv, ["wClosed.0"]), [], "the closed page's entry is taken over, not left behind");
+  next.clear("goals");
+  assert.equal(next.load("goals")?.buffer, "old unsent work", "and its draft is still recoverable");
+});
+
+test("identical drafts are not kept twice, and storing keeps the drafts taken over", () => {
+  const kv = memory();
+  const now = 1000;
+  const a = new DraftStorage(kv, "wA", () => now, "s\nplan");
+  a.store("goals", draft("same"));
+  a.release();
+  const b = new DraftStorage(kv, "wB", () => now, "s\nplan");
+  b.store("goals", draft("same"));
+  b.load("goals");
+  b.clear("goals");
+  assert.equal(b.load("goals"), null, "an identical draft is not kept as a second one");
+  const c = new DraftStorage(kv, "wC", () => now, "s\nplan");
+  c.store("goals", draft("one"));
+  c.release();
+  const d = new DraftStorage(kv, "wD", () => now, "s\nplan");
+  d.store("goals", draft("two"));
+  d.load("goals"); // takes wC's draft over with its own
+  d.store("goals", draft("two, edited")); // the pane keeps typing
+  d.clear("goals");
+  assert.equal(d.load("goals")?.buffer, "one", "storing did not drop the draft it took over");
+});
