@@ -316,3 +316,28 @@ func TestTaskPaneFormLabelsAreSeparatedFromTheirValue(t *testing.T) {
 		}
 	}
 }
+
+// TestTaskPaneWrappedExplanationFitsNarrowPane: the wrap budget derives from the
+// same label width as the label itself, so at a narrow pane the cron reason
+// wraps whole instead of being cut by the pane's clip (Codex finding on #6387).
+func TestTaskPaneWrappedExplanationFitsNarrowPane(t *testing.T) {
+	for _, width := range []int{30, 33, 34, 36, 37, 40} {
+		tp := editTaskWithCap(t, 0, false, "")
+		tp.SetSize(width, 40)
+		lines := strings.Split(stripANSI(tp.String()), "\n")
+		var joined string
+		for i, ln := range lines {
+			if strings.Contains(ln, "Max runs:") {
+				joined = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ln), "Max runs:"))
+				for _, next := range lines[i+1:] {
+					next = strings.TrimSpace(next)
+					if next == "" || strings.HasSuffix(joined, ".") {
+						break
+					}
+					joined += " " + next
+				}
+			}
+		}
+		assert.Equal(t, "Cron fires already coalesce.", joined, "width %d must show the whole reason", width)
+	}
+}
