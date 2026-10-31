@@ -7030,7 +7030,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "b9d84d5ffb08";
+var CLIENT_VERSION = "a6fdb92bc26e";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -15098,6 +15098,8 @@ var SplitView = class {
     const desired = leaves(this.tree);
     const wanted = new Set(desired.map((l) => l.id));
     const focusedDropped = this.focusedId !== null && !wanted.has(this.focusedId);
+    const heldPane = this.focusedId !== null && wanted.has(this.focusedId) ? this.panes.get(this.focusedId) : void 0;
+    const heldKeyboard = this.termHoldsFocus && !!heldPane?.term && heldPane.container.contains(document.activeElement);
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
         pane.term?.dispose();
@@ -15208,6 +15210,9 @@ var SplitView = class {
     }
     this.applyFocusClass();
     this.reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped);
+    if (heldKeyboard && !focusedRebuilt && !focusedDropped && heldPane && !heldPane.container.contains(document.activeElement)) {
+      this.refocus();
+    }
   }
   /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, or closed it
    *  and re-pointed focus at a survivor, correcting the desync where `store.focus`

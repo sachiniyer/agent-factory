@@ -893,6 +893,13 @@ export class SplitView {
     // desired[0] without re-attaching the keyboard.
     const focusedDropped = this.focusedId !== null && !wanted.has(this.focusedId);
 
+    // Whether the keyboard is in the focused pane's terminal as the pass starts. Building the new tree
+    // can reparent a pane that is kept (a split added around it), and moving a node blurs the textarea
+    // inside it without any rebuild or drop to mark it: that loss is undone below, for a user who had
+    // the keyboard and not for one who had left it.
+    const heldPane = this.focusedId !== null && wanted.has(this.focusedId) ? this.panes.get(this.focusedId) : undefined;
+    const heldKeyboard = this.termHoldsFocus && !!heldPane?.term && heldPane.container.contains(document.activeElement);
+
     // Drop panes no longer in the tree.
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
@@ -1086,6 +1093,9 @@ export class SplitView {
 
     this.applyFocusClass();
     this.reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped);
+    if (heldKeyboard && !focusedRebuilt && !focusedDropped && heldPane && !heldPane.container.contains(document.activeElement)) {
+      this.refocus();
+    }
   }
 
   /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, or closed it

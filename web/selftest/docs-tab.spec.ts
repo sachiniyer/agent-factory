@@ -226,3 +226,40 @@ test("docs tab: switching docs mid-edit keeps what was typed", async ({ page, re
   await expect(pane.locator(".cm-content")).toContainText(marker);
   await expect.poll(() => readFileSync(join(started.path, "goals.md"), "utf8")).toContain(marker);
 });
+
+// A Proposal tab that arrives while the user is typing in the Agent terminal adds the split, which
+// rebuilds the pane wrappers and reparents the Agent container: the keyboard must stay in the terminal
+// for a user who had it, and must not be handed to one who had left it.
+for (const attached of [true, false]) {
+  test(`docs tab: a proposal arriving ${attached ? "keeps the keyboard in the Agent terminal" : "does not take a detached user into it"}`, async ({ page, request }) => {
+    const afBin = process.env.AF_BIN;
+    const mockRepo = process.env.AF_MOCK_REPO;
+    test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+    const af = (...args: string[]): string =>
+      execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+    const title = attached ? "docs-focus-kept-probe" : "docs-focus-detached-probe";
+    const slug = attached ? "docs-focus-kept-plan" : "docs-focus-detached-plan";
+    af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
+    const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+    const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
+    expect(session).toBeTruthy();
+    await page.goto(`/#/session/${session.id}`);
+    await expect(page.locator(".af-tab-label", { hasText: /^Agent$/ })).toBeVisible();
+    const textarea = page.locator(".af-pane-host .xterm-helper-textarea").first();
+    await page.locator(".af-pane-host .xterm").first().click();
+    await expect(textarea).toBeFocused();
+    if (!attached) {
+      await textarea.evaluate((el) => (el as HTMLElement).blur());
+      await expect(textarea).not.toBeFocused();
+    }
+
+    af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title, "--docs", "goals");
+    await expect(page.locator(`.af-docs[data-proposal="${slug}"] .cm-content`)).toBeVisible({ timeout: 20_000 });
+    if (attached) {
+      await expect(page.locator(".af-pane-host .xterm-helper-textarea").first(), "the Agent terminal keeps the keyboard").toBeFocused();
+    } else {
+      await expect(page.locator(".af-pane-host .xterm-helper-textarea").first(), "a detached user is not pulled into it").not.toBeFocused();
+    }
+  });
+}
