@@ -667,7 +667,7 @@ its own origin is what partitions that store.
 
 Two consequences worth knowing:
 
-- **Editor origins require a LOOPBACK, fixed preview port.** With
+- **`*.localhost` editor origins require a LOOPBACK, fixed preview port.** With
   `network.preview_listen_addr` bound to a network interface (or to an ephemeral `:0`), web
   tabs still get per-tab origins but **editors do not** — they stay on the same-origin
   mirror. On that listener the hostname is the only credential, and a remote client can
