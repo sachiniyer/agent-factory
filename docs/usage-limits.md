@@ -151,10 +151,14 @@ The default has these properties:
 - **The pickers show it.** The TUI's `ctrl+o` field and the web's Account select
   preselect the project default and mark its row `project default`, so a scoped
   create is visible before you press Enter rather than discovered afterwards.
-- **A default `af` cannot honour refuses the create**, naming the key, the file
-  it is set in, and how to clear it. It never falls back to the ambient identity:
-  a session quietly running as someone else is the failure the whole feature
-  exists to prevent.
+- **A default naming an account that is not registered refuses the create**,
+  naming the key, the file it is set in, and how to clear it. It never silently
+  falls back to the ambient identity: a session quietly running as someone
+  else is the failure the whole feature exists to prevent. The one carve-out
+  is a target that cannot carry an account at all — a sandbox, hook or
+  unlisted SSH create drops a *default* account with a logged warning and runs
+  on the target's own credentials rather than refusing a preference nobody
+  typed (an explicit `--account` is still refused there).
 - **A project's always-on `root` agent is deliberately not scoped by it.** Its
   command comes from `[root_agent]` rather than an agent name, and a preference
   set about ordinary creates must not be able to stop a project's guaranteed
