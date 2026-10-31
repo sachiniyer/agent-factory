@@ -704,8 +704,6 @@ func findingRemediation(f Finding, fixMode bool) string {
 	// than sending the reader back to the line above it.
 	case "git":
 		return "install git, then rerun `af doctor --setup`"
-	case "git-repo":
-		return "cd into a git repository (or run `git init` in your project), then rerun `af doctor --setup`"
 	case "git-identity":
 		return "run the git config commands above, then rerun `af doctor --setup`"
 	case "tmux":
