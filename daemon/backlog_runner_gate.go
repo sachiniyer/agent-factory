@@ -70,7 +70,7 @@ func (m *Manager) capBacklogRuns(repoID string, b *backlog.Backlog, states map[i
 			m.warn().Printf("backlog cap per run on %s: %v", backlog.FormatID(c.ID), err)
 			continue
 		}
-		backlogHost{m: m}.SetAttention(repoID, c.SessionID, q.Text)
+		backlogHost{m: m}.SetAttention(repoID, c.SessionID, q.ID, q.Text)
 		s, ok := sessions[c.SessionID]
 		if !ok || m.isPollPaused(repoID, s.instance.Title, s.instance.ID) {
 			continue
