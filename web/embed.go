@@ -6,6 +6,8 @@
 // the extracted CSS, produced by `make web-build`, design §1.3/§3.3) is the sole
 // embed root. Keeping dist/ committed means `go build ./...` and the Go test
 // suite never need Node — the JS toolchain is gated entirely behind `make web-*`.
+// Pull requests do not carry it (#6447): .github/workflows/web-dist-sync.yml commits
+// it after the source lands, as a dist-only PR.
 //
 // This package is a pure leaf: it embeds assets and exposes them as an fs.FS. All
 // serving, routing, and the auth/CSP policy live in the daemon (daemon/webserve.go),

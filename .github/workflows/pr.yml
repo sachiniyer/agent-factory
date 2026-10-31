@@ -282,6 +282,12 @@ jobs:
       - name: Test stale-external-pr helper
         run: node --test .github/scripts/stale-external-pr.test.js
 
+      # The guard in front of web-dist-sync.yml's write-capable commit job (#6447):
+      # it must refuse symlinks, odd names, oversize and non-bundle trees. And the
+      # PR-side rule for web/dist, which has to hold for non-ASCII names and renames.
+      - name: Test the web/dist guard and PR rules
+        run: node --test .github/scripts/web-dist-guard.test.js .github/scripts/web-dist-pr-rules.test.js
+
       # The container harness's own disk hygiene (#2133): cleanup must run on a
       # FAILING run, and every prune must be scoped to artifacts the harness
       # built. It went green for months while filling a 2TB box, so "the suite
@@ -660,6 +666,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history: the bundle check below diffs against HEAD^1 on a
+          # pull_request (a merge commit) and against the merge base with master on a
+          # branch dispatch.
+          fetch-depth: 0
 
       # Pinned major, matching the toolchain the lockfile was resolved against.
       # `cache: npm` caches ~/.npm (the download cache), not node_modules — `npm ci`
@@ -678,12 +689,27 @@ jobs:
       - name: Typecheck and test the web client
         run: make web-test
 
-      # Bundle reproducibility. web/dist is COMMITTED because the Go binary embeds
-      # it (web/embed.go) and the Go side must stay Node-free — so a PR that edits
-      # web/src and forgets `make web-build` ships a binary serving the OLD bundle,
-      # and nothing before this caught it. The selftest serves the committed dist,
-      # so it would have been testing the stale one too.
-      - name: Rebuild the committed bundle
+      # Bundle reproducibility. web/dist is COMMITTED because the Go binary embeds it
+      # (web/embed.go) and the Go side must stay Node-free.
+      #
+      # Until the repository variable WEB_DIST_SYNC is `true`, the rule is the original
+      # one: every PR carries a web/dist byte-identical to a fresh build, and any
+      # difference fails. With it `true` (#6447, web-dist-sync.yml, which the owner turns
+      # on only once its credential exists) PRs no longer carry the bundle, because
+      # every web change rewrote the one generated file and any two web PRs conflicted;
+      # web-dist-sync.yml proposes it after the source lands, as a dist-only PR on the
+      # bot branch `web-dist-sync`. Then:
+      #   * a normal PR must NOT touch web/dist (a pathspec diff, see
+      #     .github/scripts/web-dist-pr-rules.sh);
+      #   * the sync PR may touch ONLY web/dist, and its bundle must be byte-identical
+      #     to a fresh build of the PR's own merge tree: the independent second build
+      #     that stands between the sync job's artifact and master;
+      #   * everywhere else (master push, nightly, dispatch) a stale bundle is the sync
+      #     job's to fix. It is a WARNING on a push, where failing would turn Build red
+      #     in the minutes between a merge and its sync PR and halt the merger, and an
+      #     ERROR on the nightly, which is the backstop that notices a sync job that has
+      #     stopped working. The release workflows fail hard.
+      - name: Rebuild the bundle
         run: make web-build
 
       # `git status --porcelain`, not `git diff --exit-code`: diff sees modified
@@ -691,23 +717,85 @@ jobs:
       # emitting an extra asset (an icon, a chunk) would pass a diff-only check while
       # the committed dist was genuinely incomplete. Porcelain catches modified,
       # untracked and deleted alike.
-      - name: Check the committed bundle matches web/src
+      - name: Check the committed bundle
+        env:
+          EVENT: ${{ github.event_name }}
+          SYNC: ${{ vars.WEB_DIST_SYNC }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          dirty="$(git status --porcelain -- web/dist)"
-          if [ -n "$dirty" ]; then
-            echo "::error::web/dist is stale — it does not match a fresh build of web/src."
-            echo "$dirty"
-            echo
-            echo "The Go binary embeds the COMMITTED web/dist (web/embed.go), so this PR would"
-            echo "ship a bundle that does not match its source. Fix it with:"
-            echo
-            echo "    make web-build && git add web/dist"
-            echo
-            echo "Rebuild — never hand-edit or hand-merge dist/af-web.js; it is generated."
-            git diff -- web/dist | head -50
+          set -euo pipefail
+          stale="$(git status --porcelain -- web/dist)"
+
+          if [ "$SYNC" != "true" ]; then
+            if [ -n "$stale" ]; then
+              echo "::error::web/dist is stale — it does not match a fresh build of web/src."
+              echo "$stale"
+              echo
+              echo "The Go binary embeds the COMMITTED web/dist (web/embed.go), so this change would"
+              echo "ship a bundle that does not match its source. Fix it with:"
+              echo
+              echo "    make web-build && git add web/dist"
+              echo
+              echo "Rebuild — never hand-edit or hand-merge dist/af-web.js; it is generated."
+              git diff -- web/dist | head -50
+              exit 1
+            fi
+            echo "web/dist matches a fresh build."
+            exit 0
+          fi
+
+          # Which rules apply. A pull_request is the obvious case. The other is a
+          # workflow_dispatch on a PR BRANCH: auto-gate.js dispatches pr.yml on
+          # headRefName when a head has no run (recovery after an update-branch), and
+          # the merger accepts that run's Build as the PR's. It must enforce the same
+          # rules, so only a run on master itself (push, nightly, dispatch, queue)
+          # gets the warn-only staleness handling below.
+          base=""
+          if [ "$EVENT" = "pull_request" ]; then
+            # The checkout is the merge commit: HEAD^1 is the base tip, so this is
+            # exactly the PR's own change.
+            base="HEAD^1"
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ "$REF" != "refs/heads/master" ]; then
+            git fetch -q --no-tags origin master
+            base="$(git merge-base origin/master HEAD)"
+            HEAD_REF="$REF_NAME"
+            HEAD_REPO="$REPO"
+          fi
+
+          if [ -n "$base" ]; then
+            if [ "$HEAD_REF" = "web-dist-sync" ] && [ "$HEAD_REPO" = "$REPO" ]; then
+              .github/scripts/web-dist-pr-rules.sh "$base" sync
+              if [ -n "$stale" ]; then
+                echo "::error::the web-dist-sync bundle does not match a fresh build of this tree."
+                echo "$stale"
+                echo "If master moved since the sync ran, web-dist-sync.yml (run on that push) updates this PR; re-run it with: gh workflow run web-dist-sync.yml --ref master"
+                git diff -- web/dist | head -50
+                exit 1
+              fi
+              echo "web/dist in this sync PR is byte-identical to a fresh build."
+              exit 0
+            fi
+            .github/scripts/web-dist-pr-rules.sh "$base" normal
+            echo "No web/dist change in this PR (the bundle is synced after merge)."
+            exit 0
+          fi
+
+          if [ -z "$stale" ]; then
+            echo "web/dist matches a fresh build."
+            exit 0
+          fi
+          echo "$stale"
+          msg="web/dist is stale: it does not match a fresh build of web/src. web-dist-sync.yml proposes the fix (a dist-only PR on branch web-dist-sync)."
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$EVENT" = "schedule" ]; then
+            echo "::error::$msg It has not landed by the nightly run, so the sync job is not working."
             exit 1
           fi
-          echo "web/dist matches a fresh build."
+          echo "::warning::$msg"
 
   # Should the Playwright web-driver selftest run on this PR? (#2762)
   #
@@ -836,6 +924,16 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
+      # Once WEB_DIST_SYNC is on, PRs do not carry web/dist (#6447), so measure a fresh build of this
+      # tree's source: the container copies the working tree, dist included.
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the web bundle
+        run: make web-build
       - name: Recompute budgets and pixel-diff demo stills
         timeout-minutes: 35
         run: make perf-container

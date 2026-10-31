@@ -99,9 +99,46 @@ jobs:
         go test -v -race -count=1 -timeout=30m ./...
         go build ./...
 
+  # web/dist is committed (web/embed.go embeds it) but, once WEB_DIST_SYNC is on, PRs no
+  # longer carry it: web-dist-sync.yml lands it after the source (#6447). A tag must never
+  # embed a bundle that lags web/src, so rebuild and fail on any difference. This runs
+  # npm, which executes package scripts, so it is its OWN job: contents: read, no
+  # persisted credential, no npm cache, and no workspace shared with the jobs that hold
+  # contents: write or run `go ./...`. `build` needs it. The wait is minutes; the next
+  # run picks the release up once the sync PR has merged.
+  web-bundle:
+    name: Committed web/dist is current
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+
+    - name: Set up Node
+      if: vars.WEB_DIST_SYNC == 'true'
+      uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+
+    - name: Committed web/dist matches web/src
+      if: vars.WEB_DIST_SYNC == 'true'
+      run: |
+        make web-build
+        dirty="$(git status --porcelain -- web/dist)"
+        if [ -n "$dirty" ]; then
+          echo "::error::web/dist is stale: it does not match a fresh build of web/src, so a release would embed an old web client."
+          echo "$dirty"
+          echo "web-dist-sync.yml proposes the fix as a dist-only PR (branch web-dist-sync); release once it has merged."
+          exit 1
+        fi
+
   build:
     name: Build
-    needs: validate
+    needs: [validate, web-bundle]
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -223,6 +260,23 @@ jobs:
       run: |
         .github/scripts/release-bump.sh "$NEW_VERSION"
         echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+    # The web-bundle job above checked github.sha, but the bump's rebase-retry can
+    # land the tag on a NEWER master. If the bundle's inputs (or the bundle) moved in
+    # between, the freshness check says nothing about the tagged tree, so refuse to
+    # publish and let the release be restarted. No npm here: this job can write. The
+    # failure leaves at most an untagged bump commit, like any failure of the step above.
+    - name: Refuse a tag whose web bundle inputs moved during the build
+      if: vars.WEB_DIST_SYNC == 'true'
+      env:
+        BUILT_SHA: ${{ github.sha }}
+        TAG_SHA: ${{ steps.bump.outputs.sha }}
+      run: |
+        if ! git diff --quiet "$BUILT_SHA" "$TAG_SHA" -- web design; then
+          echo "::error::web/ or design/ changed between the validated commit ($BUILT_SHA) and the tag target ($TAG_SHA), so the web/dist freshness check does not cover the tag. Re-run the release."
+          git diff --stat "$BUILT_SHA" "$TAG_SHA" -- web design | tail -5
+          exit 1
+        fi
 
     # Immutable releases require all assets to be attached before the release
     # is published: create as draft, upload assets into the draft, then

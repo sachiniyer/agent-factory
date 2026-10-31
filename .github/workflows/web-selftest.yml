@@ -113,6 +113,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Once WEB_DIST_SYNC is on, PRs do not carry web/dist (#6447), so the committed bundle can lag the
+      # source under test. Build the bundle from this tree first; the container
+      # copies the working tree, dist included, so the suite drives what this
+      # source would ship.
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the web bundle
+        run: make web-build
+
       # `make web-selftest-container` is the ONLY sanctioned entry point
       # (docs/dev/web-selftest.md), and CI uses it verbatim rather than reimplementing
       # the steps — a CI-only copy of the harness is how the thing CI runs stops
@@ -197,21 +211,14 @@ jobs:
 #     product race (#2311, #2341). Retries, raised timeouts and xfail are how a
 #     real signal becomes silence.
 #
-# ── Why this serves the COMMITTED bundle rather than rebuilding ───────────────
+# ── Why this BUILDS the bundle first (#6447) ─────────────────────────────────
 #
-# The harness builds af from source and web/embed.go embeds the COMMITTED
-# web/dist, so the suite exercises the bundle a released binary would actually
-# serve — which is what an acceptance proof should test. It deliberately does not
-# run `make web-build` first:
-#
-#   * pr.yml's `Web` job already owns dist↔src fidelity — it rebuilds the bundle
-#     and fails on any `git status --porcelain` diff — and Web is in Build's
-#     `needs` too. Rebuilding here would be a second implementation of a check
-#     that already blocks, and would HIDE a stale dist from the one job that
-#     catches it.
-#   * On master, where Web does not run, testing the committed artifact is the
-#     more useful of the two: it is the artifact that ships.
-#
-# So the pair is what covers source: Web proves dist == build(src), this proves
-# dist works. Locally, run `make web-build` before `make web-selftest-container`
-# or you validate the old bundle.
+# The harness builds af from source and web/embed.go embeds web/dist. Until #6447
+# the committed dist was always in step with web/src (every web PR carried it, and
+# pr.yml's Web job proved it), so this suite could serve the committed bundle.
+# PRs no longer carry web/dist: web-dist-sync.yml commits it after the source
+# lands, so on a PR (and for a few minutes on master) the committed bundle lags the
+# source. Serving it would test the OLD bundle against the NEW source, so the
+# `make web-build` step above builds from this tree and the container copies it in.
+# Locally, run `make web-build` before `make web-selftest-container` or you
+# validate whatever bundle is in your tree.

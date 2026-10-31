@@ -71,11 +71,11 @@ A red run is worth investigating rather than re-running: twice on 2026-07-21 a
 "flake" here was a genuine web-client race (#2311, #2341).
 
 The deterministic web checks — typecheck, the unit/parity suites, and
-`web/dist` reproducibility — gate too, as pr.yml's `Web` job. The two are a pair:
-`Web` proves the committed bundle matches `web/src`, and this suite proves that
-bundle works. This harness deliberately serves the **committed** `web/dist` rather
-than rebuilding, so it exercises the artifact a released binary embeds — which is
-also why you run `make web-build` before it locally.
+`web/dist` reproducibility — gate too, as pr.yml's `Web` job. PRs do not carry
+`web/dist` once `WEB_DIST_SYNC` is on (#6447; `web-dist-sync.yml` commits it after the source lands), so CI
+runs `make web-build` before this suite and the container serves that fresh bundle:
+the source under test, not a committed bundle that may lag it. Locally, run
+`make web-build` before it for the same reason.
 
 Failures give you Playwright's assertion output in the job log **and** the trace.
 The harness works inside the container's own copy of the tree, so its
@@ -107,9 +107,11 @@ Against the live SPA served over the daemon's plain-HTTP listener:
 Node and Playwright stay **entirely** behind `make web-selftest-container` (and
 `make web-build` / `make web-test`). `go build ./...` and `make test-container`
 never invoke them — the built `web/dist/` is committed, so the Go side is
-Node-free (the locked toolchain decision). The harness tests the **committed**
-`web/dist/` bundle the binary embeds; rebuild it with `make web-build` after
-changing `web/src/`.
+Node-free (the locked toolchain decision). The harness tests whatever bundle is in
+your tree's `web/dist/`; rebuild it with `make web-build` after changing
+`web/src/`. Once `WEB_DIST_SYNC` is on, do **not** commit it: a PR that touches
+`web/dist` fails the `Web` job (#6447). `web-dist-sync.yml` proposes the bundle as its own dist-only PR once
+your source has merged. Before pushing, `git checkout origin/master -- web/dist`.
 
 ## Artifacts
 

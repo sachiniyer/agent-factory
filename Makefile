@@ -215,8 +215,10 @@ web/node_modules: web/package-lock.json web/package.json
 	cd web && npm ci
 	@touch web/node_modules
 
-# esbuild the SPA bundle into the committed web/dist/ (design §3.1, §1.3). PR1 bundles
-# only the wire-frame codec; later PRs add the UI and go:embed dist/ into the daemon.
+# esbuild the SPA bundle into web/dist/ (design §3.1, §1.3), which web/embed.go embeds.
+# web/dist is committed but never by a PR (#6447): web-dist-sync.yml commits it after
+# the source lands. Build it to try a change; `git checkout origin/master -- web/dist`
+# before you push.
 web-build: web/node_modules
 	cd web && npm run build
 
