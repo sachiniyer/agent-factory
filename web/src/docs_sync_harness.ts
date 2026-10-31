@@ -360,7 +360,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
                 }
               },
             });
-            throw new Error("Failed to fetch");
+            throw Object.assign(new Error("cannot reach the daemon: Failed to fetch"), { status: 0 }); // as putDoc reports it
           }
           const result = d.save(text, base, fence);
           if (fault === "lose-reply") throw new Error("network error: reply lost");

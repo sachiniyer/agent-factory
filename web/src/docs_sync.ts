@@ -470,12 +470,13 @@ function statusOf404(e: unknown): boolean {
   return httpStatus(e) === 404;
 }
 
-/** No reply from the daemon at all (the connection dropped) or one from a gateway in front of it
+/** No reply from the daemon at all (the connection dropped: `putDoc` reports it as status 0, and any
+ *  error that carries no status counts too) or one from a gateway in front of it
  *  (408, 502, 504): the request may have reached the daemon and can still commit. A reply from the
  *  daemon itself (a 503 it sends before it starts, a 4xx refusal) ends the request. */
 function mayStillLand(e: unknown): boolean {
   const status = httpStatus(e);
-  return status === null || status === 408 || status === 502 || status === 504;
+  return status === null || status === 0 || status === 408 || status === 502 || status === 504;
 }
 
 /** A 4xx other than a timeout or a rate limit: the daemon refused, and did not apply, the save. */
