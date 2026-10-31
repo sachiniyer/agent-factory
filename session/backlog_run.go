@@ -81,9 +81,17 @@ func (i *Instance) ArmBacklogRun(at time.Time) bool {
 
 // DisarmBacklogRun closes a backlog run whose prompt was not delivered.
 func (i *Instance) DisarmBacklogRun() bool {
+	return i.DisarmBacklogRunGen(-1)
+}
+
+// DisarmBacklogRunGen closes the backlog run only while it is still the one armed
+// at generation gen (a negative gen matches any): a delivery that armed the
+// session again since owns the marker now, and a failed earlier attempt must not
+// close it.
+func (i *Instance) DisarmBacklogRunGen(gen int) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if !i.backlogRunActive {
+	if !i.backlogRunActive || (gen >= 0 && i.backlogRunGen != gen) {
 		return false
 	}
 	i.backlogRunActive = false

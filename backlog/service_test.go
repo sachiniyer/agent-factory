@@ -23,15 +23,23 @@ type testHost struct {
 	target    AnswerTarget
 	delivered []PendingAnswer
 	usage     planusage.Usage
+	// onTarget runs inside AnswerTarget, between the service reading the item and
+	// its transaction.
+	onTarget func()
 }
 
-func (h *testHost) SetAttention(_, sessionID, reason string) {
+func (h *testHost) SetAttention(_, sessionID string, _ int, reason string) {
 	if h.attention == nil {
 		h.attention = map[string]string{}
 	}
 	h.attention[sessionID] = reason
 }
-func (h *testHost) AnswerTarget(string, string) AnswerTarget { return h.target }
+func (h *testHost) AnswerTarget(string, string) AnswerTarget {
+	if h.onTarget != nil {
+		h.onTarget()
+	}
+	return h.target
+}
 func (h *testHost) DeliverAnswer(_ string, a PendingAnswer) {
 	h.delivered = append(h.delivered, a)
 }

@@ -134,3 +134,16 @@ func TestScanSourcesFilesAnAmbientDirUnderItsRegisteredAccount(t *testing.T) {
 		t.Fatalf("a plain ambient dir stays ambient, a run's effective dir joins its account: %v", got)
 	}
 }
+
+func TestTranscriptConfigRoot(t *testing.T) {
+	for file, want := range map[string]string{
+		"/h/.claude/projects/-w-a/s.jsonl":                         "/h/.claude",
+		"/af/accounts/claude/work/projects/-w/s/subagents/x.jsonl": "/af/accounts/claude/work",
+		"/home/u/projects/x/.claude/projects/-w/s.jsonl":           "/home/u/projects/x/.claude",
+		"/no/marker/s.jsonl":                                       "",
+	} {
+		if got := transcriptConfigRoot(file); got != want {
+			t.Errorf("transcriptConfigRoot(%q) = %q, want %q", file, got, want)
+		}
+	}
+}

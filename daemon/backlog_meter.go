@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -355,11 +356,29 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		// (Codex P2 on #6299).
 		rm := backlog.MeterRun(r.item.ID, r.run, planusage.TranscriptFiles(dirs), seen, overrides, now)
 		usage.Runs[r.run.SessionID] = rm.Cost()
-		state.AddRunEntries(r.run.SessionID, accountOfRun(home, configDir), rm.Entries)
+		// Each message belongs to the account whose config root holds its transcript,
+		// not to the session's account now: a session that switched accounts has
+		// transcripts under both, and the account-wide scan counts them where they
+		// lie. The same roots keep a killed session's custom CLAUDE_CONFIG_DIR in the
+		// account scans (Codex P2s on #6299).
+		for f, entries := range rm.FileEntries {
+			root := transcriptConfigRoot(f)
+			state.AddRunEntries(r.run.SessionID, accountOfRun(home, root), entries)
+		}
+		for _, f := range planusage.TranscriptFiles(dirs) {
+			if root := transcriptConfigRoot(f); root != "" {
+				account := accountOfRun(home, root)
+				if !containsDir(runConfigs[account], root) {
+					runConfigs[account] = append(runConfigs[account], root)
+				}
+			}
+		}
 		if configDir != "" {
 			account := planusage.AccountForConfigDir(home, configDir)
 			runAccount[r.run.SessionID] = account
-			runConfigs[account] = append(runConfigs[account], configDir)
+			if !containsDir(runConfigs[account], configDir) {
+				runConfigs[account] = append(runConfigs[account], configDir)
+			}
 		}
 		if running && rm.Unmeterable != "" {
 			usage.Unmeterable[r.run.SessionID] = rm.Unmeterable
@@ -502,4 +521,14 @@ func ambientClaudeConfigDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".claude")
+}
+
+// transcriptConfigRoot is the Claude config root holding a transcript file:
+// <root>/projects/<project>/<file>.jsonl (subagent files sit deeper), or "".
+func transcriptConfigRoot(file string) string {
+	const marker = string(filepath.Separator) + "projects" + string(filepath.Separator)
+	if i := strings.LastIndex(file, marker); i > 0 {
+		return file[:i]
+	}
+	return ""
 }

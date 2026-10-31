@@ -26,7 +26,7 @@ type Host interface {
 	// SetAttention mirrors an item's open question on its session; reason ""
 	// clears it. Best effort: the thread is the source of truth. The service
 	// calls it under the backlog lock, so mirrors follow the thread's order.
-	SetAttention(repoID, sessionID, reason string)
+	SetAttention(repoID, sessionID string, questionID int, reason string)
 	// AnswerTarget reports whether an answer can reach the session.
 	AnswerTarget(repoID, sessionID string) AnswerTarget
 	// Usage returns the plan windows from the last metering pass.
@@ -288,7 +288,7 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		still := b.questionSessions()
 		for id, sessionID := range asked {
 			if _, open := still[id]; !open {
-				s.host.SetAttention(p.id, sessionID, "")
+				s.host.SetAttention(p.id, sessionID, 0, "")
 			}
 		}
 		return changed, nil

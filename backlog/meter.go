@@ -20,6 +20,9 @@ type RunMeter struct {
 	Unmeterable string
 	// Entries are the messages this pass counted, for time buckets.
 	Entries []planusage.Entry
+	// FileEntries are the same messages by the transcript file they came from, so a
+	// caller can attribute each to the account that incurred it.
+	FileEntries map[string][]planusage.Entry
 }
 
 // Cost sums the run's per-file costs.
@@ -39,6 +42,12 @@ func MeterRun(id int, r RunRef, files []string, seen map[string]int64, overrides
 		old := out.Meter[f]
 		res, err := planusage.ReadTranscript(f, planusage.FileMark{Offset: old.Offset, Last: old.Last}, planusage.ReadOptions{Overrides: overrides, Seen: seen})
 		out.Entries = append(out.Entries, res.Entries...)
+		if len(res.Entries) > 0 {
+			if out.FileEntries == nil {
+				out.FileEntries = map[string][]planusage.Entry{}
+			}
+			out.FileEntries[f] = append(out.FileEntries[f], res.Entries...)
+		}
 		next := Meter{Offset: res.Mark.Offset, Cost: old.Cost + res.Cost(), Last: res.Mark.Last}
 		if _, known := r.Meter[f]; next != old || !known {
 			out.Meter[f], out.Changed = next, true

@@ -535,7 +535,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	// The backlog question this prompt answers, captured the same way (and from
 	// memory, so a dismissed chip still names it): a user's send-prompt is the
 	// same answer as a line typed in the pane.
-	seenQuestion := m.backlogSeenQuestion(instance)
+	seenQ := m.backlogSeenQuestion(instance)
 	// Liveness cannot express "owed a stale-pane teardown": a committed retry
 	// restores LiveRunning/LiveReady for its owner, and the pane this would
 	// reach may still be bound to the deleted inode. The durable flag is the
@@ -580,8 +580,8 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		if answered != nil {
 			m.queueAttentionClear(instance, answered.SetAt)
 		}
-		if seenQuestion != "" {
-			m.noteBacklogSubmitted(instance, seenQuestion)
+		if !seenQ.empty() {
+			m.noteBacklogSubmitted(instance, seenQ)
 		}
 	}
 	return status, nil

@@ -230,10 +230,12 @@ func (it *Item) OpenQuestion() *Message {
 }
 
 // answerPending reports whether an answer to one of the item's questions has not
-// been delivered to its session yet.
+// been delivered to its session yet. Only an answer of the CURRENT run counts: one
+// accepted under an earlier run never reaches this one and must not hold back its
+// completion (a legacy answer without a run count counts).
 func (it *Item) answerPending() bool {
 	for _, m := range it.Thread {
-		if m.Kind == KindAnswer && m.Delivery == DeliveryPending {
+		if m.Kind == KindAnswer && m.Delivery == DeliveryPending && (m.RunCount == 0 || m.RunCount == len(it.Runs)) {
 			return true
 		}
 	}
