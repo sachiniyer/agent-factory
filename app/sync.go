@@ -820,6 +820,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileCallbackUnavailable(d.CallbackUnavailable) {
 		changed = true
 	}
+	// The skipped agent-config list is the same class again (#6337): a
+	// (re)provision or an account swap rewrites it while liveness stays
+	// Ready/Running, and a placement that lands every file clears it.
+	if inst.ReconcileAgentConfigSkipped(d.AgentConfigSkipped) {
+		changed = true
+	}
 	// Automatic restore can exhaust its attempts while liveness stays Lost. Mirror
 	// that durable terminal axis independently so an already-open TUI surfaces the
 	// reason immediately rather than only after cold-start materialization.

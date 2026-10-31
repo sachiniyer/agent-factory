@@ -311,6 +311,11 @@ type TmuxSession struct {
 	// (#6258). Guarded by programMu with the other launch settings. Empty for
 	// sessions that are not an instance's agent (siblings, login panes).
 	instanceID string
+
+	// pendingCapabilities are the launch capabilities the current prepare has
+	// minted and not yet committed or revoked (#4731).
+	capMu               sync.Mutex
+	pendingCapabilities []pendingCapability
 	// account is the credential account this session runs its agent as, or empty
 	// for the ambient identity. Guarded by programMu with envPassthrough (#3051).
 	account string

@@ -698,6 +698,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,
 		callbackUnavailable:   callbackUnavailableReasonFor(opts, res),
+		agentConfigSkipped:    append([]string(nil), res.AgentConfigSkipped...),
 		hostedRemotely:        opts.HostedRemotely,
 		advertisedFeatures:    opts.AdvertisedFeatures,
 	}, nil

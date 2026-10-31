@@ -501,6 +501,18 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.CallbackUnavailable != "" {
 		d.CallbackUnavailable = redactedMarker
 	}
+	// AgentConfigSkipped entries each name an operator-declared agent:file and
+	// the reason af could not place it (#6337): the reason quotes the file's
+	// path under the operator's agent home, which is the same class of
+	// user-meaningful path as the tab names above. Each entry takes the marker
+	// so the COUNT of skipped files survives for triage — "af skipped 2 of the
+	// declared files" is the actionable fact — while no operator path rides
+	// the bundle.
+	for i := range d.AgentConfigSkipped {
+		if d.AgentConfigSkipped[i] != "" {
+			d.AgentConfigSkipped[i] = redactedMarker
+		}
+	}
 	// PendingHandoffMission is a rendered takeover brief that embeds the user's
 	// free-text prompt/goal verbatim — the same sensitivity class as Prompt. It
 	// was added with transactional handoff (#2286) after this policy was written,

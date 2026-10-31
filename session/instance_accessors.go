@@ -87,6 +87,17 @@ func (i *Instance) CallbackUnavailable() string {
 	return i.callbackUnavailable
 }
 
+// AgentConfigSkipped returns the "agent:file: <reason>" entries for the declared
+// sandbox_agent_config files the account-scope placement refused, or nil when
+// every declared file landed (or none applied). Surfaces render the joined
+// entries prefixed by AgentConfigSkippedPrefix. The slice is a copy: a renderer
+// must never mutate the row's own list.
+func (i *Instance) AgentConfigSkipped() []string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return append([]string(nil), i.agentConfigSkipped...)
+}
+
 // SetRuntimeTeardownForTest installs the physical reap a sandbox runtime would
 // normally supply through ProvisionResult.Teardown.
 //

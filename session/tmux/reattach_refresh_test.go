@@ -68,6 +68,9 @@ func accountScopedRefreshSession(t *testing.T, m *reattachRefreshTmux) *TmuxSess
 	t.Helper()
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	// These tests model the daemon's restore, the one process that writes a
+	// session's default-command (#4731).
+	forceLaunchCapabilityOwner(t, true)
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	if _, err := agentaccount.Register(home, ProgramCodex, "work"); err != nil {

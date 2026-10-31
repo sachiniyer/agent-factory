@@ -72,6 +72,11 @@ type capRecord struct {
 	cap     Capability
 	expires time.Time
 	panes   map[string]bool // PerPane: "<pane id>:<root pid>" already claimed
+	// pending marks a PerPane record minted for a launch that has not yet created
+	// its session. It keeps the launch TTL until Activate, so a launch that dies
+	// leaves nothing behind, and it is exempt from the lost-session sweep because
+	// its session legitimately does not exist yet.
+	pending bool
 }
 
 // CapabilityBroker holds the minted records and answers claims.
@@ -102,14 +107,53 @@ func (b *CapabilityBroker) Mint(c Capability) (string, error) {
 	if len(b.recs) >= capabilityMaxRecords {
 		return "", errors.New("too many unclaimed launch capabilities")
 	}
-	rec := &capRecord{cap: c, expires: b.now().Add(capabilityTTL)}
-	if c.PerPane {
-		// Backs tmux's session-long default-command: new windows open at any time,
-		// so it lives until the session ends (Revoke), never by the clock.
-		rec.expires = time.Time{}
-	}
+	rec := &capRecord{cap: c, expires: b.now().Add(capabilityTTL), pending: c.PerPane}
 	b.recs[token] = rec
 	return token, nil
+}
+
+// Activate ends a PerPane record's launch window once its session exists. It then
+// backs tmux's session-long default-command: new windows open at any time, so it
+// lives until the session ends (Revoke), never by the clock.
+func (b *CapabilityBroker) Activate(token string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if rec, ok := b.recs[token]; ok && rec.pending {
+		rec.pending = false
+		rec.expires = time.Time{}
+	}
+}
+
+// RevokeTokens drops exactly these records: what a failed launch minted, never
+// what an earlier launch of the same session still has installed.
+func (b *CapabilityBroker) RevokeTokens(tokens ...string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, token := range tokens {
+		delete(b.recs, token)
+	}
+}
+
+// RevokeSessionExcept drops every record of a session but keep: how a successful
+// launch retires the records it superseded only after its own are installed.
+func (b *CapabilityBroker) RevokeSessionExcept(session string, keep ...string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for token, rec := range b.recs {
+		if rec.cap.Session != session {
+			continue
+		}
+		kept := false
+		for _, k := range keep {
+			if k == token {
+				kept = true
+				break
+			}
+		}
+		if !kept {
+			delete(b.recs, token)
+		}
+	}
 }
 
 func (b *CapabilityBroker) expireLocked() {

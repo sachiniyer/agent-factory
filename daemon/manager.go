@@ -800,6 +800,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		log.WarningLog.Printf("editor preview origins disabled: %v", err)
 		editorSecret = ""
 	}
+	claimLaunchCapabilityOwnership() // before any restore: restoring a session re-establishes its default-command
 	state := config.LoadState()
 	storage, err := session.NewStorage(state, "")
 	if err != nil {

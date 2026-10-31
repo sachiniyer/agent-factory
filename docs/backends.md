@@ -965,7 +965,13 @@ personalization af places in that same scope — read from the operator's own ag
 home on the daemon machine, written beside the synced credentials, one way, and
 removed with them. It applies only on a listed host and only to an account-scoped
 session; a repository can never set it. A copied codex `config.toml` is rewritten to
-the file credential store so it cannot override the session's account.
+the file credential store so it cannot override the session's account. A declared
+file af cannot place — missing, unreadable, not a regular file, unparsable, or
+pushing the placement archive over its 64 MiB bound — is skipped rather than
+failing the provision, and the
+skip is not silent: the session row carries one `agent:file: <reason>` entry per
+skipped file in `agent_config_skipped`, surfaced on `af sessions get`, the TUI row,
+and the web view until a later provision or account swap places every file.
 
 Not yet built: fanning a refresh out to every live session on the same account
 (providers that rotate refresh tokens log the others out), write-back on a timer or

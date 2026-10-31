@@ -143,6 +143,8 @@ var auditedMkdir = map[string]struct {
 }{
 	"config/inrepo.go:inRepoConfigWriteTarget": {1,
 		"Creates the config directory inside a repo; its parent must exist or Mkdir returns ENOENT."},
+	"internal/sessionenv/capability_endpoint.go:claimSocketDir": {1,
+		"Creates the launch-capability socket's private directory one level under os.TempDir() (a short path, since sun_path is 104 bytes), never under the AF home; the system temp dir is the existing parent."},
 	"internal/agentaccount/agentaccount.go:Register": {1,
 		"Creates one account beneath accounts/<agent>, whose parent is created through guarded afhome.MkdirAll; ENOENT if gone."},
 	"internal/upgradetxn/install_lock.go:ensureLockRoot": {1,
