@@ -72,7 +72,7 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		// Use existing tmux session (useful for testing)
 		tmuxSession = existingSession
 	} else {
-		repo, err := config.RepoFromPath(i.Path)
+		repo, err := i.restoreContext().RepoFromPath(i.Path)
 		if err != nil {
 			return fmt.Errorf("failed to resolve repository identity for tmux session: %w", err)
 		}

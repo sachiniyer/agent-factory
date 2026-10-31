@@ -57,10 +57,10 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/SetConfigValue` | `key`, `value`, `hosts_edit` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
 | `POST` | `/v1/UnsetConfigValue` | `key` | Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins, allowed_hosts) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically). |
 | `POST` | `/v1/ListProposals` | `session_id`, `repo_id`, `repo_path` | List a project's proposals, newest edit first. Name the project with exactly one of session_id, repo_id or repo_path (a path on the daemon host). |
-| `POST` | `/v1/GetProposal` | `session_id`, `repo_id`, `repo_path`, `slug` | Describe one proposal for the Docs tab: head commit, docs, unused templates, open question count, and attached sessions. |
-| `POST` | `/v1/StartProposal` | `session_id`, `slug`, `docs` | Create a proposal from templates, attach the session to it, open its Docs tab, and return the rules for the agent. |
-| `POST` | `/v1/AttachProposal` | `session_id`, `slug` | Attach the session to a proposal (or, with no slug, report its current one), open its Docs tab, and return the rules. |
-| `POST` | `/v1/DetachProposal` | `session_id` | Remove the session's proposal attachment and cursor, and close its Docs tab. |
+| `POST` | `/v1/GetProposal` | `session_id`, `repo_id`, `repo_path`, `slug` | Describe one proposal for the Proposal tab: head commit, docs, unused templates, open question count, and attached sessions. |
+| `POST` | `/v1/StartProposal` | `session_id`, `slug`, `docs` | Create a proposal from templates, attach the session to it, open its Proposal tab, and return the rules for the agent. |
+| `POST` | `/v1/AttachProposal` | `session_id`, `slug` | Attach the session to a proposal (or, with no slug, report its current one), open its Proposal tab, and return the rules. |
+| `POST` | `/v1/DetachProposal` | `session_id` | Remove the session's proposal attachment and cursor, and close its Proposal tab. |
 | `POST` | `/v1/AddProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `name`, `author` | Add a doc to a proposal from a template, or blank, and commit it as the given author. |
 | `POST` | `/v1/RemoveProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `author` | Remove a doc from a proposal and commit the deletion as the given author; the doc stays in the proposal's history. |
 | `POST` | `/v1/ReadProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc` | Read a proposal doc and the commit it is at, after committing its uncommitted edits as external. |
@@ -68,7 +68,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/WriteProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `author` | Replace a proposal doc and commit it as the given author, with no merge. |
 | `POST` | `/v1/PullProposalChanges` | `session_id` | Return the edits to the session's proposal that it has not seen, then move its cursor. |
 | `POST` | `/v1/CheckpointProposal` | `session_id` | Commit the session's edits to its proposal as its own and move its cursor past them. |
-| `POST` | `/v1/SetProposalPushMode` | `session_id`, `mode` | Set the push mode (auto or manual) of the session's Docs tabs for its proposal, and return its push status. |
+| `POST` | `/v1/SetProposalPushMode` | `session_id`, `mode` | Set the push mode (auto or manual) of the session's Proposal tabs for its proposal, and return its push status. |
 | `POST` | `/v1/HoldProposalPush` | `session_id` | Hold the session's pending proposal push until the next human save, and return its push status. |
 | `POST` | `/v1/SendProposalChanges` | `session_id` | Send the session its unseen proposal edits as a prompt now when the agent is Ready, or on the next tick where it is, and return its push status. |
 | `POST` | `/v1/GetBacklog` | `repo_id`, `repo_path` | Read a project's backlog in tree order, with each item's derived state and reason and the runner's state and slots. |
