@@ -500,7 +500,7 @@ test("a refused note comes back to the box, ahead of anything typed since", asyn
   const pane = mount(h);
   pane.update(data({ "/a": view(item(1)) }), "/a", []);
   pane.select(1);
-  const note = el(pane).querySelector(".af-backlog-note")!;
+  const note = el(pane).querySelector('textarea[aria-label="Note"]')!;
   const addNote = (): void => {
     [...el(pane).querySelectorAll("button")].find((b) => b.textContent === "Add note")!.click();
   };
