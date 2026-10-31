@@ -59,3 +59,23 @@ export class SerialSaver<T> {
     this.queue.submit(() => this.save(value), (ok) => this.settled(value, ok));
   }
 }
+
+// The value a field was last submitted with, until a confirming read carries it, kept
+// by key like the queues: it must outlive the panel that submitted it, or a reopened
+// panel would build its next change from the stale stored value.
+const drafts = new Map<string, unknown>();
+
+export function getDraft<T>(key: string): T | null {
+  return drafts.has(key) ? (drafts.get(key) as T) : null;
+}
+
+export function setDraft<T>(key: string, value: T | null): void {
+  if (value === null) drafts.delete(key);
+  else drafts.set(key, value);
+}
+
+/** Forgets every queue and draft: tests start each case clean. */
+export function resetSerialState(): void {
+  drafts.clear();
+  queues.clear();
+}

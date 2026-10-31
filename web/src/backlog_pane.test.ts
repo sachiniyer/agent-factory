@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { type FakeDocument, FakeDataTransfer, type FakeElement, FakeEvent, installFakeDom } from "./backlog_fakedom.js";
 import { bodyEditorLoader } from "./backlog_body.js";
+import { resetSerialState } from "./backlog_serial.js";
 import type { BacklogData } from "./backlog_data.js";
 import type { BacklogView, Item } from "./backlog_model.js";
 import { BacklogPane, type BacklogHost } from "./backlog_pane.js";
@@ -27,6 +28,7 @@ interface FakeEditor {
 let editors: FakeEditor[];
 
 beforeEach(() => {
+  resetSerialState();
   dom = installFakeDom();
   doc = dom.doc;
   calls = [];
@@ -517,4 +519,36 @@ test("an edit is not acknowledged by a refresh that failed to read the project",
   await settle();
   pane.update(data({ "/a": view(item(1, { body: "from agent" })) }, 3), "/a", []);
   assert.equal(editors[0].text, "from agent", "a confirmed save releases the guard");
+});
+
+test("a dependency list submitted before the panel was closed is the base for the reopened panel's next change", async () => {
+  const finish: (() => void)[] = [];
+  reply = (method) => method === "UpdateBacklogItem" ? new Promise((r) => { finish.push(() => r({})); }) : Promise.resolve({});
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1, { waits_on: [2, 3] }), item(2), item(3)) }), "/a", []);
+  pane.select(1);
+  el(pane).querySelector('button[aria-label="Remove B-2"]')!.click();
+  pane.select(2);                                      // close it and look at another item
+  pane.select(1);                                      // reopen: a new panel, the write still in flight
+  assert.equal(el(pane).querySelector('button[aria-label="Remove B-2"]'), null, "the removal still shows");
+  el(pane).querySelector('button[aria-label="Remove B-3"]')!.click();
+  finish[0]();
+  await settle();
+  assert.deepEqual(updates().map((c) => c.body.waits_on), [[3], []], "the second removal builds on the first, not on the stored list");
+  finish[1]?.();
+  await settle();
+});
+
+test("a body save held across a panel reopening shows the saved text, not the stored one", async () => {
+  reply = (method) => method === "UpdateBacklogItem" ? new Promise(() => {}) : Promise.resolve({});
+  const pane = mount(host());
+  pane.update(data({ "/a": view(item(1, { body: "old" }), item(2)) }), "/a", []);
+  pane.select(1);
+  await settle();
+  editors[0].change("typed");
+  mock.timers.tick(800);                               // the save is in flight and never lands
+  pane.select(2);
+  pane.select(1);
+  await settle();
+  assert.equal(editors.at(-1)!.text, "typed");
 });

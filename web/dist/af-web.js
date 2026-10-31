@@ -8681,20 +8681,20 @@ var ConfigPane = class {
   }
   /** Every register field's current text, keyed by agent. */
   readAccountDrafts() {
-    const drafts = /* @__PURE__ */ new Map();
+    const drafts2 = /* @__PURE__ */ new Map();
     for (const field2 of this.el.querySelectorAll(`input[${ACCOUNT_INPUT_ATTR}]`)) {
       const agent = field2.getAttribute(ACCOUNT_INPUT_ATTR);
       if (agent !== null && field2.value !== "") {
-        drafts.set(agent, field2.value);
+        drafts2.set(agent, field2.value);
       }
     }
-    return drafts;
+    return drafts2;
   }
   /** Puts them back on the freshly rendered fields. An agent whose row is gone —
    *  a roster that shrank between renders — simply drops its draft; there is no
    *  field left to hold it. */
-  restoreAccountDrafts(drafts) {
-    for (const [agent, value] of drafts) {
+  restoreAccountDrafts(drafts2) {
+    for (const [agent, value] of drafts2) {
       const field2 = this.accountInput(agent);
       if (field2) {
         field2.value = value;
@@ -18393,6 +18393,14 @@ var SerialSaver = class {
     this.queue.submit(() => this.save(value), (ok) => this.settled(value, ok));
   }
 };
+var drafts = /* @__PURE__ */ new Map();
+function getDraft(key) {
+  return drafts.has(key) ? drafts.get(key) : null;
+}
+function setDraft(key, value) {
+  if (value === null) drafts.delete(key);
+  else drafts.set(key, value);
+}
 
 // src/backlog_body.ts
 var SAVE_DELAY_MS = 800;
@@ -18421,6 +18429,8 @@ var BodyEditor = class {
   constructor(save, label, queueKey) {
     this.save = save;
     this.queue = queueKey === void 0 ? new SerialQueue() : queueFor(queueKey);
+    this.draftKey = queueKey;
+    if (this.draft !== null) this.text = this.draft;
     this.el = document.createElement("div");
     this.el.className = "af-backlog-body";
     const fallback = document.createElement("pre");
@@ -18442,7 +18452,15 @@ var BodyEditor = class {
   // debounce is running) or saved and still in flight. Stored text arriving while it
   // is set is older than the edit and must not replace it. It survives a failed save,
   // so the edit is kept (and the next change saves it again).
-  draft = null;
+  localDraft = null;
+  draftKey;
+  get draft() {
+    return this.draftKey === void 0 ? this.localDraft : getDraft(this.draftKey);
+  }
+  set draft(v) {
+    if (this.draftKey === void 0) this.localDraft = v;
+    else setDraft(this.draftKey, v);
+  }
   disposed = false;
   /** `save` may return a promise that settles true once the write AND the refresh
    *  after it have landed; a plain void return acknowledges at once. */
@@ -18618,6 +18636,8 @@ var ItemPanel = class {
     this.root = root2;
     this.id = id;
     this.actions = actions2;
+    this.titleKey = `${root2}\0${id}\0title`;
+    this.waitsKey = `${root2}\0${id}\0waits`;
     this.titles = new SerialSaver((title) => actions2.update(id, { title }), (title, ok) => {
       if (this.titleDraft !== title) return;
       this.titleDraft = null;
@@ -18729,10 +18749,22 @@ ${this.note.value}` : text;
   lookups = /* @__PURE__ */ new Map();
   // The title the user submitted that no confirming response has covered yet: a
   // refresh that read the old item must not put the old title back over it.
-  titleDraft = null;
+  get titleDraft() {
+    return getDraft(this.titleKey);
+  }
+  set titleDraft(v) {
+    setDraft(this.titleKey, v);
+  }
   // The waits-on list the user last submitted, likewise held until acknowledged, so
   // a second change builds on it instead of on the stored list.
-  waitsDraft = null;
+  get waitsDraft() {
+    return getDraft(this.waitsKey);
+  }
+  set waitsDraft(v) {
+    setDraft(this.waitsKey, v);
+  }
+  titleKey;
+  waitsKey;
   titles;
   waits;
   focus() {
