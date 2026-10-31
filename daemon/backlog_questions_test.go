@@ -586,3 +586,49 @@ func TestLongQuestionIsAnsweredInSessionWithADismissedChip(t *testing.T) {
 		t.Fatalf("the long question stayed open: %+v", it.Thread)
 	}
 }
+
+// A user's send-prompt over the control/HTTP route answers the open backlog
+// question the same way a line typed in the pane does (Codex P2 on #6295).
+func TestSendPromptAnswersTheOpenBacklogQuestion(t *testing.T) {
+	drain := queuedAttentionClears(t)
+	m, repoID, inst := askedItem(t)
+	if _, err := m.SendPromptWithStatus(SendPromptRequest{Title: inst.Title, RepoID: repoID, Prompt: "Postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	m.backgroundMutationWG.Wait()
+	if it := loadItem(t, repoID, 1); it.OpenQuestion() != nil {
+		t.Fatalf("the question stayed open after a delivered send-prompt: %+v", it.Thread)
+	}
+}
+
+// An answer waiting to be delivered is not sent once the item was started again in
+// another session (Codex P2 on #6295): two sessions would work on it.
+func TestAnswerIsNotSentToASupersededSession(t *testing.T) {
+	m, repoID, inst := askedItem(t)
+	sent := stubBacklogSend(t, m, repoID)
+	var pa backlog.PendingAnswer
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		out, err := b.Answer(1, 0, "Postgres", true, time.Now())
+		if err != nil {
+			return err
+		}
+		pa = backlog.PendingAnswer{ID: 1, AnswerID: out.Answer.ID, SessionID: inst.ID, Prompt: "Postgres"}
+		b.Item(1).Runs = append(b.Item(1).Runs, backlog.RunRef{State: backlog.RunStarted, SessionID: "replacement", Title: "B-1 again"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.deliverBacklogAnswer(nil, repoID, pa)
+	if sent.count() != 0 {
+		t.Fatal("the answer was sent to the superseded session")
+	}
+	it := loadItem(t, repoID, 1)
+	var failed bool
+	for _, msg := range it.Thread {
+		failed = failed || (msg.Kind == backlog.KindAnswer && msg.Delivery == backlog.DeliveryFailed)
+	}
+	if !failed {
+		t.Fatalf("the answer was not recorded as undelivered: %+v", it.Thread)
+	}
+}
