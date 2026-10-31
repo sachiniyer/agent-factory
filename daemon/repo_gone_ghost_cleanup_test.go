@@ -529,6 +529,67 @@ func TestValidateGhostCleanupAdmission_AbsentArchiveDischargesCleanupReady(t *te
 	}
 }
 
+// The discharge must retire the fence's copy of the record too: a loaded row
+// carries no archiveReportSource, so persistKillTombstone's ForStorage keeps a
+// nonempty report's RollbackFence VERBATIM — and a cleanup_ready left behind in
+// OriginalRelocationRecovery would be resurrected by ghostCleanupWorktree's
+// RestoreArchiveRollbackFence, refusing the very archive the admission proved
+// conclusively absent and stranding the tombstoned row (Codex P2 on #6333).
+// The fence's other originals stay: they carry the same decoded ownership the
+// discharge propagates, and a rolled-back reader still needs the latch that
+// refuses this row.
+func TestValidateGhostCleanupAdmission_DischargeClearsStaleRollbackFence(t *testing.T) {
+	root := t.TempDir()
+	archive := filepath.Join(root, "archive")
+	require.NoError(t, os.Mkdir(archive, 0o755))
+	repoPath := filepath.Join(root, "missing-repo")
+	recovery := preparedCleanupRecovery(t, repoPath, archive, "ghost-fence-absent")
+	require.NoError(t, os.RemoveAll(archive),
+		"the archived directory is deleted outside af during the cleanup_ready window")
+
+	originalExternal := false
+	originalBranchCreated := true
+	originalStartupUnknown := false
+	branchCreated := true
+	data := session.InstanceData{
+		ID: "ghost-fence-absent-id", Title: "ghost-fence-absent",
+		Status: session.Archived, Liveness: session.LiveArchived, BackendType: "local",
+		Worktree: session.GitWorktreeData{
+			RepoPath: repoPath, WorktreePath: archive, SessionName: "ghost-fence-absent",
+			BranchName: "af/ghost-fence-absent", BranchCreatedByUs: &branchCreated,
+			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
+				State: sessiongit.RelocationRecoveryCleanupReady, IdentityKnown: true,
+				Device: recovery.Device, Inode: recovery.Inode, FileType: recovery.FileType,
+				CleanupGeneration:           recovery.CleanupGeneration,
+				OriginalExternalWorktree:    &originalExternal,
+				OriginalBranchCreatedByUs:   &originalBranchCreated,
+				OriginalStartupStateUnknown: &originalStartupUnknown,
+			},
+		},
+		ArchiveReport: retainedProjectionFixture(root),
+	}
+	stored := data.ForStorage()
+	require.NotNil(t, stored.ArchiveReport)
+	require.NotNil(t, stored.ArchiveReport.RollbackFence)
+	require.NotNil(t, stored.ArchiveReport.RollbackFence.OriginalRelocationRecovery,
+		"setup: the fence must hold the cleanup_ready original for this test to mean anything")
+
+	require.NoError(t, validateGhostWorktreeDestructionAdmission(&stored))
+	require.Nil(t, stored.Worktree.RelocationRecovery)
+	require.Nil(t, stored.ArchiveReport.RollbackFence.OriginalRelocationRecovery,
+		"the discharge must retire the fence's recovery snapshot or ForStorage persists it and ghost cleanup resurrects it")
+	assert.True(t, stored.ArchiveReport.RollbackFence.RelocationRecoveryProjected,
+		"the projected nil must remain authoritative rather than read as no-fence-written")
+
+	restored := stored.RestoreArchiveRollbackFence()
+	require.Nil(t, restored.Worktree.RelocationRecovery,
+		"restoring the discharged row must not resurrect the record")
+	assert.False(t, restored.Worktree.ExternalWorktree,
+		"the fence's ownership originals still decode: the discharge propagates the same values")
+	require.NotNil(t, restored.Worktree.BranchCreatedByUs)
+	assert.True(t, *restored.Worktree.BranchCreatedByUs)
+}
+
 func retainedProjectionFixture(root string) *sessiongit.ArchiveReport {
 	return &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
 		Path: filepath.Join(root, "retained-source"), IdentityKnown: true,

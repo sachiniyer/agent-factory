@@ -450,6 +450,22 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 			data.Worktree.BranchCreatedByUs = nil
 		}
 		data.Worktree.RelocationRecovery = nil
+		// The discharge must retire the fence's recovery snapshot too: a loaded
+		// row carries no archiveReportSource, so persistKillTombstone's
+		// ForStorage keeps this report's RollbackFence VERBATIM rather than
+		// rebuilding it, and ghostCleanupWorktree's RestoreArchiveRollbackFence
+		// would then resurrect the discharged cleanup_ready record and refuse
+		// the archive admission just proved conclusively absent — stranding the
+		// tombstoned row the discharge was meant to settle. A projected nil is
+		// authoritative (RelocationRecoveryProjected), while the fence's other
+		// originals are the same decoded values propagated above and still owe
+		// a rolled-back reader the latch that refuses this row.
+		if data.ArchiveReport != nil && data.ArchiveReport.RollbackFence != nil &&
+			data.ArchiveReport.RollbackFence.RelocationRecoveryProjected {
+			report := data.ArchiveReport.Clone()
+			report.RollbackFence.OriginalRelocationRecovery = nil
+			data.ArchiveReport = &report
+		}
 	}
 	return nil
 }
