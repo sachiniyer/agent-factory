@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1231250.000 | 1231250.000–1231250.000 | 0.000 | 1292812.500 |
-| gzip_bytes | 280925.000 | 280925.000–280925.000 | 0.000 | 294971.250 |
+| raw_bytes | 1234874.000 | 1234874.000–1234874.000 | 0.000 | 1296617.700 |
+| gzip_bytes | 281855.000 | 281855.000–281855.000 | 0.000 | 295947.750 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -125,11 +125,11 @@ reason to move a budget.
 
 ### Bundle refresh provenance (Backlog web actions)
 
-On top of the Backlog view's 1,203,809 raw / 274,487 gzip, the actions port (Refs #6284, fork `0bdb649b62`: runner switch and slots, the budget settings, Start now, the answer box, plan use) takes the committed bundle to 1,231,250 raw / 280,925 gzip, +27,441 raw / +6,438 gzip. Comments do not ship (esbuild strips them), so the growth is feature code. Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
+On top of the Backlog view's 1,207,433 raw / 275,424 gzip, the actions port (Refs #6284, fork `0bdb649b62`: runner switch and slots, the budget settings, Start now, the answer box, plan use) takes the committed bundle to 1,234,874 raw / 281,855 gzip, +27,441 raw / +6,431 gzip. Comments do not ship (esbuild strips them), so the growth is feature code. Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6297)
 
-Master's committed bundle is 1,130,936 raw / 256,750 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,203,809 raw / 274,487 gzip, +72,873 raw / +17,737 gzip. The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the daemon stack branch (#6295) and master, which carry the attention-dot rail work (#5581). Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
+Master's committed bundle is 1,126,071 raw / 255,761 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,207,433 raw / 275,424 gzip, +81,362 raw / +19,663 gzip. The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the daemon stack branch (#6295) and master, which carry the attention-dot rail work (#5581). Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6289)
 
