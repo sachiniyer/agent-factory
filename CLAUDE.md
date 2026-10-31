@@ -224,6 +224,7 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `schedule/` — UI-agnostic schedule model behind the task pickers (preset shapes ↔ cron expressions)
 - `quota/` — usage-limit evidence and account selection for limited sessions
 - `proposal/` — proposal store: per-project folders of markdown docs a user and agent sessions edit together, backed by a private git repo under the AF home
+- `backlog/` — per-project backlog of work items: item/tree model, order and move, status and derived state, waits-on cycle check, and the `backlog.json` and `budget.json` stores
 - `move/` — moving a live local worktree session to a sandbox: worktree snapshot, the `move_cmd` contract, all-or-nothing orchestration
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, session monitor, control-socket RPCs, autostart unit
 - `preflight/` — pre-launch checks (tmux presence, agent command executables)
