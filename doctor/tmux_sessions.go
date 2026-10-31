@@ -480,7 +480,7 @@ func liveTmuxHomes(ctx *scanContext) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return tmuxHomesFor(ctx, names)
+	return unionLiveTmuxHomes(ctx, names, false)
 }
 
 // liveTmuxHomesNow is liveTmuxHomes against a FRESH listing rather than the
@@ -496,17 +496,73 @@ func liveTmuxHomesNow(ctx *scanContext) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return tmuxHomesFor(ctx, names)
+	return unionLiveTmuxHomes(ctx, names, true)
 }
 
-func tmuxHomesFor(ctx *scanContext, names []string) (map[string]bool, error) {
+// unionLiveTmuxHomes unions the AF homes the recorded-socket listing `names`
+// claims with whatever doctor's ambient server can ALSO see. The kill arms pin
+// to the recorded socket alone — a name absent from THAT listing is evidence
+// of death — but the rm -rf guards this set feeds need the union, not the
+// pinned view: a stale temp home's live session can sit on a socket other than
+// the active home's recorded one (its own daemon's, or the ambient server this
+// process reaches), and a listing of only the recorded socket concludes the
+// home is unused and removes it from under the session claiming it. The union
+// can only over-preserve a home, never over-remove one, and an unreadable
+// ambient listing fails the guard the same way an unreadable pinned one does.
+func unionLiveTmuxHomes(ctx *scanContext, names []string, fresh bool) (map[string]bool, error) {
+	socket, _ := ctx.recordedSocket()
+	homes, err := tmuxHomesFor(ctx, names, socket)
+	if err != nil {
+		return nil, err
+	}
+	if socket == "" {
+		// The listing already was the ambient one — nothing more to see.
+		return homes, nil
+	}
+	var ambient []string
+	if fresh {
+		ambient, err = tmux.ListSessionNamesOnSocket(ctx.opts.Exec, "")
+	} else {
+		ambient, err = ctx.ambientTmuxSessions()
+	}
+	if err != nil {
+		return nil, err
+	}
+	more, err := tmuxHomesFor(ctx, ambient, "")
+	if err != nil {
+		return nil, err
+	}
+	for home := range more {
+		homes[home] = true
+	}
+	return homes, nil
+}
+
+// ambientTmuxSessions returns the run's memoized listing of doctor's AMBIENT
+// tmux server — the second half of the union the home-removal guards need, kept
+// as one view for detection the way tmuxSessions is one view for liveness. The
+// fix-time recheck bypasses this memo for a fresh listing for the same reason
+// it bypasses the pinned one.
+func (c *scanContext) ambientTmuxSessions() ([]string, error) {
+	if !c.tmuxAmbientScanned {
+		c.tmuxAmbientNames, c.tmuxAmbientErr = tmux.ListSessionNamesOnSocket(c.opts.Exec, "")
+		c.tmuxAmbientScanned = true
+	}
+	return c.tmuxAmbientNames, c.tmuxAmbientErr
+}
+
+// tmuxHomesFor answers which AF homes the sessions in `names` claim; `socket`
+// is the server `names` was listed from, so each session's marker is read on
+// the server it actually lives on rather than the recorded one it may not be
+// on.
+func tmuxHomesFor(ctx *scanContext, names []string, socket string) (map[string]bool, error) {
 	homes := map[string]bool{}
 	var unreadable []string
 	for _, name := range names {
 		if !strings.HasPrefix(name, tmux.TmuxPrefix) {
 			continue
 		}
-		home, present, markerErr := tmuxSessionHomeMarker(ctx, name)
+		home, present, markerErr := tmux.SessionHomeMarkerOnSocket(ctx.opts.Exec, name, socket)
 		if markerErr != nil {
 			// tmux did not answer for this session, so it cannot be ruled OUT as
 			// the claimant of any home. A session that answered and carries no

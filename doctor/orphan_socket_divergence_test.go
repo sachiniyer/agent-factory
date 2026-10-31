@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -415,4 +417,65 @@ func TestMissingServerRecord_LiveDaemonDoesNotArmKill(t *testing.T) {
 			"a session death the listing cannot corroborate (missing record, live daemon) must not arm a kill: %s", f.Detail)
 		require.False(t, f.Fixed, "an uncorroborated orphan must not be fixed: %s", f.Detail)
 	}
+}
+
+// TestStaleTempHomeClaimedByAmbientOnlySessionSurvives pins the union half of
+// the socket fix: the rm -rf home guards consume liveTmuxHomes, which lists
+// only the recorded socket once the listing is pinned — but a stale temp
+// home's live session can sit on ANOTHER socket (its own daemon's, or doctor's
+// ambient server). A pinned-only read then concludes the candidate is unused
+// and --fix rm -rfs it from under the session claiming it. The guard must see
+// the union: recorded socket AND ambient.
+func TestStaleTempHomeClaimedByAmbientOnlySessionSurvives(t *testing.T) {
+	tempRoot := t.TempDir()
+	home := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.claimed-ambient")
+
+	// The daemon recorded socket S, so the session listing is pinned there.
+	recorded := filepath.Join(home, "recorded-tmux-socket")
+	writeTmuxServerState(t, home, tmux.ServerState{
+		Mode:   tmux.ServerModeDedicated,
+		Socket: recorded,
+		Unit:   "test-unit",
+		At:     time.Now(),
+	})
+
+	// The lock probe answers "takeable" so ONLY the tmux claim set can spare
+	// the candidate — the exact shape where a pinned-only listing removes a
+	// home that is still in use.
+	stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer { return daemon.AnswerNo() })
+
+	opts := testOptionsWithHome(t, home, true) // Fix: true
+	opts.TempDir = tempRoot
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			args := cmd.Args
+			joined := strings.Join(args, " ")
+			pinned := len(args) > 2 && args[1] == "-S"
+			switch {
+			case pinned && len(args) > 3 && args[3] == "ls":
+				require.Equal(t, recorded, args[2])
+				return []byte(""), nil // nothing lives on the recorded socket
+			case !pinned && len(args) > 1 && args[1] == "ls":
+				// The stale home's live session is on the AMBIENT server only.
+				return []byte("af_ambient-claimant\n"), nil
+			case pinned && strings.Contains(joined, "show-environment"):
+				return nil, fmt.Errorf("no session lives on the recorded socket: %s", joined)
+			case !pinned && strings.Contains(joined, "show-environment"):
+				if !strings.Contains(joined, "af_ambient-claimant") {
+					return nil, fmt.Errorf("marker read for a session the ambient listing did not name: %s", joined)
+				}
+				return []byte("AF_HOME=" + dir + "\n"), nil
+			}
+			return []byte(""), nil
+		},
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.DirExists(t, dir,
+		"a temp home claimed by a live session on another socket must survive --fix; the pinned listing alone cannot see it")
+	require.Empty(t, findByCheck(report, "stale-temp-home"),
+		"a claimed home is not a stale finding to remove")
 }
