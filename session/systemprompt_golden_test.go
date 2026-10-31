@@ -150,9 +150,23 @@ func TestAfUsageReferenceJoints(t *testing.T) {
 			want: "no code changes\".\n\nProposals: when the user asks",
 		},
 		{
-			// proposals + "\n\n" + attention: a blank line, a new paragraph.
-			name: "proposals to attention",
-			want: "af keeps them outside the worktree.\n\nAsking for the user:",
+			// tasks + "\n\n" + backlog section + "\n\n" + root agent, inside the body.
+			name: "tasks to backlog section",
+			want: "manage its login autostart.\n\nBacklog (one project's work items",
+		},
+		{
+			name: "backlog section to root agent",
+			want: "updated, not added again\n\nRoot-agent configuration",
+		},
+		{
+			// proposals + "\n\n" + backlog items: a blank line, a new paragraph.
+			name: "proposals to backlog items",
+			want: "af keeps them outside the worktree.\n\nBacklog items: when af started",
+		},
+		{
+			// backlog items + "\n\n" + attention: a blank line, a new paragraph.
+			name: "backlog items to attention",
+			want: "Do not create other af sessions from an item session.\n\nAsking for the user:",
 		},
 		{
 			// attention + "\n\n" + outro: a blank line, a new paragraph.

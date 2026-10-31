@@ -204,6 +204,12 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 		// running with an older snapshot; other checks retain nil/unconfigured.
 		daemonConfig = config.DefaultConfig()
 	}
+	if h.PingErr == nil {
+		// A WARN, not a FAIL: the daemon works without the web UI (#6386).
+		if notice := h.Listeners.WebListenerNotice(); notice != "" {
+			report.Warn(sectionDaemon, "web listener", notice, daemon.WebListenerRemedy, true)
+		}
+	}
 	if h.PingErr == nil && daemonConfig != nil {
 		checkRunningDaemonConfig(report, h, daemonConfig)
 		checkRootAgentPrograms(ctx, report, daemonConfig)

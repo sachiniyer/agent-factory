@@ -32,7 +32,7 @@ const AfSkillName = afSkillDirName
 // AfSkillDescription is the one-line description the generated plugin
 // artifacts (agents outside af) present for the af skill. Sessions af launches
 // use afSkillDescriptionInside instead, which adds proposals.
-const AfSkillDescription = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, and the daemon via the af CLI"
+const AfSkillDescription = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, the backlog, and the daemon via the af CLI"
 
 // afSkillMarker stamps every file we write so a later launch can tell a file it
 // owns (safe to regenerate) from a user's/tool's own file that happens to sit at
