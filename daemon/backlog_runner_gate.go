@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/planusage"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -179,6 +180,33 @@ func (m *Manager) liveContinuation(repoID string, b *backlog.Backlog, id int) *i
 func (m *Manager) continuationUnmeterable(repoID string, b *backlog.Backlog, id int) bool {
 	s := m.liveContinuation(repoID, b, id)
 	return s != nil && s.instance.ResolvedAgent() != tmux.ProgramClaude
+}
+
+// startUnmeterable reports that an automatic start of item id would run an agent
+// the budget cannot meter (it meters Claude transcripts only). A start that
+// continues a live session runs that session's CURRENT agent, which a handoff may
+// have changed; Item.Program names the agent only a NEW session would run (Codex
+// P2 on #6300).
+func (m *Manager) startUnmeterable(repoID string, b *backlog.Backlog, id int) bool {
+	if s := m.liveContinuation(repoID, b, id); s != nil {
+		return s.instance.ResolvedAgent() != tmux.ProgramClaude
+	}
+	it := b.Item(id)
+	return it != nil && it.Program != "" && sessionenv.AgentForCommand(it.Program) != tmux.ProgramClaude
+}
+
+// backlogViewIncomplete is whether some of the project's session rows failed to
+// load or its state file could not be read, so the slots in use may be undercounted:
+// a row that cannot materialize can still be a live run (Codex P2 on #6300).
+func (m *Manager) backlogViewIncomplete(repoID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sk := range m.skippedRepos {
+		if sk.RepoID == repoID {
+			return true
+		}
+	}
+	return false
 }
 
 // backlogGateFor checks the gates for one named account.

@@ -10,9 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/planusage"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 const (
@@ -29,6 +27,10 @@ var errSlotsFull = errors.New("slots full")
 
 // errRunnerOff refuses an automatic start after the runner switch went off.
 var errRunnerOff = errors.New("the runner is off")
+
+// errViewIncomplete refuses an automatic start while the project's session view
+// is incomplete: a row that failed to load may be a live run holding a slot.
+var errViewIncomplete = errors.New("the project's session view is incomplete")
 
 // errNotRunnable refuses an automatic start of an item that is no longer a
 // queued, unblocked leaf.
@@ -200,7 +202,7 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 	m.capBacklogRuns(repoID, b, states, usage, budget.MaxPerRun)
 	m.retryCapInterrupts(repoID)
 
-	plan := func() backlog.RunnerPlan {
+	choose := func(usage planusage.Usage) backlog.RunnerPlan {
 		in := backlog.RunnerInput{States: states, Used: m.backlogSlotsUsed(repoID), Limit: -1,
 			Skip: rs.backingOff(repoID, now)}
 		if b.Settings.Runner {
@@ -208,17 +210,17 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 			in.Gate = gate
 			in.Limit = rs.startLimit(func(p *backlog.StartPacer) int { return p.Limit(usageFor(usage, account), now) })
 		}
-		return b.PlanRunner(in)
+		p := b.PlanRunner(in)
+		p.Start = m.selectStarts(repoID, b, states, p, *budget, usage, now)
+		return p
 	}
-	p := plan()
-	if len(p.Start) > 0 {
-		usage = m.meterUsageWithin(meterFreshFor)
-		p = plan()
+	p := pickStartsFresh(usage, func() planusage.Usage { return m.meterUsageWithin(meterFreshFor) }, choose)
+	if m.backlogViewIncomplete(repoID) {
+		p.Start = nil // never admit automatic work against a session count that may be short
 	}
-	p.Start = m.selectStarts(repoID, b, states, p, *budget, usage, now)
 	for _, id := range p.Start {
 		_, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: id}, backlog.StartedByRunner)
-		if errors.Is(err, errSlotsFull) || errors.Is(err, errRunnerOff) {
+		if errors.Is(err, errSlotsFull) || errors.Is(err, errRunnerOff) || errors.Is(err, errViewIncomplete) {
 			break
 		}
 		if errors.Is(err, errNotRunnable) {
@@ -266,8 +268,11 @@ func (m *Manager) startBacklogItemCapped(req backlog.StartRequest, by string) (b
 	if by == backlog.StartedByRunner && !b.RunnerEligible(req.ID, b.DeriveAll(backlogHost{m: m}.Facts(ref.ID))) {
 		return backlog.RunRef{}, errNotRunnable
 	}
-	if by == backlog.StartedByRunner && m.continuationUnmeterable(ref.ID, b, req.ID) {
+	if by == backlog.StartedByRunner && m.startUnmeterable(ref.ID, b, req.ID) {
 		return backlog.RunRef{}, errNotRunnable
+	}
+	if by == backlog.StartedByRunner && m.backlogViewIncomplete(ref.ID) {
+		return backlog.RunRef{}, errViewIncomplete
 	}
 	if m.backlogSlotsUsed(ref.ID) >= b.Settings.MaxRunning {
 		return backlog.RunRef{}, errSlotsFull
@@ -351,14 +356,8 @@ func (m *Manager) selectStarts(repoID string, b *backlog.Backlog, states map[int
 		if len(out) >= free {
 			break
 		}
-		// The budget meters Claude transcripts only: an item that names another
-		// agent runs on an explicit start, never on the runner, which could not
-		// bound its spend (Codex P2 on #6300).
-		if it := b.Item(id); it != nil && it.Program != "" && sessionenv.AgentForCommand(it.Program) != tmux.ProgramClaude {
+		if m.startUnmeterable(repoID, b, id) {
 			continue
-		}
-		if m.continuationUnmeterable(repoID, b, id) {
-			continue // a handed-off session: nothing to meter, no automatic work
 		}
 		acct := m.continuationAccount(repoID, b, id)
 		if acct == "" {
@@ -383,4 +382,18 @@ func (m *Manager) selectStarts(repoID string, b *backlog.Backlog, states map[int
 		out = append(out, id)
 	}
 	return out
+}
+
+// pickStartsFresh chooses starts on the reading it has and, when that picks any,
+// takes a fresh reading and chooses again, returning only the second choice. The
+// default account's plan can be empty while a continuation on another account is
+// picked, so the refresh follows the final choice and not the default plan: a
+// start is never admitted on a cached reading that a fresh one would close (Codex
+// P2 on #6300).
+func pickStartsFresh(usage planusage.Usage, refresh func() planusage.Usage, choose func(planusage.Usage) backlog.RunnerPlan) backlog.RunnerPlan {
+	p := choose(usage)
+	if len(p.Start) > 0 {
+		p = choose(refresh())
+	}
+	return p
 }

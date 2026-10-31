@@ -628,3 +628,84 @@ func TestClaudeUsageLimitUsesDurableRowEvidenceAndFailsClosed(t *testing.T) {
 		t.Fatal("unreadable evidence did not fail closed")
 	}
 }
+
+// A start judges the agent it would actually run: a live session's current agent,
+// else the item's own program for a new session (Codex P2 on #6300). An item that
+// names codex but whose session was handed to Claude is continued; one that names
+// claude whose session went to codex is not.
+func TestStartUnmeterableJudgesTheLiveSessionBeforeTheItemProgram(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	load := func() *backlog.Backlog {
+		b, err := backlog.Load(repoID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	if _, err := m.backlogService().UpdateItem(backlog.UpdateItemRequest{RepoID: repoID, ID: 1, Program: ptrTo("codex")}); err != nil {
+		t.Fatal(err)
+	}
+	inst.Program = "claude"
+	if m.startUnmeterable(repoID, load(), 1) {
+		t.Fatal("a session handed off to Claude is meterable whatever the item names")
+	}
+	if _, err := m.backlogService().UpdateItem(backlog.UpdateItemRequest{RepoID: repoID, ID: 1, Program: ptrTo("claude")}); err != nil {
+		t.Fatal(err)
+	}
+	inst.Program = "codex"
+	if !m.startUnmeterable(repoID, load(), 1) {
+		t.Fatal("a session handed off to Codex is not meterable")
+	}
+}
+
+// The runner refuses to admit an automatic start while the project's session view
+// is incomplete: a row that failed to load can still be a live run holding a slot,
+// so the slots in use may be undercounted (Codex P2 on #6300). An explicit start
+// is the user's call and goes ahead.
+func TestAutomaticStartIsRefusedWhileTheSessionViewIsIncomplete(t *testing.T) {
+	m, repoID := runnerTestManager(t)
+	queueItem(t, m, repoID, 1)
+	setRunner(t, m, repoID, true, 1)
+	m.mu.Lock()
+	m.skippedRepos = []SkippedRepo{{RepoID: repoID, Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}
+	m.mu.Unlock()
+	if !m.backlogViewIncomplete(repoID) || m.backlogViewIncomplete("some-other-repo") {
+		t.Fatal("the view is incomplete for this project only")
+	}
+	if _, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByRunner); !errors.Is(err, errViewIncomplete) {
+		t.Fatalf("an automatic start with a row that failed to load: %v", err)
+	}
+	if it := loadItem(t, repoID, 1); len(it.Runs) != 0 {
+		t.Fatalf("a session was started: %+v", it)
+	}
+	m.mu.Lock()
+	m.skippedRepos = nil
+	m.mu.Unlock()
+	if _, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByRunner); err != nil {
+		t.Fatalf("a complete view admits the start: %v", err)
+	}
+}
+
+// A start is admitted on a fresh reading, and the choice is recomputed against it:
+// the default account's plan can be empty while another account's continuation is
+// picked, and the cached reading may be past that account's limit by now (Codex P2
+// on #6300).
+func TestPickStartsFreshRecomputesTheChoiceOnAFreshReading(t *testing.T) {
+	cached := planusage.Usage{Runs: map[string]float64{"cached": 1}}
+	fresh := planusage.Usage{Runs: map[string]float64{"fresh": 1}}
+	refreshed := 0
+	refresh := func() planusage.Usage { refreshed++; return fresh }
+	choose := func(u planusage.Usage) backlog.RunnerPlan {
+		if _, ok := u.Runs["fresh"]; ok {
+			return backlog.RunnerPlan{} // the fresh reading closes the gate
+		}
+		return backlog.RunnerPlan{Start: []int{1}}
+	}
+	if p := pickStartsFresh(cached, refresh, choose); len(p.Start) != 0 || refreshed != 1 {
+		t.Fatalf("a start the fresh reading closes was admitted: %+v (refreshed %d)", p, refreshed)
+	}
+	refreshed = 0
+	if p := pickStartsFresh(fresh, refresh, choose); len(p.Start) != 0 || refreshed != 0 {
+		t.Fatalf("nothing picked should not refresh: %+v (refreshed %d)", p, refreshed)
+	}
+}
