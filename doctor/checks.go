@@ -217,6 +217,9 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	// The listener/auth disk-posture row (#5137 refusal, opted-in exposure)
 	// lives in listener_posture.go.
 	checkListenerPosture(report, cfg)
+	if h.PingErr == nil {
+		checkRefusedHosts(report, h.RefusedHosts, cfg)
+	}
 	// "A unit file exists" is not "this home has autostart". There is one unit
 	// per user and it bakes its AGENT_FACTORY_HOME at install time, so under a
 	// non-default AGENT_FACTORY_HOME the installed unit is somebody else's

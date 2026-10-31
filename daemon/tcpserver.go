@@ -409,22 +409,27 @@ func withProbationTokenFloor(cfg *config.Config) *config.Config {
 // plain OR. CORSAllowedOrigins is an allow-list — stricter means SMALLER — so
 // its merge is the intersection: an origin survives only when the pin AND the
 // live config both allow it, which lets a live removal through without ever
-// widening a frozen gate past its pinned allow-list. The merge allocation is
-// skipped when nothing tightened — the pinned object itself is returned so
-// the common frozen path allocates nothing per request.
+// widening a frozen gate past its pinned allow-list. AllowedHosts (the Host
+// guard's allow-list, read with the same posture) merges the same way. The
+// merge allocation is skipped when nothing tightened — the pinned object
+// itself is returned so the common frozen path allocates nothing per request.
 func tightenFrozenPosture(pinned, live *config.Config) *config.Config {
 	if pinned == nil {
 		return live
 	}
 	if live == nil || (pinned.RequireToken == live.RequireToken &&
 		pinned.RequireLoopbackToken == live.RequireLoopbackToken &&
-		slices.Equal(pinned.CORSAllowedOrigins, live.CORSAllowedOrigins)) {
+		slices.Equal(pinned.CORSAllowedOrigins, live.CORSAllowedOrigins) &&
+		slices.Equal(pinned.AllowedHosts, live.AllowedHosts)) {
 		return pinned
 	}
 	merged := *pinned
 	merged.RequireToken = merged.RequireToken || live.RequireToken
 	merged.RequireLoopbackToken = merged.RequireLoopbackToken || live.RequireLoopbackToken
 	merged.CORSAllowedOrigins = intersectCORS(pinned.CORSAllowedOrigins, live.CORSAllowedOrigins)
+	// network.allowed_hosts is an allow-list too, so the same intersection: a live
+	// removal reaches a frozen generation, a live addition never widens it.
+	merged.AllowedHosts = intersectCORS(pinned.AllowedHosts, live.AllowedHosts)
 	return &merged
 }
 
@@ -638,9 +643,12 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 	// fixed at the RESOLVED bound address so a network bind never inherits
 	// loopback-exempt from a config.ListenAddr that is mid-change.
 	var handler http.Handler
+	// build is the live listener's once-per-request posture read, kept so the Host
+	// guard below can make that read itself and share it (withLiveHostGuard).
+	var build func() requestPosture
 	if live != nil {
 		boundLoopback := config.IsLoopbackListenAddr(listener.Addr().String())
-		handler = withLivePosture(mux, func() requestPosture {
+		build = func() requestPosture {
 			c := live.current()
 			g := &authGate{
 				expectedToken:           expectedToken,
@@ -662,8 +670,10 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 				// The preview origin answers no cross-origin reader, ever — see previewOrigin.
 				cors = nil
 			}
-			return requestPosture{gate: g, cors: cors, previewOrigin: live.previewOrigin, previewWarmingUp: live.previewWarmingUp}
-		})
+			return requestPosture{gate: g, cors: cors, allowedHosts: c.AllowedHosts,
+				previewOrigin: live.previewOrigin, previewWarmingUp: live.previewWarmingUp}
+		}
+		handler = withLivePosture(mux, build)
 	} else {
 		gate := &authGate{
 			expectedToken:           expectedToken,
@@ -682,9 +692,27 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 	// wrapper is TCP-only: the unix socket keeps its bare mux (whose `/` still
 	// 404s), so the web assets never appear on the socket path. The agent-server
 	// passes withoutWebShell — it cannot back the SPA (see webShell).
+	//
+	// Each shell also decides the listener's Host rule (hostguard.go), outermost so
+	// it runs before the static shell, every /v1 route and every WS upgrade:
+	//   - withWebShell, the control plane, answers only Hosts that name this daemon:
+	//     localhost and loopback IPs, the bind address's own host, the address the
+	//     client reached, and network.allowed_hosts — read with the live posture.
+	//   - previewShell keeps its own stricter rule: previewShellHandler serves only
+	//     af-minted *.localhost labels and 404s every other Host before the gate.
+	//   - withoutWebShell (the agent-server) has none: its token is mandatory for
+	//     every peer and it serves a browser nothing without one.
 	switch shell {
 	case withWebShell:
 		handler = webShellHandler(handler)
+		listenHost := config.ListenAddrHostName(addr)
+		label := hostGuardListenerLabel(listener.Addr().String())
+		if build != nil {
+			handler = withLiveHostGuard(handler, label, listenHost, build)
+		} else {
+			allowed := cfg.AllowedHosts
+			handler = withHostGuard(handler, label, listenHost, func() []string { return allowed })
+		}
 	case previewShell:
 		handler = previewShellHandler(handler)
 	default: // withoutWebShell — the agent-server
