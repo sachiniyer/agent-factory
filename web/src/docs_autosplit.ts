@@ -16,7 +16,9 @@ const AGENT_TAB = 0;
  * records the tab without placing it, which keeps the tab-bar behaviour there.
  *
  * With no Agent pane, a single pane splits right (the user keeps the tab they were
- * on); a multi-pane layout the user built is left alone.
+ * on); a multi-pane layout the user built is left alone. A visible Web or VS Code pane is
+ * never split around: building the new wrapper moves its container, which reloads the
+ * iframe and loses what the user had typed in it, so the tab stays in the tab bar.
  */
 export function placeNewDocsTabs(
   tree: LayoutNode,
@@ -33,7 +35,7 @@ export function placeNewDocsTabs(
       return;
     }
     seen.add(k);
-    if (narrow) {
+    if (narrow || leaves(out).some((l) => tabKinds[l.tab] === TabKind.Web || tabKinds[l.tab] === TabKind.VSCode)) {
       return;
     }
     out = placeDocs(out, tab, tabKinds);
@@ -97,4 +99,24 @@ export function showTab(
   }
   const next = replaceTab(tree, focusedId, tab);
   return { tree: next, focus: leaves(next).find((l) => l.tab === tab)?.id ?? focusedId };
+}
+
+/**
+ * `showTab` for the rebind that follows an awaited tab mutation (closing or creating a tab), which is
+ * bookkeeping, not a click: when the focused pane already shows `tab` the layout is left exactly as
+ * it is, so deleting an unrelated tab neither collapses Agent | Proposal nor replaces a layout the
+ * user arranged. Any other target is a click's rule.
+ */
+export function rebindTab(
+  tree: LayoutNode,
+  focusedId: string,
+  tab: number,
+  tabKinds: number[],
+  narrow: boolean,
+  ratio: number,
+): { tree: LayoutNode; focus: string } {
+  if (leaves(tree).find((l) => l.id === focusedId)?.tab === tab) {
+    return { tree, focus: focusedId };
+  }
+  return showTab(tree, focusedId, tab, tabKinds, narrow, ratio);
 }

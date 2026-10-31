@@ -263,3 +263,38 @@ for (const attached of [true, false]) {
     }
   });
 }
+
+// On a phone the session header carries one shortcut per Proposal tab; with several of them the strip
+// must not push the app menu out of the viewport, because the tab bar lives behind that menu.
+test("docs tab: several Proposal shortcuts keep the app menu on screen at phone width", async ({ page, request }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const af = (...args: string[]): string =>
+    execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+  const title = "docs-phone-strip-probe";
+  af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
+  af("proposal", "start", "phone-strip-plan", "--repo", mockRepo as string, "--session", title, "--docs", "goals");
+  for (const n of [2, 3, 4]) {
+    af("sessions", "tabs", "create", title, "--repo", mockRepo as string, "--kind", "docs", "--proposal", "phone-strip-plan", "--name", `phone-${n}`);
+  }
+  const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
+  expect(session).toBeTruthy();
+
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.goto(`/#/session/${session.id}`);
+  const shortcuts = page.locator(".af-session-first .af-term-docs");
+  await expect(shortcuts).toHaveCount(4, { timeout: 20_000 });
+  const more = page.locator(".af-appbar-more");
+  await expect(more).toBeVisible();
+  const box = (await more.boundingBox())!;
+  expect(box.x, "the app menu starts inside the viewport").toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width, "and ends inside it").toBeLessThanOrEqual(320);
+  const noOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+  expect(noOverflow, "the page does not scroll sideways").toBe(true);
+  // Every shortcut stays reachable: the strip scrolls, it does not clip them.
+  await shortcuts.last().scrollIntoViewIfNeeded();
+  await expect(shortcuts.last()).toBeVisible();
+});

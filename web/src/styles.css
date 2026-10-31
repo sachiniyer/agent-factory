@@ -3878,7 +3878,10 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   .af-session-first .af-term-title { order: 1; flex: 1; }
   .af-session-first .af-term-attention { order: 2; flex-shrink: 0; }
   .af-session-first .af-term-attention-label { display: none; }
-  .af-session-first .af-term-new-group { order: 3; flex-shrink: 0; }
+  /* The strip of Proposal shortcuts can be as long as the session has Proposal tabs: the group gives way
+   * (its shortcuts scroll) so the app menu behind it, which holds the tab bar, never leaves the screen. */
+  .af-session-first .af-term-new-group { order: 3; flex-shrink: 1; min-width: 0; }
+  .af-session-first .af-term-new-group > .af-term-new { flex-shrink: 0; }
   .af-session-first .af-appbar-tools-wrap { order: 4; flex-shrink: 0; }
   .af-session-first .af-term-head { display: none; }
   .af-session-first .af-appbar-tools { width: calc(100vw - var(--af-space-3)); }
@@ -3902,8 +3905,12 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
     display: flex;
     align-items: center;
     gap: var(--af-space-1);
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
   .af-session-first .af-term-docs {
+    flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));

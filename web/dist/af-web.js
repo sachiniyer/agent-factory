@@ -7030,7 +7030,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "a6fdb92bc26e";
+var CLIENT_VERSION = "1200bc503244";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -14297,7 +14297,7 @@ function placeNewDocsTabs(tree, tabIds, tabKinds, seen, key, narrow) {
       return;
     }
     seen.add(k);
-    if (narrow) {
+    if (narrow || leaves(out).some((l) => tabKinds[l.tab] === TabKind.Web || tabKinds[l.tab] === TabKind.VSCode)) {
       return;
     }
     out = placeDocs(out, tab, tabKinds);
@@ -14336,6 +14336,12 @@ function showTab(tree, focusedId, tab, tabKinds, narrow, ratio) {
   }
   const next = replaceTab(tree, focusedId, tab);
   return { tree: next, focus: leaves(next).find((l) => l.tab === tab)?.id ?? focusedId };
+}
+function rebindTab(tree, focusedId, tab, tabKinds, narrow, ratio) {
+  if (leaves(tree).find((l) => l.id === focusedId)?.tab === tab) {
+    return { tree, focus: focusedId };
+  }
+  return showTab(tree, focusedId, tab, tabKinds, narrow, ratio);
 }
 
 // src/docs_tab.ts
@@ -14891,18 +14897,19 @@ var SplitView = class {
    *  overlapping awaited gestures by issue order, so a stale apply still refuses
    *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
   setFocusedTabAwaited(tab) {
-    if (this.showTab(tab)) {
+    if (this.showTab(tab, true)) {
       this.land();
     }
   }
   /** Applies docs_autosplit's showTab rule to the tree and focus; false without a
    *  focused pane. */
-  showTab(tab) {
+  showTab(tab, awaited = false) {
     if (!this.tree || !this.focusedId) {
       return false;
     }
     const ratio = this.sessionId && this.proposalRatios.get(this.sessionId) || 0.5;
-    const next = showTab(this.tree, this.focusedId, tab, this.tabKinds, this.narrow(), ratio);
+    const apply = awaited ? rebindTab : showTab;
+    const next = apply(this.tree, this.focusedId, tab, this.tabKinds, this.narrow(), ratio);
     this.tree = next.tree;
     this.focusedId = next.focus;
     return true;

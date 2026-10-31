@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 
-import { isProposalView, placeNewDocsTabs, showTab } from "./docs_autosplit.js";
+import { isProposalView, placeNewDocsTabs, rebindTab, showTab } from "./docs_autosplit.js";
 import { closeLeaf, type LayoutNode, leaves, resetIds, singleLeaf, splitLeaf } from "./layout.js";
 import type { SplitView as SplitViewType } from "./split.js";
 import { TabKind } from "./types.js";
@@ -182,4 +182,49 @@ test("at phone width a Proposal click shows the proposal in the focused pane", (
   const agent = singleLeaf(0);
   const { tree } = showTab(agent, agent.id, 1, [A, D], true, 0.5);
   assert.deepEqual(tabs(tree), [1]);
+});
+
+const W = TabKind.Web;
+const V = TabKind.VSCode;
+
+test("an arriving Proposal tab does not split around a visible Web or VS Code pane", () => {
+  // Moving a pane's container to a new wrapper reloads its iframe, losing what the user typed in it:
+  // the tab stays in the tab bar instead, and is not split in later.
+  for (const kind of [W, V]) {
+    resetIds();
+    const seen = new Set<string>();
+    const shown = singleLeaf(1);
+    assert.equal(placeNewDocsTabs(shown, ["agent", "page", "docs"], [A, kind, D], seen, key, false), shown, "the only pane is an iframe");
+    const agent = singleLeaf(0);
+    const withAgent = splitLeaf(agent, agent.id, "right", 1);
+    assert.equal(placeNewDocsTabs(withAgent, ["agent", "page", "docs"], [A, kind, D], new Set(), key, false), withAgent, "an iframe beside the Agent");
+    assert.ok(seen.has("docs"), "recorded, so leaving the iframe later does not pop the split in");
+    const back = singleLeaf(0);
+    assert.equal(placeNewDocsTabs(back, ["agent", "page", "docs"], [A, kind, D], seen, key, false), back, "not split in once the iframe is gone");
+  }
+});
+
+test("a Proposal tab still splits when only terminals are visible", () => {
+  resetIds();
+  const agent = singleLeaf(0);
+  const terminals = splitLeaf(agent, agent.id, "right", 1);
+  assert.ok(tabs(placeNewDocsTabs(terminals, ["agent", "shell", "docs"], [A, S, D], new Set(), key, false)).includes(2), "the Proposal pane is added beside the Agent");
+  assert.deepEqual(tabs(placeNewDocsTabs(singleLeaf(0), ["agent", "docs"], [A, D], new Set(), key, false)), [0, 1]);
+});
+
+test("rebinding to the tab the focused pane already shows changes nothing", () => {
+  // The bookkeeping rebind after a hidden tab is deleted: the target is the tab on screen already.
+  resetIds();
+  const kinds = [A, S, D];
+  const view = showTab(singleLeaf(0), "leaf1", 2, kinds, false, 0.3).tree;
+  const agentPane = leaves(view).find((l) => l.tab === 0)!;
+  const keepAgent = rebindTab(view, agentPane.id, 0, kinds, false, 0.5);
+  assert.equal(keepAgent.tree, view, "the Agent | Proposal split is not collapsed");
+  assert.equal(keepAgent.focus, agentPane.id);
+  const first = singleLeaf(0);
+  const handMade = splitLeaf(splitLeaf(first, first.id, "right", 2), first.id, "bottom", 1);
+  const proposalPane = leaves(handMade).find((l) => l.tab === 2)!;
+  assert.equal(rebindTab(handMade, proposalPane.id, 2, kinds, false, 0.5).tree, handMade, "a custom layout is not replaced by the proposal view");
+  // A different tab is a click's rule, as before.
+  assert.deepEqual(tabs(rebindTab(view, agentPane.id, 1, kinds, false, 0.5).tree), [1]);
 });

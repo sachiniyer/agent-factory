@@ -3302,6 +3302,10 @@ textarea[class] {
   }
   .af-session-first .af-term-new-group {
     order: 3;
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  .af-session-first .af-term-new-group > .af-term-new {
     flex-shrink: 0;
   }
   .af-session-first .af-appbar-tools-wrap {
@@ -3349,8 +3353,12 @@ textarea[class] {
     display: flex;
     align-items: center;
     gap: var(--af-space-1);
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
   .af-session-first .af-term-docs {
+    flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1));

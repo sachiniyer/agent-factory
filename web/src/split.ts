@@ -56,7 +56,7 @@ import {
 } from "./layout.js";
 import { fetchEditorPortOrigin, fetchPreviewOrigin, pauseStatusPoll, probeWebTab } from "./api.js";
 import type { HoldAction } from "./delivery_hold.js";
-import { isProposalView, placeNewDocsTabs, showTab } from "./docs_autosplit.js";
+import { isProposalView, placeNewDocsTabs, rebindTab, showTab } from "./docs_autosplit.js";
 import { mountDocsTab } from "./docs_tab.js";
 import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
@@ -635,19 +635,21 @@ export class SplitView {
    *  overlapping awaited gestures by issue order, so a stale apply still refuses
    *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
   setFocusedTabAwaited(tab: number): void {
-    if (this.showTab(tab)) {
+    if (this.showTab(tab, true)) {
       this.land();
     }
   }
 
   /** Applies docs_autosplit's showTab rule to the tree and focus; false without a
    *  focused pane. */
-  private showTab(tab: number): boolean {
+  private showTab(tab: number, awaited = false): boolean {
     if (!this.tree || !this.focusedId) {
       return false;
     }
     const ratio = (this.sessionId && this.proposalRatios.get(this.sessionId)) || 0.5;
-    const next = showTab(this.tree, this.focusedId, tab, this.tabKinds, this.narrow(), ratio);
+    // An awaited mutation's rebind is bookkeeping: it must not re-lay-out a view the tab already shows.
+    const apply = awaited ? rebindTab : showTab;
+    const next = apply(this.tree, this.focusedId, tab, this.tabKinds, this.narrow(), ratio);
     this.tree = next.tree;
     this.focusedId = next.focus;
     return true;
