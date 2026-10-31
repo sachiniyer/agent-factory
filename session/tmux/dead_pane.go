@@ -473,10 +473,11 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 //
 // The reading comes from the session's active pane, but under remain-on-exit a
 // user who attaches can split the window and end up focused on a pane af did
-// not launch. Only a pane carrying a proven @af_pane_pid stamp is the recorded
-// command's pane; an unstamped foreign pane's death is not the command's exit
-// and reports not-dead, so a split pane the user killed can never be stamped
-// as how the command ended (readPaneExit).
+// not launch. Only a pane whose recorded start command carries af's launch
+// marker — and whose stamp, when it exists, still names the current
+// incarnation — is the recorded command's pane; a foreign pane's death is not
+// the command's exit and reports not-dead, so a split pane the user killed can
+// never be stamped as how the command ended (readPaneExit).
 //
 // A root that has exited but that tmux has not collected yet is dead, and tmux
 // will report how it ended as soon as it collects it: tmux marks the pane dead
@@ -603,6 +604,28 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 	if field(0) != "1" {
 		return paneExit{known: true}, false
 	}
+	// The reading comes from the session's ACTIVE pane — what `=name:`
+	// resolves to (see exactTarget) — and under remain-on-exit a user who
+	// attaches can split the window and end up focused on a pane af did not
+	// launch. That pane inherits remain-on-exit, exits, and is held dead as
+	// the active pane, so tmux reports its death — collected status or bare
+	// pid — on the very target the recorded command never ran on. What proves
+	// the recorded command ran there is pane_start_command (the last field):
+	// af wraps every pane it launches in a sessionenv exec marker
+	// (__af-*-env-exec*), immutable across respawn and older than the stamp,
+	// while a user's split pane carries the user's own command. The stamp
+	// alone cannot prove launch — restoreProcessTab's remain-on-exit heal
+	// (ApplyRemainOnExit) stamps whatever pane is ACTIVE, which under a user
+	// split is the foreign pane, and once the hook counts that death the
+	// healed stamp reads stampFresh. The first-wins guard on Tab.Exit makes a
+	// wrongly attributed exit permanent — the same active-pane hazard the
+	// session-wide scan PaneRootProcessMatches exists to reject (#5066
+	// review: "the user can split the window or focus a shell tab, moving
+	// the active-pane pointer") — so a pane af did not launch never supplies
+	// a Tab.Exit at all.
+	if !paneLaunchIsAF(fields[10:]) {
+		return paneExit{known: true}, false
+	}
 	exit = paneExit{dead: true, known: true, version: field(5)}
 	if code, perr := strconv.Atoi(field(1)); perr == nil {
 		exit.status, exit.statusKnown = code, true
@@ -649,42 +672,40 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 		}
 		return exit, true
 	}
-	// The collected status belongs to the session's ACTIVE pane — what
-	// `=name:` resolves to (see exactTarget) — and under remain-on-exit a
-	// user who attaches can split the window and end up focused on a pane
-	// af did not launch. That pane inherits remain-on-exit, exits, and is
-	// held dead as the active pane, so tmux reports its collected status on
-	// the very target the recorded command never ran on. Only a pane af
-	// launched — one carrying a proven @af_pane_pid stamp — can supply the
-	// recorded command's exit. An unstamped pane's death is not evidence of
-	// how the command ended: stamping it would fabricate an exit a live root
-	// never earned, and the first-wins guard on Tab.Exit would make the
-	// wrong record permanent. This is the same active-pane hazard the
-	// session-wide scan PaneRootProcessMatches exists to reject (#5066
-	// review: "the user can split the window or focus a shell tab, moving
-	// the active-pane pointer"), and a pane without a stamp must never be
-	// the source of a Tab.Exit.
-	switch _, verdict := paneStampPID(field(6), field(7), field(8), field(9)); verdict {
-	case stampFresh:
-		// Proven af-launched: the collected status is the recorded command's
-		// exit.
-	case stampPending:
-		// The deaths counter has not caught up to the collected status yet
-		// (#5335): keep probing so a resolving stamp records the exit rather
-		// than misses it for a probe cycle. dead:true with known unset mirrors
-		// the uncollected-root fallback's pending fold — a hook that never
-		// lands answers unknown rather than recording an exit the root
-		// earned.
-		return paneExit{dead: true, version: exit.version}, true
-	default:
-		// Unstamped (a user's split pane) or a stale stamp that cannot name
-		// this incarnation: not the recorded command's exit. Answering
-		// not-dead leaves the row unstamped rather than recording one a live
-		// root never earned — the same invariant the uncollected-root
-		// fallback keeps above.
+	// pane_start_command already proved af launched this pane, so tmux's
+	// collected status is the recorded command's exit — it is this pane's
+	// own last death — UNLESS the stamp names an earlier incarnation: a
+	// respawn that moved past the stamp's pins died under a command the row
+	// cannot attribute. A fresh stamp, a pending counter (#5335), or no
+	// stamp at all — a pane af launched before PID stamping existed — all
+	// keep the exit tmux already collected, and a pane that died before its
+	// heal must not wait out a deaths hook that can never land.
+	if _, verdict := paneStampPID(field(6), field(7), field(8), field(9)); verdict == stampStale {
 		return paneExit{known: true}, false
 	}
 	return exit, false
+}
+
+// paneLaunchIsAF reports whether the pane's recorded pane_start_command names
+// an af launch: af wraps every pane it launches in a sessionenv exec marker,
+// so the marker proves af — not a user splitting the window — started the
+// command that ran there. startFields is the raw tail of the probe's reply
+// split on the field separator, joined so a command containing the separator
+// still reads whole.
+func paneLaunchIsAF(startFields []string) bool {
+	start := strings.Join(startFields, paneFieldSeparator)
+	for _, marker := range []string{
+		sessionenv.ExecMarker,
+		sessionenv.AccountExecMarker,
+		sessionenv.AccountEnvironmentExecMarker,
+		sessionenv.AgentServerExecMarker,
+		sessionenv.AgentServerAccountExecMarker,
+	} {
+		if strings.Contains(start, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // exitedUncollected reports whether pid is a process that has exited and waits
@@ -708,7 +729,7 @@ const paneExitFormat = "#{pane_dead}" + paneFieldSeparator + "#{pane_dead_status
 	"#{pane_dead_time}" + paneFieldSeparator + "#{pane_dead_signal}" + paneFieldSeparator + "#{pane_pid}" +
 	paneFieldSeparator + "#{version}" + paneFieldSeparator + "#{" + PanePidMarker + "}" +
 	paneFieldSeparator + "#{" + paneDeathsMarker + "}" + paneFieldSeparator + "#{pane_tty}" +
-	paneFieldSeparator + paneCommandMatchField
+	paneFieldSeparator + paneCommandMatchField + paneFieldSeparator + "#{pane_start_command}"
 
 // LaunchPending reports whether the pane's root is still af's launch shim, the
 // environment filter that execs the pane command, so the command itself has

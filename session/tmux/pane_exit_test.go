@@ -412,6 +412,76 @@ func TestProbePaneExitRefusesAnUnstampedForeignPaneOnRealTmux(t *testing.T) {
 	require.Zero(t, status)
 }
 
+// The remain-on-exit heal (ApplyRemainOnExit) stamps whatever pane is ACTIVE —
+// under a user split that is the foreign pane, and once the pane-died hook
+// counts the death the healed stamp reads stampFresh: pid, deaths gap 1, pty,
+// and the command pin all hold because the heal pinned the foreign pane's OWN
+// start command. The stamp therefore proves af touched the pane, never that af
+// launched it — pane_start_command (no exec marker) is what refuses it.
+func TestProbePaneExitRefusesAHealStampedForeignPane(t *testing.T) {
+	// A heal-written stamp on the user's split pane: fresh in every stamp
+	// field, but the pane's recorded start command is the user's own.
+	healed := paneState{deaths: "1", tty: "/dev/pts/3", stampCmd: "sh -c 'exit 7'", startCmd: "sh -c 'exit 7'"}
+	ts := NewTmuxSessionWithDeps("pane-exit-healed-foreign", "true", nil,
+		deadPaneExec(t, "", "8576:0:/dev/pts/3", healed, "7", "", "1726000000", nil))
+	dead, _, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "a heal stamp on a foreign pane is not launch provenance; its death is not the command's exit")
+	require.False(t, statusKnown)
+	require.True(t, at.IsZero())
+}
+
+// The mirrored legacy cases (Codex P1 on #6336): a process pane af launched
+// BEFORE PID stamping existed carries no stamp, yet its collected status is
+// still the recorded command's exit — pane_start_command keeps the shim
+// marker that proves af launched it. Refusing here would drop a real exit the
+// pre-gate path recorded and misclassify the finished tab as stopped.
+func TestProbePaneExitRecordsAnUnstampedLegacyPane(t *testing.T) {
+	legacy := paneState{deaths: "", tty: "/dev/pts/0", stampCmd: "", startCmd: shimStartCommand}
+	ts := NewTmuxSessionWithDeps("pane-exit-legacy", "true", nil,
+		deadPaneExec(t, "", "", legacy, "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead, "an unstamped pane af launched is still the recorded command's pane")
+	require.True(t, statusKnown)
+	require.Equal(t, 7, status)
+	require.True(t, at.Equal(time.Unix(1726000000, 0)))
+}
+
+// A legacy pane the heal stamped AFTER it died (tmux <3.8 still answers
+// pane_pid then) reads stampPending forever — the pane-died hook cannot count
+// a death that already happened. tmux's collected status is still this pane's
+// own last death, so the probe records it rather than waiting out a hook that
+// can never land.
+func TestProbePaneExitRecordsAHealPendingLegacyPane(t *testing.T) {
+	gone := exitedProcess(t).PID
+	stamp := strconv.Itoa(gone) + ":0:/dev/pts/0"
+	healed := paneState{deaths: "0", tty: "/dev/pts/0", stampCmd: shimStartCommand, startCmd: shimStartCommand}
+	ts := NewTmuxSessionWithDeps("pane-exit-heal-pending", "true", nil,
+		deadPaneExec(t, "", stamp, healed, "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead, "a healed pane's pending stamp must not stall the exit tmux already collected")
+	require.True(t, statusKnown)
+	require.Equal(t, 7, status)
+	require.True(t, at.Equal(time.Unix(1726000000, 0)))
+}
+
+// The same pending verdict on a pane whose start command is not af's stays
+// refused: pending is not a way through the launch-provenance gate.
+func TestProbePaneExitRefusesAPendingStampedForeignPane(t *testing.T) {
+	gone := exitedProcess(t).PID
+	stamp := strconv.Itoa(gone) + ":0:/dev/pts/3"
+	foreign := paneState{deaths: "0", tty: "/dev/pts/3", stampCmd: "sh -c 'exit 7'", startCmd: "sh -c 'exit 7'"}
+	ts := NewTmuxSessionWithDeps("pane-exit-pending-foreign", "true", nil,
+		deadPaneExec(t, "", stamp, foreign, "7", "", "1726000000", nil))
+	dead, status, statusKnown, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "a pending foreign stamp is not the recorded command's exit either")
+	require.False(t, statusKnown)
+	require.Zero(t, status)
+}
+
 // tmuxDisplay returns tmux's expansion of format for the session's active pane.
 func tmuxDisplay(t *testing.T, name, format string) string {
 	t.Helper()

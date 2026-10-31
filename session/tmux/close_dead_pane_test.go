@@ -250,9 +250,9 @@ func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing
 }
 
 // shimStartCommand is what #{pane_start_command} answers for a pane af
-// launched through its exec shim. The fixture keeps one around only as the
-// recorded command string — freshness no longer reads launch markers out of
-// it, it just has to byte-match what the stamp pinned.
+// launched through its exec shim: the sessionenv marker is what
+// paneLaunchIsAF reads as launch provenance, and as stampCmd it is what the
+// stamp's command pin (@af_pane_cmd) byte-matches against.
 const shimStartCommand = "/usr/bin/af " + sessionenv.ExecMarker + " sh 0 'sh -c true'"
 
 // paneState is the part of a dead pane's row the stamp's freshness is judged
@@ -297,6 +297,9 @@ func deadPaneExpand(panePID, stamp string, state paneState, status, signal, dead
 		"#{"+paneDeathsMarker+"}", state.deaths,
 		"#{pane_tty}", state.tty,
 		paneCommandMatchField, state.cmdMatch(),
+		// After paneCommandMatchField so the == token is consumed whole: the
+		// raw start command is the probe's last field.
+		"#{pane_start_command}", state.startCmd,
 	)
 }
 
