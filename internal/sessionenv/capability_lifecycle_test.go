@@ -117,41 +117,64 @@ func TestCapability_KeepClaimEndpointFreshRefreshesAgedSocketAndDir(t *testing.T
 func TestCapability_EndpointRecreatesItsSocketAndDirAtTheSamePath(t *testing.T) {
 	t.Setenv("TMPDIR", shortSocketDir(t))
 	prev := capabilityEnsureInterval
-	capabilityEnsureInterval = 20 * time.Millisecond
+	capabilityEnsureInterval = time.Hour // ensure() is driven by hand: no recovery races the deletion checks
 	t.Cleanup(func() { capabilityEnsureInterval = prev })
 
 	b, socket, err := startLaunchEndpoint(paneOf("s", os.Getpid()), nil)
 	require.NoError(t, err)
 	t.Cleanup(ShutdownLaunchCapabilities)
+	ep := launchEP.Load()
 	dir := filepath.Dir(socket)
 
 	claims := func(stage string) {
 		t.Helper()
 		token, err := b.Mint(testCap())
 		require.NoError(t, err, stage)
-		require.Eventually(t, func() bool {
-			// A fresh token per attempt is unnecessary: an unreachable endpoint
-			// consumes nothing.
-			_, err := claimAs(t, socket, token, "%1")
-			return err == nil
-		}, 5*time.Second, 25*time.Millisecond, "%s: claim through the ORIGINAL path %s", stage, socket)
+		_, err = claimAs(t, socket, token, "%1")
+		require.NoError(t, err, "%s: claim through the ORIGINAL path %s", stage, socket)
+	}
+	unreachable := func(stage string) {
+		t.Helper()
+		_, err := claimAs(t, socket, "x", "%1")
+		require.ErrorContains(t, err, "unreachable", stage)
 	}
 
 	claims("fresh endpoint")
 
 	require.NoError(t, os.Remove(socket))
-	_, err = claimAs(t, socket, "x", "%1")
-	require.ErrorContains(t, err, "unreachable", "the deleted socket must really be gone")
+	unreachable("the deleted socket must really be gone")
+	ep.ensure()
 	claims("after the socket was deleted")
 
 	require.NoError(t, os.RemoveAll(dir))
-	_, err = claimAs(t, socket, "x", "%1")
-	require.ErrorContains(t, err, "unreachable", "the deleted directory must really be gone")
+	unreachable("the deleted directory must really be gone")
+	ep.ensure()
 	claims("after the whole directory was deleted")
 
 	fi, err := os.Stat(dir)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o700), fi.Mode().Perm(), "a recreated directory keeps the private mode")
+}
+
+// The periodic check is what heals the endpoint without anyone calling ensure().
+func TestCapability_EndpointHealsItselfOnTheTick(t *testing.T) {
+	t.Setenv("TMPDIR", shortSocketDir(t))
+	prev := capabilityEnsureInterval
+	capabilityEnsureInterval = 20 * time.Millisecond
+	t.Cleanup(func() { capabilityEnsureInterval = prev })
+
+	b, socket, err := startLaunchEndpoint(paneOf("s", os.Getpid()), nil)
+	require.NoError(t, err)
+	t.Cleanup(ShutdownLaunchCapabilities)
+	require.NoError(t, os.RemoveAll(filepath.Dir(socket)))
+	require.Eventually(t, func() bool {
+		token, err := b.Mint(testCap())
+		if err != nil {
+			return false
+		}
+		_, err = claimAs(t, socket, token, "%1")
+		return err == nil
+	}, 5*time.Second, 25*time.Millisecond)
 }
 
 // Re-creating the directory after a temp cleanup must not adopt what another local
