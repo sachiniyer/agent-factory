@@ -64,11 +64,13 @@ func (m *Manager) trackedInstances() []*session.Instance {
 
 // pushHostBlockers lists the live sessions the operator did not create whose
 // runtime shares a machine with any of machines, in id order. A session with no
-// recorded runtime runs nowhere and blocks nothing.
+// recorded runtime runs nowhere and blocks nothing, and neither does an archive
+// af confirmed stopped while keeping its workspace (Codex P2 on #6433): its
+// recorded runtime only lets a later kill reap the directory.
 func (m *Manager) pushHostBlockers(machines []session.RuntimeMachine) []pushBlocker {
 	var out []pushBlocker
 	for _, inst := range m.trackedInstances() {
-		if inst.OperatorCreated() {
+		if inst.OperatorCreated() || inst.StoppedPreservedArchive() {
 			continue
 		}
 		machine, ok := instanceRuntimeMachine(inst)

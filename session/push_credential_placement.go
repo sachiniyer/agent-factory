@@ -230,6 +230,20 @@ func (i *Instance) OperatorCreated() bool {
 	return i.createdByOperator && i.createdBySandbox == ""
 }
 
+// StoppedPreservedArchive reports whether this row is an archive that kept its
+// workspace after af CONFIRMED its agent and every tab stopped
+// (ArchiveSandboxPreserving): nothing of it runs on its host, though its runtime
+// identity stays so a later kill can reap the directory. Every condition is
+// needed. A restore clears the record only once its agent is back, so an
+// attached agent server means it runs. A rollback that could not confirm the
+// stop re-records the archive with its cleanup state unknown.
+func (i *Instance) StoppedPreservedArchive() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.archivedWorkspace != nil && i.liveness == LiveArchived && !i.started &&
+		i.agentSrv == nil && !i.runtimeCleanupStateUnknown
+}
+
 // ProvenanceText describes a row that OperatorCreated refuses, for a message
 // that names it.
 func (i *Instance) ProvenanceText() string {
