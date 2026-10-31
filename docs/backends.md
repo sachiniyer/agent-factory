@@ -660,8 +660,8 @@ inherit it. A local token is never copied to the SSH host implicitly.
 - An SSH server you can log into with a key, permitting **TCP forwarding**
   (`AllowTcpForwarding yes` — the default on most distros; the runtime reaches the
   remote agent-server through an SSH local-forward tunnel).
-- `git`, `tmux`, `sh`, and a platform af ships a binary for (Linux/Darwin on
-  amd64/arm64; the linux release artifact streamed to a host is a separate
+- `git`, `tmux` (3.2 or newer), `sh`, and a platform af ships a binary for
+  (Linux/Darwin on amd64/arm64; the linux release artifact streamed to a host is a separate
   static `CGO_ENABLED=0` build, so the host's libc is not a constraint there). The `af` binary is installed onto the remote for you — the
   daemon's own build on a same-platform host, the matching release artifact
   (`agent-factory-linux-<arch>-static` on linux) otherwise, always version-checked against the daemon — so there is nothing to
@@ -1021,7 +1021,7 @@ sandbox it cannot reach.
 
 What the sandbox host needs, and what af does to it:
 
-- **Tools.** `git`, `tmux` and a POSIX `sh` on the
+- **Tools.** `git`, `tmux` (3.2 or newer) and a POSIX `sh` on the
   non-interactive `PATH` of the ssh login (af sends its provisioning scripts as
   one ssh argument that the remote login shell parses). The static `af` binary
   af copies over also has to run there: see the glibc rule under
