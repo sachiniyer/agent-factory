@@ -28,6 +28,9 @@ var (
 	launchSocket  string
 	launchErr     error
 	launchStarted atomic.Pointer[CapabilityBroker]
+	launchStop    chan struct{}
+	launchLn      net.Listener
+	launchDir     string
 )
 
 // LaunchBrokerIfStarted returns the broker when this process has minted
@@ -61,17 +64,42 @@ func startLaunchEndpoint(lookup PaneLookup, alive SessionLiveness) (*CapabilityB
 	}
 	_ = os.Chmod(socket, 0o600)
 	b := NewCapabilityBroker(lookup)
+	stop := make(chan struct{})
+	launchStop, launchLn, launchDir = stop, ln, dir
 	go b.Serve(ln)
 	if alive != nil {
 		go func() {
-			for range time.Tick(capabilitySweepInterval) {
-				ctx, cancel := context.WithTimeout(context.Background(), claimIOTimeout)
-				b.Sweep(ctx, alive)
-				cancel()
+			ticker := time.NewTicker(capabilitySweepInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					ctx, cancel := context.WithTimeout(context.Background(), claimIOTimeout)
+					b.Sweep(ctx, alive)
+					cancel()
+				}
 			}
 		}()
 	}
 	return b, socket, nil
+}
+
+// ShutdownLaunchCapabilities stops the endpoint LaunchCapabilities started: it
+// closes the claim listener, stops the sweep, and removes the socket directory.
+// The endpoint otherwise lives as long as the process; this is for an orderly
+// teardown (a test binary asserting it leaves no goroutine behind). Nothing may
+// mint or claim afterwards.
+func ShutdownLaunchCapabilities() {
+	if launchStop == nil {
+		return
+	}
+	close(launchStop)
+	_ = launchLn.Close()
+	_ = os.RemoveAll(launchDir)
+	launchStarted.Store(nil)
+	launchStop, launchLn = nil, nil
 }
 
 // claimSocketDir makes this process's private socket directory
