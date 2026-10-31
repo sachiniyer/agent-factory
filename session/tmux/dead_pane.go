@@ -443,6 +443,11 @@ func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
 // handed it elsewhere — no match. An unanswerable list or a vanished session
 // returns an error: "cannot prove" must never masquerade as either verdict.
 func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, error) {
+	// A restore pass primes one server-wide listing (#6423): a session that is in
+	// it answers from there, in place of its own list-panes.
+	if rows, ok := currentSnapshot().paneRows(t.sanitizedName); ok {
+		return paneRowsHoldRoot(rows, pid, startID)
+	}
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	output, err := t.outputTmuxBounded(ctx, "list-panes", "-s", "-t", exactTarget(t.sanitizedName), "-F", paneRowFormat)
@@ -458,7 +463,13 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 	if strings.TrimSpace(string(output)) == "" {
 		return false, errPaneQueryFoundNoPane
 	}
-	for _, field := range strings.Fields(string(output)) {
+	return paneRowsHoldRoot(strings.Fields(string(output)), pid, startID)
+}
+
+// paneRowsHoldRoot is PaneRootProcessMatches' verdict over a session's pane rows,
+// whether they came from its own list-panes or from a primed SessionSnapshot.
+func paneRowsHoldRoot(fields []string, pid int, startID uint64) (bool, error) {
+	for _, field := range fields {
 		row, err := parsePaneRow(field)
 		if err != nil {
 			return false, fmt.Errorf("%w (list-panes row %q)", err, field)
