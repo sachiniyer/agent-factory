@@ -195,6 +195,7 @@ func TestLaunchEnvironmentRefusesScopedLaunchWhenGrantFails(t *testing.T) {
 }
 
 func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
+	forceLaunchCapabilityOwner(t, true) // the default-command assertions below need the owner's capability
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
 	// The scoped agent pane carries account material only on an executable af

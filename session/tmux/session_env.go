@@ -338,14 +338,19 @@ func (t *TmuxSession) prepareLaunchEnvironmentMinting(workDir string) (string, [
 				return "", nil, nil, nil, "", err
 			}
 		}
-		// The initial pane's capability is one-shot; the default-command runs for
-		// every later window, so it gets its own per-pane one.
-		defaultCommand, err = t.wrapClaimedLaunch(executable, launchSpec{
-			agent: accountAgent, account: account, command: defaultProgram, extras: extra,
-			environmentOnly: true, perPane: true,
-		})
-		if err != nil {
-			return "", nil, nil, nil, "", err
+		if ownsLaunchCapabilities() {
+			// The initial pane's capability is one-shot; the default-command runs
+			// for every later window, so it gets its own per-pane one, owned by
+			// this long-lived process.
+			defaultCommand, err = t.wrapClaimedLaunch(executable, launchSpec{
+				agent: accountAgent, account: account, command: defaultProgram, extras: extra,
+				environmentOnly: true, perPane: true,
+			})
+			if err != nil {
+				return "", nil, nil, nil, "", err
+			}
+		} else {
+			defaultCommand = nonOwnerDefaultCommand
 		}
 	}
 	return wrapped, launchEnv, importNames, sessionEnv, defaultCommand, nil
@@ -380,6 +385,9 @@ func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
 	if err != nil {
 		return err
 	}
+	// A refresh launches nothing, so the single-use capability prepare minted for
+	// an initial pane has no taker; only the per-pane one is kept.
+	revokeSingleUseLaunchCapabilities(t.sanitizedName)
 	selected := make(map[string]string, len(sessionEnv))
 	for _, entry := range sessionEnv {
 		name, value, ok := strings.Cut(entry, "=")
@@ -395,6 +403,11 @@ func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
 		if err := t.runRestoredAccountCommand(args...); err != nil {
 			return err
 		}
+	}
+	if !ownsLaunchCapabilities() {
+		// Not the owner: the daemon wrote this session's default-command and it is
+		// not ours to replace with a capability this process cannot keep alive.
+		return nil
 	}
 	return t.runRestoredAccountCommand(
 		"set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand,

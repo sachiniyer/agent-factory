@@ -10,4 +10,6 @@ func (t *TmuxSession) mintLaunchCapability(launchSpec) (string, string, error) {
 
 func revokeLaunchCapabilities(string) {}
 
+func revokeSingleUseLaunchCapabilities(string) {}
+
 func launchCapabilities(string) (int, int) { return 0, 0 }

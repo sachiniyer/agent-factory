@@ -5,6 +5,8 @@ package tmux
 import (
 	"errors"
 	"os/exec"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -16,6 +18,12 @@ import (
 
 var lookupFails atomic.Bool
 
+func forceLaunchCapabilityOwner(t *testing.T, owner bool) {
+	t.Helper()
+	prev := launchCapabilityOwner.Swap(owner)
+	t.Cleanup(func() { launchCapabilityOwner.Store(prev) })
+}
+
 // accountSessionForCapabilityTest is an account-scoped codex session whose
 // prepare step mints a per-pane (default-command) capability.
 func accountSessionForCapabilityTest(t *testing.T, name string, exec cmd_test.MockCmdExec, pty PtyFactory) *TmuxSession {
@@ -23,6 +31,7 @@ func accountSessionForCapabilityTest(t *testing.T, name string, exec cmd_test.Mo
 	forceAgentOnSearchPath(t, "codex")
 	forceSessionEnvExecutable(t, "/test/af")
 	forceNewSessionEnvMarkers(t, true)
+	forceLaunchCapabilityOwner(t, true)
 	accountDir := t.TempDir()
 	prev := sessionenv.AccountLookup
 	sessionenv.AccountLookup = func(agent, account string) (sessionenv.Account, error) {
@@ -107,4 +116,72 @@ func TestPerPaneLaunchCapabilityDoesNotOutliveItsSession(t *testing.T) {
 			"a session tmux says is still alive still needs the capability its new windows claim")
 		revokeLaunchCapabilities(name)
 	})
+}
+
+// defaultCommandWrites runs a restore's account-environment refresh and returns
+// every default-command value it wrote to tmux.
+func defaultCommandWrites(t *testing.T, s *TmuxSession, mu *sync.Mutex, got *[]string) []string {
+	t.Helper()
+	require.NoError(t, s.refreshRestoredAccountEnvironment())
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]string(nil), *got...)
+}
+
+func recordingExec() (cmd_test.MockCmdExec, *sync.Mutex, *[]string) {
+	var mu sync.Mutex
+	var writes []string
+	return cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			args := strings.Join(c.Args, " ")
+			if strings.Contains(args, "set-option") && strings.Contains(args, "default-command") {
+				mu.Lock()
+				writes = append(writes, args)
+				mu.Unlock()
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, nil },
+	}, &mu, &writes
+}
+
+// Any process that restores a session runs the account-environment refresh (af
+// sessions preview and attach, the TUI). Only the daemon may leave a capability
+// behind default-command: a process that is about to exit would hand the
+// session's every later window to nobody (#4731).
+func TestRestoreRefreshWritesDefaultCommandOnlyForTheOwner(t *testing.T) {
+	t.Run("a process that is not the owner leaves it alone", func(t *testing.T) {
+		exec, mu, got := recordingExec()
+		s := accountSessionForCapabilityTest(t, "af_cap_nonowner", exec, nil)
+		forceLaunchCapabilityOwner(t, false)
+		require.Empty(t, defaultCommandWrites(t, s, mu, got),
+			"a non-owner restore replaced the daemon's default-command with a capability it cannot keep alive")
+		_, perPane := launchCapabilities("af_cap_nonowner")
+		require.Zero(t, perPane)
+	})
+
+	t.Run("the owner re-establishes it and keeps only the per-pane capability", func(t *testing.T) {
+		exec, mu, got := recordingExec()
+		s := accountSessionForCapabilityTest(t, "af_cap_owner", exec, nil)
+		writes := defaultCommandWrites(t, s, mu, got)
+		require.Len(t, writes, 1)
+		require.Contains(t, writes[0], sessionenv.AccountEnvironmentExecMarker)
+		total, perPane := launchCapabilities("af_cap_owner")
+		require.Equal(t, 1, perPane)
+		require.Equal(t, 1, total, "the refresh launches nothing, so no single-use capability may linger")
+		revokeLaunchCapabilities("af_cap_owner")
+	})
+}
+
+// A session created by a process that is not the owner must not be left with tmux's
+// own login shell for new windows, which would run outside the account boundary.
+func TestNonOwnerPrepareInstallsARefusingDefaultCommandAndMintsNoPerPaneCapability(t *testing.T) {
+	s := accountSessionForCapabilityTest(t, "af_cap_nonowner_start", cmd_test.MockCmdExec{}, nil)
+	forceLaunchCapabilityOwner(t, false)
+	_, _, _, _, defaultCommand, err := s.prepareLaunchEnvironment("")
+	require.NoError(t, err)
+	require.Equal(t, nonOwnerDefaultCommand, defaultCommand)
+	_, perPane := launchCapabilities("af_cap_nonowner_start")
+	require.Zero(t, perPane)
+	revokeLaunchCapabilities("af_cap_nonowner_start")
 }

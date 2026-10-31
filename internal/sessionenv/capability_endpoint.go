@@ -94,6 +94,12 @@ func claimSocketDir() (string, error) {
 		}
 	}
 	dir := filepath.Join(tmp, prefix+strconv.Itoa(os.Getpid()))
+	// sun_path is 104 bytes on macOS and a long TMPDIR can overrun it, so a path
+	// that would not bind falls back to /tmp.
+	if len(filepath.Join(dir, "claim.sock")) > 100 {
+		tmp = "/tmp"
+		dir = filepath.Join(tmp, prefix+strconv.Itoa(os.Getpid()))
+	}
 	_ = os.RemoveAll(dir) // a reused pid's leftover
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", err
@@ -127,6 +133,17 @@ func (b *CapabilityBroker) revokePerPane(session string) {
 	defer b.mu.Unlock()
 	for token, rec := range b.recs {
 		if rec.cap.PerPane && rec.cap.Session == session {
+			delete(b.recs, token)
+		}
+	}
+}
+
+// RevokeSingleUse drops a session's single-use records and keeps its PerPane one.
+func (b *CapabilityBroker) RevokeSingleUse(session string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for token, rec := range b.recs {
+		if !rec.cap.PerPane && rec.cap.Session == session {
 			delete(b.recs, token)
 		}
 	}

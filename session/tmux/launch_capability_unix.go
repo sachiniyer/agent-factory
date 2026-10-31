@@ -43,6 +43,14 @@ func revokeLaunchCapabilities(session string) {
 	}
 }
 
+// revokeSingleUseLaunchCapabilities ends a session's single-use capabilities and
+// leaves its per-pane one.
+func revokeSingleUseLaunchCapabilities(session string) {
+	if b := sessionenv.LaunchBrokerIfStarted(); b != nil {
+		b.RevokeSingleUse(session)
+	}
+}
+
 // launchCapabilities reports how many capabilities session holds, and how many of
 // them are per-pane.
 func launchCapabilities(session string) (total, perPane int) {

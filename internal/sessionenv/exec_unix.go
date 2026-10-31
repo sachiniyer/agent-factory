@@ -150,6 +150,13 @@ func HandleInternalExec() {
 		err = execInvocation(os.Args[2:])
 	}
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "launch capability refused") {
+			// Value-free, and says what to do: this is what a window sees when the
+			// daemon that launched its session has since been replaced.
+			_, _ = fmt.Fprintf(os.Stderr,
+				"af: could not start this window in its account scope (%v); if the af daemon was restarted, run af daemon restart and reopen the session\n", err)
+			os.Exit(127)
+		}
 		_, _ = fmt.Fprintln(os.Stderr, "af: could not start the filtered session process")
 		os.Exit(127)
 	}
