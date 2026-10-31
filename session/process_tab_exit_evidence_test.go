@@ -30,7 +30,7 @@ func TestProcessTabExitStampEnrollsTheLoadCheckpoint(t *testing.T) {
 		RunFunc: func(*exec.Cmd) error { return nil },
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			if strings.Contains(strings.Join(c.Args, " "), "pane_dead") {
-				return []byte(paneExitAnswer(c, "1", "42", "1726000000")), nil
+				return []byte(paneExitAnswer(c, "1", "42", "1726000000", "echo hi")), nil
 			}
 			return nil, nil
 		},
@@ -58,7 +58,7 @@ func TestAccountScopedFinishedProcessPaneIsKeptWithItsExit(t *testing.T) {
 	// The mock answers the finished pane the way tmux does: its pane pid is
 	// absent from the process table.
 	cmdExec := nameKeyedExecWithFinishedPanes(map[string]bool{agentName: true, processName: true},
-		map[string]finishedPane{processName: {status: "7", at: "1726000000"}})
+		map[string]finishedPane{processName: {status: "7", at: "1726000000", start: afPaneStart("./deploy.sh")}})
 	var commands []string
 	baseRun := cmdExec.RunFunc
 	cmdExec.RunFunc = func(c *exec.Cmd) error {

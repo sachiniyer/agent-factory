@@ -223,17 +223,20 @@ func (p *launchingPane) refuses(now time.Time) bool {
 
 // paneFieldsBlank expands every pane field the way tmux does for a missing
 // target: pane-sourced fields stay empty, but the start-command equality still
-// evaluates — empty == empty answers 1 (measured on tmux 3.8: `||||||1`).
-// paneFieldsRunning is a running pane with no pid to hand out.
+// evaluates — empty == empty answers 1 (measured on tmux 3.8: `||||||1|`).
+// paneFieldsRunning is a running pane with no pid to hand out; its start
+// command is af's launch wrapper, the way every pane the model serves began.
 var (
 	paneFieldsBlank = strings.NewReplacer("#{pane_pid}", "", "#{pane_dead}", "",
 		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "",
 		"#{@af_pane_pid}", "", "#{@af_pane_deaths}", "", "#{pane_tty}", "",
-		"#{==:#{@af_pane_cmd},#{pane_start_command}}", "1")
+		"#{==:#{@af_pane_cmd},#{pane_start_command}}", "1",
+		"#{pane_start_command}", "")
 	paneFieldsRunning = strings.NewReplacer("#{pane_pid}", "", "#{pane_dead}", "0",
 		"#{pane_dead_status}", "", "#{pane_dead_signal}", "", "#{pane_dead_time}", "",
 		"#{@af_pane_pid}", "", "#{@af_pane_deaths}", "0", "#{pane_tty}", "/dev/pts/0",
-		"#{==:#{@af_pane_cmd},#{pane_start_command}}", "1")
+		"#{==:#{@af_pane_cmd},#{pane_start_command}}", "1",
+		"#{pane_start_command}", afPaneStart("true"))
 )
 
 func (m *tmuxModel) session(name, program string) *tmux.TmuxSession {
@@ -401,7 +404,7 @@ func TestAccountSwapStillRefusesARunningProcessTabThatVanishesUnobserved(t *test
 func TestAccountSwapKeepsAFinishedProcessPane(t *testing.T) {
 	name := scopeAgent + "__deploy"
 	m := newTmuxModel(t, scopeAgent)
-	m.finish(name, finishedPane{status: "7", at: "1726000000"}, "deployed")
+	m.finish(name, finishedPane{status: "7", at: "1726000000", start: afPaneStart("./deploy.sh")}, "deployed")
 	inst := swapInstance(t, m, processRow("deploy", "work"))
 
 	require.NoError(t, inst.StopForAccountSwap())
@@ -429,7 +432,7 @@ func TestAccountSwapStopsAFinishedPaneWhoseChildStillRuns(t *testing.T) {
 	root, survivor := finishedRootWithSurvivor(t)
 	name := scopeAgent + "__serve"
 	m := newTmuxModel(t, scopeAgent)
-	m.finish(name, finishedPane{pid: root, status: "0", at: "1726000000"}, "")
+	m.finish(name, finishedPane{pid: root, status: "0", at: "1726000000", start: afPaneStart("./serve.sh")}, "")
 	inst := swapInstance(t, m, processRow("serve", "work"))
 
 	require.NoError(t, inst.StopForAccountSwap())
@@ -479,7 +482,7 @@ func TestKillAndArchiveTearDownAFinishedProcessPane(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 			name := scopeAgent + "__deploy"
 			m := newTmuxModel(t)
-			m.finish(name, finishedPane{status: "7", at: "1726000000"}, "deployed")
+			m.finish(name, finishedPane{status: "7", at: "1726000000", start: afPaneStart("./deploy.sh")}, "deployed")
 
 			state, blind, err := mode.close(m.session(name, "./deploy.sh"))
 			require.NoError(t, err)
@@ -494,7 +497,7 @@ func TestAddProcessTabReportsACommandThatFailsAtOnce(t *testing.T) {
 	m := newTmuxModel(t, scopeAgent)
 	inst := scopedInstance(t, m, "")
 	name := scopeAgent + "__deplyo"
-	m.failOnStart[name] = finishedPane{status: "127", at: "1726000000"}
+	m.failOnStart[name] = finishedPane{status: "127", at: "1726000000", start: afPaneStart("./deplyo.sh")}
 	m.output[name] = "sh: 1: ./deplyo.sh: not found"
 
 	_, err := inst.AddProcessTab("./deplyo.sh", "deplyo")
@@ -554,7 +557,7 @@ func TestAddProcessTabWaitsForTheLaunchShimBeforeWatching(t *testing.T) {
 		_ = hold.Close()
 		<-done
 	}}
-	m.failOnStart[name] = finishedPane{status: "127", at: "1726000000"}
+	m.failOnStart[name] = finishedPane{status: "127", at: "1726000000", start: afPaneStart("./slow.sh")}
 	m.output[name] = "af: could not start the filtered session process"
 	m.mu.Unlock()
 
@@ -568,7 +571,7 @@ func TestAddProcessTabRecordsACommandThatFinishedCleanly(t *testing.T) {
 	m := newTmuxModel(t, scopeAgent)
 	inst := scopedInstance(t, m, "")
 	name := scopeAgent + "__migrate"
-	m.failOnStart[name] = finishedPane{status: "0", at: "1726000000"}
+	m.failOnStart[name] = finishedPane{status: "0", at: "1726000000", start: afPaneStart("./migrate.sh")}
 
 	tab, err := inst.AddProcessTab("./migrate.sh", "migrate")
 	require.NoError(t, err)

@@ -4,6 +4,9 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 )
 
 // absentPID is a pid no process can have: above the largest pid Linux allows
@@ -28,6 +31,21 @@ type finishedPane struct {
 	// active pane — exactly the shape the exit probe must not attribute to
 	// the command.
 	unstamped bool
+	// start is the pane's recorded pane_start_command: afPaneStart for a pane
+	// af launched — the launch-provenance gate reads its exec marker and the
+	// recorded command as the last word — and a foreign command for a pane
+	// the user created. An unstamped pane reports its own foreign start
+	// command; a stamped one must carry its program's.
+	start string
+}
+
+// afPaneStart is the pane_start_command a pane af launched reports: the exec
+// marker and the recorded command as the wrapper's last word — the two halves
+// of launch provenance the exit probe checks. It is also a runnable command
+// (the marker travels as an environment variable), so fixtures backed by a
+// real tmux can launch it verbatim.
+func afPaneStart(program string) string {
+	return "env " + sessionenv.ExecMarker + "=1 sh -c " + shellquote.Quote(program)
 }
 
 // answer expands a pane query's format the way tmux would for this pane, and
@@ -41,12 +59,15 @@ func (p finishedPane) answer(c *exec.Cmd) (string, bool) {
 	if pid == 0 {
 		pid = absentPID
 	}
-	stamp, deaths, tty, cmdMatch := strconv.Itoa(pid)+":0:/dev/pts/0", "1", "/dev/pts/0", "1"
+	stamp, deaths, tty, cmdMatch, start := strconv.Itoa(pid)+":0:/dev/pts/0", "1", "/dev/pts/0", "1", p.start
 	if p.unstamped {
 		// A pane af did not launch: no @af_pane_pid stamp, no deaths counter,
 		// no @af_pane_cmd pin, and its own start command does not byte-match
-		// the unset pin.
+		// the unset pin and is not af's launch.
 		stamp, deaths, tty, cmdMatch = "", "", "/dev/pts/3", "0"
+		if start == "" {
+			start = "sh -c 'exit " + p.status + "'"
+		}
 	}
 	return strings.NewReplacer(
 		"#{pane_pid}", strconv.Itoa(pid),
@@ -58,16 +79,20 @@ func (p finishedPane) answer(c *exec.Cmd) (string, bool) {
 		"#{@af_pane_deaths}", deaths,
 		"#{pane_tty}", tty,
 		"#{==:#{@af_pane_cmd},#{pane_start_command}}", cmdMatch,
+		// After the == pair so its inner #{pane_start_command} token is
+		// consumed whole: the raw start command is the probe's last field.
+		"#{pane_start_command}", start,
 	).Replace(c.Args[len(c.Args)-1]) + "\n", true
 }
 
-// paneExitAnswer answers a pane query for a finished pane with this status and
-// death time. dead must be "1": a live pane has a real pid, which these mocks
+// paneExitAnswer answers a pane query for a finished pane with this status,
+// death time and recorded program — the pane afPaneStart(program) leaves af's
+// launch on. dead must be "1": a live pane has a real pid, which these mocks
 // never hand out.
-func paneExitAnswer(c *exec.Cmd, dead, status, at string) string {
+func paneExitAnswer(c *exec.Cmd, dead, status, at, program string) string {
 	if dead != "1" {
 		panic("paneExitAnswer only models a finished pane")
 	}
-	answer, _ := finishedPane{status: status, at: at}.answer(c)
+	answer, _ := finishedPane{status: status, at: at, start: afPaneStart(program)}.answer(c)
 	return answer
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -611,19 +612,22 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 	// the active pane, so tmux reports its death — collected status or bare
 	// pid — on the very target the recorded command never ran on. What proves
 	// the recorded command ran there is pane_start_command (the last field):
-	// af wraps every pane it launches in a sessionenv exec marker
-	// (__af-*-env-exec*), immutable across respawn and older than the stamp,
-	// while a user's split pane carries the user's own command. The stamp
-	// alone cannot prove launch — restoreProcessTab's remain-on-exit heal
-	// (ApplyRemainOnExit) stamps whatever pane is ACTIVE, which under a user
-	// split is the foreign pane, and once the hook counts that death the
-	// healed stamp reads stampFresh. The first-wins guard on Tab.Exit makes a
-	// wrongly attributed exit permanent — the same active-pane hazard the
-	// session-wide scan PaneRootProcessMatches exists to reject (#5066
-	// review: "the user can split the window or focus a shell tab, moving
-	// the active-pane pointer") — so a pane af did not launch never supplies
-	// a Tab.Exit at all.
-	if !paneLaunchIsAF(fields[10:]) {
+	// af's launch wrapper leaves a sessionenv exec marker AND the recorded
+	// command as its last argument, immutable across respawn and older than
+	// the stamp. The marker alone does not suffice — an account-scoped
+	// session's default-command wraps an interactive account shell through
+	// the same sessionenv marker, so a user's split pane can carry a genuine
+	// af marker without ever having run the recorded command — and the stamp
+	// alone cannot prove launch either, because restoreProcessTab's
+	// remain-on-exit heal (ApplyRemainOnExit) stamps whatever pane is ACTIVE,
+	// which under a user split is the foreign pane, and once the hook counts
+	// that death the healed stamp reads stampFresh. The first-wins guard on
+	// Tab.Exit makes a wrongly attributed exit permanent — the same
+	// active-pane hazard the session-wide scan PaneRootProcessMatches exists
+	// to reject (#5066 review: "the user can split the window or focus a
+	// shell tab, moving the active-pane pointer") — so a pane whose recorded
+	// launch is not this session's command never supplies a Tab.Exit at all.
+	if !t.paneLaunchIsRecorded(fields[10:]) {
 		return paneExit{known: true}, false
 	}
 	exit = paneExit{dead: true, known: true, version: field(5)}
@@ -672,10 +676,10 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 		}
 		return exit, true
 	}
-	// pane_start_command already proved af launched this pane, so tmux's
-	// collected status is the recorded command's exit — it is this pane's
-	// own last death — UNLESS the stamp names an earlier incarnation: a
-	// respawn that moved past the stamp's pins died under a command the row
+	// pane_start_command already proved this pane ran the recorded command,
+	// so tmux's collected status is the recorded command's exit — it is this
+	// pane's own last death — UNLESS the stamp names an earlier incarnation:
+	// a respawn that moved past the stamp's pins died under a command the row
 	// cannot attribute. A fresh stamp, a pending counter (#5335), or no
 	// stamp at all — a pane af launched before PID stamping existed — all
 	// keep the exit tmux already collected, and a pane that died before its
@@ -686,14 +690,24 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 	return exit, false
 }
 
-// paneLaunchIsAF reports whether the pane's recorded pane_start_command names
-// an af launch: af wraps every pane it launches in a sessionenv exec marker,
-// so the marker proves af — not a user splitting the window — started the
-// command that ran there. startFields is the raw tail of the probe's reply
+// paneLaunchIsRecorded reports whether the pane's recorded pane_start_command
+// is THIS session's recorded launch — the pane the recorded process belongs
+// to, not merely a pane running under an af environment wrapper. af wraps
+// every pane it launches in a sessionenv exec marker and leaves the recorded
+// command as the wrapper's last argument, so the binding is marker AND the
+// recorded program's quoted form at the tail. The marker alone is not launch
+// provenance: an account-scoped session's default-command wraps an
+// interactive account shell through the same marker (prepareLaunchEnvironment),
+// so a split pane created from that default carries it without ever having
+// run the recorded command. startFields is the raw tail of the probe's reply
 // split on the field separator, joined so a command containing the separator
 // still reads whole.
-func paneLaunchIsAF(startFields []string) bool {
+func (t *TmuxSession) paneLaunchIsRecorded(startFields []string) bool {
 	start := strings.Join(startFields, paneFieldSeparator)
+	program := t.Program()
+	if program == "" {
+		return false
+	}
 	for _, marker := range []string{
 		sessionenv.ExecMarker,
 		sessionenv.AccountExecMarker,
@@ -702,7 +716,7 @@ func paneLaunchIsAF(startFields []string) bool {
 		sessionenv.AgentServerAccountExecMarker,
 	} {
 		if strings.Contains(start, marker) {
-			return true
+			return strings.HasSuffix(start, " "+shellquote.Quote(program))
 		}
 	}
 	return false

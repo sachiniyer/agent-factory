@@ -16,6 +16,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/log/logtest"
@@ -377,10 +378,11 @@ func TestProbePaneExitWaitsForAStampPendingOnACollectedStatus(t *testing.T) {
 func TestProbePaneExitRefusesAnUnstampedForeignPaneOnRealTmux(t *testing.T) {
 	testguard.IsolateTmux(t)
 	name := fmt.Sprintf("af_test_foreign_pane_%d", time.Now().UnixNano())
-	// Start the recorded command's pane the way af does: remain-on-exit on, and
-	// the @af_pane_pid stamp + pane-died hook installed against the living
-	// pane (mirroring startHeldPane, but the command stays alive).
-	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, "sleep 600",
+	// Start the recorded command's pane the way af does: the exec-marker
+	// launch command, remain-on-exit on, and the @af_pane_pid stamp +
+	// pane-died hook installed against the living pane (mirroring
+	// startHeldPane, but the command stays alive).
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, afPaneLaunch("sleep 600"),
 		";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
 	require.NoError(t, exec.Command("tmux", panePidStampArgs(exactTarget(name))...).Run())
 	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run() })
@@ -480,6 +482,31 @@ func TestProbePaneExitRefusesAPendingStampedForeignPane(t *testing.T) {
 	require.False(t, dead, "a pending foreign stamp is not the recorded command's exit either")
 	require.False(t, statusKnown)
 	require.Zero(t, status)
+}
+
+// The marker alone is not launch provenance (Codex re-review P1 on #6336): an
+// account-scoped session's default-command wraps an interactive account shell
+// through the same sessionenv exec marker af's own launches carry, so a split
+// pane the user created from that default reports a GENUINE marker — and the
+// remain-on-exit heal can give it a genuine stamp — without ever having run
+// the recorded command. The wrapper leaves the recorded command as its last
+// argument; the account shell's last word is the shell, so the split's death
+// still is not the command's exit.
+func TestProbePaneExitRefusesAnAccountScopedDefaultCommandSplit(t *testing.T) {
+	gone := exitedProcess(t).PID
+	// The account-scoped default command prepareLaunchEnvironment installs:
+	// a sessionenv-wrapped interactive account shell — marker present, but
+	// the last word is the shell, not the recorded program "true".
+	defaultShell := "/usr/bin/af " + sessionenv.AccountEnvironmentExecMarker + " codex 0 work '' 0 /bin/sh"
+	split := paneState{deaths: "1", tty: "/dev/pts/3", stampCmd: defaultShell, startCmd: defaultShell}
+	ts := NewTmuxSessionWithDeps("pane-exit-account-split", "true", nil,
+		deadPaneExec(t, strconv.Itoa(gone), strconv.Itoa(gone)+":0:/dev/pts/3", split, "7", "", "1726000000", nil))
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.False(t, dead, "a marker-bearing default-command split never ran the recorded command; its death is not the command's exit")
+	require.False(t, statusKnown)
+	require.Zero(t, status)
+	require.True(t, at.IsZero())
 }
 
 // tmuxDisplay returns tmux's expansion of format for the session's active pane.
