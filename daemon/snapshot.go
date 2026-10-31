@@ -667,9 +667,22 @@ func onlyOwnedBySandbox(instances []session.InstanceData, owner string) []sessio
 // reflectively so a newly populated field has to be an explicit decision.
 //
 // What is included is the agent's own operational state: who it is, what it is
-// running, what state it is in. What is excluded is anything describing the HOST,
-// anything about other sessions, and the conversation/prompt payloads a sandbox
-// already has locally and does not need served back.
+// running, what state it is in. What is excluded is anything describing the
+// daemon HOST'S LAYOUT — the absolute repository path, the worktree, the tmux
+// session name — anything about other sessions, and the conversation/prompt
+// payloads a sandbox already has locally and does not need served back.
+//
+// Host is deliberately NOT here. This projection is shared by the Snapshot path
+// (projectRowsForSandbox), which projects EVERY session in the owner's project,
+// not only the one just created: a sibling session's Host is an operator-chosen
+// listed-host alias that this sandbox did not supply, so returning it here would
+// leak operator host picks across sessions and would contradict the classCaller
+// rationale (caller text is what THIS sandbox sent). The picked host is preserved
+// ONLY by the create-specific projection (projectSandboxCreateResponse), where the
+// row is the session the sandbox itself just started with --host, and the create's
+// post-create guard (api/sessions.go) audits what came BACK against that pick.
+// Withholding it from ordinary snapshots does not reintroduce the version-skew
+// failure, because the guard reads the create response, not Snapshot.
 //
 // Program is deliberately NOT here: it is text the sandbox itself supplied (a full
 // command, possibly naming a path), the sandbox does not need it served back, and
