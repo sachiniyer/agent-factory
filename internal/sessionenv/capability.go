@@ -259,12 +259,13 @@ func (b *CapabilityBroker) Serve(ln net.Listener) {
 func (b *CapabilityBroker) serveConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(claimIOTimeout))
-	if enableAttestation(conn) != nil {
+	st, aerr := enableAttestation(conn)
+	if aerr != nil {
 		return
 	}
 	enc := json.NewEncoder(conn)
 	for round := 0; round < 2; round++ {
-		line, pid, err := readAttestedLine(conn)
+		line, pid, err := readAttestedLine(conn, st)
 		if err != nil {
 			return
 		}
@@ -317,7 +318,8 @@ func ClaimCapability(socket, token string) (Capability, error) {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(claimIOTimeout))
-	if err := enableAttestation(conn); err != nil {
+	st, err := enableAttestation(conn)
+	if err != nil {
 		return Capability{}, fmt.Errorf("launch capability refused: cannot attest the claim endpoint: %w", err)
 	}
 	enc := json.NewEncoder(conn)
@@ -326,7 +328,7 @@ func ClaimCapability(socket, token string) (Capability, error) {
 		if err := enc.Encode(req); err != nil {
 			return claimResponse{}, err
 		}
-		line, sender, err := readAttestedLine(conn)
+		line, sender, err := readAttestedLine(conn, st)
 		if err != nil {
 			return claimResponse{}, fmt.Errorf("launch capability refused: %w", err)
 		}

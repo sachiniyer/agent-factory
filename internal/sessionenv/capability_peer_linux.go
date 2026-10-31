@@ -55,7 +55,13 @@ func platformExeIdentity(pid int) (exeID, error) {
 // parent's). That is what makes the check per message rather than per connection.
 const perMessageAttestation = true
 
-func enableAttestation(conn net.Conn) error {
+type peerState struct{}
+
+func enableAttestation(conn net.Conn) (peerState, error) {
+	return peerState{}, setPassCred(conn)
+}
+
+func setPassCred(conn net.Conn) error {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		return fmt.Errorf("not a unix connection")
@@ -76,7 +82,7 @@ func enableAttestation(conn net.Conn) error {
 // readAttestedLine reads one newline-terminated message and returns the pid the
 // kernel attested for it. Every read must carry credentials and they must all
 // name the same sender, so a message cannot be stitched from two writers.
-func readAttestedLine(conn net.Conn) ([]byte, int, error) {
+func readAttestedLine(conn net.Conn, _ peerState) ([]byte, int, error) {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		return nil, 0, fmt.Errorf("not a unix connection")
