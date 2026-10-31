@@ -63,7 +63,7 @@ The rail shows state by glyph only. Hover a row to read its state in words.
 | --- | --- |
 | Blinking yellow circle | The agent asked for you with `af sessions attention`; hover the row for its reason |
 | No glyph | The agent is idle |
-| Muted filled circle | Work is in progress |
+| Muted spinner | Work is in progress |
 | Hollow circle | The agent process is dead, or a prompt was not delivered |
 | Dashed circle | The session is lost |
 | Diamond | A usage limit has been reached |
@@ -80,7 +80,7 @@ circle clears when you submit a line in the agent pane, dismiss it with the **×
 the **Attention** chip in the session header, or when the agent starts work again
 after it went idle. Typing a draft or just viewing the tab does not clear it. When
 your system asks for reduced motion, the circle does not blink and has a ring
-around it, and the chip's bell is still. The TUI rail does not show the
+around it, the working spinner does not turn, and the chip's bell is still. The TUI rail does not show the
 request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
 
 The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting

@@ -492,6 +492,6 @@ otherwise — see #1826.
 - **No caps-shouting** for emphasis — write the emphasis into the sentence. CAPS
   are reserved for env vars (`AF_HOME`) and literal flag/command names.
 - **No animated indicators** (spinners, blink, pulse) — state reads from a static
-  glyph (#1766). One named exception: the web rail's needs-attention dot blinks
-  (static under reduced motion), because an agent blocked on the user must stand
-  out from idle rows.
+  glyph (#1766). Two named exceptions, both in the web rail and both static under
+  reduced motion: the needs-attention dot blinks, because an agent blocked on the
+  user must stand out from idle rows, and a working row's loader glyph turns.

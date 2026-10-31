@@ -337,7 +337,7 @@ existing liveness/in-flight-op resolution. Shapes and labels carry the meaning
 without colour; reserve blank status cells in the TUI for alignment.
 
 The web rail has no state words, so its glyphs differ: an idle row is blank, a
-working row draws a muted filled circle, and a row whose agent asked for the user
+working row draws a muted spinner, and a row whose agent asked for the user
 (`af sessions attention`) draws a blinking circle in the attention colour.
 
 ## Type, spacing and radii
@@ -375,9 +375,10 @@ TUI focus is an accent frame plus text. Web touch targets are at least 44px high
 
 ## Motion and copy
 
-No animated indicators: no spinner, pulse or cycling glyph. The one exception is
-the web rail's needs-attention dot, which blinks so a waiting agent is visible
-from across the screen, and is static and ringed under reduced motion. Connecting…,
+No animated indicators: no pulse or cycling glyph. The exceptions are in the web rail:
+the working spinner, which turns so a busy row reads at a glance, and the
+needs-attention dot, which blinks so a waiting agent is visible from across the
+screen. Both are static under reduced motion, and the dot is ringed. Connecting…,
 Creating… and Running are static. This includes connection chrome; agent-owned
 terminal output is not an af indicator. User-caused web disclosure may take at
 most 120ms, with 0ms under reduced motion. TUI transitions are immediate.
