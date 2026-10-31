@@ -27,6 +27,6 @@ func (m *Manager) settleChurnedLiveness(instance *session.Instance, captured boo
 	// an attention request is answered only by the indicator itself.
 	_ = instance.Transition(running.ChurnOnly())
 	if captured && task.IsWorkingContent(content, agent) {
-		m.answerAttentionByWork(instance)
+		m.answerAttentionByWork(instance, epoch)
 	}
 }

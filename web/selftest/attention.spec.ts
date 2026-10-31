@@ -91,6 +91,23 @@ test("a submitted line in the agent pane clears the request", async ({ page, req
   expect(await attentionOf(request, id)).toBeNull();
 });
 
+test("a user's send-prompt answers the request, with the chip and dot following", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 844 });
+  const id = await target(request);
+  await openSettled(page, id);
+  await raise(request, id, "Which port?");
+  await expect(page.locator(".af-term-attention")).toBeVisible();
+  // The route the web client and API callers use. A task delivery cannot be sent
+  // this way (its provenance is daemon-internal), so that half is pinned by the
+  // daemon's TestAttentionIsAnsweredByAPromptTheUserSubmits. The stand-in agent's
+  // echo also produces a Running edge, so this proves the surface wiring, not
+  // that the prompt alone did it.
+  const sent = await (await request.post("/v1/SendPrompt", { data: { id, title: SESSION, prompt: "8080" } })).json();
+  expect(sent.error, "the prompt is accepted").toBeFalsy();
+  await expect(page.locator(".af-term-attention")).toBeHidden({ timeout: 15_000 });
+  expect(await attentionOf(request, id)).toBeNull();
+});
+
 test("a dismissal names the request the chip showed, so a newer request survives it", async ({ page, request }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
   const id = await target(request);

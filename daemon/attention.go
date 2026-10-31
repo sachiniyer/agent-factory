@@ -129,9 +129,11 @@ func (m *Manager) clearAttentionOnInput(instance *session.Instance) {
 }
 
 // answerAttentionByWork clears the open attention request when the agent shows
-// its own in-turn indicator after the idle spell the request waited out.
-func (m *Manager) answerAttentionByWork(instance *session.Instance) {
-	if setAt, ok := instance.AttentionAnsweredByWork(); ok {
+// its own in-turn indicator after the idle spell the request waited out. epoch
+// is the one the observing poll decided at; a request raised later is not
+// answered by a frame captured before it.
+func (m *Manager) answerAttentionByWork(instance *session.Instance, epoch uint64) {
+	if setAt, ok := instance.AttentionAnsweredByWork(epoch); ok {
 		m.queueAttentionClear(instance, setAt)
 	}
 }
