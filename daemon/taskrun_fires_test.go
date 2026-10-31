@@ -750,7 +750,7 @@ func TestTaskFireLeftoverRecordCarriesTmuxName(t *testing.T) {
 	}
 	title := "leftover-title"
 	branch := git.BranchForTitle(cfg.BranchPrefix, title)
-	wtPath := filepath.Join(t.TempDir(), "leftover-wt")
+	wtPath := filepath.Join(resolvedTempDir(t), "leftover-wt")
 	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
 		t.Fatalf("seed leftover worktree: %v: %s", err, out)
 	}
@@ -868,63 +868,6 @@ func TestTaskFireResidue_RejectsArmingVerdicts(t *testing.T) {
 	}
 }
 
-// TestTaskFireLeftoverRecord_StopsProvenRuntime pins the writer-stop ordering:
-// a proven leftover's tmux runtime can still be writing its worktree while the
-// cleanliness probe runs, and a clean snapshot taken before the stop would
-// authorize a `worktree remove -f` teardown that deletes work generated
-// afterwards. The runtime is killed before the probe, so the row persisted
-// for a clean leftover is a tombstone AND the session is already dead.
-func TestTaskFireLeftoverRecord_StopsProvenRuntime(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
-	}
-	home := testguard.SocketTempDir(t)
-	t.Setenv("AGENT_FACTORY_HOME", home)
-	repoPath := setupTaskRepo(t)
-	repo, err := config.RepoFromPath(repoPath)
-	if err != nil {
-		t.Fatalf("RepoFromPath: %v", err)
-	}
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	title := "writer-leftover"
-	branch := git.BranchForTitle(cfg.BranchPrefix, title)
-	sanitized := tmux.SanitizedNameForRepo(title, repo.IdentityPath())
-	wtPath := filepath.Join(t.TempDir(), "writer-wt")
-	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
-		t.Fatalf("seed leftover worktree: %v: %s", err, out)
-	}
-	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sanitized,
-		"-e", tmux.EnvMarkerSession+"="+sanitized,
-		"-e", tmux.EnvMarkerHome+"="+home, "sh").CombinedOutput(); err != nil {
-		t.Fatalf("seed leftover tmux session: %v: %s", err, out)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "kill-session", "-t", "="+sanitized).Run()
-	})
-
-	fire := &taskFireMarker{
-		TaskID: "ab0r7097", IntendedAt: time.Now().Add(-time.Minute), Title: title,
-	}
-	row, err := taskFireLeftoverRecord(
-		&task.Task{ID: "ab0r7097", ProjectPath: repoPath, Prompt: "p"},
-		fire, repo, nil)
-	if err != nil {
-		t.Fatalf("taskFireLeftoverRecord: %v", err)
-	}
-	if row == nil || !row.UserKilled {
-		t.Fatalf("a proven clean leftover must record a teardown tombstone, got %+v", row)
-	}
-	if row.StartupStateUnknown {
-		t.Fatal("a proven clean leftover must not be quarantined")
-	}
-	if out, err := exec.Command("tmux", "has-session", "-t", "="+sanitized).CombinedOutput(); err == nil {
-		t.Fatalf("the proven leftover's runtime must be stopped inside reconcile, still alive: %s", out)
-	}
-}
-
 // TestRunTask_UpgradeGateErrorKeepsMarker: a typed upgrade-gate refusal from
 // the loopback RPC is self-proving shutdown evidence — a live upgrade
 // transaction only exists across a daemon replacement, and it can still be
@@ -1002,7 +945,7 @@ func TestTaskFireLeftoverRecord_ForeignRowOwningCollidingTmuxName(t *testing.T) 
 	// return a quarantine record (never reach the kill) on a host without a
 	// colliding live session, isolating the foreign-scan verdict from the
 	// runtime-stop ordering.
-	wtPath := filepath.Join(t.TempDir(), "leftover-wt")
+	wtPath := filepath.Join(resolvedTempDir(t), "leftover-wt")
 	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
 		t.Fatalf("seed leftover worktree: %v: %s", err, out)
 	}

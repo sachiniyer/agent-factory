@@ -1598,30 +1598,28 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await p.goto("/");
   await expect(p.locator(".af-app")).toBeVisible();
 
-  // Working row: NO status dot at all — the dot span is omitted entirely. The row
-  // must be asserted present FIRST: toHaveCount(0) on a row that never rendered
-  // would pass for the wrong reason.
+  // The rail carries state by glyph only: no state words in any row.
   await expect(row(p, "probe-working")).toBeVisible({ timeout: 15_000 });
-  await expect(row(p, "probe-working").locator(".af-dot")).toHaveCount(0);
-  await expect(row(p, "probe-working").locator(".af-row-status")).toHaveCount(1);
-  await expect(row(p, "probe-working").locator(".af-operator-state")).toHaveText("Working");
-  // Needs-you row: the static filled circle, in the ready color bucket, never spinning.
-  const readyDot = row(p, "probe-needs-you").locator(".af-dot");
-  await expect(readyDot).toHaveClass(/af-dot-ready/);
-  await expect(readyDot.locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
-  await expect(readyDot).not.toHaveClass(/af-dot-spin/);
+  await expect(p.locator(".af-rail-list .af-operator-state")).toHaveCount(0);
+  const workingDot = row(p, "probe-working").locator(".af-dot");
+  await expect(workingDot).toHaveClass(/af-dot-working/);
+  await expect(workingDot.locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
+  await expect(row(p, "probe-working")).toHaveClass(/af-row-operator-working/);
+  // An idle Ready row is blank, but keeps its fixed status cell so titles align.
+  await expect(row(p, "probe-needs-you").locator(".af-dot")).toHaveCount(0);
+  await expect(row(p, "probe-needs-you").locator(".af-row-status")).toHaveCount(1);
   await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
-  await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toHaveCount(0);
-  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("Needs you · synth-probe-needs-you");
-  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("Needs you");
+  await expect(row(p, "probe-needs-you").locator(".af-row-branch")).toHaveText("synth-probe-needs-you");
+  await expect(row(p, "probe-no-branch").locator(".af-row-branch")).toHaveText("");
   await expect(row(p, "probe-no-branch").locator(".af-row-branch-name")).toHaveCount(0);
   await row(p, "probe-needs-you").click();
   await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
-  // Positive non-delivery is Broken even though the underlying process is Ready.
+  // Positive non-delivery is Broken even though the underlying process is Ready,
+  // so the row draws the dead glyph instead of staying blank.
   const promptBroken = row(p, "probe-broken-prompt");
   await expect(promptBroken).toHaveClass(/af-row-operator-broken/);
-  await expect(promptBroken.locator(".af-operator-state")).toHaveText("Broken");
+  await expect(promptBroken.locator(".af-dot")).toHaveClass(/af-dot-dead/);
   await expect(promptBroken.locator(".af-idle-reason")).toHaveCount(0);
   await promptBroken.click();
   await expect(promptBroken.locator(".af-idle-reason")).toContainText("prompt not delivered");
@@ -1629,14 +1627,11 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   // Error/terminal states keep distinct STATIC shapes.
   await expect(row(p, "probe-lost").locator('.af-icon[data-icon="circle-dashed"]')).toHaveCount(1);
   await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
-  await expect(row(p, "probe-lost").locator(".af-operator-state")).toHaveText("Broken");
+  await expect(row(p, "probe-lost")).toHaveClass(/af-row-operator-broken/);
   await expect(row(p, "probe-dead").locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
   await expect(row(p, "probe-limit").locator('.af-icon[data-icon="diamond"]')).toHaveCount(1);
-  await expect(row(p, "probe-limit").locator(".af-operator-state")).toHaveText("Waiting on a limit");
-  // The animation class is gone from every status row, and the removed "working" dot
-  // kind never renders anywhere.
+  await expect(row(p, "probe-limit")).toHaveClass(/af-row-operator-waiting-limit/);
   await expect(p.locator(".af-dot-spin")).toHaveCount(0);
-  await expect(p.locator(".af-dot-working")).toHaveCount(0);
 
   // Retry limit remains the conditional pane-header escape from a usage-limit wall
   // (#1934): selecting the synthetic limit row reveals it, while selecting an
@@ -4890,6 +4885,212 @@ test("accounts: one Add account disclosure preserves a refused name and keyboard
   } finally { await ctx.close(); }
 });
 
+test("accounts: a Register button keeps focus on the rebuilt button after a refused registration", REAL_FIXTURE, async ({ browser }) => {
+  // The Accounts-section sibling of the Save-button focus test above (#6051). The
+  // Register button (button.af-accounts-add) lives OUTSIDE `.af-config-list`, so the
+  // Save-button rung (gated on `closest(".af-config-list")`) never matched it, and
+  // the restoration ladder had no other rung for it either. Clicking Register in
+  // Chromium focuses the button; the refusal reply's `.then`→`.catch` writes the
+  // account status that rebuilds the pane, detaching the focused button — focus
+  // fell to <body>, and the next `[`/`]` cycled the top-level view out of config
+  // (the body-focus hazard rerenderKeepingUserState's own header comment warns
+  // about). The Enter-on-the-input path is already covered by the disclosure-focus
+  // test above; this covers the mouse-click path the ladder missed.
+  //
+  // The route is intercepted, so the daemon is NOT mutated: no real account is
+  // created. The canned refusal drives setAccountStatus + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/RegisterAccount", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: null, error: { message: "simulated registration refusal" } }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    // Entering Config starts independent config + account reads. Let both settle
+    // so the refusal response below is the one rebuild under test.
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    const add = pane.locator(".af-account-disclosure summary");
+    await add.click();
+    await expect(pane.locator(".af-accounts-register:visible")).toHaveCount(1);
+    await p.getByLabel("Account agent", { exact: true }).selectOption("claude");
+    const name = p.getByLabel("New claude account name", { exact: true });
+    await name.fill("focus-probe-account");
+    // Commit by CLICKING the Register button (the Enter path is already covered).
+    // The click focuses the button, so the button — not the input — holds focus
+    // when the refusal-driven rebuild lands.
+    const register = pane.locator(".af-accounts-register:visible .af-accounts-add");
+    await register.click();
+
+    // The refusal alert proves setAccountStatus drove ConfigPane.update (the
+    // .catch wrote the refusal + the rebuild ran) — the exact path that dropped
+    // focus to <body> before. The drafted name survives via the accounts-drafts
+    // capture (readAccountDrafts/restoreAccountDrafts).
+    await expect(pane.locator(".af-accounts-register:visible [role=alert]")).toBeVisible();
+    await expect(name).toHaveValue("focus-probe-account");
+    // RED without the fix: the rebuilt Register button replaced the focused one
+    // and the restoration ladder had no rung for it, so focus fell to <body>.
+    await expect(register).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native BUTTON the document-level keydown gate (isNativeControl) returns
+    // early, so a bare `[` is NOT a view-cycle shortcut. RED without the fix: focus
+    // on <body> let `[` cycle the view out from under the user mid-flow.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally { await ctx.close().catch(() => {}); }
+});
+
+test("accounts: a Log in button keeps focus on the rebuilt button across its own status writes", REAL_FIXTURE, async ({ browser }) => {
+  // The other Accounts-section sibling the focus ladder was missing. The Log in
+  // button (button.af-accounts-login) is per-row, and its flow writes its "Starting
+  // the … login…" status SYNCHRONOUSLY inside the click dispatch (index.ts
+  // doOpenAccountLogin → setAccountStatus → store.set, whose listeners fire
+  // synchronously — see store.ts), so the pane rebuild detaches the focused button
+  // BEFORE the click returns. The `.then` then re-rebuilds on the outcome. Both
+  // rebuilds ran while the button held focus and, with no matching rung, left focus
+  // on <body>. The no-pane exit (finished=true) is the branch the report flags as
+  // never masked by term.focus(): the outcome lands on the account's own row, not
+  // behind an overlay, so nothing re-focuses anything afterwards — the honest
+  // worst case for focus loss here.
+  //
+  // The route is intercepted, so the daemon spawns nothing: the canned no-pane
+  // reply drives setAccountStatus + refreshAccounts + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/AccountLogin", async (route) => {
+      const body = route.request().postDataJSON() as { agent: string; name: string };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            agent: body.agent,
+            name: body.name,
+            dir: "/tmp/af-accounts",
+            program: `${body.agent} login`,
+            session_name: "",
+            socket_path: "",
+            reused: false,
+            finished: true,
+            logged_in: false,
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // An existing-account row carries the Log in button. The harness seeds at
+    // least one account; click the first row's button. The locator is live, so it
+    // re-queries the rebuilt row after every rerender.
+    const row = pane.locator(".af-accounts-row[data-account]").first();
+    await expect(row).toBeVisible();
+    const login = row.locator(".af-accounts-login");
+    await expect(login).toBeVisible();
+    await login.click();
+
+    // The synchronous "Starting…" rebuilt the pane during the click dispatch; the
+    // no-pane finished status (logged_in=false → error → role=alert) then re-built
+    // on the row, and refreshAccounts re-read (preserving this status) re-built
+    // once more. The role=alert landing proves the outcome rebuild ran — the path
+    // that left focus on <body> before. RED without the fix: the rebuilt Log in
+    // button replaced the focused one and the ladder had no rung for it.
+    await expect(row.locator("[role=alert]")).toBeVisible();
+    await expect(login).toBeFocused();
+
+    // Downstream contract — the user-visible symptom from the report: with focus
+    // on a native BUTTON the document-level keydown gate returns early, so a bare
+    // `[` is NOT a view-cycle shortcut. RED without the fix: focus on <body> let
+    // `[` cycle the view out from under the user mid-flow.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally { await ctx.close().catch(() => {}); }
+});
+
+test("accounts: a Register button keeps focus after a successful registration (the .then + refreshAccounts rebuilds)", REAL_FIXTURE, async ({ browser }) => {
+  // The success sibling of the refusal test above. `doRegisterAccount`'s `.then`
+  // (not `.catch`) is the other Register rebuild trigger: it writes a NON-ERROR
+  // status, CLEARS the just-submitted name (registrationSucceeded in config.ts
+  // update()), and re-reads the accounts (refreshAccounts) — a SECOND rebuild that
+  // lands while the button still holds focus. Both rebuilds detached the focused
+  // button and, with no rung, left focus on <body>; the report flags this path (no
+  // overlay, no re-focus) as unmasked. The route is intercepted, so the daemon is
+  // NOT mutated: the canned success drives setAccountStatus + refreshAccounts +
+  // ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/RegisterAccount", async (route) => {
+      const body = route.request().postDataJSON() as { agent: string; name: string };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            entry: {
+              agent: body.agent,
+              name: body.name,
+              dir: `/tmp/af/accounts/${body.agent}/${body.name}`,
+              registration_only: false,
+              logged_in: false,
+            },
+            notices: [],
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    const add = pane.locator(".af-account-disclosure summary");
+    await add.click();
+    await expect(pane.locator(".af-accounts-register:visible")).toHaveCount(1);
+    await p.getByLabel("Account agent", { exact: true }).selectOption("claude");
+    const name = p.getByLabel("New claude account name", { exact: true });
+    await name.fill("focus-probe-account");
+    // The click focuses the Register button, so the button — not the input —
+    // holds focus when the success-driven rebuilds land.
+    const register = pane.locator(".af-accounts-register:visible .af-accounts-add");
+    await register.click();
+
+    // The success status is a non-error echo on the register form (not an alert);
+    // its landing proves the `.then` rebuild ran. registrationSucceeded cleared the
+    // submitted name, so the rebuilt input is empty — distinct from the refusal
+    // path that keeps the drafted name.
+    await expect(pane.locator(".af-accounts-register:visible .af-accounts-echo")).toBeVisible();
+    await expect(name).toHaveValue("");
+    // RED without the fix: the rebuilt Register button replaced the focused one
+    // across both the status rebuild and the refreshAccounts rebuild, so focus
+    // fell to <body>.
+    await expect(register).toBeFocused();
+
+    // Downstream contract: focus on a native BUTTON gates the document keydown,
+    // so a bare "[" does not cycle the view out of config.
+    await p.keyboard.press("[");
+    await expect(p.locator('.af-viewtab[data-view="config"]')).toHaveClass(/af-viewtab-active/);
+  } finally { await ctx.close().catch(() => {}); }
+});
+
 test("config assistant (#2467): open → live stream → close reaps → reopen spawns fresh", REAL_FIXTURE, async () => {
   // The web counterpart of the TUI's config-agent takeover, over the bare-session PTY
   // route (#2522). This proves the COMPOSED LIFECYCLE the unit tests structurally
@@ -7574,7 +7775,7 @@ test("filter (feat): the default shows every state EXCEPT archived", REAL_FIXTUR
   // user actually reads, so a default that drifts in filter.ts is caught here too.
   await page.locator(".af-rail-filter").click();
   await expect(filterItem(page, "archived")).toHaveAttribute("aria-checked", "false");
-  for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
+  for (const kind of ["attention", "needs-you", "working", "waiting-limit", "broken"]) {
     await expect(filterItem(page, kind), `${kind} must be shown by default`).toHaveAttribute("aria-checked", "true");
   }
   // The default is NOT a "narrowed" state — it must not nag with an indicator the
@@ -7599,7 +7800,7 @@ test("filter (feat): Show archived reveals the archived row as inactive, and hid
   const archived = row(page, SESSION_B);
   await expect(archived).toBeVisible();
   await expect(archived).toHaveClass(/af-row-archived.*af-row-operator-archived|af-row-operator-archived.*af-row-archived/);
-  await expect(archived.locator(".af-operator-state")).toHaveText("Archived");
+  await expect(archived.locator(".af-dot-archived")).toHaveCount(1);
   expect(Number(await archived.evaluate((el) => Number(getComputedStyle(el).opacity)))).toBe(1);
   // Revealing the archive IS a departure from the default, so the control says so.
   await expect(page.locator(".af-rail-filter")).toHaveClass(/af-rail-filter-narrowed/);
@@ -7775,7 +7976,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     // Hide every non-archived state. Selection and the terminal pane intentionally
     // survive this display filter, so management must move with them instead of
     // disappearing with the row.
-    for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
+    for (const kind of ["attention", "needs-you", "working", "waiting-limit", "broken"]) {
       await setFilter(p, kind, false);
     }
     await expect(row(p, title)).toHaveCount(0);
@@ -7871,7 +8072,7 @@ test("add + delete a registered empty project (#2456): appears while another is 
   await add.click();
   const addModal = page.locator(".af-modal-card");
   await expect(addModal.locator(".af-modal-title")).toHaveText("Add project");
-  const pathInput = addModal.locator('input[aria-label="Repository path"]');
+  const pathInput = addModal.locator('input[aria-label="Repository path or git URL"]');
   await pathInput.fill("/work/definitely-not-a-git-repo");
   await addModal.locator("button.af-primary").click();
   await expect(addModal.locator(".af-modal-error")).toBeVisible();
@@ -8060,7 +8261,7 @@ test("add-project directory picker (#2788): descend, ascend, pick a repo — and
 
   // Picking fills the free-text field — the escape hatch stays the single input
   // the submit reads, so what gets registered is always what is on screen.
-  const pathInput = addModal.locator('input[aria-label="Repository path"]');
+  const pathInput = addModal.locator('input[aria-label="Repository path or git URL"]');
   await dirRow(browseRepo).locator(".af-dirpicker-use").click();
   await expect(pathInput).toHaveValue(`${browseRoot}/${level1}/${level2}/${browseRepo}`);
 
@@ -8149,7 +8350,7 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   await expect(add).toBeVisible();
   await add.click();
   const addModal = page.locator(".af-modal-card");
-  await addModal.locator('input[aria-label="Repository path"]').fill(emptyRepo!);
+  await addModal.locator('input[aria-label="Repository path or git URL"]').fill(emptyRepo!);
   await addModal.locator("button.af-primary").click();
   await expect(addModal).toBeHidden();
   await page.locator(".af-project-switch").click();
@@ -10839,14 +11040,14 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
           // Exercise a deterministic set of live placements. Session status icons
           // legitimately come and go as the seeded agent moves between Needs you and
           // Working, so they cannot be the reason this coverage happens to exceed its
-          // floor. The default filter always exposes four checked semantic groups.
+          // floor. The default filter always exposes five checked semantic groups.
           await p.getByRole("button", { name: "Filter sessions" }).click();
           await expect(p.locator(".af-filter-menu")).toBeVisible();
           // Armed here, before the gate below rather than just before the geometry: the
           // window that went wrong in the #3681 trace is the 43 ms of round trips
           // BETWEEN this gate and the measurement, not the measurement itself.
           await armIconRebuildWatch(p);
-          await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+          await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(5);
 
           const projectIcon = p.locator(".af-project-glyph");
           const filterIcon = p.locator(".af-rail-filter-glyph");
@@ -11132,7 +11333,7 @@ test("#3681 a zero box over a QUIET window is reported as a product defect, nami
     await openTokenless(p);
     await p.getByRole("button", { name: "Filter sessions" }).click();
     await expect(p.locator(".af-filter-menu")).toBeVisible();
-    await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+    await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(5);
 
     await armIconRebuildWatch(p);
     await p.addStyleTag({
@@ -11156,7 +11357,7 @@ test("#3681 a zero box over a QUIET window is reported as a product defect, nami
     expect(message, "a quiet window makes a zero box the product's defect, not the reading's").toContain(
       "no rebuild in the window",
     );
-    for (const named of ["check:af-icon", "circle:af-icon", "git-branch:af-icon", "plus:af-icon", "ellipsis:af-icon"]) {
+    for (const named of ["check:af-icon", "git-branch:af-icon", "plus:af-icon", "ellipsis:af-icon"]) {
       expect(message, `the failure must name ${named}`).toContain(named);
     }
     expect(message, "and say which of the three clauses rejected it").toContain("zero box 0x0");

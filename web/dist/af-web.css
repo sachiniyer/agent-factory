@@ -290,6 +290,7 @@ button:disabled,
   font: inherit;
   font-size: var(--af-type-body);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 }
 .af-project-item:hover {
@@ -837,10 +838,6 @@ button:disabled,
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.af-operator-state {
-  font-weight: 400;
-  font-size: var(--af-type-body);
-}
 .af-row-branch-name {
   display: inline;
   font-family: var(--af-font-mono);
@@ -866,12 +863,48 @@ button:disabled,
   line-height: 1.5;
   font-size: var(--af-type-body);
 }
-.af-dot-ready .af-icon,
+.af-dot-working .af-icon,
 .af-dot-limit .af-icon {
   fill: currentColor;
 }
-.af-dot-ready {
-  color: var(--af-ready);
+.af-dot-working {
+  color: var(--af-ink-muted);
+}
+.af-dot-attention .af-icon {
+  fill: currentColor;
+}
+.af-dot-attention {
+  color: var(--af-attention);
+  animation: af-attention-blink 1.2s steps(2, jump-none) infinite;
+}
+@keyframes af-attention-blink {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.25;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .af-dot-attention {
+    animation: none;
+  }
+  .af-dot-attention .af-icon {
+    border-radius: 50%;
+    outline: calc(var(--af-space-1) / 2) solid currentColor;
+    outline-offset: calc(var(--af-space-1) / 4);
+  }
+}
+.af-visually-hidden {
+  position: absolute;
+  width: calc(var(--af-space-1) / 4);
+  height: calc(var(--af-space-1) / 4);
+  margin: calc(var(--af-space-1) / -4);
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 .af-dot-lost {
   color: var(--af-lost);
@@ -883,24 +916,6 @@ button:disabled,
   color: var(--af-archived);
 }
 .af-dot-limit {
-  color: var(--af-limit-reached);
-}
-.af-row[data-state=ready] .af-operator-state {
-  color: var(--af-ready);
-}
-.af-row[data-state=working] .af-operator-state {
-  color: var(--af-running);
-}
-.af-row[data-state=lost] .af-operator-state {
-  color: var(--af-lost);
-}
-.af-row[data-state=dead] .af-operator-state {
-  color: var(--af-dead);
-}
-.af-row[data-state=archived] .af-operator-state {
-  color: var(--af-archived);
-}
-.af-row[data-state=limit] .af-operator-state {
   color: var(--af-limit-reached);
 }
 .af-row-operator-broken .af-idle-reason {
@@ -1022,9 +1037,6 @@ body[data-project-color] [data-af-theme=dark] {
 .af-app[data-project-color] .af-appbar .af-project-menu :is(button, summary, a):focus-visible {
   outline-color: var(--af-accent);
 }
-.af-app[data-project-color] .af-appbar .af-term-keyboard {
-  color: inherit;
-}
 .af-app[data-project-color] .af-viewnav,
 .af-app[data-project-color] .af-viewtab,
 .af-app[data-project-color] .af-viewtab:hover,
@@ -1074,6 +1086,49 @@ body[data-project-color] [data-af-theme=dark] {
   min-width: 0;
   max-width: min(calc(var(--af-space-3) * 18), 26vw);
   overflow: hidden;
+}
+.af-term-attention {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--af-space-1);
+  padding: 0 0 0 var(--af-space-2);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-attention);
+  border-radius: var(--af-radius-control);
+  color: var(--af-attention);
+  font-size: var(--af-type-body);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.af-term-attention[hidden] {
+  display: none;
+}
+.af-term-attention-bell {
+  animation: af-attention-blink 1.2s steps(2, jump-none) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .af-term-attention-bell {
+    animation: none;
+  }
+}
+.af-term-attention-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  padding: 0 var(--af-space-1);
+  background: transparent;
+  color: inherit;
+  border: none;
+  border-left: calc(var(--af-space-1) * 0.25) solid var(--af-attention);
+  border-radius: 0 var(--af-radius-control) var(--af-radius-control) 0;
+  font: inherit;
+  cursor: pointer;
+}
+.af-term-attention-dismiss:hover,
+.af-term-attention-dismiss:focus-visible {
+  color: var(--af-ink);
+  background: var(--af-surface-raised);
 }
 .af-copy-link {
   display: inline-flex;
@@ -1485,6 +1540,7 @@ body[data-project-color] [data-af-theme=dark] {
   min-height: 0;
   padding: 0;
   overflow: hidden;
+  isolation: isolate;
 }
 .af-pane-host .xterm {
   height: 100%;
@@ -1592,9 +1648,13 @@ body[data-project-color] [data-af-theme=dark] {
 .af-webpane-fallback-retry[hidden] {
   display: none;
 }
-.af-kb-terminal .af-split-multi .af-pane-focused {
-  outline: calc(var(--af-space-1) * 0.5) solid var(--af-accent);
-  outline-offset: calc(var(--af-space-1) * -0.5);
+.af-kb-terminal .af-split-multi .af-pane-focused::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  border: calc(var(--af-space-1) * 0.5) solid var(--af-accent);
 }
 .af-dragging-tab .af-pane {
   outline: calc(var(--af-space-1) * 0.25) dashed var(--af-accent);
@@ -2308,6 +2368,13 @@ body[data-project-color] [data-af-theme=dark] {
   }
   .af-term-new-label {
     display: none;
+  }
+  .af-term-head > .af-term-attention {
+    grid-row: 1;
+    grid-column: 2;
+  }
+  .af-term-attention-dismiss {
+    min-width: calc(var(--af-space-3) * 2);
   }
   .af-term-head-main {
     grid-row: 1;
@@ -3218,6 +3285,13 @@ textarea[class] {
     order: 1;
     flex: 1;
   }
+  .af-session-first .af-term-attention {
+    order: 2;
+    flex-shrink: 0;
+  }
+  .af-session-first .af-term-attention-label {
+    display: none;
+  }
   .af-session-first .af-term-new-group {
     order: 3;
     flex-shrink: 0;
@@ -3372,6 +3446,10 @@ textarea[class] {
   right: calc(var(--af-space-1) / 2);
   background: var(--af-surface);
 }
+.af-task-switch[aria-disabled=true] {
+  cursor: default;
+  opacity: 0.6;
+}
 .af-task-switch:focus-visible {
   outline: none;
 }
@@ -3399,6 +3477,7 @@ textarea[class] {
   color-scheme: light;
   --af-accent: #2d6271;
   --af-archived: #4c566a;
+  --af-attention: #856200;
   --af-border: #657084;
   --af-dead: #883b43;
   --af-ink: #2e3440;
@@ -3425,6 +3504,7 @@ textarea[class] {
   color-scheme: dark;
   --af-accent: #2296f3;
   --af-archived: #d8dee9;
+  --af-attention: #f5c400;
   --af-border: #3d3d3d;
   --af-dead: #e4c8cd;
   --af-ink: #cccccc;

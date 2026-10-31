@@ -40,8 +40,12 @@ prompt; its **×** dismisses the offer. See [Install it as an app](#install-it-a
 If the project list is empty, choose **+ Add project** in the switcher. Browse the
 filesystem on the daemon's host: click directories to descend, **Up** for the
 parent, and **Home** for its home directory. **Use** on a git checkout fills
-**Repository path**; you can also type an absolute or `~`-prefixed path. Click
-**Add project** to register it. **Cancel** leaves it unchanged. The switcher's
+**Repository path or git URL**; you can also type an absolute or `~`-prefixed
+path on the daemon host, or a git URL (`https://host/owner/repo`,
+`ssh://host/owner/repo`, or `git@host:owner/repo`) for the daemon to clone and
+register — a clone can take a while, so the dialog closes and the project
+appears when it finishes. Click **Add project** to register it. **Cancel**
+leaves it unchanged. The switcher's
 **Delete project** asks for confirmation, then archives ordinary live sessions
 (restorable) and tears down in-place or external-worktree sessions, including
 the root agent, removing their session records (not restorable). Those in-place
@@ -53,24 +57,34 @@ attach its terminal. The main pane shows that session's title and tabs. The rail
 is the number of rows currently shown. The root agent is pinned first, then live
 sessions oldest first, then archived sessions newest first.
 
-Read the state words alongside the glyphs, rather than relying on color:
+The rail shows state by glyph only. Hover a row to read its state in words.
 
 | Rail signal | Meaning |
 | --- | --- |
-| Filled circle | Ready; read the accompanying state and idle detail for the next action |
-| Hollow circle | The agent process is dead |
+| Blinking yellow circle | The agent asked for you with `af sessions attention`; hover the row for its reason |
+| No glyph | The agent is idle |
+| Muted filled circle | Work is in progress |
+| Hollow circle | The agent process is dead, or a prompt was not delivered |
 | Dashed circle | The session is lost |
 | Diamond | A usage limit has been reached |
 | Archive icon and dimmed row | Archived session |
-| Working label | Work is in progress; the status dot is omitted |
 
-The secondary line includes the branch when available, and the selected row adds
-idle detail, such as `Needs you · pane changed · 12m ago`. These are observations of terminal activity,
+The secondary line shows the branch when available. The selected row also shows
+idle detail, such as `pane changed · 12m ago`. These are observations of terminal activity,
 not a claim that the agent finished or asked a question. Diagnostic title prefixes
 such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` add context.
 
-The **funnel** opens state checkboxes: **Needs you · Working · Waiting on a limit ·
-Broken · Archived**. Archived sessions start hidden. The filter applies inside the
+Agents learn `af sessions attention --self` from the af skill, and run it only when
+they are blocked on a decision or question that only you can answer. The yellow
+circle clears when you submit a line in the agent pane, dismiss it with the **×** on
+the **Attention** chip in the session header, or when the agent starts work again
+after it went idle. Typing a draft or just viewing the tab does not clear it. When
+your system asks for reduced motion, the circle does not blink and has a ring
+around it, and the chip's bell is still. The TUI rail does not show the
+request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
+
+The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting
+on a limit · Broken · Archived**. Archived sessions start hidden. The filter applies inside the
 selected project and is remembered by this browser; a dot on the funnel marks a
 non-default filter. If it hides everything, the empty state reports hidden rows.
 

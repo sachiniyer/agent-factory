@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/backlog"
 	cmdutil "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -45,7 +46,7 @@ const worktreesResidueDir = "worktrees"
 //   - config.toml / config.json(.bak) — daemon config: network.listen_addr, defaults,
 //     root_agents, update_channel (#1736 keeps these; root_agents legitimately
 //     re-register from config on the next start).
-//   - repos/ — per-repo config (e.g. remote_hooks provisioner commands), which
+//   - repos/ — per-repo config (e.g. remote_hooks provisioner commands) and backlogs, which
 //     is user configuration, not session state.
 //   - daemon-token, daemon-tls.* — daemon runtime IDENTITY; wiping it would
 //     needlessly break already-configured remote clients.
@@ -83,6 +84,7 @@ var resetWipePaths = []string{
 	"locks",                 // per-task run locks
 	config.StateFileName,    // state.json (help-screen bitmask etc.)
 	config.TUIStateFileName, // tui-state.json (TUI layout state)
+	backlog.BudgetFileName,  // budget.json (runner spend limit and total)
 }
 
 // resetPlan is the pre-computed, non-destructive picture of what a factory
@@ -848,11 +850,11 @@ func printResetPlan(out io.Writer, plan *resetPlan) {
 	}
 	fmt.Fprintf(out, "  • %d AF worktree(s) across %d repo(s)\n", plan.worktrees, len(plan.repoRoots))
 	fmt.Fprintf(out, "  • %d AF-created session branch(es)\n", plan.branchCount())
-	fmt.Fprintln(out, "  • all AF state (live sessions, archived sessions, events, logs, locks)")
+	fmt.Fprintln(out, "  • all AF state (live sessions, archived sessions, events, logs, locks, backlog budget)")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "WILL KEEP:")
 	fmt.Fprintln(out, "  • your git repositories (working tree, .git, and your own branches)")
-	fmt.Fprintln(out, "  • daemon config: config.toml (network.listen_addr, defaults, root_agents, update_channel) and per-repo config")
+	fmt.Fprintln(out, "  • daemon config: config.toml (network.listen_addr, defaults, root_agents, update_channel) and per-repo config, including each project's backlog items")
 	fmt.Fprintln(out, "  • registered agent accounts and their credentials (accounts/) — log out with the agent's own CLI to remove those")
 }
 

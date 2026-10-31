@@ -47,6 +47,12 @@ type agentLimitMatcher struct {
 	// matchers set it; a config limit_patterns override does not, because that is
 	// the user's own regex and may legitimately match mid-line.
 	lineAnchored bool
+	// lead, when set, replaces the default bannerLeadMarkers allow-list as the
+	// description of what may precede an anchored banner on its row. It is
+	// matched against the ANSI-stripped text from the row start to the banner.
+	// A matcher whose live rendering was never captured declares the prefixes
+	// its evidence admits here instead of dropping the anchor (#6246).
+	lead *regexp.Regexp
 	// parseReset extracts and parses the reset timestamp from content starting
 	// at detect's match, returning an absolute UTC reset time. It returns
 	// ok=false when no reset time is present or it cannot be parsed; detection
@@ -107,6 +113,16 @@ var (
 	// NOT wired here; it needs a trustworthy reset time, which this does not have.
 	// When a real exhausted-state banner is captured, add a parseReset.
 	devinLimitDetect = regexp.MustCompile(`(?i)quota exhausted`)
+
+	// devinLeadPrefix is what may open a row before devin's banner. INFERRED
+	// FROM THE BINARY, NOT OBSERVED LIVE: devin's alert is drawn with a warning
+	// glyph, U+26A0 followed by the text-presentation selector U+FE0E, or the
+	// ASCII fallback "[!]". The glyph and its selector are both optional so a
+	// bare line (or a build that drops the glyph) still matches. No box-draw
+	// border is admitted: nothing in the evidence implies a bordered render.
+	// Anything else before the words (a bullet, a quote mark, a "└" branch)
+	// still means the text sits inside something else (#4721).
+	devinLeadPrefix = regexp.MustCompile(`^[ \t\r]*(?:\x{26A0}\x{FE0E}?|\[!\])?[ \t\r]*$`)
 )
 
 // builtinLimitMatchers returns a fresh map of the shipped per-agent matchers.
@@ -119,7 +135,7 @@ func builtinLimitMatchers() map[string]agentLimitMatcher {
 		// devin is DETECT-ONLY (#2411): its exhaustion banner is inferred from the
 		// binary (not captured live) and its reset format is uncharacterized — so no
 		// parseReset and no auto-resume. See devinLimitDetect.
-		tmux.ProgramDevin: {detect: devinLimitDetect, parseReset: nil, lineAnchored: true},
+		tmux.ProgramDevin: {detect: devinLimitDetect, parseReset: nil, lineAnchored: true, lead: devinLeadPrefix},
 	}
 }
 
@@ -220,7 +236,7 @@ func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher
 	// resetAt reflects the most recent banner, not a stale earlier one (#1602).
 	matches := matcher.detect.FindAllStringIndex(content, -1)
 	if matcher.lineAnchored {
-		matches = anchoredMatches(content, matches)
+		matches = anchoredMatches(content, matches, matcher.lead)
 	}
 	if len(matches) == 0 {
 		return false, time.Time{}, false
@@ -256,12 +272,16 @@ const bannerLeadMarkers = "■⎿⚠✗✘✖×"
 // banner still opens a row. That cannot be told from the real thing by position
 // alone, and the cost of the stricter alternative (requiring the provider's colour
 // or theme) is the silent miss of #4718, so it is left to a future signal.
-func anchoredMatches(content string, matches [][]int) [][]int {
+func anchoredMatches(content string, matches [][]int, lead *regexp.Regexp) [][]int {
 	kept := matches[:0:0]
 	for _, m := range matches {
 		lineStart := strings.LastIndexByte(content[:m[0]], '\n') + 1
 		prefix := xansi.Strip(content[lineStart:m[0]])
-		if strings.Trim(prefix, " \t\r"+bannerLeadMarkers) == "" {
+		if lead != nil {
+			if lead.MatchString(prefix) {
+				kept = append(kept, m)
+			}
+		} else if strings.Trim(prefix, " \t\r"+bannerLeadMarkers) == "" {
 			kept = append(kept, m)
 		}
 	}
@@ -339,8 +359,20 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 		warnClaudeTimezoneOnce(content, rejected, loc)
 	}
 
+	// Scan the reset clause with the parenthesized timezone spans blanked out:
+	// the paren tz is already consumed separately for loc above, so the only
+	// thing left for month/weekday matching is tz noise. An IANA zone whose name
+	// begins with a weekday or month abbreviation (America/Montreal, Europe/Monaco,
+	// America/Thule, …) would otherwise satisfy the weekday regex and hijack the
+	// weekly "reset <weekday>" branch, turning a same-day 5h reset into next
+	// Monday/Thursday. Replace each paren span with equal-width spaces (not
+	// excision) so match offsets and word boundaries are preserved verbatim.
+	clause := parenTZ.ReplaceAllStringFunc(reset, func(match string) string {
+		return strings.Repeat(" ", len(match))
+	})
+
 	// Explicit calendar date wins (weekly variant that carries a date).
-	if m := monthDay.FindStringSubmatch(reset); m != nil {
+	if m := monthDay.FindStringSubmatch(clause); m != nil {
 		month := monthIndex[strings.ToLower(m[1][:3])]
 		day, _ := strconv.Atoi(m[2])
 		year := now.In(loc).Year()
@@ -358,8 +390,9 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 	}
 
 	// Weekday name (weekly variant that names a day): next such weekday at the
-	// clock time, strictly after now.
-	if m := weekday.FindStringSubmatch(reset); m != nil {
+	// clock time, strictly after now. Run against the paren-stripped clause so a
+	// weekday-prefixed tz name cannot satisfy this regex — see the clause note.
+	if m := weekday.FindStringSubmatch(clause); m != nil {
 		target := weekdayIndex[strings.ToLower(m[1][:3])]
 		return nextWeekday(now, loc, target, hour, minute).UTC(), true
 	}

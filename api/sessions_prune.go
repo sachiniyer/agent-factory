@@ -29,12 +29,13 @@ var (
 
 // `af sessions prune` is the manual, opt-in reclaim for archived sessions
 // (#5136): the archive keeps every shelved worktree forever, and the fleet
-// that motivated it measured ~146G under the archive root. Slice 1 is the
-// READ-ONLY half — this command only ever runs the dry-run listing; it
-// reports which archived sessions a future --apply would reclaim, what each
-// would free, and why the rest refuse. The apply half — deletion plus the
-// tombstone record that keeps the row listed — lands in the follow-up issue
-// referenced on the PR, and carries the guard stack this listing previews.
+// that motivated it measured ~146G under the archive root. Without --apply it
+// runs only the dry-run listing — which archived sessions an apply would
+// reclaim, what each would free, and why the rest refuse. With --apply the
+// listing becomes the confirmed plan: applyPrunePlan asks the user to approve
+// it (--yes non-interactively), binds the apply to exactly those session IDs,
+// and the daemon deletes each worktree, leaving a tombstone record that keeps
+// the row listed (#5189).
 var sessionsPruneCmd = &cobra.Command{
 	Use:   "prune --older-than <duration> [--repo <path> | --all] [--apply [--yes]]",
 	Short: "List (or with --apply, delete) old archived worktrees",

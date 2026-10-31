@@ -555,16 +555,16 @@
         "pointer": "app/switch_project.go handleAddProject (a git URL) → registerProjectURLThroughDaemon (apiclient RegisterProjectURL)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/index.ts openAddProject routes a URL-shaped value (api.ts looksLikeGitURL, mirroring projectclone.LooksLikeURL) to api.ts registerProjectURL → {url}; modal releases for the clone and a daemon refusal remounts it with the message inline (web/src/add_project_flow.test.ts)"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/projects.go newProjectsAddCmd (a git URL argument) → daemon.RegisterProjectRequest.URL"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5571",
-      "notes": "W9.10. The daemon clones the URL on ITS host with ITS credentials under the global projects_root and registers the checkout; the URL is validated there (https/ssh/scp-like only; file://, paths, option-like values and embedded passwords refused). The CLI and the TUI add-project prompt accept a URL; the web add-project modal still takes only a daemon-host path. When the modal learns to send `url`, flip the web cell to yes and delete the web_rpcs field_coverage gap for RegisterProject.url."
+      "notes": "W9.10. The daemon clones the URL on ITS host with ITS credentials under the global projects_root and registers the checkout; the URL is validated there (https/ssh/scp-like only; file://, paths, option-like values and embedded passwords refused). All three surfaces take one field and route on the same rule: LooksLikeURL on CLI (api/projects.go) and TUI (app/switch_project.go), its mirror looksLikeGitURL on web — routing only, Validate stays daemon-side so the surfaces cannot disagree on what counts. The web modal closes for the in-request clone (up to projectclone.Budget — minutes, like a remote create) and reports the outcome create-style: success lands via projects.changed, a definite refusal remounts the form with the daemon's message and the typed URL intact, an unknown outcome is surfaced as such. The web_rpcs field_coverage gap for RegisterProject.url is deleted with this flip — the web now sends both fields."
     },
     {
       "id": "project.browse",
@@ -640,6 +640,25 @@
       "verdict": "parity",
       "issue": "#2216",
       "notes": "Rebind is now daemon-backed like register (#2456): POST /v1/RebindProject + the gob control-socket method wrap config.RebindProject (the single writer, #960) and publish projects.changed, so all three surfaces share one mutation path. The CLI resolves its path arg against the caller's cwd before sending — the same contract as `af projects add`. The TUI offers it in the project picker: registry-backed rows carry their prj_ id, a row whose path_exists is false shows a 'missing' marker, and `b` opens a path-prompt mode whose daemon rejection is corrected inline (mirroring the add flow). The web switcher keeps full registry records in state, marks a missing checkout on the row, and offers 'Rebind…' in the menu footer for the selected registered project via rebindProjectModal (same host-path field + directory browser as add-project). The stable prj_ id, checkout-marker checks, and ownership refusal all live in config.RebindProject — no surface reimplements them."
+    },
+    {
+      "id": "session.attention",
+      "title": "Ask the user for attention",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/status.ts rowDot (attention arm) → web/src/ui.ts sessionRow (blinking yellow dot; the reason in the row title); web/src/components.ts terminalChrome (an Attention chip in the session header; its × clears it via SetAttention, keyed to the request it showed)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_attention.go newSessionsAttentionCmd (af sessions attention) → daemon SetAttention RPC"
+      },
+      "verdict": "real-gap",
+      "issue": "#5461",
+      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. Only the web rail shows it so far: the TUI rail does not render InstanceData.Attention yet, so a TUI user gets no sign of the request (#5461). The generated theme.Attention colour is the token that work will use. session.Instance owns the clear rules: a submitted line on the agent pane (daemon/attention.go attentionClearingBinding), the dismiss control in the web session header (web/src/components.ts terminalChrome), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
     },
     {
       "id": "project.color",
@@ -1747,7 +1766,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
+        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalRemoveDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, RemoveProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
       },
       "verdict": "real-gap",
       "issue": "TBD",
@@ -1790,6 +1809,82 @@
       "verdict": "real-gap",
       "issue": "TBD",
       "notes": "Step 3a (docs/dev/proposals/proposal-mode/api.md, Push) added the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready; the CLI sets the mode and sends now. Step 3b adds the web push chip (mode switch, countdown, Hold, Send now) over these routes — the remaining gap is that web cell. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The tui cell is n/a: goals.md lists a TUI editor as a non-goal, and with no TUI proposal edits there is nothing for a TUI push affordance to send."
+    },
+    {
+      "id": "backlog.items",
+      "title": "Keep an ordered backlog of work items per project",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog.go backlogListCmd/backlogShowCmd/backlogAddCmd/backlogEditCmd/backlogMoveCmd, api/backlog_status.go backlogDeleteCmd, api/backlog_self.go backlogNoteCmd (note <id> and note --self) → POST /v1/GetBacklog, AddBacklogItems, UpdateBacklogItem, MoveBacklogItem, DeleteBacklogItem, PostBacklogMessage (daemon/backlog.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 2 adds the daemon routes and the CLI. PR 3 adds the web Backlog view (list, reorder, item panel, waits-on picker, notes). The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
+      "id": "backlog.status",
+      "title": "Queue, review, finish, drop and reopen backlog items",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_status.go backlogStatusCmd (queue, draft, review, reopen, drop), api/backlog_self.go backlogDoneCmd (done <id> and the agent's done --self --pr) → POST /v1/SetBacklogItemStatus (daemon/backlog.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 3 adds the item panel actions on the web. The agent's done --self (session_id, pr) is CLI-only by design: it runs inside an item session. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
+      "id": "backlog.sessions",
+      "title": "Start backlog items as sessions",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_self.go backlogStartCmd → POST /v1/StartBacklogItem (daemon/backlog_start.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 4 starts items as sessions from the CLI; the web Start now button arrives in PR 8. Item sessions are ordinary sessions, so open, archive and restore use the session routes. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
+      "id": "backlog.runner",
+      "title": "Show and change a project's backlog runner and the global budget",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_status.go backlogRunnerCmd/backlogBudgetCmd → POST /v1/SetBacklogSettings, GetBudget, SetBudget, GetBacklog (daemon/backlog.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (share of the Claude plan, stop-at, cap per run, dollar limit); plan readings arrive in PR 6 and the runner loop in PR 7. PR 3 shows a read-only runner bar on the web and PR 7 makes it editable. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     }
   ],
   "ledger": {
@@ -1800,6 +1895,22 @@
       "'-' means the item is not a user capability (grouping node, internal route)."
     ],
     "cli_verbs": {
+      "af backlog list": "backlog.items",
+      "af backlog show": "backlog.items",
+      "af backlog add": "backlog.items",
+      "af backlog edit": "backlog.items",
+      "af backlog move": "backlog.items",
+      "af backlog delete": "backlog.items",
+      "af backlog note": "backlog.items",
+      "af backlog queue": "backlog.status",
+      "af backlog draft": "backlog.status",
+      "af backlog review": "backlog.status",
+      "af backlog reopen": "backlog.status",
+      "af backlog done": "backlog.status",
+      "af backlog start": "backlog.sessions",
+      "af backlog drop": "backlog.status",
+      "af backlog runner": "backlog.runner",
+      "af backlog budget": "backlog.runner",
       "af": "meta.discovery",
       "af accounts add": "session.accounts",
       "af accounts list": "session.accounts",
@@ -1840,11 +1951,13 @@
       "af proposal list": "proposal.docs",
       "af proposal path": "proposal.docs",
       "af proposal add-doc": "proposal.docs",
+      "af proposal remove-doc": "proposal.docs",
       "af proposal cat": "proposal.docs",
       "af proposal write": "proposal.docs",
       "af proposal push-mode": "proposal.push",
       "af proposal send": "proposal.push",
       "af projects color": "project.color",
+      "af sessions attention": "session.attention",
       "af quota": "quota.usage-report",
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
@@ -1892,8 +2005,20 @@
       "af version": "meta.discovery"
     },
     "routes": {
+      "POST /v1/GetBacklog": "backlog.items",
+      "POST /v1/AddBacklogItems": "backlog.items",
+      "POST /v1/UpdateBacklogItem": "backlog.items",
+      "POST /v1/MoveBacklogItem": "backlog.items",
+      "POST /v1/DeleteBacklogItem": "backlog.items",
+      "POST /v1/PostBacklogMessage": "backlog.items",
+      "POST /v1/SetBacklogItemStatus": "backlog.status",
+      "POST /v1/SetBacklogSettings": "backlog.runner",
+      "POST /v1/StartBacklogItem": "backlog.sessions",
+      "POST /v1/GetBudget": "backlog.runner",
+      "POST /v1/SetBudget": "backlog.runner",
       "GET /v1/health": "-",
       "POST /v1/AddProposalDoc": "proposal.docs",
+      "POST /v1/RemoveProposalDoc": "proposal.docs",
       "POST /v1/AttachProposal": "proposal.agent-workflow",
       "POST /v1/CheckpointProposal": "proposal.agent-workflow",
       "POST /v1/DetachProposal": "proposal.agent-workflow",
@@ -1934,6 +2059,7 @@
       "POST /v1/RegisterProject": "project.add",
       "POST /v1/RebindProject": "project.rebind",
       "POST /v1/SetProjectColor": "project.color",
+      "POST /v1/SetAttention": "session.attention",
       "POST /v1/RebindProjectGuarded": "project.rebind",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RestartTask": "task.restart",
@@ -2007,6 +2133,7 @@
       "up": "tui.navigation"
     },
     "web_rpcs": {
+      "SetAttention": "session.attention",
       "AccountLogin": "session.account-login",
       "ListAccounts": "session.accounts",
       "RegisterAccount": "session.accounts",
@@ -2047,6 +2174,53 @@
       "config-assistant": "config-agent"
     },
     "cli_flags": {
+      "af backlog --help": "meta.discovery",
+      "af backlog --json": "cli.json-envelope",
+      "af backlog --repo": "project.switch",
+      "af backlog list --help": "meta.discovery",
+      "af backlog show --help": "meta.discovery",
+      "af backlog add --help": "meta.discovery",
+      "af backlog edit --help": "meta.discovery",
+      "af backlog move --help": "meta.discovery",
+      "af backlog delete --help": "meta.discovery",
+      "af backlog note --help": "meta.discovery",
+      "af backlog queue --help": "meta.discovery",
+      "af backlog draft --help": "meta.discovery",
+      "af backlog review --help": "meta.discovery",
+      "af backlog reopen --help": "meta.discovery",
+      "af backlog done --help": "meta.discovery",
+      "af backlog start --help": "meta.discovery",
+      "af backlog done --self": "backlog.status",
+      "af backlog done --pr": "backlog.status",
+      "af backlog note --self": "backlog.items",
+      "af backlog drop --help": "meta.discovery",
+      "af backlog runner --help": "meta.discovery",
+      "af backlog budget --help": "meta.discovery",
+      "af backlog add --after": "backlog.items",
+      "af backlog add --before": "backlog.items",
+      "af backlog add --body": "backlog.items",
+      "af backlog add --file": "backlog.items",
+      "af backlog add --parent": "backlog.items",
+      "af backlog add --program": "backlog.items",
+      "af backlog add --waits-on": "backlog.items",
+      "af backlog edit --body": "backlog.items",
+      "af backlog edit --program": "backlog.items",
+      "af backlog edit --sequential": "backlog.items",
+      "af backlog edit --title": "backlog.items",
+      "af backlog edit --waits-on": "backlog.items",
+      "af backlog list --all": "backlog.items",
+      "af backlog list --state": "backlog.items",
+      "af backlog move --after": "backlog.items",
+      "af backlog move --before": "backlog.items",
+      "af backlog move --bottom": "backlog.items",
+      "af backlog move --into": "backlog.items",
+      "af backlog move --top": "backlog.items",
+      "af backlog runner --max-running": "backlog.runner",
+      "af backlog runner --on-done": "backlog.runner",
+      "af backlog budget --max-per-run": "backlog.runner",
+      "af backlog budget --share": "backlog.runner",
+      "af backlog budget --stop-at": "backlog.runner",
+      "af backlog budget --usd-limit": "backlog.runner",
       "af --daemon": "meta.internal",
       "af --daemon-url": "daemon.remote-access",
       "af --help": "meta.discovery",
@@ -2148,6 +2322,8 @@
       "af proposal path --help": "meta.discovery",
       "af proposal add-doc --help": "meta.discovery",
       "af proposal add-doc --session": "proposal.docs",
+      "af proposal remove-doc --help": "meta.discovery",
+      "af proposal remove-doc --session": "proposal.docs",
       "af proposal cat --help": "meta.discovery",
       "af proposal write --help": "meta.discovery",
       "af proposal write --session": "proposal.docs",
@@ -2161,6 +2337,7 @@
       "af projects list --help": "meta.discovery",
       "af projects rebind --help": "meta.discovery",
       "af projects color --help": "meta.discovery",
+      "af sessions attention --help": "meta.discovery",
       "af quota --help": "meta.discovery",
       "af reset --force": "install.reset",
       "af reset --help": "meta.discovery",
@@ -2171,6 +2348,9 @@
       "af sessions archive --help": "meta.discovery",
       "af sessions archive --push": "session.archive",
       "af sessions archive --self": "session.archive",
+      "af sessions attention --clear": "session.attention",
+      "af sessions attention --reason": "session.attention",
+      "af sessions attention --self": "session.attention",
       "af sessions attach --help": "meta.discovery",
       "af sessions backends --help": "meta.discovery",
       "af sessions create --account": "session.accounts",
@@ -2339,6 +2519,13 @@
       "web_rpcs: keyed by RPC method -> json field."
     ],
     "requests": {
+      "SetAttentionRequest": {
+        "cli": {
+          "set_at": {
+            "ok": "The CLI clears whatever request is current: `af sessions attention --clear` is an explicit ask to remove it. Only the web, which clears on sight, names the request it saw."
+          }
+        }
+      },
       "SetConfigValueRequest": {
         "tui": {
           "hosts_edit": {
@@ -2389,6 +2576,13 @@
           }
         }
       },
+    "PostBacklogMessageRequest": {
+      "cli": {
+        "question_id": {
+          "ok": "Answers arrive in backlog PR 5 (af backlog answer); this af posts notes only."
+        }
+      }
+    },
       "SnapshotRequest": {
         "cli": {
           "before": {
@@ -2861,9 +3055,15 @@
       "PruneSessionsRequest": {}
     },
     "web_rpcs": {
-      "RegisterProject": {
-        "url": {
-          "gap": "project.add.url"
+      "SetAttention": {
+        "reason": {
+          "ok": "The web only clears a request (clear: true). A reason belongs to setting one, which agents do with `af sessions attention --self`."
+        },
+        "repo_id": {
+          "ok": "The web addresses the session by its stable id, which wins over {title, repo_id} in SetAttentionRequest."
+        },
+        "title": {
+          "ok": "The web addresses the session by its stable id, which wins over {title, repo_id} in SetAttentionRequest."
         }
       },
       "SetConfigValue": {
@@ -3070,6 +3270,10 @@
     "synonyms": {
       "af sessions create name": "title"
     },
-    "declared": {}
+    "declared": {
+      "af backlog title": {
+        "ok": "add takes the one title it needs as a positional, like af sessions create <title>; edit changes only the fields you pass, so every field, the title included, is a flag."
+      }
+    }
   }
 }

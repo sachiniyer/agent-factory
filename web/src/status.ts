@@ -1,16 +1,14 @@
-// The status-dot + title mapping for a sidebar row (#1592 Phase 5 PR3). This is a
-// line-for-line port of the TUI renderer, ui/tree/render.go — the single source of
-// truth for how (Liveness, InFlightOp) become a glyph, a color, and the [lost] /
-// [deleting] / [limit] / [remote] / [model changed] title prefixes. The web MUST
-// match it exactly:
-// two thin clients of the same projection cannot diverge in status semantics, only
-// in pixels (design §3). Adding a Liveness value forces a deliberate choice here,
-// mirroring the TUI's TOTAL liveness switch (render.go:274-301).
+// The status-dot + title mapping for a sidebar row (#1592 Phase 5 PR3). It follows
+// the TUI renderer, ui/tree/render.go, for how (Liveness, InFlightOp) become a state
+// bucket and the [lost] / [deleting] / [limit] / [remote] / [model changed] title
+// prefixes. The glyphs differ: the web rail has no state words, so an idle Ready
+// row is blank and a working row draws a muted circle. Adding a Liveness value
+// forces a deliberate choice here, mirroring the TUI's TOTAL liveness switch
+// (render.go:274-301).
 //
-// SVG shapes preserve the TUI's low-contrast/color-blindness discipline: filled and
-// hollow circles for Ready/Dead, a dashed circle for Lost, an archive for Archived,
-// and a filled diamond for LimitReached. Colors (the `kind`) map to the exact hexes
-// render.go paints (see styles.css .af-dot-*).
+// Shapes keep the low-contrast/color-blindness discipline: a filled circle for
+// Working, hollow for Dead, dashed for Lost, an archive for Archived, and a filled
+// diamond for LimitReached (see styles.css .af-dot-*).
 
 import {
   InFlightOp,
@@ -23,25 +21,23 @@ import {
 import { formatDuration } from "./time.js";
 import type { IconName } from "./icon.js";
 
-/** The visual kind of a status dot, one per color bucket the TUI paints. Drives
- *  the .af-dot-<kind> CSS class whose color matches render.go's lipgloss styles.
- *  A working/busy row has no dot (#1766), so there is no "working" bucket. */
-export type DotKind = "ready" | "lost" | "dead" | "archived" | "limit";
+/** The state bucket a row READS AS. Drives the .af-dot-<kind> CSS class. It is
+ *  TOTAL over sessions, which makes it the key the status filter (filter.ts)
+ *  partitions the rail by. */
+export type DotKind = "ready" | "working" | "lost" | "dead" | "archived" | "limit";
 
-/** The state bucket a row READS AS — every DotKind plus the dotless working row.
- *  Unlike DotKind this is TOTAL over sessions (rowKind never returns null), which is
- *  what makes it the key the status filter (filter.ts) partitions the rail by. */
-export type RowKind = DotKind | "working";
+export type RowKind = DotKind;
 
 /** The operator-level vocabulary for scanning the rail. It deliberately groups the
  * daemon's finer mechanical reasons by the next action, while keeping Archived as a
  * separate inactive-history bucket outside the four live-work groups. */
-export type OperatorKind = "needs-you" | "working" | "waiting-limit" | "broken" | "archived";
+export type OperatorKind = "attention" | "needs-you" | "working" | "waiting-limit" | "broken" | "archived";
 
 /** Human labels shared by the rail rows and their filter. The visible words carry
  * the state independently of color, and stay sentence case per #3220. */
 export const OPERATOR_KIND_LABELS: Record<OperatorKind, string> = {
-  "needs-you": "Needs you",
+  attention: "Needs attention",
+  "needs-you": "Idle",
   working: "Working",
   "waiting-limit": "Waiting on a limit",
   broken: "Broken",
@@ -63,12 +59,11 @@ export const ROW_KIND_LABELS: Record<RowKind, string> = {
 
 /** A fully-resolved status descriptor for one row: the dot to draw and the
  *  human label (used for the row's aria/title so the state is legible to a
- *  screen reader, not only by color — the same intent as the TUI's text prefixes). */
+ *  screen reader, not only by color). */
 export interface RowStatus {
-  /** The icon to draw, or null for a working/busy row which shows no dot (#1766). */
+  /** The icon to draw, or null for an idle Ready row, which shows no dot. */
   icon: IconName | null;
-  /** The dot's color bucket, or null for a working row (the dot is omitted). */
-  kind: DotKind | null;
+  kind: DotKind;
   /** Accessible one-word state label, e.g. "Ready", "Working", "Lost". */
   label: string;
 }
@@ -144,41 +139,30 @@ function formatPaneChurnAge(churn: Date, now: Date): string {
   return formatDuration(now.getTime() - churn.getTime());
 }
 
-const READY_ICON: IconName = "circle";
 const DEAD_ICON: IconName = "circle";
 const LOST_ICON: IconName = "circle-dashed";
 const ARCHIVED_ICON: IconName = "archive";
 const LIMIT_ICON: IconName = "diamond";
 
-// A working/busy row shows NO status dot (#1766): the TUI renders a blank status
-// cell for LiveRunning / any in-flight op, and the web omits the dot entirely.
-// Kept as a resolved status (null icon and kind) so rowStatus stays total and
-// callers can still detect the working state (isWorking, the project glance count).
-const WORKING: RowStatus = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
+const WORKING: RowStatus = { icon: "circle", kind: "working", label: ROW_KIND_LABELS.working };
 
 /**
- * Resolves a session's status dot from its two axes, mirroring render.go exactly:
- * any in-flight op is a working/busy state and shows no dot (#1766); otherwise the
- * liveness picks the dot. Falls back to the legacy `status` int only when `liveness`
+ * Resolves a session's status dot from its two axes: any in-flight op is a
+ * working/busy state; otherwise the liveness picks the dot. Falls back to the legacy `status` int only when `liveness`
  * is absent (a pre-#1195 record — never emitted by the daemon's live Snapshot, but
  * handled so a stray zero renders as working, matching render.go's LivenessUnset arm).
  */
 export function rowStatus(s: SessionData): RowStatus {
   const op = s.in_flight_op ?? InFlightOp.None;
-  // An in-flight op overlays the liveness and reads as working (render.go:280-282),
-  // so it shows no dot; the [deleting] title prefix (rowTitle) distinguishes
-  // kill/archive.
+  // The [deleting] title prefix (rowTitle) distinguishes kill/archive.
   if (op !== InFlightOp.None) {
     return WORKING;
   }
   return dotForLiveness(livenessOf(s));
 }
 
-/** True when the row is a working/busy session — the state that shows NO status
- *  dot (#1766). Kept exported so the project switcher's per-project "working"
- *  glance count (project.ts) stays derivable now that the dot itself is gone. */
 export function isWorking(s: SessionData): boolean {
-  return rowStatus(s).kind === null;
+  return rowStatus(s).kind === "working";
 }
 
 /** True while ANY client-visible op is in flight (create, kill, archive, restore,
@@ -200,13 +184,12 @@ export function isCreating(s: SessionData): boolean {
  * The state bucket a row READS AS, the key the rail's status filter partitions by
  * (filter.ts). Deliberately derived from rowStatus — the DISPLAYED status — and not
  * from the raw liveness, because the two genuinely differ: a session with an
- * in-flight op renders as Working whatever its liveness is (#1766). Filtering on
- * liveness would hide a row the user is looking at ("Working" unchecked leaves a
- * dotless working row on screen) and reveal one they are not — the filter must
+ * in-flight op renders as Working whatever its liveness is. Filtering on
+ * liveness would hide a row the user is looking at and reveal one they are not — the filter must
  * partition by what the eye sees, so it stays the single mapping in rowStatus.
  */
 export function rowKind(s: SessionData): RowKind {
-  return rowStatus(s).kind ?? "working";
+  return rowStatus(s).kind;
 }
 
 /** Groups liveness + idle_reason by what the operator should do next.
@@ -217,6 +200,9 @@ export function rowKind(s: SessionData): RowKind {
  * Unknown future idle reasons fall back to the mechanically established liveness. */
 export function operatorKind(s: SessionData): OperatorKind {
   const displayed = rowKind(s);
+  if (hasAttention(s)) {
+    return "attention";
+  }
   if (displayed === "working") {
     return "working";
   }
@@ -235,6 +221,45 @@ export function operatorKind(s: SessionData): OperatorKind {
     return "broken";
   }
   return "needs-you";
+}
+
+/** True when the agent asked for the user and the row is still live. The daemon
+ * clears the request on Lost/Dead/Archived; this guard keeps a stale projection
+ * from painting it over those glyphs. */
+export function hasAttention(s: SessionData): boolean {
+  if (!s.attention) {
+    return false;
+  }
+  const kind = rowKind(s);
+  return kind === "ready" || kind === "working";
+}
+
+/** The reason the agent gave with its attention request, trimmed, or "". */
+export function attentionReason(s: SessionData): string {
+  return hasAttention(s) ? (s.attention?.reason ?? "").trim() : "";
+}
+
+export type GlyphKind = DotKind | "attention";
+
+/** The glyph a rail row draws. An idle Ready row is blank, except when its idle
+ * reason makes it Broken or Waiting on a limit: the rail has no state words, so
+ * the glyph must carry that. */
+export function rowDot(s: SessionData): { icon: IconName; kind: GlyphKind } | null {
+  if (hasAttention(s)) {
+    return { icon: "circle", kind: "attention" };
+  }
+  const status = rowStatus(s);
+  if (status.kind !== "ready") {
+    return status.icon ? { icon: status.icon, kind: status.kind } : null;
+  }
+  switch (operatorKind(s)) {
+    case "broken":
+      return { icon: DEAD_ICON, kind: "dead" };
+    case "waiting-limit":
+      return { icon: LIMIT_ICON, kind: "limit" };
+    default:
+      return null;
+  }
 }
 
 /** The daemon always emits `liveness`; this only guards a pre-#1195 record by
@@ -264,7 +289,7 @@ function livenessOf(s: SessionData): number {
 function dotForLiveness(lv: number): RowStatus {
   switch (lv) {
     case Liveness.Ready:
-      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
+      return { icon: null, kind: "ready", label: ROW_KIND_LABELS.ready };
     case Liveness.Lost:
       return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
     case Liveness.Dead:
@@ -303,9 +328,9 @@ export function isArchived(s: SessionData): boolean {
  *
  *  This gates the action. It is NOT the whole story for display, and an earlier
  *  version of this note claimed otherwise: rowStatus above returns WORKING for any
- *  in-flight op, so a respawning row shows no diamond and isWorking() counts it as
+ *  in-flight op, so a respawning row shows the working circle and isWorking() counts it as
  *  working (project.ts). Only the "[limit] resets …" prefix from rowTitle survives,
- *  because that arm keys on liveness. Consistent with every other op and #1766. */
+ *  because that arm keys on liveness. Consistent with every other op. */
 export function isLimitReached(s: SessionData): boolean {
   return (
     livenessOf(s) === Liveness.LimitReached &&

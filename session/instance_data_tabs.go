@@ -12,6 +12,7 @@ func (i *Instance) tabDataLocked(tab *Tab) TabData {
 		td.TmuxName = tab.tmux.SanitizedName()
 	}
 	td.SandboxTmux = tab.sandboxTmux
+	td.RestoreState = tab.restoreState
 	td.Conversation = conversationDataPtr(tab.Conversation)
 	if len(tab.Handoffs) > 0 {
 		td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)

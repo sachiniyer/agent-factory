@@ -13499,7 +13499,7 @@ test("the trigger scan asks a question no YAML spelling can hide", () => {
     "on:\n  pull_request:\n    branches: [master]\n\njobs:\n",
     "on:\n  workflow_dispatch:\n\njobs:\n",
     "on:\n  # we deliberately do not run on push here\n  pull_request:\n\njobs:\n",
-    "on:\n  pull_request:\n\njobs:\n  push:\n    runs-on: ubuntu-latest\n",
+    "on:\n  pull_request:\n\njobs:\n  push:\n    runs-on: ubuntu-24.04\n",
   ]) {
     assert.equal(
       mentionsPushTrigger(onSection(form)),
@@ -13510,7 +13510,7 @@ test("the trigger scan asks a question no YAML spelling can hide", () => {
 
   // A file with no readable `on:` section at all is null, which the anti-rot
   // test turns into a failure naming the file rather than a silent exclusion.
-  assert.equal(onSection("name: x\njobs:\n  a:\n    runs-on: ubuntu-latest\n"), null);
+  assert.equal(onSection("name: x\njobs:\n  a:\n    runs-on: ubuntu-24.04\n"), null);
 });
 
 

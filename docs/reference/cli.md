@@ -15,6 +15,23 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
 - [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
+- [`af backlog`](#af-backlog) — Keep an ordered backlog of work items for a project
+- [`af backlog add`](#af-backlog-add) — Add a draft item, or add and update many items from JSON
+- [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
+- [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
+- [`af backlog done`](#af-backlog-done) — Mark an item done after review, or, from an item session, send it to review
+- [`af backlog draft`](#af-backlog-draft) — Put a queued or in-review item back to draft
+- [`af backlog drop`](#af-backlog-drop) — Mark an item dropped
+- [`af backlog edit`](#af-backlog-edit) — Change an item's title, body, waits-on, program, or sequential flag
+- [`af backlog list`](#af-backlog-list) — Print the backlog in order, as a tree, with each item's state
+- [`af backlog move`](#af-backlog-move) — Reorder an item; its children move with it
+- [`af backlog note`](#af-backlog-note) — Add a note to an item's thread
+- [`af backlog queue`](#af-backlog-queue) — Make an item eligible for the runner
+- [`af backlog reopen`](#af-backlog-reopen) — Reopen a done or dropped item as a draft
+- [`af backlog review`](#af-backlog-review) — Send a running item to review
+- [`af backlog runner`](#af-backlog-runner) — Show or change this project's runner
+- [`af backlog show`](#af-backlog-show) — Print one item: body, state and reason, links, runs, and thread
+- [`af backlog start`](#af-backlog-start) — Start an item now
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
 - [`af completion bash`](#af-completion-bash) — Generate the autocompletion script for bash
@@ -58,6 +75,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
 - [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
 - [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal remove-doc`](#af-proposal-remove-doc) — Remove a doc from a proposal; it stays in the proposal's history
 - [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
 - [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
 - [`af proposal write`](#af-proposal-write) — Replace a doc with stdin and commit it
@@ -66,6 +84,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
+- [`af sessions attention`](#af-sessions-attention) — Ask the user for attention, or clear the request
 - [`af sessions backends`](#af-sessions-backends) — List the runtimes this project can create sessions on
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
@@ -129,6 +148,7 @@ af [flags]
 - [`af accounts`](#af-accounts) — Manage per-session agent credential directories
 - [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
+- [`af backlog`](#af-backlog) — Keep an ordered backlog of work items for a project
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
 - [`af config`](#af-config) — Read global or project-effective config and write global config
@@ -460,6 +480,423 @@ af api [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog
+
+Keep an ordered backlog of work items for a project
+
+The backlog is one project's work items in a strict order. Items can have children and can wait on other items. New items are drafts; queue an item to make it eligible for the runner, and mark it done after review.
+
+Item ids are accepted as 12 or B-12. Commands follow the shared project contract: --repo names a project, otherwise the current directory's project is used.
+
+```
+af backlog
+```
+
+**Subcommands**
+
+- [`af backlog add`](#af-backlog-add) — Add a draft item, or add and update many items from JSON
+- [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
+- [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
+- [`af backlog done`](#af-backlog-done) — Mark an item done after review, or, from an item session, send it to review
+- [`af backlog draft`](#af-backlog-draft) — Put a queued or in-review item back to draft
+- [`af backlog drop`](#af-backlog-drop) — Mark an item dropped
+- [`af backlog edit`](#af-backlog-edit) — Change an item's title, body, waits-on, program, or sequential flag
+- [`af backlog list`](#af-backlog-list) — Print the backlog in order, as a tree, with each item's state
+- [`af backlog move`](#af-backlog-move) — Reorder an item; its children move with it
+- [`af backlog note`](#af-backlog-note) — Add a note to an item's thread
+- [`af backlog queue`](#af-backlog-queue) — Make an item eligible for the runner
+- [`af backlog reopen`](#af-backlog-reopen) — Reopen a done or dropped item as a draft
+- [`af backlog review`](#af-backlog-review) — Send a running item to review
+- [`af backlog runner`](#af-backlog-runner) — Show or change this project's runner
+- [`af backlog show`](#af-backlog-show) — Print one item: body, state and reason, links, runs, and thread
+- [`af backlog start`](#af-backlog-start) — Start an item now
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog add
+
+Add a draft item, or add and update many items from JSON
+
+Add one draft item, at the bottom of its parent by default. With --file, add or update many items at once from JSON: {"proposal": "<slug>", "items": [{"key", "title", "body", "parent", "waits_on", "program", "sequential"}]}. key is local to the file; parent and waits_on take a key or an item id. With proposal set, an item with the same proposal and key as an existing one is updated, not added again. The batch is all or nothing and prints each key's id.
+
+```
+af backlog add <title> | add --file <path or -> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--after` | `string` | Place the item below this sibling `id` |
+| `--before` | `string` | Place the item above this sibling `id` |
+| `--body` | `string` | Item body in markdown; - reads stdin |
+| `--file` | `string` | Add or update many items from this JSON `file`; - reads stdin |
+| `--parent` | `string` | Add the item as a child of this `id` |
+| `--program` | `string` | Program to run the item with (default: the project's default) |
+| `--waits-on` | `string` | Comma-separated item `ids` this item waits on |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog budget
+
+Show or change the global budget
+
+The budget is the share of your Claude plan the backlog may use, for all projects. --share is the percent of each plan window (5-hour and weekly) the backlog may use. --stop-at is the plan percent, from any use, at which the runner stops. --max-per-run is the percent of the 5-hour window one run may use. --usd-limit is a dollar limit at API prices for accounts with no plan readings (an API key); 0 turns it off. With no flags, print the settings.
+
+```
+af backlog budget [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--max-per-run` | `string` | Percent of the 5-hour window one run may use (0-100; default 10) |
+| `--share` | `string` | Percent of each plan window the backlog may use (0-100; default 50) |
+| `--stop-at` | `string` | Plan percent, from any use, at which the runner stops (0-100; default 90) |
+| `--usd-limit` | `string` | Dollar limit at API prices for accounts with no plan readings; 0 turns it off |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog delete
+
+Delete a draft that has no runs and no thread
+
+Delete a draft item that has no runs, no thread, and no children. To remove any other item, drop it.
+
+```
+af backlog delete <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog done
+
+Mark an item done after review, or, from an item session, send it to review
+
+With an id, mark the item done. Items that wait on it can then start. Open questions on it close; its session stays.
+
+With --self, run from inside an item session: the agent's work is finished and the item goes to review for the user. --pr stores the pull request link.
+
+```
+af backlog done <id> | done --self [--pr <url>] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--pr` | `string` | With --self, the `url` of the pull request for the work |
+| `--self` |  | From inside an item session: the work is finished; send the item to review |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog draft
+
+Put a queued or in-review item back to draft
+
+Set the item's status to draft, so the runner does not start it. For a done or dropped item, use reopen.
+
+```
+af backlog draft <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog drop
+
+Mark an item dropped
+
+Mark the item dropped. On a parent, drop its open children. Its session stays.
+
+```
+af backlog drop <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog edit
+
+Change an item's title, body, waits-on, program, or sequential flag
+
+Change the fields you pass. --body - reads the body from stdin. --waits-on replaces the list; pass "" to clear it. --sequential=true makes a parent run its children in order.
+
+```
+af backlog edit <id> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--body` | `string` | New body in markdown; - reads stdin |
+| `--program` | `string` | Program to run the item with; "" uses the project's default |
+| `--sequential` |  | Run this parent's children in order |
+| `--title` | `string` | New title |
+| `--waits-on` | `string` | Comma-separated item `ids` this item waits on; "" clears |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog list
+
+Print the backlog in order, as a tree, with each item's state
+
+Print the backlog in order, children under their parent, with each item's state and reason. Done and dropped items are hidden unless --all. With --json, print the items as JSON in the {data,error} envelope.
+
+```
+af backlog list [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--all` |  | Include done and dropped items |
+| `--state` | `string` | Only items in this `state` (draft, queued, waiting, starting, working, stopped, in_review, needs_you, done, dropped) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog move
+
+Reorder an item; its children move with it
+
+Move an item and its subtree with exactly one of --before, --after, --top, --bottom or --into. --top and --bottom keep it under its current parent; to take it out of a parent, use --after <parent>.
+
+```
+af backlog move <id> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--after` | `string` | Place the item below this `id` |
+| `--before` | `string` | Place the item above this `id` |
+| `--bottom` |  | Place the item last under its parent |
+| `--into` | `string` | Make the item the last child of this parent `id` |
+| `--top` |  | Place the item first under its parent |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog note
+
+Add a note to an item's thread
+
+Add a note to the item's thread. A note is not delivered to the item's session. With --self, the item is the one of the session this runs in.
+
+```
+af backlog note <id> <text> | note --self <text> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--self` |  | Note on the item of the session this runs in |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog queue
+
+Make an item eligible for the runner
+
+Set the item's status to queued. On a parent, queue its draft children.
+
+```
+af backlog queue <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog reopen
+
+Reopen a done or dropped item as a draft
+
+Set a done or dropped item's status back to draft. On a parent, reopen its done and dropped children.
+
+```
+af backlog reopen <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog review
+
+Send a running item to review
+
+Set a running item's status to review, for you to check and mark done.
+
+```
+af backlog review <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog runner
+
+Show or change this project's runner
+
+With no arguments, print the runner's state and reason, its slots, and the budget. on and off switch the runner for this project; it is off by default. --max-running sets how many items run at once (1-8). --on-done sets what happens to an item's session when it is done: keep it or archive it.
+
+```
+af backlog runner [on | off] [--max-running N] [--on-done keep|archive] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--max-running` | `int` | How many items may run at once (1-8) (default `1`) |
+| `--on-done` | `string` | What happens to an item's session when it is done: keep or archive (default `keep`) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog show
+
+Print one item: body, state and reason, links, runs, and thread
+
+```
+af backlog show <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog start
+
+Start an item now
+
+Start the item now, ignoring the runner switch and the budget. An item with a live session gets "continue" in that session; any other item gets a new session on a new branch from the default branch. The command returns at once; the run shows starting until the session exists.
+
+```
+af backlog start <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af bug-report
@@ -1811,6 +2248,7 @@ af proposal
 - [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
 - [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
 - [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal remove-doc`](#af-proposal-remove-doc) — Remove a doc from a proposal; it stays in the proposal's history
 - [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
 - [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
 - [`af proposal write`](#af-proposal-write) — Replace a doc with stdin and commit it
@@ -2030,6 +2468,29 @@ af proposal push-mode auto|manual [flags]
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af proposal remove-doc
+
+Remove a doc from a proposal; it stays in the proposal's history
+
+```
+af proposal remove-doc <slug> <doc> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--session` | `string` | Act for the session with this `title` instead of the calling session |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af proposal send
 
 Send the user's unsent edits to this session now
@@ -2069,7 +2530,7 @@ af proposal start <slug> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--docs` | `stringSlice` | Docs to create, comma-separated (default `[goals,technical,api,ui,future]`) |
+| `--docs` | `stringSlice` | Docs to create, comma-separated (default `[goals,technical,api,ui,steps,future]`) |
 | `--session` | `string` | Act for the session with this `title` instead of the calling session |
 
 **Global flags**
@@ -2195,6 +2656,7 @@ af sessions
 
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
+- [`af sessions attention`](#af-sessions-attention) — Ask the user for attention, or clear the request
 - [`af sessions backends`](#af-sessions-backends) — List the runtimes this project can create sessions on
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
@@ -2288,6 +2750,43 @@ Attach to a running session's tmux terminal. Detach with the configured detach k
 ```
 af sessions attach <title>
 ```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions attention
+
+Ask the user for attention, or clear the request
+
+Mark a session as needing the user. The web rail shows a blinking yellow
+dot on the row, and the reason in the row tooltip.
+
+Agents run this with --self only when they are blocked on a decision or
+question that only the user can answer, as the last step before they stop.
+They do not run it when a task has simply finished.
+
+The request clears when the user submits a line in the agent pane, dismisses
+it from the session header in the web UI, or when the agent starts work again
+after it went idle.
+--clear removes it now.
+
+```
+af sessions attention [<title>] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--clear` |  | Remove the attention request |
+| `--reason` | `string` | Short note that tells the user what you need |
+| `--self` |  | Target the current session (resolved via whoami) |
 
 **Global flags**
 

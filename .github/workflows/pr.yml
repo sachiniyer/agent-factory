@@ -115,7 +115,8 @@ jobs:
   lint:
     name: ${{ inputs.probe && 'Lint (skipped by probe)' || 'Lint' }}
     if: ${{ !inputs.probe }}
-    runs-on: ubuntu-latest
+    # Pinned to 24.04 until #6281 (26.04 compatibility) lands.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -310,7 +311,7 @@ jobs:
   # verdict reads "Test (probe)" and cannot pass for a PR's "Test".
   test:
     name: ${{ inputs.probe && 'Test (probe)' || 'Test' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -447,6 +448,44 @@ jobs:
           fi
           exit "$status"
 
+  # The Go suite on Ubuntu 26.04, the next ubuntu-latest (#6281). Report-only:
+  # continue-on-error means a red run never blocks, so the leg makes drift
+  # visible without gating anything. 26.04 changes the host's coreutils to a
+  # multi-call uutils build and ships tmux 3.6, which is what broke the
+  # copy-and-rename test fixtures. Make it blocking once it has run green for a
+  # day. It never runs for a fail-first probe, which wants only the Linux Test.
+  test-ubuntu-26:
+    name: ${{ inputs.probe && 'Test (Ubuntu 26.04, skipped by probe)' || 'Test (Ubuntu 26.04, report-only)' }}
+    if: ${{ !inputs.probe }}
+    runs-on: ubuntu-26.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      # Runner facts first: when this leg goes red, the image and the tmux and
+      # coreutils builds are what to compare against the 24.04 Test job.
+      - name: Runner facts
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          uname -r
+          tmux -V
+          sleep --version | head -1
+          zsh --version || true
+
+      # Same install as the Test job, for the same reason (internal/shellsuggest
+      # runs its tests under zsh).
+      - name: Install zsh
+        run: scripts/ci-apt-install.sh zsh
+
+      - name: Run tests
+        run: go test -v -race -count=1 -timeout 30m ./...
+
   # The round-trip image builds must resolve NOTHING against a registry (#2521).
   #
   # That property is an absence — no request went out — and the ordinary suite
@@ -464,7 +503,7 @@ jobs:
   registry-free:
     name: ${{ inputs.probe && 'Registry-free image build (skipped by probe)' || 'Registry-free image build' }}
     if: ${{ !inputs.probe }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -617,7 +656,7 @@ jobs:
   web:
     name: ${{ inputs.probe && 'Web (skipped by probe)' || 'Web' }}
     if: ${{ !inputs.probe }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -688,7 +727,7 @@ jobs:
   web-selftest-scope:
     name: ${{ inputs.probe && 'Web and performance scope (skipped by probe)' || 'Web and performance scope' }}
     if: ${{ !inputs.probe }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       heavy: ${{ steps.scope.outputs.heavy }}
@@ -793,7 +832,7 @@ jobs:
     # master push runs it right here, on every landing tip the concurrency
     # group leaves standing.
     if: needs.web-selftest-scope.outputs.perf == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
@@ -917,7 +956,7 @@ jobs:
 
   build:
     name: ${{ inputs.probe && 'Build (skipped by probe)' || 'Build' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # "Build" and "Lint" are this repo's only required checks (ruleset 14851503),
     # so Build is where Test and Test (macOS) get their teeth — a new standalone
     # job would gate nothing until someone edited the ruleset (see the same note on
@@ -1009,7 +1048,7 @@ jobs:
     # THIS run — a maintainer pushing to a Dependabot branch gets a writable
     # token and runs the job.
     if: ${{ !cancelled() && vars.AUTO_GATE_ENABLED == 'true' && !inputs.probe }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     # The only write permission in this workflow, and only for the dispatch
     # POST.

@@ -106,6 +106,19 @@ func (r *closeRun) tmux(args ...string) error {
 	return err
 }
 
+// output is tmux for a command whose stdout matters (the guarded kill prints
+// which branch ran): the same bounded run, recording a tripped deadline.
+func (r *closeRun) output(args ...string) ([]byte, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := r.t.outputTmuxBounded(ctx, args...)
+	if err != nil && ctx.Err() != nil {
+		r.unknown = true
+		return nil, fmt.Errorf("%w: %s after %s", ErrTmuxTimeout, args[0], tmuxCommandTimeout)
+	}
+	return out, err
+}
+
 // probe asks whether the session still exists. A timed-out probe marks the run
 // unknown via the shared probe helper and reports ok=false, so "could not ask" is
 // never read as "not there".

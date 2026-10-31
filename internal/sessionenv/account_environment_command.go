@@ -597,7 +597,7 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	// `--opt=DENIED=value` is refused when its value names a denied
 	// variable or carries a denied assignment.
 	if _, value, ok := strings.Cut(literal, "="); ok {
-		return 1, accountEnvironmentOperandDenied(value, names)
+		return 1, accountEnvironmentFreeTextOptionValueDenied(value, names)
 	}
 	return 1, false
 }

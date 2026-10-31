@@ -168,8 +168,9 @@ func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
 	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup, RestartAdoption: s.restartAdoption}
 	if s.restartAdoption && s.inst != nil {
 		// Hand the restarted server the surviving tabs' roster — only if it says it
-		// can rebind them (W1.4, #6162); otherwise they are flagged unavailable.
-		req.Tabs = s.inst.restoreRosterForRestart(s.hasFeatureCached(tabRestoreFeature))
+		// can rebind them (W1.4, #6162). Otherwise they stay unknown and are
+		// retried later (#6235, #6236).
+		req.Tabs = s.inst.restoreRosterForRestart(s.featureVerdict(tabRestoreFeature))
 	}
 	// Send the recorded conversation so a launch resumes exactly it (#5571 W7.2).
 	// The server resumes it only where its own store still holds it.

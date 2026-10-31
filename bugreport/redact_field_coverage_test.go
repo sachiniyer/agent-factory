@@ -131,6 +131,8 @@ var verbatimInstanceFields = map[string]string{
 	"PendingRemoteTabClose[].Gen":   "minted tab incarnation id (newTabID) — random hex, never derived from user text",
 	"Tabs[].Gen":                    "minted tab incarnation id (newTabID) — random hex, never derived from user text",
 	"PendingTabs[].Gen":             "minted tab incarnation id (newTabID) — random hex, never derived from user text",
+	"Tabs[].RestoreState":           "fixed enum (empty, \"unknown\", \"gone\") — never user text",
+	"PendingTabs[].RestoreState":    "fixed enum (empty, \"unknown\", \"gone\") — never user text",
 
 	"Tabs[].ID":                          "minted tab id (#1738)",
 	"Tabs[].Conversation.Agent":          "agent enum name; the resumable ID beside it is cleared",

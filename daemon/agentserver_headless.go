@@ -509,6 +509,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// dispatch (rpcHandler: POST-only, {data,error} envelope, 400/413/500 mapping).
 	mux.HandleFunc("/v1/agent/provision", rpcHandler(hs.Provision))
 	mux.HandleFunc("/v1/agent/launch", rpcHandler(hs.Launch))
+	mux.HandleFunc("/v1/agent/restore-tabs", rpcHandler(hs.RestoreTabs))
 	mux.HandleFunc("/v1/agent/expose", rpcHandler(hs.Expose))
 	mux.HandleFunc("/v1/agent/snapshot", rpcHandler(hs.Snapshot))
 	mux.HandleFunc("/v1/agent/preview", rpcHandler(hs.Preview))
@@ -591,6 +592,9 @@ var agentServerWireFeatures = []string{
 	// "tab-restore": a restart adoption's Launch carries the roster; survivors
 	// are rebound, never re-run (W1.4, #6162).
 	session.TabRestoreFeature,
+	// "tab-restore-retry": POST /v1/agent/restore-tabs, the same rebind on a
+	// running server (#6235).
+	session.TabRestoreRetryFeature,
 }
 
 // agentHealthResponse is GET /v1/health's payload: liveness, the build version

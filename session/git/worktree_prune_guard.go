@@ -2,7 +2,6 @@ package git
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -152,59 +151,4 @@ func VerifyWorktreeRegistrationPredates(worktreePath string, bound time.Time) er
 		}
 		return nil
 	})
-}
-
-// WorktreeRegistrationIsNewer answers the temporal question
-// VerifyWorktreeRegistrationPredates inverts: whether the worktree's
-// registration leaf under the owning repo's .git/worktrees was created AFTER
-// bound — evidence that the occupant was registered during an attempt that
-// began no earlier than bound. The prune guard needed only a refusal; the
-// interrupted-create reconcile (#5503) needs the tri-state a guard error cannot
-// express: newer, older, or could-not-tell (err — including a malformed or
-// missing pointer, which must never read as "newer").
-func WorktreeRegistrationIsNewer(worktreePath string, bound time.Time) (newer bool, err error) {
-	err = boundedPointerCheck("regnewer\x00"+bound.Format(time.RFC3339Nano), worktreePath, func(path string) error {
-		target, err := verifyWorktreePointerShape(path)
-		if err != nil {
-			return err
-		}
-		st, err := BoundedLstat(target)
-		if err != nil {
-			return fmt.Errorf("could not stat worktree registration %s: %w", target, err)
-		}
-		newer = st.ModTime().After(bound)
-		return nil
-	})
-	return newer, err
-}
-
-// WorktreeCommitsBeyondRepo counts commits reachable from the worktree's HEAD
-// that are not reachable from the repo's current HEAD — the "did an agent
-// already commit work here" question for a leftover whose recorded base commit
-// af never persisted (#5503). The merge-base with the repo's HEAD stands in for
-// the unrecorded cut point: a worktree still exactly where the create left it
-// counts zero, one whose agent committed counts the new work, and one whose
-// base moved out from under it (rebase, force-push) counts more than zero and
-// therefore errs toward preservation. Every failure is an error out — the
-// caller fails closed rather than reading "could not count" as "clean".
-func WorktreeCommitsBeyondRepo(repoRoot, worktreePath string) (int, error) {
-	head, err := runBoundedWorktreeGit(repoRoot, false, "--no-optional-locks", "rev-parse", "--verify", "HEAD")
-	if err != nil {
-		return 0, fmt.Errorf("could not resolve %s's HEAD: %w", repoRoot, err)
-	}
-	base, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
-		"merge-base", "HEAD", strings.TrimSpace(string(head)))
-	if err != nil {
-		return 0, fmt.Errorf("could not merge-base %s against %s's HEAD: %w", worktreePath, repoRoot, err)
-	}
-	out, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
-		"rev-list", "--count", strings.TrimSpace(string(base))+"..HEAD")
-	if err != nil {
-		return 0, fmt.Errorf("could not count commits in %s beyond its merge-base: %w", worktreePath, err)
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return 0, fmt.Errorf("could not parse commit count for %s: %w", worktreePath, err)
-	}
-	return n, nil
 }

@@ -16,15 +16,15 @@ import (
 
 // This file owns `af sessions prune` (#5136): the manual, opt-in reclaim
 // command for archived sessions whose worktrees accumulate forever (the
-// motivating fleet measured ~146G under <AF home>/archived). Slice 1 is the
-// READ-ONLY half — the dry-run listing: it reports which archived sessions a
-// future --apply would reclaim, what each would free, and why the ineligible
-// rows refuse. af writes NOTHING: no deletion, no tombstone, no record
-// update — every probe below is a bounded read (lstat, git status, git
-// worktree list), and the af-writes-nothing property is proven by a test that
-// fingerprints the AF home and the archive before and after a run. The apply
-// half — deletion, tombstones, the confirmed-plan binding — lands in the
-// follow-up issue filed from this PR's review.
+// motivating fleet measured ~146G under <AF home>/archived). The dry-run
+// listing reports which archived sessions an --apply would reclaim, what
+// each would free, and why the ineligible rows refuse. It writes NOTHING:
+// no deletion, no tombstone, no record update — every probe below is a
+// bounded read (lstat, git status, git worktree list), and the
+// af-writes-nothing property is proven by a test that fingerprints the AF
+// home and the archive before and after a run. The apply half — deletion,
+// tombstones, the confirmed-plan binding — landed in #5189 and lives in
+// prune_apply.go; PruneSessions dispatches to it when req.Apply is set.
 //
 // The eligibility rules are a pure function of the record (session.
 // PruneSkipReason) plus read-only filesystem evidence (pruneFilesystemRefusal)
@@ -65,7 +65,7 @@ type PruneCandidate struct {
 	// credited only when deleting this tree removes its last link (#5136
 	// Codex round 4). It is what `rm -rf` of the worktree would free — the
 	// dry run reclaims nothing, so the field names what is reclaimABLE;
-	// reclaimed_bytes belongs to the follow-up's apply (#5189).
+	// the apply (#5189) reports its estimate as reclaimed_estimate_bytes.
 	ReclaimableBytes int64 `json:"reclaimable_bytes"`
 	// BranchPushed is information, not a gate: the row records whether af ever
 	// saw the branch pushed. The kept local branch is the preservation, and it
@@ -95,9 +95,9 @@ type PruneSessionsResponse struct {
 	OK             bool      `json:"ok"`
 	OlderThan      string    `json:"older_than"`
 	ArchivedBefore time.Time `json:"archived_before"`
-	// Candidates holds the rows a future --apply would reclaim. The key is
-	// "candidates", not "pruned" — a dry run prunes nothing, and #5189's
-	// apply wants "pruned" for rows it actually removed.
+	// Candidates holds the rows an --apply would reclaim. The key is
+	// "candidates", not "pruned" — a dry run prunes nothing, and the apply
+	// (#5189) uses "pruned" for rows it actually removed.
 	Candidates []PruneCandidate `json:"candidates"`
 	// Skipped holds rows refused BEFORE anything was deleted — they are
 	// untouched. Re-running with a different --older-than or after the blocking
@@ -128,9 +128,8 @@ type PruneSessionsResponse struct {
 }
 
 // PruneSessions evaluates archived sessions against req and lists the ones
-// whose worktree bytes are reclaimable. af writes nothing — the
-// delete+tombstone apply lands in the follow-up issue referenced in the file
-// header.
+// whose worktree bytes are reclaimable. Without req.Apply it writes nothing;
+// with it, pruneApply deletes what the verdict lists (#5189).
 func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
 	// Candidates is a required array on the wire: a nil slice marshals as
 	// null and breaks clients that iterate without a null special case, so

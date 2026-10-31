@@ -6306,11 +6306,26 @@ function parseRoute(hash) {
 function serializeRoute(route) {
   return route?.session ? `#/session/${encodeURIComponent(route.session)}` : "";
 }
+function parseProjectRoute(hash) {
+  const match = /^#\/project\/([^/]+)$/.exec(hash);
+  if (!match) return null;
+  try {
+    const project = decodeURIComponent(match[1]);
+    return project.trim() && !/[\x00-\x1f\x7f]/.test(project) ? { project } : null;
+  } catch {
+    return null;
+  }
+}
+function serializeProjectRoute(route) {
+  return route.project ? `#/project/${encodeURIComponent(route.project)}` : "";
+}
+function isRoute(hash) {
+  return parseRoute(hash) !== null || parseProjectRoute(hash) !== null;
+}
 var ROUTE_KEY = "af-session-route";
 function stashRoute(hash, storage) {
   try {
-    const route = parseRoute(hash);
-    if (route) storage.setItem(ROUTE_KEY, serializeRoute(route));
+    if (isRoute(hash)) storage.setItem(ROUTE_KEY, hash);
     else storage.removeItem(ROUTE_KEY);
   } catch {
   }
@@ -6319,7 +6334,7 @@ function restoreRoute(hash, storage) {
   try {
     const saved = storage.getItem(ROUTE_KEY);
     storage.removeItem(ROUTE_KEY);
-    return hash || serializeRoute(parseRoute(saved ?? ""));
+    return hash || (saved && isRoute(saved) ? saved : "");
   } catch {
     return hash;
   }
@@ -6511,7 +6526,8 @@ function formatTime(value, now = /* @__PURE__ */ new Date()) {
 
 // src/status.ts
 var OPERATOR_KIND_LABELS = {
-  "needs-you": "Needs you",
+  attention: "Needs attention",
+  "needs-you": "Idle",
   working: "Working",
   "waiting-limit": "Waiting on a limit",
   broken: "Broken",
@@ -6582,12 +6598,11 @@ function unreachableDetail(s, now = /* @__PURE__ */ new Date()) {
 function formatPaneChurnAge(churn, now) {
   return formatDuration(now.getTime() - churn.getTime());
 }
-var READY_ICON = "circle";
 var DEAD_ICON = "circle";
 var LOST_ICON = "circle-dashed";
 var ARCHIVED_ICON = "archive";
 var LIMIT_ICON = "diamond";
-var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
+var WORKING = { icon: "circle", kind: "working", label: ROW_KIND_LABELS.working };
 function rowStatus(s) {
   const op = s.in_flight_op ?? InFlightOp.None;
   if (op !== InFlightOp.None) {
@@ -6596,7 +6611,7 @@ function rowStatus(s) {
   return dotForLiveness(livenessOf(s));
 }
 function isWorking(s) {
-  return rowStatus(s).kind === null;
+  return rowStatus(s).kind === "working";
 }
 function hasInFlightOp(s) {
   return (s.in_flight_op ?? InFlightOp.None) !== InFlightOp.None;
@@ -6605,10 +6620,13 @@ function isCreating(s) {
   return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
 }
 function rowKind(s) {
-  return rowStatus(s).kind ?? "working";
+  return rowStatus(s).kind;
 }
 function operatorKind(s) {
   const displayed = rowKind(s);
+  if (hasAttention(s)) {
+    return "attention";
+  }
   if (displayed === "working") {
     return "working";
   }
@@ -6622,6 +6640,33 @@ function operatorKind(s) {
     return "broken";
   }
   return "needs-you";
+}
+function hasAttention(s) {
+  if (!s.attention) {
+    return false;
+  }
+  const kind = rowKind(s);
+  return kind === "ready" || kind === "working";
+}
+function attentionReason(s) {
+  return hasAttention(s) ? (s.attention?.reason ?? "").trim() : "";
+}
+function rowDot(s) {
+  if (hasAttention(s)) {
+    return { icon: "circle", kind: "attention" };
+  }
+  const status = rowStatus(s);
+  if (status.kind !== "ready") {
+    return status.icon ? { icon: status.icon, kind: status.kind } : null;
+  }
+  switch (operatorKind(s)) {
+    case "broken":
+      return { icon: DEAD_ICON, kind: "dead" };
+    case "waiting-limit":
+      return { icon: LIMIT_ICON, kind: "limit" };
+    default:
+      return null;
+  }
 }
 function livenessOf(s) {
   const lv = s.liveness ?? Liveness.Unset;
@@ -6646,7 +6691,7 @@ function livenessOf(s) {
 function dotForLiveness(lv) {
   switch (lv) {
     case Liveness.Ready:
-      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
+      return { icon: null, kind: "ready", label: ROW_KIND_LABELS.ready };
     case Liveness.Lost:
       return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
     case Liveness.Dead:
@@ -7111,6 +7156,9 @@ async function fetchKeptBranch(id, title, token2) {
     return { unreadable: true };
   }
 }
+async function clearAttention(id, setAt, token2) {
+  await af("SetAttention", { id, clear: true, set_at: setAt }, token2);
+}
 async function archiveSession(id, title, token2) {
   const result = await af("ArchiveSession", { id, title, repo_id: "" }, token2);
   if (result.warning) {
@@ -7187,6 +7235,15 @@ async function deleteProject(root2, token2) {
 }
 async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
+  return resp.project;
+}
+var SCP_LIKE_GIT_URL = /^[A-Za-z0-9._-]+@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~/-]+$/;
+function looksLikeGitURL(value) {
+  const trimmed = value.trim();
+  return trimmed.includes("://") || SCP_LIKE_GIT_URL.test(trimmed);
+}
+async function registerProjectURL(url, token2) {
+  const resp = await af("RegisterProject", { url }, token2);
   return resp.project;
 }
 var GUARDED_REBIND_UNSUPPORTED = "this daemon predates guarded rebinds \u2014 upgrade it, or rebind from the daemon host";
@@ -7535,6 +7592,17 @@ var ArrowRight = [
   ["path", { d: "m12 5 7 7-7 7" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/bell.mjs
+var Bell = [
+  ["path", { d: "M10.268 21a2 2 0 0 0 3.464 0" }],
+  [
+    "path",
+    {
+      d: "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"
+    }
+  ]
+];
+
 // node_modules/lucide/dist/esm/icons/bot.mjs
 var Bot = [
   ["path", { d: "M12 8V4H8" }],
@@ -7744,6 +7812,7 @@ var ICONS = {
   archive: Archive,
   "archive-restore": ArchiveRestore,
   "arrow-right": ArrowRight,
+  bell: Bell,
   bot: Bot,
   check: Check,
   "chevron-down": ChevronDown,
@@ -7987,8 +8056,30 @@ function terminalChrome(opts) {
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
-  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  const attention = attentionChip(opts.clearAttention);
+  const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+}
+function attentionChip(onDismiss) {
+  const label = h("span", { class: "af-term-attention-label" }, "Attention");
+  const dismiss = h("button", { type: "button", class: "af-term-attention-dismiss", title: "Dismiss attention request" }, icon("x"));
+  dismiss.setAttribute("aria-label", "Dismiss attention request");
+  dismiss.addEventListener("click", (event) => {
+    event.stopPropagation();
+    dismiss.blur();
+    onDismiss();
+  });
+  const el2 = h("div", { class: "af-term-attention", role: "status" }, icon("bell", "af-term-attention-bell"), label, dismiss);
+  el2.hidden = true;
+  const patch = (on, reason) => {
+    el2.hidden = !on;
+    const title = reason ? `Needs attention: ${reason}` : "Needs attention";
+    if (el2.title !== title) {
+      el2.title = title;
+      el2.setAttribute("aria-label", title);
+    }
+  };
+  return { el: el2, dismiss, patch };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -8533,6 +8624,8 @@ var ConfigPane = class {
     const focusedConfigControlKey = active instanceof HTMLElement && active.closest(".af-config-list") !== null && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement && (active.type === "checkbox" || active.type === "text")) ? active.getAttribute("aria-label") : null;
     const focusedConfigTextCaret = focusedConfigControlKey !== null && active instanceof HTMLInputElement && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd } : null;
     const saveFocusedKey = active instanceof HTMLButtonElement && active.closest(".af-config-list") !== null && active.classList.contains("af-config-save") ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null : null;
+    const accountsLoginFocusedKey = active instanceof HTMLButtonElement && active.classList.contains("af-accounts-login") ? active.closest("[data-account]")?.getAttribute("data-account") ?? null : null;
+    const accountsAddFocusedAgent = active instanceof HTMLButtonElement && active.classList.contains("af-accounts-add") ? active.closest(".af-accounts-register")?.querySelector(`input[${ACCOUNT_INPUT_ATTR}]`)?.getAttribute(ACCOUNT_INPUT_ATTR) ?? null : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -8571,6 +8664,12 @@ var ConfigPane = class {
       if (field2 && accountCaret?.start != null) {
         field2.setSelectionRange(accountCaret.start, accountCaret.end ?? accountCaret.start);
       }
+    } else if (accountsLoginFocusedKey !== null) {
+      this.el.querySelector(
+        `.af-accounts-row[data-account="${CSS.escape(accountsLoginFocusedKey)}"] .af-accounts-login`
+      )?.focus({ preventScroll: true });
+    } else if (accountsAddFocusedAgent !== null) {
+      this.accountInput(accountsAddFocusedAgent)?.closest(".af-accounts-register")?.querySelector(".af-accounts-add")?.focus({ preventScroll: true });
     }
   }
   /** Every register field's current text, keyed by agent. */
@@ -10689,6 +10788,33 @@ var TouchScroll = (now) => {
   };
 };
 
+// src/url.ts
+function safeHttpUrl(raw) {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return (u.protocol === "http:" || u.protocol === "https:") && u.host ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+// src/terminal_links.ts
+function terminalLinkHandler(open, setTooltip) {
+  return {
+    activate(_event, text) {
+      const href = safeHttpUrl(text);
+      if (href) open(href, "_blank", "noopener,noreferrer");
+    },
+    hover(_event, text) {
+      setTooltip(safeHttpUrl(text) ?? "");
+    },
+    leave() {
+      setTooltip("");
+    }
+  };
+}
+
 // src/terminal.ts
 function holdClockMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -10726,7 +10852,13 @@ var AttachTerminal = class {
       // choice elsewhere), giving onMouseDownCapture ONE bit to invert on every
       // platform. It also keeps Option out of xterm's block-select gesture, which
       // would otherwise fire on the inverted bit.
-      macOptionClickForcesSelection: true
+      macOptionClickForcesSelection: true,
+      // Opens OSC 8 links without xterm's default confirm() warning, and shows the
+      // real URL as a tooltip on hover (terminal_links.ts).
+      linkHandler: terminalLinkHandler(
+        (url, target, features) => window.open(url, target, features),
+        (tip) => tip ? container.setAttribute("title", tip) : container.removeAttribute("title")
+      )
     });
     this.fit = new import_addon_fit.FitAddon();
     this.term.loadAddon(this.fit);
@@ -11210,6 +11342,7 @@ var AttachTerminal = class {
     this.unsubscribeFontSizes?.();
     this.unsubscribeFontSizes = null;
     this.closeSocket();
+    this.container.removeAttribute("title");
     this.term.dispose();
   }
   applicationOwnsMouse() {
@@ -13273,7 +13406,9 @@ function addProjectModal(callbacks) {
   return checkoutPathModal({
     title: "Add project",
     confirmLabel: "Add project",
-    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    fieldLabel: "Repository path or git URL",
+    placeholder: "/path/to/repo  \xB7  ~/repo  \xB7  https://host/owner/repo",
+    hint: "An absolute repo path on the daemon host (~ works), or a git URL for the daemon to clone and register: https://host/owner/repo, ssh://host/owner/repo, or git@host:owner/repo.",
     ...callbacks
   });
 }
@@ -13293,13 +13428,14 @@ function checkoutPathModal(opts) {
     confirmClass: "af-primary",
     onCancel: opts.onCancel
   });
+  const fieldLabel = opts.fieldLabel ?? "Repository path";
   const pathInput = h("input", {
     type: "text",
     class: "af-input",
-    placeholder: "/path/to/repo  or  ~/repo",
+    placeholder: opts.placeholder ?? "/path/to/repo  or  ~/repo",
     autocomplete: "off"
   });
-  pathInput.setAttribute("aria-label", "Repository path");
+  pathInput.setAttribute("aria-label", fieldLabel);
   const { loadDirectory, errorText: errorText2 } = opts;
   let picker = null;
   if (loadDirectory && errorText2) {
@@ -13322,7 +13458,7 @@ function checkoutPathModal(opts) {
     );
   }
   body.append(
-    field("Repository path", pathInput),
+    field(fieldLabel, pathInput),
     h(
       "p",
       { class: "af-modal-hint" },
@@ -13499,8 +13635,9 @@ function shortcutRepeatGuard() {
 
 // src/filter.ts
 var FILTER_KEY = "af-status-filter";
-var FILTER_KINDS = ["needs-you", "working", "waiting-limit", "broken", "archived"];
+var FILTER_KINDS = ["attention", "needs-you", "working", "waiting-limit", "broken", "archived"];
 var DEFAULTS = {
+  attention: true,
   "needs-you": true,
   working: true,
   "waiting-limit": true,
@@ -13521,6 +13658,7 @@ function withKind(filter, kind, on) {
 }
 function kindCounts(list) {
   const counts = {
+    attention: 0,
     "needs-you": 0,
     working: 0,
     "waiting-limit": 0,
@@ -15463,6 +15601,7 @@ var SplitView = class {
     if (pane) {
       pane.status = status;
     }
+    this.report();
     if (leafId === this.focusedId) {
       this.cb.onStatus(status);
     }
@@ -15498,16 +15637,17 @@ var SplitView = class {
   report() {
     this.syncFocusedTabId();
     const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
+    const openTabs = this.tree ? leaves(this.tree).filter((l) => this.panes.get(l.id)?.status === "open").map((l) => l.tab) : [];
     const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0 : 0;
     const paneCount = shownTabs.length;
-    const shownKey = shownTabs.join(",");
+    const shownKey = `${shownTabs.join(",")}|${openTabs.join(",")}`;
     if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
       return;
     }
     this.lastFocusedTab = focusedTab;
     this.lastShown = shownKey;
     this.lastPaneCount = paneCount;
-    this.cb.onLayout({ focusedTab, shownTabs, paneCount });
+    this.cb.onLayout({ focusedTab, shownTabs, openTabs, paneCount });
   }
   /** Recomputes the focused pane's CURRENT tab id (by stable daemon id) and records the
    *  tab focus is LEAVING onto the MRU. THE funnel for keeping the focused-tab-id
@@ -15597,6 +15737,73 @@ function settleLookup(intent, ticket, id, rows, effects) {
   }
   effects.found(row);
   return "found";
+}
+
+// src/archive_window.ts
+var REREAD_BATCH = 500;
+var DISCOVERY_PAGE = 200;
+async function rereadHeld(ids, fetchById) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += REREAD_BATCH) {
+    out.push(...await fetchById(ids.slice(i, i + REREAD_BATCH)));
+  }
+  return out;
+}
+function aheadOfCursor(row, cursor) {
+  const order = compareTimestamps(row.created_at ?? "", cursor.created_at);
+  if (order === null) return true;
+  if (order !== 0) return order > 0;
+  return (row.id ?? "") > cursor.id;
+}
+function compareTimestamps(a, b) {
+  const split = (s) => ({
+    sec: Date.parse(s.replace(/\.\d+/, "")),
+    frac: (/\.(\d+)/.exec(s)?.[1] ?? "").padEnd(9, "0")
+  });
+  const x = split(a);
+  const y = split(b);
+  if (Number.isNaN(x.sec) || Number.isNaN(y.sec)) return null;
+  if (x.sec !== y.sec) return x.sec > y.sec ? 1 : -1;
+  if (x.frac === y.frac) return 0;
+  return x.frac > y.frac ? 1 : -1;
+}
+async function discoverHead(cursor, fetchPage, maxPages) {
+  const rows = [];
+  let before = null;
+  for (let page = 0; page < maxPages; page++) {
+    const got = await fetchPage(before, DISCOVERY_PAGE);
+    rows.push(...got.sessions);
+    if (got.next === null || got.sessions.length === 0) return { rows, complete: true };
+    const last = got.sessions[got.sessions.length - 1];
+    if (cursor !== null && !aheadOfCursor(last, cursor)) return { rows, complete: true };
+    before = got.next;
+  }
+  return { rows, complete: false };
+}
+function discoveryNeeded(dirty, previous, next) {
+  if (dirty || previous.total !== next.total) return true;
+  const keys = /* @__PURE__ */ new Set([...Object.keys(previous.byProject), ...Object.keys(next.byProject)]);
+  for (const k of keys) if ((previous.byProject[k] ?? 0) !== (next.byProject[k] ?? 0)) return true;
+  return false;
+}
+async function reconcileWindow(i) {
+  const byId = new Map(i.held.map((s) => [s.id ?? "", s]));
+  if (!discoveryNeeded(i.dirty, i.archive, i.summary)) return { rows: [...byId.values()], complete: true };
+  byId.clear();
+  const keep = (row) => {
+    if (i.isArchived(row) && !i.live.has(row.id)) byId.set(row.id ?? "", row);
+  };
+  let complete = true;
+  for (const row of await rereadHeld(i.held.flatMap((s) => s.id ? [s.id] : []), i.fetchById)) keep(row);
+  for (const [key, cursor] of Object.entries(i.archive.cursors)) {
+    if (cursor === void 0) continue;
+    const project = key === "" ? null : key;
+    const maxPages = Math.ceil(i.summary.total / DISCOVERY_PAGE) + 2;
+    const found = await discoverHead(cursor, (before, limit) => i.fetchPage(project, before, limit), maxPages);
+    for (const row of found.rows) keep(row);
+    if (!found.complete) complete = false;
+  }
+  return { rows: [...byId.values()], complete };
 }
 
 // src/pending_restores.ts
@@ -15852,12 +16059,23 @@ var OptimisticSessions = class {
   snapshotFence() {
     return this.revision;
   }
-  /** Adds rows the live-only snapshot left out (an archived page, a deep-linked
-   *  archived session). Not an event and not a snapshot: it bumps no revision, so
-   *  a fetch already in flight is not discarded for it, and it records no pending
-   *  feedback. A row already known is replaced in place. */
-  adopt(rows) {
-    for (const row of rows) this.authoritative = upsertSession(this.authoritative, row);
+  /** The one door for archive rows read outside a snapshot (an archived page, a
+   *  deep-linked session, #6206-#6209). `fence` is `snapshotFence()` captured BEFORE
+   *  the read. A row is adopted only if no session event for it is newer than the
+   *  fence: a deletion or kill that arrived while the read was in flight beats the
+   *  stale row, in either arrival order. Adopting anything advances the revision, so
+   *  a snapshot fetched before the adopt fails its own fence and is re-requested
+   *  rather than overwriting the rows. A row already known is replaced in place.
+   *  Returns the rows actually adopted. */
+  adopt(rows, fence) {
+    const taken = rows.filter((row) => {
+      const seen = this.sessionEvents.get(sessionKey(row));
+      return !seen || seen.revision <= fence;
+    });
+    if (taken.length === 0) return taken;
+    for (const row of taken) this.authoritative = upsertSession(this.authoritative, row);
+    this.revision++;
+    return taken;
   }
   /** `leftLiveSet`: the snapshot was live-only, so a row ABSENT from it may have
    *  been archived rather than killed (#6178); an archive request is then settled by
@@ -16466,6 +16684,54 @@ function taskVerbs(t, actions2) {
     { label: "Remove", glyph: "trash", run: () => actions2.remove(t) }
   ];
 }
+function paintSwitch(el2, on, busy) {
+  el2.classList.toggle("af-task-switch-on", on);
+  el2.setAttribute("aria-checked", on ? "true" : "false");
+  el2.title = on ? "Enabled \xB7 click to disable" : "Disabled \xB7 click to enable";
+  if (busy) {
+    el2.setAttribute("aria-busy", "true");
+    el2.setAttribute("aria-disabled", "true");
+  } else {
+    el2.removeAttribute("aria-busy");
+    el2.removeAttribute("aria-disabled");
+  }
+}
+function flipSwitch(pending, t, toggle, paint, latest, backstop) {
+  if (pending.has(t.id)) return;
+  const next = !t.enabled;
+  const flip = { value: next, settled: false, timer: null };
+  pending.set(t.id, flip);
+  paint(next, true);
+  void toggle().then((applied) => applied, () => false).then((applied) => {
+    if (applied) {
+      flip.settled = true;
+      if (backstop) {
+        flip.timer = backstop.set(() => {
+          flip.timer = null;
+          if (pending.get(t.id) !== flip) return;
+          pending.delete(t.id);
+          backstop.expire(t.id);
+        }, backstop.ms);
+      }
+      return;
+    }
+    pending.delete(t.id);
+    paint(latest(), false);
+  });
+}
+function releaseSettled(pending, tasks, backstop) {
+  const enabled = new Map(tasks.map((t) => [t.id, t.enabled]));
+  for (const [id, flip] of pending) {
+    if (!flip.settled) continue;
+    if (enabled.has(id) && enabled.get(id) !== flip.value) continue;
+    if (flip.timer !== null) backstop?.clear(flip.timer);
+    flip.timer = null;
+    pending.delete(id);
+  }
+}
+function reconcileOnUpdate(pending, previous, tasks, backstop) {
+  if (previous !== tasks) releaseSettled(pending, tasks, backstop);
+}
 var TasksPane = class {
   constructor(actions2) {
     this.actions = actions2;
@@ -16480,6 +16746,9 @@ var TasksPane = class {
   // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
   // next-run recalculation) keeps the reader's place (#2933).
   lastToken = null;
+  // Task id -> the value an in-flight toggle is moving to. Rebuilds re-apply it so
+  // a refetch mid-request cannot hand back an enabled switch for the same task.
+  pending = /* @__PURE__ */ new Map();
   /** Re-renders the tasks list SCOPED to the selected project (redesign PR2): only
    *  tasks whose project_path matches, so the tasks view operates within the same
    *  project the rail is scoped to. A null project (none exist) shows no tasks. */
@@ -16488,6 +16757,7 @@ var TasksPane = class {
       return;
     }
     this.lastError = error;
+    reconcileOnUpdate(this.pending, this.lastTasks, tasks, { clear: (h2) => window.clearTimeout(h2) });
     const token2 = listToken([selectedProject]);
     const previous = this.lastToken;
     this.lastToken = token2;
@@ -16509,6 +16779,32 @@ var TasksPane = class {
       const control = [...row?.querySelectorAll("button") ?? []].find((button) => sameControlKey(controlKey(button), focused));
       control?.focus({ preventScroll: true });
     }
+  }
+  /** If no list ever arrives to reconcile an applied flip, fall back to the last one. */
+  backstop(paint) {
+    return {
+      ms: 5e3,
+      set: (fn, ms) => window.setTimeout(fn, ms),
+      clear: (handle) => window.clearTimeout(handle),
+      expire: (id) => {
+        const known = this.lastTasks?.find((x) => x.id === id);
+        if (known) paint(id, known.enabled, false);
+      }
+    };
+  }
+  flip(t) {
+    const paint = (id, on, busy) => {
+      const el2 = this.el.querySelector(`[data-task-id="${CSS.escape(id)}"] .af-task-switch`);
+      if (el2) paintSwitch(el2, on, busy);
+    };
+    flipSwitch(
+      this.pending,
+      t,
+      () => this.actions.toggle(t),
+      (on, busy) => paint(t.id, on, busy),
+      () => this.lastTasks?.find((x) => x.id === t.id)?.enabled ?? t.enabled,
+      this.backstop(paint)
+    );
   }
   render(tasks) {
     if (this.lastError) {
@@ -16589,7 +16885,11 @@ var TasksPane = class {
     toggle.setAttribute("aria-checked", t.enabled ? "true" : "false");
     toggle.setAttribute("aria-label", `Enabled: ${t.name}`);
     toggle.title = t.enabled ? "Enabled \xB7 click to disable" : "Disabled \xB7 click to enable";
-    toggle.addEventListener("click", () => this.actions.toggle(t));
+    const inFlight = this.pending.get(t.id);
+    if (inFlight !== void 0) {
+      paintSwitch(toggle, inFlight.value, true);
+    }
+    toggle.addEventListener("click", () => this.flip(t));
     const verbs = taskVerbs(t, this.actions);
     const iconBtns = verbs.map(({ label, glyph, run, blocked }) => {
       const btn = h("button", { type: "button", class: "af-task-icon-btn", title: blocked ?? label }, icon(glyph));
@@ -18047,6 +18347,7 @@ var AppShell = class {
   // treatment, and for the same reason, as lifecycleBtn above: a session hits the
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
+  attentionChip = null;
   retryBtn = null;
   retryKind = null;
   // The "Mark delivered" button and whether it is currently shown (#4429). Same
@@ -18694,7 +18995,7 @@ var AppShell = class {
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
     add.dataset.projectFocus = "add";
-    add.setAttribute("title", "Register a git checkout by path as a project");
+    add.setAttribute("title", "Register a git checkout by path or git URL as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
@@ -18752,6 +19053,8 @@ var AppShell = class {
     const focusFallback = this.projectSwitchBtn.getClientRects().length ? this.projectSwitchBtn : this.appControls.trigger;
     replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
+  /** The project whose Space press is armed, awaiting its release (see projectItem). */
+  projectSpaceArmed = null;
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
    *  switches the active project and closes the menu. `record` is the registry
@@ -18781,15 +19084,37 @@ var AppShell = class {
       { class: "af-project-item-meta" },
       ...record && !record.path_exists ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` \xB7 ${projectMeta(p)}`] : [projectMeta(p)]
     );
-    const item = h("button", { type: "button", class: cls }, check, label, meta);
+    const item = h("a", { class: cls, href: serializeProjectRoute({ project: p.root }) }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
-    item.addEventListener("click", (e) => {
+    const activate = (e) => {
+      e.preventDefault();
       e.stopPropagation();
       this.closeProjectMenu();
       this.appControls.dismiss();
       this.actions.switchProject(p.root);
+    };
+    item.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) {
+        e.stopPropagation();
+        return;
+      }
+      activate(e);
+    });
+    item.addEventListener("keydown", (e) => {
+      if (e.key !== " " || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      if (!e.repeat) this.projectSpaceArmed = p.root;
+    });
+    item.addEventListener("keyup", (e) => {
+      if (e.key !== " " || this.projectSpaceArmed !== p.root) return;
+      this.projectSpaceArmed = null;
+      activate(e);
+    });
+    item.addEventListener("blur", (e) => {
+      const to = e.relatedTarget;
+      if (to instanceof Node && !this.projectMenu.contains(to)) this.projectSpaceArmed = null;
     });
     return item;
   }
@@ -18880,6 +19205,7 @@ var AppShell = class {
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
+      this.attentionChip = null;
       this.archiveWarning = null;
       this.headActions = null;
       this.headActionSig = "";
@@ -18925,11 +19251,13 @@ var AppShell = class {
       },
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
+      clearAttention: () => this.actions.clearAttention(),
       closePane: () => this.actions.closePane?.(),
       fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta)
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
+    this.attentionChip = chrome.attention;
     this.retryBtn = chrome.retry;
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
@@ -18972,6 +19300,7 @@ var AppShell = class {
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
       [chrome.newTabs, this.header],
+      [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
     ]);
@@ -19372,6 +19701,7 @@ var AppShell = class {
     if (this.terminalChrome) {
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
+    this.attentionChip?.patch(hasAttention(selected), attentionReason(selected));
     const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
@@ -19578,11 +19908,9 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
-  const branchParts = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator])
-  ];
+  const branchParts = [];
   if ((selected || outageDetail !== "") && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, ` \xB7 ${idleDetail}`);
+    const idle = h("span", { class: "af-idle-reason" }, idleDetail);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (outageDetail !== "" && s.unreachable) {
       idle.dataset.unreachableSince = s.unreachable.since ?? "";
@@ -19593,8 +19921,10 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
     branchParts.push(idle);
   }
   if (s.branch) {
+    if (branchParts.length > 0) {
+      branchParts.push(" \xB7 ");
+    }
     branchParts.push(
-      " \xB7 ",
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch)
     );
   }
@@ -19605,19 +19935,20 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
     branchParts.push(" \xB7 ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
-  const main = h("div", { class: "af-row-main" }, title, branch);
+  const stateLabel = h("span", { class: "af-visually-hidden" }, ` ${OPERATOR_KIND_LABELS[operator]}`);
+  const main = h("div", { class: "af-row-main" }, title, stateLabel, branch);
   const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
   const row = previous ?? h("li", { class: cls });
   row.className = cls;
   row.replaceChildren();
   row.onclick = null;
   row.removeAttribute("aria-disabled");
-  row.dataset.state = status.kind ?? "working";
+  row.dataset.state = status.kind;
   const statusSlot = h("span", { class: "af-row-status" });
   statusSlot.setAttribute("aria-hidden", "true");
-  if (status.kind && status.icon) {
-    const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
-    statusSlot.append(dot);
+  const dot = rowDot(s);
+  if (dot) {
+    statusSlot.append(h("span", { class: `af-dot af-dot-${dot.kind}` }, icon(dot.icon)));
   }
   row.append(statusSlot);
   row.append(main);
@@ -19635,7 +19966,8 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const archiveWarning = archiveWarningText(s);
   const callbackWarning = callbackUnavailableText(s);
   const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
-  row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}`;
+  const reason = attentionReason(s);
+  row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}${reason ? `: ${reason}` : ""}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
@@ -19659,7 +19991,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       },
       now
     );
-    idle.textContent = detail ? ` \xB7 ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row");
     if (row) {
       const reason = detail ? `; ${detail}` : "";
@@ -19677,7 +20009,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       },
       now
     );
-    idle.textContent = detail ? ` \xB7 ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row");
     if (row) {
       const reason = detail ? `; ${detail}` : "";
@@ -19758,6 +20090,7 @@ var store = new Store({
   focus: "rail",
   activeTab: 0,
   shownTabs: [0],
+  openTabs: [],
   tabError: null,
   tasks: [],
   registeredProjects: [],
@@ -19810,7 +20143,7 @@ var splitView = new SplitView(termHost, {
   // Mirror the layout into the store so the tab bar can highlight the focused pane's
   // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
   // on a real change, so this write never loops back through rerender → syncSplit.
-  onLayout: ({ focusedTab, shownTabs }) => store.set({ activeTab: focusedTab, shownTabs })
+  onLayout: ({ focusedTab, shownTabs, openTabs }) => store.set({ activeTab: focusedTab, shownTabs, openTabs })
 });
 var root = null;
 function mount() {
@@ -19946,6 +20279,7 @@ async function connect(candidate) {
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: void 0,
     tasks,
@@ -20006,6 +20340,7 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: void 0,
     tasks: [],
@@ -20030,6 +20365,7 @@ function resolveRoute() {
     return;
   }
   const route = parseRoute(location.hash);
+  const projectRoute = route ? null : parseProjectRoute(location.hash);
   resolvingRoute = true;
   let lookup = false;
   try {
@@ -20041,6 +20377,15 @@ function resolveRoute() {
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
+    } else if (projectRoute) {
+      const { sessions, tasks, registeredProjects } = store.get();
+      const known = pickerProjects(sessions, tasks, projectRoots(registeredProjects)).includes(projectRoute.project);
+      if (known) {
+        switchProject(projectRoute.project);
+        store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      } else {
+        showTransientNotice("No project at that path in this daemon");
+      }
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -20054,6 +20399,7 @@ function resolveRoute() {
 async function resolveArchivedRoute(id, ticket) {
   const tok = token;
   const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
   let rows = [];
   try {
     if (tok !== null) rows = await fetchSessionsById(tok, [id]);
@@ -20064,19 +20410,22 @@ async function resolveArchivedRoute(id, ticket) {
     }
   }
   if (token !== tok || connectionGeneration !== generation) return;
+  const missing = () => {
+    store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+    showTransientNotice("No session with that id in this daemon");
+    replaceRoute(null);
+  };
   settleLookup(createSelectionIntent, ticket, id, rows, {
     found: (row) => {
-      optimisticSessions.adopt([row]);
+      if (optimisticSessions.adopt([row], fence).length === 0) {
+        if (store.get().sessions.some((s) => s.id === id)) resolveRoute();
+        else missing();
+        return;
+      }
       applySessions(optimisticSessions.project());
       resolveRoute();
     },
-    // The one terminal state of an unknown id: the empty pane (the previous
-    // selection must not linger), one toast, and the URL reset to /.
-    missing: () => {
-      store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
-      showTransientNotice("No session with that id in this daemon");
-      replaceRoute(null);
-    }
+    missing
   });
 }
 function moveSelection(id) {
@@ -20532,6 +20881,7 @@ function openDeleteProject(root2, label) {
   );
 }
 function openAddProject() {
+  const invoker = captureModalInvoker();
   openModal(
     addProjectModal({
       // #2788: the picker's daemon read. The token is resolved PER CALL, not
@@ -20546,14 +20896,40 @@ function openAddProject() {
       // The daemon's own message ("cannot read /x: permission denied"), never the
       // login-framed describeError — a refused directory is not an auth failure.
       errorText,
-      onSubmit: (path) => {
+      onSubmit: (value) => {
         const tok = token;
         if (tok === null || !modal) {
           return;
         }
         const m = modal;
+        if (looksLikeGitURL(value)) {
+          m.setBusy(true);
+          closeModal();
+          showTransientNotice(`Cloning ${value} on the daemon host \u2014 the project appears in the switcher when it lands.`);
+          void registerProjectURL(value, tok).then(() => {
+            refreshRegisteredProjects();
+          }).catch((e) => {
+            if (isMutationOutcomeUncertain(e)) {
+              refreshRegisteredProjects();
+              surfaceMutationError(
+                new Error(`The registration of ${value} could not be confirmed. ${errorText(e)}`),
+                "uncertain"
+              );
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+            if (!modal && !configAssistant && !accountLogin && token === tok) {
+              openModal(m, true, invoker);
+              m.el.querySelector(".af-modal-card input")?.focus({ preventScroll: true });
+            } else {
+              surfaceMutationError(e);
+            }
+          });
+          return;
+        }
         m.setBusy(true);
-        void registerProject(path, tok).then(() => {
+        void registerProject(value, tok).then(() => {
           if (modal === m) closeModal();
         }).catch((e) => {
           m.setBusy(false);
@@ -21323,17 +21699,23 @@ function openEditTask(task) {
     })
   );
 }
-function toggleTask(task) {
+async function toggleTask(task) {
   const tok = token;
   if (tok === null) {
-    return;
+    return false;
   }
-  void updateTask(task, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
-    if (isMutationCommittedError(e)) {
+  try {
+    await updateTask(task, { enabled: !task.enabled }, tok);
+  } catch (e) {
+    const committed = isMutationCommittedError(e);
+    if (committed) {
       refreshTasks();
     }
     surfaceTabError(e);
-  });
+    return committed;
+  }
+  refreshTasks();
+  return true;
 }
 function doTriggerTask(task) {
   const tok = token;
@@ -21346,6 +21728,15 @@ function doTriggerTask(task) {
     }
     surfaceTabError(e);
   });
+}
+function doClearAttention() {
+  const sel = selectedSessionData();
+  const tok = token;
+  const setAt = sel?.attention?.set_at;
+  if (!sel || tok === null || !setAt) {
+    return;
+  }
+  void clearAttention(sel.id ?? "", setAt, tok).catch(surfaceTabError);
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -21496,6 +21887,7 @@ var actions = {
   archive: (session) => openConfirm("archive", session),
   restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  clearAttention: doClearAttention,
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
@@ -21575,9 +21967,13 @@ function startStream(tok) {
   stream = new EventStream(tok, {
     onEvent,
     onResync: () => {
+      markArchiveDirty();
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s }),
+    onStatus: (s) => {
+      if (s !== "open") markArchiveDirty();
+      store.set({ live: s });
+    },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
     // Not /v1/auth-info, which says whether a token is required, not whether
@@ -21667,19 +22063,31 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
     restoreSettled: isActionableSession(s) && s.lifecycle_action === "archive"
   })), evidence);
 }
-var ARCHIVE_WINDOW_REREAD_MAX = 500;
+var archiveDirtyEpoch = 1;
+var archiveCleanEpoch = 0;
+function markArchiveDirty() {
+  archiveDirtyEpoch++;
+}
+function clearArchiveDirty(epoch) {
+  if (epoch > archiveCleanEpoch) archiveCleanEpoch = epoch;
+}
 async function fetchSnapshotWithArchiveWindow(tok) {
+  const epoch = archiveDirtyEpoch;
   const snapshot = await fetchSessionSnapshot(tok);
-  if (!snapshot.archived) return snapshot;
+  if (!snapshot.archived) return { ...snapshot, archiveEpoch: epoch };
   const live = new Set(snapshot.sessions.map((s) => s.id));
-  const window2 = optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id));
-  if (window2.length === 0) return snapshot;
-  let kept = window2;
-  if (window2.length <= ARCHIVE_WINDOW_REREAD_MAX) {
-    const ids = window2.flatMap((s) => s.id ? [s.id] : []);
-    kept = (await fetchSessionsById(tok, ids)).filter((s) => isArchived(s) && !live.has(s.id));
-  }
-  return { ...snapshot, sessions: [...snapshot.sessions, ...kept] };
+  const archive = store.get().archive;
+  const { rows: kept, complete } = await reconcileWindow({
+    held: optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id)),
+    live,
+    archive,
+    summary: snapshot.archived,
+    dirty: epoch > archiveCleanEpoch,
+    isArchived,
+    fetchById: (ids) => fetchSessionsById(tok, ids),
+    fetchPage: (project, before, limit) => fetchArchivedPage(tok, { project, before, limit })
+  });
+  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: complete ? epoch : archiveCleanEpoch };
 }
 async function loadArchivedPage() {
   const tok = token;
@@ -21692,14 +22100,10 @@ async function loadArchivedPage() {
   const before = start.cursors[key] ?? null;
   store.set({ archive: { ...start, loading: true, error: void 0 } });
   try {
-    let page;
-    for (let attempt = 0; ; attempt++) {
-      const eventsBefore = sessionEventGeneration;
-      page = await fetchArchivedPage(tok, { project, before });
-      if (eventsBefore === sessionEventGeneration || attempt >= 2) break;
-    }
+    const fence = optimisticSessions.snapshotFence();
+    const page = await fetchArchivedPage(tok, { project, before });
     if (token !== tok || connectionGeneration !== generation) return;
-    optimisticSessions.adopt(page.sessions);
+    optimisticSessions.adopt(page.sessions, fence);
     applySessions(optimisticSessions.project());
     const archive = store.get().archive;
     store.set({ archive: { ...archive, loading: false, cursors: { ...archive.cursors, [key]: page.next } } });
@@ -21729,6 +22133,7 @@ async function fetchProjectedSnapshot(tok) {
     let daemonBootId;
     let skippedRepos;
     let archived;
+    let archiveEpoch = 0;
     const sessions = await optimisticSessions.refresh(async () => {
       generation = pendingRestores.beginSnapshot();
       const snapshot = await fetchSnapshotWithArchiveWindow(tok);
@@ -21738,8 +22143,10 @@ async function fetchProjectedSnapshot(tok) {
       daemonBootId = snapshot.daemonBootId;
       skippedRepos = snapshot.skippedRepos;
       archived = snapshot.archived;
+      archiveEpoch = snapshot.archiveEpoch;
       return authoritative;
     }, () => archived !== void 0);
+    if (sessions !== null) clearArchiveDirty(archiveEpoch);
     return sessions === null ? null : {
       sessions,
       authoritative,
@@ -21792,6 +22199,7 @@ function requestResync() {
         skippedRepos: snapshot.skippedRepos,
         archived: snapshot.archived
       }, sessions);
+      clearArchiveDirty(snapshot.archiveEpoch);
       root?.setAttribute("data-af-resync-settled", "");
       resolveResyncCompletions();
     }).catch((error) => {
@@ -21940,6 +22348,7 @@ if (document.readyState === "loading") {
 lucide/dist/esm/icons/archive-restore.mjs:
 lucide/dist/esm/icons/archive.mjs:
 lucide/dist/esm/icons/arrow-right.mjs:
+lucide/dist/esm/icons/bell.mjs:
 lucide/dist/esm/icons/bot.mjs:
 lucide/dist/esm/icons/check.mjs:
 lucide/dist/esm/icons/chevron-down.mjs:

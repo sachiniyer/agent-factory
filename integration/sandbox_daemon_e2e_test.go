@@ -157,7 +157,7 @@ func TestSandboxDaemonE2E(t *testing.T) {
 		return host.execOK(t, "cd "+workspace()+" && git status --porcelain --ignored && git rev-parse HEAD && cat e2e-work.txt staged.txt untracked.txt keep.ign")
 	}
 	stateAtArchive := treeState()
-	for _, want := range []string{"A  staged.txt", "?? untracked.txt", "!! keep.ign"} {
+	for _, want := range []string{" M e2e-work.txt", "A  staged.txt", "?? untracked.txt", "!! keep.ign"} {
 		if !strings.Contains(stateAtArchive, want) {
 			t.Fatalf("the fixture does not hold %q, so the fingerprint would not cover it:\n%s", want, stateAtArchive)
 		}

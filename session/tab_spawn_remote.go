@@ -22,6 +22,22 @@ func (s *remoteAgentServer) hasFeatureCached(name string) bool {
 	return s.idPlaneKnown && slices.Contains(s.features, name)
 }
 
+// featureVerdict resolves the advertisement, asking the server once if it has
+// not yet answered. A health fetch that fails leaves the verdict unknown — never
+// absent — so a transient failure is not read as an old server (#6236).
+func (s *remoteAgentServer) featureVerdict(name string) featureVerdict {
+	s.idNative()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case !s.idPlaneKnown:
+		return featureUnknown
+	case slices.Contains(s.features, name):
+		return featurePresent
+	}
+	return featureAbsent
+}
+
 // remoteTabServerCached returns the cached remote agent-server without building
 // one. Safe under i.mu (reads only); nil for a local instance or one nobody has
 // asked for the server yet.

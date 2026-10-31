@@ -67,14 +67,14 @@ func TestChipComposerVerdictNamesWhyAShapeIsWithheld(t *testing.T) {
 
 	// Claude's ordinary composer hides its cursor: unprovable by design, and the
 	// reason says so rather than leaving a generic "not a still, single-chip composer".
-	ok, why := stillChipComposerWhy(claude, claude, paneCursorState{Visible: false}, chipText)
+	ok, why := stillChipComposer(claude, claude, paneCursorState{Visible: false}, chipText)
 	if ok || !strings.Contains(why, "cursor is hidden") {
 		t.Fatalf("hidden cursor: ok=%v why=%q, want a withheld verdict naming the hidden cursor", ok, why)
 	}
 	// With a visible cursor parked after the chip the very same pane IS provable: the
 	// INSERT line below the composer is not read as foreign composer content.
 	row := "❯ " + claudeChip
-	ok, why = stillChipComposerWhy(claude, claude, paneCursorState{Visible: true, Row: 3, Col: len([]rune(row))}, chipText)
+	ok, why = stillChipComposer(claude, claude, paneCursorState{Visible: true, Row: 3, Col: len([]rune(row))}, chipText)
 	if !ok {
 		t.Fatalf("visible cursor on the chip row: withheld (%s); the INSERT status line must not defeat the check", why)
 	}
@@ -82,14 +82,14 @@ func TestChipComposerVerdictNamesWhyAShapeIsWithheld(t *testing.T) {
 	// Codex with its warning footer a blank row below the composer is provable...
 	codex := codexWarningPane("› "+codexChip, true)
 	codexRow := "› " + codexChip
-	ok, why = stillChipComposerWhy(codex, codex, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, normalizeDelivery(codexChip))
+	ok, why = stillChipComposer(codex, codex, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, normalizeDelivery(codexChip))
 	if !ok {
 		t.Fatalf("codex composer with a warning footer: withheld (%s)", why)
 	}
 	// ...while a footer drawn with no blank row between it and the composer is
 	// composer content as far as the region goes, and the reason names that.
 	tight := codexWarningPane("› "+codexChip, false)
-	ok, why = stillChipComposerWhy(tight, tight, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, normalizeDelivery(codexChip))
+	ok, why = stillChipComposer(tight, tight, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, normalizeDelivery(codexChip))
 	if ok || !strings.Contains(why, "not only the bound chip") {
 		t.Fatalf("footer without a gap: ok=%v why=%q, want it named as foreign composer content", ok, why)
 	}

@@ -61,16 +61,13 @@ type operandTailMemo struct {
 	// xargsNestedAny: does any nested xargs from here take the marker in an
 	// env-reaching option.
 	xargsNestedAny map[xargsMarkerKey]bool
-	// childTails: shadowedChildTailMutates — does any suffix from here mutate,
-	// for a wrapper's returned child tail (ionice --/default and taskset mask).
-	childTails map[*syntax.Word]bool
-	// literalChildTails is childTails for the literal-boundary scan
-	// (laterLiteralChildSuffixMutates): does any literal verdict suffix from
-	// here mutate. A separate map because the two scans judge different words.
+	// literalChildTails: laterLiteralChildSuffixMutates — does any literal
+	// verdict suffix from here mutate, for a wrapper's returned child tail
+	// (ionice --/default and taskset mask).
 	literalChildTails map[*syntax.Word]bool
 	// childJudgements counts the suffix judgements child-tail walks have
 	// started in this validation. It is shared by pointer so every copy of
-	// the memo draws on one budget; see shadowedChildTailMutates.
+	// the memo draws on one budget; see shadowedChildJudgementLimit.
 	childJudgements *int
 	// straceRunWork counts the words strace option-run scans have visited in
 	// this validation (a stat: each position is judged once).
@@ -101,7 +98,6 @@ func newOperandTailMemo() operandTailMemo {
 		xargsMarkerAnywhereMap: map[xargsMarkerKey]bool{},
 		xargsNested:            map[xargsNestedKey]xargsNestedResult{},
 		xargsNestedAny:         map[xargsMarkerKey]bool{},
-		childTails:             map[*syntax.Word]bool{},
 		literalChildTails:      map[*syntax.Word]bool{},
 		childJudgements:        new(int),
 		straceRunWork:          new(int),

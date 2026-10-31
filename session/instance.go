@@ -52,6 +52,11 @@ type Instance struct {
 	// construction, so cross-goroutine readers may read it without the mutex
 	// (like ID and Title).
 	TaskID string
+	// BacklogItem is the id of the backlog item this session was started for, 0
+	// for any other session. Immutable after construction. backlog.json is the
+	// source of truth for the item ↔ session link; this is a cache for clients
+	// and the one input restart recovery matches a starting run against.
+	BacklogItem int
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.
@@ -232,6 +237,19 @@ type Instance struct {
 	// failing, and only a never-bound run may be ended failed by it. Persisted
 	// while the run is in flight, with the boundary it qualifies.
 	taskRunPromptBound bool
+	// backlogRunActive is the backlog's run marker. Unlike taskRunActive it is
+	// re-armed each time the backlog delivers a prompt, so one item session has
+	// many runs. It shares the task run's completion gate (prompt boundary, turn
+	// evidence, held edges); a session is never both a task and an item session.
+	backlogRunActive bool
+	// backlogRunEndedAt is when the latest backlog run ended (persisted).
+	backlogRunEndedAt time.Time
+	// backlogRunGen counts the runs armed on this session (in memory only): a
+	// completion queued for run N must not finish run N+1 (ArmBacklogRun).
+	backlogRunGen int
+	// backlogRunEndedAtBeforeArm is backlogRunEndedAt as ArmBacklogRun found it,
+	// for DisarmBacklogRun to restore (in memory only).
+	backlogRunEndedAtBeforeArm time.Time
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
@@ -518,6 +536,8 @@ type Instance struct {
 	// first launch by noteRecreateContext, persisted, rendered on the row by
 	// every rail, and cleared the first time a client opens the session's pane.
 	rootRecreateContext RootRecreateContext
+
+	attention *Attention
 
 	// userKilled is the kill-intent tombstone (#1108): set (and persisted)
 	// before an explicit kill's teardown begins, so a record that survives a
@@ -965,36 +985,4 @@ func (i *Instance) AttachShellTab(name, tmuxName, tabID string) (*Tab, error) {
 		return nil, fmt.Errorf("session was killed during tab attach")
 	}
 	return tab, nil
-}
-
-// DropClosedTab removes the tab at idx from the in-memory list WITHOUT killing
-// its tmux session (#960 PR 2). It is the no-kill counterpart of CloseTab, used
-// when the daemon's CloseTab RPC has already torn the tmux session down: the
-// daemon owns the kill+persist, and the TUI only needs to drop the now-dead tab
-// from its local view for instant display. Killing again here would shell out a
-// second tmux kill-session that errors ("session not found") on the already-gone
-// session and surface a spurious failure. The agent tab (idx 0) is undroppable;
-// errors on idx 0 or any out-of-range index, mirroring CloseTab.
-func (i *Instance) DropClosedTab(idx int) error {
-	i.mu.Lock()
-	if idx <= 0 || idx >= len(i.Tabs) {
-		i.mu.Unlock()
-		return fmt.Errorf("tab cannot be closed")
-	}
-	tab := i.Tabs[idx]
-	i.Tabs = append(i.Tabs[:idx], i.Tabs[idx+1:]...)
-	i.touchLocked()
-	i.mu.Unlock()
-
-	// Release the TUI-side attach PTY (ptmx fd + blocked cmd.Wait goroutine) the
-	// dropped tab held, matching CloseTab. No kill: the daemon's CloseTab RPC
-	// already tore the tmux session down (#960 PR 2), so CloseAttachOnly only
-	// releases this client's attach resources. Done outside the lock so the tmux
-	// teardown never runs while holding i.mu.
-	if tab.tmux != nil {
-		if err := tab.tmux.CloseAttachOnly(); err != nil {
-			log.WarningLog.Printf("DropClosedTab: releasing attach client for tab %q: %v", tab.Name, err)
-		}
-	}
-	return nil
 }

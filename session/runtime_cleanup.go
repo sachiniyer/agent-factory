@@ -72,6 +72,11 @@ type SandboxRuntimeCleanupData struct {
 	// never obtained (#5571 W8.6): reap then refuses to remove the directory without
 	// stopping a server that may still run, across a daemon restart too.
 	LaunchUnconfirmed bool `json:"launch_unconfirmed,omitempty"`
+	// AccountSyncHost is the listed host (global `hosts`) that licensed the
+	// session's synced account (W7.3), recorded only when one was synced. A
+	// reattach after a daemon restart rebuilds the account workspace from it and
+	// the row's account (#5948); empty on rows with no account.
+	AccountSyncHost string `json:"account_sync_host,omitempty"`
 }
 
 type DockerRuntimeCleanupData struct {
@@ -290,6 +295,13 @@ func (b *HookBackend) clearRuntimeCleanupData() {
 // dial, run docker, or invoke hook scripts while loading storage; the returned
 // closure performs that I/O later when finishUserKill processes the tombstone.
 func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) (Backend, func() error, error) {
+	return restoreRuntimeCleanupWithAccount(title, backendType, data, restoredAccount{})
+}
+
+// restoreRuntimeCleanupWithAccount is restoreRuntimeCleanup for a row that
+// carries a synced account: the sandbox's account workspace is rebuilt from the
+// row (#5948).
+func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCleanupData, account restoredAccount) (Backend, func() error, error) {
 	if data == nil {
 		return nil, nil, fmt.Errorf("no runtime cleanup handle was stored")
 	}
@@ -373,6 +385,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		p.launchScript, p.adoptPending = data.SSH.LaunchScript, data.SSH.AdoptPending
 		p.restoreCallbackIdentity(data.SSH.CallbackRef, data.SSH.CallbackReverse)
 		p.launchAttempted = data.SSH.LaunchUnconfirmed
+		p.restoreAccountWorkspace(account, data.SSH.HostName)
 		// The accept-new store is prepared inside each ATTEMPT, never here: this
 		// function composes a closure while persisted instances are being loaded,
 		// and a transiently unwritable AF home must not be captured as a permanently
@@ -414,6 +427,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		}
 		p.restoreCallbackIdentity(data.Sandbox.CallbackRef, data.Sandbox.CallbackReverse)
 		p.launchAttempted = data.Sandbox.LaunchUnconfirmed
+		p.restoreAccountWorkspace(account, data.Sandbox.AccountSyncHost)
 		teardown := p.reap
 		return &sandboxBackend{
 			provisioner: p,

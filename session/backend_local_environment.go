@@ -53,6 +53,9 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	accountAgent := i.accountNamespaceLocked()
 	i.mu.RUnlock()
 	tmuxSession.SetAccountForAgent(accountAgent, account)
+	// The agent session carries its instance id so a reconcile that finds it live
+	// can prove which create attempt spawned it (#6258).
+	tmuxSession.SetInstanceID(i.ID)
 	return nil
 }
 

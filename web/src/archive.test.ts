@@ -69,9 +69,9 @@ test("a resync keeps the page cursors and loading flag while the counts refresh"
 test("adopted archived rows survive a live-only snapshot only when the caller folds them back in", () => {
   const model = new OptimisticSessions();
   model.reset([row("live", Liveness.Running)]);
-  model.adopt([row("old", Liveness.Archived)]);
+  model.adopt([row("old", Liveness.Archived)], model.snapshotFence());
   assert.deepEqual(model.authoritativeRows().map((s) => s.id), ["live", "old"]);
-  model.adopt([row("old", Liveness.Archived)]);
+  model.adopt([row("old", Liveness.Archived)], model.snapshotFence());
   assert.equal(model.authoritativeRows().length, 2, "adopting a known row replaces it in place");
 });
 

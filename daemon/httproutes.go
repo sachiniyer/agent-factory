@@ -302,6 +302,16 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProject) },
 	},
 	{
+		Method:         http.MethodPost,
+		Path:           "/v1/SetAttention",
+		sandboxAllowed: true,
+		Description:    "Set (with an optional reason) or clear a session's attention request — the agent's explicit ask for the user. It clears when the user submits a line in the agent pane, dismisses it in the web UI, or when the agent starts work again after it went idle.",
+		requestType:    reflect.TypeOf(SetAttentionRequest{}),
+		// rpcHandlerCtx, not rpcHandler: a sandbox caller is constrained to its
+		// own session, like Snapshot's owner narrowing (#3056).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.setAttention) },
+	},
+	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetProjectColor",
 		Description: "Set or clear (empty color) the display color of a registered project (id, a prj_… registry id) — a hex color such as #2f5fd8 that web clients use for the session frame and the favicon.",
@@ -510,6 +520,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/RemoveProposalDoc",
+		Description: "Remove a doc from a proposal and commit the deletion as the given author; the doc stays in the proposal's history.",
+		requestType: reflect.TypeOf(RemoveProposalDocRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RemoveProposalDoc) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/ReadProposalDoc",
 		Description: "Read a proposal doc and the commit it is at, after committing its uncommitted edits as external.",
 		requestType: reflect.TypeOf(ReadProposalDocRequest{}),
@@ -563,6 +580,84 @@ var httpRoutes = []HTTPRoute{
 		Description: "Send the session its unseen proposal edits as a prompt now when the agent is Ready, or on the next tick where it is, and return its push status.",
 		requestType: reflect.TypeOf(SendProposalChangesRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendProposalChanges) },
+	},
+	// Backlog (backlog proposal, api.md).
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/GetBacklog",
+		Description: "Read a project's backlog in tree order, with each item's derived state and reason and the runner's state and slots.",
+		requestType: reflect.TypeOf(GetBacklogRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetBacklog) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/AddBacklogItems",
+		Description: "Add draft items to a project's backlog, or, with a proposal, update the items that have the same proposal and key; returns each key's id.",
+		requestType: reflect.TypeOf(AddBacklogItemsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AddBacklogItems) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/UpdateBacklogItem",
+		Description: "Change an item's title, body, waits-on, program or sequential flag.",
+		requestType: reflect.TypeOf(UpdateBacklogItemRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UpdateBacklogItem) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/MoveBacklogItem",
+		Description: "Move an item and its subtree before or after an item, to the top or bottom of its parent, or into a parent.",
+		requestType: reflect.TypeOf(MoveBacklogItemRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.MoveBacklogItem) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SetBacklogItemStatus",
+		Description: "Set an item's status (draft, queued, review, done, dropped); on a parent, queue queues its draft children and drop drops its open children.",
+		requestType: reflect.TypeOf(SetBacklogItemStatusRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetBacklogItemStatus) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/DeleteBacklogItem",
+		Description: "Delete a draft item that has no runs, thread or children.",
+		requestType: reflect.TypeOf(DeleteBacklogItemRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DeleteBacklogItem) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/PostBacklogMessage",
+		Description: "Add a note to an item's thread; notes are not delivered to a session.",
+		requestType: reflect.TypeOf(PostBacklogMessageRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PostBacklogMessage) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/StartBacklogItem",
+		Description: "Start an item now, ignoring the runner switch and budget: send \"continue\" to its live session, or create a session for it; returns the run, which is starting until the session exists.",
+		requestType: reflect.TypeOf(StartBacklogItemRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.StartBacklogItem) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SetBacklogSettings",
+		Description: "Change a project's runner switch, max running, or what happens to an item's session when the item is done.",
+		requestType: reflect.TypeOf(SetBacklogSettingsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetBacklogSettings) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/GetBudget",
+		Description: "Read the global backlog budget: the share of each Claude plan window the backlog may use, the plan percent at which the runner stops, the cap per run, and the dollar limit for accounts with no plan readings.",
+		requestType: reflect.TypeOf(GetBudgetRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetBudget) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SetBudget",
+		Description: "Change the global backlog budget: share, stop_at and max_per_run as percents from 0 to 100, and usd_limit in US dollars at API prices (0 turns it off).",
+		requestType: reflect.TypeOf(SetBudgetRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetBudget) },
 	},
 	// Tasks.
 	{

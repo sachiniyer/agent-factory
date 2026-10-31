@@ -350,8 +350,41 @@ func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]stru
 }
 
 func accountEnvironmentOperandDenied(value string, names map[string]struct{}) bool {
+	return accountEnvironmentOperandDeniedWith(value, names, true)
+}
+
+// accountEnvironmentFreeTextOptionValueDenied judges the value of an attached
+// `--opt=value` on a wrapper tail this walk does not model. Such a value is
+// free text unless it names a denied variable or carries a denied assignment,
+// so the subscript rule applies only where the value is SHAPED like a variable
+// operand: an identifier immediately followed by `[`. A bracket anywhere else
+// is a glob or character class (`--ignore=[a-c]*`), which is no evidence of a
+// mutation — and the same text as a separate word is never judged at all.
+func accountEnvironmentFreeTextOptionValueDenied(value string, names map[string]struct{}) bool {
+	bracket := strings.IndexByte(value, '[')
+	subscripted := bracket > 0 && isShellIdentifier(value[:bracket])
+	return accountEnvironmentOperandDeniedWith(value, names, subscripted || bracket < 0)
+}
+
+func isShellIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// accountEnvironmentOperandDeniedWith is the shared rule; subscriptRule false
+// skips only the blanket bracket refusal, never the name/assignment check.
+func accountEnvironmentOperandDeniedWith(value string, names map[string]struct{}, subscriptRule bool) bool {
 	name := value
-	if strings.IndexByte(name, '[') >= 0 {
+	if subscriptRule && strings.IndexByte(name, '[') >= 0 {
 		// Bash evaluates indexed-array subscripts as arithmetic and can assign a
 		// protected variable while resolving an unrelated base name. Proving the
 		// subscript is side-effect-free requires runtime semantics, so fail closed.

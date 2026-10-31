@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"syscall"
 	"time"
@@ -122,5 +123,18 @@ func (hs *headlessServer) Launch(req agentLifecycleRequest, resp *agentOKRespons
 		rep := restoreSurvivingTabs(hs.inst, req.Tabs)
 		resp.TabsRestored, resp.TabsGone = rep.Restored, rep.Gone
 	}
+	return nil
+}
+
+// RestoreTabs rebinds surviving tabs on a running server, outside a launch: the
+// daemon's retry for tabs a restart adoption left unknown (#6235, #6236). It is
+// idempotent — an id already held is reported by its true state.
+func (hs *headlessServer) RestoreTabs(req agentLifecycleRequest, resp *agentOKResponse) error {
+	if hs.inst == nil {
+		return errors.New("agent-server has no workspace to restore tabs into")
+	}
+	rep := restoreSurvivingTabs(hs.inst, req.Tabs)
+	resp.OK = true
+	resp.TabsRestored, resp.TabsGone = rep.Restored, rep.Gone
 	return nil
 }

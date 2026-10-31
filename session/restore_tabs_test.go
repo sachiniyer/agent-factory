@@ -177,9 +177,9 @@ func TestRestartAdoptionLaunchHandsTheRosterToAServerThatCanRestoreIt(t *testing
 	for _, tab := range inst.GetTabs() {
 		byID[tab.ID] = tab
 	}
-	assert.False(t, byID["t-shell"].restoreUnavailable, "restored: usable")
-	assert.False(t, byID["t-dead"].restoreUnavailable, "gone is the sweep's to retire, not a guess")
-	assert.True(t, byID["t-old"].restoreUnavailable, "no recorded session: cannot be handed back, said so")
+	assert.Equal(t, TabRestored, byID["t-shell"].restoreState, "restored: usable")
+	assert.Equal(t, TabRestoreGone, byID["t-dead"].restoreState, "confirmed gone: the sweep retires it")
+	assert.Equal(t, TabRestoreUnknown, byID["t-old"].restoreState, "no recorded session: cannot be handed back, said so")
 	assert.Nil(t, byID["t-shell"].tmux, "the daemon fabricates no local binding")
 }
 
@@ -201,7 +201,7 @@ func TestRestartAdoptionAgainstAnOldServerLeavesTheTabsUnavailableAndHonest(t *t
 		if idx == 0 {
 			continue
 		}
-		assert.True(t, tab.restoreUnavailable, tab.ID)
+		assert.Equal(t, TabRestoreUnknown, tab.restoreState, tab.ID)
 		assert.Nil(t, tab.tmux, "no binding is made up")
 		assert.False(t, inst.TabAlive(idx), "reported unavailable")
 	}
@@ -242,7 +242,7 @@ func TestSandboxTabBindingSurvivesADaemonRestartAndReachesTheRoster(t *testing.T
 	require.Empty(t, inst.GetTabs(), "nothing is bound until the reattach reaches the sandbox")
 
 	inst.materializeRestorableTabs()
-	rows := inst.restoreRosterForRestart(true)
+	rows := inst.restoreRosterForRestart(featurePresent)
 	var names []string
 	for _, r := range rows {
 		names = append(names, r.ID+"="+r.TmuxName)

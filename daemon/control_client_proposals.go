@@ -11,7 +11,7 @@ func CallProposal(method string, req, resp any) error {
 
 var proposalMethods = map[string]bool{
 	"ListProposals": true, "GetProposal": true, "StartProposal": true, "AttachProposal": true,
-	"DetachProposal": true, "AddProposalDoc": true, "ReadProposalDoc": true, "SaveProposalDoc": true,
+	"DetachProposal": true, "AddProposalDoc": true, "RemoveProposalDoc": true, "ReadProposalDoc": true, "SaveProposalDoc": true,
 	"WriteProposalDoc": true, "PullProposalChanges": true, "CheckpointProposal": true,
 	"SetProposalPushMode": true, "HoldProposalPush": true, "SendProposalChanges": true,
 }

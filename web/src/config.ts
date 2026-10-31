@@ -527,6 +527,33 @@ export class ConfigPane {
         && active.classList.contains("af-config-save")
         ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null
         : null;
+    // The Accounts section's two commit buttons — Register (button.af-accounts-add)
+    // and Log in (button.af-accounts-login) — live OUTSIDE `.af-config-list`, so the
+    // Save-button rung above (gated on `closest(".af-config-list")`) never matches
+    // them, and their own actions rebuild the pane while the clicked button still
+    // holds focus. The login's "Starting the … login…" status write is synchronous
+    // inside the click dispatch (index.ts doOpenAccountLogin → setAccountStatus →
+    // store.set, whose listeners fire synchronously — see store.ts); the register's
+    // status write lands in the RPC response's `.then`/`.catch`, while the button —
+    // not the input — holds focus. In both cases `replaceChildren` detaches the
+    // focused button and, with no matching capture or restore rung, focus fell to
+    // <body> — the exact body-focus hazard this method exists to prevent (the next
+    // `[`/`]` then cycled the top-level view out of config). The two rungs below name
+    // them, keyed per row so a multi-account roster restores the RIGHT button: the
+    // Log in button's row carries `data-account="agent/name"`, and the Register
+    // button's form carries its agent on the input (`ACCOUNT_INPUT_ATTR`). Scoped to
+    // the accounts buttons' own classes (not the Save button's) so the rungs do not
+    // collide with `saveFocusedKey`'s `.af-config-save` match.
+    const accountsLoginFocusedKey =
+      active instanceof HTMLButtonElement
+        && active.classList.contains("af-accounts-login")
+        ? active.closest("[data-account]")?.getAttribute("data-account") ?? null
+        : null;
+    const accountsAddFocusedAgent =
+      active instanceof HTMLButtonElement
+        && active.classList.contains("af-accounts-add")
+        ? active.closest(".af-accounts-register")?.querySelector<HTMLInputElement>(`input[${ACCOUNT_INPUT_ATTR}]`)?.getAttribute(ACCOUNT_INPUT_ATTR) ?? null
+        : null;
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
@@ -607,6 +634,30 @@ export class ConfigPane {
       if (field && accountCaret?.start != null) {
         field.setSelectionRange(accountCaret.start, accountCaret.end ?? accountCaret.start);
       }
+    } else if (accountsLoginFocusedKey !== null) {
+      // Hand focus back to the rebuilt "Log in" button for the same account row the
+      // user clicked — keyed by `data-account` so a multi-account roster restores the
+      // right one, not the first match. preventScroll for the same reason as every
+      // other rung: focus() would otherwise undo the scroll offset
+      // rebuildKeepingScroll just restored. For the login flow that proceeds to an
+      // overlay terminal, the later `term.focus()` overwrites this — the desired
+      // outcome in both branches.
+      this.el
+        .querySelector<HTMLElement>(
+          `.af-accounts-row[data-account="${CSS.escape(accountsLoginFocusedKey)}"] .af-accounts-login`,
+        )
+        ?.focus({ preventScroll: true });
+    } else if (accountsAddFocusedAgent !== null) {
+      // Hand focus back to the rebuilt "Register" button for the agent whose form the
+      // user submitted from. There is one register form per agent — only the selected
+      // agent's is visible — so the agent the input carries is the identity of the
+      // right button. `this.accountInput(agent)` re-locates the rebuilt form's input
+      // (it already escapes the agent), and the form's sibling button is the one to
+      // re-focus, mirroring the Save-button rung's re-locate-then-focus shape.
+      this.accountInput(accountsAddFocusedAgent)
+        ?.closest(".af-accounts-register")
+        ?.querySelector<HTMLElement>(".af-accounts-add")
+        ?.focus({ preventScroll: true });
     }
   }
 

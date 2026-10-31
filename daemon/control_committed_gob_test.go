@@ -7,10 +7,11 @@ import (
 
 	"encoding/json"
 	"errors"
-	"github.com/sachiniyer/agent-factory/apiproto"
-	"github.com/stretchr/testify/require"
 	"net/rpc"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/stretchr/testify/require"
 )
 
 // The control socket is net/rpc with gob, and gob ELIDES zero values. That is

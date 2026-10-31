@@ -14,12 +14,13 @@ import "./styles.css";
 import "./tokens.css";
 import "./recovery.css";
 import { appendMutationOutcome, type MutationOutcomeNotice } from "./recovery.js";
-import { parseRoute, replaceRoute, restoreLoginRoute, stashLoginRoute, clearLoginRoute, sessionURL } from "./route.js";
+import { parseRoute, parseProjectRoute, replaceRoute, restoreLoginRoute, stashLoginRoute, clearLoginRoute, sessionURL } from "./route.js";
 import { copyText } from "./clipboard.js";
 import {
   addTask,
   ApiError,
   archiveSession,
+  clearAttention,
   clearToken,
   closeTab,
   createSession,
@@ -28,6 +29,7 @@ import {
   createVSCodeTab,
   deleteProject,
   registerProject,
+  registerProjectURL,
   rebindProject,
   setProjectColor,
   type RegisteredProject,
@@ -42,6 +44,7 @@ import {
   getConfig,
   isMutationCommittedError,
   isMutationOutcomeUncertain,
+  looksLikeGitURL,
   isProjectReboundError,
   handoffSession,
   listBackends,
@@ -116,6 +119,7 @@ import { synthIdentities } from "./layout.js";
 import { SplitView } from "./split.js";
 import { archiveKey, archiveFromSnapshot, archiveNeedsFirstPage, emptyArchive } from "./archive.js";
 import { settleLookup } from "./route_lookup.js";
+import { reconcileWindow } from "./archive_window.js";
 import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
@@ -197,6 +201,7 @@ const store = new Store<AppState>({
   focus: "rail",
   activeTab: 0,
   shownTabs: [0],
+  openTabs: [],
   tabError: null,
   tasks: [],
   registeredProjects: [],
@@ -231,7 +236,6 @@ const pendingRestores = new PendingRestores(
   requestPendingRestoreResync,
 );
 const connectionGate = createLatestRequestGate();
-
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
  *  offer a program picker: new session, add task, edit task. One helper rather than
  *  three copies of the token dance — the hardcoded-list bug this RPC exists to
@@ -319,7 +323,7 @@ const splitView = new SplitView(termHost, {
   // Mirror the layout into the store so the tab bar can highlight the focused pane's
   // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
   // on a real change, so this write never loops back through rerender → syncSplit.
-  onLayout: ({ focusedTab, shownTabs }) => store.set({ activeTab: focusedTab, shownTabs }),
+  onLayout: ({ focusedTab, shownTabs, openTabs }) => store.set({ activeTab: focusedTab, shownTabs, openTabs }),
 });
 
 let root: HTMLElement | null = null;
@@ -521,6 +525,7 @@ async function connect(candidate: string): Promise<void> {
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: undefined,
     tasks,
@@ -594,6 +599,7 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: undefined,
     tasks: [],
@@ -629,6 +635,7 @@ function resolveRoute(): void {
     return;
   }
   const route = parseRoute(location.hash);
+  const projectRoute = route ? null : parseProjectRoute(location.hash);
   resolvingRoute = true;
   let lookup = false;
   try {
@@ -642,6 +649,18 @@ function resolveRoute(): void {
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
+    } else if (projectRoute) {
+      // A project link (the switcher's rows, opened in a new tab): land on that
+      // project's sessions view with nothing selected, like a menu click would.
+      const { sessions, tasks, registeredProjects } = store.get();
+      const known = pickerProjects(sessions, tasks, projectRoots(registeredProjects))
+        .includes(projectRoute.project);
+      if (known) {
+        switchProject(projectRoute.project);
+        store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+      } else {
+        showTransientNotice("No project at that path in this daemon");
+      }
     } else {
       store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
       if (route) showTransientNotice("No session with that id in this daemon");
@@ -661,6 +680,7 @@ function resolveRoute(): void {
 async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
   const tok = token;
   const generation = connectionGeneration;
+  const fence = optimisticSessions.snapshotFence();
   let rows: SessionData[] = [];
   try {
     if (tok !== null) rows = await fetchSessionsById(tok, [id]);
@@ -671,19 +691,27 @@ async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
     }
   }
   if (token !== tok || connectionGeneration !== generation) return;
+  // The one terminal state of an unknown id: the empty pane (the previous
+  // selection must not linger), one toast, and the URL reset to /.
+  const missing = (): void => {
+    store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
+    showTransientNotice("No session with that id in this daemon");
+    replaceRoute(null);
+  };
   settleLookup(createSelectionIntent, ticket, id, rows, {
     found: (row) => {
-      optimisticSessions.adopt([row]);
+      if (optimisticSessions.adopt([row], fence).length === 0) {
+        // An event newer than the read refused it. If that event already put the
+        // session in the model, the route resolves against that row; only a row
+        // the model does not hold is genuinely missing (a kill, #6209).
+        if (store.get().sessions.some((s) => s.id === id)) resolveRoute();
+        else missing();
+        return;
+      }
       applySessions(optimisticSessions.project());
       resolveRoute();
     },
-    // The one terminal state of an unknown id: the empty pane (the previous
-    // selection must not linger), one toast, and the URL reset to /.
-    missing: () => {
-      store.set({ selectedId: null, view: "sessions", focus: "rail", activeTab: 0 });
-      showTransientNotice("No session with that id in this daemon");
-      replaceRoute(null);
-    },
+    missing,
   });
 }
 
@@ -1358,6 +1386,14 @@ function openDeleteProject(root: string, label: string): void {
  *  login-framed describeError) and the modal stays open to correct; on success the
  *  modal closes.
  *
+ *  A GIT URL instead takes the RegisterProject url half (W9.10, mirrors
+ *  `af projects add <url>` and the TUI's add prompt): the daemon clones it on
+ *  its own host inside the request, which can run for minutes, so the modal
+ *  closes and the outcome is reported the way a session create's is — a
+ *  definite refusal remounts the form with the daemon's message and the typed
+ *  URL intact, an outcome that never arrived is reported unknown, and a
+ *  success is already visible through the echoed projects.changed.
+ *
  *  The registered repo appears in the switcher and is selectable in the New session
  *  picker IMMEDIATELY — no session required (the #2456 union: projectSummaries /
  *  pickerProjects ∪ the daemon's registry, listProjects). The write closes the modal;
@@ -1365,6 +1401,7 @@ function openDeleteProject(root: string, label: string): void {
  *  refetches the registry and surfaces the new project — so the add is observable
  *  without a reload. */
 function openAddProject(): void {
+  const invoker = captureModalInvoker();
   openModal(
     addProjectModal({
       // #2788: the picker's daemon read. The token is resolved PER CALL, not
@@ -1380,15 +1417,57 @@ function openAddProject(): void {
       // The daemon's own message ("cannot read /x: permission denied"), never the
       // login-framed describeError — a refused directory is not an auth failure.
       errorText,
-      onSubmit: (path: string) => {
+      onSubmit: (value: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
         if (tok === null || !modal) {
           return;
         }
         const m = modal;
+        if (looksLikeGitURL(value)) {
+          // A URL is cloned by the daemon on ITS host (W9.10), inside the
+          // request — a large repo can run for minutes, far past anything a
+          // held-busy modal should wait on. Latch the detached form, close the
+          // modal, and report like a create: the picker said "the project
+          // appears when the registration lands", and projects.changed keeps
+          // that promise without any row pretending to know the clone's state.
+          m.setBusy(true);
+          closeModal();
+          showTransientNotice(`Cloning ${value} on the daemon host — the project appears in the switcher when it lands.`);
+          void registerProjectURL(value, tok)
+            .then(() => {
+              refreshRegisteredProjects();
+            })
+            .catch((e) => {
+              if (isMutationOutcomeUncertain(e)) {
+                // A clone may still have landed (or still be running): re-read
+                // the registry rather than assume either way, and say so.
+                refreshRegisteredProjects();
+                surfaceMutationError(
+                  new Error(`The registration of ${value} could not be confirmed. ${errorText(e)}`),
+                  "uncertain",
+                );
+                return;
+              }
+              // A definite daemon refusal (the URL failed validation, or the
+              // clone itself failed): remount the form with its message inline
+              // and the typed URL still there to correct — the shape the create
+              // modal's reverted row returns to. If another overlay has taken
+              // the slot or the credential moved on, the outcome notice is the
+              // path — openModal would reap a live assistant/login overlay.
+              m.setBusy(false);
+              m.setError(errorText(e));
+              if (!modal && !configAssistant && !accountLogin && token === tok) {
+                openModal(m, true, invoker);
+                m.el.querySelector<HTMLElement>(".af-modal-card input")?.focus({ preventScroll: true });
+              } else {
+                surfaceMutationError(e);
+              }
+            });
+          return;
+        }
         m.setBusy(true);
-        void registerProject(path, tok)
+        void registerProject(value, tok)
           .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
             m.setBusy(false);
@@ -2787,22 +2866,26 @@ function openEditTask(task: TaskData): void {
 /** Enables/disables a task (UpdateTask with `enabled` flipped), then refetches. A
  *  failure surfaces as the shared transient toast (task ops have no modal). Keys off
  *  the task's stable id — requireTaskID in the api layer refuses a missing one. */
-function toggleTask(task: TaskData): void {
+async function toggleTask(task: TaskData): Promise<boolean> {
   const tok = token;
   if (tok === null) {
-    return;
+    return false;
   }
   // Ship ONLY the flipped bit as a field-level patch (#1700): the toggle must
   // not carry the rest of this (possibly-stale) cached task, or it could revert a
   // concurrent edit another client made to the prompt/trigger/target.
-  void updateTask(task, { enabled: !task.enabled }, tok)
-    .then(refreshTasks)
-    .catch((e) => {
-      if (isMutationCommittedError(e)) {
-        refreshTasks();
-      }
-      surfaceTabError(e);
-    });
+  try {
+    await updateTask(task, { enabled: !task.enabled }, tok);
+  } catch (e) {
+    const committed = isMutationCommittedError(e);
+    if (committed) {
+      refreshTasks();
+    }
+    surfaceTabError(e);
+    return committed;
+  }
+  refreshTasks();
+  return true;
 }
 
 /** Fires a task now (TriggerTask), then refetches to pick up the new last-run. The
@@ -2823,6 +2906,19 @@ function doTriggerTask(task: TaskData): void {
       }
       surfaceTabError(e);
     });
+}
+
+/** Dismisses the selected session's attention request — the × on the header chip.
+ *  The clear names the request the chip showed, so an agent that raised a newer
+ *  one meanwhile keeps it. */
+function doClearAttention(): void {
+  const sel = selectedSessionData();
+  const tok = token;
+  const setAt = sel?.attention?.set_at;
+  if (!sel || tok === null || !setAt) {
+    return;
+  }
+  void clearAttention(sel.id ?? "", setAt, tok).catch(surfaceTabError);
 }
 
 /**
@@ -3044,6 +3140,7 @@ const actions = {
   archive: (session: ActionableSession) => openConfirm("archive", session),
   restore: (session: ActionableSession) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  clearAttention: doClearAttention,
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
@@ -3159,9 +3256,13 @@ function startStream(tok: string): void {
   stream = new EventStream(tok, {
     onEvent,
     onResync: () => {
+      markArchiveDirty();
       requestResync();
     },
-    onStatus: (s: EventStreamStatus) => store.set({ live: s }),
+    onStatus: (s: EventStreamStatus) => {
+      if (s !== "open") markArchiveDirty();
+      store.set({ live: s });
+    },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
     // Not /v1/auth-info, which says whether a token is required, not whether
@@ -3315,19 +3416,31 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
  *  rows on every resync and the archive would empty itself. They are re-read by id
  *  rather than kept as they were: a session deleted while this client missed the
  *  event must not linger, and one restored since is already in the live rows. */
-const ARCHIVE_WINDOW_REREAD_MAX = 500;
-async function fetchSnapshotWithArchiveWindow(tok: string): Promise<SessionSnapshot> {
+// Set whenever the stream was not live (or asked for a resync): rows may have been
+// archived or deleted unseen. A reconcile clears it only when its snapshot is applied
+// (clearArchiveDirty), so a response discarded by a fence retries the discovery.
+let archiveDirtyEpoch = 1;
+let archiveCleanEpoch = 0;
+function markArchiveDirty(): void { archiveDirtyEpoch++; }
+function clearArchiveDirty(epoch: number): void { if (epoch > archiveCleanEpoch) archiveCleanEpoch = epoch; }
+
+async function fetchSnapshotWithArchiveWindow(tok: string): Promise<SessionSnapshot & { archiveEpoch: number }> {
+  const epoch = archiveDirtyEpoch;
   const snapshot = await fetchSessionSnapshot(tok);
-  if (!snapshot.archived) return snapshot;
+  if (!snapshot.archived) return { ...snapshot, archiveEpoch: epoch };
   const live = new Set(snapshot.sessions.map((s) => s.id));
-  const window = optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id));
-  if (window.length === 0) return snapshot;
-  let kept: SessionData[] = window;
-  if (window.length <= ARCHIVE_WINDOW_REREAD_MAX) {
-    const ids = window.flatMap((s) => (s.id ? [s.id] : []));
-    kept = (await fetchSessionsById(tok, ids)).filter((s) => isArchived(s) && !live.has(s.id));
-  }
-  return { ...snapshot, sessions: [...snapshot.sessions, ...kept] };
+  const archive = store.get().archive;
+  // Reads nothing while the stream stayed live and the counts did not move: a
+  // deletion elsewhere then arrived as an event (adopt fence + event path).
+  const { rows: kept, complete } = await reconcileWindow({
+    held: optimisticSessions.authoritativeRows().filter((s) => isArchived(s) && !live.has(s.id)),
+    live, archive, summary: snapshot.archived, dirty: epoch > archiveCleanEpoch, isArchived,
+    fetchById: (ids) => fetchSessionsById(tok, ids),
+    fetchPage: (project, before, limit) => fetchArchivedPage(tok, { project, before, limit }),
+  });
+  // A discovery that ran out of pages did not reconcile the window: leave the
+  // dirty mark so the next resync tries again instead of calling it clean.
+  return { ...snapshot, sessions: [...snapshot.sessions, ...kept], archiveEpoch: complete ? epoch : archiveCleanEpoch };
 }
 
 /** Reads the next page of the selected project's archive, newest first, into the
@@ -3344,16 +3457,12 @@ async function loadArchivedPage(): Promise<void> {
   const before = start.cursors[key] ?? null;
   store.set({ archive: { ...start, loading: true, error: undefined } });
   try {
-    // A page read across an event may carry a row that event just removed or
-    // restored; adopting it would resurrect that row. Read again, bounded.
-    let page: Awaited<ReturnType<typeof fetchArchivedPage>>;
-    for (let attempt = 0; ; attempt++) {
-      const eventsBefore = sessionEventGeneration;
-      page = await fetchArchivedPage(tok, { project, before });
-      if (eventsBefore === sessionEventGeneration || attempt >= 2) break;
-    }
+    // A row an event removed or restored while the read was in flight is refused by
+    // the adopt fence, so no re-read is needed (#6209).
+    const fence = optimisticSessions.snapshotFence();
+    const page = await fetchArchivedPage(tok, { project, before });
     if (token !== tok || connectionGeneration !== generation) return;
-    optimisticSessions.adopt(page.sessions);
+    optimisticSessions.adopt(page.sessions, fence);
     applySessions(optimisticSessions.project());
     const archive = store.get().archive;
     store.set({ archive: { ...archive, loading: false, cursors: { ...archive.cursors, [key]: page.next } } });
@@ -3400,6 +3509,7 @@ async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnaps
     let daemonBootId: string | undefined;
     let skippedRepos: SkippedRepo[] | undefined;
     let archived: ArchivedSummary | undefined;
+    let archiveEpoch = 0;
     const sessions = await optimisticSessions.refresh(async () => {
       // refresh may retry after an intervening event. Carry the issuance stamp
       // and raw rows from the accepted attempt together to the commit site.
@@ -3411,8 +3521,10 @@ async function fetchProjectedSnapshot(tok: string): Promise<AcceptedSessionSnaps
       daemonBootId = snapshot.daemonBootId;
       skippedRepos = snapshot.skippedRepos;
       archived = snapshot.archived;
+      archiveEpoch = snapshot.archiveEpoch;
       return authoritative;
     }, () => archived !== undefined);
+    if (sessions !== null) clearArchiveDirty(archiveEpoch);
     return sessions === null ? null : {
       sessions, authoritative, generation, operationLockTimeoutMs, operationClockMs, daemonBootId, skippedRepos, archived,
     };
@@ -3473,6 +3585,7 @@ function requestResync(): void {
           skippedRepos: snapshot.skippedRepos,
           archived: snapshot.archived,
         }, sessions);
+        clearArchiveDirty(snapshot.archiveEpoch);
         // A successful HTTP response is not necessarily authoritative: either fence
         // above can discard it and schedule a replacement. Stamp the stable app root
         // only after the winning response reaches the store, giving black-box clients

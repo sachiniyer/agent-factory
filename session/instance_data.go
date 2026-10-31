@@ -71,6 +71,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		UserKilled:               i.userKilled,
 		StartupStateUnknown:      i.startupStateUnknown,
 		RootRecreateContext:      i.rootRecreateContext,
+		Attention:                cloneAttention(i.attention),
 	}
 	data.IdleReason = IdleReasonFor(data)
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
@@ -173,9 +174,13 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	data.TaskRunInterrupted = i.taskRunInterrupted
 	data.TaskRunInterruptedAt = i.taskRunInterruptedAt
 	data.TaskRunFailurePending = i.taskRunFailurePending
-	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
-	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
-	if i.taskRunActive {
+	data.BacklogItem = i.BacklogItem
+	data.BacklogRunActive = i.backlogRunActive
+	data.BacklogRunEndedAt = i.backlogRunEndedAt
+	gate := i.runGateActiveLocked()
+	data.TaskRunIdleEdgeHeld = gate && i.taskRunIdleEdgeHeld
+	data.TaskRunTurnGateHeld = gate && i.taskRunTurnGateHeld
+	if gate {
 		// Same gating as the held flag: a finished run's last turn observation
 		// is not evidence for anything, and persisting it would let a later run
 		// on this row inherit a boundary it never crossed.
@@ -487,10 +492,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
 		taskRunActive:        data.TaskRunActive,
+		BacklogItem:          data.BacklogItem,
+		backlogRunActive:     data.BacklogRunActive && data.BacklogItem != 0,
+		backlogRunEndedAt:    data.BacklogRunEndedAt,
 		taskRunInterrupted:   data.TaskRunInterrupted && !data.TaskRunActive,
 		taskRunInterruptedAt: data.TaskRunInterruptedAt,
-		taskRunIdleEdgeHeld:  data.TaskRunActive && data.TaskRunIdleEdgeHeld,
-		taskRunTurnGateHeld:  data.TaskRunActive && data.TaskRunTurnGateHeld,
+		taskRunIdleEdgeHeld:  runGateActiveInData(data) && data.TaskRunIdleEdgeHeld,
+		taskRunTurnGateHeld:  runGateActiveInData(data) && data.TaskRunTurnGateHeld,
 		// Gate on the run still being in flight, mirroring the write side and
 		// the held flag: a finished run's stale observation cannot release the
 		// next run's delivery window.
@@ -541,6 +549,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// outage. An unrecognized value from a newer binary loads as-is and
 		// renders nothing, which is the rollforward-safe direction.
 		rootRecreateContext: data.RootRecreateContext,
+		attention:           cloneAttention(data.Attention),
 	}
 	// The restart twin of the live edge (#5278): a run persisted mid-flight
 	// whose prompt boundary reloads unbound AND whose last send verdict is a
@@ -569,6 +578,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		instance.taskRunFailedStamp = true
 		instance.taskRunFailurePending = true
 	}
+	instance.dropAttentionIfStoppedLocked()
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	// The pending on_complete obligation rides the restart so the daemon can
 	// re-drive the teardown it could not finish (#4162). An archived row cannot
@@ -634,7 +644,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// workspace is still on the host, and a kill of the row must reap it.
 		preservedArchive := liveness == LiveArchived && hadPersistedCleanupHandle && data.keepsPreservedWorkspaceHandle()
 		if preservedArchive || (liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle)) {
-			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
+			backend, teardown, cleanupErr := restoreRuntimeCleanupWithAccount(data.Title, data.BackendType, data.RuntimeCleanup,
+				restoredAccount{Name: data.Account, Agent: data.AccountAgent, Program: data.Program})
 			if cleanupErr != nil {
 				if data.UserKilled && data.RuntimeCleanup == nil && data.KilledWithoutLiveRuntime {
 					// Inert-at-kill tombstone: the kill was committed against an inert
@@ -865,6 +876,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			instance.assignLivenessLocked(LiveLost)
 			instance.touchLocked()
 		}
+		// Attention rides this provisional Lost on purpose: the daemon reattaches
+		// the row to the agent that is still running and waiting for the user
+		// (ReattachSandbox). SettleAttentionAfterReattach drops it when that
+		// reattach does not bring the row back to a live state.
 		instance.mu.Unlock()
 		return inertReturn(), nil
 	}
@@ -905,6 +920,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			instance.mu.Lock()
 			instance.assignLivenessLocked(LiveLost)
 			instance.started = true
+			instance.dropAttentionIfStoppedLocked()
 			instance.touchLocked()
 			instance.mu.Unlock()
 			return instance, nil

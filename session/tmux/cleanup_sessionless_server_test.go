@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -232,13 +234,7 @@ func TestProbeSessionStrictStaysUnknownWhenAnUnsignallableCandidateRemains(t *te
 	// liveTmuxServerPIDs' comm prefilter admits and isTmuxArgv accepts —
 	// but it is not a daemonised server (SID != PID, PPID != 1), so
 	// IsTmuxServer rejects it at tmuxServerIdentity's `case "tmux"`.
-	sleepPath, err := exec.LookPath("sleep")
-	require.NoError(t, err)
-	fakeBody, err := os.ReadFile(sleepPath)
-	require.NoError(t, err)
-	fakeDir := t.TempDir()
-	fakeTmux := filepath.Join(fakeDir, "tmux")
-	require.NoError(t, os.WriteFile(fakeTmux, fakeBody, 0o755))
+	fakeTmux := sleeper.Named(t, filepath.Join(t.TempDir(), "tmux"))
 	fakeCmd := exec.Command(fakeTmux, "60")
 	require.NoError(t, fakeCmd.Start())
 	t.Cleanup(func() {

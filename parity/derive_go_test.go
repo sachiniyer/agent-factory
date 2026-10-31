@@ -59,11 +59,23 @@ var goSurfaces = map[string][]string{
 // check, so this registry cannot silently fall behind the code.
 var auditedRequests = map[string]reflect.Type{
 	"StartProposalRequest":          reflect.TypeOf(daemon.StartProposalRequest{}),
+	"GetBacklogRequest":             reflect.TypeOf(daemon.GetBacklogRequest{}),
+	"AddBacklogItemsRequest":        reflect.TypeOf(daemon.AddBacklogItemsRequest{}),
+	"UpdateBacklogItemRequest":      reflect.TypeOf(daemon.UpdateBacklogItemRequest{}),
+	"MoveBacklogItemRequest":        reflect.TypeOf(daemon.MoveBacklogItemRequest{}),
+	"SetBacklogItemStatusRequest":   reflect.TypeOf(daemon.SetBacklogItemStatusRequest{}),
+	"DeleteBacklogItemRequest":      reflect.TypeOf(daemon.DeleteBacklogItemRequest{}),
+	"PostBacklogMessageRequest":     reflect.TypeOf(daemon.PostBacklogMessageRequest{}),
+	"SetBacklogSettingsRequest":     reflect.TypeOf(daemon.SetBacklogSettingsRequest{}),
+	"GetBudgetRequest":              reflect.TypeOf(daemon.GetBudgetRequest{}),
+	"SetBudgetRequest":              reflect.TypeOf(daemon.SetBudgetRequest{}),
+	"StartBacklogItemRequest":       reflect.TypeOf(daemon.StartBacklogItemRequest{}),
 	"AttachProposalRequest":         reflect.TypeOf(daemon.AttachProposalRequest{}),
 	"DetachProposalRequest":         reflect.TypeOf(daemon.DetachProposalRequest{}),
 	"ListProposalsRequest":          reflect.TypeOf(daemon.ListProposalsRequest{}),
 	"GetProposalRequest":            reflect.TypeOf(daemon.GetProposalRequest{}),
 	"AddProposalDocRequest":         reflect.TypeOf(daemon.AddProposalDocRequest{}),
+	"RemoveProposalDocRequest":      reflect.TypeOf(daemon.RemoveProposalDocRequest{}),
 	"PullProposalChangesRequest":    reflect.TypeOf(daemon.PullProposalChangesRequest{}),
 	"CheckpointProposalRequest":     reflect.TypeOf(daemon.CheckpointProposalRequest{}),
 	"ReadProposalDocRequest":        reflect.TypeOf(daemon.ReadProposalDocRequest{}),
@@ -116,6 +128,7 @@ var auditedRequests = map[string]reflect.Type{
 	"UpdateTaskRequest":             reflect.TypeOf(daemon.UpdateTaskRequest{}),
 	"RebindProjectRequest":          reflect.TypeOf(daemon.RebindProjectRequest{}),
 	"SetProjectColorRequest":        reflect.TypeOf(daemon.SetProjectColorRequest{}),
+	"SetAttentionRequest":           reflect.TypeOf(daemon.SetAttentionRequest{}),
 }
 
 // minGoLiterals guards against a vacuous pass: if the surfaces are refactored to

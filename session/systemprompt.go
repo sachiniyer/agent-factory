@@ -35,7 +35,7 @@ import (
 // generated plugin artifacts must never carry a verbatim copy of the "you are
 // running inside af" opening, which is false for the audience that installed
 // them.
-const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageAttentionInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
 
 // afUsageReferenceCallbackless replaces afUsageReference for an instance that
 // has NO af callback — a sandbox session whose credential could not be minted
@@ -127,6 +127,7 @@ Sessions (one agent per isolated worktree):
   af sessions kill <title>                             Delete a session; work in af-owned workspaces can be lost
   af sessions archive <title>                          Archive (tmux down, worktree moved out; restartable)
   af sessions archive --self                            Archive your OWN session (resolved via whoami); no title needed
+  af sessions attention --self [--reason <text>]        Tell the user you need them (a blinking dot on your row in the web UI); clears when they reply
   af sessions handoff <title> [--to <agent>] [--account <name>]  Continue under another agent, account, or both
   af sessions retry-limit <title>                      Retry a usage-limit resume or an inspected, unconfirmed handoff
   af sessions retry-limit <title> --delivered           Mark an inspected handoff mission delivered (no resend); only after confirming it landed
@@ -158,7 +159,7 @@ Creating or prompting a session: the prompt is the entire contract, because the 
 // afUsageProposalsInside names only the entry points; the working rules are
 // printed by af proposal start and attach, so they can change without a
 // skill update. Proposal commands need a session, so plugins do not get it.
-const afUsageProposalsInside = `Proposals: when the user asks you to make a proposal (a plan or design written as docs you edit together), run "af proposal start <slug>" with a short lowercase-dashed slug. When the user asks you to work on an existing proposal, run "af proposal list" to find it and "af proposal attach <slug>". Both print the proposal's path and a "rules" field: follow those rules for the rest of the work. Do not write proposal docs into the repository yourself; af keeps them outside the worktree.`
+const afUsageProposalsInside = `Proposals: when the user asks to make a proposal (a plan or design written as docs you edit together), run "af proposal start <slug>" with a short lowercase-dashed slug. When the user asks you to work on an existing proposal, run "af proposal list" to find it and "af proposal attach <slug>". Both print the proposal's path and a "rules" field: follow those rules for the rest of the work. Do not write proposal docs into the repository yourself; af keeps them outside the worktree.`
 
 // afSkillDescriptionInside is AfSkillDescription for an agent inside an af
 // session, where proposal commands work.
@@ -169,6 +170,10 @@ const afSkillDescriptionInside = "Manage Agent Factory (af) sessions, tabs, sche
 // proposal" does not match a description about sessions and tasks.
 const afProposalTrigger = "Use when the user asks to make, write, draft, or start a proposal, plan, spec, or design doc, or to work on, continue, review, or update an existing proposal"
 
+// afUsageAttentionInside is inside-only: the user scans many sessions at once,
+// and an agent that stops to wait gives no other sign that it needs them.
+const afUsageAttentionInside = `Asking for the user: the user watches many sessions at once and cannot tell that you are blocked on them. Run "af sessions attention --self --reason '<what you need, in one line>'" only when you are blocked on a decision or question that only the user can answer, as the last step before you stop, after you write the question in your reply. Do not run it when a task has simply finished or at the end of an ordinary turn. It clears on its own when the user replies; "af sessions attention --self --clear" removes it if you no longer need them.`
+
 // afUsageOutroInside is the wrap-up for an agent that IS an af session: it can
 // self-archive, and doing so kills it.
 const afUsageOutroInside = `Finishing up: when the user confirms your work is complete and asks you to wrap up, self-archive with "af sessions archive --self". It is non-destructive — the worktree is moved out, nothing is deleted, and the session is restorable later with "af sessions restore <title>". But it tears down THIS session's tmux, so it kills you the instant you run it: nothing you say or do after it is ever seen. Treat it as the ABSOLUTE LAST action — first finish every summary, result, and confirmation the user needs, and only once you have nothing left to report run "af sessions archive --self" as the very last step.`
@@ -177,7 +182,7 @@ const afUsageOutroInside = `Finishing up: when the user confirms your work is co
 // The inside version would be actively wrong here in both directions: there is
 // no own session to archive, and the sessions this agent created keep running
 // after the conversation ends unless it says so.
-const afUsageOutroPlugin = `Finishing up: the sessions you create keep running after this conversation ends — they are separate agents in their own worktrees, not part of this one. When work in a session is done and reviewed, archive it with "af sessions archive <title>": non-destructive, the worktree is moved out, nothing is deleted, and it comes back with "af sessions restore <title>". Prefer archiving over "af sessions kill <title>", which permanently removes af-owned workspaces; uncommitted changes and unpushed commits there can be lost. "af sessions whoami" and "af sessions archive --self" resolve the CALLING session, so they only work from inside a session af launched — from here, always name the session.`
+const afUsageOutroPlugin = `Finishing up: the sessions you create keep running after this conversation ends — they are separate agents in their own worktrees, not part of this one. When work in a session is done and reviewed, archive it with "af sessions archive <title>": non-destructive, the worktree is moved out, nothing is deleted, and it comes back with "af sessions restore <title>". Prefer archiving over "af sessions kill <title>", which permanently removes af-owned workspaces; uncommitted changes and unpushed commits there can be lost. "af sessions whoami", "af sessions archive --self", and "af sessions attention --self" resolve the CALLING session, so they only work from inside a session af launched — from here, always name the session.`
 
 // afUsageOutro closes the reference for both audiences.
 const afUsageOutro = `Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes ALL linked worktrees and their branches across repos.`

@@ -274,9 +274,9 @@ only needs the workspace tooling:
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
 - A libc/architecture compatible with the daemon's `af` binary. The copied-in
   binary is the **daemon's own executable**, and the release artifacts
-  `install.sh` fetches are a plain `go build` (cgo on) on `ubuntu-latest` —
+  `install.sh` fetches are a plain `go build` (cgo on) on `ubuntu-24.04` —
   i.e. **dynamically linked against glibc**. So your base must be **glibc, and
-  its glibc must be ≥ the daemon build's** (`ubuntu-latest` is glibc 2.39
+  its glibc must be ≥ the daemon build's** (`ubuntu-24.04` is glibc 2.39
   today): `debian:trixie`/`ubuntu:24.04` work, `debian:bookworm` (2.36) is too
   old, and a musl base (alpine) will not run the binary at all. If you rebuild
   the daemon on a newer-glibc distro, rebuild the image on a matching-or-newer
@@ -714,9 +714,10 @@ session against a containerized sshd host through its own RPCs (create, prompt,
 preview, tab, archive, restore, kill, and a task-fired create).
 `TestSandboxDisruptionsE2E` then hits one live session: a daemon restart (same
 agent-server process, roster and conversation, no re-provision) and a killed ssh
-connection (reconnects with no operator action). A third case, a host restart
-that recovers the committed work, is a skipped subtest until W1.6 and W8.5/W8.6
-land. `make backend-sandbox-e2e` runs both tests by hand; it is not a routine
+connection (reconnects with no operator action). A third case archives the
+session, restarts the host container and the daemon, restores, and compares a
+stdout-only fingerprint (HEAD, a staged file, an unstaged edit, an untracked file
+and an ignored one) taken before the archive with one taken after the restore. `make backend-sandbox-e2e` runs both tests by hand; it is not a routine
 local gate.
 
 `make backend-ssh-roundtrip` runs the real end-to-end SSH round-trips on a host
