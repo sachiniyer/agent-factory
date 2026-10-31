@@ -340,7 +340,7 @@ existing liveness/in-flight-op resolution. Shapes and labels carry the meaning
 without colour; reserve blank status cells in the TUI for alignment.
 
 The web rail has no state words, so its glyphs differ: an idle row is blank, a
-working row draws a muted filled circle, and a row whose agent asked for the user
+working row draws a muted spinner, and a row whose agent asked for the user
 (`af sessions attention`) draws a blinking circle in the attention colour.
 
 ## Type, spacing and radii

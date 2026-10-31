@@ -863,12 +863,19 @@ button:disabled,
   line-height: 1.5;
   font-size: var(--af-type-body);
 }
-.af-dot-working .af-icon,
 .af-dot-limit .af-icon {
   fill: currentColor;
 }
 .af-dot-working {
   color: var(--af-ink-muted);
+}
+.af-dot-working .af-icon {
+  animation: af-working-spin 1s linear infinite;
+}
+@keyframes af-working-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .af-dot-attention .af-icon {
   fill: currentColor;
@@ -886,7 +893,8 @@ button:disabled,
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .af-dot-attention {
+  .af-dot-attention,
+  .af-dot-working .af-icon {
     animation: none;
   }
   .af-dot-attention .af-icon {
@@ -3697,11 +3705,6 @@ textarea[class] {
 .af-docs-status:is([data-state=saving], [data-state=pending], [data-state=loading]) .af-icon {
   display: inline-block;
   animation: af-working-spin 1s linear infinite;
-}
-@keyframes af-working-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   .af-docs-status:is([data-state=saving], [data-state=pending], [data-state=loading]) .af-icon {

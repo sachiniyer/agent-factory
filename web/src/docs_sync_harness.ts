@@ -7,6 +7,7 @@
 
 import type { DocText, SaveResult } from "./proposal_api.js";
 import { DraftStorage, type KV } from "./docs_draft_store.js";
+import { ClosingTabs } from "./docs_closing.js";
 import { CONFLICT_MINE, CONFLICT_SPLIT, CONFLICT_THEIRS, hasConflictMarkers } from "./text_diff.js";
 
 export interface SyncLike {
@@ -159,6 +160,9 @@ interface Pending {
   reject(e: unknown): void;
 }
 
+/** A sync of an engine that can be tracked as closed (whenQuiet and abandon). */
+type Closable = SyncLike & { whenQuiet(): Promise<void>; abandon(keepDraft: boolean): void };
+
 export interface ScenarioOptions {
   seed: number;
   steps: number;
@@ -227,6 +231,12 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const net: Pending[] = [];
   let now = 0;
   const timers: { at: number; fn: () => void; live: boolean; owner: "a" | "g" }[] = [];
+  /** Every sync whose tab was closed, whether or not the pane still tracks it. */
+  const closedSyncs = new Set<SyncLike>();
+  const saveBurst = new Map<string, { at: number; n: number }>();
+  /** The daemon's write path fails (5xx) while reads succeed. */
+  let writesBroken = false;
+  let flushing = false;
   const saves: { doc: string; text: string; bufferHadMarkers: boolean }[] = [];
   let seq = 0;
   let violation: Violation | null = null;
@@ -241,7 +251,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
 
   const syncs = new Map<string, SyncLike>();
   /** Tabs that closed with a save still in flight, per doc (the pane keeps this map). */
-  const closing = new Map<string, Set<SyncLike>>();
+  const closing = new ClosingTabs<Closable>();
   const editor = { doc: "" as string, text: "" };
   let attached = "";
   const events: { doc: string; commit: string }[] = [];
@@ -265,8 +275,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     const deps: SyncDepsLike = {
       load: async (initial) => {
         // A reopened tab loads only after the closing tab's final save has landed.
-        const priors = initial ? [...(closing.get(doc) ?? [])].filter((p) => p !== self) : [];
-        await Promise.all(priors.map((p) => p.whenQuiet?.()));
+        const priors = initial && self ? closing.priors(doc, self as Closable) : [];
+        await Promise.all(priors.map((p) => p.whenQuiet()));
         const stored = initial && synthetic ? synthetic() : null;
         if (stored) return stored;
         return call(() => {
@@ -283,15 +293,22 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         void final;
         // I12: once a newer tab has loaded the doc, a tab that closed on it writes no more.
         const current = syncs.get(doc);
-        if (!isGhost && self && current && current !== self && current.text !== "" && closing.get(doc)?.has(self)) {
+        if (!isGhost && self && current && current !== self && current.text !== "" && closedSyncs.has(self)) {
           fail("closed-tab-wrote-after-reopen", `${doc}: a closed tab sent a save after the doc was reopened and loaded`);
         }
         // I10: a sync that knows its doc is gone sends nothing.
         if (self && self.currentStatus === "gone") fail("saved-while-gone", `${doc}: a deleted doc's sync sent a save`);
         if (process.env.AF_STASHLOG || (process.env.AF_KVLOG && text.includes(process.env.AF_KVLOG))) console.log("SAVE", isGhost ? "ghost" : "A", doc, JSON.stringify(text), base, "final=" + final);
+        // I18: a save that keeps failing is retried with a delay, not in a loop at one instant.
+        // (A flush is the user asking to save now: the pane's Send now. It is the user's loop, not the engine's.)
+        const burst = saveBurst.get(`${doc}${owner}`);
+        if (flushing) saveBurst.delete(`${doc}${owner}`);
+        else if (burst && burst.at === now) burst.n++;
+        else saveBurst.set(`${doc}${owner}`, { at: now, n: 1 });
+        if ((saveBurst.get(`${doc}${owner}`)?.n ?? 0) > 12) fail("save-loop-without-backoff", `${doc}: ${saveBurst.get(`${doc}${owner}`)!.n} saves at one instant`);
         const faulty = rand() < (o.faults ?? 0);
         const kinds = o.chaos ? (["drop", "lose-reply", "refuse", "hang-applied", "hang-lost"] as const) : (["drop", "lose-reply"] as const);
-        const fault = nextSaveFault ?? (faulty ? pick(kinds) : null);
+        const fault = nextSaveFault ?? (writesBroken ? "drop" : faulty ? pick(kinds) : null);
         nextSaveFault = null;
         const pending = call(() => {
           if (d.down > 0) {
@@ -331,6 +348,26 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       },
     };
     const s = o.makeSync(deps);
+    const rawFlush = s.flush.bind(s);
+    s.flush = () => {
+      flushing = true;
+      try {
+        rawFlush();
+      } finally {
+        flushing = false;
+      }
+    };
+    if (s.whenSaved) {
+      const rawWhenSaved = s.whenSaved.bind(s);
+      s.whenSaved = () => {
+        flushing = true; // Send now asks for a save right away, too
+        try {
+          return rawWhenSaved();
+        } finally {
+          flushing = false;
+        }
+      };
+    }
     self = s;
     storageOf.set(s, st);
     if (register) syncs.set(doc, s);
@@ -362,8 +399,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       // The pane's rule: once the new tab has loaded and restored the stored draft, the
       // tabs that closed on this doc are redundant writers and are abandoned (draft kept).
       if (process.env.AF_NO_ABANDON) return; // (the pane before it abandoned them, for the failing run)
-      for (const old of closing.get(doc) ?? []) if (old !== fresh) old.abandon?.(true);
-      closing.delete(doc);
+      // The pane's own bookkeeping (AF_NO_OPEN_GUARD: a loader closed meanwhile takes over too).
+      closing.takeOver(doc, fresh as Closable, !!process.env.AF_NO_OPEN_GUARD || syncs.get(doc) === fresh);
     }).catch(() => undefined);
   }
 
@@ -547,6 +584,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     if (process.env.AF_STASHLOG) console.log("PAGECLOSE");
     const doc = attached;
     if (!doc) return;
+    // pagehide: the pane's drafts are released first (a listener registered before the
+    // panes'), and the final saves that follow write released entries.
+    closedOwners.add(storageA.owner);
+    storageA.release();
     for (const s of syncs.values()) s.saveBeforeLeaving();
     await tick();
     for (const p of net.filter((x) => x.stage === "sent" && x.owner === "a")) {
@@ -569,14 +610,15 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     // The window is gone: it releases its drafts; the page that opens next is a new
     // window with a new id, and adopts them.
     if (ghostBox.cur) pageWorkTransferred = true;
-    closedOwners.add(storageA.owner);
-    if (process.env.AF_RELEASE_ONLY) storageA.release(); // (the store before a closed pane kept its late writes released)
-    else storageA.close();
+    // (A page that unloads is released at pagehide, and nothing closes it after: the final
+    // saves' writes must stay released on their own.)
+    const oldOwner = storageA.owner;
     storageA = new DraftStorage(kv, `wA${++winSeq}`, () => now, "s\nplan");
     const unsaved = [...typed.get(doc)!.values()].filter((tok) => !daemons.get(doc)!.everHad(tok) && !excused.has(tok));
     // Storage may be full as the new page adopts the old one's draft: the copy does not
     // fit, and the original must stay.
     storageFull = !!o.chaos && rand() < 0.3;
+    const fullAtReopen = storageFull;
     // The pane lists the daemon's docs, so a doc the daemon no longer has is not opened:
     // the unsaved work stored for it comes back as a deleted doc instead.
     if (daemons.get(doc)!.deleted) {
@@ -602,6 +644,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     await drain();
     recoverStoredGone();
     storageFull = false;
+    // I19: the page that opens next takes over what the closed page left for this doc (its
+    // entry is released, however late its final save wrote it), unless storage was full.
+    const left = [...kvMap.keys()].filter((k) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`) && k.endsWith(`\n${oldOwner}`));
+    if (!fullAtReopen && left.length && syncs.get(doc) && isLoaded(syncs.get(doc)!)) fail("closed-page-draft-not-adopted", `${doc}: the closed page's draft was left behind when the page reopened`);
     const back = syncs.get(doc)!;
     // I6: unsaved edits that survive only in storage come back, and say so.
     if (unsaved.length && isLoaded(back) && !["recovered", "conflict", "saving", "saved", "merged"].includes(back.currentStatus)) {
@@ -709,8 +755,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     const before = g.sync.text;
     g.sync.dispose();
     closedOwners.add(ghostStorage.owner);
-    if (process.env.AF_RELEASE_ONLY) ghostStorage.release();
-    else ghostStorage.close();
+    ghostStorage.close();
     ghostStorage = newGhostStorage();
     ghostBox.cur = null;
     await tick();
@@ -889,6 +934,45 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     await drain();
     // I15: a reply to a request from before the restore does not undo the restore.
     if (revived && s.currentStatus === "gone" && !d.deleted) fail("revived-doc-marked-gone-again", `${doc}: a 404 to a request from before the restore marked the restored doc deleted`);
+  }
+
+  /** A tab is closed while its first read is out, after the user's work was stored: the
+   *  loader restores the draft and sends it, and a tab opened next must wait for that. */
+  async function closeWhileLoading(): Promise<void> {
+    const doc = attached;
+    const s = syncs.get(doc);
+    if (!doc || !s || !isLoaded(s) || s.ended || daemons.get(doc)!.deleted || userEdit() === null) return;
+    const close = (x: SyncLike): void => {
+      x.dispose();
+      closedSyncs.add(x);
+      closing.track(doc, x as Closable);
+      syncs.delete(doc);
+    };
+    close(s);
+    await tick();
+    await open(doc); // a new tab: its read goes out
+    const loading = syncs.get(doc);
+    if (loading) close(loading); // closed before the read answered
+    attached = "";
+    editor.text = "";
+    // The daemon answers some of what is out, in any order: the closed loader's read may
+    // have arrived (it restores its draft and sends it) while its save is still out.
+    for (let i = 0, n = 2 + Math.floor(rand() * 10); i < n; i++) {
+      await netStep();
+      await tick();
+    }
+    // I20: a closed tab that can still write stays tracked until it is quiet, wherever its
+    // read had got to, so the tab opened next waits for it.
+    const stillWriting = (): boolean => !!loading && loading.isQuiet === false && !closing.get(doc)?.has(loading as Closable);
+    if (stillWriting()) fail("closed-loader-untracked", `${doc}: a tab closed while loading can still write, and is no longer tracked`);
+    await open(doc); // and another, while the second one's save may still be out
+    if (stillWriting()) fail("closed-loader-untracked", `${doc}: a tab closed while loading can still write, and is no longer tracked`);
+    await drain();
+  }
+
+  /** The daemon's writes fail for a while (reads still work), then recover. */
+  function toggleWriteOutage(): void {
+    writesBroken = !writesBroken;
   }
 
   /** A save is in flight, the user undoes back to the acknowledged text, and the doc is
@@ -1138,7 +1222,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         const draft = s.text;
         const savesBefore = saves.length;
         s.dispose();
-        closing.set(doc, (closing.get(doc) ?? new Set()).add(s));
+        closedSyncs.add(s);
+        closing.track(doc, s as Closable);
         syncs.delete(doc);
         await tick();
         if (wasConflict && saves.length !== savesBefore) {
@@ -1183,8 +1268,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9625 && r < 0.9645) await deleteThenClose();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9645 && r < 0.9655) await lateLanding();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9655 && r < 0.966) await undoThenGone();
-    else if (o.chaos && o.collide && r >= 0.966 && r < 0.97) rollbackHead();
-    else if (o.chaos && !o.collide && r >= 0.966 && r < 0.97) await discardDeleted();
+    else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9660 && r < 0.9665) await closeWhileLoading();
+    else if (o.chaos && o.collide && r >= 0.9665 && r < 0.9695) rollbackHead();
+    else if (o.chaos && !o.collide && r >= 0.9665 && r < 0.9695) await discardDeleted();
+    else if (o.chaos && r >= 0.9695 && r < 0.97) toggleWriteOutage();
     else if (o.chaos && r >= 0.97 && r < 0.98) {
       if (!ghostBox.cur) ghostOpen();
       else if (rand() < 0.5) ghostEdit();
@@ -1203,6 +1290,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   // Quiesce: no more outages, deliver everything, resolve conflicts and markers,
   // reconnect, and let every timer and reload run to completion.
   outage = false;
+  writesBroken = false;
   for (const d of daemons.values()) d.down = 0;
   for (const p of net.filter((x) => x.stage === "held")) {
     p.stage = "sent";

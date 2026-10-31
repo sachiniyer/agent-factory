@@ -18,6 +18,10 @@ import { hasConflictMarkers, mergeWithMarkers } from "./text_diff.js";
 
 export const AUTOSAVE_DELAY_MS = 500;
 export const SAVE_RETRY_MS = 5000;
+/** How long to wait before the next attempt after `fails` saves in a row went unanswered. */
+export function retryDelay(fails: number): number {
+  return Math.min(SAVE_RETRY_MS * 2 ** Math.max(0, fails - 1), 60_000);
+}
 
 export type SyncStatus =
   | "loading"
@@ -77,6 +81,8 @@ export interface Model {
   stale: boolean;
   /** A read failed; no new one until a timer fires. */
   backoff: boolean;
+  /** Saves in a row whose outcome was unknown or failed; the next attempt waits longer for each. */
+  fails: number;
   /** A save's outcome is unknown: it may or may not have landed. Nothing is sent
    *  or reloaded until the daemon's head has been read (phase "reconciling"). */
   unknown: boolean;
@@ -188,6 +194,7 @@ export function initialModel(): Model {
     readSeq: null,
     stale: false,
     backoff: false,
+    fails: 0,
     unknown: false,
     inDoubt: [],
     late: [],
@@ -438,6 +445,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.flight = null;
       m.phase = "idle";
       m.note = null;
+      m.fails = 0;
       m.inDoubt = m.late.map((l) => l.text);
       m.unknown = false;
       const mergedAgentEdits = r.merged && r.text !== sent;
@@ -475,6 +483,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
     case "save_conflict": {
       if (m.phase !== "saving" || !m.flight || e.seq !== m.flight.seq) return;
       m.flight = null;
+      m.fails = 0;
       m.inDoubt = m.late.map((l) => l.text);
       m.unknown = false;
       const r = e.result;
@@ -495,6 +504,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       if (m.phase !== "saving" || !m.flight || e.seq !== m.flight.seq) return;
       // The outcome is unknown, not "failed": the save may have landed. Remember its
       // text, and read the daemon's head (settle) before sending or loading anything.
+      m.fails++;
       m.inDoubt = [...m.inDoubt, m.flight.text];
       if (e.outstanding) m.late = [...m.late, { seq: e.seq, text: m.flight.text, baseText: m.flight.baseText, ended: null }];
       m.flight = null;
@@ -543,6 +553,7 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       m.unknown = false;
       m.inDoubt = [];
       m.late = [];
+      m.fails = 0;
       m.fatal = false;
       m.base = e.head.commit;
       m.saved = e.head.text;
@@ -725,8 +736,15 @@ function settle(m: Model, fx: Effect[]): void {
   if (m.leaving || m.closed) {
     // A closed tab keeps sending until its edits have landed (it reaches here again
     // after each reply), and a queued final save goes out now.
+    const final = m.leaving;
     m.leaving = false;
-    if (isDirty(m) && !m.fatal) startSave(m, fx, true);
+    if (isDirty(m) && !m.fatal) {
+      // The page is going: send now. Otherwise a save that keeps failing is retried with
+      // a growing delay, not in a loop of save, read, save.
+      if (m.fails > 0 && !final) {
+        if (m.timer === null) arm(m, fx, "save", retryDelay(m.fails));
+      } else startSave(m, fx, true);
+    }
     return;
   }
   const dirty = isDirty(m);
@@ -735,7 +753,7 @@ function settle(m: Model, fx: Effect[]): void {
     return;
   }
   if (dirty && !m.fatal && !hasConflictMarkers(m.buffer)) {
-    if (m.timer === null) arm(m, fx, "save", AUTOSAVE_DELAY_MS);
+    if (m.timer === null) arm(m, fx, "save", m.fails > 0 ? retryDelay(m.fails) : AUTOSAVE_DELAY_MS);
   } else if (m.timer === "save") {
     disarm(m, fx);
   }

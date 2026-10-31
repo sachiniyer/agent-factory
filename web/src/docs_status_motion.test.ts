@@ -14,3 +14,10 @@ test("the Docs save glyph's reduced-motion rule is as specific as the rule that 
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\) \{\s*([^{]+)\{\s*animation: none;/g) ?? [];
   assert.ok(reduced.some((block) => block.includes(spin[1])), "a reduced-motion block disables the spin with the same selector");
 });
+
+test("the save glyph and the working dot share one af-working-spin keyframes rule", () => {
+  const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  assert.equal(css.match(/@keyframes af-working-spin/g)?.length, 1, "a second definition would silently override the first");
+  assert.match(css, /\.af-dot-working \.af-icon \{[^}]*animation: af-working-spin/);
+  assert.match(css, /\.af-docs-status:is\([^)]*\) \.af-icon \{[^}]*animation: af-working-spin/);
+});

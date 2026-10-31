@@ -31,6 +31,9 @@ test("a final save that fails keeps the buffer in storage and reconciles before 
   assert.deepEqual(r.fx.filter((f) => f.t === "load").map((f) => (f as { kind: string }).kind), ["reconcile"], "the daemon's head is read first");
   // The head is unchanged: the save did not land, so the closed tab sends it again.
   r = run(r.m, { t: "reconcile_ok", doc: { text: "v1", commit: "c1" } });
+  assert.equal(r.fx.some((f) => f.t === "save"), false, "not in a loop of save and read: the retry waits");
+  assert.deepEqual(r.fx.filter((f) => f.t === "arm").map((f) => (f as { ms: number }).ms), [5000]);
+  r = run(r.m, { t: "timer" });
   assert.deepEqual(r.fx.filter((f) => f.t === "save").map((f) => (f as { text: string }).text), ["v1 edited"]);
   r = run(r.m, { t: "save_ok", result: { kind: "saved", text: "v1 edited", commit: "c2", merged: false } });
   assert.equal(r.m.stashed, null, "storage is cleared once a save has landed");
@@ -185,4 +188,17 @@ test("a deleted doc keeps an undone buffer in storage when the save that was out
   assert.equal(statusOf(r.m).status, "gone");
   assert.ok(!r.fx.some((f) => f.t === "unstash"), "the recovery entry stays");
   assert.deepEqual(r.m.inDoubt, ["v2"]);
+});
+
+test("a closed tab whose saves keep failing waits longer each time, while its reads succeed", () => {
+  let r = run(loaded(), { t: "edit", text: "v2" }, { t: "close" });
+  const delays: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    r = run(r.m, { t: "save_fail", error: "503" });
+    r = run(r.m, { t: "reconcile_ok", doc: { text: "v1", commit: "c1" } });
+    assert.equal(r.fx.some((f) => f.t === "save"), false);
+    delays.push(...r.fx.filter((f) => f.t === "arm").map((f) => (f as { ms: number }).ms));
+    r = run(r.m, { t: "timer" });
+  }
+  assert.deepEqual(delays, [5000, 10000, 20000, 40000, 60000, 60000]);
 });

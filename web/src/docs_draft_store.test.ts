@@ -156,3 +156,17 @@ test("a closed pane's check of its own entry adopts nothing", () => {
   assert.equal(closed.load("goals"), null);
   assert.equal(kv.keys().length, 1, "the orphan stays where it is for the pane that opens next");
 });
+
+test("pagehide releases first and the final saves that follow stay released, until the page is shown again", () => {
+  const kv = memory();
+  let now = 1000;
+  const a = new DraftStorage(kv, "wA", () => now, "s\nplan", "1");
+  a.store("goals", draft("typed"));
+  a.release(); // pagehide, before the panes' own listeners start their final saves
+  a.store("goals", { ...draft("typed"), maybe: ["typed, sent"] }); // the final save's draft
+  now += 1000;
+  assert.equal(new DraftStorage(kv, "wA", () => now, "s\nplan", "2").peek("goals")?.maybe?.[0], "typed, sent", "adoptable at once, not after 30 s");
+  a.touch(); // bfcache restore
+  a.store("goals", draft("typed more"));
+  assert.equal(new DraftStorage(kv, "wA", () => now, "s\nplan", "3").peek("goals"), null, "alive again");
+});

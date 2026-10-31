@@ -6602,7 +6602,7 @@ var DEAD_ICON = "circle";
 var LOST_ICON = "circle-dashed";
 var ARCHIVED_ICON = "archive";
 var LIMIT_ICON = "diamond";
-var WORKING = { icon: "circle", kind: "working", label: ROW_KIND_LABELS.working };
+var WORKING = { icon: "loader-circle", kind: "working", label: ROW_KIND_LABELS.working };
 function rowStatus(s) {
   const op = s.in_flight_op ?? InFlightOp.None;
   if (op !== InFlightOp.None) {
