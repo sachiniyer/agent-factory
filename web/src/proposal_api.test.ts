@@ -14,12 +14,14 @@ import {
   parseProposalInfo,
   parseSaveResponse,
   putDoc,
+  resetFenceSupport,
   sendChanges,
 } from "./proposal_api.js";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = realFetch;
+  resetFenceSupport();
 });
 
 function recordFetch(status: number, body: unknown): { url: string; init: RequestInit }[] {
@@ -160,4 +162,62 @@ test("putDoc sends the writer fence when it is given, and nothing extra when it 
   calls = recordFetch(200, { data: { text: "t", commit: "c2", merged: false }, error: null });
   await putDoc("s1", "auth", "api", "t", "c1", "");
   assert.deepEqual(Object.keys(JSON.parse(calls[0]!.init.body as string)).sort(), ["base", "doc", "session_id", "slug", "text"]);
+});
+
+test("putDoc sends the save again without the fence when the daemon does not know its fields, and stops sending it", async () => {
+  const calls: { body: Record<string, unknown> }[] = [];
+  const warnings: unknown[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => void warnings.push(a);
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    calls.push({ body });
+    if ("writer" in body) {
+      const refusal = { data: null, error: { message: 'malformed JSON request body: json: unknown field "writer"', code: "" } };
+      return new Response(JSON.stringify(refusal), { status: 400 });
+    }
+    return new Response(JSON.stringify({ data: { text: "t", commit: "c2", merged: false }, error: null }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const fence = { writer: "sync-1", seq: 3 };
+    const first = await putDoc("s1", "auth", "api", "t", "c1", "", false, fence);
+    assert.equal(first.kind, "saved", "the save goes through");
+    assert.equal(calls.length, 2, "it was sent twice: refused, then again");
+    assert.ok("writer" in calls[0]!.body && "seq" in calls[0]!.body);
+    assert.ok(!("writer" in calls[1]!.body) && !("seq" in calls[1]!.body), "the second has no fence fields");
+    assert.deepEqual(calls[1]!.body, { session_id: "s1", slug: "auth", doc: "api", text: "t", base: "c1" });
+    await putDoc("s1", "auth", "api", "t2", "c2", "", false, { writer: "sync-1", seq: 4 });
+    assert.equal(calls.length, 3, "later saves go once, without the fence");
+    assert.ok(!("writer" in calls[2]!.body));
+    assert.equal(warnings.length, 1, "logged once");
+  } finally {
+    console.warn = realWarn;
+  }
+});
+
+test("putDoc does not retry a refusal that is not about the fence's fields", async () => {
+  let n = 0;
+  globalThis.fetch = (async () => {
+    n++;
+    return new Response(JSON.stringify({ data: null, error: { message: 'malformed JSON request body: json: unknown field "textt"', code: "" } }), { status: 400 });
+  }) as typeof fetch;
+  await assert.rejects(putDoc("s1", "auth", "api", "t", "c1", "", false, { writer: "w", seq: 1 }));
+  assert.equal(n, 1);
+});
+
+test("a stale-save refusal is a plain refusal: it is not retried and does not switch the fence off", async () => {
+  let n = 0;
+  globalThis.fetch = (async () => {
+    n++;
+    return new Response(JSON.stringify({ data: null, error: { message: "stale", code: "proposal_stale_save" } }), { status: 409 });
+  }) as typeof fetch;
+  await assert.rejects(putDoc("s1", "auth", "api", "t", "c1", "", false, { writer: "w", seq: 1 }), (e: unknown) => (e as { code?: string }).code === "proposal_stale_save");
+  assert.equal(n, 1);
+  let sent: Record<string, unknown> = {};
+  globalThis.fetch = (async (_u: string, init: RequestInit) => {
+    sent = JSON.parse(init.body as string) as Record<string, unknown>;
+    return new Response(JSON.stringify({ data: { text: "t", commit: "c", merged: false }, error: null }), { status: 200 });
+  }) as typeof fetch;
+  await putDoc("s1", "auth", "api", "t", "c1", "", false, { writer: "w", seq: 2 });
+  assert.equal(sent.writer, "w", "the fence is still on");
 });
