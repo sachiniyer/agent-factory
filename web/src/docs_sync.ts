@@ -244,7 +244,10 @@ export class DocSync {
     const m = this.model;
     if (
       m.phase === "idle" && isDirty(m) && !hasConflictMarkers(m.buffer) && m.note?.kind !== "error" &&
-      !m.closed && !m.unknown && !m.gone && !m.fatal && !m.suspended && m.loaded
+      !m.closed && !m.unknown && !m.gone && !m.fatal && !m.suspended && m.loaded &&
+      // after failures the retry timer sends it, with its growing delay: a waiter that pumps on
+      // every reply would make a loop of save, read, save
+      m.fails === 0
     ) {
       this.dispatch({ t: "flush" });
     }

@@ -43,6 +43,8 @@ export class DraftStorage {
   /** The pane is gone for good: whatever its still-closing syncs write later is
    *  released at once. */
   private closed = false;
+  /** The page is unloading: writes stay released until the page is shown again. */
+  private unloading = false;
 
   /** `scope` names the proposal ("session\nslug"); docs are keyed within it. `pane`
    *  tells apart two panes of one window. */
@@ -172,7 +174,7 @@ export class DraftStorage {
   }
 
   store(doc: string, draft: Draft): void {
-    if (!this.write(this.key(doc, this.owner), { owner: this.owner, at: this.now(), released: this.closed, draft })) return;
+    if (!this.write(this.key(doc, this.owner), { owner: this.owner, at: this.now(), released: this.closed || this.unloading, draft })) return;
     this.dropAdopted(doc); // this pane's copy now holds the work
   }
 
@@ -198,6 +200,7 @@ export class DraftStorage {
   /** The heartbeat: tells other panes this one is alive and still holds its entries. */
   touch(): void {
     if (this.closed) return;
+    this.unloading = false;
     const t = this.now();
     for (const key of this.owned()) {
       const e = this.read(key);
@@ -215,6 +218,7 @@ export class DraftStorage {
 
   /** The pane is closing, or its window is: its entries can be adopted at once. */
   release(): void {
+    this.unloading = true; // the final saves that follow write released entries too
     for (const key of this.owned()) {
       const e = this.read(key);
       if (e) this.write(key, { ...e, released: true });

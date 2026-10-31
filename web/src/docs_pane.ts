@@ -36,6 +36,7 @@ import {
   sendChanges,
 } from "./proposal_api.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
+import { ClosingTabs } from "./docs_closing.js";
 import { diffText } from "./text_diff.js";
 
 // The doc each proposal last showed, so a rebuilt pane opens where it was.
@@ -44,7 +45,7 @@ const lastDoc = new Map<string, string>();
 // Tabs that closed with a save still in flight, per doc. A tab that reopens the
 // doc waits for it, so its first load does not return text older than what the
 // user just typed.
-const closing = new Map<string, Set<DocSync>>();
+const closing = new ClosingTabs<DocSync>();
 
 /** The key a doc's closing tabs are tracked under. */
 function draftKey(sessionId: string, slug: string, doc: string): string {
@@ -256,13 +257,7 @@ export class DocsPane {
     const key = draftKey(this.opts.sessionId, this.opts.slug, name);
     sync.dispose();
     if (forget) draftFor(this.drafts, name).clear();
-    const set = closing.get(key) ?? new Set<DocSync>();
-    set.add(sync);
-    closing.set(key, set);
-    void sync.whenQuiet().then(() => {
-      set.delete(sync);
-      if (set.size === 0 && closing.get(key) === set) closing.delete(key);
-    });
+    closing.track(key, sync);
   }
 
   /** The doc is being deleted: every sync of it, the shown one and a tab that closed
@@ -695,7 +690,7 @@ export class DocsPane {
       load: async (initial) => {
         // A tab's first read waits for every tab that closed on this doc with a save
         // still in flight (later reads must not: closing tabs would wait on each other).
-        const priors = initial ? [...(closing.get(key) ?? [])].filter((p) => p !== sync) : [];
+        const priors = initial ? closing.priors(key, sync) : [];
         await Promise.all(priors.map((p) => p.whenQuiet()));
         const stored = initial && this.storedGone.has(doc.name) ? this.drafts.peek(doc.name) : null;
         // A doc the daemon no longer has opens from what its stored draft was based on:
@@ -730,8 +725,8 @@ export class DocsPane {
       await sync.start();
       // This tab has loaded and restored the doc's stored draft: the tabs that closed
       // on it are redundant writers now, and must not save over what the user does next.
-      for (const old of closing.get(key) ?? []) if (old !== sync) old.abandon(true);
-      closing.delete(key);
+      // (Unless this tab was itself closed meanwhile: it is one of them.)
+      closing.takeOver(key, sync, this.syncs.get(doc.name) === sync);
       if (this.storedGone.delete(doc.name)) sync.remoteDeleted();
     } catch (e) {
       if (this.sync !== sync) return;

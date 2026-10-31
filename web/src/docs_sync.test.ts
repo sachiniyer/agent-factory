@@ -392,6 +392,7 @@ test("whenSaved stays pending while a lost-reply save is unreconciled, even when
   h.holdLoad = null;
   await tick();
   assert.equal(verdict, null, "the corrective save of v1 is still to land");
+  await h.fire(); // after a failure the retry waits for its timer
   assert.equal(h.saves.at(-1)!.text, "v1");
   assert.equal(h.saves.at(-1)!.base, "c2");
   h.saves.at(-1)!.reply.resolve({ kind: "saved", text: "v1", commit: "c3", merged: false });
@@ -450,5 +451,21 @@ test("a save that timed out and lands later does not overwrite an undo", async (
   await tick();
   await tick();
   assert.equal(h.buffer, "v1", "the undo stands over the landed save");
+  await h.fire();
   assert.equal(h.saves.at(-1)!.text, "v1", "and is saved on top of it");
+});
+
+test("a pumped whenSaved does not turn a failing save into a loop of save and read", async () => {
+  const h = await started();
+  h.type("v2");
+  void h.sync.whenSaved();
+  await tick();
+  for (let i = 0; i < 20; i++) {
+    const n = h.saves.length;
+    h.saves.at(-1)!.reply.reject(new Error("503 service unavailable"));
+    await tick();
+    await tick();
+    assert.equal(h.saves.length, n, `no save is sent until the retry timer fires (round ${i})`);
+    await h.fire();
+  }
 });
