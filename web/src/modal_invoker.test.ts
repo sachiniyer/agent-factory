@@ -65,17 +65,21 @@ for (const operation of ["kill", "archive"]) {
         doc.activeElement = doc.body;
       },
       killSession: () => Promise.reject(new Error("Rejected")),
+      fetchKeptBranch: () => Promise.resolve({}), connectionGeneration: 1,
+      createSelectionIntent: { snapshot: () => 0, isCurrent: () => true },
       archiveSession: () => Promise.reject(new Error("Rejected")),
       isMutationCommittedError: () => false, isMutationOutcomeUncertain: () => false,
       requestResync() {}, errorText: (error: Error) => error.message,
       surfaceMutationError: () => assert.fail("must retain the rejected dialog"),
     };
-    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null;\n${handlers}`, {
+    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\n${handlers}`, {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
     }).outputText;
     runInNewContext(code, context);
     const app = context as typeof context & { openConfirm(action: string, target: typeof session): void; closeModal(): void };
     app.openConfirm(operation, session);
+    // A delete reads the worktree's HEAD before it mounts (#6233).
+    await new Promise(resolve => setImmediate(resolve));
     confirms!.onConfirm();
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(projectionCount, 2, "optimistic hide followed by definitive rollback");
@@ -131,7 +135,7 @@ for (const [name, committed, optimisticConfirmed] of [
       isMutationCommittedError: () => committed, isMutationOutcomeUncertain: () => !committed,
       requestResync() {}, errorText: (error: Error) => error.message, surfaceMutationError() {},
     };
-    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null;\n${handlers}`, {
+    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\n${handlers}`, {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
     }).outputText;
     runInNewContext(code, context);
@@ -187,7 +191,7 @@ test(`a definitive restore refusal waits for accepted resync (replaced=${connect
     requestPendingRestoreResync: () => assert.fail("the refusal ticket owns reconciliation"),
     errorText: (error: Error) => error.message, surfaceMutationError() {},
   };
-  const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null;\n${handlers}`, {
+  const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\n${handlers}`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
   }).outputText;
   runInNewContext(code, context);
@@ -257,3 +261,51 @@ test("reconnect retains a completed restore through its pre-response initial Sna
   assert.equal(pending.has("session"), true,
     "a Snapshot issued before success cannot release the ticket when reconnect commits it later");
 });
+
+// #6234 review: the delete confirm's branch read must not replace a newer dialog,
+// nor open after a close or a navigation, when it finally answers.
+for (const [name, supersede] of [
+  ["a newer dialog opened meanwhile", (app: any, session: any) => app.openConfirm("archive", session, { sessionId: session.id, actionLabel: null, header: false })],
+  ["the dialog was closed meanwhile", (app: any) => app.closeModal()],
+  ["the user navigated meanwhile", (_app: any, _session: any, nav: { current: boolean }) => { nav.current = false; }],
+] as Array<[string, (app: any, session: any, nav: { current: boolean }) => void]>) {
+  test(`a slow branch read is discarded when ${name}`, async () => {
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
+    const names = new Set(["openModal", "mountOverlay", "closeModal", "closeOverlays", "openConfirm", "captureModalInvoker"]);
+    const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text ?? ""))
+      .map(node => node.getText(ast)).join("\n");
+    const session = { id: "s", title: "S", is_root: false, backend_type: "local" };
+    const body = { closest: () => null, getAttribute: () => null, isConnected: true, getClientRects: () => [{}] };
+    const card = { focus() {}, isConnected: true, getClientRects: () => [{}], matches: () => false };
+    const mounted: string[] = [];
+    let answer!: (kept: object) => void;
+    const nav = { current: true };
+    const context = {
+      document: { activeElement: body, body }, CSS: { escape: (v: string) => v },
+      getComputedStyle: () => ({ visibility: "visible" }), root: { querySelector: () => null },
+      modalHost: { replaceChildren() {} }, closeConfigAssistant() {}, closeAccountLogin() {}, focusRail() {}, token: "",
+      connectionGeneration: 1,
+      store: { get: () => ({ phase: "app", sessions: [session] }), subscribe: () => () => {} },
+      createSelectionIntent: { snapshot: () => 0, isCurrent: () => nav.current },
+      confirmModal: (o: { action: string }) => { mounted.push(o.action); return { el: { querySelector: () => card }, close() {}, setBusy() {}, setError() {} }; },
+      restoreRequiresConfirmation: () => true, isActionableSession: () => true,
+      isArchived: () => false, isOffBoxWorkspace: () => false,
+      optimisticSessions: { begin: () => null }, pendingRestores: { has: () => false },
+      fetchKeptBranch: () => new Promise<object>((resolve) => { answer = resolve; }),
+    };
+    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\n${handlers}`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+    }).outputText;
+    runInNewContext(code, context);
+    const app = context as unknown as { openConfirm(a: string, s: object, i: object): void; closeModal(): void };
+    app.openConfirm("kill", session, { sessionId: session.id, actionLabel: null, header: false });
+    assert.deepEqual(mounted, [], "the delete dialog waits for the branch read");
+    supersede(app, session, nav);
+    const before = mounted.length;
+    answer({ name: "feature/x" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((mounted as string[]).includes("kill"), false, "the late answer must not mount the delete dialog");
+    assert.equal(mounted.length, before);
+  });
+}

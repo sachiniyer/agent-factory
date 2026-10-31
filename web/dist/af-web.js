@@ -7148,6 +7148,14 @@ async function killSession(id, title, token2) {
     throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
   }
 }
+async function fetchKeptBranch(id, title, token2) {
+  try {
+    const r = await af("WorkspaceFacts", { id, title, repo_id: "" }, token2);
+    return r.kept_branch ?? {};
+  } catch {
+    return { unreadable: true };
+  }
+}
 async function clearAttention(id, setAt, token2) {
   await af("SetAttention", { id, clear: true, set_at: setAt }, token2);
 }
@@ -13256,7 +13264,21 @@ function handoffSameAgentTarget(catalogValues, currentAgent, recordedProgram, re
   if (matched !== void 0) return matched;
   return resolvedAgents === void 0 ? currentAgent : void 0;
 }
+function keptBranchNote(kept) {
+  if (kept?.name) {
+    return `Branch '${kept.name}' is checked out in the worktree and af does not own it \xB7 the branch and its commits are kept in the repo.`;
+  }
+  if (kept?.unreadable) {
+    return "Could not read the worktree's current branch \xB7 a branch you created there, and its commits, would be kept in the repo.";
+  }
+  return "";
+}
 function deletionConfirmationBody(opts) {
+  const base = deletionBaseBody(opts);
+  const kept = opts.offBox || opts.externalWorktree ? "" : keptBranchNote(opts.keptBranch);
+  return kept ? `${base} ${kept}` : base;
+}
+function deletionBaseBody(opts) {
   if (opts.archived && opts.offBox) {
     return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
   }
@@ -17563,20 +17585,26 @@ function projectAccent(color, ...surfaces) {
   }
   return hex(target);
 }
-function projectFaviconSvg(color) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${color}"/><path d="${FAVICON_MARK_PATH}" fill="${markInk(color)}"/></svg>`;
+function projectFaviconSvg(color, inverted = false) {
+  const [tile, mark] = faviconColors(color, inverted);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${tile}"/><path d="${FAVICON_MARK_PATH}" fill="${mark}"/></svg>`;
 }
-function projectFaviconDataUrl(color) {
-  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color))}`;
+function projectFaviconDataUrl(color, inverted = false) {
+  return `data:image/svg+xml,${encodeURIComponent(projectFaviconSvg(color, inverted))}`;
 }
-function projectFaviconPng(color, size) {
+function faviconColors(color, inverted) {
+  const ink = markInk(color);
+  return inverted ? [ink, color] : [color, ink];
+}
+function projectFaviconPng(color, inverted, size) {
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d");
   if (!ctx || typeof Path2D === "undefined") return null;
+  const [tile, mark] = faviconColors(color, inverted);
   ctx.scale(size / 512, size / 512);
-  ctx.fillStyle = color;
+  ctx.fillStyle = tile;
   ctx.beginPath();
   ctx.moveTo(112, 0);
   ctx.arcTo(512, 0, 512, 512, 112);
@@ -17585,19 +17613,66 @@ function projectFaviconPng(color, size) {
   ctx.arcTo(0, 0, 512, 0, 112);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = markInk(color);
+  ctx.fillStyle = mark;
   ctx.fill(new Path2D(FAVICON_MARK_PATH));
   return canvas.toDataURL("image/png");
 }
 var DEFAULT_FAVICON_COLOR = "#2f5fd8";
-var appliedFavicon = null;
-function applyProjectFavicon(color) {
-  if (appliedFavicon === color) return;
-  appliedFavicon = color;
-  const tile = color ?? DEFAULT_FAVICON_COLOR;
+var FAVICON_BLINK_MS = 1e3;
+var appliedColor = null;
+var appliedAttention = false;
+var blinkTimer = null;
+var blinkInverted = false;
+var lastBlinkAt = 0;
+var motionQuery = null;
+var faviconHrefs = /* @__PURE__ */ new Map();
+function applyProjectFavicon(color, attention = false) {
+  if (appliedColor === color && appliedAttention === attention) return;
+  if (appliedColor !== color) faviconHrefs.clear();
+  appliedColor = color;
+  appliedAttention = attention;
+  restartBlink();
+  paintFavicon();
+}
+function restartBlink() {
+  if (blinkTimer !== null) {
+    clearInterval(blinkTimer);
+    blinkTimer = null;
+  }
+  blinkInverted = appliedAttention;
+  if (appliedAttention && !prefersReducedMotion()) {
+    lastBlinkAt = Date.now();
+    blinkTimer = setInterval(blinkTick, FAVICON_BLINK_MS);
+  }
+}
+function blinkTick() {
+  const now = Date.now();
+  const late = now - lastBlinkAt > 2 * FAVICON_BLINK_MS;
+  lastBlinkAt = now;
+  blinkInverted = late ? true : !blinkInverted;
+  paintFavicon();
+}
+function prefersReducedMotion() {
+  if (motionQuery === null && typeof matchMedia === "function") {
+    motionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+    motionQuery.addEventListener("change", () => {
+      restartBlink();
+      paintFavicon();
+    });
+  }
+  return motionQuery?.matches ?? false;
+}
+function paintFavicon() {
+  const tile = appliedColor ?? DEFAULT_FAVICON_COLOR;
   for (const link of document.querySelectorAll('link[rel="icon"]')) {
     if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    const href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile) : projectFaviconPng(tile, Number.parseInt(link.sizes.value, 10) || 32);
+    const size = Number.parseInt(link.sizes.value, 10) || 32;
+    const key = `${link.type}|${size}|${blinkInverted}`;
+    let href = faviconHrefs.get(key);
+    if (href === void 0) {
+      href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile, blinkInverted) : projectFaviconPng(tile, blinkInverted, size);
+      faviconHrefs.set(key, href);
+    }
     link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }
@@ -18449,7 +18524,7 @@ var AppShell = class {
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
-    applyProjectFavicon(color);
+    applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -20496,8 +20571,10 @@ function selectedSession2() {
   return s ? { id: s.id ?? "", title: s.title } : null;
 }
 var restoreModalFocus = null;
+var modalGeneration = 0;
 var stopModalProjectionWatch = null;
 function closeModal() {
+  modalGeneration++;
   if (modal) {
     const restoreFocus = restoreModalFocus;
     restoreModalFocus = null;
@@ -20537,6 +20614,7 @@ function captureModalInvoker() {
   };
 }
 function openModal(m, focusCard = false, explicitInvoker) {
+  modalGeneration++;
   mountOverlay((mountHost) => {
     const focused = document.activeElement;
     const invoker = explicitInvoker ?? captureModalInvoker();
@@ -20667,6 +20745,7 @@ function newSession() {
 function openConfirm(action, session, invoker = captureModalInvoker()) {
   if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
+  const dialogGeneration = ++modalGeneration;
   const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest) => {
@@ -20777,21 +20856,34 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
       } else showRefusal();
     });
   };
-  mountConfirmation(
-    confirmModal({
-      action,
-      sessionTitle: target.title,
-      immediateRestore,
-      isRoot: hasRootAcknowledgment,
-      archived: isArchived(session),
-      offBox: isOffBoxWorkspace(session),
-      externalWorktree: session.worktree?.external_worktree === true,
-      branchCreatedByUs: session.worktree?.branch_created_by_us === true,
-      onConfirm,
-      onCancel: closeModal
-    })
-  );
-  if (immediateRestore) onConfirm();
+  const mountWith = (keptBranch) => {
+    mountConfirmation(
+      confirmModal({
+        keptBranch,
+        action,
+        sessionTitle: target.title,
+        immediateRestore,
+        isRoot: hasRootAcknowledgment,
+        archived: isArchived(session),
+        offBox: isOffBoxWorkspace(session),
+        externalWorktree: session.worktree?.external_worktree === true,
+        branchCreatedByUs: session.worktree?.branch_created_by_us === true,
+        onConfirm,
+        onCancel: closeModal
+      })
+    );
+    if (immediateRestore) onConfirm();
+  };
+  if (action === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
+    const ticket = createSelectionIntent.snapshot();
+    const generation = connectionGeneration;
+    void fetchKeptBranch(target.id, target.title, token ?? "").then((kept) => {
+      if (modalGeneration !== dialogGeneration || !createSelectionIntent.isCurrent(ticket) || connectionGeneration !== generation) return;
+      mountWith(kept);
+    });
+  } else {
+    mountWith();
+  }
 }
 function openDeleteProject(root2, label) {
   openModal(
