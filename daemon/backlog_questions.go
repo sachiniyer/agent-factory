@@ -36,7 +36,7 @@ func (h backlogHost) SetAttention(repoID, sessionID, reason string) {
 	if reason == "" {
 		h.m.backlog.asked.Delete(sessionID)
 	} else {
-		h.m.backlog.asked.Store(sessionID, reason)
+		h.m.backlog.asked.Store(sessionID, session.NormalizeAttentionReason(reason))
 	}
 	req := SetAttentionRequest{ID: sessionID, RepoID: repoID, Reason: reason, Clear: reason == ""}
 	if _, _, err := h.m.SetAttention(req); err != nil {
@@ -390,6 +390,6 @@ func (m *Manager) rebuildAskedQuestions(b *backlog.Backlog) {
 		if q == "" || r == nil || r.SessionID == "" {
 			continue
 		}
-		m.backlog.asked.Store(r.SessionID, q)
+		m.backlog.asked.Store(r.SessionID, session.NormalizeAttentionReason(q))
 	}
 }
