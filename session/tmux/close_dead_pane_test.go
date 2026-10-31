@@ -300,22 +300,30 @@ func TestProbePaneExit_ARootThatIsExitingIsNotReportedAlive(t *testing.T) {
 // the root between them, the check answers "gone" while the fields it just read
 // still had no status; the probe must read again rather than report a finished
 // command with an unknown status (#6439). The ordering is forced, not timed: the
-// liveness check is held until tmux has recorded the status, which is exactly
-// "root collected after the format read, before the check".
+// root exits only when the liveness check releases it, and the check is held until
+// tmux has recorded the status, which is exactly "root collected after the format
+// read, before the check".
 func TestProbePaneExit_AStatusRecordedBetweenTheReadAndTheLivenessCheckIsNotLost(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skipf("a pane is held dead with its root running only on Linux ptys, not on %s", runtime.GOOS)
 	}
 	testguard.IsolateTmux(t)
 	name := fmt.Sprintf("af_test_dead_pane_reap_order_%d", time.Now().UnixNano())
-	program := startHeldPane(t, name, `sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; sleep 0.3; exit 7'`)
+	// The root closes its terminal (so tmux holds the pane dead) and then stays up
+	// until the injected liveness check lets it go: it cannot exit, and so cannot be
+	// collected, before the probe has taken its format read.
+	gate := filepath.Join(t.TempDir(), "exit")
+	program := startHeldPane(t, name, fmt.Sprintf(
+		`sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; while [ ! -f %s ]; do sleep 0.01; done; exit 7'`, gate))
 
 	var raced atomic.Bool
 	prev := paneRootGone
 	paneRootGone = func(pid int) bool {
 		// The first check is the one that follows the format read that saw no
-		// status. Hold it until tmux has collected the root and recorded 7.
+		// status. Let the root exit now, and hold the check until tmux has
+		// collected it and recorded 7.
 		if raced.CompareAndSwap(false, true) {
+			require.NoError(t, os.WriteFile(gate, nil, 0o600))
 			require.Eventually(t, func() bool {
 				out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead_status}").Output()
 				return err == nil && strings.TrimSpace(string(out)) == "7"
