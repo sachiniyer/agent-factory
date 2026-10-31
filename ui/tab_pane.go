@@ -582,7 +582,7 @@ func vscodeTabPlaceholder() string {
 // docsTabPlaceholder is the TUI pane for a proposal Docs tab. The editor is web
 // only, so the pane names the proposal and the way to read it from a terminal.
 func docsTabPlaceholder(slug string) string {
-	return fmt.Sprintf("The Docs tab is web only. Open it in the web UI to edit proposal %s.\n\nIn a terminal, run: af proposal path %s", slug, slug)
+	return fmt.Sprintf("The Proposal tab is web only. Open it in the web UI to edit proposal %s.\n\nIn a terminal, run: af proposal path %s", slug, slug)
 }
 
 // tabPlaceholder returns the TUI placeholder for a tab kind the terminal cannot

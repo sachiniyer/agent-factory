@@ -78,12 +78,14 @@ Agents learn `af sessions attention --self` from the af skill, and run it only w
 they are blocked on a decision or question that only you can answer. The yellow
 circle clears when you submit a line in the agent pane, dismiss it with the **×** on
 the **Attention** chip in the session header, or when the agent starts work again
-after it went idle. Typing a draft or just viewing the tab does not clear it. While
+after it went idle. Typing a draft or just viewing the tab does not clear it. On a phone, a count on **Toggle sessions** shows how many *other* sessions need attention, and the open drawer says so in words ("1 session needs attention"), so you do not need hover to find out. While
 any session in the selected project needs attention, the browser tab's favicon also
 swaps its tile and mark colors every second, so you can see it from another tab.
 When your system asks for reduced motion, neither the circle nor the favicon blinks,
 the circle has a ring around it, the working spinner does not turn, and the chip's bell is still. The TUI rail does not show the
 request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
+
+When the browser loses its connection to the daemon (the event stream or the focused terminal's socket) for more than about two seconds, the pane header shows **Reconnecting…** with the time of the next retry, and the rail says the same on desktop. It is a static glyph plus words, with no animation, and it clears when the connection returns. Keystrokes typed meanwhile are queued, in order, and delivered on reconnect; only past a 64 KiB backlog does the terminal say "typing was not delivered".
 
 The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting
 on a limit · Broken · Archived**. Archived sessions start hidden. The filter applies inside the

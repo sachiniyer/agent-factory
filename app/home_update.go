@@ -278,6 +278,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handoffCmd(msg.request)
 	case handoffDoneMsg:
 		return m.handleHandoffDone(msg)
+	case webListenerNoticeMsg:
+		return m.handleWebListenerNotice(msg)
 	case instanceRestoredMsg:
 		return m.handleInstanceRestored(msg)
 	case startDeleteProjectMsg:
