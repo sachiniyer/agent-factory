@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -77,6 +78,15 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		return err
 	}
 	defer unlock()
+	// A remote client sends the project path as typed (W9.7); ~ is the DAEMON
+	// host's home, and every later reader (the repo-id binding, the runner's
+	// git check) needs the expanded form.
+	req.Task.ProjectPath = config.ExpandTilde(req.Task.ProjectPath)
+	if req.ValidatePath {
+		if err := validateTaskProjectPath(req.Task.ProjectPath); err != nil {
+			return err
+		}
+	}
 	var validate func(task.Task) error
 	targetLocked := false
 	if s.manager != nil {
@@ -104,6 +114,7 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		return err
 	}
 	resp.OK = true
+	resp.Task = &created
 	// The task-file write is the durable commit. Publish it before the
 	// non-transactional scheduler/watch reload so other clients never remain
 	// stale when that follow-up fails.
@@ -117,8 +128,11 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 		// into an error envelope carrying the shared committed code — which is
 		// what every existing consumer reads. The envelope covers the handlers
 		// that answer OK; these answer with an error (#3036).
+		// Carries the stored id: an error has no response body, and a caller that
+		// did not choose the id (a sandbox credential's add) could otherwise never
+		// address the task that now exists (#5890).
 		return &mutationCommittedError{err: fmt.Errorf(
-			"%s %w", taskAddCommittedErrorPrefix, reloadErr)}
+			"%s %w", taskAddCommittedErrorPrefix, reloadErr), storedID: created.ID}
 	}
 	return nil
 }
@@ -132,6 +146,15 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 		return err
 	}
 	defer unlock()
+	if req.Update.ProjectPath != nil {
+		expanded := config.ExpandTilde(*req.Update.ProjectPath)
+		req.Update.ProjectPath = &expanded
+		if req.ValidatePath {
+			if err := validateTaskProjectPath(expanded); err != nil {
+				return err
+			}
+		}
+	}
 	var validate func(task.Task) (string, error)
 	targetLocked := false
 	if s.manager != nil {
@@ -222,6 +245,13 @@ func (s *controlServer) updateTask(ctx context.Context, req UpdateTaskRequest, r
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
+	return s.removeTask(req, resp, nil)
+}
+
+// removeTask is RemoveTask with an optional admission predicate evaluated on the
+// record loaded under the tasks-file lock, so a scoped caller's authorization is
+// atomic with the delete (#5889).
+func (s *controlServer) removeTask(req RemoveTaskRequest, resp *RemoveTaskResponse, admit func(task.Task) error) error {
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
@@ -230,7 +260,7 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 		return err
 	}
 	defer unlock()
-	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
+	if err := task.RemoveTaskChecked(req.ID, req.Expect, admit); err != nil {
 		return err
 	}
 	resp.OK = true

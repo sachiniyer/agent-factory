@@ -33,7 +33,14 @@ func (e *mutationCommittedError) APIErrorCode() string {
 // client narrowly restores to the same three-valued marker.
 type mutationCommittedError struct {
 	err error
+	// storedID is the id of the record the committed write stored, when the
+	// caller could not have known it (#5890).
+	storedID string
 }
+
+var _ apiproto.StoredIDCarrier = (*mutationCommittedError)(nil)
+
+func (e *mutationCommittedError) StoredID() string { return e.storedID }
 
 // record classifies a mutation's error for a control-socket handler and fills
 // the response envelope, returning false for a genuine failure the handler must

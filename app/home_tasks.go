@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
@@ -56,7 +57,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// path caused that, and nothing the user retypes fixes it, so it is an
 	// operation failure. ("invalid path" is the user-facing half; the severity is
 	// the monitoring half, and they answer different questions.)
-	absPath, err := config.ResolveUserPath(projectPath)
+	absPath, err := ui.ResolveTaskProjectPath(projectPath)
 	if err != nil {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
@@ -87,11 +88,16 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		// its stored form ("" for keep, and "" whenever the draft names a target
 		// session), so a task created here is byte-identical to one created
 		// before the field was reachable unless the user chose otherwise.
-		OnComplete:  draft.OnComplete,
-		ProjectPath: absPath,
-		Program:     program,
-		Enabled:     true,
-		CreatedAt:   time.Now(),
+		OnComplete: draft.OnComplete,
+		Host:       draft.Host,
+		// The concurrency cap the form collected (#4180), in the same stored
+		// form: 0 for unlimited, and 0 whenever the draft's shape cannot carry
+		// one.
+		MaxConcurrentRuns: draft.MaxConcurrentRuns,
+		ProjectPath:       absPath,
+		Program:           program,
+		Enabled:           true,
+		CreatedAt:         time.Now(),
 	}
 	// Route the create through the daemon (#1029 PR 6): it is the sole writer of
 	// tasks.json among clients (#960) and re-arms its own scheduler/watchers in
@@ -99,6 +105,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// is the durable commit; a later refresh failure is classified so this caller
 	// can accept the saved task without presenting a retryable create form.
 	addErr := addTaskThroughDaemon(t)
+	m.noteRemoteCreate(t, addErr)
 	// Only a definitive refusal re-arms the form. A task that may have been
 	// saved — committed, or a reply lost after the daemon received it (#4820) —
 	// closes the form like a success, so the user cannot submit a duplicate, and
@@ -121,7 +128,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// different repo than the active scope — is intentionally outside this list
 	// and is surfaced below.
 	var reloadErr error
-	tasks, err := task.LoadTasksForKnownRepo(m.repoRoot, m.repoID)
+	tasks, err := m.activeTasks(m.repoRoot, m.repoID)
 	if err == nil {
 		// Like refreshTasks, a successful read clears load errors separately
 		// from replacing the task data and its transient pane state.
@@ -200,6 +207,11 @@ func (m *home) handleTaskCreate() tea.Cmd {
 // path that resolves to a different repo. Used when the list could not be
 // reloaded to show the absence directly (#5667).
 func boundOutsideActiveScope(activeRepoID, projectPath string) bool {
+	if isRemoteTarget() {
+		// The path is on the daemon's host; this machine cannot resolve it to a
+		// repo, so only registry mode is known to be out of scope.
+		return activeRepoID == ""
+	}
 	return activeRepoID == "" || config.RepoIDForPath(projectPath) != activeRepoID
 }
 

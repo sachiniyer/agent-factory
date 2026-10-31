@@ -56,6 +56,21 @@ func (t *TmuxSession) SetEnvPassthrough(names []string) error {
 	return nil
 }
 
+// SetInstanceID records the instance id the next Start stamps into the session
+// environment as AF_INSTANCE_ID (#6258). Call it before Start; it only labels
+// the session and cannot affect the pane.
+func (t *TmuxSession) SetInstanceID(id string) {
+	t.programMu.Lock()
+	t.instanceID = id
+	t.programMu.Unlock()
+}
+
+func (t *TmuxSession) launchInstanceID() string {
+	t.programMu.RLock()
+	defer t.programMu.RUnlock()
+	return t.instanceID
+}
+
 // Account is the credential account this session's next Start launches under,
 // or "" for the ambient identity.
 func (t *TmuxSession) Account() string {

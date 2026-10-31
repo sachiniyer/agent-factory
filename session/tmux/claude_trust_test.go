@@ -1059,7 +1059,7 @@ func TestCheckAndHandleTrustPrompt_RealMCPTrustDialogStillFiresEnter(t *testing.
 // answers and must not map to the same return value. The latter permits prompt
 // delivery; the former does not.
 //
-// This is the start.go:503 finding: the pane is NOT dialog-free just because
+// This is the trust_prompt.go finding: the pane is NOT dialog-free just because
 // the footer hasn't painted yet.
 func TestCheckAndHandleTrustPrompt_PartiallyRenderedMCPDialogBlocks(t *testing.T) {
 	for _, tt := range []struct{ name, content string }{

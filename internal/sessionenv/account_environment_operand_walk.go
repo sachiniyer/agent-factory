@@ -6,55 +6,14 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// shadowedChildTailMutates is shadowedOperandTailMutates for a wrapper's
-// returned CHILD tail — the real util-linux binary's own command line, reached
-// by ionice's `--` and `default` arms and by tasksetCommandAfterMask after the
-// mask. A shadowed `./ionice` with `shift N; exec "$@"` can discard any prefix
-// of that tail, so the property enforced is:
-//
-//	the tail is refused if ANY suffix of it, judged as a command line by
-//	wrapperOperandTailMutates, mutates the account environment.
-//
-// It does NOT fail closed on the tail's length. The childless bound does not
-// apply here: this tail is an ordinary command's argv, and a command may take
-// any number of operands, so `ionice echo a1 … a65` is not a mutation (Codex on
-// #4708 — the capped scan refused it for its length alone).
-//
-// Judging every suffix literally is quadratic: each judgement re-reads the rest
-// of the tail. Two things make this walk linear in the command's length instead.
-//
-// Only some suffixes need their own judgement. words[0]'s suffix is judged
-// unconditionally. That judgement peels recognized wrappers and reaches
-// unwrapAccountCommand's default arm at the first head that is not one — a
-// builtin included — where unrecognizedWrapperHidesAccountAssignment inspects
-// every LATER position for an env word, a non-literal word, a shell start and
-// an `--opt=DENIED` value. A later suffix therefore needs its own judgement only
-// when its head begins a verdict that scan does not see from before it
-// (accountChildTailSuffixStartsVerdict). A long benign argv has no such word and
-// costs one judgement.
-//
-// Those judgements are still per word, and a tail can hold nothing else:
-// `ionice echo unset unset …` judged each `unset` over the whole remainder, and
-// nested wrappers (`ionice echo ionice echo …`) chained one child-tail walk per
-// level (Codex on #4708). So each tail position is scanned once per validation
-// (memo.childTails caches "does any suffix from here mutate"), and the suffix
-// judgements every child-tail walk starts share shadowedChildJudgementLimit per
-// validation. Past it the walk fails closed. The bound counts verdict words, not
-// operands: a real launch command carries a handful of wrapper or builtin names
-// in a child's argv, never dozens. Total work is O(limit × length).
-func shadowedChildTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	if len(words) == 0 {
-		return false
-	}
-	if judgeShadowedChildSuffix(words, names, memo) {
-		return true
-	}
-	return laterChildSuffixMutates(words[1:], names, memo)
-}
-
 // shadowedChildJudgementLimit bounds the suffix judgements the child-tail walks
-// of one validation start; see shadowedChildTailMutates. The work is
-// proportional to it times the command's length.
+// (shadowedLiteralChildTailMutates) of one validation start. Judging every
+// suffix of a long tail would be quadratic, and nested wrappers chain one walk
+// per level (Codex on #4708), so every walk's judgements share this budget per
+// validation and the walk fails closed past it. It counts verdict words, not
+// operands: a real launch command carries a handful of wrapper or builtin names
+// in a child's argv, never dozens. Total work is proportional to it times the
+// command's length.
 const shadowedChildJudgementLimit = 32
 
 // judgeShadowedChildSuffix judges one child-tail suffix. A suffix another walk
@@ -69,35 +28,6 @@ func judgeShadowedChildSuffix(words []*syntax.Word, names map[string]struct{}, m
 		return true
 	}
 	return wrapperOperandTailMutates(words, names, memo)
-}
-
-// laterChildSuffixMutates reports whether any suffix of words that begins at a
-// verdict word mutates. Every words slice in one validation is a suffix of the
-// call's Args, so words[0] names the answer, and memo.childTails holds it for
-// every position already scanned. A scan stops at the first cached position or
-// the first mutating suffix; every position it passed has the same answer as
-// the one it stopped at (none of them began a mutating suffix), so each is
-// cached and no position is scanned twice.
-func laterChildSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	answer := false
-	scanned := 0
-	for scanned < len(words) {
-		if cached, seen := memo.childTails[words[scanned]]; seen {
-			answer = cached
-			break
-		}
-		if accountChildTailSuffixStartsVerdict(words[scanned]) &&
-			judgeShadowedChildSuffix(words[scanned:], names, memo) {
-			answer = true
-			scanned++
-			break
-		}
-		scanned++
-	}
-	for _, word := range words[:scanned] {
-		memo.childTails[word] = answer
-	}
-	return answer
 }
 
 // accountChildTailSuffixStartsVerdict reports whether judging
@@ -197,4 +127,52 @@ var accountChildTailSuffixBuiltinVerdictNames = map[string]struct{}{
 	"eval": {}, ".": {}, "source": {}, "trap": {}, "alias": {}, "fc": {}, "history": {}, "enable": {},
 	// The declaration builtins isAccountDeclarationBuiltin matches.
 	"export": {}, "readonly": {}, "declare": {}, "typeset": {}, "local": {},
+}
+
+// shadowedLiteralChildTailMutates judges a wrapper's real child argv by the
+// exec-boundary rule: the boundary is decided at COMMAND POSITION, so words[0]
+// is judged as a command (a dynamic word there refuses), and once it is literal
+// its arguments are opaque — `ionice codex "$PROMPT"` runs codex with a prompt.
+// A shadowed wrapper (`shift N; exec "$@"`) can still land on a LITERAL later
+// word that begins a mutating command, so those suffixes are judged too.
+func shadowedLiteralChildTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+	if len(words) == 0 {
+		return false
+	}
+	if judgeShadowedChildSuffix(words, names, memo) {
+		return true
+	}
+	return laterLiteralChildSuffixMutates(words[1:], names, memo)
+}
+
+// laterLiteralChildSuffixMutates judges each suffix of words that begins at a
+// literal verdict word. A non-literal word is skipped: it is an argument, not
+// the command the wrapper runs, so it is not an exec boundary. Every words slice
+// in one validation is a suffix of the call's Args, so words[0] names the answer
+// and memo.literalChildTails holds it for every position already scanned: the
+// scan stops at the first cached position or the first mutating suffix, and each
+// position it passed has that same answer, so no position is scanned twice
+// (Codex P2 on #5711 — nested option interpretations returned one long tail
+// once each).
+func laterLiteralChildSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+	answer := false
+	scanned := 0
+	for scanned < len(words) {
+		if cached, seen := memo.literalChildTails[words[scanned]]; seen {
+			answer = cached
+			break
+		}
+		if _, literal := literalShellWord(words[scanned]); literal &&
+			accountChildTailSuffixStartsVerdict(words[scanned]) &&
+			judgeShadowedChildSuffix(words[scanned:], names, memo) {
+			answer = true
+			scanned++
+			break
+		}
+		scanned++
+	}
+	for _, word := range words[:scanned] {
+		memo.literalChildTails[word] = answer
+	}
+	return answer
 }

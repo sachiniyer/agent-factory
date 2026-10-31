@@ -146,9 +146,7 @@ test("tab create retries a fenced snapshot before resolving and attaching its ne
     };
     await route.fulfill({ json: { data: { name: tab.name }, error: null } });
   });
-  await page.locator(".af-main .af-term-more").click();
-  await page.locator(".af-tab-new").click();
-  await page.locator(".af-tab-menu-item").filter({ hasText: /^Terminal$/ }).click();
+  await page.locator(".af-main .af-term-new-shell").click();
   await waitingSnapshot.promise;
   const changed = { ...f.b, branch: "race-ledger-event" };
   f.state.rows = [f.state.rows[0], changed];

@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	stdlog "log"
-
 	"github.com/sachiniyer/agent-factory/config"
 	aflog "github.com/sachiniyer/agent-factory/log"
 
@@ -40,9 +38,7 @@ import (
 func suppressWarningLog(t *testing.T) {
 	t.Helper()
 	var buf bytes.Buffer
-	old := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&buf, "", 0)
-	t.Cleanup(func() { aflog.WarningLog = old })
+	aflog.CaptureOutput(t, aflog.WarningLog, "", &buf)
 }
 
 // wireCLIWarnings replicates rootCmd.PersistentPreRun: when the command is an

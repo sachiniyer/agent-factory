@@ -54,6 +54,9 @@ func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, pro
 	if err != nil || archived == nil {
 		return err
 	}
+	if err := m.pruneRowFence(repoID, archived); err != nil {
+		return fmt.Errorf("the title %q is held by an archived session: %w", archived.Title, err)
+	}
 	return m.validateTitleClaimableLocked(repoID, repoPath, title, program, namespace, allowReserved, diskData, archived, inPlace, remedyPath...)
 }
 
@@ -79,6 +82,12 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	}
 	if archived == nil {
 		return nil, nil
+	}
+	// The rename relocates the archive. A pending prune intent owns that worktree
+	// until it resolves (the startup resume or the next apply), so refuse before
+	// anything moves (#5189).
+	if err := m.pruneRowFence(repoID, archived); err != nil {
+		return nil, fmt.Errorf("the title %q is held by an archived session: %w", archived.Title, err)
 	}
 	oldTitle := archived.Title
 	// The replacement name must clear the same bar the archived row itself had:

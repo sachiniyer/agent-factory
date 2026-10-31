@@ -166,8 +166,70 @@ func DeriveAgentServerToken(key []byte, ref string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
+// DeriveCallbackToken computes the sandbox callback credential for one session
+// under ref (#5571 W3.6): HMAC-SHA256(key, "af-sandbox-callback/v1/"+sessionID+
+// "/"+nonce), base64url. Deriving it, rather than drawing a random secret that
+// lives only in the daemon's memory, is what lets a restarted daemon accept the
+// credential a still-running sandbox already holds: the row persists only the
+// ref, the daemon re-derives the same secret from its 0600 key and re-registers
+// it, and nothing has to be re-delivered to the sandbox. The session id is part
+// of the input so one ref can never yield a credential for another session, and
+// the label separates this construction from DeriveAgentServerToken's so the two
+// credentials are never interchangeable.
+func DeriveCallbackToken(key []byte, sessionID, ref string) (string, error) {
+	nonce, ok := strings.CutPrefix(ref, refSchemeV1+".")
+	if !ok || nonce == "" {
+		return "", fmt.Errorf("sandbox callback reference has an unknown scheme")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return "", fmt.Errorf("cannot derive a sandbox callback token without a session id")
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte("af-sandbox-callback/" + refSchemeV1 + "/" + sessionID + "/" + nonce))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+// argv0 is a test seam for the spelling this process was launched under.
+var argv0 = func() string {
+	if len(os.Args) > 0 {
+		return os.Args[0]
+	}
+	return ""
+}
+
+// sessionLaunchDir is the directory the session's own token sits in: the
+// directory of the path THIS session launched the binary under. With one af
+// binary shared per host (#5571 W2.2) the session's <sessionDir>/af is a
+// symlink to the shared cache file, and os.Executable resolves through it — so
+// the executable's own directory is the HOST-WIDE cache, which no session may
+// look in. The launch path is used only when it is absolute and names the very
+// file that is running; anything else falls back to the executable's directory,
+// the pre-W2.2 behavior, and never to a lookup keyed to anything shared.
+func sessionLaunchDir(exe, launch string) string {
+	if filepath.IsAbs(launch) {
+		if a, err := os.Stat(launch); err == nil {
+			if b, err := os.Stat(exe); err == nil && os.SameFile(a, b) {
+				return filepath.Dir(launch)
+			}
+		}
+	}
+	return filepath.Dir(exe)
+}
+
+// SessionDir is this agent-server's own session directory on the sandbox host —
+// the directory beside the binary a provision staged, where the per-session
+// token already lives. State that must survive an agent-server restart but belongs
+// to this one session (and must not touch the host's shared af home) goes here.
+func SessionDir() (string, error) {
+	exe, err := executable()
+	if err != nil {
+		return "", fmt.Errorf("agent-server cannot resolve its own binary path: %w", err)
+	}
+	return sessionLaunchDir(exe, argv0()), nil
+}
+
 // SuppliedAgentServerToken reads the token a W1.1 provision placed beside THIS
-// binary — <dirname(executable)>/af-server-token — when one exists. It returns
+// binary's session-specific launch path — <dirname(argv[0])>/af-server-token — when one exists. It returns
 // "" when the file is absent: an agent-server provisioned before W1.1, or run
 // by hand, keeps the file-backed daemon-token of the AF home it runs under.
 //
@@ -185,7 +247,7 @@ func SuppliedAgentServerToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("agent-server cannot resolve its own binary path: %w", err)
 	}
-	path := filepath.Join(filepath.Dir(exe), TokenFileName)
+	path := filepath.Join(sessionLaunchDir(exe, argv0()), TokenFileName)
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {

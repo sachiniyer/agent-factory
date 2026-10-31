@@ -56,7 +56,7 @@ func TestStopDaemon_PreservesNewDaemonSocket(t *testing.T) {
 	// argv[0] with a discrete "--daemon" token as a real argv element,
 	// satisfying both checks isAgentFactoryDaemon requires (same recipe as
 	// TestStopDaemon_SIGTERMFirst).
-	cmd := spawnFakeDaemonProc(t, "af", "sleep 60; :", "--daemon", "af-test")
+	cmd := spawnFakeDaemonHomeProc(t, "af", "sleep 60; :", "--daemon", "af-test")
 	pid := cmd.Process.Pid
 
 	// Event-driven readiness with a generous bound so a loaded runner cannot

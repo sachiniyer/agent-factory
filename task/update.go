@@ -47,7 +47,10 @@ type TaskUpdate struct {
 	// the same reason as MaxConcurrentRuns: "keep" is a meaningful value to patch
 	// BACK to, and a plain string could not tell "revert to keep" from "leave it
 	// alone".
-	OnComplete  *string `json:"on_complete,omitempty"`
+	OnComplete *string `json:"on_complete,omitempty"`
+	// Host patches the listed host sessions are placed on (#5571 W6.3). A pointer
+	// so "" (clear the pick) is distinguishable from "leave it alone".
+	Host        *string `json:"host,omitempty"`
 	ProjectPath *string `json:"project_path,omitempty"`
 	Program     *string `json:"program,omitempty"`
 	Enabled     *bool   `json:"enabled,omitempty"`
@@ -77,9 +80,13 @@ func (u *TaskUpdate) GobDecode(data []byte) error {
 func (u TaskUpdate) IsEmpty() bool {
 	return u.Name == nil && u.Prompt == nil && u.CronExpr == nil &&
 		u.WatchCmd == nil && u.TargetSession == nil && u.MaxConcurrentRuns == nil &&
-		u.OnComplete == nil &&
+		u.OnComplete == nil && u.Host == nil &&
 		u.ProjectPath == nil && u.Program == nil && u.Enabled == nil
 }
+
+// ApplyTo is apply for callers outside the package that keep a local copy of a
+// task and must advance it by a patch the daemon accepted.
+func (u TaskUpdate) ApplyTo(t Task) Task { return u.apply(t) }
 
 // apply merges the non-nil fields of u onto t and returns the result. It never
 // touches CreatedAt, LastRunAt, LastRunStatus, or DroppedEvents, so a merge onto
@@ -105,6 +112,9 @@ func (u TaskUpdate) apply(t Task) Task {
 	}
 	if u.OnComplete != nil {
 		t.OnComplete = *u.OnComplete
+	}
+	if u.Host != nil {
+		t.Host = strings.TrimSpace(*u.Host)
 	}
 	if u.ProjectPath != nil {
 		t.ProjectPath = *u.ProjectPath
@@ -196,6 +206,9 @@ func DiffTask(old, cur Task) TaskUpdate {
 	if cur.OnComplete != old.OnComplete {
 		u.OnComplete = &cur.OnComplete
 	}
+	if cur.Host != old.Host {
+		u.Host = &cur.Host
+	}
 	if cur.ProjectPath != old.ProjectPath {
 		u.ProjectPath = &cur.ProjectPath
 	}
@@ -243,6 +256,14 @@ func UpdateTask(id string, update TaskUpdate, expect ProjectExpectation) (Task, 
 func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, actor Actor, validate func(Task) (string, error)) (Task, error) {
 	if err := ValidateTaskID(id); err != nil {
 		return Task{}, err
+	}
+	// Validate a host the patch sets BEFORE the lock, like the repo re-resolve
+	// below: it reads the global config. Only a patch that sets it is checked, so
+	// an unrelated edit never fails on a host removed from the list since.
+	if update.Host != nil {
+		if err := validateTaskHost(strings.TrimSpace(*update.Host)); err != nil {
+			return Task{}, err
+		}
 	}
 	path, err := getTasksPathFn()
 	if err != nil {

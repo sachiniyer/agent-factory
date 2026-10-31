@@ -40,7 +40,7 @@ for (const surface of ["drawer", "rebuilt header"] as const) {
         await page.locator(".af-rail-title").click();
       }
       await expect(page.locator(".af-row")).toHaveCount(0);
-      await page.getByRole("button", { name: "Session actions", exact: true }).click();
+      await page.getByRole("button", { name: "More session actions", exact: true }).click();
       const action = page.locator(".af-term-head").getByRole("button", { name: /^(Kill|Delete) session/ });
       await action.focus();
       const originalAction = await action.elementHandle();

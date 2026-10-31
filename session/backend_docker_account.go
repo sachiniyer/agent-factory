@@ -812,6 +812,28 @@ func parseContainerOwner(out string) (string, error) {
 	return owner, nil
 }
 
+// prepareContainerUser prepares a writable HOME and /workspace for the uid the
+// container will run provisioning and the agent-server as, then records that
+// uid so every subsequent exec (configureGit, cloneWorkspace, the agent-server,
+// readBanner) runs as it via sessionExecOptions. The account path probes the
+// mounted account directory's owner; the non-account path probes the image's
+// default USER. Both chown as root (0:0) and set containerUser, so the two paths
+// share the same contract — a non-root BYO image is in scope for an account
+// session, and after this fix it is in scope for a non-account session too
+// (previously the non-account path forced HOME=/root while running every exec
+// as a non-root default user, so provisioning failed at the first
+// `git config --global`). The exception is a non-account session on a
+// root-DEFAULT image: the probe reports uid 0 (0:0 for a bare `USER 0`/`root`,
+// 0:<gid> for `USER 0:<gid>`), no preparation is needed, and the step returns
+// early with containerUser unset so the session runs exactly as it did before
+// this step existed.
+func (p *dockerProvisioner) prepareContainerUser() error {
+	if p.spec.Account.Dir != "" {
+		return p.prepareAccountUser()
+	}
+	return p.prepareNonAccountUser()
+}
+
 // prepareAccountUser asks the mounted directory who owns it in the container's
 // user namespace, then prepares a writable HOME/workspace for that same uid.
 // Rootful Docker reports the host af uid; rootless Docker commonly reports 0,

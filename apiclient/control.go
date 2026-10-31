@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/projectclone"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -44,6 +46,15 @@ func (c *Client) CreateSession(req daemon.CreateSessionRequest) (*session.Instan
 // callCtx for why the local socket has no deadline of its own.
 func (c *Client) KillSession(ctx context.Context, req daemon.KillSessionRequest) error {
 	return c.callCtx(ctx, "KillSession", req, &daemon.KillSessionResponse{})
+}
+
+// WorkspaceFacts asks the daemon to measure an off-box session's workspace for
+// its kill confirmation (#5571 W8.2). It takes a ctx because the measurement
+// crosses to another host and the kill dialog waits on it.
+func (c *Client) WorkspaceFacts(ctx context.Context, req daemon.WorkspaceFactsRequest) (daemon.WorkspaceFactsResponse, error) {
+	var resp daemon.WorkspaceFactsResponse
+	err := c.callCtx(ctx, "WorkspaceFacts", req, &resp)
+	return resp, err
 }
 
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the
@@ -200,6 +211,17 @@ func (c *Client) ReorderTab(req daemon.ReorderTabRequest) (daemon.ReorderTabResp
 	return resp, nil
 }
 
+// SetAttention sets or clears a session's attention request over /v1/SetAttention
+// — the same route the web clears it with, and the one `af sessions attention`
+// reaches under a remote target or a sandbox credential.
+func (c *Client) SetAttention(req daemon.SetAttentionRequest) (daemon.SetAttentionResponse, error) {
+	var resp daemon.SetAttentionResponse
+	if err := c.call("SetAttention", req, &resp); err != nil {
+		return daemon.SetAttentionResponse{}, err
+	}
+	return resp, nil
+}
+
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
 // one attached session (#1160). Best-effort attach coordination; it rides an
 // internal (non-cataloged) route because it is daemon infra, not a public verb.
@@ -218,7 +240,20 @@ func (c *Client) ResumeStatusPoll(req daemon.ResumeStatusPollRequest) error {
 // the daemon over these same HTTP routes the web UI uses, so the transport alone
 // cannot tell them apart and each client says which it is.
 func (c *Client) AddTask(t task.Task, actor task.Actor) error {
-	return c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor)}, &daemon.AddTaskResponse{})
+	_, err := c.AddTaskResult(t, actor)
+	return err
+}
+
+// AddTaskResult is AddTask returning the record the daemon stored, or nil when
+// the daemon predates the field or answered a committed-with-warning error. For a
+// remote target it also asks the daemon to validate the task's project path on its
+// own host (#5859).
+func (c *Client) AddTaskResult(t task.Task, actor task.Actor) (*task.Task, error) {
+	var resp daemon.AddTaskResponse
+	if err := c.call("AddTask", daemon.AddTaskRequest{Task: t, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Task, nil
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
@@ -235,7 +270,7 @@ func (c *Client) AddTask(t task.Task, actor task.Actor) error {
 // actor names the calling surface for the audit trail — see AddTask.
 func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor), ValidatePath: c.isRemote()}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil
@@ -399,6 +434,19 @@ func (c *Client) ListAccounts(agent, repoPath string) (daemon.ListAccountsRespon
 // a Go consumer. Unlike login, registration needs no terminal on the daemon
 // host: #3950 deliberately restores it for the config pane's remote target.
 
+// QuotaReport reads the daemon host's per-agent usage/quota report (#2983) —
+// the web's usage section and a remote `af quota` both render it. HTTP twin of
+// daemon.QuotaReport: the daemon reads ITS host's session records, so the
+// answer describes the daemon a remote client is actually pointed at — the
+// local-records read `af quota` used to refuse for exactly that reason.
+func (c *Client) QuotaReport() (daemon.QuotaReportResponse, error) {
+	var resp daemon.QuotaReportResponse
+	if err := c.call("QuotaReport", daemon.QuotaReportRequest{}, &resp); err != nil {
+		return daemon.QuotaReportResponse{}, err
+	}
+	return resp, nil
+}
+
 // RegisterAccount creates an account's credential directory on the daemon host
 // without logging in, for the config pane's Accounts section.
 func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResponse, error) {
@@ -409,22 +457,43 @@ func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResp
 	return resp, nil
 }
 
-// There is deliberately no ListProjects here. The web reads the registry over HTTP
-// (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),
-// but the two GO consumers read it in-process: the TUI's switcher union
-// (app/switch_project.go buildProjectListFrom) and the CLI's `af projects list`
-// (api/projects.go) both call config.ListProjects(), the same file-locked read the
-// daemon writes through — a read of on-disk config needs no round trip. A wrapper
-// here would be dead code whose only caller was its own test. RegisterProject stays
-// because it is a WRITE, which must go through the daemon (the single writer, #960).
-
 // RegisterProject registers a git checkout as a durable project through the
 // daemon (#2456) — the single-writer path the TUI's add-project action routes
 // through, replacing the legacy in-process root_agents write. The path is
 // resolved on the daemon's filesystem. HTTP twin of RegisterProject.
 func (c *Client) RegisterProject(path string) (config.Project, error) {
+	return c.registerProject(daemon.RegisterProjectRequest{Path: path})
+}
+
+// registerURLSlack is the transport margin added to the daemon's clone budget.
+const registerURLSlack = time.Minute
+
+// RegisterProjectURL asks the daemon to clone a git URL on ITS host, with its
+// credentials, under its projects_root, and register the checkout (W9.10).
+func (c *Client) RegisterProjectURL(url string) (config.Project, error) {
+	return c.registerProject(daemon.RegisterProjectRequest{URL: url})
+}
+
+func (c *Client) registerProject(req daemon.RegisterProjectRequest) (config.Project, error) {
 	var resp daemon.RegisterProjectResponse
-	if err := c.call("RegisterProject", daemon.RegisterProjectRequest{Path: path}, &resp); err != nil {
+	// A URL registration runs the clone inside the request, so the wait is
+	// derived from the daemon's own clone budget rather than a private shorter
+	// number that would report failure for a clone that then succeeds (#6093).
+	wait := time.Duration(0)
+	if req.URL != "" {
+		wait = projectclone.Budget + registerURLSlack
+	}
+	if err := c.callCtxMin(context.Background(), wait, "RegisterProject", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
+// SetProjectColor sets or clears (empty color) a registered project's display
+// color through the daemon — the single writer. HTTP twin of SetProjectColor.
+func (c *Client) SetProjectColor(req daemon.SetProjectColorRequest) (config.Project, error) {
+	var resp daemon.SetProjectColorResponse
+	if err := c.call("SetProjectColor", req, &resp); err != nil {
 		return config.Project{}, err
 	}
 	return resp.Project, nil
@@ -494,4 +563,21 @@ func (c *Client) SendPrompt(req daemon.SendPromptRequest) (session.PromptDeliver
 		return session.PromptCouldNotConfirm, nil
 	}
 	return resp.Status, nil
+}
+
+// ListProjects reads the daemon's own project registry (HTTP twin of
+// config.ListProjects run on the daemon's host), so a remote `af projects list`
+// describes the targeted machine rather than this one.
+func (c *Client) ListProjects() ([]config.Project, error) {
+	return c.ListProjectsContext(context.Background())
+}
+
+// ListProjectsContext is ListProjects bound to ctx, for a caller (the TUI's
+// poll) that must be able to abandon the read.
+func (c *Client) ListProjectsContext(ctx context.Context) ([]config.Project, error) {
+	var resp daemon.ListProjectsResponse
+	if err := c.callCtx(ctx, "ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Projects, nil
 }

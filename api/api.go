@@ -680,6 +680,8 @@ func silenceCobraOutput() {
 	ProjectsCmd.SilenceErrors = true
 	ProposalCmd.SilenceUsage = true
 	ProposalCmd.SilenceErrors = true
+	BacklogCmd.SilenceUsage = true
+	BacklogCmd.SilenceErrors = true
 	if root := SessionsCmd.Root(); root != nil {
 		root.SilenceUsage = true
 		root.SilenceErrors = true
@@ -745,6 +747,7 @@ func init() {
 	// way. The positional stays supported: this is additive, not a migration.
 	sessionsSendPromptCmd.Flags().StringVar(&sendPromptPromptFlag, "prompt", "", "The prompt to send (alias for the positional <prompt>, matching 'sessions create --prompt')")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptCreateFlag, "create", false, "Auto-create the session if it doesn't exist")
+	sessionsSendPromptCmd.Flags().StringVar(&sendPromptHostFlag, "host", "", "With --create: place a NEWLY created session on a host from your global `hosts` list, over ssh (see `af sessions backends`). If the session already exists the prompt is sent to it unchanged")
 	sessionsSendPromptCmd.Flags().StringVar(&sendPromptProgramFlag, "program", "", "Program to run when creating a new session (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllFlag, "all", false, "Broadcast the prompt to every live session in scope (current repo by default; excludes the reserved root session)")
 	sessionsSendPromptCmd.Flags().BoolVar(&sendPromptAllReposFlag, "all-repos", false, "With --all, broadcast across every repo instead of only the current/--repo one")
@@ -754,6 +757,7 @@ func init() {
 	// can imply that it affects the always-destructive kill operation.
 	sessionsKillCmd.Flags().Bool("force", false, "Deprecated no-op, accepted for compatibility: kill always destroys the session (use 'af sessions archive' to keep it restorable)")
 	sessionsArchiveCmd.Flags().BoolVar(&sessionsArchiveSelf, "self", false, "Archive the current session (resolved via whoami); use from inside a session when your work is done")
+	sessionsArchiveCmd.Flags().BoolVar(&sessionsArchivePush, "push", false, "Push an ssh/sandbox session's branch to origin before archiving. Without it nothing is published: the agent stops and the workspace stays on its host (docker and hook sessions always push)")
 
 	sessionsHandoffCmd.Flags().StringVar(&sessionsHandoffTo, "to", "", "Agent to hand the session off to (one of "+tmux.SupportedProgramsString()+")")
 	sessionsHandoffCmd.Flags().StringVar(&sessionsHandoffBrief, "brief", "", "Mission for the incoming agent, replacing the session's stored prompt")
@@ -823,6 +827,10 @@ func init() {
 
 	sessionsPruneCmd.Flags().StringVar(&sessionsPruneOlderThanStr, "older-than", "",
 		"Report sessions archived longer than this duration ago (required, for example 720h for thirty days)")
+	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneApplyFlag, "apply", false,
+		"Delete the archived worktrees the dry run lists (the branch is kept; the row stays as a pruned tombstone)")
+	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneYesFlag, "yes", false,
+		"With --apply: skip the confirmation prompt (required when stdin is not a terminal)")
 	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneAllFlag, "all", false,
 		"Span every project instead of only the current/--repo one")
 	SessionsCmd.AddCommand(sessionsPruneCmd)
@@ -843,6 +851,7 @@ func init() {
 	tasksAddCmd.Flags().StringVar(&taskAddCronFlag, "cron", "", "Cron expression (exactly one of --cron / --watch-cmd)")
 	tasksAddCmd.Flags().StringVar(&taskAddWatchCmdFlag, "watch-cmd", "", "Long-running watch command; each stdout line triggers the task (exactly one of --cron / --watch-cmd)")
 	tasksAddCmd.Flags().StringVar(&taskAddTargetSessionFlag, "target-session", "", "Deliver the prompt into this session (auto-created if missing); empty creates a new session per run")
+	tasksAddCmd.Flags().StringVar(&taskAddHostFlag, "host", "", "Place each session this task creates on a host from your global `hosts` list, over ssh (see `af sessions backends`); empty uses the repo's backend. A name that is not in the list is refused")
 	tasksAddCmd.Flags().IntVar(&taskAddMaxConcurrentRunsFlag, "max-concurrent-runs", 0, "Cap how many sessions this watch task may have in flight at once; excess events are queued in order instead of spawning runs, subject to the durable queue's retention limits (0 = unlimited; --watch-cmd tasks without --target-session only)")
 	tasksAddCmd.Flags().StringVar(&taskAddOnCompleteFlag, "on-complete", "", "What happens to the session a run spawns once it finishes: keep (default, leaves it in place), archive (restorable, but retains its whole worktree), or kill (reclaims the worktree and prunes the session's branch). Not for --target-session tasks, whose session is meant to be reused")
 	tasksAddCmd.Flags().StringVar(&taskAddProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
@@ -862,6 +871,7 @@ func init() {
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateWatchCmdFlag, "watch-cmd", "", "New watch command (clears cron)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateTargetSessionFlag, "target-session", "", "New target session; pass an empty value to revert to a new session per run")
 	tasksUpdateCmd.Flags().IntVar(&taskUpdateMaxConcurrentRunsFlag, "max-concurrent-runs", 0, "New in-flight session cap for this watch task; pass 0 to revert to unlimited")
+	tasksUpdateCmd.Flags().StringVar(&taskUpdateHostFlag, "host", "", "New host for the sessions this task creates (a name from your global `hosts` list); pass an empty value (--host \"\") to clear it")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateOnCompleteFlag, "on-complete", "", "New spawned-session lifecycle: keep, archive, or kill; pass keep to revert to leaving sessions in place")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateProjectPathFlag, "project-path", "", "Move the task to this git repository (distinct from --repo, which scopes its current project)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateEnabledFlag, "enabled", "", "Enable or disable the task (true/false)")

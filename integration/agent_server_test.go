@@ -29,6 +29,9 @@ type agentServerBanner struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"`
 	Title string `json:"title"`
+	// Version is the af build the agent-server reports (#5571 W4.3) — the same
+	// fact /v1/health's `version` member carries.
+	Version string `json:"version"`
 }
 
 // TestAgentServerRoundTrip is the #1592 Phase 4 PR1 payoff: it starts a REAL,
@@ -192,6 +195,150 @@ func TestAgentServerRoundTrip(t *testing.T) {
 	alive := post("/v1/agent/alive", ``)
 	if a, _ := alive["alive"].(bool); !a {
 		t.Fatalf("expected the workspace to be alive, got %+v", alive)
+	}
+
+	// --- W4.3: the stable-id tab surface --------------------------------------
+	//
+	// The banner's version advertisement is the first thing a driver read.
+	if banner.Version == "" {
+		t.Fatalf("the startup banner must carry the build version, got %+v", banner)
+	}
+	// GET /v1/health advertises the version + feature tokens the W4.3 surface
+	// negotiated by.
+	healthReq, err := http.NewRequest(http.MethodGet, base+"/v1/health", nil)
+	if err != nil {
+		t.Fatalf("health request: %v", err)
+	}
+	healthReq.Header.Set("Authorization", "Bearer "+banner.Token)
+	healthResp, err := client.Do(healthReq)
+	if err != nil {
+		t.Fatalf("GET /v1/health: %v", err)
+	}
+	var healthEnv struct {
+		Data struct {
+			OK       bool     `json:"ok"`
+			Version  string   `json:"version"`
+			Features []string `json:"features"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(healthResp.Body).Decode(&healthEnv); err != nil {
+		t.Fatalf("decode /v1/health: %v", err)
+	}
+	_ = healthResp.Body.Close()
+	if !healthEnv.Data.OK || healthEnv.Data.Version == "" {
+		t.Fatalf("health must report ok + version, got %+v", healthEnv.Data)
+	}
+	for _, want := range []string{"tab-api", "tab-id-addressing"} {
+		found := false
+		for _, f := range healthEnv.Data.Features {
+			if f == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("health features must advertise %q, got %v", want, healthEnv.Data.Features)
+		}
+	}
+
+	// Create a shell tab under the daemon's own stable id — assigned verbatim,
+	// and visible on the roster with the agent row first.
+	created := post("/v1/agent/tab-create", `{"id":"daemon-shell-1","kind":"shell"}`)
+	createdTab, _ := created["tab"].(map[string]any)
+	if got, _ := createdTab["id"].(string); got != "daemon-shell-1" {
+		t.Fatalf("the supplied stable id must be assigned verbatim, got %+v", createdTab)
+	}
+	// A replayed create — the reconnect-retry shape — answers the same row and
+	// lands no second tab.
+	replayed := post("/v1/agent/tab-create", `{"id":"daemon-shell-1","kind":"shell"}`)
+	replayedTab, _ := replayed["tab"].(map[string]any)
+	if got, _ := replayedTab["id"].(string); got != "daemon-shell-1" {
+		t.Fatalf("the replayed create must answer the same row, got %+v", replayedTab)
+	}
+	roster := post("/v1/agent/tabs", ``)
+	tabs, _ := roster["tabs"].([]any)
+	if len(tabs) != 2 {
+		t.Fatalf("the replay must not append: want 2 roster rows (agent + shell), got %d", len(tabs))
+	}
+
+	// Id-addressed preview of the shell tab.
+	pv := post("/v1/agent/preview", `{"tab_id":"daemon-shell-1","full":false}`)
+	if _, hasContent := pv["content"]; !hasContent {
+		t.Fatalf("tab_id preview must return the pane content field, got %+v", pv)
+	}
+
+	// Id-addressed WS stream: type a marker command into the fresh shell and see
+	// its echo — proving the ?tab_id= bind reaches the shell pane, not tab 0.
+	shCtx, shCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shCancel()
+	shConn, _, err := websocket.Dial(shCtx,
+		"ws://"+banner.Addr+"/v1/sessions/probe/stream?tab_id=daemon-shell-1&"+agentproto.AccessTokenQueryParam+"="+banner.Token,
+		&websocket.DialOptions{HTTPClient: client})
+	if err != nil {
+		t.Fatalf("dial ?tab_id= PTY stream: %v", err)
+	}
+	defer func() { _ = shConn.Close(websocket.StatusNormalClosure, "") }()
+	shConn.SetReadLimit(1 << 20)
+
+	var (
+		shMu   sync.Mutex
+		shPump strings.Builder
+	)
+	go func() {
+		for {
+			msg, rerr := agentproto.ReadMessage(shCtx, shConn)
+			if rerr != nil {
+				return
+			}
+			if msg.Binary && msg.Frame.Op == agentproto.OpPTYOut {
+				shMu.Lock()
+				shPump.Write(msg.Frame.Data)
+				shMu.Unlock()
+			}
+		}
+	}()
+	shOutput := func() string {
+		shMu.Lock()
+		defer shMu.Unlock()
+		return shPump.String()
+	}
+	if err := agentproto.WriteFrame(shCtx, shConn, agentproto.InputFrame([]byte("echo w43-shell-marker\n"))); err != nil {
+		t.Fatalf("send input on the id-addressed stream: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "the id-addressed stream echoes the shell's output", func() bool {
+		return strings.Contains(shOutput(), "w43-shell-marker")
+	})
+
+	// Close by stable id, then the roster shows the agent row alone and a
+	// stale-id preview is a 404 — never a fall back to a positional tab.
+	post("/v1/agent/tab-close", `{"id":"daemon-shell-1"}`)
+	roster = post("/v1/agent/tabs", ``)
+	if tabs, _ = roster["tabs"].([]any); len(tabs) != 1 {
+		t.Fatalf("after tab-close the roster must hold the agent row alone, got %d rows", len(tabs))
+	}
+	goneReq, err := http.NewRequest(http.MethodPost, base+"/v1/agent/preview", strings.NewReader(`{"tab_id":"daemon-shell-1"}`))
+	if err != nil {
+		t.Fatalf("preview request: %v", err)
+	}
+	goneReq.Header.Set("Authorization", "Bearer "+banner.Token)
+	goneReq.Header.Set("Content-Type", "application/json")
+	goneResp, err := client.Do(goneReq)
+	if err != nil {
+		t.Fatalf("POST preview (stale id): %v", err)
+	}
+	defer func() { _ = goneResp.Body.Close() }()
+	if goneResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("a stale stable id must be a 404, got %d", goneResp.StatusCode)
+	}
+	var goneEnv struct {
+		Error *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(goneResp.Body).Decode(&goneEnv); err != nil {
+		t.Fatalf("decode stale-id envelope: %v", err)
+	}
+	if goneEnv.Error == nil || goneEnv.Error.Code != "tab_gone" {
+		t.Fatalf("the stale-id 404 must carry the tab_gone code, got %+v", goneEnv.Error)
 	}
 }
 

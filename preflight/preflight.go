@@ -240,6 +240,26 @@ func LocalSessionPrereqs(cfg *config.Config, agent string) error {
 	return nil
 }
 
+// LocalSessionPrereqsAt is LocalSessionPrereqs for a caller that is not the
+// process the session launches from — the daemon validating a remote create. A
+// relative program_overrides path resolves against the directory the launch
+// uses (the session's repo or workspace), never the checking process's own
+// working directory (#5779). An empty workingDir keeps LocalSessionPrereqs's
+// behaviour.
+func LocalSessionPrereqsAt(cfg *config.Config, agent, workingDir string) error {
+	if workingDir == "" {
+		return LocalSessionPrereqs(cfg, agent)
+	}
+	if _, err := CheckTmux(); err != nil {
+		return err
+	}
+	command := config.ResolveProgram(cfg, agent)
+	if _, err := CheckCommandAt(command, workingDir); err != nil {
+		return ProgramError(agent, command, err)
+	}
+	return nil
+}
+
 // ProgramError renders the actionable user-facing error for an agent that
 // failed its preflight check. It classifies the cause so the lead line points
 // at the real fix: a missing binary says "not installed or not on PATH" (fix:

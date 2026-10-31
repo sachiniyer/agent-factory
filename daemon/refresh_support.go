@@ -432,6 +432,9 @@ func (m *Manager) refreshLocked() error {
 	owed := persistLoadRuntimeReplacements(refreshed)
 	m.attachCredentialsToAll(refreshed)
 	m.instances = refreshed
+	// A repo whose instances.json vanished was preserved above; write its live
+	// sessions' records back so the preservation ends (#6048).
+	m.restoreMissingRecordsLocked(refreshed)
 	// Replaced wholesale, never merged: the ghost set is a projection of what is on
 	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
 	// ghost, or its slot would be held twice — once by the ghost and once by the

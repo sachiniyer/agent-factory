@@ -4,16 +4,17 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 )
 
 // InRepoUnknownLeaf is one leaf under an allowed structured config table that
 // no typed field matches: an in-repo [docker] or [ssh] table (no
 // DockerConfig/SSHConfig field) or a personal per-project [root_agent] table
-// (no RootAgent field). The typed decode drops it, so the setting it was
-// meant to carry has no effect. The in-repo loader reports [docker]/[ssh]
-// leaves this way (#4599); the personal loader reports [root_agent] leaves the
-// same way, so neither root-agent surface silently drops a typo'd leaf.
+// (no RootAgent field). The typed decode would drop it, so the setting it was
+// meant to carry would have no effect. The in-repo loader REJECTS such a file
+// with an InRepoUnknownLeavesError (#4599 warned first; #4845 made it an error);
+// the personal loader still reports [root_agent] leaves as a warning.
 type InRepoUnknownLeaf struct {
 	// Path is the config file, in the home-abbreviated form load errors use.
 	Path string
@@ -27,15 +28,41 @@ type InRepoUnknownLeaf struct {
 	Message string
 }
 
-// UnknownLeaves reports the [docker]/[ssh] leaves the load dropped because no
-// field matches them, sorted by table then key. Empty for a clean file. Unlike
-// the warning, which is emitted once per process, this is reported on every
-// load, so af doctor sees it even after the CLI already warned.
-func (c *InRepoConfig) UnknownLeaves() []InRepoUnknownLeaf {
-	if c == nil {
-		return nil
+// InRepoUnknownLeavesError is the load error for one or more unknown [docker]/[ssh]
+// leaves in an in-repo config (#4845). Each leaf's Message names the file, the key
+// and, when a known key is close, the intended one; Error joins them one per line.
+// af doctor reads Leaves to report each as its own finding.
+type InRepoUnknownLeavesError struct {
+	// Path is the config file, in the home-abbreviated form load errors use.
+	Path   string
+	Leaves []InRepoUnknownLeaf
+}
+
+func (e *InRepoUnknownLeavesError) Error() string {
+	lines := make([]string, 0, len(e.Leaves))
+	for _, leaf := range e.Leaves {
+		lines = append(lines, leaf.Message)
 	}
-	return append([]InRepoUnknownLeaf(nil), c.unknownLeaves...)
+	return strings.Join(lines, "\n")
+}
+
+// rejectedInRepoLeaf builds the report for one unknown leaf that fails the load:
+// the file, the table and key, the closest valid key ("did you mean …?") when one
+// is near, and the allowed set so the fix needs no docs.
+func rejectedInRepoLeaf(prettyPath, table, leaf string, allowed map[string]bool) InRepoUnknownLeaf {
+	suggestion := closestTableLeafSuggestion(strings.ToLower(leaf), allowed)
+	didYouMean := ""
+	if suggestion != "" {
+		didYouMean = fmt.Sprintf(" did you mean %q?", suggestion)
+	}
+	return InRepoUnknownLeaf{
+		Path:       prettyPath,
+		Table:      table,
+		Key:        leaf,
+		Suggestion: suggestion,
+		Message: fmt.Sprintf("in-repo config %s: unknown key %q under %q;%s fix or remove it (allowed %s keys: %s)",
+			prettyPath, leaf, table, didYouMean, table, strings.Join(sortedKeysFrom(allowed), ", ")),
+	}
 }
 
 func sortInRepoUnknownLeaves(leaves []InRepoUnknownLeaf) []InRepoUnknownLeaf {

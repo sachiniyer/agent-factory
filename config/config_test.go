@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1135,9 +1134,7 @@ codex = "/opt/codex/bin/codex --quiet"
 
 	t.Run("retired theme color migrates to system", func(t *testing.T) {
 		var warnings logtest.Buffer
-		prevWarning := log.WarningLog
-		log.WarningLog = stdlog.New(&warnings, "", 0)
-		t.Cleanup(func() { log.WarningLog = prevWarning })
+		log.CaptureOutput(t, log.WarningLog, "", &warnings)
 
 		writeToml(t, `
 [theme]

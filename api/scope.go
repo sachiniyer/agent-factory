@@ -101,19 +101,14 @@ func optionalCurrentRepo() (*config.RepoContext, error) {
 
 // resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
 //
-// This ALWAYS consults the cwd, including when --daemon-url is set. That looks
-// wrong for a remote target — the client's cwd names a repo on this machine —
-// but its callers are the write commands (kill/archive/restore/send-prompt, tab
-// mutations) whose transport does NOT honor --daemon-url: daemon.* goes over the
-// local control socket (callDaemon → DaemonSocketPath). Dropping the cwd scope
-// for them would send an UNSCOPED destructive request to the LOCAL daemon, which
-// could then resolve a same-titled session in a different local repo and kill or
-// archive it. Keeping the cwd scope keeps those commands pointed where they
-// already point.
+// This ALWAYS consults the cwd. Its remaining callers only run on paths a
+// remote target never reaches — the send-prompt broadcast (refused against a
+// remote before it runs) and prune's non-remote branch — so the cwd scope is
+// the right one there: it names a repo on this machine, which is the machine
+// those requests act on.
 //
-// Reads that genuinely reach the targeted daemon (sessions list/get/watch/preview)
-// use resolveRepoIDForLookup instead. If a write command is ever migrated onto the
-// apiclient transport, move it across too.
+// Every verb that genuinely reaches the targeted daemon — reads AND the routed
+// lifecycle/tab mutations (W9.1/W9.3) — uses resolveRepoIDForLookup instead.
 func resolveRepoID() (string, error) {
 	if repoFlag != "" {
 		repo, err := repoFromFlag()
@@ -133,14 +128,15 @@ func resolveRepoID() (string, error) {
 	return repo.ID, nil
 }
 
-// resolveRepoIDForLookup resolves the repo scope for a READ that is actually
-// served by the targeted daemon: the snapshot-based reads (`sessions list`,
-// `get`, `watch`) and `preview`, all of which route through apiclient and so
-// follow --daemon-url/AF_DAEMON_URL to the remote.
+// resolveRepoIDForLookup resolves the repo scope for a request routed to the
+// TARGETED daemon: the snapshot-based reads (`sessions list`, `get`, `watch`,
+// `preview`, `attach`) and the lifecycle/tab mutations W9.1/W9.3 moved onto
+// apiclient (kill/archive/restore/send-prompt/retry-limit/handoff, the tab
+// verbs), all of which follow --daemon-url/AF_DAEMON_URL to the remote.
 //
 // The dividing line is the TRANSPORT, not the command: a caller belongs here if
-// its request reaches the targeted daemon, and on resolveRepoID if it goes over
-// the local control socket regardless of the target.
+// its request reaches the targeted daemon, and on resolveRepoID if it can only
+// run against this machine anyway.
 //
 // It differs from resolveRepoID in one way: against a REMOTE target the cwd is
 // ignored. The client's cwd names a repo that exists HERE, not on the daemon's
@@ -149,10 +145,6 @@ func resolveRepoID() (string, error) {
 // lookup that used to succeed would report a spurious not-found. Against a
 // remote only an EXPLICIT --repo scopes; a bare title resolves across the
 // remote's repos, with the ambiguity guard refusing to pick between them.
-//
-// Deliberately NOT shared with the write commands: their transport is the local
-// control socket regardless of --daemon-url, so an unscoped request there is a
-// destructive mis-target rather than a remote lookup (see resolveRepoID).
 //
 // Known limitation: --repo becomes an ID by hashing the path on THIS machine
 // (config.RepoIDFromRoot), so against a remote it only disambiguates when the

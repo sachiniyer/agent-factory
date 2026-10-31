@@ -53,7 +53,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	// the failure that produced this draft may well be the old default going
 	// away, and replaying it as a pick would retry the same dead program.
 	m.pendingProgram, m.pendingPrompt = instance.Program, failed.rawPrompt
-	m.pendingBackend, m.pendingAccount = req.Backend, req.Account
+	m.pendingBackend, m.pendingHost, m.pendingAccount = req.Backend, req.Host, req.Account
 	// The wire values can't tell a user choice from a derived one: a program
 	// the account-pairing pinned is indistinguishable from a pick, and a
 	// deliberate "Ambient identity" is indistinguishable from an untouched
@@ -79,7 +79,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 			// review).
 			m.remoteDefaultPending = true
 			m.menu.SetNamingHasPrompt(strings.TrimSpace(m.pendingPrompt) != "")
-			m.menu.SetNamingBackend(m.pendingBackend != "")
+			m.menu.SetNamingBackend(m.backendPicked())
 			m.menu.SetNamingAccount(m.pendingAccount != "")
 			m.state = stateNew
 			m.menu.SetState(ui.StateNewInstance)
@@ -103,7 +103,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 		m.pendingProgram = m.defaultProgram()
 	}
 	m.menu.SetNamingHasPrompt(strings.TrimSpace(m.pendingPrompt) != "")
-	m.menu.SetNamingBackend(m.pendingBackend != "")
+	m.menu.SetNamingBackend(m.backendPicked())
 	m.menu.SetNamingAccount(m.pendingAccount != "")
 	m.state = stateNew
 	m.menu.SetState(ui.StateNewInstance)

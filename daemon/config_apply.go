@@ -157,7 +157,10 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 		return !reflect.DeepEqual(a.SessionEnvPassthrough, b.SessionEnvPassthrough)
 	},
 	"on_archive_command":   func(a, b *config.Config) bool { return a.OnArchiveCommand != b.OnArchiveCommand },
+	"move_cmd":             func(a, b *config.Config) bool { return a.MoveCmd != b.MoveCmd },
+	"sandbox_agent_config": func(a, b *config.Config) bool { return !reflect.DeepEqual(a.SandboxAgentConfig, b.SandboxAgentConfig) },
 	"worktree_root":        func(a, b *config.Config) bool { return a.WorktreeRoot != b.WorktreeRoot },
+	"projects_root":        func(a, b *config.Config) bool { return a.ProjectsRoot != b.ProjectsRoot },
 	"vscode_server_binary": func(a, b *config.Config) bool { return a.VSCodeServerBinary != b.VSCodeServerBinary },
 	"daemon_poll_interval": func(a, b *config.Config) bool { return a.DaemonPollInterval != b.DaemonPollInterval },
 	"log_max_size_mb":      func(a, b *config.Config) bool { return a.LogMaxSizeMB != b.LogMaxSizeMB },
@@ -172,6 +175,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"docker.mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
 	"ssh.host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
 	"sandbox.ssh":                    func(a, b *config.Config) bool { return a.SandboxSSH != b.SandboxSSH },
+	"sandbox.binary":                 func(a, b *config.Config) bool { return a.SandboxBinary != b.SandboxBinary },
 	"hosts":                          func(a, b *config.Config) bool { return !reflect.DeepEqual(a.Hosts, b.Hosts) },
 	"default_host":                   func(a, b *config.Config) bool { return a.DefaultHost != b.DefaultHost },
 	// Network listener keys — applied-live since #2480 PR2: the auth/CORS keys are
@@ -179,6 +183,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	// socket in place (webListeners.reconcile, below in ApplyConfig).
 	"network.listen_addr":            func(a, b *config.Config) bool { return a.ListenAddr != b.ListenAddr },
 	"network.preview_listen_addr":    func(a, b *config.Config) bool { return a.PreviewListenAddr != b.PreviewListenAddr },
+	"network.editor_origin_ports":    func(a, b *config.Config) bool { return a.EditorOriginPorts != b.EditorOriginPorts },
 	"network.require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
 	"network.require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"network.cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
@@ -298,7 +303,6 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	preReconcileServingAddr := old.ListenAddr
 	preReconcilePreviewAddr := old.PreviewListenAddr
 	preReconcileRefusal := ""
-	preSwapRevokedSandbox := 0
 	// The #5183 probation token floor (upgrade-candidate window) makes the
 	// EFFECTIVE token demand stricter than either config generation says: a
 	// candidate keeping a journaled socket bound answers 401 even under a
@@ -321,7 +325,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 		// the full control API unauthenticated even for the span of this
 		// apply, including a retained socket whose earlier failed rebind left
 		// it answering on a network address the file no longer names.
-		preSwapRevokedSandbox = m.webListeners.retireWebBeforePostureSwap(newCfg)
+		m.webListeners.retireWebBeforePostureSwap(newCfg)
 	}
 
 	// Swap the live config: per-op keys (default_program, session_env_passthrough,
@@ -382,65 +386,6 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 			// incomplete. Three outcomes, not two — applied, deferred to the next
 			// start, and attempted-but-not-in-effect, which is what these keys are.
 			result.Applied = withoutKeys(result.Applied, failed)
-		}
-	}
-	// Turning network.require_token OFF voids the premise every outstanding sandbox callback
-	// credential was issued under (#3012 review).
-	//
-	// mintSandboxCallbackFenced REFUSES to issue one while network.require_token is false, on the
-	// grounds that a scoped credential against a listener that authenticates nobody
-	// "manufactures the appearance of a boundary that nothing enforces". That check
-	// runs once, at provision time — and per the block above, an auth key applies
-	// live with no rebind, so this relaxation silently converts every already-issued
-	// credential into exactly the thing that refusal exists to prevent: authGate
-	// short-circuits on the tokenless posture before it ever consults the registry,
-	// so the scope stops being enforced for callers that had one.
-	//
-	// Revoked and WARNED rather than refused. Refusing would make an operator's own
-	// config unwritable because of sessions they may not remember provisioning, and
-	// this repo does not hold a config key hostage to runtime state. But af must
-	// also stop claiming a scope it is no longer enforcing, so the credentials go
-	// and the operator is told what they just widened.
-	//
-	// This does NOT restore the boundary, and the warning says so: with network.require_token
-	// false the control plane answers every caller anonymously, so a sandbox does not
-	// need a credential to reach it. Only re-enabling the key restores it.
-	if old.RequireToken && !newCfg.RequireToken {
-		// Some or all of the revocations may already have run inside
-		// retireWebBeforePostureSwap's pre-publish fence — the credentials are
-		// gone either way, so the count must cover both sweeps or a hand-edited
-		// refused apply would silently consume the fence's revocations and this
-		// warning would never reach the save surface (#5137 review).
-		if n := preSwapRevokedSandbox + m.sandboxTokens.revokeAll(); n > 0 {
-			// The warning must describe the boundary the operator is actually
-			// left with. When the posture was REFUSED — or no TCP listener is
-			// bound at all — nothing answers unauthenticated callers on TCP,
-			// so the generic exposure wording would falsely report an active
-			// unauthenticated endpoint and give remediation for a boundary
-			// the refusal already enforced by taking the socket down
-			// (#5137 review).
-			servingAddr := ""
-			refusal := ""
-			if m.webListeners != nil {
-				servingAddr = m.ListenerAddress("network.listen_addr")
-				if m.lifecycle != nil {
-					refusal = m.lifecycle.snapshot().listeners.TCPRefusalReason
-				}
-			}
-			var warning string
-			switch {
-			case refusal != "" || servingAddr == "":
-				warning = fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s). Those sessions lose callback — and no TCP control listener is serving (the posture was refused rather than left answering unauthenticated over TCP), so no unauthenticated network endpoint exists. Re-enable network.require_token or bind a listener and re-provision to restore sandbox callback", n)
-			case m.tokenFloorArmed():
-				// #5183: an upgrade candidate holding the journaled socket keeps
-				// demanding the token on it, so "answers unauthenticated callers"
-				// would be false today — but only until the upgrade completes.
-				warning = fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s). Those sessions lose callback. The control listener on %s keeps demanding the bearer token only until the in-progress af upgrade completes — the daemon that replaces it applies the tokenless posture on disk; re-enable network.require_token to keep the boundary", n, servingAddr)
-			default:
-				warning = fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. This does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
-			}
-			m.warn().Printf("%s", warning)
-			result.Warnings = append(result.Warnings, warning)
 		}
 	}
 	// The tokenless-network exposure notice, surfaced at SAVE time so a user who

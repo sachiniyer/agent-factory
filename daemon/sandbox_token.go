@@ -2,12 +2,10 @@ package daemon
 
 import (
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 )
 
 // The sandbox callback credential (#2999).
@@ -29,14 +27,19 @@ import (
 //     this small because every route worth giving a sandbox is parameterised by a
 //     host path or a session id, which route-level allowlisting cannot constrain
 //     to the caller's own; that waits on binding the credential to its session;
-//   - IN MEMORY ONLY, so a daemon restart invalidates every outstanding sandbox
-//     credential. A long-running sandbox loses callback until it is
-//     re-provisioned, which is the right side to fail on: a restart is exactly
-//     when a credential minted by the previous process should stop working.
+//   - DERIVED, NOT STORED (#5571 W3.6): the registry is memory-only, but the
+//     secret is HMAC(runtime-identity key, session id, ref), so a row persists
+//     only the non-secret ref. A restarted daemon re-derives and re-registers the
+//     very secret a still-running sandbox holds (adopt, driven by the reattach),
+//     and nothing is re-delivered. Without the key it cannot be re-derived, so a
+//     lost key fails closed rather than minting a stranger. Neither a listener
+//     rebind nor a require_token change revokes it: the credential's carrier is
+//     the dedicated sandbox endpoint (W3.4), which neither touches.
 //
 // It is deliberately NOT written to disk beside the operator token. There is no
 // `af sandbox-token show`, and nothing renders one: the only copy outside this
-// registry is the one injected into the sandbox that owns it.
+// registry is the one injected into the sandbox that owns it; the row stores
+// only the ref it derives from.
 
 // sandboxTokenRegistry maps live sandbox credentials to the session that owns
 // them. Zero value is usable.
@@ -65,12 +68,46 @@ type sandboxTokenRegistry struct {
 // mint issues a fresh credential for sessionID, replacing and thereby revoking
 // any credential that session already held.
 func (r *sandboxTokenRegistry) mint(sessionID string) (string, error) {
+	secret, _, err := r.mintDerived(sessionID)
+	return secret, err
+}
+
+// mintDerived is mint plus the opaque ref the credential derives from (#5571
+// W3.6). The secret is not random: it is HMAC(runtime-identity key, session id,
+// ref), so the row can persist only the ref and a restarted daemon re-derives
+// and re-registers the very secret the sandbox already holds (adopt).
+func (r *sandboxTokenRegistry) mintDerived(sessionID string) (secret, ref string, err error) {
 	if strings.TrimSpace(sessionID) == "" {
-		return "", fmt.Errorf("cannot mint a sandbox callback token without a session id")
+		return "", "", fmt.Errorf("cannot mint a sandbox callback token without a session id")
 	}
-	secret, err := generateToken()
+	if ref, err = runtimetoken.NewTokenRef(); err != nil {
+		return "", "", fmt.Errorf("cannot mint a sandbox callback token: %w", err)
+	}
+	if secret, err = r.adopt(sessionID, ref, true); err != nil {
+		return "", "", err
+	}
+	return secret, ref, nil
+}
+
+// adopt registers the credential derived from ref for sessionID, replacing any
+// the session already held, and returns it. ensureKey creates the key when
+// absent (a fresh mint); a restart passes false, because a key that is gone
+// means the credential the sandbox holds can no longer be re-derived and
+// inventing a new one would only mint a stranger.
+func (r *sandboxTokenRegistry) adopt(sessionID, ref string, ensureKey bool) (string, error) {
+	var key []byte
+	var err error
+	if ensureKey {
+		key, err = runtimetoken.EnsureKey()
+	} else {
+		key, err = runtimetoken.LoadKey()
+	}
 	if err != nil {
-		return "", fmt.Errorf("cannot mint a sandbox callback token: %w", err)
+		return "", fmt.Errorf("cannot derive a sandbox callback token: %w", err)
+	}
+	secret, err := runtimetoken.DeriveCallbackToken(key, sessionID, ref)
+	if err != nil {
+		return "", err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -117,22 +154,16 @@ func (r *sandboxTokenRegistry) revoke(sessionID string) {
 }
 
 // revokeAll drops every outstanding sandbox credential and reports how many it
-// dropped, for the caller's log line.
+// dropped, advancing the invalidation fence a mint compares across its window.
 //
-// The control listener rebinding is the one event that calls this (#3012 review).
-// A callback credential is inseparable from the endpoint it was minted for: the
-// URL is baked into the sandbox's environment file at provision time and nothing
-// rewrites it, so when bindWebLocked moves the listener and closes the old one,
-// every already-running sandbox is left calling an address that no longer answers
-// while its token stays valid. Leaving it valid buys nothing — the sandbox cannot
-// reach the daemon to use it — and costs the ability to say what happened.
-//
-// This is the same rule the registry already documents for a daemon restart:
-// credentials do not survive the listener they were issued against. Revoking makes
-// the capability's disappearance explicit and logged, instead of a silent
-// connection failure inside a sandbox nobody is watching. It is a MITIGATION, not
-// the fix — the fix is a stable advertised callback endpoint that a rebind does not
-// move, which is recorded on #2999.
+// Since #5571 W3.6 nothing in the daemon calls this: it used to run on a
+// listener rebind, teardown, unexpected death and require_token going false,
+// because the callback rode that listener. It now rides the dedicated sandbox
+// endpoint, which none of those events touch, so revoking on them only cut
+// working callbacks. The primitive and its fence stay as the one way to void the
+// whole registry at once (an endpoint rebind, a key rotation) so such an event
+// cannot be reinvented per call site; removing the fence with the session-side
+// revalidation hook it feeds is a follow-up.
 func (r *sandboxTokenRegistry) revokeAll() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -155,69 +186,24 @@ func (r *sandboxTokenRegistry) invalidationCount() uint64 {
 	return r.invalidations
 }
 
-// requireTokenFixHint is the one-line fix named by the refusal below. Kept beside
-// the refusal so the message and the key cannot drift.
-const requireTokenFixHint = "af config set network.require_token true"
-
-// errSandboxCallbackNeedsRequireToken refuses to hand a sandbox a credential for
-// a listener that does not ask for one (#2999).
-//
-// This is the load-bearing refusal, so the reasoning is here rather than at the
-// call site. network.require_token defaults to FALSE. #2168 Phase 0 reversed #2090's
-// refusal to bind a tokenless network listener, and #5137 reinstated the refusal
-// scoped to the TCP listener — but only as the DEFAULT: network.allow_unauthenticated_network
-// opts back in, so a tokenless network listener can still exist. So the moment an
-// operator points network.listen_addr somewhere a sandbox can reach under that
-// opt-in, the whole control plane answers every caller with no credential at all.
-//
-// Injecting a token into that would be worse than doing nothing: it manufactures
-// the appearance of a boundary that nothing enforces, and the next reader — human
-// or agent — would reasonably believe the sandbox is limited to its scope when it
-// is limited by nothing.
-//
-// Silently skipping the injection would be worse still. The sandbox would reach
-// an UNAUTHENTICATED daemon and simply not know it, so the failure would surface
-// as a mysterious capability rather than a refusal. Failing closed, naming the
-// single config key that fixes it, is the only honest option.
-func errSandboxCallbackNeedsRequireToken() error {
-	return fmt.Errorf(
-		"refusing to give this sandbox a callback credential: network.require_token is false, so the daemon's "+
-			"listener accepts requests with no token and a scoped credential would enforce nothing. "+
-			"Enable it first: %s",
-		requireTokenFixHint,
-	)
+// errSandboxEndpointDown is the refusal while the dedicated sandbox endpoint is
+// not listening. It is the only precondition a callback now has (#5571 W3.4):
+// the credential's carrier is the endpoint, not the client listener, so
+// network.listen_addr and network.require_token no longer decide anything here.
+// The create degrades through the W3.1 path rather than failing.
+func errSandboxEndpointDown() error {
+	return fmt.Errorf("refusing to give this sandbox a callback credential: the daemon's sandbox callback endpoint is not running, so a callback would have nothing to reach. Check the daemon log for its bind failure")
 }
 
 // mintSandboxCallbackFenced issues a sandbox callback credential with the fence
 // sampled by the CALLER, for a caller that reads an input of its own first.
 //
-// The daemon's live minter reads m.Config() before calling in, and an argument is
-// evaluated before the function it is passed to runs — so sampling the fence in
-// here would leave that config read outside the window, and an invalidation
-// landing between the two would complete its sweep before the window opened
-// (#3065 review). The fence would then compare equal on both sides and the mint
-// would proceed on config that was already stale when it was read.
-//
-// This is the third time this exact boundary has moved: first the fence was
-// sampled after the address read, then after the config read moved out to the
-// caller. The rule that survives all three is the one stated below — every input
-// the credential depends on must be read INSIDE the window — and the only way to
-// keep it true when a caller acquires an input is to let the caller open the
-// window.
-func (m *Manager) mintSandboxCallbackFenced(fence uint64, cfg *config.Config, sessionID string) (sandboxGrant, error) {
-	// The fence is sampled BEFORE the address is read, not merely before the mint
-	// (#3012 review): an invalidation landing between the read and the sample would
-	// complete its sweep and then be recorded as the STARTING value, so the final
-	// comparison matched and the create finished with a live token paired to a dead
-	// endpoint. Everything the credential depends on is read inside the window, and
-	// the address is the first of those reads.
-	//
-	// It counts INVALIDATIONS, not listener rebinds (#3065 review). The listener
-	// generation could not see an auth-only change: network.require_token going false
-	// revokes every credential without touching a socket, so the generation stayed
-	// put and a mint in flight across it survived the sweep — provisioning a sandbox
-	// against a daemon that had just stopped authenticating anyone.
-	url, err := m.callbackURLOrRefusal(cfg)
+// The fence must be sampled before every input the credential depends on is
+// read, so an invalidation landing between the read and the sample cannot be
+// recorded as the starting value (#3012, #3065 reviews). The only input left is
+// the endpoint's liveness; the caller opens the window.
+func (m *Manager) mintSandboxCallbackFenced(fence uint64, sessionID string) (sandboxGrant, error) {
+	socket, err := m.sandboxEndpointOrRefusal()
 	if err != nil {
 		return sandboxGrant{}, err
 	}
@@ -226,55 +212,37 @@ func (m *Manager) mintSandboxCallbackFenced(fence uint64, cfg *config.Config, se
 	// -> revokeAll -> registry lock) and is a deadlock waiting to happen. Refusing
 	// costs a create the operator can retry; the alternative is a session that looks
 	// provisioned with a callback that never connects.
-	token, err := m.sandboxTokens.mint(sessionID)
+	token, ref, err := m.sandboxTokens.mintDerived(sessionID)
 	if err != nil {
 		return sandboxGrant{}, err
 	}
 	if m.sandboxTokens.invalidationCount() != fence {
 		m.sandboxTokens.revoke(sessionID)
-		return sandboxGrant{}, errSandboxCallbackInvalidated(url)
+		return sandboxGrant{}, errSandboxCallbackInvalidated(socket)
 	}
-	return sandboxGrant{URL: url, Token: token, fence: fence}, nil
+	return sandboxGrant{Token: token, Ref: ref, Socket: socket, fence: fence}, nil
 }
 
-// callbackURLOrRefusal runs the mint's configuration checks WITHOUT minting:
-// the callback URL a sandbox would dial, or the refusal the create path will
-// now degrade with (#5571 W3.1). Extracted rather than re-asked inside the mint
-// because the picker's callback_unavailable_reason and the create path's
-// degraded reason must be the SAME answer — two implementations of "will this
-// callback work" is how they drifted apart before.
-//
-// The mint's remaining checks — the invalidation fence and the registry insert
-// — are deliberately NOT here: they are about a live mint in flight, and a
-// read-only preview cannot and should not predict them.
-func (m *Manager) callbackURLOrRefusal(cfg *config.Config) (string, error) {
-	if cfg == nil {
-		return "", errSandboxCallbackNeedsRequireToken()
+// sandboxEndpointOrRefusal returns the socket the running endpoint listens on,
+// or the refusal the create path will degrade with (#5571 W3.1). Shared by the
+// mint and the picker's callback_unavailable_reason, so choose-time and
+// create-time give one answer.
+func (m *Manager) sandboxEndpointOrRefusal() (string, error) {
+	if path := m.sandboxEndpointSocket.Load(); path != nil && *path != "" {
+		return *path, nil
 	}
-	active := m.activeWebConfigAddr(cfg.ListenAddr)
-	if strings.TrimSpace(active) == "" && strings.TrimSpace(cfg.ListenAddr) != "" {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix network.listen_addr", cfg.ListenAddr)
-	}
-	// Dialability first, posture second. Both refuse before any secret exists, but
-	// the ORDER decides which message an operator reads, and a loopback network.listen_addr
-	// used to answer "enable network.require_loopback_token" — advice that would have led
-	// them to a well-enforced credential their sandbox still could not use.
-	url, err := sandboxCallbackURL(active)
-	if err != nil {
-		return "", err
-	}
-	if err := sandboxCallbackPostureOK(cfg); err != nil {
-		return "", err
-	}
-	return url, nil
+	return "", errSandboxEndpointDown()
+}
+
+// setSandboxEndpointSocket records (or, with "", clears) the live endpoint.
+func (m *Manager) setSandboxEndpointSocket(path string) {
+	m.sandboxEndpointSocket.Store(&path)
 }
 
 // callbackUnavailableReason answers "would a sandbox created right now get a
-// callback?" with the refusal text when it would not — "" when it would. The
-// backend picker renders it as callback_unavailable_reason so choose-time and
-// create-time give one answer (#5571 W3.1).
-func (m *Manager) callbackUnavailableReason(cfg *config.Config) string {
-	if _, err := m.callbackURLOrRefusal(cfg); err != nil {
+// callback?" with the refusal text when it would not — "" when it would.
+func (m *Manager) callbackUnavailableReason() string {
+	if _, err := m.sandboxEndpointOrRefusal(); err != nil {
 		return err.Error()
 	}
 	return ""
@@ -285,8 +253,14 @@ func (m *Manager) callbackUnavailableReason(cfg *config.Config) string {
 // slow part and therefore the widest window (#3065 review). Minting revalidates
 // its own window; only the create knows when provisioning finished.
 type sandboxGrant struct {
-	URL   string
 	Token string
+	// Ref is the opaque reference Token derives from; the row persists it so a
+	// restarted daemon can re-register the same credential (W3.6).
+	Ref string
+	// Socket is the daemon-side endpoint socket the -R forward terminates on. The
+	// sandbox-side address is the provisioner's to choose (a socket inside the
+	// session's own directory), so the grant carries no URL.
+	Socket string
 	// fence is the registry's invalidation count at the moment this grant's inputs
 	// were first read. Unexported: it is meaningless outside a comparison against
 	// invalidationCount(), and nothing should serialize or log it.
@@ -299,123 +273,8 @@ func (g sandboxGrant) stillValid(r *sandboxTokenRegistry) bool {
 	return r.invalidationCount() == g.fence
 }
 
-// errSandboxCallbackInvalidated refuses a credential whose premises changed while
-// it was being issued, or while the sandbox it was issued for was provisioned.
-//
-// One message for both windows on purpose: from the operator's side they are the
-// same event — something voided every outstanding credential while this create was
-// in flight — and the same action answers both.
-func errSandboxCallbackInvalidated(url string) error {
-	return fmt.Errorf("refusing to give this sandbox a callback credential: the daemon's callback posture changed while this session was being provisioned — the control listener moved or closed, or network.require_token was disabled — so the callback address %q may already be dead. Retry the create", url)
-}
-
-// activeWebConfigAddr is the config address behind the control-plane listener that
-// is actually serving. It falls back to requested — the caller's own config value —
-// only when there is no listener owner at all (a bare Manager, as tests construct),
-// where the two cannot disagree because nothing has bound.
-func (m *Manager) activeWebConfigAddr(requested string) string {
-	if m.webListeners == nil {
-		return requested
-	}
-	return m.webListeners.webConfigAddress()
-}
-
-// sandboxCallbackURL renders network.listen_addr as a URL a sandbox can dial, or refuses.
-//
-// It never rewrites an address into something routable: guessing an
-// externally-reachable one would invent a fact about the operator's network, and a
-// wrong guess points the agent at whatever answers there — far worse to debug than
-// a named refusal. So every address that is not dialable FROM A SANDBOX is refused,
-// and the three ways an address can fail that test are one rule, not three special
-// cases: the address must name the daemon when resolved on the sandbox's side of
-// the network, and must name a fixed port.
-func sandboxCallbackURL(listenAddr string) (string, error) {
-	addr := strings.TrimSpace(listenAddr)
-	if addr == "" {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr is empty, so the daemon serves no HTTP listener for it to call back to. Set network.listen_addr to an address the sandbox can reach")
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q is not host:port, so no callback URL can be derived from it", addr)
-	}
-	// A BIND address is not automatically a DIALABLE one, and the difference is not
-	// cosmetic: a wildcard or empty host means "every interface HERE", which from
-	// inside a sandbox names the SANDBOX, so the agent would quietly call itself.
-	// Port 0 means "whatever the kernel picked", which this config value cannot know.
-	//
-	// Refused rather than guessed. Rewriting a wildcard into some interface address
-	// would invent a fact about the operator's network, and a wrong guess points the
-	// agent at whatever answers there — far worse to debug than a named refusal.
-	// ONE predicate for the host, because the previous three rounds of this review
-	// each found another spelling the last one missed: a wildcard, then the expanded
-	// and v4-mapped unspecified forms, then loopback, then loopback ALIASES like
-	// ip6-localhost, then zone-scoped addresses. Enumerating spellings loses.
-	//
-	// The host must be a LITERAL IP. That is not a convenience — it is the only form
-	// whose meaning does not depend on who resolves it, and the resolver that matters
-	// here is the SANDBOX'S, not this daemon's. "ip6-localhost" was the visible case
-	// of a general fact: af cannot know what a name denotes on the other side of the
-	// network, so it must not put one in a callback URL. Requiring a literal also
-	// rejects zone-scoped addresses (net.ParseIP refuses "fe80::1234%eth0") — which
-	// is right twice over, since a zone names an interface on the DAEMON'S host and
-	// would additionally emit a raw "%" that Go's URL parser reads as a bad escape.
-	//
-	// With the host guaranteed to be an IP, the two undialable classes are semantic
-	// questions with exact answers, rather than string comparisons:
-	//   - IsUnspecified — binds every interface, so it names the SANDBOX.
-	//   - IsLoopback — names the sandbox ITSELF, and nothing forwards a callback back
-	//     (the ssh runtime tunnels daemon→sandbox only).
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q does not name a literal IP address, and a hostname is resolved by the SANDBOX rather than by this daemon — af cannot know what it points at over there. Set network.listen_addr to a literal IP the sandbox can reach", addr)
-	}
-	if ip.IsUnspecified() {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q binds every interface, which names the SANDBOX rather than the daemon when dialled from inside one. Set network.listen_addr to an address the sandbox can reach", addr)
-	}
-	if ip.IsLoopback() {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q is loopback, so a sandbox dialling it reaches ITSELF rather than this daemon — and nothing forwards the other way (the ssh runtime tunnels daemon→sandbox only). Set network.listen_addr to an address the sandbox can reach", addr)
-	}
-	// The port is RESOLVED rather than string-matched, for the same reason as the
-	// host above: "", "0", "00" and "000" are four spellings of port zero, they all
-	// resolve to 0, and net.Listen treats every one as "let the kernel pick" — so
-	// each literal I matched was one spelling out of an open-ended set (#3012
-	// review). LookupPort is the same resolution net.Listen performs, so an address
-	// it rejects could not have been bound either.
-	resolved, perr := net.LookupPort("tcp", port)
-	if perr != nil {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q has no resolvable port, so no callback URL can be derived from it", addr)
-	}
-	if resolved == 0 {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q asks the kernel to choose a port, so no fixed callback URL exists. Set an explicit port", addr)
-	}
-	// The RESOLVED port goes into the URL, so a service name ("…:http") becomes a
-	// number the sandbox's HTTP client can dial rather than being passed through.
-	return "http://" + net.JoinHostPort(host, strconv.Itoa(resolved)), nil
-}
-
-// sandboxCallbackPostureOK reports whether a credential handed out now would
-// actually be CHECKED when it comes back (#3012 review).
-//
-// network.require_token alone does not establish that, and believing it did was the
-// original bug in this refusal. authGate.authRequired exempts loopback peers
-// BEFORE it looks at any token, so on a loopback network.listen_addr with
-// network.require_loopback_token at its default false a same-host or host-network
-// sandbox reaches the whole control plane with no credential — and therefore no
-// scope at all. Minting there hands out something ceremonial and calls it a
-// boundary.
-//
-// The predicate is "will this request be authenticated", not "is a config key
-// set", which is why it mirrors the gate's own terms rather than restating them.
-//
-// It no longer carries a network.require_loopback_token branch. That check existed because
-// authGate exempts loopback peers before examining any token, so a loopback
-// listener would have enforced no scope — but sandboxCallbackURL now refuses every
-// loopback address outright, as undialable from a sandbox, so this is only ever
-// reached for an address the exemption cannot apply to. One rule, stated once,
-// beats the same rule half-stated in two places (#3012 review).
-func sandboxCallbackPostureOK(cfg *config.Config) error {
-	if !cfg.RequireToken {
-		return errSandboxCallbackNeedsRequireToken()
-	}
-	return nil
+// errSandboxCallbackInvalidated refuses a credential that was voided while it was
+// being issued, or while the sandbox it was issued for was provisioned.
+func errSandboxCallbackInvalidated(socket string) error {
+	return fmt.Errorf("refusing to give this sandbox a callback credential: outstanding callback credentials were revoked while this session was being provisioned, so the callback to %q may already be dead. Retry the create", socket)
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The three session-lifecycle verbs — kill, archive, restore — moved out of
@@ -95,8 +96,14 @@ With --self, archive the current session (resolved via whoami) instead of a
 named one — use it from inside a session when your work is done. --self and a
 <title> argument are mutually exclusive.
 
-Sandboxes publish work before removal; restore recreates them from the published
-branch. In-place (--here) sessions cannot be archived because af does not own
+An ssh or sandbox session publishes nothing by default: the agent stops and the
+workspace stays on its host, owned by the archived row, and the output names where
+(archived_workspace). Pass --push to push the branch to origin first; docker and
+hook sessions always push. Restoring a session archived without a push
+reattaches that workspace — the tree, index and ignored files come back exactly as
+archived and the agent resumes its conversation; nothing is cloned, pushed or
+re-hooked. If the host proves the workspace gone, restore re-provisions onto the
+recorded branch or fails. In-place (--here) sessions cannot be archived because af does not own
 their worktree. Local archives print the relocated worktree path on success.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -116,13 +123,20 @@ their worktree. Local archives print the relocated worktree path on success.`,
 		var repoID string
 		var sessionID string
 		if sessionsArchiveSelf {
-			if apiclient.IsRemoteTarget() {
-				return jsonError(remoteSelfRefusal("--self"))
-			}
 			if title != "" {
 				return jsonError(fmt.Errorf("cannot combine --self with a <title> argument; --self archives the current session"))
 			}
-			data, err := resolveSelfSession()
+			// Against a remote daemon the caller is whoever the CREDENTIAL says it
+			// is: a sandbox credential is bound to its own session, which the
+			// daemon reports (and whose route admits this verb). This machine's
+			// tmux name would be a guess about someone else's registry.
+			var data *session.InstanceData
+			var err error
+			if apiclient.IsRemoteTarget() {
+				data, err = resolveCredentialSelf()
+			} else {
+				data, err = resolveSelfSession()
+			}
 			if err != nil {
 				return jsonError(fmt.Errorf("--self must be run from inside an af session: %w", err))
 			}
@@ -169,7 +183,7 @@ their worktree. Local archives print the relocated worktree path on success.`,
 
 		// --self's reason for existing: same SIGHUP shield as kill (#5182).
 		defer ignoreTeardownHangup()()
-		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
+		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID, Push: sessionsArchivePush})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
@@ -181,8 +195,32 @@ their worktree. Local archives print the relocated worktree path on success.`,
 		if warning != "" {
 			result["warning"] = warning
 		}
+		// Where an off-box session's work lives: the preserved directory on its
+		// host, or the pushed branch (#5571 W8.5). Best-effort, from the archived
+		// row; a local archive has none and the key is absent.
+		if loc := archivedWorkspaceOf(repoID, sessionID, title); loc != nil {
+			result["archived_workspace"] = loc
+		}
 		return jsonOut(result)
 	},
+}
+
+// archivedWorkspaceOf reads back where an archived off-box session's work lives.
+// Best-effort: any read failure just omits the additive field.
+func archivedWorkspaceOf(repoID, sessionID, title string) *session.ArchivedWorkspaceData {
+	rows, _, err := snapshotViaDaemon(daemon.SnapshotRequest{RepoID: repoID})
+	if err != nil {
+		return nil
+	}
+	for _, d := range rows {
+		if d.ArchivedWorkspace == nil {
+			continue
+		}
+		if (sessionID != "" && d.ID == sessionID) || (sessionID == "" && d.Title == title) {
+			return d.ArchivedWorkspace
+		}
+	}
+	return nil
 }
 
 var sessionsRestoreCmd = &cobra.Command{
@@ -199,14 +237,21 @@ Fails if the session is not restorable, or if its origin repository is gone.
 The restored worktree path is printed on success.
 
 For a sandbox session (docker/ssh/hook) whose sandbox still ANSWERS but whose
-agent is gone, restore first pushes the sandbox's work to origin, because
-recovery re-clones from there and anything unpushed would be destroyed. If that
-push fails, or if af cannot tell whether the sandbox is gone or merely
-unreachable, the restore REFUSES and the session stays recoverable.
+agent is gone, restore relaunches the agent in place: the sandbox's
+agent-server stops the agent and starts it again in its existing workspace,
+so the branch, the tree and any uncommitted work are untouched, and nothing
+is pushed, reaped, re-cloned or re-provisioned. A sandbox whose agent-server
+does not advertise the relaunch feature on /v1/health (an older build, before
+the relaunch route existed) falls back to replacing the sandbox: that pushes
+its work to origin first, because recovery re-clones from there and anything
+unpushed would be destroyed. If that push fails, or if af cannot tell whether
+the sandbox is gone or merely unreachable, the restore REFUSES and the session
+stays recoverable.
 
---force-reap replaces the sandbox anyway, without the push. It discards whatever
-that sandbox has not pushed, so it is for a sandbox you know is expendable. It
-applies to this one session and this one command; there is no global equivalent.`,
+--force-reap replaces the sandbox anyway, skipping the relaunch and the push.
+It discards whatever that sandbox has not pushed, so it is for a sandbox you
+know is expendable. It applies to this one session and this one command; there
+is no global equivalent.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)

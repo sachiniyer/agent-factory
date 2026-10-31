@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
+
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -203,37 +205,44 @@ func TestRequestShutdownSlowVerificationStillShutsDown(t *testing.T) {
 	}
 }
 
-// nearBoundPingControl answers Ping just inside the RequestShutdown probe's
-// bound and records that Shutdown arrived.
-type nearBoundPingControl struct {
+// promptPingControl answers Ping at once and records that Shutdown arrived. It
+// used to sleep 3/4 of daemonDialTimeout to land "just inside" the bound, which
+// made the outcome depend on how much of the remaining quarter a loaded macOS
+// runner spent on scheduling and RPC overhead: a ping that missed the bound lost
+// the PID and the test failed with `shutdown pid = 0` (#5340). Answering at once
+// makes "the ping answered within its bound" true by construction.
+type promptPingControl struct {
 	pid      int
 	shutdown *atomic.Bool
 }
 
-func (c nearBoundPingControl) Ping(_ PingRequest, resp *PingResponse) error {
-	time.Sleep(daemonDialTimeout * 3 / 4)
+func (c promptPingControl) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.PID = c.pid
 	return nil
 }
 
-func (c nearBoundPingControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
+func (c promptPingControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
 	c.shutdown.Store(true)
 	resp.OK = true
 	resp.PID = c.pid
 	return nil
 }
 
-// TestRequestShutdownPingNearBoundStillShutsDown: a Ping answering just inside
-// its bound must leave the connection usable — the bound may not outlive the
-// Ping and expire under net/rpc's next read — so Shutdown reaches the daemon on
-// the same connection and the pinned PID is kept.
+// TestRequestShutdownPingNearBoundStillShutsDown: a Ping that answered within its
+// bound must leave the connection usable — the bound may not outlive the Ping and
+// expire under net/rpc's next read — so Shutdown reaches the daemon on the same
+// connection and the pinned PID is kept. The near-the-bound part is the
+// verification that follows, which runs for the whole bound: a deadline still
+// armed from before the Ping would expire during it. That direction is safe on a
+// slow runner (slower only means further past the bound); the Ping itself must
+// not depend on real time.
 func TestRequestShutdownPingNearBoundStillShutsDown(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	const fakePID = 424242
 	var shutdown atomic.Bool
 	srv := rpc.NewServer()
-	if err := srv.RegisterName(controlServiceName, nearBoundPingControl{pid: fakePID, shutdown: &shutdown}); err != nil {
+	if err := srv.RegisterName(controlServiceName, promptPingControl{pid: fakePID, shutdown: &shutdown}); err != nil {
 		t.Fatalf("register Control: %v", err)
 	}
 	_, cleanup := startFakeControlListener(t, srv)
@@ -441,18 +450,7 @@ func TestProcessStartTokenIdentifiesIncarnation(t *testing.T) {
 	}
 	name := "sleep"
 	if runtime.GOOS == "linux" {
-		sleepPath, err := exec.LookPath("sleep")
-		if err != nil {
-			t.Skip("sleep not available")
-		}
-		data, err := os.ReadFile(sleepPath)
-		if err != nil {
-			t.Skipf("read %s: %v", sleepPath, err)
-		}
-		name = filepath.Join(t.TempDir(), "a) (b c")
-		if err := os.WriteFile(name, data, 0o755); err != nil {
-			t.Fatalf("copy sleep: %v", err)
-		}
+		name = sleeper.Named(t, filepath.Join(t.TempDir(), "a) (b c"))
 	}
 	pid := startReapedProcess(t, name, "30")
 

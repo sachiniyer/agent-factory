@@ -347,11 +347,10 @@ func shellQuote(s string) string {
 // while TestVSCodeSocketPath_RejectsOverlongPath still covers the limit itself.
 func shortAFHome(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "af")
-	if err != nil {
-		t.Fatalf("creating a short af home: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	// SocketTempDir, not os.MkdirTemp("", …): darwin's default temp dir is ~56 bytes
+	// before the test appends its own structure, which pushed the W5.4
+	// namespaced editor sockets over the 104-byte limit on master.
+	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 	return dir
 }

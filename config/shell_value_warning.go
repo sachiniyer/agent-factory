@@ -40,6 +40,7 @@ import (
 // to warn from a real loader. `default_program` is deliberately absent — it is
 // enum-validated to a bare agent name, so it cannot carry a command.
 var warnedShellValueKeys = []string{
+	"move_cmd",
 	"on_archive_command",
 	"post_worktree_commands",
 	"program_overrides",
@@ -176,6 +177,7 @@ func warnGlobalShellValues(config *Config, prettyConfigPath string) {
 	values := shellValueSet{}
 	values.addMap("program_overrides", config.ProgramOverrides, overrideDefaults, detectedClaudeNote)
 	values.add("on_archive_command", config.OnArchiveCommand)
+	values.add("move_cmd", config.MoveCmd)
 	values.add("sandbox.ssh", config.SandboxSSH)
 	values.add("root_agent.program", config.RootAgent.Program)
 	values.addRootAgents(config.RootAgents)

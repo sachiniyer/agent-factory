@@ -47,10 +47,67 @@ type SnapshotRequest struct {
 	// Limit bounds the filtered result. A pointer distinguishes an omitted,
 	// backward-compatible unbounded request from an explicit invalid zero.
 	Limit *int `json:"limit,omitempty"`
+
+	// The remaining fields are the lazy-archive shape (#6178). They are additive:
+	// a request that sets none of them is answered exactly as before, and a daemon
+	// that predates them ignores them and answers with every row, so a client
+	// that asked for LazyArchive detects the absence of ArchivedTotal in the reply
+	// and treats the rows it got as the complete list.
+
+	// LazyArchive asks for the live (non-archived) rows only, with ArchivedTotal
+	// and ArchivedByProject standing in for the archived rows left out — counted
+	// over the repo-scoped rows BEFORE any other filter. It is one switch, not
+	// Live plus a summary flag, so a daemon that honors Live but predates the
+	// summary cannot drop the archived rows without saying how many there are.
+	LazyArchive bool `json:"lazy_archive,omitempty"`
+	// NewestFirst orders the filtered rows newest-created first, ties broken by
+	// descending id, so a page boundary is a stable (created_at, id) position.
+	NewestFirst bool `json:"newest_first,omitempty"`
+	// Before resumes a NewestFirst listing after the row a previous reply's
+	// NextBefore named: only rows strictly older in that order are returned.
+	Before *SnapshotCursor `json:"before,omitempty"`
+	// ProjectPath keeps only rows whose worktree repo path is exactly this. It is
+	// the key the web groups projects by. A sandbox credential's projection
+	// withholds that path, so the field is ignored for one.
+	ProjectPath string `json:"project_path,omitempty"`
+	// IDs keeps only the rows with these stable session ids (a deep link to one
+	// archived session).
+	IDs []string `json:"ids,omitempty"`
+}
+
+// SnapshotCursor is a position in a NewestFirst listing.
+type SnapshotCursor struct {
+	CreatedAt time.Time `json:"created_at"`
+	ID        string    `json:"id"`
+}
+
+// SnapshotCapabilities is the subset of Ping's capability bits a SANDBOX
+// credential can learn. That credential is not admitted to /v1/health, so a
+// client that must know whether this daemon honors a wire field before sending it
+// (the --host pick) reads it from the one admitted response instead of probing a
+// route the scope denies. Present only for a sandbox credential; its existence
+// is itself the proof, since scoped credentials are minted only by daemons that
+// already honor every field listed here.
+type SnapshotCapabilities struct {
+	HostPick        bool `json:"host_pick,omitempty"`
+	DeliverHostPick bool `json:"deliver_host_pick,omitempty"`
+	TaskHost        bool `json:"task_host,omitempty"`
 }
 
 type SnapshotResponse struct {
 	Instances []session.InstanceData `json:"instances"`
+	// ArchivedTotal is the number of archived rows in the request's repo scope,
+	// present only when the request set LazyArchive. Its presence is also how a
+	// client learns the daemon understands the lazy-archive request shape.
+	ArchivedTotal *int `json:"archived_total,omitempty"`
+	// ArchivedByProject counts those archived rows per worktree repo path (the
+	// key web groups projects by). Withheld from a sandbox credential.
+	ArchivedByProject map[string]int `json:"archived_by_project,omitempty"`
+	// NextBefore is set when a Limit cut the listing short: pass it as Before to
+	// read the next page.
+	NextBefore *SnapshotCursor `json:"next_before,omitempty"`
+	// Capabilities: see SnapshotCapabilities. Nil for an operator credential.
+	Capabilities *SnapshotCapabilities `json:"capabilities,omitempty"`
 	// Caller is the id of the session the presented sandbox credential is bound
 	// to (#5571 W3.2). It lets an in-sandbox `whoami` / `archive --self` resolve
 	// the caller from the credential instead of from TmuxName, which the narrowed
@@ -455,10 +512,11 @@ func (s *controlServer) Snapshot(req SnapshotRequest, resp *SnapshotResponse) er
 // finding, because "show only the caller's own row" is not the same as "show only
 // what the caller may see":
 //
-//   - Instances is filtered to the owner's own id. Not to its repo, and not to a
-//     title match: the id is the stable identity (#1195), and titles are unique
-//     only per repo, so matching on one would let a same-titled session in another
-//     repo through.
+//   - Instances is filtered to the owner's PROJECT (#5571 W3.5): the repo is the
+//     owner's own row's, whatever the request named, and every surviving row is
+//     the projection below. Other projects are never visible, and neither is a
+//     repo ID. (#3056 narrowed to the owner's single row; the project bound is
+//     the W3.5 widening.)
 //   - Each surviving row is PROJECTED (sandboxSafeInstanceData). The owner's own
 //     row still carries the daemon host's layout — Path is the absolute repo root
 //     on the host — so narrowing alone handed back the operator layout that the
@@ -478,6 +536,19 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
+	// A sandbox credential reads its own PROJECT (#5571 W3.5): the repo filter is
+	// the owner's, whatever the request named — the sandbox does not know the
+	// daemon host's repo IDs and must not be able to aim at another project's.
+	// An owner that is no longer tracked reads nothing rather than everything.
+	sandboxOwnerID, isSandbox := sandboxOwner(ctx)
+	sandboxProjectID, sandboxProjectErr := "", error(nil)
+	if isSandbox {
+		var proj sandboxProject
+		if proj, sandboxProjectErr = s.manager.sandboxProjectOf(sandboxOwnerID); sandboxProjectErr == nil {
+			sandboxProjectID = proj.repoID
+			req.RepoID = proj.repoID
+		}
+	}
 	// Sample before the rows so reconciliation delay is measured against the
 	// projection returned with this response.
 	operationClockMS := operationClockMilliseconds()
@@ -489,9 +560,21 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	// instead of refusing the not-yet-complete snapshot (#603 over the wire).
 	instances, skipped := s.manager.SnapshotWithSkipped(req.RepoID)
 	alarms := s.deliveryAlarms(req.RepoID)
-	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
-		instances = onlyOwnedBySandbox(instances, owner)
-		resp.Caller = owner
+	if isSandbox {
+		instances = projectRowsForSandbox(instances, sandboxProjectID, sandboxProjectErr == nil)
+		resp.Caller = sandboxOwnerID
+		// Project only what the sandbox scope HONORS, not the operator's full
+		// triple: every bit here is a promise that the daemon honors that wire
+		// field for this credential, and the client's preflight refuses a pick
+		// when the bit is absent (#5571 W6.3). The scope's AddTask path clears
+		// Task.Host (stampSandboxTask), and /v1/DeliverPrompt — the sole bearer
+		// of DeliverPromptRequest.Host — is not admitted to the scope at all
+		// (no sandboxAllowed), so advertising those two would be a false claim
+		// the preflight would trust. HostPick is honored: a sandbox create
+		// requires --host and the create path keeps it. Advertising the other
+		// two would let `af tasks add --host` pass preflight and be silently
+		// dropped, exactly the fail-closed protection the bit exists to produce.
+		resp.Capabilities = &SnapshotCapabilities{HostPick: true}
 		alarms = nil
 		// A repo ID is operator identity a sandbox must not learn — the
 		// sandboxSafeInstanceData projection already withholds Path/Worktree/
@@ -499,11 +582,32 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 		// operator reading stdout, not the agent reading its own row (#3065).
 		skipped = nil
 	}
-	instances, err := FilterSnapshotInstances(req, instances)
+	if isSandbox {
+		// The projection above withheld the worktree path these two keys read.
+		req.ProjectPath = ""
+		// A sandbox reads only its own project and has no business paging an
+		// archive: the paging inputs are ignored and no cursor is returned (below),
+		// exactly as archived_by_project is withheld.
+		req.NewestFirst, req.Before, req.IDs = false, nil, nil
+	}
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	if req.LazyArchive {
+		total, byProject := archivedSummary(instances)
+		resp.ArchivedTotal = &total
+		if !isSandbox {
+			resp.ArchivedByProject = byProject
+		}
+	}
+	instances, next, err := FilterSnapshotPage(req, instances)
 	if err != nil {
 		return err
 	}
 	resp.Instances = instances
+	if !isSandbox {
+		resp.NextBefore = next
+	}
 	resp.DeliveryAlarms = alarms
 	resp.SkippedRepos = skipped
 	if s.manager.lifecycle != nil {
@@ -512,6 +616,21 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	resp.OperationLockTimeoutMS = opLockTimeout.Milliseconds()
 	resp.OperationClockMS = operationClockMS
 	return nil
+}
+
+// projectRowsForSandbox projects the rows of the caller's project (already
+// filtered to it by repo) through the sandbox-safe projection. With no known
+// project it returns an EMPTY slice, never the input: the direction a bug here
+// should fail in.
+func projectRowsForSandbox(instances []session.InstanceData, projectID string, known bool) []session.InstanceData {
+	out := make([]session.InstanceData, 0, len(instances))
+	if !known || projectID == "" {
+		return out
+	}
+	for _, d := range instances {
+		out = append(out, sandboxSafeInstanceData(d))
+	}
+	return out
 }
 
 // onlyOwnedBySandbox keeps just the caller's own session.
@@ -551,6 +670,11 @@ func onlyOwnedBySandbox(instances []session.InstanceData, owner string) []sessio
 // running, what state it is in. What is excluded is anything describing the HOST,
 // anything about other sessions, and the conversation/prompt payloads a sandbox
 // already has locally and does not need served back.
+//
+// Program is deliberately NOT here: it is text the sandbox itself supplied (a full
+// command, possibly naming a path), the sandbox does not need it served back, and
+// returning caller-supplied text is exactly what makes a response depend on the
+// host's layout. Every string this returns is classified in sandboxStringClasses.
 func sandboxSafeInstanceData(d session.InstanceData) session.InstanceData {
 	return session.InstanceData{
 		ID:                       d.ID,
@@ -562,7 +686,6 @@ func sandboxSafeInstanceData(d session.InstanceData) session.InstanceData {
 		InFlightOp:               d.InFlightOp,
 		LifecycleAction:          d.LifecycleAction,
 		CurrentAgent:             d.CurrentAgent,
-		Program:                  d.Program,
 		BackendType:              d.BackendType,
 		TaskRunActive:            d.TaskRunActive,
 		LimitResetAt:             d.LimitResetAt,

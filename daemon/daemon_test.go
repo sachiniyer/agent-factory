@@ -371,7 +371,7 @@ func TestStopDaemon_SIGTERMFirst(t *testing.T) {
 	// argv[0] plus a discrete "--daemon" token as a real argv element, so it
 	// satisfies both checks isAgentFactoryDaemon requires (#1004, #1214). This
 	// is the same recipe used in TestSigtermFallback_KillsPIDFileDaemon.
-	cmd := spawnFakeDaemonProc(t, "af", "sleep 60; :", "--daemon", "af-test")
+	cmd := spawnFakeDaemonHomeProc(t, "af", "sleep 60; :", "--daemon", "af-test")
 	pid := cmd.Process.Pid
 
 	// Wait for the post-exec cmdline to be readable. Event-driven with a
@@ -463,7 +463,7 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 	// escalation this test exercises still lands long before the ceiling.
 	script := fmt.Sprintf(`trap "" TERM; : > %s; %s`, readyFile,
 		testguard.BoundedSpin(time.Second, 5*time.Minute))
-	cmd := spawnFakeDaemonProc(t, "af", script, "--daemon", "af-test")
+	cmd := spawnFakeDaemonHomeProc(t, "af", script, "--daemon", "af-test")
 	pid := cmd.Process.Pid
 
 	// Wait until the trap is installed (sentinel present) AND the rewritten

@@ -61,6 +61,9 @@ type remoteAgentServer struct {
 	// holds inst's roster lock across the bounded REST capture (#2200). nil only
 	// for the transport-only NewRemoteAgentServer constructor used by integrations.
 	inst *Instance
+	// restartAdoption is set on the short-lived server a W1.4 restart uses to
+	// adopt the surviving workspace; it rides the Launch request.
+	restartAdoption bool
 	// teardown reaps the off-box workspace AFTER its in-sandbox agent is killed over
 	// REST. nil for an out-of-process `af agent-server` the caller owns. Run
 	// best-effort in Kill so a session kill also removes its sandbox; idempotent
@@ -72,6 +75,25 @@ type remoteAgentServer struct {
 	// — each fans a single remote WS to N local subscribers. The channel behind
 	// each is a remoteClientlessChannel (the remote WS) rather than a tmux one.
 	brokers map[int]*ptyBroker
+	// idBrokers is brokers keyed by stable tab id, for the id-addressed plane
+	// (#5571 W4.4); see agentserver_remote_tabid.go. idPlaneKnown/idPlane cache
+	// the sandbox's tab-id-addressing advertisement.
+	idBrokers map[string]*ptyBroker
+	// goneTabs are ids whose tab closed: terminal for subscriptions (#5963).
+	goneTabs map[string]bool
+	// agentTabSynced is the agent-tab id the sandbox is known to hold (#5997).
+	agentTabSynced string
+	// ordBound holds the brokers of tabs opened through the ordinal plane,
+	// keyed by the stable id they resolved to (agentserver_remote_ordinal.go).
+	ordBound map[string]*ptyBroker
+	// boundChannel and idChannel, when set, replace the remote WS channel a
+	// broker is built over (test seams; production leaves them nil).
+	boundChannel func(tabID string) clientlessChannel
+	idChannel    func(tabID string) clientlessChannel
+	idPlaneKnown bool
+	idPlane      bool
+	features     []string
+
 	// relays are the open loopback port relays (W5.1); Kill closes them.
 	relays map[*trackedRelayConn]struct{}
 	// closed latches once Kill has run so a Subscribe/Input/Resize racing the kill
@@ -129,11 +151,46 @@ func (s *remoteAgentServer) noteAdoption() error {
 }
 
 func (s *remoteAgentServer) Provision(firstTimeSetup bool) error {
-	return s.rc.call("/v1/agent/provision", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup}
+	if s.restartAdoption && s.inst != nil {
+		// The restarted server's fresh instance holds only its agent tab; tell it
+		// how many other tabs the daemon's durable row records (W1.4, #6162).
+		req.SiblingTabs = s.inst.nonAgentTabCount()
+	}
+	err := s.rc.call("/v1/agent/provision", req, nil)
+	if err == nil {
+		s.idNative() // warm the feature advertisement (#5571 W4.5)
+	}
+	return err
 }
 
 func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
-	return s.rc.call("/v1/agent/launch", agentLifecycleReq{FirstTimeSetup: firstTimeSetup}, nil)
+	req := agentLifecycleReq{FirstTimeSetup: firstTimeSetup, RestartAdoption: s.restartAdoption}
+	if s.restartAdoption && s.inst != nil {
+		// Hand the restarted server the surviving tabs' roster — only if it says it
+		// can rebind them (W1.4, #6162). Otherwise they stay unknown and are
+		// retried later (#6235, #6236).
+		req.Tabs = s.inst.restoreRosterForRestart(s.featureVerdict(tabRestoreFeature))
+	}
+	// Send the recorded conversation so a launch resumes exactly it (#5571 W7.2).
+	// The server resumes it only where its own store still holds it.
+	if s.inst != nil {
+		if conv := s.inst.AgentConversation(); conv.HasID() {
+			req.Conversation = &conv
+		}
+	}
+	var resp agentLaunchResp
+	err := s.rc.call("/v1/agent/launch", req, &resp)
+	if err == nil {
+		s.idNative() // warm the feature advertisement (#5571 W4.5)
+		if s.inst != nil && resp.Conversation != nil {
+			s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
+		}
+		if s.inst != nil && len(req.Tabs) > 0 {
+			s.inst.applyRestoreOutcome(req.Tabs, resp.TabsRestored, resp.TabsGone)
+		}
+	}
+	return err
 }
 
 func (s *remoteAgentServer) Expose() (StreamEndpoint, error) {
@@ -164,6 +221,11 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	if resp.Captured != nil {
 		captured = *resp.Captured
 	}
+	// The server captures a conversation the provider only exposes after launch
+	// (a Codex rollout) and reports it on later polls (#5571 W7.2).
+	if s.inst != nil && resp.Conversation != nil {
+		s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
+	}
 	return Observation{
 		Updated:     resp.Updated,
 		Baseline:    resp.Baseline,
@@ -179,6 +241,9 @@ func (s *remoteAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error)
 }
 
 func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapshot, error) {
+	if s.nativeFor(tabID) {
+		return s.rc.previewByID(tabID, full)
+	}
 	if s.inst == nil {
 		return PreviewSnapshot{}, fmt.Errorf("remote session %q cannot resolve stable tab id %q without its owning instance", s.rc.title, tabID)
 	}
@@ -197,6 +262,17 @@ func (s *remoteAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapsho
 // (false, nil — authoritative) from "the sandbox never answered" (false, err —
 // UNKNOWN). Swallowing the error into a bare false made a transport blip
 // indistinguishable from a dead agent, and callers re-provisioned on it (#1794).
+// WorkspaceFacts asks the agent-server to measure its workspace (W8.2). A server
+// predating the route answers 404, which surfaces as an error: the caller reports
+// the workspace as unmeasured, never as clean.
+func (s *remoteAgentServer) WorkspaceFacts() (WorkspaceFacts, error) {
+	var facts WorkspaceFacts
+	if err := s.rc.call("/v1/agent/workspace-facts", struct{}{}, &facts); err != nil {
+		return WorkspaceFacts{}, err
+	}
+	return facts, nil
+}
+
 func (s *remoteAgentServer) Alive() (bool, error) {
 	var resp agentAliveResp
 	if err := s.rc.call("/v1/agent/alive", struct{}{}, &resp); err != nil {
@@ -228,69 +304,40 @@ func (s *remoteAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryS
 	return resp.Status, nil
 }
 
-// --- data plane: one remote WS per tab, fanned by the shared ptyBroker ---
-
-// ensureBroker lazily builds the ptyBroker for tab `tab`, bound to a remote WS
-// clientlessChannel. Refuses once Kill has latched closed (the #1632 guard): a
-// Subscribe racing teardown must not dial a fresh WS to a sandbox being torn down.
-func (s *remoteAgentServer) ensureBroker(tab int) (*ptyBroker, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, fmt.Errorf("remote session %q is being terminated", s.rc.title)
-	}
-	if br := s.brokers[tab]; br != nil {
-		return br, nil
-	}
-	if s.brokers == nil {
-		s.brokers = make(map[int]*ptyBroker)
-	}
-	br := newPTYBroker(newRemoteClientlessChannel(s.rc, tab))
-	s.brokers[tab] = br
-	return br, nil
-}
-
-func (s *remoteAgentServer) Subscribe(tab int, since Seq) (PTYSubscription, error) {
-	br, err := s.ensureBroker(tab)
-	if err != nil {
-		return nil, err
-	}
-	return br.subscribe(since)
-}
-
-func (s *remoteAgentServer) Input(tab int, b []byte) error {
-	// The off-box runtime's PTY input path, same reason as the local one (#3865).
-	// It has no InputTab: a remote roster is fixed, so ws_pty.go's id-native
-	// binding never selects this runtime.
-	if err := s.noteAdoption(); err != nil {
-		return err
-	}
-	br, err := s.ensureBroker(tab)
-	if err != nil {
-		return err
-	}
-	return br.input(b)
-}
-
-func (s *remoteAgentServer) Resize(tab int, rows, cols uint16) error {
-	br, err := s.ensureBroker(tab)
-	if err != nil {
-		return err
-	}
-	return br.resize(rows, cols)
-}
-
 // trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
+// StopPreservingWorkspace stops the remote agent and closes this side's data
+// plane without running the runtime teardown, so the workspace stays on its host
+// (#5571 W8.5).
+func (s *remoteAgentServer) StopPreservingWorkspace() error {
+	s.mu.Lock()
+	s.closed = true
+	all := s.takeBrokersLocked()
+	s.mu.Unlock()
+	for _, br := range all {
+		br.close()
+	}
+	s.closeRelays()
+	if err := s.rc.call("/v1/agent/stop", struct{}{}, nil); err != nil {
+		// The agent was not proven stopped, so the session carries on: lift the
+		// latch so the next subscribe, input or resize dials a fresh broker rather
+		// than failing "is being terminated" for as long as the row lives (#5869).
+		s.mu.Lock()
+		s.closed = false
+		s.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
 func (s *remoteAgentServer) Kill(_ bool) error {
 	// Tear every tab's data plane down first (closing each remote WS so subscribers
 	// see io.EOF), latch closed under the same lock that snapshots the brokers so a
 	// racing Subscribe can't resurrect one, then kill the remote workspace over REST.
 	s.mu.Lock()
 	s.closed = true
-	brokers := s.brokers
-	s.brokers = nil
+	all := s.takeBrokersLocked()
 	s.mu.Unlock()
-	for _, br := range brokers {
+	for _, br := range all {
 		br.close()
 	}
 	s.closeRelays()
@@ -323,7 +370,7 @@ func (s *remoteAgentServer) Archive() (string, error) {
 }
 
 // deadRemoteAgentServer is the AgentServer for a remote-workspace instance
-// (docker/ssh/hook) whose runtime wiring has been torn down: remoteClient is nil,
+// (docker/ssh/sandbox/hook) whose runtime wiring has been torn down: remoteClient is nil,
 // so there is no live `af agent-server` to reach. AgentServer() returns it — never
 // a localAgentServer — for such an instance (#2005): a remote backend's data-plane
 // methods delegate back to i.AgentServer(), so a localAgentServer wrapping one
@@ -395,253 +442,6 @@ func (s *deadRemoteAgentServer) Kill(_ bool) error {
 }
 
 func (s *deadRemoteAgentServer) Archive() (string, error) { return "", s.err() }
-
-// --- remote WS clientlessChannel: the sandbox stream as a broker channel ---
-
-// remoteClientlessChannel is the remote runtime's clientlessChannel: it binds ONE
-// tab's ptyBroker to the sandbox's WS PTY stream. Where tmuxClientlessChannel
-// drives pipe-pane/send-keys/resize-window on a local tmux pane, this drives the
-// same three verbs over a single bidirectional WebSocket to the `af agent-server`:
-//
-//   - StartCapture dials the tab's WS and returns a reader that yields the
-//     sandbox's PTY_OUT bytes (dropping the remote's own repaint/resize-echo control
-//     frames — the daemon-side broker re-derives those locally, so feeding them into
-//     the ring would double-count them in the seq).
-//   - SendRaw/Resize write INPUT/RESIZE frames back over that same socket (the
-//     agent-server accepts input from any subscriber — the multi-writer model).
-//   - Snapshot fetches the current screen over REST Preview so the broker can paint
-//     a fresh local subscriber, exactly as the tmux channel's capture-pane does.
-//
-// This is what lets remoteAgentServer reuse ptyBroker unchanged: the broker never
-// knows whether its bytes come from a local pipe or a remote socket.
-type remoteClientlessChannel struct {
-	rc  *remoteAgentClient
-	tab int
-
-	mu     sync.Mutex
-	conn   *websocket.Conn
-	ctx    context.Context
-	cancel context.CancelFunc
-	// remoteSeq is this channel's cursor in the REMOTE broker's ring (#5571
-	// W1.2): the OpHello start seq of the current subscription plus the bytes
-	// it has delivered since. A re-dial sends it as ?since=, so bytes the
-	// sandbox produced while the tunnel was down replay into the daemon-side
-	// ring as contiguous output instead of a silent scrollback hole. Written
-	// by readLoop under mu; read by StartCapture under the same lock.
-	remoteSeq uint64
-	// dialSeq is the ?since the live subscription requested, and helloPending
-	// marks its OpHello as not yet seen. The first OpHello's seq is the
-	// post-clamp start position — equal to dialSeq iff the remote honored the
-	// cursor exactly. Any clamp (down over an evicted head, or up over a base
-	// ahead of the cursor) leaves a gap the local ring cannot backfill, so the
-	// recovery repaint is still owed; replayContiguous records the verdict.
-	dialSeq          uint64
-	helloPending     bool
-	replayContiguous bool
-	// writeMu serializes SendRaw/Resize writes: coder/websocket allows one
-	// concurrent reader + one writer, but two goroutines writing (an input and a
-	// resize) would race the frame boundary.
-	writeMu sync.Mutex
-}
-
-var _ clientlessChannel = (*remoteClientlessChannel)(nil)
-
-// PaneDead is always false here: a dead REMOTE pane is the remote daemon's
-// business — its own broker serves the repaint-only stream, which reaches this
-// channel as ordinary upstream bytes (#5330). Nothing local ever needs the
-// verdict this method answers for.
-func (c *remoteClientlessChannel) PaneDead() bool {
-	return false
-}
-
-func newRemoteClientlessChannel(rc *remoteAgentClient, tab int) *remoteClientlessChannel {
-	return &remoteClientlessChannel{rc: rc, tab: tab}
-}
-
-// StartCapture dials the tab's WS stream and returns a reader over the
-// sandbox's PTY_OUT bytes. The dial carries ?since=remoteSeq whenever the
-// channel holds a cursor from an earlier capture (#5571 W1.2): the remote
-// broker replays exactly the bytes produced while the socket was down, so a
-// transport blip costs a repaint at most, never a hole in the scrollback. The
-// first dial — or one after the remote clamped a stale cursor — is a live
-// tail, same as before. The reader goroutine also drains the socket's
-// control/repaint frames (dropping them) so the connection stays healthy —
-// coder/websocket auto-responds to the server's keepalive pings only while a
-// read is in flight, so this loop IS the keepalive. It is the broker's
-// first-Subscribe entry point, so the returned reader is consumed immediately
-// and never blocks the socket.
-func (c *remoteClientlessChannel) StartCapture() (io.ReadCloser, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn != nil {
-		return nil, fmt.Errorf("remote clientless capture already started")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	conn, err := c.rc.dialStream(ctx, c.tab, c.remoteSeq)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	c.conn, c.ctx, c.cancel = conn, ctx, cancel
-	c.dialSeq, c.helloPending, c.replayContiguous = c.remoteSeq, true, false
-	pr, pw := io.Pipe()
-	go c.readLoop(ctx, conn, pw)
-	return pr, nil
-}
-
-// readLoop copies the sandbox's PTY_OUT bytes into the broker's pipe until the
-// socket errors or capture is stopped. It DROPS the remote's OpRepaint and every
-// control frame (MsgResize echo, MsgExit): the daemon-side broker paints its own
-// per-subscriber repaint via Snapshot and manages its own resize echo, so passing
-// the remote's through would double-count repaint bytes in the ring seq and echo
-// resizes twice. This makes the remote socket behave to the broker exactly like
-// tmux pipe-pane: a future-only stream of raw output.
-//
-// The one frame it READS rather than drops is OpHello (#5571 W1.2): its seq is
-// the remote ring position this subscription actually started from — the
-// ?since cursor post-clamp — so remoteSeq tracks startSeq + Σ|PTY_OUT| with
-// the clamp already priced in. It is updated AFTER the bytes are written to
-// the pipe, so a failed delivery never advances the cursor past output the
-// broker never saw.
-func (c *remoteClientlessChannel) readLoop(ctx context.Context, conn *websocket.Conn, pw *io.PipeWriter) {
-	defer func() { _ = pw.Close() }()
-	for {
-		msg, err := agentproto.ReadMessage(ctx, conn)
-		if err != nil {
-			return
-		}
-		if !msg.Binary {
-			continue
-		}
-		switch msg.Frame.Op {
-		case agentproto.OpHello:
-			c.mu.Lock()
-			c.reseedRemoteSeqLocked(conn, msg.Frame.Seq)
-			if c.helloPending && c.remoteSeqWritableLocked(conn) {
-				c.replayContiguous = msg.Frame.Seq == c.dialSeq
-				c.helloPending = false
-			}
-			c.mu.Unlock()
-		case agentproto.OpPTYOut:
-			n, werr := pw.Write(msg.Frame.Data)
-			c.mu.Lock()
-			c.advanceRemoteSeqLocked(conn, uint64(n))
-			c.mu.Unlock()
-			if werr != nil {
-				return
-			}
-		}
-	}
-}
-
-// remoteSeqWritableLocked reports whether one readLoop's conn may still write
-// remoteSeq: dropped only when c.conn is a DIFFERENT live socket — a stale
-// loop's frame must never move the cursor a newer subscription already
-// re-seeded. Post-StopCapture (c.conn nil) it still applies: bytes the pipe
-// provably delivered belong in the cursor, and the next dial's ?since would
-// otherwise replay them as duplicated output. Callers hold c.mu.
-func (c *remoteClientlessChannel) remoteSeqWritableLocked(conn *websocket.Conn) bool {
-	return c.conn == nil || c.conn == conn
-}
-
-// reseedRemoteSeqLocked SETS the cursor from an OpHello — a subscription's
-// post-clamp start, or a mid-stream re-seed after the remote fast-forwarded
-// over evicted bytes (a jump is authoritative, not additive — even to 0 on a
-// fresh remote ring).
-func (c *remoteClientlessChannel) reseedRemoteSeqLocked(conn *websocket.Conn, seed uint64) {
-	if c.remoteSeqWritableLocked(conn) {
-		c.remoteSeq = seed
-	}
-}
-
-// advanceRemoteSeqLocked ADDs to the cursor for bytes just delivered to the
-// broker's pipe.
-func (c *remoteClientlessChannel) advanceRemoteSeqLocked(conn *websocket.Conn, delta uint64) {
-	if c.remoteSeqWritableLocked(conn) {
-		c.remoteSeq += delta
-	}
-}
-
-// ReplaysHistory reports whether THIS capture actually delivers contiguous
-// retained output — the remote honored the ?since cursor exactly, proven by
-// the subscription's OpHello seq matching the requested dialSeq. A clamped
-// OpHello means the remote ring evicted our cursor during the outage and the
-// gap is unrecoverable from the stream: the recovery repaint is still owed.
-// False whenever no capture is live or the hello has not landed — both are
-// the repaint-safe side.
-func (c *remoteClientlessChannel) ReplaysHistory() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn != nil && c.replayContiguous
-}
-
-// StopCapture cancels the read loop and closes the WS, so the broker's read side
-// (the pipe) returns EOF. Idempotent.
-func (c *remoteClientlessChannel) StopCapture() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn == nil {
-		return nil
-	}
-	c.cancel()
-	err := c.conn.Close(websocket.StatusNormalClosure, "")
-	c.conn, c.ctx, c.cancel = nil, nil, nil
-	return err
-}
-
-// SendRaw writes verbatim input bytes to the sandbox PTY as an INPUT frame over
-// the capture socket (multi-writer: the agent-server accepts input from any
-// subscriber). It requires the capture socket, which the broker always opens on
-// the first Subscribe before any input can be routed here.
-func (c *remoteClientlessChannel) SendRaw(b []byte) error {
-	conn, ctx, err := c.activeConn()
-	if err != nil {
-		return err
-	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	wctx, cancel := context.WithTimeout(ctx, remoteWSWriteTimeout)
-	defer cancel()
-	return agentproto.WriteFrame(wctx, conn, agentproto.InputFrame(b))
-}
-
-// Resize sends the winning size to the sandbox PTY as a RESIZE frame. The broker
-// tracks last-resize-wins + echoes the authoritative size to local subscribers;
-// this just forwards the size to the remote (whose own echo is dropped by readLoop).
-func (c *remoteClientlessChannel) Resize(rows, cols uint16) error {
-	conn, ctx, err := c.activeConn()
-	if err != nil {
-		return err
-	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	wctx, cancel := context.WithTimeout(ctx, remoteWSWriteTimeout)
-	defer cancel()
-	return agentproto.WriteFrame(wctx, conn, agentproto.ResizeFrame(rows, cols))
-}
-
-// Snapshot returns the sandbox's current visible screen over REST Preview — the
-// repaint the broker injects so a fresh local subscriber sees the screen before
-// the first live byte, mirroring tmux capture-pane. The WS stream carries only
-// future output, so without this a just-opened remote pane would render blank.
-func (c *remoteClientlessChannel) Snapshot() (PaneSnapshot, error) {
-	// The grid form (one line per row, no -J) plus cursor and size, so the
-	// repaint lands exactly at any client width (#1688, #5571 W4.2). Against an
-	// agent-server that predates it, previewGrid returns the joined screen only
-	// and the repaint stays the screen-only best effort it was.
-	return c.rc.previewGrid(c.tab)
-}
-
-// activeConn returns the live capture socket and its context, or an error if
-// capture is not running (no subscriber has opened the stream yet).
-func (c *remoteClientlessChannel) activeConn() (*websocket.Conn, context.Context, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn == nil {
-		return nil, nil, fmt.Errorf("remote pty stream for tab %d is not open", c.tab)
-	}
-	return c.conn, c.ctx, nil
-}
 
 // --- remoteAgentClient: the thin REST + WS transport to one agent-server ---
 
@@ -742,22 +542,43 @@ func (c *remoteAgentClient) call(path string, req, resp any) error {
 // callWithin is call with an explicit budget, for the one route whose work is
 // not a health check.
 func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.Duration) error {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("remote agent-server: marshal request: %w", err)
+	return c.doJSON(http.MethodPost, path, req, resp, timeout)
+}
+
+// doJSON is callWithin's plumbing generalized over the HTTP method: GET
+// /v1/health is the one non-POST route on the wire, and it shares the same
+// token, envelope, and error-code reconstruction. A nil req sends no body.
+// agentAnswered wraps an error the agent-server returned in its envelope — it ran
+// the request and refused — as opposed to a transport failure, which leaves the
+// request's effect unknown. The message is unchanged.
+type agentAnswered struct{ err error }
+
+func (e *agentAnswered) Error() string { return e.err.Error() }
+func (e *agentAnswered) Unwrap() error { return e.err }
+
+func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout time.Duration) error {
+	var body io.Reader
+	if req != nil {
+		data, err := json.Marshal(req)
+		if err != nil {
+			return fmt.Errorf("remote agent-server: marshal request: %w", err)
+		}
+		body = bytes.NewReader(data)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpBase+path, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, method, c.httpBase+path, body)
 	if err != nil {
 		return fmt.Errorf("remote agent-server: build request: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
 	httpReq.Header.Set(agentproto.AuthHeader, agentproto.BearerScheme+c.token)
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("remote agent-server: POST %s: %w", path, err)
+		return fmt.Errorf("remote agent-server: %s %s: %w", method, path, err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
@@ -793,7 +614,15 @@ func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.
 			// site's bare-deadline arm see the stall (#5295 review).
 			err = fmt.Errorf("%s: %w", env.Error.Message, context.DeadlineExceeded)
 		}
-		return err
+		if env.Error.Code == apiproto.ErrorCodeTabGone {
+			// The status line alone cannot name this class — an unknown ROUTE
+			// on an older server is a 404 too — so the server emits the code
+			// only for a genuine stale-id refusal, and ErrTabGone is
+			// reconstructed for the caller's errors.Is check exactly as the
+			// classes above (#5571 W4.3).
+			err = fmt.Errorf("%s: %w", env.Error.Message, ErrTabGone)
+		}
+		return &agentAnswered{err: err}
 	}
 	if resp != nil {
 		if err := json.Unmarshal(env.Data, resp); err != nil {
@@ -806,8 +635,24 @@ func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.
 // preview fetches tab `tab`'s content over the control REST — shared by the
 // AgentServer.Preview surface and the broker's fresh-subscriber repaint (Snapshot).
 func (c *remoteAgentClient) preview(tab int, full bool) (PreviewSnapshot, error) {
+	return c.previewReq(agentPreviewReq{Tab: tab, Full: full})
+}
+
+// previewByID is preview addressed by the tab's STABLE id (#5571 W4.3): the
+// sandbox binds the identified target itself — atomically, inside its own
+// roster — so the id never round-trips through an ordinal a close/reorder can
+// shift (#1779). ErrTabGone when the id names no live tab (the envelope's
+// tab_gone code reconstructs it). Only call it against a server that advertises
+// the "tab-id-addressing" feature: an older one rejects the unknown `tab_id`
+// field outright under strict decoding, which is the honest failure — but a
+// caller that checks health first avoids paying the round-trip.
+func (c *remoteAgentClient) previewByID(tabID string, full bool) (PreviewSnapshot, error) {
+	return c.previewReq(agentPreviewReq{TabID: tabID, Full: full})
+}
+
+func (c *remoteAgentClient) previewReq(req agentPreviewReq) (PreviewSnapshot, error) {
 	var resp agentPreviewResp
-	if err := c.call("/v1/agent/preview", agentPreviewReq{Tab: tab, Full: full}, &resp); err != nil {
+	if err := c.call("/v1/agent/preview", req, &resp); err != nil {
 		return PreviewSnapshot{}, err
 	}
 	return PreviewSnapshot{
@@ -825,8 +670,17 @@ func (c *remoteAgentClient) preview(tab int, full bool) (PreviewSnapshot, error)
 // screen-only snapshot — same bytes, no cursor, no size — so an old agent-server
 // degrades instead of failing.
 func (c *remoteAgentClient) previewGrid(tab int) (PaneSnapshot, error) {
+	return c.previewGridReq(agentPreviewReq{Tab: tab, Grid: true})
+}
+
+// previewGridByID is previewGrid addressed by stable tab id (#5571 W4.4).
+func (c *remoteAgentClient) previewGridByID(tabID string) (PaneSnapshot, error) {
+	return c.previewGridReq(agentPreviewReq{TabID: tabID, Grid: true})
+}
+
+func (c *remoteAgentClient) previewGridReq(req agentPreviewReq) (PaneSnapshot, error) {
 	var resp agentPreviewResp
-	if err := c.call("/v1/agent/preview", agentPreviewReq{Tab: tab, Grid: true}, &resp); err != nil {
+	if err := c.call("/v1/agent/preview", req, &resp); err != nil {
 		return PaneSnapshot{}, err
 	}
 	if !resp.HasGrid {
@@ -840,17 +694,65 @@ func (c *remoteAgentClient) previewGrid(tab int) (PaneSnapshot, error) {
 	}, nil
 }
 
-// dialStream opens the WS PTY subscription to tab `tab`. A nonzero `since` is
-// the caller's cursor into the sandbox's output ring, sent as ?since= so the
-// remote broker replays the gap produced while a previous socket was down
-// (#5571 W1.2); 0 subscribes at the live tail. The token rides both the
-// Authorization header and the ?access_token= query — the agent-server honors
-// either, and the query mirrors the browser WS path Phase 5 needs. The read
-// limit is raised off the 32 KiB default: a repaint of a wide pane is a single
-// large binary frame.
-func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, since uint64) (*websocket.Conn, error) {
+// createTab asks the sandbox to spawn one tab under the daemon's STABLE id
+// (#5571 W4.3). The id travels verbatim — the driving daemon is the id
+// authority, and the id is the create's idempotency key: a retry of the same
+// create answers the tab the first call made (see agentTabCreateReq). The
+// response is the sandbox's own roster row — one shape shared with tabs().
+func (c *remoteAgentClient) createTab(id, kind, command, name string) (TabData, error) {
+	var resp agentTabCreateResp
+	if err := c.call("/v1/agent/tab-create",
+		agentTabCreateReq{ID: id, Kind: kind, Command: command, Name: name}, &resp); err != nil {
+		return TabData{}, err
+	}
+	return resp.Tab, nil
+}
+
+// closeTab asks the sandbox to close the tab a stable id names — never an
+// ordinal. ErrTabGone when it names no live tab (reconstructed from the
+// envelope's tab_gone code), which a W4.4 reconciler reads as "already closed"
+// rather than a failure.
+func (c *remoteAgentClient) closeTab(id, gen string) error {
+	return c.call("/v1/agent/tab-close", agentTabCloseReq{ID: id, Gen: gen}, nil)
+}
+
+// tabs reads the sandbox's roster: every tab with its stable id, kind, name,
+// and — for process tabs — the exit evidence (status, time, stopped_by) the
+// server refreshed before answering (#5571 W4.3).
+func (c *remoteAgentClient) tabs() ([]TabData, error) {
+	var resp agentTabsResp
+	if err := c.call("/v1/agent/tabs", struct{}{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Tabs, nil
+}
+
+// health GETs the agent-server's /v1/health — the capability probe a driver
+// runs before depending on a W4.3+ surface. `version` says which af build
+// answered; `features` says which route clusters it speaks, so the caller
+// degrades on a missing token instead of calling a route that may not exist.
+func (c *remoteAgentClient) health() (agentHealthResp, error) {
+	var resp agentHealthResp
+	if err := c.doJSON(http.MethodGet, "/v1/health", nil, &resp, remoteAgentCallTimeout); err != nil {
+		return agentHealthResp{}, err
+	}
+	return resp, nil
+}
+
+// dialStream opens the WS PTY subscription to tab `tab` (or the tab named by
+// stable id `tabID`, #5571 W4.3 — see dialStreamByID for when that is safe to
+// send). A nonzero `since` is the caller's cursor into the sandbox's output
+// ring, sent as ?since= so the remote broker replays the gap produced while a
+// previous socket was down (#5571 W1.2); 0 subscribes at the live tail. The
+// token rides both the Authorization header and the ?access_token= query — the
+// agent-server honors either, and the query mirrors the browser WS path Phase 5
+// needs. The read limit is raised off the 32 KiB default: a repaint of a wide
+// pane is a single large binary frame.
+func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, tabID string, since uint64) (*websocket.Conn, error) {
 	q := url.Values{}
-	if tab != 0 {
+	if tabID != "" {
+		q.Set("tab_id", tabID)
+	} else if tab != 0 {
 		q.Set("tab", strconv.Itoa(tab))
 	}
 	if since != 0 {
@@ -877,13 +779,29 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, since uint6
 	// independent budget while still bounding a peer that stops reading.
 	dialCtx, cancel := context.WithTimeout(ctx, remoteAgentDialTimeout+remoteAgentWSHandshakeTimeout)
 	defer cancel()
-	conn, _, err := websocket.Dial(dialCtx, u, opts)
+	conn, resp, err := websocket.Dial(dialCtx, u, opts)
 	if err != nil {
+		// A stale stable id is a 404 on the handshake (the sandbox's tab_gone
+		// refusal); surface it as ErrTabGone so the caller stops addressing it.
+		if tabID != "" && resp != nil && resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("remote agent-server: tab id %q: %w", tabID, ErrTabGone)
+		}
 		return nil, fmt.Errorf("remote agent-server: dial pty stream: %w",
 			agentproto.RedactAccessTokenError(err, c.token))
 	}
 	conn.SetReadLimit(4 << 20)
 	return conn, nil
+}
+
+// dialStreamByID is dialStream addressed by the tab's STABLE id (#5571 W4.3):
+// the sandbox binds the id once, at subscribe time, inside its own roster — an
+// id-addressed connection can never be retargeted by a close/reorder the way
+// re-resolving an ordinal can. Only dial it against a server advertising the
+// "tab-id-addressing" feature on /v1/health: an OLDER agent-server parses no
+// ?tab_id= and would silently bind the AGENT tab — the query carries no strict
+// decode to refuse on, so the features check is the only guard.
+func (c *remoteAgentClient) dialStreamByID(ctx context.Context, tabID string) (*websocket.Conn, error) {
+	return c.dialStream(ctx, 0, tabID, 0)
 }
 
 // splitHTTPBaseURL validates an agent-server base URL and derives its REST
@@ -922,6 +840,30 @@ func splitHTTPBaseURL(raw string) (httpBase, wsBase string, err error) {
 
 type agentLifecycleReq struct {
 	FirstTimeSetup bool `json:"first_time_setup"`
+	// Conversation is the daemon's recorded conversation for a launch to resume
+	// (#5571 W7.2). Absent for a first launch and for a pre-field server.
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
+	// RestartAdoption marks the launch that adopts a RESTARTED agent-server's
+	// surviving workspace (W1.4). Only that launch is refused a lazy respawn onto
+	// a guessed conversation; every other restore (an archive restore, a Lost
+	// recovery) keeps resuming the way it always has.
+	RestartAdoption bool `json:"restart_adoption,omitempty"`
+	// SiblingTabs is how many non-agent tabs the daemon's row records, sent with a
+	// restart adoption's Provision so the host can refuse to rebuild under them.
+	SiblingTabs int `json:"sibling_tabs,omitempty"`
+	// Tabs is the roster of off-box shell/process tabs a restarted server should
+	// rebind to their surviving tmux sessions (feature tab-restore, #6162). Sent
+	// only to a server that advertises the feature; the commands in it are never run.
+	Tabs []TabData `json:"tabs,omitempty"`
+}
+
+// agentLaunchResp carries back the conversation the server launched or resumed.
+type agentLaunchResp struct {
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
+	// TabsRestored and TabsGone answer a restart adoption's Tabs: the ids rebound
+	// to a live session, and the ids whose session tmux confirmed absent.
+	TabsRestored []string `json:"tabs_restored,omitempty"`
+	TabsGone     []string `json:"tabs_gone,omitempty"`
 }
 
 type agentSnapshotResp struct {
@@ -935,12 +877,19 @@ type agentSnapshotResp struct {
 	// review): nil resolves to the legacy contract — an all-false frame is
 	// unconfirmed, positive evidence marks the capture real.
 	Captured *bool `json:"captured,omitempty"`
+	// Conversation is the conversation identity the server has for the agent, once
+	// it has one (#5571 W7.2).
+	Conversation *AgentConversationData `json:"conversation,omitempty"`
 }
 
 type agentPreviewReq struct {
-	Tab  int  `json:"tab"`
-	Full bool `json:"full"`
-	Grid bool `json:"grid,omitempty"`
+	// TabID addresses by stable id and wins over Tab, mirroring the daemon's
+	// own PreviewRequest precedence — a stale id is a tab_gone 404, never an
+	// ordinal fallback (#5571 W4.3).
+	TabID string `json:"tab_id,omitempty"`
+	Tab   int    `json:"tab"`
+	Full  bool   `json:"full"`
+	Grid  bool   `json:"grid,omitempty"`
 }
 
 type agentPreviewResp struct {
@@ -974,4 +923,53 @@ type agentSendPromptResp struct {
 
 type agentArchiveResp struct {
 	Branch string `json:"branch"`
+}
+
+// --- wire structs: the W4.3 stable-id tab surface (#5571) ---
+//
+// These mirror daemon/agentserver_headless.go's agentTab*/agentHealth* types
+// field-for-field, the same duplication rule as the rest of this file: the JSON
+// tags are the contract, and the round-trip tests pin them.
+
+// agentTabCreateReq asks the sandbox to spawn a tab under the daemon's stable
+// id. Kind is the tabKindVocabulary wire name — only "shell" and "process" are
+// creatable here. ID is verbatim AND the idempotency key: a retry repeating
+// id+kind (and command, for a process tab) answers the tab the first create
+// made; a same-id request of a different shape refuses. Empty ID mints.
+type agentTabCreateReq struct {
+	ID      string `json:"id,omitempty"`
+	Kind    string `json:"kind"`
+	Command string `json:"command,omitempty"`
+	Name    string `json:"name,omitempty"`
+}
+
+// agentTabCreateResp carries the created tab as the sandbox's roster row — the
+// same TabData shape /v1/agent/tabs reports, so the create answer can never
+// drift from the roster.
+type agentTabCreateResp struct {
+	Tab TabData `json:"tab"`
+}
+
+// agentTabCloseReq names the tab to close by stable id only.
+type agentTabCloseReq struct {
+	ID string `json:"id"`
+	// Gen makes the close conditional on the tab's incarnation, checked
+	// atomically on the sandbox (#5996). Empty closes whatever holds the id.
+	Gen string `json:"gen,omitempty"`
+}
+
+// agentTabsResp is the sandbox's roster: every tab as TabData, exit evidence
+// included.
+type agentTabsResp struct {
+	Tabs []TabData `json:"tabs"`
+}
+
+// agentHealthResp is /v1/health's payload: liveness plus the version/features
+// advertisement. Features is nil against a server that predates the field —
+// the caller degrades on a missing TOKEN, and a missing field is just zero
+// tokens.
+type agentHealthResp struct {
+	OK       bool     `json:"ok"`
+	Version  string   `json:"version"`
+	Features []string `json:"features"`
 }

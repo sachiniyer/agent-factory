@@ -41,7 +41,29 @@ export class OptimisticSessions {
   /** Captured before fetching, so an older snapshot cannot undo an RPC or event. */
   snapshotFence(): number { return this.revision; }
 
-  snapshot(sessions: SessionData[], fence: number): boolean {
+  /** The one door for archive rows read outside a snapshot (an archived page, a
+   *  deep-linked session, #6206-#6209). `fence` is `snapshotFence()` captured BEFORE
+   *  the read. A row is adopted only if no session event for it is newer than the
+   *  fence: a deletion or kill that arrived while the read was in flight beats the
+   *  stale row, in either arrival order. Adopting anything advances the revision, so
+   *  a snapshot fetched before the adopt fails its own fence and is re-requested
+   *  rather than overwriting the rows. A row already known is replaced in place.
+   *  Returns the rows actually adopted. */
+  adopt(rows: SessionData[], fence: number): SessionData[] {
+    const taken = rows.filter((row) => {
+      const seen = this.sessionEvents.get(sessionKey(row));
+      return !seen || seen.revision <= fence;
+    });
+    if (taken.length === 0) return taken;
+    for (const row of taken) this.authoritative = upsertSession(this.authoritative, row);
+    this.revision++;
+    return taken;
+  }
+
+  /** `leftLiveSet`: the snapshot was live-only, so a row ABSENT from it may have
+   *  been archived rather than killed (#6178); an archive request is then settled by
+   *  its absence, as a full snapshot settled it by the row's archived liveness. */
+  snapshot(sessions: SessionData[], fence: number, leftLiveSet = false): boolean {
     if (fence !== this.revision) return false;
     this.authoritative = sessions;
     this.revision++;
@@ -52,7 +74,7 @@ export class OptimisticSessions {
       if (op.kind !== "create" && op.row.id) {
         const target = sessions.find(row => row.id === op.row.id);
         if ((op.kind === "kill" && !target) ||
-          (op.kind === "archive" && target?.liveness === Liveness.Archived)) op.confirmed = true;
+          (op.kind === "archive" && (target?.liveness === Liveness.Archived || (leftLiveSet && !target)))) op.confirmed = true;
       }
       if (op.acknowledged) this.pending.delete(key);
     }
@@ -62,7 +84,7 @@ export class OptimisticSessions {
   /** A tab mutation requires a snapshot accepted after its RPC. Never return
    * the old projection when events cross that request; retry a bounded number
    * of times and cancel silently when this connection no longer owns the work. */
-  async refresh(fetch: () => Promise<SessionData[]>): Promise<SessionData[] | null> {
+  async refresh(fetch: () => Promise<SessionData[]>, leftLiveSet: () => boolean = () => false): Promise<SessionData[] | null> {
     const epoch = this.epoch;
     for (let attempt = 0; attempt < 3; attempt++) {
       const fence = this.snapshotFence();
@@ -74,7 +96,7 @@ export class OptimisticSessions {
         throw error;
       }
       if (epoch !== this.epoch) return null;
-      if (this.snapshot(sessions, fence)) return this.project();
+      if (this.snapshot(sessions, fence, leftLiveSet())) return this.project();
     }
     throw new Error("Could not refresh sessions after the operation because they kept changing. Check the session before trying again.");
   }
@@ -205,11 +227,15 @@ export class OptimisticSessions {
   }
 }
 
-/** Orders create selection against subsequent submissions and navigation. */
+/** Orders create selection against subsequent submissions and navigation, and is the
+ *  one clock every selection change advances (rail, keyboard, hash, back/forward). */
 export class CreateSelectionIntent {
   private generation = 0;
 
   navigate(): void { this.generation++; }
   submit(): number { return ++this.generation; }
+  /** The generation now: a by-id route lookup (#6204) takes it and applies its answer
+   *  only while isCurrent, so ANY navigation or selection since supersedes it. */
+  snapshot(): number { return this.generation; }
   isCurrent(intent: number): boolean { return intent === this.generation; }
 }

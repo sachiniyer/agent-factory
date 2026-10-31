@@ -20,10 +20,14 @@ import (
 )
 
 type controlServer struct {
-	manager    *Manager
-	scheduler  *taskScheduler
-	watchers   *watcherSupervisor
-	shutdownCh chan struct{}
+	// createSessionFn replaces createSession in the sandbox-scoped CreateSession
+	// handler. Nil in production; a test sets it to exercise the response boundary
+	// on a successful create without provisioning a host.
+	createSessionFn func(ctx context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error
+	manager         *Manager
+	scheduler       *taskScheduler
+	watchers        *watcherSupervisor
+	shutdownCh      chan struct{}
 	// shutdownOnce is shared by every per-connection controlServer
 	// startControlServer builds: one Shutdown must fire once for the whole
 	// listener, not once per connection. It is nil on servers that cannot shut
@@ -63,6 +67,9 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
 	resp.HostPick = true
+	resp.DeliverHostPick = true
+	resp.TaskHost = true
+	resp.ConfigHostsEdit = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -285,7 +292,7 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	result, wroteDigest, err := config.SetGlobalConfigValueWithDigest(req.Key, req.Value)
+	result, wroteDigest, err := writeGlobalConfig(req)
 	if err != nil {
 		return err
 	}
@@ -450,7 +457,20 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	}
 	// A remote client sends the project path as typed; expand ~ against this
 	// daemon's home before anything resolves it.
-	req.RepoPath = config.ExpandTilde(strings.TrimSpace(req.RepoPath))
+	// A still-relative path would resolve against the DAEMON's working directory
+	// and could silently pick a different checkout, so it is refused (#5743).
+	if strings.TrimSpace(req.RepoPath) != "" {
+		resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
+		if err != nil {
+			return err
+		}
+		req.RepoPath = resolved
+	}
+	if req.ValidateFirst {
+		if err := validateCreateFirst(req); err != nil {
+			return err
+		}
+	}
 	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
@@ -598,29 +618,6 @@ func (s *controlServer) ArchiveSession(req *ArchiveSessionRequest, resp *Archive
 	return s.archiveSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) archiveSession(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	// The `af sessions archive --self` caller this issue is about (#5182):
-	// register the kernel-verified requester before its own pane tree is
-	// reaped, and unregister when the reply is on the wire.
-	defer s.trackTeardownRequester(ctx, req)()
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
-	// commits it, and publishes the full projection inside its operation lock. That
-	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, _, err := s.manager.ArchiveSession(*req)
-	if !resp.record(err) {
-		return err
-	}
-	resp.OK = true
-	resp.ArchivedPath = archivedPath
-	return nil
-}
-
 func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *RestoreArchivedResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
@@ -683,22 +680,6 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 	if err == nil {
 		s.manager.publishEvent(agentproto.EventSessionRestored, restored)
 	}
-	return nil
-}
-
-func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	status, err := s.manager.SendPromptWithStatus(req)
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	resp.Status = status
 	return nil
 }
 

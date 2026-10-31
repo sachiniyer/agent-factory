@@ -118,3 +118,34 @@ func TestHooksPaneWhitespaceEditDoesNotClobberCommand(t *testing.T) {
 	assert.Equal(t, []string{"make test"}, h.GetCommands(),
 		"whitespace-only edit must leave the existing command untouched")
 }
+
+func TestHooksPaneReadOnlyRefusesEditsAndSaysWhy(t *testing.T) {
+	h := NewHooksPane()
+	h.SetCommands([]string{"make test"})
+	h.SetSize(80, 12)
+	h.SetReadOnly("edit it on the daemon host")
+	h.SetFocus(true)
+	for _, k := range []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune("n")}, {Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune("D")}} {
+		assert.True(t, h.HandleKeyPress(k), "the key is consumed")
+		assert.False(t, h.IsEditing())
+		assert.False(t, h.IsDirty())
+	}
+	assert.Equal(t, []string{"make test"}, h.GetCommands())
+	assert.Contains(t, h.String(), "edit it on the daemon host")
+
+	h.SetReadOnly("")
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	assert.True(t, h.IsDirty(), "control: an editable pane still edits")
+}
+
+func TestHooksPaneDiscardRestoresTheStoredList(t *testing.T) {
+	h := NewHooksPane()
+	h.SetCommands([]string{"a", "b"})
+	h.SetFocus(true)
+	h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	require.True(t, h.IsDirty())
+	require.Equal(t, []string{"b"}, h.GetCommands())
+	h.Discard()
+	assert.False(t, h.IsDirty())
+	assert.Equal(t, []string{"a", "b"}, h.GetCommands())
+}

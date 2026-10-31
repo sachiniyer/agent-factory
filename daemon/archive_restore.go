@@ -15,21 +15,29 @@ import (
 // Split out of archive.go, which had grown past the file-length limit holding
 // both verbs (#1145); nothing here changed in the move.
 
-// restoreRemoteSession restores an archived off-box session (docker/ssh/hook) by
-// re-provisioning a fresh sandbox that clones the pushed branch back and
-// relaunching the agent (#1592 Phase 4 PR6) — the remote analogue of
-// RestoreArchived's worktree-move body, sharing its guards + locks. It reuses
-// RestoreFromArchive unchanged: BeginRestore fences the restore, then the
-// backend's Recover (recoverSandbox) re-provisions + relaunches + flips the
-// session live. The code survives via origin; a fresh agent runs on the pushed
-// branch (the pre-archive conversation lived only in the disposed sandbox).
+// restoreRemoteSession restores an archived off-box session (docker/ssh/hook) —
+// the remote analogue of RestoreArchived's worktree-move body, sharing its guards
+// + locks. It reuses RestoreFromArchive unchanged: BeginRestore fences the
+// restore, then the backend's Recover (recoverSandbox) brings the runtime back
+// and flips the session live.
+//
+// An ssh/sandbox row archived without a push (#5571 W8.5) keeps its workspace on
+// its host, and the restore REATTACHES it (W8.6): a new agent-server over the
+// existing worktree, the agent relaunched with its recorded conversation, nothing
+// cloned, pushed or re-hooked. Only a workspace the host proves gone, or a row
+// that was pushed (and docker/hook, which always push), gets a fresh sandbox that
+// clones the pushed branch back (#1592 Phase 4 PR6).
 func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance, title string) (string, error) {
+	what := "re-provisioning its sandbox"
+	if instance.ArchivedWorkspace() != nil {
+		what = "restoring its preserved workspace"
+	}
 	if err := instance.RestoreFromArchive(); err != nil {
 		// On a re-provision/relaunch failure RestoreFromArchive left the instance
 		// Lost; persist that and surface the failure (an explicit retry re-provisions
 		// from the still-pushed branch).
 		m.persistInstance(repoID, instance)
-		return "", fmt.Errorf("failed to restore remote session %q (re-provisioning its sandbox): %w", title, err)
+		return "", fmt.Errorf("failed to restore remote session %q (%s): %w", title, what, err)
 	}
 	// A FRESH sandbox now backs this session, so its accumulated remote-loss
 	// failures describe a sandbox that is gone (#1794). Reset BEFORE the persist
@@ -51,7 +59,7 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	// (#5436).
 	m.clearLostRestoreEpisode(stableSessionKey(repoID, instance))
 	m.persistRuntimeReplacement(repoID, title, instance)
-	m.info().Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
+	m.info().Printf("restored remote session %q (repo %s): runtime back, agent relaunched", title, repoID)
 	return restoredArchiveResult(instance, instance.GetWorktreePath())
 }
 
@@ -90,6 +98,14 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, session.I
 // one body avoids a second title lookup between those sibling paths.
 func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, title string) (string, error) {
 	req := RestoreArchivedRequest{ID: instance.ID, Title: title, RepoID: repoID}
+	// A prune tombstone has no worktree to move back (#5189): refuse by naming the
+	// branch the work was kept on, instead of failing later on a missing path.
+	if at := instance.PrunedAt(); !at.IsZero() {
+		return "", session.PrunedRestoreError(title, instance.KeptBranch(), at)
+	}
+	if err := m.pruneRowFence(repoID, instance); err != nil {
+		return "", fmt.Errorf("cannot restore session %q: %w", title, err)
+	}
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
@@ -166,6 +182,14 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	m.mu.Unlock()
 	if current != instance {
 		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
+	}
+	// Prune holds this same operation lock for its whole run, so a tombstone (or an
+	// interrupted prune) is visible here even if it landed during the wait (#5189).
+	if at := instance.PrunedAt(); !at.IsZero() {
+		return "", session.PrunedRestoreError(title, instance.KeptBranch(), at)
+	}
+	if err := m.pruneRowFence(repoID, instance); err != nil {
+		return "", fmt.Errorf("cannot restore session %q: %w", title, err)
 	}
 	// Re-run the shared runtime-entry guard under the operation lock, before the
 	// worktree move. A durable kill tombstone is terminal intent: restoring
@@ -298,7 +322,15 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// either way.
 	restoredPath := instance.GetWorktreePath()
 	commitRestore := func() error {
-		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+		// Under worktree admission the start lock must not be taken: it sits to the
+		// LEFT of admission in the documented order, and create holds it while it
+		// waits on admission (#6197). Admission is released right after the respawn,
+		// so the commits after it take the ordinary path.
+		persist := m.persistInstanceErr
+		if worktreeAdmissionHeld {
+			persist = m.persistUnderAdmission
+		}
+		if perr := persist(repoID, instance); perr != nil {
 			return fmt.Errorf("the worktree for %q was moved back to %s but that location could not be written to disk (%v); "+
 				"nothing durable points at it — move it back or re-register it manually before restarting the daemon",
 				req.Title, restoredPath, perr)
@@ -412,7 +444,7 @@ func (m *Manager) moveArchivedWorktreeBack(repoID, title string, instance *sessi
 			refusal := fmt.Errorf(
 				"cannot restore session %q: its archived worktree %s was recorded as deleted outside af, and the directory now at that path is not one git proves is the session's checkout (%v) — af will not move it back or start the agent in it; inspect %s, remove it or move it aside if it is not the session's work, then retry (restore then rebuilds the worktree from its kept branch)",
 				title, relocationClaim.Path, verifyErr, relocationClaim.Path)
-			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+			if perr := m.persistUnderAdmission(repoID, instance); perr != nil {
 				return errors.Join(refusal, fmt.Errorf("could not persist its unverified-worktree fence: %w", perr))
 			}
 			return refusal
@@ -464,7 +496,7 @@ func (m *Manager) moveArchivedWorktreeBack(repoID, title string, instance *sessi
 			// (full or read-only disk) reproduces the exact stranding it exists to
 			// prevent. Reporting the relocate error alone would tell the operator
 			// their worktree is safely recorded when nothing recorded it.
-			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+			if perr := m.persistUnderAdmission(repoID, instance); perr != nil {
 				return fmt.Errorf("restore of %q was cut off mid-relocate AND its recovery candidates could not be written to disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w", title, perr, worktreeRecoveryLocation(instance), err)
 			}
 			return fmt.Errorf("restore of %q was cut off mid-relocate; both possible worktree locations are recorded (%s), destructive cleanup is blocked, and a retry will resolve the directory identity: %w", title, worktreeRecoveryLocation(instance), err)

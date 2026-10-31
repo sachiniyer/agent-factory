@@ -89,13 +89,18 @@ the session (auto-suffixed -2, -3, …). So the name you pass is not always the
 name you get — the resolved tab name is printed on success, and that is the one
 the other tab verbs address.
 
-For remote sessions, web tabs are admitted. That kind is metadata-only: it needs
+For remote sessions, web and VS Code tabs are admitted. A VS Code tab opens the
+editor running on the session's host, rooted at the workspace (code-server or
+openvscode-server must be installed there). A web tab is metadata-only: it needs
 no PTY and spawns no process. An external HTTPS URL is iframed
 directly, and a loopback target (including --port) is served from the session's
 own workspace through the agent-server's port relay, so it shows what listens on
 that port in the sandbox rather than on the daemon host. Plain-HTTP external URLs
-cannot be framed by an HTTPS Agent Factory UI. Shell, process, and VS Code tabs
-still require local runtime/worktree resources.`,
+cannot be framed by an HTTPS Agent Factory UI. Shell and process tabs are
+admitted when the session's agent-server advertises "tab-api" (a current build
+does): they run on the session's host. An older agent-server without that
+advertisement keeps the refusal, because those kinds then need a daemon-side
+worktree the off-box session does not have.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTabCreate,
 }
@@ -195,7 +200,7 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 	// empty repoID preserves the all-repo search; a non-empty one confines the
 	// session lookup to that repo so a same-titled session in another repo
 	// never receives the tab.
-	repoID, err := resolveRepoID()
+	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
 		return jsonError(err)
 	}
@@ -243,8 +248,10 @@ step rather than a dead end.
 
 The agent tab can't be deleted — use "af sessions kill" to tear down the whole
 session. Deleting a tab or session that doesn't exist is an error, not a silent
-success. On remote sessions, admitted metadata-only web tabs can be deleted;
-PTY-backed kinds are never admitted there.`,
+success. On remote sessions, metadata-only web tabs can be deleted, and so can shell and
+process tabs when the session's agent-server advertises "tab-api" (it closes
+them on the session's host); an older agent-server without that advertisement
+never admits those kinds.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTabDelete,
 }
@@ -263,7 +270,7 @@ func runTabDelete(cmd *cobra.Command, args []string) error {
 	// repoID preserves the all-repo search; a non-empty one confines the
 	// session lookup to that repo so a same-titled session in another repo
 	// never loses a tab.
-	repoID, err := resolveRepoID()
+	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
 		return jsonError(err)
 	}
@@ -313,9 +320,10 @@ success — that is what the tab is actually called, and what the other tab verb
 now address it by.
 
 The rename persists across a daemon/af restart and does not disturb the tab's
-running process. On remote sessions, admitted metadata-only web tabs can be
-renamed; PTY-backed kinds are never admitted there. Archived sessions still
-have to be restored first.`,
+running process. On remote sessions, metadata-only web tabs can be renamed, and so can process
+tabs when the session's agent-server advertises "tab-api"; an older
+agent-server without that advertisement never admits process tabs. Archived
+sessions still have to be restored first.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTabRename,
 }
@@ -337,7 +345,7 @@ func runTabRename(cmd *cobra.Command, args []string) error {
 	// empty repoID preserves the all-repo search; a non-empty one confines the
 	// session lookup to that repo so a same-titled session in another repo never
 	// has a tab renamed out from under it.
-	repoID, err := resolveRepoID()
+	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
 		return jsonError(err)
 	}
@@ -383,9 +391,10 @@ can be moved in front of it. That is structural, not cosmetic — the agent tab 
 identified by its position throughout a session's lifecycle.
 
 The new order persists across a daemon/af restart and does not disturb any tab's
-running process. On remote sessions, admitted metadata-only web tabs can be
-reordered; PTY-backed kinds are never admitted there. Archived sessions still
-have to be restored first.`,
+running process. On remote sessions, metadata-only web tabs can be reordered, and so can shell
+and process tabs when the session's agent-server advertises "tab-api"; an older
+agent-server without that advertisement never admits those kinds. Archived
+sessions still have to be restored first.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTabReorder,
 }
@@ -401,7 +410,7 @@ func runTabReorder(cmd *cobra.Command, args []string) error {
 	}
 
 	// Honor --repo scoping (#891 class), mirroring the other tab verbs.
-	repoID, err := resolveRepoID()
+	repoID, err := resolveRepoIDForLookup()
 	if err != nil {
 		return jsonError(err)
 	}

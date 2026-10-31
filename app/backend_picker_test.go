@@ -614,3 +614,59 @@ func TestBackendChoicesFromKeepsRefusalsOverAdvisories(t *testing.T) {
 		"the precondition names what to fix; the advisory would say what would also be missing")
 	assert.False(t, ssh.callbackless, "a create that cannot run has no 'will lack callback' to flag")
 }
+
+// TestBackendChoicesFromCarriesHostReadinessNote is #5785: the web renders the
+// readiness note of an unprobed or stale host beside the available backend; the
+// TUI must too, still selectable, joined to any callback advisory.
+func TestBackendChoicesFromCarriesHostReadinessNote(t *testing.T) {
+	const note = "not probed yet — the host is checked when a session is created"
+	choices := backendChoicesFrom(daemon.ListBackendsResponse{
+		Backends: []daemon.BackendOption{
+			{Name: config.BackendSandbox, Label: "sandbox", Status: daemon.BackendAvailable, Note: note},
+			{Name: config.BackendSSH, Label: "ssh", Status: daemon.BackendAvailable, Note: note, CallbackUnavailableReason: "no listener"},
+		},
+		Default:       config.BackendSandbox,
+		DefaultStatus: daemon.BackendAvailable,
+	})
+	byValue := map[string]backendChoice{}
+	for _, c := range choices {
+		byValue[c.value] = c
+	}
+	assert.Equal(t, "Host "+note, byValue[config.BackendSandbox].reason)
+	assert.Equal(t, daemon.BackendAvailable, byValue[config.BackendSandbox].status)
+	assert.Equal(t, "Host "+note, byValue[repoDefaultBackend].reason, "the repo-default row resolves to the same backend")
+	assert.False(t, byValue[config.BackendSandbox].callbackless)
+	assert.Equal(t, "Host "+note+" · "+"af callback unavailable: no listener", byValue[config.BackendSSH].reason)
+	assert.True(t, byValue[config.BackendSSH].callbackless)
+}
+
+// TestBackendChoicesFromListsHostsAfterBackends is the TUI half of W6.3 (#5571):
+// each listed host is a row after the backends, carrying the daemon's status and
+// reason verbatim, and a host row never carries a backend value — a host pick IS
+// the ssh placement and the daemon refuses a host paired with another backend.
+func TestBackendChoicesFromListsHostsAfterBackends(t *testing.T) {
+	choices := backendChoicesFrom(daemon.ListBackendsResponse{
+		Backends: []daemon.BackendOption{
+			{Name: config.BackendLocal, Label: "local", Status: daemon.BackendAvailable},
+		},
+		Default:       config.BackendLocal,
+		DefaultStatus: daemon.BackendAvailable,
+		Hosts: []daemon.HostOption{
+			{Name: "box1", Address: "box1.example", Status: daemon.BackendAvailable},
+			{Name: "box2", Address: "box2.example", Status: daemon.BackendUnavailable, Reason: "ssh identity file is missing"},
+		},
+		DefaultHost: "box1",
+	})
+	require.Len(t, choices, 4, "repo default, local, box1, box2")
+
+	box1, box2 := choices[2], choices[3]
+	assert.Equal(t, "box1", box1.host)
+	assert.Equal(t, repoDefaultBackend, box1.value)
+	assert.Equal(t, "host: box1 (box1.example) · default", box1.label)
+	assert.Equal(t, daemon.BackendAvailable, box1.status)
+
+	assert.Equal(t, "box2", box2.host)
+	assert.Equal(t, daemon.BackendUnavailable, box2.status)
+	assert.Equal(t, "ssh identity file is missing", box2.reason, "the daemon's reason, verbatim")
+	assert.Contains(t, box2.item(), "unavailable")
+}

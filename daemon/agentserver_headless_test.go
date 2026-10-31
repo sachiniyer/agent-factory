@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -338,4 +341,103 @@ func TestAgentServerServesNoWebShell(t *testing.T) {
 	// The 404 must tell a human where the UI actually is, not just "unknown route".
 	require.Contains(t, string(body), "serves no web UI")
 	require.Contains(t, string(body), "http://localhost:8443")
+}
+
+// shutdownRecorder is an AgentServer that records which way the workspace was
+// stopped.
+type shutdownRecorder struct {
+	session.AgentServer
+	killed, preserved int
+}
+
+func (r *shutdownRecorder) Kill(bool) error { r.killed++; return nil }
+
+func (r *shutdownRecorder) StopPreservingWorkspace() error { r.preserved++; return nil }
+
+// #5947 review (B): a server that adopted a preserved workspace must never take
+// the workspace down with it, whatever stops it.
+func TestShutdownOfAnAdoptingServerPreservesTheWorkspace(t *testing.T) {
+	adopted := &shutdownRecorder{}
+	hs := &headlessServer{adopted: true, as: adopted}
+	if err := hs.shutdownWorkspace(); err != nil {
+		t.Fatal(err)
+	}
+	if adopted.killed != 0 || adopted.preserved != 1 {
+		t.Fatalf("adopting server stop: killed=%d preserved=%d, want 0 and 1", adopted.killed, adopted.preserved)
+	}
+
+	ordinary := &shutdownRecorder{}
+	hs = &headlessServer{as: ordinary}
+	if err := hs.shutdownWorkspace(); err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.killed != 1 || ordinary.preserved != 0 {
+		t.Fatalf("ordinary server stop: killed=%d preserved=%d, want 1 and 0", ordinary.killed, ordinary.preserved)
+	}
+}
+
+// An adopting server whose runtime has no safe stop leaves the workspace alone
+// rather than falling back to the destructive one.
+func TestShutdownOfAnAdoptingServerWithoutASafeStopKillsNothing(t *testing.T) {
+	killOnly := &killOnlyServer{}
+	hs := &headlessServer{adopted: true, as: killOnly}
+	if err := hs.shutdownWorkspace(); err == nil {
+		t.Fatal("expected a refusal: no workspace-preserving stop is available")
+	}
+	if killOnly.killed != 0 {
+		t.Fatalf("an adopting server fell back to Kill (%d calls)", killOnly.killed)
+	}
+}
+
+type killOnlyServer struct {
+	session.AgentServer
+	killed int
+}
+
+func (r *killOnlyServer) Kill(bool) error { r.killed++; return nil }
+
+func TestHeadlessWorkspaceFactsMissingWorkspace(t *testing.T) {
+	hs := &headlessServer{inst: &session.Instance{Path: filepath.Join(t.TempDir(), "gone")}}
+	var facts session.WorkspaceFacts
+	if err := hs.WorkspaceFacts(struct{}{}, &facts); err != nil {
+		t.Fatal(err)
+	}
+	if facts.Exists {
+		t.Fatalf("a deleted workspace must report Exists=false, got %+v", facts)
+	}
+}
+
+// The kill warning must describe the agent's linked worktree, not the clone root
+// it hangs off (#5796 review).
+func TestHeadlessWorkspaceFactsMeasuresLinkedWorktree(t *testing.T) {
+	root := t.TempDir() // the clone root: deliberately not a git repo
+	wt := t.TempDir()
+	if out, err := exec.Command("git", "-C", wt, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "scratch"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := session.FromInstanceData(session.InstanceData{
+		Title: "linked", Path: root, Status: session.Archived, BackendType: "local",
+		Worktree: session.GitWorktreeData{RepoPath: root, WorktreePath: wt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &headlessServer{inst: inst}
+	var facts session.WorkspaceFacts
+	if err := hs.WorkspaceFacts(struct{}{}, &facts); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh repo has no upstream, so the unpushed count is honestly unverified;
+	// that is the one fact this fixture cannot measure and it must say so.
+	if !facts.Exists || facts.DirtyFiles != 1 {
+		t.Fatalf("expected the linked worktree's one untracked file; got %+v", facts)
+	}
+	for _, u := range facts.Unverified {
+		if u != "unpushed_commits" {
+			t.Fatalf("only the unpushed count may be unverified without an upstream; got %+v", facts)
+		}
+	}
 }

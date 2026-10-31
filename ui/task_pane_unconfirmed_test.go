@@ -212,3 +212,43 @@ func TestTaskPaneUnconfirmedSkipsEmptySiblingWhenDuplicateIDHasAnEdit(t *testing
 	assert.Empty(t, s.ConsumeDirty(), "a held unconfirmed edit is not re-sent automatically")
 	assert.Contains(t, s.TakeUnconfirmedQuitNotice(), `could not be confirmed`)
 }
+
+// #5969: a host-only edit with an uncertain outcome must settle only when the
+// reload shows the new host. Comparing every other field and not Host announced
+// "Saved edits" and dropped the draft while runs stayed on the old host.
+func TestTaskPaneUnconfirmedHostEditSettlesOnlyWhenTheReloadCarriesIt(t *testing.T) {
+	repo := newGitRepo(t)
+	base := task.Task{
+		ID: "demo", Name: "demo", Prompt: "p", WatchCmd: "echo hi",
+		Enabled: true, ProjectPath: repo, Host: "old",
+	}
+	hold := func() *TaskPane {
+		s := NewTaskPane()
+		s.SetSize(100, 40)
+		s.SetTasks([]task.Task{base})
+		s.SetFocus(true)
+		s.EnterEditSelected()
+		require.True(t, s.IsEditing())
+		s.editHost.SetValue("new")
+		require.True(t, s.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}))
+		edits := s.ConsumeDirty()
+		require.Len(t, edits, 1)
+		require.NotNil(t, edits[0].Update.Host)
+		s.HoldUnconfirmedEdit(edits[0].ID)
+		return s
+	}
+
+	// The reload still shows the old host: the edit did not land, so it stays held.
+	s := hold()
+	s.SetTasks([]task.Task{base})
+	assert.True(t, s.IsDirty(), "an unlanded host edit stays held")
+	assert.Empty(t, s.TakeSettledDraftNotice(), "and is not announced as saved")
+
+	// The reload shows the new host: it settled.
+	s = hold()
+	landed := base
+	landed.Host = "new"
+	s.SetTasks([]task.Task{landed})
+	assert.False(t, s.IsDirty())
+	assert.NotEmpty(t, s.TakeSettledDraftNotice())
+}

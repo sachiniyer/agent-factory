@@ -64,10 +64,6 @@ type InRepoConfig struct {
 	// "absent" (falls through to the legacy/global value).
 	setKeys map[string]bool
 
-	// unknownLeaves lists the [docker]/[ssh] leaves the typed decode dropped
-	// because no field matches them; see UnknownLeaves.
-	unknownLeaves []InRepoUnknownLeaf
-
 	// source retains nested presence and the source path for provenance. It is
 	// populated by the same decode as setKeys; the resolver never re-reads the
 	// checked-in file to explain a value.
@@ -109,12 +105,11 @@ var (
 	// inRepoAllowedTableLeaves mirrors the top-level inRepoAllowedKeys
 	// check at the leaf level for the [docker] and [ssh] tables. An
 	// unknown/typo'd leaf under an allowed table (e.g. "runargs" for
-	// "run_args") earns a loud warning at load — naming the file, the
-	// unknown leaf, the likely intended key, and the allowed set — so the
-	// silent drop of Go's non-strict unmarshalling cannot change runtime
-	// behavior without a diagnostic. Per the owner's "warn now, reject
-	// later" decision the config still loads; turning the warning into a
-	// hard error is a later, separate change with a changelog note. Each
+	// "run_args") fails the load — naming the file, the unknown leaf, the
+	// likely intended key, and the allowed set — so the silent drop of Go's
+	// non-strict unmarshalling cannot change runtime behavior. (#4599 warned
+	// first, per the owner's "warn now, reject later" decision; #4845 made it
+	// an error once the warning had shipped.) Each
 	// set is derived from the same struct the typed decode targets, so
 	// adding a field to DockerConfig/SSHConfig automatically admits it
 	// here. The comparison folds case against the shape key (see
@@ -193,9 +188,10 @@ var unknownTableLeafWarned sync.Map
 // allowed one ("did you mean run_args?"), and the full allowed set. It
 // reaches every surface that loads the config through the shared project
 // logger (log.WarningLog): CLI stderr, the daemon log as WARNING, and af
-// doctor's load-time output. The config still loads — a hard rejection is a
-// later, separate change — so the typed decode below ignores the typo'd
-// value and the sibling, correctly-spelled leaves decode normally.
+// doctor's load-time output. The config still loads, the typed decode ignores
+// the typo'd value and the sibling, correctly-spelled leaves decode normally.
+// Only the personal per-project [root_agent] table still takes this path: an
+// in-repo [docker]/[ssh] leaf is rejected at load instead (#4845).
 func warnUnknownTableLeaf(sourceLabel, memoPrefix, prettyPath, table, leaf string, allowed map[string]bool) InRepoUnknownLeaf {
 	unknown := newInRepoUnknownLeaf(sourceLabel, prettyPath, table, leaf, allowed)
 	source := fmt.Sprintf("%s %s:%s.%s", memoPrefix, prettyPath, table, leaf)
@@ -517,23 +513,21 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		}
 	}
 
-	// Warn on unknown/typo'd leaves under the allowed [docker] and [ssh]
-	// tables. The top-level allowlist above admits these tables, but the
-	// typed decode below uses Go's non-strict unmarshalling, which silently
-	// discards any leaf not on DockerConfig/SSHConfig. A typo like
-	// docker.runargs is therefore dropped with err == nil, and downstream
-	// code sees the zero value — for docker.run_args that means docker run
-	// starts without the intended flags and no error is ever emitted. Walk
-	// the shape's nested tables (which metadataForSource decoded as
-	// map[string]any for both TOML and JSON) and, for any leaf not in the
-	// struct-tag-derived allowlist, emit a loud warning via
-	// warnUnknownTableLeaf. Per the owner's "warn now, reject later"
-	// decision the config still loads; turning the warning into a hard
-	// error is a later, separate change with a changelog note. The typed
-	// decode below ignores the typo'd value, sibling correct leaves decode
-	// normally, and global-only grouped leaves (e.g.
-	// docker.mount_agent_credentials) are already hard-rejected above by
-	// globalOnlyGroupedAliasInShape, so they are not re-reachable here.
+	// Reject unknown/typo'd leaves under the allowed [docker] and [ssh] tables.
+	// The top-level allowlist above admits these tables, but the typed decode
+	// below uses Go's non-strict unmarshalling, which silently discards any leaf
+	// not on DockerConfig/SSHConfig. A typo like docker.runargs would be dropped
+	// with err == nil and downstream code would see the zero value — for
+	// docker.run_args that means docker run starts without the intended flags
+	// and no error is ever emitted. Walk the shape's nested tables (which
+	// metadataForSource decoded as map[string]any for both TOML and JSON) and,
+	// for any leaf not in the struct-tag-derived allowlist, fail the load with an
+	// error that names the file, the key and the closest valid key, as unknown
+	// top-level in-repo keys already do. #4599 shipped this as a warning first
+	// (owner decision: warn now, reject later); the warning has since shipped in
+	// stable releases, so it is now a load error (#4845). Global-only grouped
+	// leaves (e.g. docker.mount_agent_credentials) are already hard-rejected
+	// above by globalOnlyGroupedAliasInShape, so they are not re-reachable here.
 	var unknownLeaves []InRepoUnknownLeaf
 	for table, allowed := range inRepoAllowedTableLeaves {
 		raw, present := metadata.shape[table]
@@ -547,16 +541,18 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		for leaf := range sub {
 			// Fold case to match the typed decoders: encoding/json and
 			// go-toml/v2 both match field names case-insensitively, so a
-			// spelling like [docker] Image would be accepted by the typed
-			// decode into DockerConfig. The leaf check lowercases the shape
-			// key (whose casing is preserved from the file by
-			// metadataForSource) before the allowlist lookup so such
-			// spellings load cleanly and the warning lands on genuine
-			// typos (e.g. "runargs", "iamge") instead.
+			// spelling like [docker] Image is accepted by the typed decode into
+			// DockerConfig. The leaf check lowercases the shape key (whose
+			// casing is preserved from the file by metadataForSource) before the
+			// allowlist lookup so such spellings keep loading and the error
+			// lands on genuine typos (e.g. "runargs", "iamge") instead.
 			if !allowed[strings.ToLower(leaf)] {
-				unknownLeaves = append(unknownLeaves, warnUnknownTableLeaf("in-repo config", "in-repo", prettyPath, table, leaf, allowed))
+				unknownLeaves = append(unknownLeaves, rejectedInRepoLeaf(prettyPath, table, leaf, allowed))
 			}
 		}
+	}
+	if len(unknownLeaves) > 0 {
+		return nil, nil, &InRepoUnknownLeavesError{Path: prettyPath, Leaves: sortInRepoUnknownLeaves(unknownLeaves)}
 	}
 
 	var cfg InRepoConfig
@@ -571,7 +567,6 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	}
 	cfg.setKeys = presentKeys
 	cfg.source = metadata
-	cfg.unknownLeaves = sortInRepoUnknownLeaves(unknownLeaves)
 
 	if cfg.IsSet("default_program") {
 		if err := ValidateProgramEnum(

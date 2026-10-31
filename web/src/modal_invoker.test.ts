@@ -234,6 +234,7 @@ test("reconnect retains a completed restore through its pre-response initial Sna
     reconcileProject: () => "", loadProjectChoice: () => null,
     projectRoots: (projects: { root: string }[]) => projects.map((p) => p.root),
     optimisticSessions: { reset() {} }, pickSelection: () => null,
+    archiveFromSnapshot: () => ({}), emptyArchive: () => ({}),
     applySessions: (_sessions: unknown, evidence: Parameters<PendingRestores["observe"]>[1]) => {
       pending.observe(rows, evidence);
     },

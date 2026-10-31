@@ -231,6 +231,12 @@ type Config struct {
 	// daemon's environment. Values are looked up only when a session starts and
 	// are never written to config, argv, or logs.
 	SessionEnvPassthrough []string `json:"session_env_passthrough,omitempty" toml:"session_env_passthrough,omitempty"`
+	// SandboxAgentConfig is the operator's chosen agent personalization to place in
+	// a sandbox session's account scope on a LISTED host (#5571 W7.7): entries of
+	// the form "<agent>:<file>" from a closed set (settings.json, CLAUDE.md,
+	// .claude.json, config.toml, AGENTS.md). Global-only, like sandbox.ssh: a
+	// repository must never choose what af copies off the daemon box or where.
+	SandboxAgentConfig []string `json:"sandbox_agent_config,omitempty" toml:"sandbox_agent_config,omitempty"`
 	// DockerMountAgentCredentials, when true, lets a docker-backend session
 	// bind-mount the daemon user's on-disk credential file for THAT session's
 	// agent (only) read-only into the container, so a containerised agent can
@@ -273,6 +279,24 @@ type Config struct {
 	// operator's ssh_config / known_hosts / ProxyCommand are the authority (unlike
 	// the x/crypto `ssh` backend, which af enforces via ssh_host_key_verification).
 	SandboxSSH string `json:"sandbox_ssh,omitempty" toml:"sandbox_ssh,omitempty"`
+	// SandboxBinary is a daemon-local path to an `af` binary the sandbox/ssh
+	// backends stream to the remote host instead of the daemon's own binary or
+	// a release download — the override for air-gapped hosts and hosts whose
+	// platform has no published artifact (#5571 W2.2). The file must be a
+	// static build for the host's platform; af still runs it on the host and
+	// requires its `version` to equal the daemon's before launch. Global-only,
+	// like sandbox.ssh: the daemon reads the path and streams the file, so a
+	// repo-settable value would let a cloned repository exfiltrate an arbitrary
+	// local path or install an arbitrary binary on every sandbox host.
+	SandboxBinary string `json:"sandbox_binary,omitempty" toml:"sandbox_binary,omitempty"`
+	// MoveCmd is the operator-written script af runs on the daemon box when it
+	// moves a live local session to a sandbox (`af sessions move`, W7.9): JSON spec
+	// on stdin, AF_SSH / AF_SSH_DEST / AF_SSH_FULL in the environment. It is
+	// deliberately global-only: af EXECUTES it with the session's environment and
+	// the operator's credentials in reach, so a repository must never choose it —
+	// a checked-in value is a load error, not a warning. The user writes the
+	// script; the repo only ever has a session worth moving.
+	MoveCmd string `json:"move_cmd,omitempty" toml:"move_cmd,omitempty"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.
@@ -308,6 +332,12 @@ type Config struct {
 	OnArchiveCommand string `json:"on_archive_command,omitempty" toml:"on_archive_command,omitempty"`
 	// WorktreeRoot controls where new worktrees are created.
 	WorktreeRoot string `json:"worktree_root" toml:"worktree_root"`
+	// ProjectsRoot is the directory on the DAEMON's host under which
+	// `af projects add <git-url>` clones repositories (W9.10). Empty means
+	// <AF home>/projects. Global-only: the daemon creates directories and runs
+	// git there for a possibly-remote caller, so a cloned repository must never
+	// choose where.
+	ProjectsRoot string `json:"projects_root,omitempty" toml:"projects_root,omitempty"`
 	// DetachKeys is the key combination used to detach from an attached session (e.g. "ctrl-w", "ctrl-q").
 	DetachKeys string `json:"detach_keys" toml:"detach_keys"`
 	// UpdateChannel selects which release channel auto-update and
@@ -551,6 +581,14 @@ type Config struct {
 	// Global-only (daemon network surface), like listen_addr: a cloned repo must
 	// never be able to open a network port. See docs/configuration.md.
 	PreviewListenAddr string `json:"preview_listen_addr,omitempty" toml:"preview_listen_addr,omitempty"`
+	// EditorOriginPorts is the pool of loopback ports (W5.2) the daemon allocates
+	// per-session editor origins from, e.g. "9100-9119" or "9100,9105-9107". Each
+	// session with a VS Code editor gets one port, persisted across restarts, and an
+	// operator exposes the same ports behind the front door (`tailscale serve
+	// --https=<port> 127.0.0.1:<port>`) so a remote viewer's editor storage is
+	// partitioned per session. Empty ⇒ off. Global-only, like listen_addr: a cloned
+	// repo must never open a port.
+	EditorOriginPorts string `json:"editor_origin_ports,omitempty" toml:"editor_origin_ports,omitempty"`
 	// DebugPprof serves the daemon's opt-in runtime profiling endpoint (#3651) at
 	// GET /v1/debug/pprof/{profile} — the stdlib net/http/pprof surface (heap,
 	// goroutine, allocs, profile, block, mutex, trace). It exists to answer the

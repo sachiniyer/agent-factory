@@ -373,6 +373,13 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	if inst == nil || !lostSessionWantsRestore(inst.LifecycleView()) {
 		return
 	}
+	// A row that still owes a preserved workspace (#5571 W8.6) is restored only by
+	// an explicit restore. Its refusals are decisions about work that may exist
+	// nowhere else (a workspace the host proved gone, an origin that cannot be
+	// asked), and re-asking the host on a timer cannot change them.
+	if inst.OwesPreservedWorkspace() {
+		return
+	}
 
 	// Two keys, deliberately. `key` is the repo/title daemon key: it addresses the
 	// SLOT, which is what the exclusive-operation gates (killsInFlight, the
@@ -483,9 +490,9 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	if !acquired {
 		return
 	}
-	if worktreeAdmission != nil {
-		defer worktreeAdmission.Unlock()
-	}
+	// Released right after Recover (#6197), the rebuild choke point.
+	releaseAdmission := admissionReleaser(worktreeAdmission)
+	defer releaseAdmission()
 
 	// Re-verify under the lock: everything checked above was point-in-time,
 	// and a KillSession that beat us to the lock may have torn the session
@@ -575,10 +582,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// terminal verdict NOW, before this arm can spend another pass — and
 		// hold the watch-task slot — on a preserve push that may keep failing
 		// under its own retry policy.
-		if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst) {
+		if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst, false) {
 			return
 		}
-		if err := m.preserveSandboxBeforeReap(repoID, key, inst, reapRefusalSuggestionFor(repoID, inst)); err != nil {
+		if err := m.preserveUnlessRelaunchable(repoID, key, inst); err != nil {
 			// The durable terminal verdict is a session fact, safe to read
 			// before the state lock — the same discipline lostRestoreFailed
 			// applies: arming an environmental retry for a session the entry
@@ -707,7 +714,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// not at the top of the function, so a remote whose Lost mark was a blip the
 	// sandbox probe just healed never gets charged a cycle — and an arm on the
 	// very pass that confirms the previous cycle is included in the count.
-	if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst) {
+	if m.lostRestoreFlapGiveUpIfBound(key, repoID, stateKey, inst, worktreeAdmission != nil) {
 		return
 	}
 
@@ -724,8 +731,9 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// that cleared state before the spawn proceeds — otherwise a daemon exit
 	// in the settle→boundary window reloads the stale record and strands the
 	// recovery as an inert row (#5295 review).
+	// Runs inside Recover, under worktree admission: no start lock (#6197).
 	inst.SetRelocationSettleNotify(func(i *session.Instance) error {
-		return m.persistInstanceErr(repoID, i)
+		return m.persistUnderAdmission(repoID, i)
 	})
 	// A rebuild teardown obligation must be durable when it is set and again
 	// when it is discharged — before any replacement launches (#5371 review).
@@ -735,11 +743,14 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	inst.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
 		return m.stopVSCodeForInstance(key, i.ID)
 	})
-	if err := inst.RecoverFencedWithLiveBoundary(func() {
+	recoverErr := inst.RecoverFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)
 		}
-	}); err != nil {
+	})
+	// The bookkeeping below takes the start lock, left of admission (#6197).
+	releaseAdmission()
+	if err := recoverErr; err != nil {
 		// Persist the instance even on failure, matching the manual restore path
 		// (restore.go): Recover can mutate durable worktree state before it fails
 		// — a rebuild reconstructs the worktree+branch and flips branchCreatedByUs

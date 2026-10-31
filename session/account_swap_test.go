@@ -592,6 +592,71 @@ func TestRespawnForAccountSwapUsesThePreflightedProgramSnapshot(t *testing.T) {
 		"the stopped runtime must be replaced with the exact command admitted by preflight")
 }
 
+// RuntimeProgram records the clean base the swap actually launched, frozen at
+// preflight and carried in the launch plan. A program_overrides edit between
+// preflight and RespawnForAccountSwap must not leak into it: recording the
+// re-resolved command would claim a command that never ran, and the next
+// same-agent swap would trust that false evidence (#6049 review).
+func TestRespawnForAccountSwapRecordsThePreflightedBaseNotTheReresolvedOne(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude"}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+
+	const agentName = "af_swap_runtime_base"
+	var newSessions int
+	var spawns []string
+	inst := lostInstanceForRecover(t, agentName, agentName+tmuxTabSeparator+shellTabName,
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	inst.mu.Lock()
+	inst.Tabs[1].Kind = TabKindProcess
+	inst.Tabs[1].Command = "git status --short"
+	inst.Tabs[1].tmux.SetProgram("git status --short")
+	inst.mu.Unlock()
+	inst.Path = initTempGitRepo(t)
+	inst.SetLimitReached(time.Time{})
+	require.NoError(t, inst.BeginLimitResume())
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+
+	cfg.ProgramOverrides[tmux.ProgramClaude] = "claude --model changed-after-preflight"
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err = inst.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	require.NoError(t, inst.RespawnForAccountSwap())
+	require.NotEmpty(t, spawns)
+
+	recorded := inst.RuntimeProgram()
+	require.NotEmpty(t, recorded, "the launched base must be recorded")
+	require.NotContains(t, recorded, "changed-after-preflight",
+		"RuntimeProgram must not be re-resolved from configuration at the respawn boundary")
+	require.Equal(t, "claude", recorded, "RuntimeProgram records the base frozen at preflight, which is what launched")
+	require.NotContains(t, spawns[0], "changed-after-preflight")
+}
+
+// In the pane-fallback state the launch base is the pane's frozen, flagged
+// command. A current override that differs from it (changed BEFORE preflight)
+// is not that command, so the recorded base must be DERIVED from the launched
+// command — the frozen program minus af's declared flags — and never taken from
+// the fresh resolution, which would leave false RuntimeProgram evidence the next
+// same-agent swap refuses as an undeclared argument (#6049 review).
+func TestValidateAccountSwapDerivesTheRuntimeBaseFromTheLaunchedPaneCommand(t *testing.T) {
+	inst, _ := flaggedPaneSwapInstance(t)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: "codex --model other"}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	plan := cloneAccountSwapLaunchPlan(inst.accountSwapLaunch)
+	require.NotNil(t, plan)
+	require.Equal(t, "codex -c check_for_update_on_startup=false", plan.base,
+		"the launch base is the frozen pane command, not the current override")
+	require.Equal(t, "codex", plan.runtimeBase,
+		"the recorded base is the launched command minus af's declared flag, not the re-resolved override")
+}
+
 func TestStopForAccountSwapStopsEveryCredentialBearingPane(t *testing.T) {
 	var mu sync.Mutex
 	var killed []string
@@ -926,6 +991,14 @@ func TestValidateAccountSwapAdmitsCodexPaneFallbackCarryPlan(t *testing.T) {
 		[]string{"-c", "check_for_update_on_startup=false", "resume", carryTestID},
 		plan.proof.GeneratedArgs,
 		"the proof declares the recorded flag and the appended resume words")
+	// The recorded runtime base is the launched BASE minus af's declared flag —
+	// never the carry's `resume <id>`, which is added on top at launch. Recording
+	// the resumed command would make the next same-agent swap refuse it as pinning
+	// an existing conversation, and recording nothing would leave that fallback
+	// (#6049 review).
+	require.Equal(t, tmux.ProgramCodex, plan.runtimeBase,
+		"a carried pane-fallback swap still records a reusable, selector-free base")
+	require.Empty(t, tmux.ConversationSelectorArgs(plan.runtimeBase))
 
 	// The proof must satisfy the account boundary, the same check the
 	// ApplyAccount step inside validateAccountSwapPlan just passed.

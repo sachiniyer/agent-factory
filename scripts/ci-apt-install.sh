@@ -7,7 +7,7 @@
 #     sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
 #
 # `apt-get update` exits 100 when ANY configured source fails, whether or not
-# the packages you asked for come from it. The ubuntu-latest runner image ships
+# the packages you asked for come from it. The ubuntu-24.04 runner image ships
 # packages.microsoft.com in /etc/apt/sources.list.d and nothing here installs
 # from it; on 2026-09-03 it answered 403, the `&&` short-circuited, and master's
 # Build went red on a step whose only job was to add zsh from the Ubuntu

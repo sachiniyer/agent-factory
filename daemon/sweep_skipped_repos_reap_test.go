@@ -85,10 +85,12 @@ func newBareManagerForSweep() *Manager {
 
 // --- sweepStartupOrphanContainers: the startup-side decision ---
 
-// TestSweepStartupOrphanContainers_RunsWhenSkippedReposEmpty is the no-regression
-// baseline: with no skipped repos the daemon's session view is complete, so the
-// destructive pass runs immediately exactly as it did before the fix.
-func TestSweepStartupOrphanContainers_RunsWhenSkippedReposEmpty(t *testing.T) {
+// TestSweepStartupOrphanContainers_ArmsWithoutRunningWhenSkippedReposEmpty pins
+// #5815: with a complete session view the startup step must NOT run the Docker
+// pass itself — doing so made daemon readiness wait on `docker info`/`docker ps`
+// (30s each against a hung engine). It arms the sweep, which then runs after
+// readiness on the deferred path with the same protected-slug set.
+func TestSweepStartupOrphanContainers_ArmsWithoutRunningWhenSkippedReposEmpty(t *testing.T) {
 	stubConfigDirForReap(t, "/test/home")
 	rec := stubSweepOrphanContainers(t)
 
@@ -97,14 +99,46 @@ func TestSweepStartupOrphanContainers_RunsWhenSkippedReposEmpty(t *testing.T) {
 
 	sweepStartupOrphanContainers(m)
 
-	assert.Equal(t, 1, rec.count(), "the sweep must run when no repo is skipped")
+	assert.Equal(t, 0, rec.count(), "the startup step must not run the Docker pass before readiness")
 	m.mu.Lock()
-	assert.False(t, m.deferredOrphanSweepArmed, "the deferral flag must NOT be armed")
+	assert.True(t, m.deferredOrphanSweepArmed, "the sweep must be armed to run after readiness")
 	m.mu.Unlock()
 
+	runDeferredOrphanSweepIfReady(m)
+
+	assert.Equal(t, 1, rec.count(), "the armed sweep runs once the deferred path is reached")
 	call, ok := rec.lastCall()
 	require.True(t, ok)
 	assert.True(t, call.slugs[session.Slugify("live one")], "the protected set must include the live session's slug")
+}
+
+// TestSweepStartupOrphanContainers_NeverBlocksOnADockerEngine is the regression
+// for #5815: a Docker pass that never returns (an unavailable engine) must not
+// hold the startup step, because readiness waits on that step.
+func TestSweepStartupOrphanContainers_NeverBlocksOnADockerEngine(t *testing.T) {
+	stubConfigDirForReap(t, "/test/home")
+	release := make(chan struct{})
+	prev := sweepOrphanContainers
+	sweepOrphanContainers = func(string, map[string]bool) session.OrphanSweepResult {
+		<-release
+		return session.OrphanSweepResult{}
+	}
+	t.Cleanup(func() {
+		close(release)
+		sweepOrphanContainers = prev
+	})
+
+	m := newBareManagerForSweep()
+	done := make(chan struct{})
+	go func() {
+		sweepStartupOrphanContainers(m)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the startup orphan-sweep step blocked on the Docker pass; daemon readiness would wait on Docker (#5815)")
+	}
 }
 
 // TestSweepStartupOrphanContainers_DefersWhenSkippedReposNonEmpty is the core

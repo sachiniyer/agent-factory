@@ -3,13 +3,14 @@ package api
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
 // setProjectColorViaDaemon is the daemon seam, overridable in tests.
-var setProjectColorViaDaemon = daemon.SetProjectColor
+var setProjectColorViaDaemon = routedSetProjectColor
 
 var projectsColorCmd = &cobra.Command{
 	Use:   "color <project> <color>",
@@ -21,7 +22,10 @@ color such as '#2f5fd8' or '2f5fd8'. Pass "" to clear the color.
 
 The web client uses this color as its accent, fills the top bar with it, and
 paints the browser tab's favicon with it, so you can find the project's tab or
-window quickly.`,
+window quickly.
+
+Against a remote daemon (--daemon-url) <project> is a prj_ id or an absolute
+checkout path on the daemon's host, resolved by that daemon's registry.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -30,7 +34,12 @@ window quickly.`,
 		// An id goes to the daemon verbatim, as for `rebind`: the daemon reads only
 		// that record, so an unrelated broken one cannot block the change.
 		id := args[0]
-		if config.ValidateProjectID(id) != nil {
+		if apiclient.IsRemoteTarget() {
+			var err error
+			if id, err = resolveRemoteProjectSelector(id); err != nil {
+				return jsonError(err)
+			}
+		} else if config.ValidateProjectID(id) != nil {
 			project, err := config.ResolveProjectSelector(id)
 			if err != nil {
 				return jsonError(err)

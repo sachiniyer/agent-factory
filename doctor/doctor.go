@@ -214,6 +214,10 @@ type Options struct {
 	// working directory (defaultRemoteConfig); tests inject a hermetic resolver.
 	remoteConfig func() (*config.RemoteHooks, string, error)
 
+	// checkHosts asks the daemon to probe the listed hosts; defaults to
+	// daemon.CheckHost. Tests inject a fake: doctor's tests never dial a host.
+	checkHosts func(daemon.CheckHostRequest) (daemon.CheckHostResponse, error)
+
 	// inRepoUnknownLeaves lists the unknown [docker]/[ssh] leaves in the
 	// current repo's in-repo config (#4599). Defaults to loading the repo of
 	// the current working directory; tests inject a hermetic list.
@@ -513,6 +517,7 @@ func Run(opts Options) (*Report, error) {
 	checkTaskSchedules(ctx, report)
 	checkRemoteSetup(ctx, report)
 	checkOrphanedHookHosts(ctx, report)
+	checkListedHosts(ctx, report, cfg, health)
 
 	if ctx.opts.Fix {
 		for i := range report.Findings {

@@ -838,27 +838,28 @@ func TestPostureFreezeExpiresDrainedRanges(t *testing.T) {
 	require.Equal(t, uint64(4), f.pins[0].through)
 }
 
-// TestRetireWebBeforePostureSwapReportsSandboxRevocations pins the warning
-// plumbing (#5137 review): the pre-swap fence consumes the credential
-// registry before ApplyConfig's require_token transition block can count it —
-// the return carries what the fence took so the save surface still warns.
-func TestRetireWebBeforePostureSwapReportsSandboxRevocations(t *testing.T) {
+// TestRetireWebBeforePostureSwapKeepsSandboxCredentials: retiring the control
+// listener before a relaxed posture publishes is about the client listener only.
+// A sandbox's callback rides the dedicated endpoint (#5571 W3.4), so the fence
+// must leave its credentials registered (W3.6).
+func TestRetireWebBeforePostureSwapKeepsSandboxCredentials(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0"
 	cfg.RequireToken = true
 	m, wl, _ := boundWebListeners(t, cfg)
 
-	_, err := m.sandboxTokens.mint("sess-a")
+	a, err := m.sandboxTokens.mint("sess-a")
 	require.NoError(t, err)
-	_, err = m.sandboxTokens.mint("sess-b")
+	b, err := m.sandboxTokens.mint("sess-b")
 	require.NoError(t, err)
 
 	next := *cfg
 	next.RequireToken = false
-	revoked := wl.retireWebBeforePostureSwap(&next)
-	require.Equal(t, 2, revoked,
-		"the fence consumed the registry — the count must travel back for the save-surface warning")
-	require.Zero(t, m.sandboxTokens.revokeAll(), "the fence already emptied the registry")
+	wl.retireWebBeforePostureSwap(&next)
+	for _, secret := range []string{a, b} {
+		_, ok := m.sandboxTokens.sessionFor(secret)
+		require.True(t, ok, "the pre-swap fence retired the client listener and must not touch sandbox credentials")
+	}
 }
 
 // TestNonRefusalRetireLeavesPostureLive pins the boundary from the other side

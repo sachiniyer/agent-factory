@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // lockedTarget is the ONE resolution a followed-lock body may touch: the file
@@ -53,6 +55,10 @@ type lockedTarget struct {
 	// that end in a refusal. The decision is never made on this string —
 	// see confirmDir.
 	dirResolved string
+	// retargeted is set when the path now resolves somewhere other than
+	// dirResolved while the lock was being opened; the acquisition is refused
+	// with it rather than re-pinned (#6130).
+	retargeted error
 	// dirFD is that same directory, held open for the length of the critical
 	// section. Every syscall that creates, renames or stats inside it goes
 	// through this fd rather than through dir, so a link ABOVE the file cannot
@@ -281,11 +287,13 @@ var followedLockRaceHookForTest func()
 // and resolving would drop a .lock file into whatever directory the link points
 // at, which for a dotfiles repository is somebody's tracked working tree.
 func withFollowedFileLock(path string, fn func(lockedTarget) error) error {
-	locked, release, err := pinFollowedTarget(path)
+	locked, _, err := pinFollowedTarget(path)
 	if err != nil {
 		return err
 	}
-	defer release()
+	// Close whatever fd the target holds when the body returns, not the one it was
+	// first pinned with: acquiring the lock may re-pin a replaced directory.
+	defer func() { _ = unix.Close(locked.dirFD) }()
 	if followedLockRaceHookForTest != nil {
 		followedLockRaceHookForTest()
 	}
@@ -390,14 +398,19 @@ func openPinnedDir(dir string) (int, error) {
 // The replaced-inode retry is WithFileLock's, for its reason: a peer that
 // removes the lock file between our open and our flock leaves us holding an
 // exclusive lock on an unlinked inode, which excludes nobody.
-func (t lockedTarget) withLock(fn func() error) error {
+func (t *lockedTarget) withLock(fn func() error) error {
 	name := t.name + ".lock"
 	// Named by path in messages, because that is what the user can go look at.
 	lockPath := t.file + ".lock"
 
 	for {
-		fd, err := unix.Openat(t.dirFD, name, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC, 0644)
+		fd, err := openLockWithRetry(lockPath, func() (int, error) {
+			return unix.Openat(t.dirFD, name, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC, 0644)
+		}, t.repinIfReplaced)
 		if err != nil {
+			if t.retargeted != nil {
+				return t.retargeted
+			}
 			return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 		}
 		if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
@@ -453,7 +466,7 @@ func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
 		return false, fmt.Errorf("failed to create lock directory: %w", err)
 	}
 
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	f, err := openLockWithRetry(lockPath, func() (*os.File, error) { return os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644) }, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 	}
@@ -511,7 +524,7 @@ func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) er
 
 	deadline := time.Now().Add(timeout)
 	for {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+		f, err := openLockWithRetry(lockPath, func() (*os.File, error) { return os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644) }, nil)
 		if err != nil {
 			return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 		}
@@ -555,6 +568,104 @@ func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) er
 	}
 }
 
+// lockOpenAttempts and lockOpenBackoff bound openLockWithRetry. Vars so tests
+// can shorten them; production never reassigns.
+var (
+	lockOpenAttempts = 50
+	lockOpenBackoff  = 2 * time.Millisecond
+)
+
+// openLockWithRetry opens a lock file with O_CREAT and rides out a transient
+// ENOENT or EINTR. The lock file is never unlinked by any config writer, and the
+// directory is created or pinned before the open, so an O_CREAT open that reports
+// "no such file or directory" under contention is either the filesystem losing a
+// lookup/create race (seen on macOS, run 40931667845) or a pinned directory that
+// was replaced under us, through which openat(O_CREAT) reports ENOENT forever.
+// Acquiring the lock must never fail because of another writer, so the open is
+// retried a bounded number of times; a directory that is genuinely gone still
+// fails, with the original error, after the budget.
+//
+// onENOENT, when non-nil, runs before each retried ENOENT and returns what it
+// observed (and did) as one line of evidence. One warning per retry episode
+// carries the last evidence and the attempt count, so a sighting is diagnosable
+// from the log alone.
+func openLockWithRetry[T any](lockPath string, open func() (T, error), onENOENT func() string) (T, error) {
+	var zero T
+	var err error
+	retries := 0
+	evidence := ""
+	report := func(outcome string) {
+		if retries > 0 {
+			log.WarningLog.Printf("lock open %s: %d retr%s after a transient error (%v), %s; %s",
+				lockPath, retries, map[bool]string{true: "y", false: "ies"}[retries == 1], err, outcome, evidence)
+		}
+	}
+	for attempt := 0; attempt < lockOpenAttempts; attempt++ {
+		var v T
+		v, err = open()
+		if err == nil {
+			report("recovered")
+			return v, nil
+		}
+		if !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.EINTR) {
+			report("gave up on a non-retryable error")
+			return zero, err
+		}
+		if errors.Is(err, syscall.ENOENT) && onENOENT != nil {
+			evidence = onENOENT()
+		}
+		retries++
+		time.Sleep(lockOpenBackoff)
+	}
+	report("budget exhausted")
+	return zero, err
+}
+
+// repinIfReplaced is openLockWithRetry's answer to an ENOENT through the pinned
+// directory fd. It compares the fd's (dev, inode) with stat(dir): equal means the
+// directory is the one we hold and the ENOENT is the filesystem's race, so the
+// caller just retries; different means the directory was replaced (a dotfiles
+// `stow -D && stow`, a restored home), and openat(O_CREAT) through the stale fd
+// would report ENOENT forever, so the target is re-pinned from the path and the
+// stale fd closed. Nothing has been read under the lock yet, and the caller's
+// confirm() still runs once the lock is held. The re-pin happens only when the
+// path still resolves to the destination pinned at the start; a link that now
+// resolves elsewhere is recorded in t.retargeted and the acquisition refused. The
+// returned string is the evidence for the retry-episode warning.
+func (t *lockedTarget) repinIfReplaced() string {
+	var pinned, now unix.Stat_t
+	fdErr := unix.Fstat(t.dirFD, &pinned)
+	pathErr := unix.Stat(t.dir, &now)
+	switch {
+	case fdErr != nil || pathErr != nil:
+		return fmt.Sprintf("fd identity unavailable (fstat: %v), path identity unavailable (stat %s: %v)", fdErr, t.dir, pathErr)
+	case sameInode(&pinned, &now):
+		return fmt.Sprintf("fd dev=%d ino=%d nlink=%d matches %s dev=%d ino=%d: the directory is the one pinned",
+			pinned.Dev, pinned.Ino, pinned.Nlink, t.dir, now.Dev, now.Ino)
+	}
+	// Re-pin only a directory replaced at the SAME resolved destination. A link
+	// that now resolves elsewhere is a retarget, not a replacement: adopting it
+	// would make confirmDir compare the new directory with itself (#6130).
+	resolved, evalErr := filepath.EvalSymlinks(t.dir)
+	if evalErr != nil || resolved != t.dirResolved {
+		t.retargeted = fmt.Errorf("the directory holding %s moved while af was working on it: %s now reaches %s, "+
+			"but af pinned %s — nothing was written; re-run the command (resolve error: %v)",
+			t.link, t.dir, resolved, t.dirResolved, evalErr)
+		return fmt.Sprintf("fd dev=%d ino=%d differs from %s dev=%d ino=%d: the path now resolves to %q, not the pinned %q; refusing to re-pin",
+			pinned.Dev, pinned.Ino, t.dir, now.Dev, now.Ino, resolved, t.dirResolved)
+	}
+	fresh, err := openPinnedDir(t.dir)
+	if err != nil {
+		return fmt.Sprintf("fd dev=%d ino=%d nlink=%d differs from %s dev=%d ino=%d: the directory was replaced, re-pin failed: %v",
+			pinned.Dev, pinned.Ino, pinned.Nlink, t.dir, now.Dev, now.Ino, err)
+	}
+	stale := t.dirFD
+	t.dirFD = fresh
+	_ = unix.Close(stale)
+	return fmt.Sprintf("fd dev=%d ino=%d nlink=%d differs from %s dev=%d ino=%d: the directory was replaced, re-pinned from the path",
+		pinned.Dev, pinned.Ino, pinned.Nlink, t.dir, now.Dev, now.Ino)
+}
+
 // lockPollInterval is how often WithFileLockTimeout re-attempts a contended
 // flock. A var so tests can shorten it; production never reassigns.
 var lockPollInterval = 20 * time.Millisecond
@@ -573,7 +684,7 @@ func WithFileLock(path string, fn func() error) error {
 	}
 
 	for {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+		f, err := openLockWithRetry(lockPath, func() (*os.File, error) { return os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644) }, nil)
 		if err != nil {
 			return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 		}

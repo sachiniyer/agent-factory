@@ -364,7 +364,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeyRight), "Expand tabs"},
 		}},
 		{title: "Configuration:", rows: []helpRow{
-			{helpKey(keys.KeyConfigAgent), "Configure with assistant"},
+			{helpKey(keys.KeyConfigAgent), "Configure with assistant · " + tmux.DetachKeyDisplay + " leaves"},
 			{helpKey(keys.KeyHooks), "Edit worktree hooks"},
 			{helpKey(keys.KeyConfigEditor), "Edit settings"},
 		}},
@@ -405,25 +405,39 @@ func (h helpTypeInstanceStart) toContent() string {
 	if !h.instance.Capabilities().TabManagement {
 		tabHelp = keyStyle.Render("1-9/"+jumpAny) + descStyle.Render(fmt.Sprintf(" - Select a tab: digits reach the first nine, %s reaches any by number or name (%s opens it; tabs live in the tree)", jumpAny, openPane))
 	}
-	content := lipgloss.JoinVertical(lipgloss.Left,
+	// An off-box session has no local worktree and no daemon-side tmux session, so
+	// the local wording ("isolated worktree", "background tmux session", in-pane
+	// Enter, full-screen attach) would promise surfaces it does not have.
+	branchLine := "• Git branch: %s (isolated worktree)"
+	runLine := "• Agent process running in background tmux session"
+	managing := []string{
+		keyStyle.Render(helpKey(keys.KeyEnter)) + descStyle.Render(fmt.Sprintf("     - Interact with the session in its pane (%s returns to nav)", helpKey(keys.KeyExitInteractive))),
+		keyStyle.Render(helpKey(keys.KeyAttach)) + descStyle.Render("     - Attach to the session full-screen"),
+		keyStyle.Render(tmux.DetachKeyDisplay) + descStyle.Render("     - Leave full-screen"),
+	}
+	if h.instance.Capabilities().Workspace == session.WorkspaceRemote {
+		branchLine = "• Git branch: %s (in the sandbox's workspace)"
+		runLine = "• Agent process running in the sandbox"
+		managing = nil
+	}
+	lines := []string{
 		titleStyle.Render("Session created"),
 		"",
 		descStyle.Render("New session created:"),
-		descStyle.Render(fmt.Sprintf("• Git branch: %s (isolated worktree)",
+		descStyle.Render(fmt.Sprintf(branchLine,
 			lipgloss.NewStyle().Bold(true).Render(h.instance.GetBranch()))),
-		descStyle.Render("• Agent process running in background tmux session"),
+		descStyle.Render(runLine),
 		"",
 		headerStyle.Render("Managing:"),
-		keyStyle.Render(helpKey(keys.KeyEnter))+descStyle.Render(fmt.Sprintf("     - Interact with the session in its pane (%s returns to nav)", helpKey(keys.KeyExitInteractive))),
-		keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render("     - Attach to the session full-screen"),
-		keyStyle.Render(tmux.DetachKeyDisplay)+descStyle.Render("     - Leave full-screen"),
-		tabHelp,
+	}
+	lines = append(lines, managing...)
+	lines = append(lines, tabHelp,
 		keyStyle.Render(helpKey(keys.KeyKill))+descStyle.Render("     - Permanently delete the session"),
 		"",
 		headerStyle.Render("Actions:"),
 		firstRunActionLine("enter continue · esc close"),
 	)
-	return content
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
 func (h helpTypeInstanceAttach) toContent() string {

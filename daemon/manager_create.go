@@ -118,6 +118,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Liveness:      session.LiveReady,
 		InFlightOp:    session.OpCreating,
 		TaskRunActive: req.TaskID != "",
+		BacklogItem:   req.BacklogItem,
 		CreatedAt:     createdAt,
 		UpdatedAt:     createdAt,
 		Prompt:        req.Prompt,
@@ -181,20 +182,17 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// own config.LoadConfig() here, so a raw hand-edit of session_env_passthrough
 	// was picked up on the next create; now it applies on save/ApplyConfig like
 	// every other key — a deliberate, uniform change (see the #2480 release note).
-	instance, err := session.NewInstance(session.InstanceOptions{
+	launchOpts := session.InstanceOptions{
 		ID:                             pending.ID,
 		CreatedAt:                      pending.CreatedAt,
 		Title:                          title,
 		TaskID:                         req.TaskID,
+		BacklogItem:                    req.BacklogItem,
 		Path:                           workspace,
 		RepoIdentityPath:               repo.IdentityPath(),
 		Program:                        req.Program,
 		Account:                        req.Account,
 		AccountSource:                  req.AccountSource,
-		InPlace:                        req.InPlace,
-		ForceRemote:                    req.ForceRemote,
-		Backend:                        session.BackendKind(req.Backend),
-		Host:                           req.Host,
 		ResumeConversation:             req.resumeConversation,
 		RestoreTabs:                    req.restoreTabs,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
@@ -209,7 +207,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// Post-provision revalidation lives with the mint, in session, so the create
 		// and replacement paths cannot differ on it.
 		SandboxCredentials: newSandboxCredentials(m, pending.ID),
-	})
+	}
+	// The backend/target selection comes from the one resolver validation used.
+	req.applyBackendSelection(&launchOpts)
+	instance, err := session.NewInstance(launchOpts)
 	// A create that does not finish must not leave a live credential behind
 	// (#3012 review). The mint happens INSIDE NewInstance, so a provisioning
 	// failure after it — or any later abandonment on this path — would otherwise
@@ -615,13 +616,8 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	if req.ForceRemote {
 		runtimeKind = session.BackendHook
 	}
-	backendOpts := session.InstanceOptions{
-		Backend:     session.BackendKind(req.Backend),
-		Host:        req.Host,
-		ForceRemote: req.ForceRemote,
-		InPlace:     req.InPlace,
-	}
-	if kind, kerr := backendKindForCreate(backendOpts, workspace); kerr == nil {
+	backendOpts := req.backendSelection()
+	if kind, kerr := createBackendKind(req, workspace); kerr == nil {
 		runtimeKind = kind
 	}
 	// A kerr means an invalid backend value. Leave the conservative default above

@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 
 import {
   closeLeaf,
+  focusSuccessorAfterDrop,
   companionTab,
   findLeaf,
   type LayoutNode,
@@ -704,3 +705,123 @@ test("a backfilled survivor out of range is preserved when the dead leaf HOLDS m
     "the shell rebinds to its tab's new ordinal (max) via validate's clamp",
   );
 });
+
+// #5982: a backfill must be matched to the synthesized tab it replaced. The old
+// session-wide flag read "some real id appeared" as "every missing synthesized tab
+// was adopted", so a CLOSED legacy tab stayed alive and the clamp evicted the real
+// survivor's pane.
+test("a backfill of one synthesized tab does not keep a different closed synthesized tab alive (#5982)", () => {
+  resetIds();
+  const seq = (leaf: string, tab: number) => ({ kind: "leaf", id: leaf, tab }) as LayoutNode;
+  // Visual order: the closed tab's pane (ordinal 3) FIRST, then agent, legacy, survivor.
+  const tree: LayoutNode = {
+    kind: "split",
+    id: "S1",
+    dir: "row",
+    ratio: 0.5,
+    a: seq("Lclosed", 3),
+    b: {
+      kind: "split",
+      id: "S2",
+      dir: "row",
+      ratio: 0.5,
+      a: seq("Lagent", 0),
+      b: { kind: "split", id: "S3", dir: "row", ratio: 0.5, a: seq("Llegacy", 1), b: seq("Lsurv", 2) },
+    },
+  };
+  const out = setSessionSequence(
+    tree,
+    ["id-agent", "0:legacy", "id-survivor", "1:closed"],
+    ["id-agent", "id-backfill", "id-survivor"],
+  );
+  const ls = leaves(out);
+  assert.ok(ls.some((l) => l.id === "Lsurv" && l.tab === 2), "the real survivor keeps its pane at its ordinal");
+  assert.ok(ls.some((l) => l.id === "Llegacy" && l.tab === 1), "the adopted legacy tab keeps its pane");
+  assert.ok(!ls.some((l) => l.id === "Lclosed"), "the closed legacy tab's pane is the one that goes");
+});
+
+// #5983: the out-of-band close successor is closePane's sibling rule.
+test("focusSuccessorAfterDrop: the sibling that grew into the dropped leaf's region, not the root-first leaf (#5983)", () => {
+  resetIds();
+  const a = singleLeaf(0);
+  const two = splitLeaf(a, a.id, "right", 1);
+  const r = leaves(two)[1];
+  const three = splitLeaf(two, r.id, "bottom", 2); // A | (B / C)
+  const [A, B, C] = leaves(three).map((l) => l.id);
+  const survivors = new Set([A, C]);
+  assert.equal(focusSuccessorAfterDrop(three, B, survivors), C, "B dropped: C took its space, not A");
+  // The whole sibling gone too: the next ancestor's sibling (A) is the closest survivor.
+  assert.equal(focusSuccessorAfterDrop(three, B, new Set([A])), A);
+  // Sibling subtree with several leaves: its first surviving leaf.
+  assert.equal(focusSuccessorAfterDrop(three, A, new Set([B, C])), B);
+  assert.equal(focusSuccessorAfterDrop(three, A, new Set([C])), C, "dead first leaf of the sibling is skipped");
+  assert.equal(focusSuccessorAfterDrop(null, B, survivors), null);
+  assert.equal(focusSuccessorAfterDrop(a, a.id, new Set()), null);
+});
+
+// #6001: a lower legacy tab closes while a later legacy tab receives its real id.
+// Positional pairing bound the new id to the CLOSED tab and dropped the live pane.
+function twoLegacyTree(closedFirst: boolean): LayoutNode {
+  resetIds();
+  const l = (id: string, tab: number) => ({ kind: "leaf", id, tab }) as LayoutNode;
+  const inner: LayoutNode = { kind: "split", id: "S2", dir: "row", ratio: 0.5, a: l("Lclosed", 1), b: l("Lshell", 2) };
+  const swapped: LayoutNode = { kind: "split", id: "S2", dir: "row", ratio: 0.5, a: l("Lshell", 2), b: l("Lclosed", 1) };
+  return { kind: "split", id: "S1", dir: "row", ratio: 0.5, a: l("Lagent", 0), b: closedFirst ? inner : swapped };
+}
+
+for (const closedFirst of [true, false]) {
+  test(`a closed legacy tab is never paired with a new real id — names pair exactly (#6001, closed ${closedFirst ? "first" : "last"})`, () => {
+    const prev = ["id-agent", "1:closed", "1:shell"];
+    const next = ["id-agent", "id-shell"];
+    const out = validate(
+      remapByIdentity(twoLegacyTree(closedFirst), prev, next, ["0:agent", "1:shell"]),
+      next.length,
+    );
+    const ls = leaves(out);
+    assert.ok(ls.some((l) => l.id === "Lshell"), "the live shell pane survives");
+    assert.ok(!ls.some((l) => l.id === "Lclosed"), "the closed legacy tab's pane goes");
+    assert.equal(ls.find((l) => l.id === "Lshell")!.tab, 1);
+  });
+}
+
+test("without names, an ambiguous gap keeps every candidate alive instead of guessing a pairing (#6001)", () => {
+  const prev = ["id-agent", "1:closed", "1:shell"];
+  const next = ["id-agent", "id-shell"];
+  const ls = leaves(validate(remapByIdentity(twoLegacyTree(false), prev, next), next.length));
+  assert.ok(ls.some((l) => l.id === "Lshell"), "the live shell pane is not dropped by a wrong pairing");
+});
+
+test("a renamed-then-backfilled tab falls back to the gap rule; a gap with no new id still closes (#6001)", () => {
+  // The id's kind:name no longer matches (renamed), so no exact pair — but a new real
+  // id sits in the gap, so the candidate stays alive; the trailing gap has none.
+  resetIds();
+  const l = (id: string, tab: number) => ({ kind: "leaf", id, tab }) as LayoutNode;
+  const tree: LayoutNode = { kind: "split", id: "S", dir: "row", ratio: 0.5, a: l("Lold", 1), b: l("Lagent", 0) };
+  const out = remapByIdentity(tree, ["id-agent", "1:old"], ["id-agent", "id-new"], ["0:agent", "1:renamed"]);
+  assert.equal(leaves(out).length, 2, "the renamed-backfilled pane is kept");
+});
+
+// #6025: an ambiguous gap-fallback candidate must never displace a pane whose
+// backfill was matched exactly.
+for (const closedFirst of [true, false]) {
+  test(`fallback candidate does not evict an exactly-matched live pane (#6025, closed ${closedFirst ? "first" : "last"})`, () => {
+    resetIds();
+    const l = (id: string, tab: number) => ({ kind: "leaf", id, tab }) as LayoutNode;
+    const rest: LayoutNode = {
+      kind: "split", id: "S2", dir: "row", ratio: 0.5,
+      a: l("Lagent", 0),
+      b: { kind: "split", id: "S3", dir: "row", ratio: 0.5, a: l("Lold", 1), b: l("Lshell", 2) },
+    };
+    const tree: LayoutNode = closedFirst
+      ? { kind: "split", id: "S1", dir: "row", ratio: 0.5, a: l("Lclosed", 3), b: rest }
+      : { kind: "split", id: "S1", dir: "row", ratio: 0.5, a: rest, b: l("Lclosed", 3) };
+    const prev = ["id-agent", "1:old", "1:shell", "1:closed"];
+    const next = ["id-agent", "id-renamed", "id-shell"];
+    const out = validate(remapByIdentity(tree, prev, next, ["0:agent", "1:renamed", "1:shell"]), next.length);
+    const ls = leaves(out);
+    assert.ok(ls.some((x) => x.id === "Lshell" && x.tab === 2), "the exactly-matched shell pane keeps its slot");
+    assert.ok(!ls.some((x) => x.id === "Lclosed"), "the closed tab's pane goes");
+    assert.ok(ls.some((x) => x.id === "Lold"), "the renamed-backfilled pane is kept by the fallback");
+    assert.ok(ls.some((x) => x.id === "Lagent"));
+  });
+}

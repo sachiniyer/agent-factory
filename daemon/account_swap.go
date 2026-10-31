@@ -272,6 +272,11 @@ func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
 	if instance == nil || !accountSwapResumeEligible(instance) || !instance.SupportsAutomaticAccountSwap() {
 		return nil, nil
 	}
+	// Item sessions park at a limit instead: their spend is metered against
+	// the backlog budget for the account they started on.
+	if instance.BacklogItem != 0 {
+		return nil, nil
+	}
 	if committed := committedAccountSwap(instance); committed != nil {
 		return committed, nil
 	}
@@ -363,6 +368,12 @@ func preflightAccountSwapCandidates(swap *autoAccountSwap, validate func(string)
 // the exact selected-account launch plan can be frozen. Any failed or incomplete
 // read is a refusal that leaves the existing runtime and identity untouched.
 func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Config) (*autoAccountSwap, error) {
+	return m.admitAccountSwapWith(instance, global, instance.ValidateAccountSwap)
+}
+
+// admitAccountSwapWith is admitAccountSwap with the per-candidate launch proof
+// injected: the local frozen-launch proof, or a sandbox session's off-box one.
+func (m *Manager) admitAccountSwapWith(instance *session.Instance, global *config.Config, validate func(string) error) (*autoAccountSwap, error) {
 	swap, err := m.accountSwapOpportunityFromFacts(instance, global)
 	if err != nil {
 		return nil, err
@@ -376,7 +387,7 @@ func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Co
 	if instanceHasVSCodeTab(instance) {
 		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab: integrated login shells can override the selected account from shell startup files, so af cannot prove their identity boundary", instance.Title)
 	}
-	admitted, err := preflightAccountSwapCandidates(swap, instance.ValidateAccountSwap)
+	admitted, err := preflightAccountSwapCandidates(swap, validate)
 	if err == nil {
 		testHookAccountSwapBeforeAdmissionReturns()
 	}
@@ -656,8 +667,9 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 		err          error
 	}
 	resultCh := make(chan captureResult, 1)
+	captureTimeout := conversationCaptureTimeout // read at spawn: the loop below may abandon the worker
 	go func() {
-		conversation, err := session.CaptureAgentConversation(token.Agent(), snap, conversationCaptureTimeout)
+		conversation, err := session.CaptureAgentConversation(token.Agent(), snap, captureTimeout)
 		resultCh <- captureResult{conversation, err}
 	}()
 	var res captureResult

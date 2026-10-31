@@ -78,12 +78,26 @@ type webTabTarget struct {
 	// be wrong. Nil for a web tab, which leaves the proxy on http.DefaultTransport.
 	Transport *http.Transport
 	Kind      session.TabKind
+	// RelayedEditor marks the editor of an off-box workspace (W5.4): it is reached
+	// through the agent-server's server-owned relay, so it has no SocketPath on this
+	// machine, but like a socket target it names no host an attacker could aim — the
+	// dialer ignores the address. It earns the same editor treatment as a socket
+	// target (no loopback check, no Host rewriting) and nothing a web tab does.
+	RelayedEditor bool
 }
 
 // isUnixSocket reports whether this target is reached over a unix socket rather
 // than TCP — the predicate that decides both the dialer and which safety check
 // applies (loopback for TCP, the socket's own 0600-in-0700 perms for a socket).
 func (t webTabTarget) isUnixSocket() bool { return t.SocketPath != "" }
+
+// isServerOwnedEditor reports whether the target is an editor af itself started and
+// reaches by a dialer that ignores the URL: a local socket, or a relayed one. It is
+// the predicate for the checks that ask "does this URL name a host?", which such a
+// target answers no to. Arbitrary web targets never satisfy it.
+func (t webTabTarget) isServerOwnedEditor() bool {
+	return t.isUnixSocket() || (t.RelayedEditor && t.Kind == session.TabKindVSCode)
+}
 
 // roundTripper is the proxy's transport for this target: the editor's socket
 // dialer, or nil to leave httputil.ReverseProxy on http.DefaultTransport.
@@ -186,6 +200,12 @@ func (m *Manager) WebTabTarget(sessionID, tabID string) (webTabTarget, error) {
 		}
 		return webTabTarget{URL: tabURL, Kind: kind}, nil
 	case session.TabKindVSCode:
+		// An off-box workspace's editor runs on its HOST and is relayed (W5.4);
+		// the daemon's own supervisor is rooted at a daemon-host directory the
+		// workspace does not have, and must never be pointed at one.
+		if instance.Capabilities().Workspace == session.WorkspaceRemote {
+			return m.remoteEditorTarget(instance, repoID, title)
+		}
 		endpoint, err := m.ensureVSCodeServer(instance, repoID, title)
 		if err != nil {
 			return webTabTarget{Kind: kind}, err
@@ -337,6 +357,9 @@ func (m *Manager) stopVSCodeForInstance(key, instanceID string) error {
 	// daemonInstanceKey; drop the session's cached relay transport with the
 	// editor so removed sessions do not accumulate them. It is rebuilt on demand.
 	m.evictRelayTransport(key)
+	// And withdraw the session's editor-origin key (W5.2): the editor is going away
+	// (archive, kill, swap), so no cookie issued for it may outlive it.
+	m.editorPorts.invalidate(instanceID)
 	err := m.vscode.stopForInstance(key, instanceID)
 	if err != nil {
 		m.warn().Printf("vscode: could not determine or complete teardown for session id %q: %v", instanceID, err)
@@ -435,7 +458,7 @@ func forwardAppCookies(r *http.Request) {
 	r.Header.Del("Cookie")
 	var b strings.Builder
 	for _, c := range cookies {
-		if c.Name == webtabTokenCookie || c.Name == previewTokenCookie {
+		if c.Name == webtabTokenCookie || c.Name == previewTokenCookie || strings.HasPrefix(c.Name, editorPortCookiePrefix) {
 			continue
 		}
 		if b.Len() > 0 {

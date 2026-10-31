@@ -28,7 +28,7 @@ func (i *Instance) AttachVSCodeTab(name, tabID string) (*Tab, error) {
 	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
 		return nil, spawnErr
 	}
-	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindVSCode); err != nil {
+	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil || i.capabilitiesLocked().RemoteEditor, TabKindVSCode); err != nil {
 		return nil, err
 	}
 
@@ -75,4 +75,37 @@ func (i *Instance) resolveAttachedTabLocked(name, tabID string) (*Tab, bool, err
 		)
 	}
 	return nil, false, nil
+}
+
+// AttachOffBoxTab reflects a tab the daemon's CreateTab RPC already committed on
+// an off-box row (#6020). Such a row owns no tmux sessions — every tab is a
+// tmux-less projection addressed by its stable id, exactly what
+// reconcileProjectedTabs builds from a snapshot — so the local-only
+// AttachShellTab, which needs a started tmux session and a worktree, can never
+// apply. The projection is the one the next snapshot would produce; it exists
+// only so the new tab is visible and selectable without waiting for the poll.
+//
+// An empty tabID is the older-daemon fallback and stays name-keyed until the next
+// snapshot, as for AttachVSCodeTab.
+func (i *Instance) AttachOffBoxTab(kind TabKind, name, tabID string) (*Tab, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("cannot attach a tab without a name")
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.capabilitiesLocked().Workspace != WorkspaceRemote {
+		return nil, fmt.Errorf("cannot attach an off-box tab to a session that runs locally")
+	}
+	if tab, ok, err := i.resolveAttachedTabLocked(name, tabID); ok || err != nil {
+		return tab, err
+	}
+	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
+		return nil, spawnErr
+	}
+	tab := &Tab{ID: tabID, Name: name, Kind: kind}
+	i.Tabs = append(i.Tabs, tab)
+	i.tabRosterGeneration++
+	i.touchLocked()
+	return tab, nil
 }

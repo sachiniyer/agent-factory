@@ -21,8 +21,8 @@ const MaxAttentionReasonLen = 500
 const attentionAnswerIdle = 10 * time.Second
 
 // Attention is an agent's explicit request for the user, set with
-// `af sessions attention --self`. It clears when the user types into the
-// agent pane, opens the agent tab in the web UI, or when the agent starts work
+// `af sessions attention --self`. It clears when the user submits a line in
+// the agent pane, dismisses it in the web UI, or when the agent starts work
 // again after it was idle for attentionAnswerIdle.
 type Attention struct {
 	Reason string    `json:"reason,omitempty"`
@@ -33,6 +33,10 @@ type Attention struct {
 	// record without IdleSince predates it and counts as long enough.
 	SeenIdle  bool      `json:"seen_idle,omitempty"`
 	IdleSince time.Time `json:"idle_since,omitzero"`
+	// setEpoch is the state epoch the request was raised at. A status observation
+	// decided at an earlier epoch predates the request and cannot answer it. Not
+	// persisted: a request reloaded after a restart has no observation in flight.
+	setEpoch uint64
 }
 
 func cloneAttention(a *Attention) *Attention {
@@ -94,6 +98,7 @@ func (i *Instance) SetAttention(reason string, now time.Time) (AttentionUndo, er
 	// A status decision captured before the request must not mark it seen idle
 	// or clear it; the poll re-observes on its next tick.
 	i.stateEpoch++
+	i.attention.setEpoch = i.stateEpoch
 	i.touchLocked()
 	return AttentionUndo{previous: previous, epoch: i.stateEpoch}, nil
 }
@@ -142,20 +147,51 @@ func (i *Instance) noteAttentionLivenessLocked() {
 			i.attention.IdleSince = instanceNow().UTC()
 		}
 	case LiveRunning:
-		if !i.attention.SeenIdle {
-			return
-		}
-		since := i.attention.IdleSince
-		if since.IsZero() || instanceNow().Sub(since) >= attentionAnswerIdle {
+		if i.attentionAnsweredByWorkLocked() {
 			i.attention = nil
-			return
 		}
-		i.attention.SeenIdle = false
-		i.attention.IdleSince = time.Time{}
 	case LivenessUnset:
 	default:
 		i.attention = nil
 	}
+}
+
+// attentionAnsweredByWorkLocked applies the rule for work seen after the agent
+// asked: the request counts as answered only when the agent went idle first and
+// stayed idle for attentionAnswerIdle. A shorter still spell is the agent
+// pausing inside its own turn, so it only resets the idle record. It reports
+// whether the request is answered; the caller clears it. Caller holds i.mu for
+// writing and has checked i.attention is set.
+func (i *Instance) attentionAnsweredByWorkLocked() bool {
+	if !i.attention.SeenIdle {
+		return false
+	}
+	since := i.attention.IdleSince
+	if since.IsZero() || instanceNow().Sub(since) >= attentionAnswerIdle {
+		return true
+	}
+	i.attention.SeenIdle = false
+	i.attention.IdleSince = time.Time{}
+	return false
+}
+
+// AttentionAnsweredByWork reports the agent's own evidence of work (it shows its
+// in-turn indicator, not merely a repainted pane) against the open request, and
+// returns the SetAt of the request that work answers, for a keyed clear. It does
+// not clear: the caller persists and publishes the clear like any other.
+// epoch is the state epoch the observation was decided at: a request raised
+// after that cannot be answered by work the poll saw before it existed.
+func (i *Instance) AttentionAnsweredByWork(epoch uint64) (time.Time, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.attention == nil || epoch < i.attention.setEpoch {
+		return time.Time{}, false
+	}
+	if i.attentionAnsweredByWorkLocked() {
+		return i.attention.SetAt, true
+	}
+	i.touchLocked()
+	return time.Time{}, false
 }
 
 // dropAttentionIfStoppedLocked removes a request on a session that is not
@@ -165,6 +201,19 @@ func (i *Instance) noteAttentionLivenessLocked() {
 func (i *Instance) dropAttentionIfStoppedLocked() {
 	if attentionStoppedLocked(i) {
 		i.attention = nil
+	}
+}
+
+// SettleAttentionAfterReattach is the other half of the sandbox loader leaving a
+// request on its provisional Lost row: once the reattach attempt is over, a row
+// that is still not live has no agent to answer, so the request goes with it.
+// A reattached row is live and keeps it.
+func (i *Instance) SettleAttentionAfterReattach() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.attention != nil && attentionStoppedLocked(i) {
+		i.attention = nil
+		i.touchLocked()
 	}
 }
 

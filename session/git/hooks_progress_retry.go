@@ -13,7 +13,7 @@ import (
 // at the same path, including a same-session rebuild.
 func retireHookProgressSnapshot(p *hookProgress, path string) (bool, error) {
 	var cleanup hookProgressCleanup
-	acquired, err := tryWithBoundedHookProgressFileLock(filepath.Join(filepath.Dir(path), ".progress"), relocationIdentityTimeout, func() error {
+	acquired, err := tryWithBoundedHookProgressFileLock(filepath.Join(filepath.Dir(path), ".progress"), relocationIdentityTimeout.Load(), func() error {
 		current, err := readHookProgress(path)
 		if os.IsNotExist(err) {
 			retired := filepath.Join(filepath.Dir(path), "retired-"+filepath.Base(p.Directory)+".json")

@@ -68,7 +68,7 @@ var boundedLstatFlights = struct {
 }{byPath: map[string]*boundedLstatFlight{}}
 
 func waitForBoundedLstat(path string, flight *boundedLstatFlight) (os.FileInfo, error) {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -80,7 +80,7 @@ func waitForBoundedLstat(path string, flight *boundedLstatFlight) (os.FileInfo, 
 			boundedLstatFlights.Unlock()
 			return nil, fmt.Errorf(
 				"timed out after %s while checking path %s: %w",
-				relocationIdentityTimeout, path, context.DeadlineExceeded,
+				relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
 			)
 		}
 		boundedLstatFlights.Unlock()
@@ -136,7 +136,7 @@ var resolveFlights = struct {
 }{byPath: map[string]*resolveFlight{}}
 
 func waitForResolveFlight(path string, flight *resolveFlight) (string, error) {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -148,7 +148,7 @@ func waitForResolveFlight(path string, flight *resolveFlight) (string, error) {
 			resolveFlights.Unlock()
 			return "", fmt.Errorf(
 				"timed out after %s while normalizing path %s: %w",
-				relocationIdentityTimeout, path, context.DeadlineExceeded,
+				relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
 			)
 		}
 		resolveFlights.Unlock()

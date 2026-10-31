@@ -31,7 +31,7 @@ func (p *preparedHookProgress) enableResume() error {
 		done <- err
 		closeHookProgressFile(file)
 	}()
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case err := <-done:
@@ -40,6 +40,6 @@ func (p *preparedHookProgress) enableResume() error {
 		}
 		return err
 	case <-timer.C:
-		return fmt.Errorf("timed out after %s while committing hook journal recovery: %w", relocationIdentityTimeout, context.DeadlineExceeded)
+		return fmt.Errorf("timed out after %s while committing hook journal recovery: %w", relocationIdentityTimeout.Load(), context.DeadlineExceeded)
 	}
 }

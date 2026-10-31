@@ -71,7 +71,7 @@ func TestEnsurePluginDirIsolatesTheCallbacklessGuidance(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	lessDir, err := ensurePluginDir(true)
+	lessDir, err := ensurePluginDir(noCallbackGuidanceCaps)
 	require.NoError(t, err)
 	assert.Contains(t, lessDir, "plugin-callbackless")
 
@@ -84,7 +84,7 @@ func TestEnsurePluginDirIsolatesTheCallbacklessGuidance(t *testing.T) {
 
 	// A callback-enabled session on the same host gets its own dir — and the
 	// callbackless file beside it must be left exactly as written.
-	fullDir, err := ensurePluginDir(false)
+	fullDir, err := ensurePluginDir(fullGuidanceCaps)
 	require.NoError(t, err)
 	assert.NotEqual(t, lessDir, fullDir)
 	fullBody, err := os.ReadFile(filepath.Join(fullDir, "commands", "af.md"))
@@ -101,7 +101,7 @@ func TestEnsureAiderReadFileIsolatesTheCallbacklessGuidance(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	lessPath, err := ensureAiderReadFile(true)
+	lessPath, err := ensureAiderReadFile(noCallbackGuidanceCaps)
 	require.NoError(t, err)
 	assert.Contains(t, lessPath, "af-skill-callbackless.md")
 
@@ -110,7 +110,7 @@ func TestEnsureAiderReadFileIsolatesTheCallbacklessGuidance(t *testing.T) {
 	assert.Contains(t, string(body), "cannot reach the daemon")
 	assert.NotContains(t, string(body), "af tasks list")
 
-	fullPath, err := ensureAiderReadFile(false)
+	fullPath, err := ensureAiderReadFile(fullGuidanceCaps)
 	require.NoError(t, err)
 	assert.NotEqual(t, lessPath, fullPath)
 	fullBody, err := os.ReadFile(fullPath)

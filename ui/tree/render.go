@@ -8,7 +8,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/theme"
@@ -523,16 +522,28 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// instance-creation tea.Cmd goroutine.
 	branch := i.GetBranch()
 	hasBranch := branch != ""
-	if i.Started() && hasMultipleRepos {
-		repoName, err := i.RepoName()
-		if err != nil {
-			log.ErrorLog.Printf("could not get repo name in instance renderer: %v", err)
-		} else if hasBranch {
+	// An unstarted local row has no repo yet; an off-box snapshot row never
+	// starts on this side but does carry its project (W8.8). An unknown repo
+	// just leaves the row unlabelled — it is not an error worth logging on
+	// every render.
+	offBox := i.Capabilities().Workspace != session.WorkspaceLocalWorktree
+	if (i.Started() || offBox) && hasMultipleRepos {
+		if repoName, err := i.RepoName(); err == nil && hasBranch {
 			branch += fmt.Sprintf(" (%s)", repoName)
-		} else {
+		} else if err == nil {
 			// No branch to attach the context to; the repo name still
 			// disambiguates, but the row must not pick up the branch glyph.
 			branch = fmt.Sprintf("(%s)", repoName)
+		}
+	}
+
+	// An off-box row names where it runs (#5571 W6.4); a local row says nothing
+	// extra. The place trails the branch so the branch keeps its leading slot.
+	if place := i.Placement().Short(); place != "" {
+		if branch != "" {
+			branch += " · " + place
+		} else {
+			branch = place
 		}
 	}
 

@@ -284,6 +284,7 @@ func (m *home) attachOverlayCallback(target sessionActionTarget, label, traceSuf
 // out is the terminal, captured by the caller before the attach starts, never
 // re-read from the package seam mid-attach.
 func (m *home) releaseTerminalToAttach(out io.Writer) bool {
+	m.tookTerminal.Store(true)
 	if m.releaseTerminal == nil {
 		return false // no Program wired (tests): nothing owns the terminal
 	}

@@ -5,14 +5,16 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/projectclone"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
@@ -62,6 +64,13 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 	return projects, registryDegraded
 }
 
+// projectSnapshotFetchTimeout bounds the cross-repo snapshot read the project
+// picker and the Projects section make synchronously on the event loop. It is
+// deliberately short — the loop is parked for up to this long — where
+// rebindConflictRefreshTimeout bounds the same fetch off-loop and can afford
+// ten seconds. A var so tests can shrink it.
+var projectSnapshotFetchTimeout = 3 * time.Second
+
 // buildProjectListWithSnapshotStatus is buildProjectList, also reporting whether
 // the picker's cross-repo session snapshot fetch FAILED. The failure is a
 // first-class degraded state, distinct from the registry read's: the union
@@ -73,9 +82,20 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 // destructive consumers of the counts (refreshSidebarProjects) drop it via
 // buildProjectList.
 func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bool) {
-	data, err := allReposSnapshotFetcher(context.Background())
+	// This runs on the bubbletea event loop (Ctrl+P, launch, project switch,
+	// add/delete/rebind completion), and the local daemon transport bounds only
+	// the dial, so a daemon that accepts the connection and never answers would
+	// park Update — key input, repaint and the Ctrl+C hard exit with it — until
+	// the process is killed (#6045). The deadline rides the transport read, and
+	// its expiry lands in the same snapshotDegraded path as any failed fetch.
+	ctx, cancel := context.WithTimeout(context.Background(), projectSnapshotFetchTimeout)
+	defer cancel()
+	data, err := allReposSnapshotFetcher(ctx)
 	snapshotDegraded := false
 	if err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("no answer from the daemon within %s: %w", projectSnapshotFetchTimeout, err)
+		}
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
 		snapshotDegraded = true
 		data = nil
@@ -122,6 +142,10 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	// candidate can start its bounded Git probe together. A single stalled path
 	// must not consume the entire opportunity of an inactive worktree that comes
 	// later in the snapshot or registry.
+	if isRemoteTarget() {
+		projects, degraded := m.buildRemoteProjectList(data)
+		return projects, degraded, nil
+	}
 	registryDegraded := false
 	registeredProjects, err := config.ListProjects()
 	if err != nil {
@@ -488,7 +512,7 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 // nothing. Switching to the already-active project is a no-op inside
 // switchProject.
 func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
-	repo, err := config.RepoFromPath(root)
+	repo, err := m.repoContextForSelection(root, "")
 	if err != nil {
 		return m, m.handleError(fmt.Errorf("cannot open project %q: %w", filepath.Base(root), err))
 	}
@@ -554,7 +578,7 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var target *config.RepoContext
 	if proj, ok := m.projectPickerOverlay.SelectedProject(); ok {
-		repo, err := config.RepoFromPath(proj.Root)
+		repo, err := m.repoContextForSelection(proj.Root, proj.RepoID)
 		if err != nil {
 			m.closeProjectPicker()
 			return m, m.handleError(fmt.Errorf("cannot open project %q: %w", proj.Name, err))
@@ -573,6 +597,23 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // loop. A path that is not a git repository keeps the overlay open with an inline
 // error rather than dismissing the user's typing.
 func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
+	if projectclone.LooksLikeURL(path) {
+		// A git URL (W9.10) is cloned by the DAEMON, on its host, so there is
+		// nothing to probe or switch to here: the project appears in the list
+		// when the registration lands.
+		url := strings.TrimSpace(path)
+		if err := projectclone.Validate(url); err != nil {
+			m.projectPickerOverlay.SetAddError(err.Error())
+			return m, nil
+		}
+		m.closeProjectPicker()
+		return m, func() tea.Msg {
+			return projectAddedMsg{root: url, byURL: true, err: registerProjectURLThroughDaemon(url)}
+		}
+	}
+	if isRemoteTarget() {
+		return m.handleRemoteAddProject(path)
+	}
 	repo, err := config.RepoFromPath(config.ExpandTilde(path))
 	if err != nil {
 		// A probe that never answered says nothing about what the user typed
@@ -618,6 +659,10 @@ func (m *home) addProjectCmd(root string) tea.Cmd {
 // happened; the registration just won't persist for the next launch — and is surfaced
 // as a warning rather than an error box, matching the pre-#2456 best-effort write.
 func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil && msg.byURL && !mutationMayHaveLanded(msg.err) {
+		// Nothing else on screen says the clone failed, and the user waited on it.
+		return m, m.handleError(fmt.Errorf("could not add project %s: %w", msg.root, msg.err))
+	}
 	if msg.err != nil {
 		// A registration that may have landed is re-read rather than assumed
 		// either way (#4824): the Projects section shows it if the daemon
@@ -630,6 +675,11 @@ func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
 				fmt.Sprintf("adding project %s", msg.root), "the projects list", msg.err))
 		}
 		log.WarningLog.Printf("failed to register project %s in the registry: %v", msg.root, msg.err)
+		if isRemoteTarget() {
+			// Nothing else happened for the user to see: the remote add does not
+			// switch first, so a quiet log line would read as success.
+			return m, m.handleError(fmt.Errorf("could not add project %s on the daemon: %w", msg.root, msg.err))
+		}
 		return m, nil
 	}
 	m.refreshSidebarProjects()
@@ -699,7 +749,18 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// here on (#4889): a launch --program flag scoped the launch project and is
 	// replaced by the incoming project's resolution, exactly as it always was.
 	m.programFollowsConfig = true
-	if resolved, err := config.ResolveConfigForRepo(repo); err == nil {
+	if isRemoteTarget() {
+		// The project's in-repo config is on the daemon's host. Resolving it
+		// from THIS machine would read an unrelated (or absent) file, so the
+		// program falls back to the global default and the hooks pane is empty
+		// (a hooks save is refused in remote mode).
+		if m.appConfig != nil {
+			m.program = m.appConfig.DefaultProgram
+		}
+		m.store.SetHookCount(0)
+		m.hooksPane.SetCommands(nil)
+		m.hooksPane.SetReadOnly(remoteHooksReadOnlyReason())
+	} else if resolved, err := config.ResolveConfigForRepo(repo); err == nil {
 		// A project that sets no default_program already arrives here as the
 		// global default: ResolveConfig seeds DefaultProgram from the global
 		// config and only overwrites it with a non-empty in-repo value, and a
@@ -740,7 +801,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// unrestorable record is skipped, so the switch is committed from here on.
 	m.materializeSnapshot(data)
 
-	if tasks, err := task.LoadTasksForKnownRepo(repo.Root, repo.ID); err != nil {
+	if tasks, err := m.activeTasks(repo.Root, repo.ID); err != nil {
 		log.WarningLog.Printf("switch project: failed to load tasks for %s: %v", repo.Root, err)
 		m.store.SetTasks(nil)
 		m.automations.TaskPane().ResetTasks(nil)
@@ -758,4 +819,19 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	m.focusTreeForNav()
 	m.relayout()
 	return m, tea.Sequence(tea.WindowSize(), m.selectionChanged())
+}
+
+// handleRemoteAddProject registers a project on the target daemon. The path is a
+// path ON THE DAEMON'S HOST, so nothing here probes it with this machine's git
+// or filesystem: it is validated only for shape (absolute, or ~/…, never
+// relative) and sent as typed — the daemon expands ~ against its own home and
+// owns every other check. Unlike the local add there is no optimistic switch, so
+// handleProjectAdded reports a refusal instead of logging it.
+func (m *home) handleRemoteAddProject(path string) (tea.Model, tea.Cmd) {
+	if _, err := config.ResolveDaemonHostPath(path); err != nil {
+		m.projectPickerOverlay.SetAddError(err.Error())
+		return m, nil
+	}
+	m.closeProjectPicker()
+	return m, m.addProjectCmd(path)
 }

@@ -21,10 +21,16 @@ import (
 // the same repo can't race the tab list or derive a duplicate name. The new tab
 // is persisted immediately (ToInstanceData serializes its command + tmux name,
 // and restoreLocalTabs reconnects it by exact name on reload) so it survives a
-// daemon/af restart — Sachin's hard #930 requirement. Rejected for off-box
-// instances, which have no daemon-side worktree from which to spawn a
-// user-managed tab; also rejected for an empty command or an instance already at
-// no tab-count cap since #3023.
+// daemon/af restart — Sachin's hard #930 requirement. Off-box
+// instances have no daemon-side worktree from which to spawn a process, shell
+// or vscode tab, so admission there follows the instance's capabilities
+// (Instance.Capabilities / Capabilities.RefuseTabKind), not a fixed roster:
+// docs tabs are always admitted; web tabs on an external target are admitted,
+// and on a loopback target only where the runtime has LoopbackRelay (current
+// off-box runtimes do); shell and process tabs are admitted only when
+// TabManagement is on, which an agent-server lifts by advertising "tab-api"
+// (#5571 W4.5) — otherwise they are refused. Also
+// rejected for an empty command; there has been no tab-count cap since #3023.
 func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// An empty kind is the default (shell-or-process, per req.Shell), not a kind;
 	// every explicit kind resolves through session.ParseTabKindName, the shared
@@ -323,17 +329,28 @@ func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (st
 		// Stop before removing the last durable UI retry handle. An unknown result
 		// leaves the tab intact so the user can retry instead of orphaning an editor.
 		vscodeKey = daemonInstanceKey(repoID, title)
+		m.stopRemoteEditor(instance)
 		if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 			return "", fmt.Errorf("cannot close the last VS Code tab because editor teardown could not be confirmed: %w", err)
 		}
 	}
 
+	// Nothing below may call a locking Instance method from inside the commit
+	// callback (it runs under instance.mu), so the remote stop is resolved here.
+	stopRemote := func() {}
+	if lastVSCode {
+		stopRemote = m.remoteEditorStopper(instance)
+	}
 	committed, err := instance.CloseTabByIDWithCommit(targetID, func(staged session.InstanceData) error {
 		// A proxy that resolved the tab before the first stop can still reach
 		// editor admission without the session op-lock. Sweep again while the
 		// roster is staged but before committing it. An unknown result makes the
 		// transaction restore the exact tab, preserving its durable retry handle.
 		if lastVSCode {
+			// A remote start in flight when the first stop ran can have finished
+			// since (#6089); stop it again before the tab is gone for good.
+			// Resolved before this callback: it runs under instance.mu.
+			stopRemote()
 			if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 				return fmt.Errorf("final editor teardown stayed unknown: %w", err)
 			}
@@ -359,7 +376,7 @@ func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (st
 		// abandoned either — the commit persisted a cleanup handle for it, which the
 		// next daemon start sweeps and which reserves its name against a colliding
 		// spawn in the meantime (#2669).
-		m.warn().Printf("CloseTab %q committed, but runtime teardown could not be confirmed; its tmux session is retained for cleanup: %v", name, committed.TeardownErr)
+		m.warn().Printf("CloseTab %q committed, but runtime teardown could not be confirmed; its cleanup handle (tmux session or sandbox tab) is retained and retried: %v", name, committed.TeardownErr)
 	case committed.Settled != nil:
 		// Teardown confirmed the session is gone, so retire its cleanup handle on
 		// disk. Best-effort by design: a failed write only leaves a handle whose

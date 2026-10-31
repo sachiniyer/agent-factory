@@ -218,7 +218,28 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 			// row asserts this install created the session, and we do not know
 			// that (#2874).
 			origin = fmt.Sprintf("ownership could not be read: %v", markerErr)
-		case present && home != "" && filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir):
+		case present && home != "" && !filepath.IsAbs(home):
+			// A relative AGENT_FACTORY_HOME is stamped relative to the
+			// launching af process's frame (session/tmux.afHomeDir leaves it
+			// unchanged), which doctor cannot recover, so it cannot prove
+			// which install created this session. Normalizing it in doctor's
+			// frame would collapse two distinct homes — each launched from a
+			// different working directory with AF_HOME=.af — onto the same
+			// doctor-relative path and let a genuine foreign session compare
+			// equal to ours, arming a manual `tmux kill-session` for a session
+			// that may belong to another install. Treat a relative marker as
+			// unproven ownership rather than a confirmed match — it stays
+			// advisory below, mirroring the orphaned-process arm.
+			origin = fmt.Sprintf("created from a relative AGENT_FACTORY_HOME (%s) that cannot be resolved to a specific install",
+				home)
+		case present && home != "" && sameHome(home, ctx.opts.ConfigDir):
+			// Canonicalized by filesystem identity (os.SameFile via sameHome)
+			// rather than filepath.Clean: Clean is lexical and leaves a
+			// symlinked AGENT_FACTORY_HOME — or macOS /var vs /private/var, or
+			// a case-differing spelling on a case-insensitive volume —
+			// comparing unequal to the same home, which would report a
+			// genuine same-install leak as "another home" and keep it
+			// advisory instead of actionable.
 			origin = "created by this install"
 			ownedByActiveHome = true
 		case present && home != "":

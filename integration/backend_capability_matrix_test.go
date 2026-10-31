@@ -58,16 +58,17 @@ func assertLiveCapabilityMatrix(t *testing.T, label string, inst *session.Instan
 		}
 	}
 
-	// TabManagement is the one bit that must be FALSE off-box, and it is serviced
-	// here rather than merely asserted: the live sandbox must actually refuse the
-	// spawn. Advertising true while every Add*Tab path needs a daemon-side
-	// worktree is exactly the drift #1874 fixed, so pin BOTH halves — if a future
-	// agent-server grows a create-tab RPC, both flip together in one change.
-	if caps.TabManagement {
-		t.Errorf("%s: live backend advertises TabManagement, but tab creation needs a daemon-side worktree an off-box workspace does not have (#1874)", label)
+	// TabManagement is lifted per instance once the sandbox's agent-server
+	// advertises the tab API (#5571 W4.5): a live sandbox must both advertise it
+	// and actually service a spawn, and the two flip together. Close the tab again
+	// by id so the sandbox is left as found.
+	if !caps.TabManagement {
+		t.Errorf("%s: live backend must advertise TabManagement once its agent-server advertises tab-api (#5571 W4.5)", label)
 	}
-	if _, err := inst.AddShellTab(); err == nil {
-		t.Errorf("%s: AddShellTab unexpectedly succeeded on an off-box workspace; if the agent-server now services tab creation, flip TabManagement true with it (#1874)", label)
+	if tab, err := inst.AddShellTab(); err != nil {
+		t.Errorf("%s: AddShellTab on a live off-box workspace failed: %v", label, err)
+	} else if cerr := inst.CloseTabByID(tab.ID); cerr != nil {
+		t.Errorf("%s: CloseTabByID(%q) on the off-box shell tab failed: %v", label, tab.ID, cerr)
 	}
 
 	// Service the streamable capabilities over the wire against the live sandbox:

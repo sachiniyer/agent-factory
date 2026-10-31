@@ -330,11 +330,10 @@ func TestDisablingAListenerRetiresIt(t *testing.T) {
 // closeControl returns. The fix adds a third wl.close() after closeControl so
 // the replacement listener does not outlive shutdown.
 //
-// This test directly exercises the fix: it calls wl.close() (simulating
-// closeHTTP's final close), then wl.reconcile() (simulating an in-flight
-// ApplyConfig that rebinds), asserts the new port is listening, then calls
-// wl.close() once more (the post-closeControl close added by this PR) and
-// asserts nothing is left accepting on either address.
+// This test calls wl.close() (simulating closeHTTP's final close), then
+// wl.reconcile() (simulating an in-flight ApplyConfig that rebinds), asserts
+// the closed latch refused the bind, then calls wl.close() once more (the
+// post-closeControl close) and asserts nothing is left accepting.
 func TestControlDrainWindowListenerIsClosedAfterControlReturns(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	cfg := config.DefaultConfig()
@@ -366,9 +365,12 @@ func TestControlDrainWindowListenerIsClosedAfterControlReturns(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, failed)
 
-	// The new listener must be accepting — this is the window the bug leaves open.
-	require.Equal(t, http.StatusOK, getStatus(t, newAddr, "/v1/health"),
-		"the rebound listener must be serving before the post-control close")
+	// Since W9.9 the latch set by close() makes that late reconcile bind nothing
+	// at all, so the replacement listener never exists to outlive shutdown. The
+	// third close below stays as the belt-and-braces for any path the latch does
+	// not cover.
+	_, dialErr := net.DialTimeout("tcp", newAddr, 200*time.Millisecond)
+	require.Error(t, dialErr, "a reconcile after close() must not bind a listener")
 
 	// Post-closeControl close: the third wl.close() added by this fix.
 	require.NoError(t, wl.close())

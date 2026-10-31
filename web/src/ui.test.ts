@@ -17,6 +17,7 @@ import {
   markDeliveredActionForSession,
   isActionableSession,
   isKillableSession,
+  isOpenableSession,
   sessionRow,
   skippedRepoReasonLabel,
   skippedRepoRepairHint,
@@ -27,9 +28,11 @@ import {
   canCreateTabKind,
   canCloseTabs,
   canMutateTabRoster,
+  offeredNewTabKinds,
 } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { InFlightOp, Liveness, type SessionData } from "./types.js";
+import { OptimisticSessions } from "./optimistic.js";
 
 // Minimal DOM for sessionRow units (the same hand-rolled approach as
 // phone-header.test.ts): createElement/createElementNS feed h() and icon(),
@@ -131,6 +134,58 @@ test("rail actionability is granted only by the daemon projection (#2234)", () =
     false,
     "a malformed id-less capability fails closed",
   );
+});
+
+test("the reserved root agent is openable without a lifecycle verb (#5406)", () => {
+  // The daemon withholds archive/restore from root by design, so a healthy root
+  // projects can_kill and is_root but no lifecycle_action. It must still open.
+  const root = { is_root: true, can_kill: true };
+  assert.equal(isOpenableSession(sess(root)), true, "healthy root opens");
+  assert.equal(isActionableSession(sess(root)), false, "root still gets no archive/restore verb");
+  assert.equal(isOpenableSession(sess({ lifecycle_action: "archive" })), true, "actionable rows still open");
+  assert.equal(isOpenableSession(sess({ can_kill: true })), false, "a non-root row without a verb stays inert");
+  for (const [name, over] of Object.entries({
+    "id-less": { id: undefined },
+    creating: { in_flight_op: InFlightOp.Creating },
+    "kill pending": { user_killed: true },
+    "startup unknown": { startup_state_unknown: true },
+    "account swap": { pending_account_swap: {} },
+    unreachable: { unreachable: { since: "2026-10-28T00:00:00Z", error: "x" } },
+  }) as Array<[string, Partial<SessionData>]>) {
+    assert.equal(isOpenableSession(sess({ ...root, ...over })), false, `root fails closed: ${name}`);
+  }
+});
+
+test("root is not openable while any op is in flight; idle root and non-root rows unchanged (#6104)", () => {
+  const root = { is_root: true, can_kill: true };
+  assert.equal(isOpenableSession(sess(root)), true, "idle root opens");
+  for (const [name, op] of Object.entries(InFlightOp)) {
+    if (op === InFlightOp.None) continue;
+    assert.equal(isOpenableSession(sess({ ...root, in_flight_op: op })), false, `root with ${name} in flight`);
+  }
+  // The real optimistic projection of a root delete / archive: it sets the op and
+  // clears the verbs but not user_killed, so the op itself must fence the row.
+  for (const kind of ["kill", "archive"] as const) {
+    const model = new OptimisticSessions();
+    const row = sess({ ...root, liveness: Liveness.Ready, worktree: { repo_path: "/repo" } });
+    model.reset([row]);
+    assert.ok(model.begin(kind, row));
+    const projected = model.project()[0];
+    assert.equal(projected.user_killed, undefined);
+    assert.equal(isOpenableSession(projected), false, `root ${kind} pending`);
+  }
+  // Non-root rows keep routing through isActionableSession.
+  assert.equal(isOpenableSession(sess({ lifecycle_action: "archive" })), true);
+  assert.equal(isOpenableSession(sess({ lifecycle_action: "archive", in_flight_op: InFlightOp.Killing })), true,
+    "a non-root row is unchanged by this fence (its verbs are cleared by the projection)");
+});
+
+test("a healthy root row is clickable and carries no lifecycle controls (#5406)", () => {
+  const { el, open } = row({ is_root: true, can_kill: true });
+  assert.notEqual(el.getAttribute("aria-disabled"), "true", "root must not read as disabled");
+  assert.ok(!el.className.includes("af-row-inert"), "root must not be styled inert");
+  el.click();
+  assert.equal(open.calls, 1, "a click on root reaches the open callback");
 });
 
 test("kill addressability is independent and fails closed", () => {
@@ -685,6 +740,16 @@ test("restore skips confirmation only for known local backends (#4017)", () => {
   for (const backend_type of ["docker", "ssh", "sandbox", "remote", "future-backend"]) {
     assert.equal(restoreRequiresConfirmation(sess({ backend_type })), true);
   }
+});
+
+test("an archived session offers no new-tab kinds even when its tab_kinds allow them", () => {
+  const tab_kinds = [{ kind: "shell", allowed: true }, { kind: "vscode", allowed: true }];
+  assert.deepEqual(offeredNewTabKinds(sess({ backend_type: "local", tab_kinds })), ["shell", "vscode"]);
+  assert.deepEqual(
+    offeredNewTabKinds(sess({ backend_type: "local", liveness: Liveness.Archived, tab_kinds })),
+    [],
+    "the daemon refuses CreateTab on an archived session, so t/T must stay inert",
+  );
 });
 
 // The skipped-repo reason/repair-hint helpers (#4742). The daemon stamps stable

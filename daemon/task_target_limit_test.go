@@ -22,6 +22,23 @@ func routeTaskDeliveryToManager(t *testing.T, manager *Manager) {
 	t.Cleanup(func() { deliverPromptForTask = original })
 }
 
+// verdictRecordingBackend records the prompts it is sent AND reports the pane
+// verdict a real tmux runtime would. A fake that only implements
+// SendPromptCommand observes nothing, so the daemon honestly reports
+// could-not-confirm for it (session.SendPromptWithStatus): a healthy-run
+// assertion needs a backend that proves delivery (#6224).
+type verdictRecordingBackend struct {
+	recordingBackend
+	verdict session.PromptDeliveryStatus
+}
+
+func (b verdictRecordingBackend) SendPromptCommandWithStatus(i *session.Instance, prompt string) (session.PromptDeliveryStatus, error) {
+	if err := b.SendPromptCommand(i, prompt); err != nil {
+		return session.PromptCouldNotConfirm, err
+	}
+	return b.verdict, nil
+}
+
 func addTargetedCronTask(t *testing.T, id, repoPath, target, prompt string) {
 	t.Helper()
 	if err := task.AddTask(task.Task{
@@ -115,7 +132,7 @@ func TestTaskDeliveryIntoHealthyTargetIsUnchanged(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, repoID, repoPath := newStatusTestManager(t)
 	recorder := &promptRecorder{}
-	backend := recordingBackend{readyFakeBackend{session.NewFakeBackend()}, recorder}
+	backend := verdictRecordingBackend{recordingBackend{readyFakeBackend{session.NewFakeBackend()}, recorder}, session.PromptDelivered}
 	registerStarted(t, manager, repoID, repoPath, "healthy", backend, true, session.Running)
 	routeTaskDeliveryToManager(t, manager)
 	addTargetedCronTask(t, "a4223002", repoPath, "healthy", "scheduled monitor")
@@ -279,5 +296,46 @@ func TestCleanOrphanQueuesRemovesLimitMarker(t *testing.T) {
 	s.cleanOrphanQueues(nil, everyWatchTask())
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("orphan usage-limit marker survived cleanup: %v", err)
+	}
+}
+
+// TestTaskRunRecordsTheVerdictTheRuntimeReported drives a cron run through the real
+// manager send path (no stubbed result): whatever verdict the target's runtime
+// reports is what the task record carries, and a runtime that observes nothing
+// reads unconfirmed rather than "sent" (#6224).
+func TestTaskRunRecordsTheVerdictTheRuntimeReported(t *testing.T) {
+	for i, tc := range []struct {
+		name    string
+		backend func(*promptRecorder) session.Backend
+		want    string
+	}{
+		{"delivered", func(r *promptRecorder) session.Backend {
+			return verdictRecordingBackend{recordingBackend{readyFakeBackend{session.NewFakeBackend()}, r}, session.PromptDelivered}
+		}, "sent"},
+		{"sent-unverified", func(r *promptRecorder) session.Backend {
+			return verdictRecordingBackend{recordingBackend{readyFakeBackend{session.NewFakeBackend()}, r}, session.PromptSentUnverified}
+		}, TaskStatusSentUnverified},
+		{"runtime that observes nothing", func(r *promptRecorder) session.Backend {
+			return recordingBackend{readyFakeBackend{session.NewFakeBackend()}, r}
+		}, TaskStatusSentUnconfirmed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			manager, repoID, repoPath := newStatusTestManager(t)
+			registerStarted(t, manager, repoID, repoPath, "target", tc.backend(&promptRecorder{}), true, session.Running)
+			routeTaskDeliveryToManager(t, manager)
+			id := fmt.Sprintf("a62240%02d", i)
+			addTargetedCronTask(t, id, repoPath, "target", "scheduled monitor")
+			if err := RunTask(id, task.ProjectExpectation{}); err != nil {
+				t.Fatalf("RunTask: %v", err)
+			}
+			stored, err := task.GetTask(id)
+			if err != nil {
+				t.Fatalf("GetTask: %v", err)
+			}
+			if stored.LastRunStatus != tc.want {
+				t.Fatalf("recorded status=%q, want %q", stored.LastRunStatus, tc.want)
+			}
+		})
 	}
 }

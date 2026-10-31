@@ -85,6 +85,29 @@ func tmuxProvedSessionAbsent(cmdExec cmd.Executor, err error, name string) bool 
 	return !slices.Contains(names, name)
 }
 
+// sessionIDProvedAbsent is the one classifier for "this session id is gone" on
+// every id-addressed command (#6258). tmux words a vanished-id failure per
+// COMMAND — measured on the CI runner, kill-session says "can't find session:
+// $N" while show-environment says "no such session: $N" — so no list of strings
+// is complete. The diagnostic recognises the one wording the repo already knows
+// (and a definitive no-server answer); for any other exit 1 the server's own
+// id listing decides, because that read happened and is authoritative. A failure
+// that is not an exit 1, or a listing that does not answer, or one that still
+// contains the id, is UNKNOWN — never "gone", so never a licence to act.
+func sessionIDProvedAbsent(cmdExec cmd.Executor, runErr error, id string) bool {
+	if missingTmuxSession(runErr, id) {
+		return true
+	}
+	if _, exitOne := tmuxExitOneDiagnostic(runErr); !exitOne {
+		return false
+	}
+	ids, listErr := listSessionIDs(cmdExec)
+	if listErr != nil {
+		return false
+	}
+	return !slices.Contains(ids, id)
+}
+
 // NoServerRunning reports whether a failed tmux command's error is tmux's
 // DEFINITIVE "there is no server on this socket" answer, and therefore a
 // determinate EMPTY rather than a read that did not happen.

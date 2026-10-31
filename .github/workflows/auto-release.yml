@@ -27,11 +27,13 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   check:
     name: Check for changes and compute version
-    runs-on: ubuntu-latest
+    # Pinned to 24.04 until #6281 (26.04 compatibility) lands.
+    runs-on: ubuntu-24.04
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
       new_version: ${{ steps.compute.outputs.new_version }}
@@ -87,6 +89,15 @@ jobs:
       if: steps.check.outputs.should_release == 'true'
       run: scripts/ci-apt-install.sh zsh
 
+    # Test (macOS) is the only darwin test run and lives on master's pr.yml, which
+    # the preflight below cannot see. Block on a known-red verdict (#5818).
+    - name: Test (macOS) verdict on master
+      if: steps.check.outputs.should_release == 'true'
+      uses: actions/github-script@v8
+      with:
+        script: |
+          await require('./.github/scripts/macos-verdict.js').gateRelease({ github, core, context });
+
     - name: Release preflight
       if: steps.check.outputs.should_release == 'true'
       run: |
@@ -122,7 +133,7 @@ jobs:
     name: Build
     needs: check
     if: needs.check.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         goos: [linux, darwin]
@@ -208,7 +219,7 @@ jobs:
   release:
     name: Release
     needs: [check, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v6
       with:

@@ -3,7 +3,6 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	stdlog "log"
 	"os"
 	"strings"
 	"testing"
@@ -95,9 +94,7 @@ func TestLoadAllRepoInstancesReportingSkipDetailsSilentWritesNoLog(t *testing.T)
 	require.False(t, os.IsNotExist(readErr), "fixture must produce a READ error, not a missing file")
 
 	var buf bytes.Buffer
-	orig := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&buf, "", 0)
-	t.Cleanup(func() { aflog.WarningLog = orig })
+	aflog.CaptureOutput(t, aflog.WarningLog, "", &buf)
 
 	_, skips, err := LoadAllRepoInstancesReportingSkipDetailsSilent()
 	require.NoError(t, err)

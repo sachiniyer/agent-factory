@@ -12,7 +12,7 @@
 | ui/tab_pane.go | No sessions yet — press n to create one. | 40 | No sessions · n to create one. | 30 |
 | ui/tab_pane.go | VS Code tab — view in the web UI ⏎  ⏎ The editor opens this session's worktree. A terminal can't render it. | 103 | Open this VS Code tab in the web UI. | 36 |
 | ui/tab_pane.go | Press Enter to open a terminal on the remote machine. | 53 | Enter to open a remote terminal. | 32 |
-| ui/tab_pane.go | Terminal tab not available for remote sessions. ⏎ Configure remote_hooks.terminal_cmd to enable it. ⏎ Use the Agent tab to see session output. | 138 | Set remote_hooks.terminal_cmd for a remote terminal. ⏎ Use the Agent tab for output. | 82 |
+| ui/tab_pane.go | Terminal tab not available for remote sessions. ⏎ Configure remote_hooks.terminal_cmd to enable it. ⏎ Use the Agent tab to see session output. | 138 | This tab streams from the sandbox. ⏎ Select the Agent tab for session output. | 80 |
 | ui/tabbed_window.go |  %s · %s · Preview  | 19 |  %s · %s · preview  | 19 |
 | ui/tabbed_window.go |  · Keyboard  | 12 |  · keyboard  | 12 |
 | ui/tabbed_window.go |  No session selected  | 21 |  Select a session  | 18 |

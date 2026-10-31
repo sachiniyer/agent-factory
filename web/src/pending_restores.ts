@@ -1,3 +1,4 @@
+import type { ArchivedSummary } from "./api.js";
 import type { SkippedRepo } from "./types.js";
 
 type RestoreRow = {
@@ -19,6 +20,9 @@ export type RestoreEvidence =
      *  the same carrier as operationLockTimeoutMs/daemonBootId because both are
      *  snapshot-level metadata consumed at the same commit site. */
     skippedRepos?: SkippedRepo[];
+    /** What the live-only snapshot left out of the archive (#6178); same carrier and
+     *  same reason as skippedRepos — snapshot-level metadata for applySessions. */
+    archived?: ArchivedSummary;
   }
   | { kind: "updated" | "restored"; id: string };
 

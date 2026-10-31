@@ -845,13 +845,21 @@ export function confirmDeleteProjectModal(
 }
 
 /** The add-project modal (#2456): registers a git checkout as a durable,
- *  sessionless project through the RegisterProject RPC. The path names a
- *  directory ON THE DAEMON HOST (absolute, or ~-prefixed which the daemon
- *  expands) — a browser has no shared cwd to resolve a relative path against, so
- *  the daemon owns resolution and validation. A non-git or unreadable path comes
- *  back as the daemon's actionable error, shown inline; on success the modal
- *  closes and the repo appears in the switcher immediately (the #2456 union: the
- *  derived project list ∪ the daemon's registry), no session required.
+ *  sessionless project through the RegisterProject RPC. The field takes EITHER
+ *  half of the request, like `af projects add <path-or-git-url>`:
+ *
+ *  - a PATH names a directory ON THE DAEMON HOST (absolute, or ~-prefixed which
+ *    the daemon expands) — a browser has no shared cwd to resolve a relative
+ *    path against, so the daemon owns resolution and validation. A non-git or
+ *    unreadable path comes back as the daemon's actionable error, shown inline;
+ *  - a git URL (W9.10) is cloned ON THE DAEMON HOST with its credentials under
+ *    its projects_root, then registered. The clone runs inside the request, so
+ *    index.ts closes the modal and reports the outcome the way a session create
+ *    does rather than holding the form open for it; a refusal remounts this
+ *    form with the daemon's message and the typed value intact.
+ *
+ *  On success the repo appears in the switcher immediately (the #2456 union:
+ *  the derived project list ∪ the daemon's registry), no session required.
  *
  *  #2788 adds a minimal directory picker above the field, because on a phone (or
  *  any browser away from the daemon host) a typed absolute path is close to
@@ -875,7 +883,9 @@ export function addProjectModal(callbacks: {
   return checkoutPathModal({
     title: "Add project",
     confirmLabel: "Add project",
-    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    fieldLabel: "Repository path or git URL",
+    placeholder: "/path/to/repo  ·  ~/repo  ·  https://host/owner/repo",
+    hint: "An absolute repo path on the daemon host (~ works), or a git URL for the daemon to clone and register: https://host/owner/repo, ssh://host/owner/repo, or git@host:owner/repo.",
     ...callbacks,
   });
 }
@@ -904,11 +914,14 @@ export function rebindProjectModal(opts: {
 
 /** The shared body of the add/rebind project modals: a daemon-host path field
  *  with the #2788 directory browser above it. Both are one path input + a
- *  submit; what differs is the copy (title, confirm label, hint). */
+ *  submit; what differs is the copy (title, confirm label, field label,
+ *  placeholder, hint). */
 function checkoutPathModal(opts: {
   title: string;
   confirmLabel: string;
   hint: string;
+  fieldLabel?: string;
+  placeholder?: string;
   onSubmit: (path: string) => void;
   onCancel: () => void;
   loadDirectory?: (path: string) => Promise<DirectoryListing>;
@@ -921,13 +934,14 @@ function checkoutPathModal(opts: {
     onCancel: opts.onCancel,
   });
 
+  const fieldLabel = opts.fieldLabel ?? "Repository path";
   const pathInput = h("input", {
     type: "text",
     class: "af-input",
-    placeholder: "/path/to/repo  or  ~/repo",
+    placeholder: opts.placeholder ?? "/path/to/repo  or  ~/repo",
     autocomplete: "off",
   });
-  pathInput.setAttribute("aria-label", "Repository path");
+  pathInput.setAttribute("aria-label", fieldLabel);
 
   const { loadDirectory, errorText } = opts;
   let picker: DirectoryPickerHandle | null = null;
@@ -958,7 +972,7 @@ function checkoutPathModal(opts: {
   }
 
   body.append(
-    field("Repository path", pathInput),
+    field(fieldLabel, pathInput),
     h(
       "p",
       { class: "af-modal-hint" },

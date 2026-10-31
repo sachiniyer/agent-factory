@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -333,7 +334,7 @@ func TestConfigAgentCodexReceiptHome(t *testing.T) {
 		{name: "unset uses command home", program: "env -u CODEX_HOME HOME=/tmp/inline-home codex", want: "/tmp/inline-home/.codex"},
 		{name: "attached unset uses command home", program: "env -uCODEX_HOME HOME=/tmp/inline-home codex", want: "/tmp/inline-home/.codex"},
 		{name: "relative home uses env chdir", program: "env -C " + envChdir + " CODEX_HOME=relative-codex codex", want: filepath.Join(envChdir, "relative-codex")},
-		{name: "cleared environment without home", program: "env -i codex", wantErr: "no literal HOME fallback"},
+		{name: "cleared environment falls back to the OS account home (#5986)", program: "env -i codex", want: filepath.Join(osAccountHome(t), ".codex")},
 		{name: "dynamic path refused", program: "CODEX_HOME=$OTHER codex", wantErr: "uses shell expansion"},
 		{name: "dynamic env chdir refused", program: "env -C $OTHER CODEX_HOME=relative codex", wantErr: "use a literal value"},
 		{name: "unknown env option refused", program: "env --future-option CODEX_HOME=/tmp codex", wantErr: "unknown option"},
@@ -1096,4 +1097,14 @@ func TestConfigAgentPaneExcerpt(t *testing.T) {
 	t.Run("marks an empty pane", func(t *testing.T) {
 		require.Equal(t, "(empty pane)", configAgentPaneExcerpt("\x1b[2J  \n\t\n"))
 	})
+}
+
+// osAccountHome is the passwd home codex falls back to when HOME is absent.
+func osAccountHome(t *testing.T) string {
+	t.Helper()
+	u, err := user.Current()
+	if err != nil || u.HomeDir == "" {
+		t.Skipf("no account home to fall back to: %v", err)
+	}
+	return filepath.Clean(u.HomeDir)
 }

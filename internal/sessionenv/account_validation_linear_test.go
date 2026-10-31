@@ -64,7 +64,16 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"echo A=$x … x", func(n int) string { return "echo" + strings.Repeat(" A=$x", n) + " x" }, false},
 		{"echo env -v env -v … x", func(n int) string { return "echo" + strings.Repeat(" env -v", n) + " x" }, false},
 		{"strace -E x … x", func(n int) string { return "strace" + strings.Repeat(" -E x", n) + " x" }, false},
-		{"nohup … nohup x", func(n int) string { return strings.Repeat("nohup ", n) + "x" }, false},
+		// nohup's child tail is scanned like ionice's (#5034), so this nesting
+		// fails closed past shadowedChildJudgementLimit instead of staying
+		// admitted — the same budget the taskset family below pins.
+		// A long option run over a long benign child argv (Codex P2 on #5711):
+		// each nested `nice -n` operand interpretation returns the same tail, which
+		// the literal child-tail scan must cache rather than rescan.
+		{"nice -n … echo a …", func(n int) string {
+			return "nice -n" + strings.Repeat(" nice -n", n) + " echo" + strings.Repeat(" a", n)
+		}, false},
+		{"nohup … nohup x", func(n int) string { return strings.Repeat("nohup ", n) + "x" }, true},
 		// #4968: option runs whose operands start nested wrapper layers, and
 		// xargs's env operand-region scan.
 		{"nice -n nice -n … x", func(n int) string { return "nice -n" + strings.Repeat(" nice -n", n) + " x" }, false},

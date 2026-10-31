@@ -584,6 +584,17 @@ func ListBackends(req ListBackendsRequest) (ListBackendsResponse, error) {
 	return resp, nil
 }
 
+// CheckHost asks the daemon to probe a listed host (empty: every listed host)
+// and record its readiness. It dials the host, so unlike ListBackends it is not
+// free; the daemon refuses a name outside the global host list.
+func CheckHost(req CheckHostRequest) (CheckHostResponse, error) {
+	var resp CheckHostResponse
+	if err := callDaemon("CheckHost", req, &resp); err != nil {
+		return CheckHostResponse{}, err
+	}
+	return resp, nil
+}
+
 // CreateTab asks the daemon to spawn, persist, and report a new tab on an
 // existing session. Returning the response object keeps the daemon-minted ID
 // together with its resolved and tmux names across the gob transport.
@@ -705,8 +716,8 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 }
 
 // PruneSessions asks the daemon to evaluate archived sessions against a
-// prune request (#5136). Slice 1 is strictly read-only — a dry-run listing of
-// the reclaimable sessions; the apply call lands in the follow-up issue.
+// prune request (#5136). Without req.Apply it is a strictly read-only dry-run
+// listing; with it, the daemon deletes what that listing names (#5189).
 //
 // The read must NOT spawn a daemon (#5136 Codex round 6): a launch writes
 // sockets, locks, and logs and runs session recovery — far more side effects
@@ -719,7 +730,14 @@ func PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
 	attempt := callDaemonNoEnsureAttemptUntil("PruneSessions", req, &resp, time.Time{})
 	if attempt.err != nil {
 		if !attempt.requestStarted {
-			return PruneSessionsResponse{}, ErrDaemonUnavailable
+			// Only a daemon that is absent (no socket, connection refused) is
+			// "unavailable". A socket path that cannot be formed or a permission
+			// error is not fixed by starting the daemon, so it keeps its own
+			// words (#5189).
+			if isDaemonAbsentErr(attempt.err) {
+				return PruneSessionsResponse{}, ErrDaemonUnavailable
+			}
+			return PruneSessionsResponse{}, fmt.Errorf("could not reach the daemon's control socket: %w", attempt.err)
 		}
 		return PruneSessionsResponse{}, attempt.err
 	}
@@ -921,6 +939,17 @@ func ListAccounts(req ListAccountsRequest) (ListAccountsResponse, error) {
 	var resp ListAccountsResponse
 	if err := callDaemon("ListAccounts", req, &resp); err != nil {
 		return ListAccountsResponse{}, err
+	}
+	return resp, nil
+}
+
+// QuotaReport reads the daemon host's per-agent usage/quota report (#2983) —
+// the same records→quota.Build read `af quota` makes locally, served so a
+// remote or UI client cannot paint a different answer.
+func QuotaReport(req QuotaReportRequest) (QuotaReportResponse, error) {
+	var resp QuotaReportResponse
+	if err := callDaemon("QuotaReport", req, &resp); err != nil {
+		return QuotaReportResponse{}, err
 	}
 	return resp, nil
 }

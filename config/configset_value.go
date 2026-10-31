@@ -216,6 +216,12 @@ func validateStructuredConfigValue(key string, field reflect.Value) error {
 			return err
 		}
 		field.Set(reflect.ValueOf(normalized))
+	case "sandbox_agent_config":
+		normalized, err := NormalizeSandboxAgentConfig(field.Interface().([]string))
+		if err != nil {
+			return err
+		}
+		field.Set(reflect.ValueOf(normalized))
 	case "default_accounts":
 		for agent, name := range field.Interface().(map[string]string) {
 			if err := ValidateDefaultAccountEntry("default_accounts key", agent, name); err != nil {

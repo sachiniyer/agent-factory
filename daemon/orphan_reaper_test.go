@@ -13,10 +13,13 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// TestRunDaemonKeepsManagerWarmingUntilOrphanSweepCompletes pins the startup
-// ordering that makes the sweep's candidate set a true pre-admission boundary:
-// no state-dependent RPC can start a new container while the sweep is running.
-func TestRunDaemonKeepsManagerWarmingUntilOrphanSweepCompletes(t *testing.T) {
+// TestRunDaemonReachesReadyWhileOrphanSweepIsBlocked pins #5815: the Docker
+// orphan pass is housekeeping, so a pass that never returns (an unavailable
+// engine: 30s per Docker call) must not hold the daemon in "starting (restoring
+// sessions)". The pass is armed at startup and runs after readiness on a tracked
+// worker; createSweepMu, not the readiness barrier, keeps a concurrent create out
+// of its protected-slug window (#2632).
+func TestRunDaemonReachesReadyWhileOrphanSweepIsBlocked(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	sweepStarted := make(chan struct{})
@@ -25,9 +28,10 @@ func TestRunDaemonKeepsManagerWarmingUntilOrphanSweepCompletes(t *testing.T) {
 	releaseSweep := func() { releaseOnce.Do(func() { close(sweepGate) }) }
 	t.Cleanup(releaseSweep)
 
+	var startedOnce sync.Once
 	previousSweep := sweepOrphanContainers
 	sweepOrphanContainers = func(string, map[string]bool) session.OrphanSweepResult {
-		close(sweepStarted)
+		startedOnce.Do(func() { close(sweepStarted) })
 		<-sweepGate
 		return session.OrphanSweepResult{}
 	}
@@ -36,19 +40,17 @@ func TestRunDaemonKeepsManagerWarmingUntilOrphanSweepCompletes(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- RunDaemon(config.DefaultConfig()) }()
 
+	// Ready with the sweep still blocked (or not yet started).
+	waitForDaemonPhase(t, DaemonPhaseReady)
+
 	select {
 	case <-sweepStarted:
 	case err := <-runDone:
 		t.Fatalf("RunDaemon exited before the orphan sweep: %v", err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("RunDaemon did not start the orphan sweep")
+		t.Fatal("RunDaemon did not run the armed orphan sweep after readiness")
 	}
-
-	var resp SendPromptResponse
-	err := callDaemonNoEnsure("SendPrompt", SendPromptRequest{Title: "created-during-sweep", Prompt: "hi"}, &resp)
-	require.Error(t, err)
-	assert.True(t, IsDaemonStartingErr(err),
-		"state RPC reached the ready manager while the orphan sweep was still running: %v", err)
+	assert.Equal(t, DaemonPhaseReady, Health().Phase, "the daemon stays ready while the sweep is blocked")
 
 	releaseSweep()
 	result, _, err := RequestShutdown()

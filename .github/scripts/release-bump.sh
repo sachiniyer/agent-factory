@@ -10,7 +10,7 @@
 #
 # Usage: release-bump.sh <version>    # bare semver, no leading v
 #
-# Runs on the ubuntu-latest release runner. Kept POSIX-portable (no `sed -i`,
+# Runs on the ubuntu-24.04 release runner. Kept POSIX-portable (no `sed -i`,
 # no `grep -oP`) so scripts/release_scripts_test.go can exercise it hermetically
 # on both the Linux and macOS CI runners.
 set -eu

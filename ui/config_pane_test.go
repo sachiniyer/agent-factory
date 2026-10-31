@@ -179,6 +179,7 @@ func TestConfigPaneFormerlyImmutableKeysRoundTrip(t *testing.T) {
 	for _, key := range []string{
 		"program_overrides",
 		"session_env_passthrough",
+		"sandbox_agent_config",
 		"limit_patterns",
 		"root_agents",
 		"root_agent",

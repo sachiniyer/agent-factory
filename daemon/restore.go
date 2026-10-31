@@ -225,9 +225,11 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	if err != nil {
 		return "", err
 	}
-	if worktreeAdmission != nil {
-		defer worktreeAdmission.Unlock()
-	}
+	// Held only through the respawn's rebuild choke point, then released (see
+	// releaseAdmission below): everything after it persists through the start lock,
+	// which sits to the LEFT of admission in the documented order (#6197).
+	releaseAdmission := admissionReleaser(worktreeAdmission)
+	defer releaseAdmission()
 
 	if err := m.claimRestoreOperation(repoID, key, title, waited, deleteSeq); err != nil {
 		return "", err
@@ -441,7 +443,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		}
 		// The shared selector keeps the refusal's off-ramp executable even when
 		// this session's branch is not durable and --force-reap cannot proceed (#4195).
-		if err := m.preserveSandboxBeforeReap(repoID, key, instance, reapRefusalSuggestionFor(repoID, instance)); err != nil {
+		if err := m.preserveUnlessRelaunchable(repoID, key, instance); err != nil {
 			// The failure is the session's newest evidence even though it is an
 			// operator's, not the episode's. A structural one — rejected auth, an
 			// empty branch — means the row must stop claiming the environment,
@@ -479,8 +481,9 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// settles a relocation record persists the cleared state before the spawn
 	// proceeds, so a daemon exit cannot strand the recovery on a stale
 	// record (#5295 review).
+	// Runs inside Recover, under worktree admission: no start lock (#6197).
 	instance.SetRelocationSettleNotify(func(i *session.Instance) error {
-		return m.persistInstanceErr(repoID, i)
+		return m.persistUnderAdmission(repoID, i)
 	})
 	// A rebuild teardown obligation must be durable when it is set and again
 	// when it is discharged — before any replacement launches (#5371 review).
@@ -488,11 +491,20 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
 		return m.stopVSCodeForInstance(key, i.ID)
 	})
-	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
+	// --force-reap asks for the sandbox to be REPLACED; the in-place relaunch
+	// would keep the work it asked to discard (W7.1).
+	instance.SetForceSandboxReplacement(force)
+	defer instance.SetForceSandboxReplacement(false)
+	recoverErr := instance.RecoverHeldFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 			m.warn().Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
 		}
-	}); err != nil {
+	})
+	// Recover is LocalBackend's only missing-worktree rebuild choke point, so
+	// admission has done its job; the bookkeeping below persists through the start
+	// lock and must not do so from under admission (#6197).
+	releaseAdmission()
+	if err := recoverErr; err != nil {
 		// The fence stays up through the bookkeeping below and comes down in the
 		// deferred release, which is what announces it. Nothing here is distorted by
 		// that ordering — persistInstanceData scrubs the in-flight op before it

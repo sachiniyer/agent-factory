@@ -135,8 +135,19 @@ export interface Attention {
   set_at: string;
 }
 
+/** Where a session runs (#5571 W6.4); additive, derived by the daemon per snapshot. */
+export interface Placement {
+  kind: "local" | "remote";
+  host?: string;
+  backend?: string;
+  /** Workspace directory: the worktree locally, the host directory for ssh/sandbox. */
+  location?: string;
+}
+
 export interface SessionData {
   id?: string;
+  /** Absent on a daemon that predates W6.4; surfaces then show nothing extra. */
+  placement?: Placement;
   title: string;
   branch: string;
   path?: string;
@@ -328,6 +339,20 @@ export interface SnapshotResponse {
 	 *  (omitempty on the Go side) when no repo was skipped, which is every healthy
 	 *  startup, so the rail renders nothing extra in the steady state. */
 	skipped_repos?: SkippedRepo[];
+	/** Archived rows in the request's repo scope, present only when the request set
+	 *  `lazy_archive` AND the daemon understands it (#6178). Its absence on such a
+	 *  request means the daemon predates the shape and `instances` is the whole list. */
+	archived_total?: number;
+	/** Those archived rows per worktree repo path (the key projects are grouped by). */
+	archived_by_project?: Record<string, number>;
+	/** Resume position after a `limit`-bounded newest-first listing; absent on the last page. */
+	next_before?: SnapshotCursor;
+}
+
+/** A position in a newest-first listing (daemon SnapshotCursor). */
+export interface SnapshotCursor {
+	created_at: string;
+	id: string;
 }
 
 /** One repo the daemon could not load sessions for at startup
@@ -368,6 +393,9 @@ export interface OnCompleteOption {
  */
 export interface TaskData {
   on_complete?: string;
+  /** Listed host (global `hosts`) the sessions this task creates are placed on;
+   *  absent means the repo's backend decides (#5571 W6.3). */
+  host?: string;
   id: string;
   name?: string;
   prompt: string;
@@ -378,6 +406,10 @@ export interface TaskData {
   watch_cmd?: string;
   /** Route deliveries into this session by title (empty ⇒ a fresh session per run). */
   target_session?: string;
+  /** Cap on in-flight sessions for a watch task (#1892): 0/absent = unlimited.
+   *  Meaningful only on a watch task with no target_session — the shape
+   *  task.CapApplies describes — and absent on any task that cannot carry one. */
+  max_concurrent_runs?: number;
   /** The repo root the task belongs to — the project it groups under. */
   project_path: string;
   /** The agent program; empty resolves the repo default at run time. */
@@ -441,11 +473,18 @@ export interface TaskData {
  */
 export interface TaskUpdate {
   on_complete?: string;
+  /** "" clears the pick; absent leaves it alone. */
+  host?: string;
   name?: string;
   prompt?: string;
   cron_expr?: string;
   watch_cmd?: string;
   target_session?: string;
+  /** New cap on a watch task's in-flight sessions (#4180). The edit form always
+   *  sends it: unlike the CLI's gob socket, JSON keeps an explicit 0, which is
+   *  how a cap is reverted to unlimited (task.TaskUpdate.MaxConcurrentRuns is a
+   *  *int for exactly this reason). */
+  max_concurrent_runs?: number;
   /** The repo root the task belongs to — the project it groups under. Present so
    *  the edit form can move a task between projects (#1935); the Go task.TaskUpdate
    *  struct carries it, and the TUI already edits it (ui/task_pane_edit.go). */
@@ -689,6 +728,31 @@ export interface RegisterAccountResponse {
   /** What the agent's credential-root variable relocates, and anything af could
    *  not verify about the directory. Never about a credential's contents. */
   notices?: string[];
+}
+
+/** One agent's line of the QuotaReport (daemon/control_types_quota.go): the
+ *  four columns `af quota` prints, rendered server-side so every surface shows
+ *  the daemon's own words (#2983). The strings are the content — no client
+ *  re-derives them from codes. */
+export interface QuotaAgentRow {
+  program: string;
+  quota: string;
+  observed: string;
+  sessions: number;
+  limited_sessions: number;
+  /** RFC3339; absent when the parked limit carried no reset time. */
+  reset_at?: string;
+  /** The row's sentence — reset times included — rendered at serve time. */
+  detail: string;
+}
+
+/** QuotaReportResponse (daemon/control_types_quota.go). */
+export interface QuotaReportResponse {
+  agents: QuotaAgentRow[];
+  /** Completeness caveats (record files that could not be read or parsed).
+   *  Shown when present — an incomplete report that hides them reads as
+   *  authoritative. */
+  warnings?: string[];
 }
 
 /** AccountLoginResponse (daemon/control_types_accounts.go). */

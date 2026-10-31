@@ -128,6 +128,16 @@ func (m *Manager) clearAttentionOnInput(instance *session.Instance) {
 	m.queueAttentionClear(instance, seen.SetAt)
 }
 
+// answerAttentionByWork clears the open attention request when the agent shows
+// its own in-turn indicator after the idle spell the request waited out. epoch
+// is the one the observing poll decided at; a request raised later is not
+// answered by a frame captured before it.
+func (m *Manager) answerAttentionByWork(instance *session.Instance, epoch uint64) {
+	if setAt, ok := instance.AttentionAnsweredByWork(epoch); ok {
+		m.queueAttentionClear(instance, setAt)
+	}
+}
+
 // queueAttentionClear schedules a keyed clear of the request set at setAt.
 // Keys name the request an answer saw, so a newer key always wins over a queued
 // older one: the older clear is already a no-op on the request that replaced
@@ -199,23 +209,28 @@ func (m *Manager) clearAttentionNow(instance *session.Instance, setAt time.Time)
 }
 
 // attentionClearingBinding clears the session's attention request when the
-// user types into the agent pane.
+// user submits a line in the agent pane. A keystroke alone does not clear it,
+// so focusing the pane and typing a draft keeps the request.
 type attentionClearingBinding struct {
 	ptyTabBinding
 	instance *session.Instance
 	clear    func(time.Time)
+	// submit follows bracketed-paste state across this connection's frames; nil
+	// (a binding built without one) judges each frame alone.
+	submit *submitDetector
 }
 
 func (b attentionClearingBinding) input(p []byte) error {
-	// The keystroke answers the request set when it was sent, so capture it
+	// The submitted line answers the request set when it was sent, so capture it
 	// before transport: a request that lands while input is in flight is a
 	// different question and must survive this clear.
 	var answered time.Time
 	if seen := b.instance.Attention(); seen != nil {
 		answered = seen.SetAt
 	}
+	submitted := b.submit.Submitted(p) // every frame, so paste state stays current
 	err := b.ptyTabBinding.input(p)
-	if err == nil && isTypedInput(p) && !answered.IsZero() {
+	if err == nil && submitted && !answered.IsZero() {
 		b.clear(answered)
 	}
 	return err
@@ -235,4 +250,72 @@ func isTypedInput(p []byte) bool {
 		return len(rest) > 0 && !bytes.Equal(rest, bracketedPasteEnd)
 	}
 	return len(p) > 0 && p[0] != 0x1b
+}
+
+// isSubmittedInput reports whether one frame, judged alone, ends a line. A real
+// connection uses a submitDetector, which carries paste state between frames.
+func isSubmittedInput(p []byte) bool { return (&submitDetector{}).Submitted(p) }
+
+// submitDetector decides, frame by frame, whether the user submitted a line. A
+// newline inside a bracketed paste is part of the pasted text, and a paste can
+// span frames (the CLI attach reads stdin 32 bytes at a time) with its markers
+// split across them, so the state lives per connection: whether a paste is open,
+// and the tail of a marker that may be completed by the next frame.
+// Not safe for concurrent use; a connection feeds it from one reader loop.
+type submitDetector struct {
+	inPaste bool
+	carry   []byte
+}
+
+// Submitted feeds one input frame and reports whether it contains a submitting
+// newline outside any paste. A nil detector judges the frame alone.
+func (d *submitDetector) Submitted(p []byte) bool {
+	if d == nil {
+		d = &submitDetector{}
+	}
+	idle := !d.inPaste && len(d.carry) == 0
+	startsPaste := len(p) < len(bracketedPasteStart) && bytes.HasPrefix(bracketedPasteStart, p)
+	if idle && !startsPaste && !isTypedInput(p) {
+		return false // a terminal's own reply (focus, cursor, device query), not the user
+	}
+	buf := append(d.carry, p...)
+	d.carry = nil
+	submitted := false
+	for i := 0; i < len(buf); {
+		rest := buf[i:]
+		if d.inPaste {
+			j := bytes.Index(rest, bracketedPasteEnd)
+			if j < 0 {
+				d.carry = partialMarker(rest, bracketedPasteEnd)
+				return submitted
+			}
+			i += j + len(bracketedPasteEnd)
+			d.inPaste = false
+			continue
+		}
+		if bytes.HasPrefix(rest, bracketedPasteStart) {
+			i += len(bracketedPasteStart)
+			d.inPaste = true
+			continue
+		}
+		if len(rest) < len(bracketedPasteStart) && bytes.HasPrefix(bracketedPasteStart, rest) {
+			d.carry = append([]byte(nil), rest...) // may become a paste start in the next frame
+			return submitted
+		}
+		if rest[0] == '\r' || rest[0] == '\n' {
+			submitted = true
+		}
+		i++
+	}
+	return submitted
+}
+
+// partialMarker is the longest suffix of b that is a proper prefix of marker.
+func partialMarker(b, marker []byte) []byte {
+	for n := min(len(marker)-1, len(b)); n > 0; n-- {
+		if bytes.HasPrefix(marker, b[len(b)-n:]) {
+			return append([]byte(nil), b[len(b)-n:]...)
+		}
+	}
+	return nil
 }

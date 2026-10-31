@@ -143,6 +143,8 @@ func (d InstanceData) ForStorage() InstanceData {
 	// instances.json row and be read back as fact by an older binary.
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
+	d.Placement = nil
+	d.TabManagement = nil
 	d.ArchiveWarning = ""
 	// A live-probe outage is exactly the class of transient observation the
 	// fields above are scrubbed for: re-derived by the restarted daemon's own
@@ -221,10 +223,21 @@ func (d InstanceData) ForStorage() InstanceData {
 	switch {
 	case lv == LiveArchived:
 		// Archived rows have already reaped their runtime, so retaining a teardown
-		// identity here would only preserve unused credentials until row deletion.
+		// identity here would only preserve unused credentials until row deletion,
+		// except a preserved unpushed workspace (below).
 		d.RuntimeCleanupStateUnknown = false
-		d.RuntimeCleanup = nil
 		d.KilledWithoutLiveRuntime = false
+		if d.keepsPreservedWorkspaceHandle() {
+			// The exception: an archive that left its workspace on the host still owes
+			// the reap of it, and a restart must not lose the handle that names what
+			// af made (#5867). A fresh snapshot staged the private field; a reloaded
+			// row carries only the public one.
+			if d.runtimeCleanup != nil {
+				d.RuntimeCleanup = d.runtimeCleanup.clone()
+			}
+		} else {
+			d.RuntimeCleanup = nil
+		}
 	case !d.UserKilled && !d.RuntimeCleanupStateUnknown:
 		// Cleanup credentials/identities have no reason to live in ordinary LOCAL
 		// session records — a local reaped-worktree path proves nothing extra, and

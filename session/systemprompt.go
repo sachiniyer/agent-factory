@@ -96,6 +96,22 @@ const afUsageIntroPlugin = `Agent Factory (af) is a terminal multiplexer that ru
 // drifted is worse than none.
 const AfInstallCommand = `curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh`
 
+// The tab section of the reference, in parts so guidance can be generated from
+// the capability projection (#5571 W3.3). afUsageBody concatenates them back to
+// the full text, so the plugin audience — a CALLER of af, not a session — and a
+// session whose projection admits everything read byte-for-byte what they always
+// did.
+const (
+	afTabsLead         = `Tabs (extra processes and views in your instance's worktree; no limit on how many). `
+	afTabsRestrictions = `Shell and process tabs require a local session; web and VS Code tabs work on remote sessions too — an external HTTPS URL is framed directly, a loopback target (--port is loopback) shows whatever listens on that port inside the session's own workspace, and a VS Code tab opens the editor running on the session's host (code-server or openvscode-server must be installed there). `
+	afTabsTail         = `The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.`
+	afTabLineShell     = `  af sessions tab-create <title> --kind shell                    Terminal tab running $SHELL in the worktree (the same Terminal the TUI/web opens)`
+	afTabLineProcess   = `  af sessions tab-create <title> --command <cmd> [--name <tab>]   Process tab running <cmd> in the worktree; prints the tab name; persists across restarts`
+	afTabLineWeb       = `  af sessions tab-create <title> --kind web --url <u>|--port <n>  Web tab — a live browser view (no process) shown to the user in the web UI; this is how you show a URL, site, or dev server (--port n = http://localhost:n)`
+	afTabLineVSCode    = `  af sessions tab-create <title> --kind vscode                    VS Code editor tab on the worktree (no --url/--port); needs code-server installed`
+	afTabLineDelete    = `  af sessions tab-delete <title> --name <tab>                     Delete a tab; the agent tab can't be deleted (delete the session instead)`
+)
+
 // afUsageBody is every part of the reference that is true for BOTH audiences.
 const afUsageBody = `Commands print JSON on stdout; run "af <command> --help" for full flag lists. Every session and task command is PROJECT-SCOPED: it acts on the current directory's project unless --repo <path> names another one, so "af tasks list" shows this project's tasks and "af tasks add" binds the new task here. Acting on another project always takes an explicit --repo; "af tasks list --all" and "af sessions prune --all" are the opt-ins that span every project. Session titles are unique WITHIN a project, not across projects, so the same name may exist in several repos: a <title> resolves inside --repo when given, else the current directory's repo. Task ids are globally unique but still project-scoped — "af tasks get/show/update/trigger/remove/restart <id-or-name>" accepts a task's id OR its exact name: an exact id match always wins (a name that collides with another task's id still resolves to the id), and otherwise the name must belong to exactly one task in scope — a name several in-scope tasks share is refused with their ids, and a task owned by another project is refused naming the --repo that would reach it. A task whose project changed underneath a command is refused rather than acted on; nothing is changed, so re-run it. With no repo context (outside a git repository) a title or task id-or-name held by just one project still resolves, while one held by several reports an error naming the matches — sessions list the projects to pick with --repo, tasks the ids to pass instead. Remote hook sessions are the one exception: their names are shared across projects because the hook scripts receive them verbatim.
 
@@ -120,12 +136,7 @@ Sessions (one agent per isolated worktree):
 
 Never rebind an af worktree to another lane's branch with "git checkout -B", "git switch -C", or a direct ref/HEAD write. Those commands bypass Git's ordinary worktree collision refusal and can turn the other lane's unchanged index into a staged revert when the branch moves. Use "af sessions handoff --to <agent> -- <title>" to continue in the existing worktree, or create a session on a different branch.
 
-Tabs (extra processes and views in your instance's worktree; no limit on how many). Shell, process, and VS Code tabs require a local session; web tabs work on remote sessions too — an external HTTPS URL is framed directly, and a loopback target (--port is loopback) shows whatever listens on that port inside the session's own workspace. The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
-  af sessions tab-create <title> --kind shell                    Terminal tab running $SHELL in the worktree (the same Terminal the TUI/web opens)
-  af sessions tab-create <title> --command <cmd> [--name <tab>]   Process tab running <cmd> in the worktree; prints the tab name; persists across restarts
-  af sessions tab-create <title> --kind web --url <u>|--port <n>  Web tab — a live browser view (no process) shown to the user in the web UI; this is how you show a URL, site, or dev server (--port n = http://localhost:n)
-  af sessions tab-create <title> --kind vscode                    VS Code editor tab on the worktree (no --url/--port); needs code-server installed
-  af sessions tab-delete <title> --name <tab>                     Delete a tab; the agent tab can't be deleted (delete the session instead)
+` + afTabsLead + afTabsRestrictions + afTabsTail + "\n" + afTabLineShell + "\n" + afTabLineProcess + "\n" + afTabLineWeb + "\n" + afTabLineVSCode + "\n" + afTabLineDelete + `
 
 Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch script prints a stdout line; exactly one of --cron/--watch-cmd per task):
   af tasks list [--all]                                List this project's tasks (--all spans every project)
@@ -249,17 +260,42 @@ func shellQuote(s string) string {
 // injectSystemPrompt adds af's guidance to the resolved command, and for the two
 // agents that DISCOVER it from a config root, places it where the launch will
 // actually look: target carries the account boundary's config root for a scoped
-// session, and the zero value means unscoped (#3645).
+// session (#3645) and the root the command itself resolves to for an unscoped one
+// (#4501). The zero value places nothing; see skillTarget.
 //
-// callbackUnavailable swaps the guidance on the PER-INSTANCE seams (claude's
-// --plugin-dir, aider's --read) for the callbackless variant — a session with
-// no af callback must not be taught af verbs it cannot use (#5571 W3.1). The
-// shared config-root seams keep the full doc until W3.3's capability-generated
-// guidance; they are opted into globally rather than per session anyway.
-func injectSystemPrompt(resolved string, target skillTarget, callbackUnavailable bool) string {
+// caps renders the guidance on the PER-INSTANCE seams (claude's --plugin-dir,
+// aider's --read) from the session's capability projection — no af verbs without
+// a callback (#5571 W3.1), only the tab kinds the projection admits, and
+// self-archive only where it works (W3.3). The shared config-root seams
+// (codex/gemini/amp/devin/opencode) keep the full doc: they are opted into
+// globally, so one file cannot vary per session.
+func injectSystemPrompt(resolved string, target skillTarget, caps guidanceCaps) string {
+	return injectSystemPromptWithEnv(resolved, target, caps, launchEnv{})
+}
+
+// launchEnv is the launch's own environment inputs: the session's merged
+// exact-name pass-through list and the directory the pane starts in. The
+// opencode seam asks whether a name the user supplied will survive the pane's
+// filter, and that answer depends on both (#5981). The zero value gives the
+// conservative "no extras, remote workDir" answer. It is deliberately not part
+// of skillTarget, which identifies WHERE the skill lands and is compared by
+// value.
+type launchEnv struct {
+	passthrough []string
+	workDir     string
+}
+
+// launchEnvFor is the launch environment of session i starting in workDir.
+func launchEnvFor(i *Instance, workDir string) launchEnv {
+	return launchEnv{passthrough: SessionEnvPassthroughForInstance(i), workDir: workDir}
+}
+
+// injectSystemPromptWithEnv is injectSystemPrompt for a launch whose
+// environment inputs are known.
+func injectSystemPromptWithEnv(resolved string, target skillTarget, caps guidanceCaps, env launchEnv) string {
 	switch tmux.DetectAgentFromCommand(resolved) {
 	case tmux.ProgramClaude:
-		pluginDir, err := ensurePluginDir(callbackUnavailable)
+		pluginDir, err := ensurePluginDir(caps)
 		if err != nil {
 			log.WarningLog.Printf("failed to set up plugin directory, slash commands unavailable: %v", err)
 			return resolved
@@ -340,7 +376,7 @@ func injectSystemPrompt(resolved string, target skillTarget, callbackUnavailable
 		// behavior) and the pane still gets af's config. The inline-assignment
 		// channel (opencodeCarriesConfigEnv) is in the command string, which
 		// FilterForCommand never touches, so it is not subject to this gate.
-		if opencodeCarriesConfigEnv(resolved) || opencodeExportedConfigReachesPane(resolved) {
+		if opencodeCarriesConfigEnv(resolved) || opencodeExportedConfigReachesPane(resolved, env.passthrough, env.workDir) {
 			// INFO, not WARNING (#2166): the user pointed OPENCODE_CONFIG at
 			// their own file (program_overrides assignment OR exported env var
 			// that the pane's allowlist will actually deliver) and af is
@@ -367,7 +403,7 @@ func injectSystemPrompt(resolved string, target skillTarget, callbackUnavailable
 		// skills folder. A write failure (or a non-af file at our path) yields an
 		// empty path, in which case we must NOT append --read pointing at a file
 		// we do not own — return the launch command unchanged.
-		path, err := ensureAiderReadFile(callbackUnavailable)
+		path, err := ensureAiderReadFile(caps)
 		if err != nil {
 			log.WarningLog.Printf("failed to set up aider af skill, af guidance unavailable to aider: %v", err)
 			return resolved
@@ -407,21 +443,29 @@ func injectSystemPrompt(resolved string, target skillTarget, callbackUnavailable
 // for, and a non-attributable spelling is exactly the case the credential grant
 // refuses.
 //
-// This helper mirrors the pane's grant decision so the env-channel guard does
-// not skip af's injection for a value the pane will never see — which would
-// leave the pane with neither the user's config nor af's, while the INFO log
-// claims the user's value was honored. workDir is unknown at this call site
-// (the daemon that runs injectSystemPrompt does not know the pane's working
-// directory), so the empty value is the same conservative default
-// GrantAgentForCommand uses for a remote host: it denies every non-absolute
-// spelling, which is exactly the class whose env does not survive the pane's
-// filter. An absolute path inside the real pane workDir is attributed here but
-// denied by the pane's own grant — for that rare spelling the env guard still
-// fires and the pane still gets nothing, matching the pre-env-channel behavior
-// and no worse than the silent skip this guard replaced.
-func opencodeExportedConfigReachesPane(resolved string) bool {
+// This helper asks the pane's own filter (FilterForCommand over the grant the
+// launch uses) so the env-channel guard does not skip af's injection for a value
+// the pane will never see — which would leave the pane with neither the user's
+// config nor af's, while the INFO log claims the user's value was honored. The
+// converse matters as much: a value the user explicitly named in the session's
+// pass-through list reaches the pane even for a spelling the grant refuses, and
+// af must not shadow it with a command-prefix assignment (#5981). passthrough
+// and workDir are the launch's own (launchEnv carries them); zero values give
+// the conservative "no extras, remote workDir" answer.
+func opencodeExportedConfigReachesPane(resolved string, passthrough []string, workDir string) bool {
 	if os.Getenv("OPENCODE_CONFIG") == "" {
 		return false
 	}
-	return sessionenv.GrantAgentForCommand(resolved, os.Environ(), "") == tmux.ProgramOpencode
+	// Ask the pane's own filter rather than re-deriving its rules: the value
+	// reaches the pane when FilterForCommand keeps it, whether the opencode
+	// allowlist admits it (an attributable command) or the operator named it in
+	// the pass-through list (which survives for an unattributable spelling too).
+	source := os.Environ()
+	agent := sessionenv.GrantAgentForCommand(resolved, source, workDir)
+	for _, entry := range sessionenv.FilterForCommand(source, agent, resolved, passthrough) {
+		if name, value, ok := strings.Cut(entry, "="); ok && name == "OPENCODE_CONFIG" && value != "" {
+			return true
+		}
+	}
+	return false
 }

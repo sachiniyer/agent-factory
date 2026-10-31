@@ -10,7 +10,7 @@ import (
 )
 
 // setAttentionViaDaemon is the daemon seam, overridable in tests.
-var setAttentionViaDaemon = daemon.SetAttention
+var setAttentionViaDaemon = routedSetAttention
 
 func newSessionsAttentionCmd() *cobra.Command {
 	var self, clear bool
@@ -25,8 +25,9 @@ Agents run this with --self only when they are blocked on a decision or
 question that only the user can answer, as the last step before they stop.
 They do not run it when a task has simply finished.
 
-The request clears when the user types into the agent pane, opens the agent
-tab in the web UI, or when the agent starts work again after it went idle.
+The request clears when the user submits a line in the agent pane, dismisses
+it from the session header in the web UI, or when the agent starts work again
+after it went idle.
 --clear removes it now.`,
 		Example: `  af sessions attention --self --reason "Pick option A or B in the summary above"
   af sessions attention --self --clear
@@ -54,7 +55,10 @@ tab in the web UI, or when the agent starts work again after it went idle.
 					return jsonError(fmt.Errorf("a session <title> is required (or pass --self to target the current session)"))
 				}
 				var err error
-				repoID, err = resolveRepoID()
+				// The request goes to the TARGETED daemon (routedSetAttention), so the
+				// scope is the one every other routed session verb uses: against a
+				// remote daemon the client's cwd names a repo that exists here, not there.
+				repoID, err = resolveRepoIDForLookup()
 				if err != nil {
 					return jsonError(err)
 				}

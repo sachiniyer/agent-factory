@@ -90,6 +90,7 @@ function stage(): Stage {
     projectRoots: () => [],
     optimisticSessions: { reset() {}, snapshotFence() { return 0; } },
     pickSelection: () => null,
+    archiveFromSnapshot: () => ({}), emptyArchive: () => ({}),
     applySessions() {},
     startStream() {},
     resolveRoute() {},

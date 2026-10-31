@@ -143,7 +143,7 @@ func boundedRecordHookWorktreeIdentity(repoPath, worktree string) (*hookWorktree
 }
 
 func waitForHookWorktreeIdentity(key, worktree string, flight *hookWorktreeIdentityFlight) (*hookWorktreeIdentity, error) {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -153,7 +153,7 @@ func waitForHookWorktreeIdentity(key, worktree string, flight *hookWorktreeIdent
 		if hookWorktreeIdentityFlights.byCheckout[key] == flight {
 			flight.timedOut = true
 			hookWorktreeIdentityFlights.Unlock()
-			return nil, fmt.Errorf("timed out after %s while recording checkout identity under %s: %w", relocationIdentityTimeout, worktree, context.DeadlineExceeded)
+			return nil, fmt.Errorf("timed out after %s while recording checkout identity under %s: %w", relocationIdentityTimeout.Load(), worktree, context.DeadlineExceeded)
 		}
 		hookWorktreeIdentityFlights.Unlock()
 		<-flight.done

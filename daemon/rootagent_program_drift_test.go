@@ -38,10 +38,13 @@ func TestEnsureRootAgentsWarnsOnceForAdoptedProgramDrift(t *testing.T) {
 		t.Fatalf("create pre-existing root: %v", err)
 	}
 	findRootInstance(t, manager, repoPath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", "claude"))
+	stubRootProgramResolution(t, manager, nil)
 
+	// ensureRootAgentsAndWait joins the drift worker, and the worker commits the
+	// warning before it exits, so the log is complete when it returns: there is
+	// nothing left to wait for, and no window for a loaded runner to overrun.
 	manager.ensureRootAgentsAndWait()
 	manager.ensureRootAgentsAndWait()
-	waitForRootProgramWarning(t, warnings)
 
 	got := warnings.String()
 	for _, want := range []string{repoPath, `configured command "codex"`, `running command "claude"`, "restart the daemon, then kill the root"} {
@@ -78,9 +81,9 @@ func TestAdoptedRootProgramDriftDedupesEquivalentPathsByRepository(t *testing.T)
 		t.Fatalf("create pre-existing root: %v", err)
 	}
 	findRootInstance(t, manager, repoPath).SetTmuxSession(tmux.NewTmuxSession("root-runtime", "claude"))
+	stubRootProgramResolution(t, manager, nil)
 
 	manager.ensureRootAgentsAndWait()
-	waitForRootProgramWarning(t, warnings)
 	if count := strings.Count(warnings.String(), "configured command"); count != 1 {
 		t.Fatalf("equivalent paths logged program drift %d times, want once by repository:\n%s", count, warnings.String())
 	}
@@ -1133,6 +1136,31 @@ func waitForRootProgramResolutionIdle(t *testing.T, manager *Manager, st *rootEn
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// stubRootProgramResolution replaces the repository-config resolution the drift
+// worker runs with one that returns instantly and cannot fail. The real
+// resolution reads the checkout through bounded filesystem and git probes; when
+// one of those errors on a loaded runner the worker records a retry backoff
+// (rootProgramDriftConfigInspectionInterval) instead of a verdict, so the warning
+// the test waits for is not late, it is deferred by product timing the test must
+// not depend on (#6126). overrides is the resolved program_overrides map (nil for
+// none, so a bare agent name resolves to itself).
+//
+// The worker is joined before the original is restored: it is a goroutine that
+// reads this variable and can outlive the test body.
+func stubRootProgramResolution(t *testing.T, manager *Manager, overrides map[string]string) {
+	t.Helper()
+	previous := resolveRootProgramConfigForInspection
+	resolveRootProgramConfigForInspection = func(*config.RepoContext, *config.Config) (*config.ResolvedConfig, error) {
+		resolved := config.DefaultConfig()
+		resolved.ProgramOverrides = overrides
+		return &config.ResolvedConfig{Config: *resolved}, nil
+	}
+	t.Cleanup(func() {
+		manager.waitRootProgramDriftInspections()
+		resolveRootProgramConfigForInspection = previous
+	})
 }
 
 func waitForRootProgramWarning(t *testing.T, warnings *logCapture) {

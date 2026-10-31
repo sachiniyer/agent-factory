@@ -127,6 +127,7 @@ var (
 	taskAddTargetSessionFlag     string
 	taskAddMaxConcurrentRunsFlag int
 	taskAddOnCompleteFlag        string
+	taskAddHostFlag              string
 	taskAddProgramFlag           string
 )
 
@@ -217,6 +218,7 @@ var tasksAddCmd = &cobra.Command{
 			TargetSession:     taskAddTargetSessionFlag,
 			MaxConcurrentRuns: taskAddMaxConcurrentRunsFlag,
 			OnComplete:        taskAddOnCompleteFlag,
+			Host:              strings.TrimSpace(taskAddHostFlag),
 			ProjectPath:       projectPath,
 			Program:           program,
 			Enabled:           true,
@@ -229,14 +231,33 @@ var tasksAddCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
+		// A host pick must reach a daemon that stores it: one that predates the
+		// field would drop it and every run would silently use the repo's default
+		// backend. The daemon's store refuses a name outside the global host list.
+		if s.Host != "" {
+			if err := requireHostPickOn(hostPickOnTask, s.Host); err != nil {
+				return jsonError(err)
+			}
+		}
+
 		// Route the write through the daemon: it owns scheduling and reloads its
 		// own scheduler/watchers in-process, so no separate reload poke is needed
 		// (#1029 PR 3). The on-disk tasks.json format is unchanged.
-		if err := routedAddTask(s, task.ActorCLI); err != nil {
+		storedID, err := routedAddTask(s, task.ActorCLI)
+		if err != nil {
 			if !apiclient.IsMutationCommitted(err) {
 				return jsonError(fmt.Errorf("failed to add task: %w", err))
 			}
 			warnCommittedTaskMutation(err)
+		}
+		// The id the daemon STORED, not the one this command generated: a daemon
+		// that mints the id (a sandbox credential's add) discards the request's,
+		// and printing the unstored one leaves the caller unable to get or remove
+		// the task (#5890). A committed add whose reload failed names the stored
+		// id on the error itself; only a failure that stored nothing leaves the
+		// generated one, and then there is no task to address.
+		if storedID != "" {
+			id = storedID
 		}
 
 		// Echo the resolved binding, not just the id (#1891). The id alone left
@@ -400,6 +421,7 @@ var (
 	taskUpdateTargetSessionFlag     string
 	taskUpdateMaxConcurrentRunsFlag int
 	taskUpdateOnCompleteFlag        string
+	taskUpdateHostFlag              string
 	taskUpdateProjectPathFlag       string
 	taskUpdateEnabledFlag           string
 	taskUpdateProgramFlag           string
@@ -549,6 +571,15 @@ var tasksUpdateCmd = &cobra.Command{
 		// the two above do (#2595).
 		if cmd.Flags().Changed("on-complete") {
 			patch.OnComplete = strPtr(taskUpdateOnCompleteFlag)
+		}
+		// --host "" clears the pick, so this gates on the flag being passed too.
+		if cmd.Flags().Changed("host") {
+			patch.Host = strPtr(strings.TrimSpace(taskUpdateHostFlag))
+			if *patch.Host != "" {
+				if err := requireHostPickOn(hostPickOnTask, *patch.Host); err != nil {
+					return jsonError(err)
+				}
+			}
 		}
 		// --repo authorizes the task against its CURRENT project. Keep the new
 		// binding separate so a caller can say `--repo old --project-path new`

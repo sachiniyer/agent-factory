@@ -85,8 +85,10 @@ func TestSandboxBackendsDoNotAdvertiseTabManagement(t *testing.T) {
 }
 
 // TestSandboxBackendsDoNotAdvertiseHandoff is the handoff half of the same
-// contract (#2013): an off-box backend must not claim it can swap its agent in
-// place, AND its SwapAgent must actually refuse. The bit and the behavior are
+// contract (#2013): an off-box backend's STATIC declaration must not claim it can
+// swap its agent in place, AND its SwapAgent must actually refuse when there is no
+// live sandbox to ask. A sandbox whose agent-server advertises the swap route
+// lifts the bit per instance (W7.5, handoff_inplace_test.go). The bit and the behavior are
 // asserted together for the same reason as TabManagement above — a capability
 // that lies in either direction is worse than one that is simply false.
 func TestSandboxBackendsDoNotAdvertiseHandoff(t *testing.T) {
@@ -141,11 +143,11 @@ func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 			assert.Equal(t, TabKindWeb, webTab.Kind)
 			assert.Nil(t, webTab.tmux, "a web tab must hold no tmux session")
 
-			// Needs the worktree to READ, which off-box cannot serve yet (#3054).
-			_, vscodeErr := newInst().AddVSCodeTab("")
-			require.Error(t, vscodeErr, "AddVSCodeTab must reject a worktree-less sandbox instance")
-			assert.Contains(t, strings.ToLower(vscodeErr.Error()), "editor",
-				"the vscode refusal must name the editor requirement, not a spawn it does not do")
+			// The editor runs on the host (W5.4), so a worktree-less instance whose
+			// runtime has one admits the tab as metadata.
+			vscodeTab, vscodeErr := newInst().AddVSCodeTab("")
+			require.NoError(t, vscodeErr, "AddVSCodeTab serves a worktree-less instance whose host runs the editor")
+			assert.Equal(t, TabKindVSCode, vscodeTab.Kind)
 
 			// Need a PTY in the local worktree.
 			_, shellErr := newInst().AddShellTab()
@@ -180,6 +182,34 @@ func TestAddWebTab_RejectsFailedRestoreBeforeAgentTab(t *testing.T) {
 	require.Error(t, err, "a metadata tab must not take the reserved agent slot")
 	assert.Contains(t, strings.ToLower(err.Error()), "agent tab")
 	require.Empty(t, inst.GetTabs(), "a refused create must leave slot 0 empty for remote Launch")
+}
+
+// #6091: the remote editor is metadata too, and the same failed restore left it
+// free to take slot 0, where it is unclosable and keeps remote Launch from seeding
+// the agent tab. An editor never takes the agent slot; once the agent row exists it
+// lands after it and closes like any other tab.
+func TestAddVSCodeTab_NeverTakesTheAgentSlot(t *testing.T) {
+	inst, err := FromInstanceData(InstanceData{Title: "failed-restore-editor", BackendType: "ssh", Status: Archived})
+	require.NoError(t, err)
+	require.NoError(t, inst.Transition(BeginRestore()))
+	require.NoError(t, inst.Transition(AbortRestoreToLost()))
+	require.Empty(t, inst.GetTabs())
+
+	_, err = inst.AddVSCodeTab("")
+	require.Error(t, err, "an editor must not take the reserved agent slot")
+	assert.Contains(t, strings.ToLower(err.Error()), "agent tab")
+	require.Empty(t, inst.GetTabs(), "a refused create must leave slot 0 empty for remote Launch")
+
+	// With the agent row seeded the editor is admitted after it, and closable.
+	inst.mu.Lock()
+	inst.Tabs = []*Tab{newRemoteAgentTab()}
+	inst.mu.Unlock()
+	tab, err := inst.AddVSCodeTab("")
+	require.NoError(t, err)
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 2)
+	assert.Equal(t, TabKindAgent, tabs[0].Kind)
+	assert.Same(t, tab, tabs[1], "the editor sits after the agent slot")
 }
 
 // TestSandboxTabSpawnErrorIsNotMisleading covers the copy half of #1874. The old

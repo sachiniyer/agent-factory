@@ -48,6 +48,19 @@ func requestApplyConfigAttempt() (ApplyConfigResponse, daemonCallAttempt) {
 // reopen exactly the split #3231 closes. It never STARTS a daemon, like the
 // apply poke.
 func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
+	return setGlobalConfig(key, value, nil)
+}
+
+// EditGlobalHosts is SetGlobalConfigValue for one per-entry edit of the host
+// table, applied by the writer as a single read-modify-write under the config
+// file lock (config.EditGlobalHosts). Against a daemon that has not advertised
+// ConfigHostsEdit — or one whose Ping cannot be read — it is refused rather than
+// sent, because the daemon would drop the edit and write an empty table.
+func EditGlobalHosts(edit config.HostsEdit) (SetConfigValueResponse, error) {
+	return setGlobalConfig("hosts", "", &edit)
+}
+
+func setGlobalConfig(key, value string, edit *config.HostsEdit) (SetConfigValueResponse, error) {
 	if err := config.RetiredThemeKeyError(key); err != nil {
 		return SetConfigValueResponse{}, err
 	}
@@ -62,8 +75,14 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 			// daemon canonicalizes the same alias before writing. Normalize its
 			// echo so new callers always see the canonical public key.
 			wireKey := config.LegacyConfigKey(key)
+			if edit != nil {
+				var ping PingResponse
+				if err := client.Call(controlServiceName+".Ping", PingRequest{}, &ping); err != nil || !ping.ConfigHostsEdit {
+					return SetConfigValueResponse{}, fmt.Errorf("the running daemon (%s) cannot apply a host-list edit atomically; run `af daemon restart` to upgrade it, then retry (nothing was written)", ping.Version)
+				}
+			}
 			callErr := client.Call(controlServiceName+".SetConfigValue",
-				SetConfigValueRequest{Key: wireKey, Value: value}, &resp)
+				SetConfigValueRequest{Key: wireKey, Value: value, HostsEdit: edit}, &resp)
 			if callErr == nil && resp.Result != nil {
 				resp.Result.Key = config.CanonicalConfigKey(resp.Result.Key)
 			}
@@ -95,7 +114,13 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 				"config change refused while rollback restores the previous daemon: %w; retry after rollback recovery finishes", gateErr)
 		}
 	}
-	result, err := config.SetGlobalConfigValue(key, value)
+	var result *config.SetResult
+	var err error
+	if edit != nil {
+		result, _, err = config.EditGlobalHosts(*edit)
+	} else {
+		result, err = config.SetGlobalConfigValue(key, value)
+	}
 	if err != nil {
 		return SetConfigValueResponse{}, err
 	}

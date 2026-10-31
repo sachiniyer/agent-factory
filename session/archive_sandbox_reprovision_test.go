@@ -4,6 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +18,7 @@ type orderedReprovisionRuntime struct {
 	events *[]string
 	res    ProvisionResult
 	err    error
+	got    *ProvisionSpec
 }
 
 type cleanupFailingStartBackend struct {
@@ -24,7 +29,10 @@ func (b *cleanupFailingStartBackend) Start(*Instance, bool) error {
 	return fmt.Errorf("start failed")
 }
 
-func (r *orderedReprovisionRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
+func (r *orderedReprovisionRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
+	if r.got != nil {
+		*r.got = spec
+	}
 	if r.events != nil {
 		*r.events = append(*r.events, "provision")
 	}
@@ -401,4 +409,185 @@ func TestReprovisionRemote_ConfirmedReapDropsDischargedCleanupHandle(t *testing.
 	restored, err := FromInstanceData(reloaded)
 	require.NoError(t, err, "restore the reloaded row")
 	assert.Nil(t, restored.runtimeTeardown, "the reloaded row rebuilt a teardown handle for a runtime af already reaped")
+}
+
+// stubOrigin fakes the daemon's `git ls-remote` of the recorded branch.
+func stubOrigin(t *testing.T, has bool, err error) *int {
+	t.Helper()
+	calls := new(int)
+	prev := branchOnOrigin
+	branchOnOrigin = func(string, string) (bool, error) { *calls++; return has, err }
+	t.Cleanup(func() { branchOnOrigin = prev })
+	return calls
+}
+
+// TestReprovisionRemote_ForwardsThePersistedBranch proves the replacement
+// agent-server is told the exact branch name the session works on, rather than
+// re-deriving one from its own branch_prefix (#5571 W2.4) — and that the restore
+// FETCH is requested only for a branch origin holds (#5972): a non-empty
+// RestoreBranch is fetched unconditionally, so a bare name af chose at create
+// would fail every replacement of a never-pushed session and leave it Lost. A
+// row an older af wrote has no unpushed mark and keeps fetching, unasked.
+func TestReprovisionRemote_ForwardsThePersistedBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		unpushed     bool
+		originHas    bool
+		wantRestore  string
+		wantAsked    int
+		wantMarkKept bool
+	}{
+		{"named at create, origin lacks it", true, false, "", 1, true},
+		{"unobserved push that did reach origin", true, true, "root/s", 1, false},
+		{"legacy record: a recorded branch was a pushed one", false, false, "root/s", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asked := stubOrigin(t, tc.originHas, nil)
+			var got ProvisionSpec
+			rt := &orderedReprovisionRuntime{got: &got, err: fmt.Errorf("stop after provision")}
+			defer SetRuntimeForTest(BackendDocker, func() Runtime { return rt })()
+
+			i := &Instance{
+				Title:          "s",
+				Path:           t.TempDir(),
+				Branch:         "root/s",
+				branchUnpushed: tc.unpushed,
+				backend:        &dockerBackend{containerID: "old"},
+			}
+			_ = i.reprovisionRemote()
+			assert.Equal(t, tc.wantRestore, got.RestoreBranch)
+			assert.Equal(t, "root/s", got.Branch, "the name is forwarded either way")
+			assert.Equal(t, tc.wantAsked, *asked)
+			assert.Equal(t, tc.wantMarkKept, i.branchUnpushed)
+		})
+	}
+}
+
+// An origin af cannot reach says nothing about the branch: the checkpoint is
+// neither discarded (a fresh clone would strand pushed work) nor fetched blind
+// (it would loop on a ref that may not exist). The attempt refuses with an
+// actionable message and changes nothing (#5972).
+func TestReprovisionRemote_UnreachableOriginNeitherDiscardsNorLoops(t *testing.T) {
+	asked := stubOrigin(t, false, fmt.Errorf("could not resolve host"))
+	var got ProvisionSpec
+	provisioned := false
+	rt := &orderedReprovisionRuntime{got: &got, err: fmt.Errorf("must not be reached")}
+	defer SetRuntimeForTest(BackendDocker, func() Runtime { provisioned = true; return rt })()
+
+	i := &Instance{Title: "s", Path: t.TempDir(), Branch: "root/s", branchUnpushed: true, backend: &dockerBackend{containerID: "old"}}
+	err := i.reprovisionRemote()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not check whether its branch")
+	assert.Contains(t, err.Error(), "nothing was changed")
+	assert.False(t, provisioned, "no runtime is provisioned, so there is no fetch to loop on")
+	assert.Equal(t, 1, *asked)
+	assert.True(t, i.branchUnpushed, "unknown is kept, not resolved to unpushed")
+	assert.Equal(t, "root/s", i.Branch)
+}
+
+// A row written by an older af has no branch_unpushed key: loaded from its
+// stored JSON it must still restore its pushed branch (#5972 review).
+func TestReprovisionRemote_LegacyStoredRecordStillRestores(t *testing.T) {
+	var data InstanceData
+	require.NoError(t, json.Unmarshal([]byte(`{"title":"s","path":"`+t.TempDir()+`","branch":"root/s","backend_type":"docker"}`), &data))
+	require.False(t, data.BranchUnpushed)
+	i, err := FromInstanceData(data)
+	require.NoError(t, err)
+	var got ProvisionSpec
+	rt := &orderedReprovisionRuntime{got: &got, err: fmt.Errorf("stop after provision")}
+	defer SetRuntimeForTest(BackendDocker, func() Runtime { return rt })()
+	i.backend = &dockerBackend{containerID: "old"}
+	_ = i.reprovisionRemote()
+	assert.Equal(t, "root/s", got.RestoreBranch)
+}
+
+// #5972: the push recovery performs before replacing a reachable sandbox
+// reports the branch through SetSandboxBranch; that push turns a chosen name
+// into a checkpoint, and the change survives a stored round trip.
+func TestReprovisionRemote_PushRecoveryRecordsTheCheckpoint(t *testing.T) {
+	var got ProvisionSpec
+	rt := &orderedReprovisionRuntime{got: &got, err: fmt.Errorf("stop after provision")}
+	defer SetRuntimeForTest(BackendDocker, func() Runtime { return rt })()
+
+	stubOrigin(t, false, nil)
+	i := &Instance{Title: "s", Path: t.TempDir(), Branch: "root/s", branchUnpushed: true, backend: &dockerBackend{containerID: "old"}}
+	_ = i.reprovisionRemote()
+	require.Empty(t, got.RestoreBranch, "control: the create-time name is not a checkpoint")
+
+	i.SetSandboxBranch("root/s")
+	reloaded, err := FromInstanceData(i.ToInstanceData())
+	require.NoError(t, err)
+	reloaded.backend = &dockerBackend{containerID: "old"}
+	got = ProvisionSpec{}
+	_ = reloaded.reprovisionRemote()
+	assert.Equal(t, "root/s", got.RestoreBranch)
+}
+
+// The real probe distinguishes the three answers it must (#5972): present,
+// positively absent, and unreachable (an error, never "absent").
+func TestBranchOnOriginViaGitSeparatesAbsentFromUnreachable(t *testing.T) {
+	origin := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", "--bare", "-b", "main", origin},
+	} {
+		out, err := exec.Command("git", args...).CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	work := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", work, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	run("init", "-q", "-b", "pushed")
+	run("commit", "-q", "--allow-empty", "-m", "x")
+	run("push", "-q", origin, "pushed")
+
+	has, err := branchOnOriginViaGit(origin, "pushed")
+	require.NoError(t, err)
+	assert.True(t, has)
+	has, err = branchOnOriginViaGit(origin, "never-pushed")
+	require.NoError(t, err, "a reachable origin without the ref is a positive answer")
+	assert.False(t, has)
+	_, err = branchOnOriginViaGit(filepath.Join(t.TempDir(), "gone"), "pushed")
+	assert.Error(t, err, "an unreachable origin is unknown, not absent")
+	_, err = branchOnOriginViaGit("", "pushed")
+	assert.Error(t, err)
+}
+
+// #6003: the origin probe authenticates the way the session's clone does — via
+// the environment credential helper — not with a bare ls-remote that cannot use
+// GH_TOKEN/GITHUB_TOKEN.
+func TestLsRemoteArgsCarryTheCloneCredentialHelper(t *testing.T) {
+	args := lsRemoteArgs("https://github.com/o/r.git", "af/s")
+	require.GreaterOrEqual(t, len(args), 6)
+	assert.Equal(t, "-c", args[0])
+	key, helper, ok := githubEnvironmentCredential("https://github.com/o/r.git")
+	require.True(t, ok)
+	assert.Equal(t, key+"="+helper, args[1], "the exact helper the clone installs")
+	assert.Equal(t, []string{"ls-remote", "--exit-code", "--heads", "https://github.com/o/r.git", "refs/heads/af/s"}, args[2:])
+	assert.NotContains(t, strings.Join(args, " "), "secret-token", "names only, never a value")
+
+	// Origins the clone gives no helper get none here either.
+	for _, u := range []string{"git@github.com:o/r.git", "https://git.example.com/o/r.git", "/srv/repo.git"} {
+		assert.Equal(t, []string{"ls-remote", "--exit-code", "--heads", u, "refs/heads/af/s"}, lsRemoteArgs(u, "af/s"), u)
+	}
+}
+
+// The helper in the probe's exact argument form really answers git's credential
+// request from GH_TOKEN, and falls back to GITHUB_TOKEN.
+func TestLsRemoteCredentialHelperAnswersFromTheTokenEnvironment(t *testing.T) {
+	args := lsRemoteArgs("https://github.com/o/r.git", "b")
+	for env, want := range map[string]string{
+		"GH_TOKEN=secret-token":     "password=secret-token",
+		"GITHUB_TOKEN=other-secret": "password=other-secret",
+	} {
+		cmd := exec.Command("git", args[0], args[1], "credential", "fill")
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GH_TOKEN=", "GITHUB_TOKEN=", env)
+		cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		assert.Contains(t, string(out), "username=x-access-token")
+		assert.Contains(t, string(out), want)
+	}
 }

@@ -1,7 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -152,12 +155,21 @@ func TestFetchSnapshotCmdPairsAScopedRowWithItsOwnRowInTheAnswer(t *testing.T) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	rootA, rootB := t.TempDir(), t.TempDir()
-	for _, root := range []string{rootA, rootB} {
+	for i, root := range []string{rootA, rootB} {
 		require.NoError(t, task.AddTask(task.Task{
-			ID: "dup00001", Name: "nightly", Prompt: "p", CronExpr: "0 3 * * *",
+			ID: fmt.Sprintf("dup0000%d", i+1), Name: "nightly", Prompt: "p", CronExpr: "0 3 * * *",
 			ProjectPath: root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
 		}))
 	}
+	// The store refuses a duplicate id on add (task.ErrTaskIDExists), so the
+	// legacy shape this test is about — a hand-edited tasks.json carrying one id
+	// twice — is written to the file directly.
+	tasksPath, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	raw, err := os.ReadFile(tasksPath)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "dup00002")
+	require.NoError(t, os.WriteFile(tasksPath, bytes.ReplaceAll(raw, []byte("dup00002"), []byte("dup00001")), 0o600))
 	h.switchProject(&config.RepoContext{Root: rootB, ID: config.RepoIDFromRoot(rootB)})
 
 	next := time.Date(2026, time.March, 4, 9, 0, 0, 0, time.UTC)

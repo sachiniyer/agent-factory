@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -142,6 +141,10 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	if m.currentInstanceReplaced(key, instance, targetID) {
 		m.info().Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
 		return resolved, nil
+	}
+	// The pending-prune fence is asked HERE, inside the claim and the op lock (#5189).
+	if err := m.killPruneFence(repoID, title, instance); err != nil {
+		return session.InstanceData{}, err
 	}
 	// The caller's own precondition, asked here and nowhere earlier: this line
 	// sits inside both the killsInFlight claim (registered above, before the
@@ -432,6 +435,15 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 // It performs no extra wait: local tmux and remote agent-server paths return
 // the observation their existing submit already made.
 func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, error) {
+	return m.sendPromptGuarded(req, nil)
+}
+
+// sendPromptGuarded is SendPromptWithStatus with an optional send guard. The
+// guard runs under the target's op lock on the instance the send is about to
+// reach and may refuse it; a sandbox-created task uses it to pin the delivery to
+// the session it authorized (#5571 W3.5). It is an argument, not a request
+// field: the request is wire data and stays comparable.
+func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *session.Instance, repoID string) error) (session.PromptDeliveryStatus, error) {
 	if req.Prompt == "" {
 		return session.PromptCouldNotConfirm, fmt.Errorf("prompt is required")
 	}
@@ -484,6 +496,11 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	}
 	if instance.IsTearingDown() {
 		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+	}
+	if guard != nil {
+		if gerr := guard(instance, repoID); gerr != nil {
+			return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("%w; %s", gerr, notDeliveredMarker))
+		}
 	}
 	releaseObservationFence := func() {}
 	releaseLimitFence := func() {}
@@ -557,37 +574,6 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	return status, nil
 }
 
-func promptTargetLivenessError(title string, liveness session.Liveness) error {
-	switch liveness {
-	case session.LiveLost:
-		return fmt.Errorf("target session %q is Lost; prompt not delivered; recover it first", title)
-	case session.LiveDead:
-		return fmt.Errorf("target session %q is Dead; prompt not delivered; recover it first", title)
-	case session.LiveArchived:
-		// Archived sessions have no live tmux to deliver into (#1529): without
-		// this case the prompt falls through to a confusing backend error. Point
-		// at the off-ramp, mirroring the TUI's interactiveGuard message. The
-		// restore command embeds the title, so it goes through shellsuggest — a title
-		// with spaces or shell metacharacters must not turn a copy-pasted
-		// `af sessions restore ...` into the wrong target or a second command, and a
-		// title beginning with "-" must not be parsed as a flag by af itself (#3432).
-		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (%s)", title, shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, title))
-	}
-	return nil
-}
-
-// taskPromptTargetLivenessError extends the ordinary target guard only for an
-// automated task delivery. LiveLimitReached is intentionally allowed by the
-// manual helper above: typing into a limit or credits picker can be the only way
-// for an operator to recover the lane. A scheduler has no such intent, and its
-// keystrokes can cancel an agent's own timed auto-continue.
-func taskPromptTargetLivenessError(title string, liveness session.Liveness, taskOrigin bool) error {
-	if taskOrigin && liveness == session.LiveLimitReached {
-		return fmt.Errorf("%w: target session %q is at a usage limit; prompt not delivered", errTargetLimitReached, title)
-	}
-	return promptTargetLivenessError(title, liveness)
-}
-
 // agentServerForStream resolves the /v1/sessions/{id}/stream target to its cached
 // agent-server for the WS PTY broker (#1592 Phase 2 PR5). The route multiplexes
 // two authoritative request shapes: TUI/CLI send {title}+repo_id, while Web sends
@@ -599,7 +585,22 @@ func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentS
 	return m.agentServerForStreamTarget(authoritativeStreamTarget(idOrTitle, repoID))
 }
 
+// agentServerForStreamTarget resolves a target to its agent-server without any
+// liveness gate: Preview and WorkspaceFacts measure rows an attach would refuse
+// (an Archived session's preview, a remote row whose endpoint recovered before
+// the next status reconciliation), so they must keep resolving them.
 func (m *Manager) agentServerForStreamTarget(target streamTarget) (session.AgentServer, *session.Instance, error) {
+	return m.resolveAgentServerForTarget(target, false)
+}
+
+// agentServerForAttachTarget is agentServerForStreamTarget for the attach paths
+// only (/stream and /stream-info): it additionally refuses a non-live target
+// before the WS upgrade, with the restore off-ramp.
+func (m *Manager) agentServerForAttachTarget(target streamTarget) (session.AgentServer, *session.Instance, error) {
+	return m.resolveAgentServerForTarget(target, true)
+}
+
+func (m *Manager) resolveAgentServerForTarget(target streamTarget, attach bool) (session.AgentServer, *session.Instance, error) {
 	instance, resolvedRepoID, title, err := m.resolveStreamTarget(target)
 	if err != nil {
 		return nil, nil, err
@@ -610,6 +611,18 @@ func (m *Manager) agentServerForStreamTarget(target streamTarget) (session.Agent
 			name = target.stableID
 		}
 		return nil, nil, fmt.Errorf("session %q not found", name)
+	}
+	// Attach only: refuse a non-live target with the same actionable off-ramp
+	// SendPrompt's promptTargetLivenessError returns (#1529). The stream path
+	// resolves any title-matching row with no liveness filter, so an Archived (or
+	// Lost/Dead) session would upgrade the WS and then fail deep at broker
+	// subscribe with a generic 500 whose body the client discards. Refusing here
+	// keeps the failure BEFORE websocket.Accept. streamTargetLivenessError keeps
+	// the refusal inside the 1 KiB the WS dial client reads.
+	if attach {
+		if err := streamTargetLivenessError(title, instance.GetLiveness()); err != nil {
+			return nil, nil, err
+		}
 	}
 	// Reject a new subscription while a kill is in flight for this session, the
 	// same killsInFlight gate SendPrompt checks (#1632). Streaming previously

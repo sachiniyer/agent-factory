@@ -72,6 +72,9 @@ type projectDeletedMsg struct {
 type projectAddedMsg struct {
 	root string
 	err  error
+	// byURL marks a git-URL registration (W9.10): its failure is reported to the
+	// user, since no optimistic switch already happened.
+	byURL bool
 }
 
 // projectReboundMsg reports completion of an async rebind-project (the picker's

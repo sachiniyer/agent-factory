@@ -146,7 +146,7 @@ test(`immediate restore ${surface} owns keyboard focus through progress, retry, 
     await page.locator('.af-filter-item[data-kind="archived"]').click();
     await page.locator(".af-rail-title").click();
     await expect(page.locator(".af-row-selected")).toHaveCount(0);
-    await page.getByRole("button", { name: "Session actions", exact: true }).click();
+    await page.getByRole("button", { name: "More session actions", exact: true }).click();
     actions = page.locator(".af-term-actions").getByRole("button", { name: `Restore session “${session.title}”`, exact: true });
     await actions.focus();
   } else {
@@ -175,7 +175,7 @@ test(`immediate restore ${surface} owns keyboard focus through progress, retry, 
   }
   await expect(dialog).toBeHidden();
   await expect(surface === "header-pointer"
-    ? page.getByRole("button", { name: "Session actions", exact: true }) : actions).toBeFocused();
+    ? page.getByRole("button", { name: "More session actions", exact: true }) : actions).toBeFocused();
 });
 
 }

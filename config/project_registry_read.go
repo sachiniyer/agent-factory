@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/hostlayout"
 )
 
 // The registry READ side (#1145 split): listings in their two strictness
@@ -31,7 +33,9 @@ func ListProjects() ([]Project, error) {
 	}
 	projects := make([]Project, 0, len(records))
 	for _, record := range records {
-		projects = append(projects, projectFromRecord(record))
+		p := projectFromRecord(record)
+		hostlayout.Default.Note(p.Root)
+		projects = append(projects, p)
 	}
 	return projects, nil
 }
@@ -83,7 +87,9 @@ func ListProjectsDetailed() ([]Project, []ProjectRecordFailure, []string, bool, 
 	}
 	projects := make([]Project, 0, len(records))
 	for _, record := range records {
-		projects = append(projects, projectFromRecord(record))
+		p := projectFromRecord(record)
+		hostlayout.Default.Note(p.Root)
+		projects = append(projects, p)
 	}
 	if len(projects) == 0 && len(failures) == 0 && len(strays) == 0 {
 		present, err = projectRegistryDirPresent(dir)

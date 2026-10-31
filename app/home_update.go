@@ -91,8 +91,22 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (#1461): applying its old-repo sessions/tasks would bleed the previous
 		// project into the new view. Still re-arm the pacing tick so polling of
 		// the now-active repo continues.
+		// The target's registry is not repo-scoped, so it is applied even when the
+		// rest of the message is dropped below.
+		m.remote.apply(msg.remote, msg.remoteSeq)
 		if msg.repoID != m.repoID {
 			return m, tickRefreshExternalCmd
+		}
+		if isRemoteTarget() {
+			// The poll's own task list was computed before any mutation this
+			// loop acknowledged meanwhile, so it is never what the pane applies:
+			// the cache is, and apply() has already refused to overwrite it with
+			// a read older than an acknowledged write. A failed read still shows
+			// as unavailable while the last good rows stay.
+			msg.tasks, msg.tasksErr = m.activeTasks(m.repoRoot, m.repoID)
+			if msg.tasksErr == nil {
+				msg.tasksErr = m.remote.tasksErr
+			}
 		}
 		tickStart := time.Now()
 		changed := m.handleSnapshot(msg)
@@ -134,6 +148,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.automations.TaskPane().TakeDiscardedDraftNotice(),
 				m.automations.TaskPane().TakeSettledDraftNotice(),
 				m.automations.TaskPane().TakeCrossRepoRetargetNotice(),
+				m.takePendingPaneNotice(),
 			}
 			combined := strings.TrimSpace(strings.Join(notices, " "))
 			if combined != "" {
@@ -168,8 +183,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
 	case tea.MouseMsg:
-		if m.recovery != nil {
-			m.recovery = nil
+		dismissed, endInput := m.beginUserInput()
+		defer endInput()
+		if dismissed {
 			return m, nil
 		}
 		// First-class mouse (#1024 R4, closes #1025): every event is
@@ -181,8 +197,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fully sufficient.
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
-		if m.recovery != nil {
-			m.recovery = nil
+		dismissed, endInput := m.beginUserInput()
+		defer endInput()
+		if dismissed {
 			return m, nil
 		}
 		return m.handleKeyPress(msg)
@@ -286,7 +303,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case handoffAccountsLoadedMsg:
 		return m.handleHandoffAccountsLoaded(msg)
 	case accountsLoadedMsg:
-		m.handleAccountsLoaded(msg)
+		return m, m.handleAccountsLoaded(msg)
+	case quotaLoadedMsg:
+		m.handleQuotaLoaded(msg)
 		return m, nil
 	case accountRegisteredMsg:
 		return m, m.handleAccountRegistered(msg)
@@ -555,7 +574,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		case "ctrl+r":
 			// Same swap for the backend hint (#1933).
 			name = keys.KeySetBackend
-			if m.pendingBackend != repoDefaultBackend {
+			if m.backendPicked() {
 				name = keys.KeyEditBackend
 			}
 		case "ctrl+o":

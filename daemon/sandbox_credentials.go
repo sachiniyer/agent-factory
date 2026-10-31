@@ -45,14 +45,15 @@ func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 	// window opened — the fence comparing equal on both sides while the config it
 	// guards was already stale (#3065 review).
 	fence := c.manager.sandboxTokens.invalidationCount()
-	grant, err := c.manager.mintSandboxCallbackFenced(fence, c.manager.Config(), c.sessionID)
+	grant, err := c.manager.mintSandboxCallbackFenced(fence, c.sessionID)
 	if err != nil {
 		return session.SandboxCredential{}, err
 	}
 	registry := &c.manager.sandboxTokens
 	return session.SandboxCredential{
-		URL:   grant.URL,
-		Token: grant.Token,
+		Token:  grant.Token,
+		Ref:    grant.Ref,
+		Socket: grant.Socket,
 		// Carries the fence with it, so whoever provisions can re-check it after —
 		// the create path and the replacement path both do, through the same
 		// helper. The first version handed back only url+token, and the fence it
@@ -61,9 +62,32 @@ func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 			if grant.stillValid(registry) {
 				return nil
 			}
-			return errSandboxCallbackInvalidated(grant.URL)
+			return errSandboxCallbackInvalidated(grant.Socket)
 		},
 	}, nil
+}
+
+// RestoreCallback re-registers the credential derived from ref for this session
+// (session.CallbackRestorer, #5571 W3.6). A restarted daemon has an empty
+// registry, but the sandbox still holds the secret it was given; the row
+// persisted only the non-secret ref, so deriving it again from the daemon's
+// runtime-identity key yields the same secret and nothing is re-delivered. A
+// missing key is an error, never a fresh key: a new key could only derive a
+// credential the sandbox does not hold. So is a callback endpoint that is not
+// bound.
+func (c *sandboxCredentials) RestoreCallback(ref string) error {
+	if c == nil || c.manager == nil {
+		return nil
+	}
+	// A credential is only worth registering while the endpoint its -R forward
+	// terminates on is bound (#5897): sshd accepts a forward to a socket nobody
+	// listens on, so without this the callback would be reported restored with
+	// every call dead. Refusing here surfaces the reason on the row (W3.1).
+	if _, err := c.manager.sandboxEndpointOrRefusal(); err != nil {
+		return err
+	}
+	_, err := c.manager.sandboxTokens.adopt(c.sessionID, ref, false)
+	return err
 }
 
 // Revoke drops this session's credential. Idempotent, and a no-op for a session

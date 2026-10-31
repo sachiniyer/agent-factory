@@ -16,6 +16,7 @@ import {
   createTab,
   errorText,
   fetchSessionSnapshot,
+  fetchEditorPortOrigin,
   fetchPreviewOrigin,
   handoffSession,
   isMutationCommittedError,
@@ -30,6 +31,8 @@ import {
   probeWebTab,
   reapConfigAssistant,
   registerProject,
+  registerProjectURL,
+  looksLikeGitURL,
   rebindProject,
   removeTask,
   renameTab,
@@ -150,6 +153,16 @@ for (const backend of ["local", "docker", "ssh", "hook"]) {
     assert.equal(cap.body.repo_path, "/repos/af");
   });
 }
+
+test("createSession sends a listed-host row as `host` and no backend", async () => {
+  // A host pick IS the ssh placement (#5571 W6.3): the daemon refuses a host paired
+  // with any other backend, so the web must send the name alone.
+  const cap = stubFetch();
+  await createSession(createInput({ backend: "host:box1" }), "tok");
+
+  assert.equal(cap.body.host, "box1");
+  assert.equal("backend" in cap.body, false, "the host: prefix is a UI encoding and must never reach the daemon as a backend");
+});
 
 test("createSession omits backend entirely when the user chose the repo default", async () => {
   // This is the subtle half. Sending "local" here would look equivalent and is
@@ -587,6 +600,24 @@ test("triggerTask / removeTask post the stable id", async () => {
   await removeTask(displayedTask(), "tok");
   assert.equal(cap.url, "/v1/RemoveTask");
   assert.equal(cap.body.id, "t-abc123");
+});
+
+test("triggerTask surfaces a committed run's warning instead of plain success (#5762)", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: { ok: true, code: "mutation_committed", warning: "session created, but its start could not be confirmed" },
+      error: null,
+    }),
+  });
+  const err = await triggerTask(displayedTask(), "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError, "a committed run must reject, not resolve as success");
+  assert.equal(isMutationCommittedError(err), true);
+  assert.match((err as ApiError).message, /start could not be confirmed/);
 });
 
 test("task mutations pin the displayed record's project binding (#3230)", async () => {
@@ -1091,6 +1122,67 @@ test("registerProject surfaces a non-git path error for inline display", async (
   assert.doesNotMatch(errorText(err), /Login failed/);
 });
 
+// --- registerProjectURL + looksLikeGitURL: add-project by git URL --------------
+//
+// W9.10 / project.add.url: the same RegisterProject RPC's `url` half — the
+// daemon clones on ITS host and registers the checkout. looksLikeGitURL is the
+// ROUTING mirror of internal/projectclone.LooksLikeURL (which picks `url` vs
+// `path` on the CLI and TUI); the verdict stays the daemon's Validate, which is
+// why file:// still routes as a URL — it must reach the refusal that owns it.
+
+test("registerProjectURL sends the url field, not path, to RegisterProject", async () => {
+  const cap = stubFetch();
+  await registerProjectURL("https://github.com/owner/repo", "tok");
+  assert.ok(cap.url.endsWith("/v1/RegisterProject"), `posted to ${cap.url}`);
+  assert.equal(cap.body.url, "https://github.com/owner/repo");
+  assert.equal(cap.body.path, undefined, "exactly one of path/url is given — sending both is refused");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("registerProjectURL returns the daemon's registered project and surfaces its refusal", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: {
+        ok: true,
+        project: {
+          id: "prj_00000000000000000000000000000000",
+          checkout_id: "chk_00000000000000000000000000000000",
+          root: "/daemon/projects/repo",
+          relative_root: ".",
+          path_exists: true,
+        },
+      },
+      error: null,
+    }),
+  });
+  const project = await registerProjectURL("git@github.com:owner/repo.git", "tok");
+  assert.equal(project.root, "/daemon/projects/repo");
+
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({ data: null, error: { message: "project git URL must not embed a password" } }),
+  });
+  const err = await registerProjectURL("https://u:p@x/o/r", "tok").then(() => null, (e: unknown) => e);
+  assert.ok(err instanceof ApiError);
+  assert.match(err.message, /must not embed a password/);
+});
+
+test("looksLikeGitURL mirrors the projectclone.LooksLikeURL routing table", () => {
+  // The Go table (internal/projectclone TestLooksLikeURLRoutesPathsAndURLs):
+  // every surface routes on the same rule so the same input cannot become a
+  // path on one surface and a clone on another.
+  for (const u of ["https://x/y", "file:///etc", "ssh://h/p", "git@github.com:o/r.git"]) {
+    assert.equal(looksLikeGitURL(u), true, u);
+  }
+  for (const p of [".", "./repo", "/srv/repo", "~/repo", "repo", "C:repo", "a:b"]) {
+    assert.equal(looksLikeGitURL(p), false, p);
+  }
+});
+
 // --- rebindProject: the web rebind affordance (project.rebind parity) ----------
 //
 // Same wire contract as registerProject: the path names a directory on the
@@ -1546,4 +1638,41 @@ test("handoffSession sends an operator-selected account with optional agent", as
  await handoffSession("id", "feature", "", "tok", "personal");
  assert.equal(cap.body.account, "personal");
  assert.equal(cap.body.to, "");
+});
+
+// --- fetchEditorPortOrigin (W5.2) -------------------------------------------
+
+test("fetchEditorPortOrigin POSTs with the bearer and returns origin and bootstrap URL", async () => {
+  const cap: { url: string; method?: string; auth?: string } = { url: "" };
+  (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    cap.url = url;
+    cap.method = init.method;
+    cap.auth = (init.headers as Record<string, string> | undefined)?.Authorization;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { origin: "https://box.ts.net:9100", bootstrap_url: "https://box.ts.net:9100/_af/editor-bootstrap?t=x" },
+        error: null,
+      }),
+    } as unknown as Response;
+  };
+  const got = await fetchEditorPortOrigin("sess 1", "tok");
+  assert.deepEqual(got, {
+    origin: "https://box.ts.net:9100",
+    bootstrapUrl: "https://box.ts.net:9100/_af/editor-bootstrap?t=x",
+  });
+  assert.equal(cap.url, "/v1/editor-origin?session=sess%201");
+  assert.equal(cap.method, "POST", "minting allocates, so it must not be a GET");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("fetchEditorPortOrigin is null when the feature is off or the call fails", async () => {
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> =>
+    ({ ok: false, status: 404, json: async () => ({ error: "off" }) }) as unknown as Response;
+  assert.equal(await fetchEditorPortOrigin("s", ""), null);
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => {
+    throw new Error("network");
+  };
+  assert.equal(await fetchEditorPortOrigin("s", ""), null);
 });

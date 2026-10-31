@@ -241,8 +241,10 @@ func accountLoginFinishedStatus(msg accountLoginStartedMsg) string {
 // releases the terminal, runs the child, and resumes — which is why this needs
 // neither the WS PTY stream nor a hand-restore of the terminal modes.
 func (m *home) enterAccountLogin(agent, name, sessionName, socketPath string) tea.Cmd {
+	m.tookTerminal.Store(true)
 	cmd := execAccountLoginAttach(sessionName, socketPath)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		bareAttachCleanup(cmd)
 		return accountLoginDoneMsg{agent: agent, name: name, err: err}
 	})
 }

@@ -35,6 +35,14 @@ import (
 //     branch, where the in-memory wiring is retained for the abort-to-Lost
 //     retry. The whole body runs under the i.mu.Lock it takes at the top, so
 //     the read is synchronized.
+//   - ReattachSandbox — reads i.backend twice, each time inside an explicit
+//     i.mu.Lock section: once to snapshot the backend it will probe, and once
+//     to verify the row still holds that backend immediately before binding.
+//   - RemoteRuntimeUnbound — reads i.backend under i.mu.RLock to ask whether a
+//     remote-workspace row's agent-server transport is currently bound
+//     (remoteClient == nil). The daemon's handoff-recovery gate (#5634) calls
+//     it to refuse retrying a mission on a client-less row before a readiness
+//     wait would burn against the deadRemoteAgentServer sentinel.
 //
 // owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
 // backend pointer its caller already read under i.mu as an argument and never
@@ -54,11 +62,15 @@ var backendReadersUnderLock = map[string]bool{
 	"AgentServer":                   true,
 	"agentServerLocked":             true,
 	"reprovisionRemote":             true,
+	"reprovisionRemoteWith":         true,
+	"reprovisionRemoteOpts":         true,
 	"resetRemoteRuntime":            true,
 	"clearDischargedRuntimeCleanup": true,
 	"toInstanceDataLocked":          true,
 	"PreviewTabSnapshotByID":        true,
 	"FromInstanceData":              true,
+	"ReattachSandbox":               true,
+	"RemoteRuntimeUnbound":          true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.

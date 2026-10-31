@@ -1,6 +1,7 @@
 package apiclient
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -17,14 +18,14 @@ import (
 // ui/termpane, the attach proxy — is byte-identical to the local path; only the
 // dialer, the base URL, and the bearer token differ.
 //
-// There is NO TLS. af terminates none of its own: the daemon serves plaintext
-// HTTP, and a user who needs transport encryption terminates it at a reverse
-// proxy (nginx/caddy) or runs over a private network (Tailscale/VPN/SSH tunnel).
-// The optional bearer token authenticates the surface and now travels over the
-// plaintext connection, so it must not be exposed on an untrusted network
-// without one of those wrappers. A wss:// or https:// --daemon-url is rejected
-// with a clear, actionable error (parseDaemonURL) — the migration signal for
-// users who pinned the old TLS listener.
+// The daemon itself serves plaintext HTTP and terminates no TLS. A client may
+// still reach it over TLS when something in front of it does: `tailscale serve`,
+// a reverse proxy, a cloud load balancer. `https://` and `wss://` targets are
+// therefore accepted (W9.5) and verified against the SYSTEM root CAs — the
+// transport keeps Go's default TLS config with a TLS 1.2 floor and there is, by
+// design, no flag that skips verification. A plain `http://` target still sends
+// the optional bearer token in the clear, so it belongs on a private network
+// (Tailscale/VPN/SSH tunnel) or behind such a TLS front.
 
 // Timeouts bounding a remote round-trip. Unlike the local unix socket (a quarter
 // second — it is either there or not), a remote target crosses a real network and
@@ -72,18 +73,28 @@ var (
 	remoteRequestTimeout     = 5 * time.Minute
 )
 
-// NewRemote returns a Client that dials the remote daemon at daemonURL over
-// plain HTTP/WS, threading `token` on every REST call and WS handshake. daemonURL
-// is an HTTP base URL — `http://host:port` or `ws://host:port` (the two are
-// equivalent; both select the same plaintext transport and only the authority is
-// used). A `wss://`/`https://` URL is rejected with an actionable HTTP-only error.
+// NewRemote returns a Client that dials the remote daemon at daemonURL,
+// threading `token` on every REST call and WS handshake. daemonURL is a base URL:
+// `http://host:port` / `ws://host:port` (plaintext, equivalent) or
+// `https://host:port` / `wss://host:port` (TLS, equivalent, verified against the
+// system CAs). Only the scheme and authority are used.
 func NewRemote(daemonURL, token string) (*Client, error) {
+	if socket, ok, err := parseUnixDaemonURL(daemonURL); err != nil {
+		return nil, err
+	} else if ok {
+		return newRemoteUnix(socket, token), nil
+	}
 	httpBase, wsBase, err := parseDaemonURL(daemonURL)
 	if err != nil {
 		return nil, err
 	}
 	dialer := &net.Dialer{Timeout: remoteDialTimeout}
-	transport := &http.Transport{DialContext: dialer.DialContext}
+	// TLSClientConfig is set only to pin a floor; RootCAs stays nil so the system
+	// pool verifies the peer, and InsecureSkipVerify is never set.
+	transport := &http.Transport{
+		DialContext:     dialer.DialContext,
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
 	return &Client{
 		httpClient: &http.Client{
 			// No http.Client.Timeout: it fires on the whole request lifetime, which
@@ -102,12 +113,11 @@ func NewRemote(daemonURL, token string) (*Client, error) {
 }
 
 // parseDaemonURL validates a remote daemon base URL and derives the REST
-// (http://host:port) and WS (ws://host:port) authorities from it. It accepts the
-// plaintext schemes `http` and `ws` interchangeably (a daemon serves REST and WS
-// on the same HTTP listener) and rejects the TLS schemes `wss`/`https` with a
-// clear HTTP-only error — af removed TLS, so a client pointed at a wss:// URL is
-// almost certainly a stale config from the old pinned-TLS listener. Only the
-// scheme and authority are used; any path or query on the URL is ignored.
+// (http[s]://host:port) and WS (ws[s]://host:port) authorities from it. The
+// plaintext schemes `http`/`ws` are interchangeable, as are the TLS schemes
+// `https`/`wss` (a daemon serves REST and WS on the same listener, so a TLS front
+// does too). Only the scheme family and authority are used; any path or query on
+// the URL is ignored.
 //
 // The host check tests u.Hostname(), not u.Host: net/url parses `http://:8443`
 // into a NON-empty Host (":8443") with an empty Hostname, so a u.Host check
@@ -120,19 +130,20 @@ func parseDaemonURL(daemonURL string) (httpBase, wsBase string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("invalid --daemon-url %q: %w", daemonURL, err)
 	}
+	secure := false
 	switch strings.ToLower(u.Scheme) {
 	case "http", "ws":
 	case "https", "wss":
-		return "", "", fmt.Errorf("--daemon-url %q uses a TLS scheme, but the daemon is HTTP-only; "+
-			"use http:// (or ws://) instead — TLS was removed. If you need transport encryption, "+
-			"terminate TLS at your own reverse proxy (nginx/caddy) or use a private network "+
-			"(Tailscale/VPN/SSH tunnel).", daemonURL)
+		secure = true
 	default:
-		return "", "", fmt.Errorf("--daemon-url %q must be an http:// or ws:// URL", daemonURL)
+		return "", "", fmt.Errorf("--daemon-url %q must be an http://, ws://, https:// or wss:// URL", daemonURL)
 	}
 	if u.Hostname() == "" {
 		return "", "", fmt.Errorf("invalid --daemon-url %q: missing host; use http://HOST:PORT "+
 			"(if this URL came from a variable, it likely expanded empty)", daemonURL)
+	}
+	if secure {
+		return "https://" + u.Host, "wss://" + u.Host, nil
 	}
 	return "http://" + u.Host, "ws://" + u.Host, nil
 }

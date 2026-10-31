@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -116,16 +117,38 @@ func TestCleanupClaimedRepoGone_FinalizingGenerationChangeRetainsRecord(t *testi
 	}
 }
 
+// awaitOrDump waits for ch and, instead of hanging the package until the go test
+// timeout, fails fast with every goroutine's stack (#6128: the only evidence of
+// the two earlier hangs was the test goroutine parked in a receive).
+func awaitOrDump(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(deadlineObservationBudget):
+		buf := make([]byte, 1<<20)
+		buf = buf[:runtime.Stack(buf, true)]
+		t.Fatalf("timed out after %s waiting for %s; goroutines:\n%s", deadlineObservationBudget, what, buf)
+	}
+}
+
+// The cleanup deadline is fired by the test once the worker is parked inside the
+// delete, not by a 25ms wall-clock timer (#6128). The timer covers the worker's
+// whole run, including RevalidateRelocationClaim and the retained-tree step before
+// the delete; on a loaded runner it expired first, the stall record then made the
+// worker's finalization checkpoint refuse (correctly), the stub returned before
+// close(started), and the test parked on <-started forever.
 func TestCleanupClaimedRepoGone_LateLiveSuccessRetainsFinalizationFence(t *testing.T) {
 	gw, claim, worktree := repoGoneCleanupClaim(t)
 	previousRemove := repoGoneRemoveDirectory
-	previousTimeout := repoGoneCleanupTimeout
+	previousDeadline := repoGoneCleanupDeadline
 	started := make(chan struct{})
 	release := make(chan struct{})
 	workerFinished := make(chan struct{})
-	repoGoneCleanupTimeout = 25 * time.Millisecond
-	repoGoneRemoveDirectory = func(path string, _ pathIdentity, _ string, checkpoint func(string) error) error {
-		defer close(workerFinished)
+	fire := make(chan time.Time)
+	var workerErr error
+	repoGoneCleanupDeadline = func() (<-chan time.Time, func()) { return fire, func() {} }
+	repoGoneRemoveDirectory = func(path string, _ pathIdentity, _ string, checkpoint func(string) error) (err error) {
+		defer func() { workerErr = err; close(workerFinished) }()
 		secured := path + "-secured"
 		if err := os.Rename(path, secured); err != nil {
 			return err
@@ -139,7 +162,7 @@ func TestCleanupClaimedRepoGone_LateLiveSuccessRetainsFinalizationFence(t *testi
 	}
 	t.Cleanup(func() {
 		repoGoneRemoveDirectory = previousRemove
-		repoGoneCleanupTimeout = previousTimeout
+		repoGoneCleanupDeadline = previousDeadline
 	})
 
 	type result struct {
@@ -151,15 +174,33 @@ func TestCleanupClaimedRepoGone_LateLiveSuccessRetainsFinalizationFence(t *testi
 		state, err := gw.CleanupClaimedRepoGone(claim)
 		done <- result{state: state, err: err}
 	}()
-	<-started
-	observed := <-done
+	select {
+	case <-started:
+	case <-workerFinished:
+		t.Fatalf("the delete worker ended before it was parked: %v", workerErr)
+	case <-time.After(deadlineObservationBudget):
+		close(release)
+		buf := make([]byte, 1<<20)
+		buf = buf[:runtime.Stack(buf, true)]
+		t.Fatalf("the delete worker never reached its parked step; goroutines:\n%s", buf)
+	}
+	fire <- time.Now()
+	var observed result
+	select {
+	case observed = <-done:
+	case <-time.After(deadlineObservationBudget):
+		close(release)
+		buf := make([]byte, 1<<20)
+		buf = buf[:runtime.Stack(buf, true)]
+		t.Fatalf("cleanup did not return after its deadline fired; goroutines:\n%s", buf)
+	}
 	if observed.state != CleanupStateUnknown || !errors.Is(observed.err, context.DeadlineExceeded) {
 		close(release)
-		<-workerFinished
+		awaitOrDump(t, workerFinished, "the delete worker")
 		t.Fatalf("live cleanup did not return at its deadline: state=%v err=%v", observed.state, observed.err)
 	}
 	close(release)
-	<-workerFinished
+	awaitOrDump(t, workerFinished, "the delete worker to finish")
 
 	recovery, retained := gw.GetRelocationRecovery()
 	if !retained || recovery.State != RelocationRecoveryCleanupFinalizing {

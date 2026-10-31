@@ -432,3 +432,37 @@ func (s *TaskPane) IsCreating() bool {
 func (s *TaskPane) IsTextFieldFocused() bool {
 	return (s.editing || s.creating) && s.textFocusStop()
 }
+
+// FocusedField names the form stop that has focus ("name", "path", "host", …),
+// or "" outside the form. It exists so a caller drives the form by field
+// identity instead of counting Tab presses, which every new field breaks.
+func (s *TaskPane) FocusedField() string {
+	if !(s.editing || s.creating) {
+		return ""
+	}
+	switch s.focusIndex {
+	case taskFocusName:
+		return "name"
+	case taskFocusTrigger:
+		return "trigger"
+	case taskFocusTriggerValue:
+		return "trigger_value"
+	case taskFocusPrompt:
+		return "prompt"
+	case taskFocusTarget:
+		return "target"
+	case taskFocusOnComplete:
+		return "on_complete"
+	case taskFocusMaxRuns:
+		return "max_runs"
+	case taskFocusHost:
+		return "host"
+	case taskFocusPath:
+		return "path"
+	case taskFocusProgram:
+		return "program"
+	case taskFocusSave:
+		return "save"
+	}
+	return ""
+}

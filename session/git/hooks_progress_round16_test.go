@@ -215,7 +215,7 @@ func TestTerminalHookAbandonmentSharesRestoreBudget(t *testing.T) {
 	}
 	started := time.Now()
 	AdoptRunningHooks(worktrees)
-	if elapsed := time.Since(started); elapsed > 3*relocationIdentityTimeout {
+	if elapsed := time.Since(started); elapsed > 3*relocationIdentityTimeout.Load() {
 		t.Fatalf("terminal abandonment consumed serial restore budgets: %s", elapsed)
 	}
 	for _, candidate := range candidates {
@@ -275,7 +275,7 @@ func TestHookProgressPruneBoundsReceiptMetadata(t *testing.T) {
 	})
 	started := time.Now()
 	pruneHookProgress(filepath.Dir(path), time.Now().Add(48*time.Hour))
-	if elapsed := time.Since(started); elapsed > 3*relocationIdentityTimeout {
+	if elapsed := time.Since(started); elapsed > 3*relocationIdentityTimeout.Load() {
 		t.Fatalf("receipt metadata stalled pruning for %s", elapsed)
 	}
 	for _, retained := range []string{path, p.Directory} {

@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/afhome"
@@ -24,6 +26,7 @@ const (
 	dedicatedServerExecMarker = "__af-tmux-server"
 	dedicatedServerLogEnv     = "AF_TMUX_SERVER_LOG"
 	dedicatedServerLogName    = "tmux-server.log"
+	dedicatedServerUnitEnv    = "AF_TMUX_SERVER_UNIT"
 	serverProbeTimeout        = 250 * time.Millisecond
 	tmuxVersionProbeTimeout   = 2 * time.Second
 	serverStartupTimeout      = 2 * time.Second
@@ -127,7 +130,14 @@ func ensureDedicatedServer(home string) error {
 		_ = launchLog.Close()
 		return fmt.Errorf("secure tmux server launch log: %w", err)
 	}
-	cmd := dedicatedServerScopeCommand(logPath)
+	// A fresh unit name per launch, never the deterministic one (#6180). A scope
+	// stays loaded for as long as ANY process remains in its cgroup, so after the
+	// server died a leftover process kept the old name taken and the next
+	// systemd-run failed with "Unit … was already loaded or has a fragment file".
+	// Stopping the old unit instead would kill those leftovers (measured: stop
+	// kills the whole control group), which is not ours to do.
+	unit := newDedicatedServerUnit()
+	cmd := dedicatedServerScopeCommand(logPath, unit)
 	cmd.Stdout = launchLog
 	cmd.Stderr = launchLog
 	if err := cmd.Start(); err != nil {
@@ -144,6 +154,7 @@ func ensureDedicatedServer(home string) error {
 	defer ticker.Stop()
 	for {
 		if tmuxServerRunning() {
+			dedicatedServerReady(home, unit)
 			return nil
 		}
 		select {
@@ -154,6 +165,7 @@ func ensureDedicatedServer(home string) error {
 				// launcher failed. Prefer the observed healthy server to a false
 				// startup refusal.
 				if tmuxServerRunning() {
+					dedicatedServerReady(home, unit)
 					return nil
 				}
 				return fmt.Errorf("dedicated tmux server scope exited before readiness: %w", launchErr)
@@ -162,7 +174,7 @@ func ensureDedicatedServer(home string) error {
 		case <-deadline.C:
 			timeoutErr := fmt.Errorf("dedicated tmux server did not become ready within %s", serverStartupTimeout)
 			if done != nil {
-				if stopErr := stopAndReapDedicatedScope(cmd, done); stopErr != nil {
+				if stopErr := stopAndReapDedicatedScope(cmd, unit, done); stopErr != nil {
 					return fmt.Errorf("%w (failed to stop its scope: %v)", timeoutErr, stopErr)
 				}
 			}
@@ -171,13 +183,13 @@ func ensureDedicatedServer(home string) error {
 	}
 }
 
-func stopAndReapDedicatedScope(cmd *exec.Cmd, done <-chan error) error {
+func stopAndReapDedicatedScope(cmd *exec.Cmd, unit string, done <-chan error) error {
 	// Killing only the systemd-run client can strand its child in the transient
 	// scope. Target the exact deterministic unit so every process in the failed
 	// bootstrap attempt is killed before the fail-open session launch proceeds.
 	ctx, cancel := context.WithTimeout(context.Background(), serverScopeKillTimeout)
 	defer cancel()
-	unit := dedicatedServerScopeName() + ".scope"
+	unit += ".scope"
 	out, scopeErr := exec.CommandContext(
 		ctx, "systemctl", "--user", "kill", "--kill-who=all", "--signal=KILL", unit,
 	).CombinedOutput()
@@ -242,14 +254,14 @@ func tmuxSupportsNoStart() (bool, error) {
 	return noStartProbeSupports, nil
 }
 
-func dedicatedServerScopeCommand(logPath string) *exec.Cmd {
+func dedicatedServerScopeCommand(logPath, unit string) *exec.Cmd {
 	// /proc/<pid>/exe avoids systemd-run's ${NAME} argv expansion without
 	// requiring a new-systemd-only flag. The daemon remains alive throughout
 	// this readiness barrier, so the proc link is stable until the helper execs.
 	executable := fmt.Sprintf("/proc/%d/exe", os.Getpid())
 	args := []string{
 		"--user", "--scope", "--quiet", "--collect",
-		"--unit=" + dedicatedServerScopeName(),
+		"--unit=" + unit,
 		"--property=KillMode=control-group",
 		"--", executable, dedicatedServerExecMarker,
 	}
@@ -258,24 +270,28 @@ func dedicatedServerScopeCommand(logPath string) *exec.Cmd {
 	// server must not snapshot the daemon's ambient secrets into its global
 	// environment. Later session clients import only their approved names.
 	serverEnv := sessionenv.Filter(os.Environ(), "", nil)
-	cmd.Env = replaceEnvironment(serverEnv, dedicatedServerLogEnv, logPath)
+	cmd.Env = replaceEnvironment(replaceEnvironment(serverEnv, dedicatedServerLogEnv, logPath), dedicatedServerUnitEnv, unit)
 	return cmd
 }
 
+// dedicatedServerScopeName is the stable per-socket prefix of every dedicated
+// server unit; newDedicatedServerUnit appends a per-launch suffix.
 func dedicatedServerScopeName() string {
-	identity := os.Getenv("TMUX")
-	if socket, _, ok := strings.Cut(identity, ","); ok {
-		identity = socket
-	}
-	if identity == "" {
-		base := os.Getenv("TMUX_TMPDIR")
-		if base == "" {
-			base = "/tmp"
-		}
-		identity = fmt.Sprintf("%s/tmux-%d/default", base, os.Getuid())
-	}
-	sum := sha256.Sum256([]byte(identity))
+	sum := sha256.Sum256([]byte(defaultSocketPath()))
 	return fmt.Sprintf("agent-factory-tmux-server-%x", sum[:6])
+}
+
+// newDedicatedServerUnit names one launch's scope. Unique per launch so a unit a
+// previous server left loaded can never block this one (#6180).
+func newDedicatedServerUnit() string {
+	return dedicatedServerScopeName() + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+// dedicatedServerReady records that sessions are hosted by the dedicated server.
+func dedicatedServerReady(home, unit string) {
+	socket := defaultSocketPath()
+	log.InfoLog.Printf("dedicated tmux server is running in systemd unit %s.scope on socket %s", unit, socket)
+	recordServerState(home, ServerState{Mode: ServerModeDedicated, Socket: socket, Unit: unit, At: time.Now()})
 }
 
 func replaceEnvironment(environ []string, name, value string) []string {
@@ -329,11 +345,14 @@ func runDedicatedServer() error {
 	defer writer.Close()
 	_, _ = fmt.Fprintf(writer, "%s af tmux server starting in foreground\n", time.Now().Format(time.RFC3339))
 
+	unit := os.Getenv(dedicatedServerUnitEnv)
 	cmd := exec.Command("tmux", "-D")
-	cmd.Env = withoutEnvironment(os.Environ(), dedicatedServerLogEnv)
+	cmd.Env = withoutEnvironment(withoutEnvironment(os.Environ(), dedicatedServerLogEnv), dedicatedServerUnitEnv)
 	cmd.Stdout = writer
 	cmd.Stderr = writer
+	started := time.Now()
 	err = cmd.Run()
+	recordServerDeath(filepath.Dir(logPath), unit, started, err)
 	if err != nil {
 		_, _ = fmt.Fprintf(writer, "%s af tmux server exited: %v\n", time.Now().Format(time.RFC3339), err)
 		return err
@@ -342,11 +361,36 @@ func runDedicatedServer() error {
 	return nil
 }
 
+// recordServerDeath leaves the marker #5429 asked for: what this wrapper saw when
+// tmux ended. The cause of a signal's sender is not knowable here; the exit code
+// or signal, the uptime and the unit narrow it, and the server log carries the
+// rest.
+func recordServerDeath(home, unit string, started time.Time, runErr error) {
+	death := ServerDeath{
+		At:            time.Now(),
+		Unit:          unit,
+		Socket:        defaultSocketPath(),
+		UptimeSeconds: time.Since(started).Seconds(),
+	}
+	if runErr != nil {
+		death.Error = runErr.Error()
+		death.ExitCode = -1
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			death.ExitCode = exitErr.ExitCode()
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				death.Signal = status.Signal().String()
+			}
+		}
+	}
+	_ = writeJSONFile(filepath.Join(home, serverDeathFileName), death)
+}
+
 func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd, bool) {
 	if !systemdunit.RunningDaemonProcess() {
 		return exec.Command("tmux", args...), false
 	}
-	if _, configured := configuredDaemonServerHome(); configured {
+	if home, configured := configuredDaemonServerHome(); configured {
 		serverReady := serverErr == nil || tmuxServerRunning()
 		if serverReady {
 			supportsNoStart, probeErr := tmuxSupportsNoStart()
@@ -361,7 +405,9 @@ func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd
 				log.WarningLog.Printf("tmux client lacks a verified -N no-autostart flag; using a per-session systemd scope compatibility fallback")
 			})
 		} else {
-			log.WarningLog.Printf("dedicated tmux server launch failed; falling back to a per-session systemd scope: %v", serverErr)
+			socket := defaultSocketPath()
+			log.WarningLog.Printf("dedicated tmux server launch failed; falling back to a per-session systemd scope on socket %s: %v", socket, serverErr)
+			recordServerState(home, ServerState{Mode: ServerModeFallback, Socket: socket, Reason: serverErr.Error(), At: time.Now()})
 		}
 	}
 

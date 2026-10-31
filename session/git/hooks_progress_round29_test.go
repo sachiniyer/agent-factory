@@ -73,7 +73,7 @@ func TestHookProgressRetirementBoundsProgressLockOpen(t *testing.T) {
 		if result.acquired || !errors.Is(result.err, config.ErrLockTimeout) {
 			t.Fatalf("teardown lock result = acquired %v, err %v; want bounded timeout", result.acquired, result.err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		t.Fatal("teardown progress-lock open exceeded its bound")
 	}
 	releaseOnce.Do(func() { close(release) })

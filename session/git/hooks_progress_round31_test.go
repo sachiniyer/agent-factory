@@ -66,7 +66,7 @@ func TestHookProgressTimedOutPreparationUsesCapturedIO(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("preparation error = %v, want deadline", err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		t.Fatal("journal preparation did not return at its bound")
 	}
 

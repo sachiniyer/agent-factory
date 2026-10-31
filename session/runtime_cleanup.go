@@ -52,6 +52,31 @@ type SandboxRuntimeCleanupData struct {
 	RemoteAddr         string `json:"remote_addr,omitempty"`
 	AgentServerVersion string `json:"agent_server_version,omitempty"`
 	TokenRef           string `json:"token_ref,omitempty"`
+	// LaunchScript is the command that started the agent-server (W1.4), so a
+	// crashed one can be relaunched after proof it is dead. No secret in it: the
+	// token and callback credential live in the 0600 env files it sources.
+	LaunchScript string `json:"launch_script,omitempty"`
+	// AdoptPending records that a restarted agent-server is running but has not
+	// yet adopted its surviving workspace (W1.4). A reattach that finds the
+	// server responsive finishes the adoption instead of binding a server that
+	// holds no session.
+	AdoptPending bool `json:"adopt_pending,omitempty"`
+	// CallbackRef and CallbackReverse are the callback half of the runtime
+	// identity (#5571 W3.6): the reference the sandbox's callback credential
+	// derives from and the `-R` spec its forward uses. Neither is a secret — the
+	// credential is re-derived from the daemon's key — and both are absent when no
+	// callback was granted or the row predates this field.
+	CallbackRef     string `json:"callback_ref,omitempty"`
+	CallbackReverse string `json:"callback_reverse,omitempty"`
+	// LaunchUnconfirmed is set when an agent-server was launched but its pid was
+	// never obtained (#5571 W8.6): reap then refuses to remove the directory without
+	// stopping a server that may still run, across a daemon restart too.
+	LaunchUnconfirmed bool `json:"launch_unconfirmed,omitempty"`
+	// AccountSyncHost is the listed host (global `hosts`) that licensed the
+	// session's synced account (W7.3), recorded only when one was synced. A
+	// reattach after a daemon restart rebuilds the account workspace from it and
+	// the row's account (#5948); empty on rows with no account.
+	AccountSyncHost string `json:"account_sync_host,omitempty"`
 }
 
 type DockerRuntimeCleanupData struct {
@@ -116,6 +141,19 @@ type SSHRuntimeCleanupData struct {
 	RemoteAddr         string `json:"remote_addr,omitempty"`
 	AgentServerVersion string `json:"agent_server_version,omitempty"`
 	TokenRef           string `json:"token_ref,omitempty"`
+	LaunchScript       string `json:"launch_script,omitempty"`
+	AdoptPending       bool   `json:"adopt_pending,omitempty"`
+	// CallbackRef and CallbackReverse are the callback half of the runtime
+	// identity (#5571 W3.6): the reference the sandbox's callback credential
+	// derives from and the `-R` spec its forward uses. Neither is a secret — the
+	// credential is re-derived from the daemon's key — and both are absent when no
+	// callback was granted or the row predates this field.
+	CallbackRef     string `json:"callback_ref,omitempty"`
+	CallbackReverse string `json:"callback_reverse,omitempty"`
+	// LaunchUnconfirmed is set when an agent-server was launched but its pid was
+	// never obtained (#5571 W8.6): reap then refuses to remove the directory without
+	// stopping a server that may still run, across a daemon restart too.
+	LaunchUnconfirmed bool `json:"launch_unconfirmed,omitempty"`
 }
 
 type HookRuntimeCleanupData struct {
@@ -257,6 +295,13 @@ func (b *HookBackend) clearRuntimeCleanupData() {
 // dial, run docker, or invoke hook scripts while loading storage; the returned
 // closure performs that I/O later when finishUserKill processes the tombstone.
 func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) (Backend, func() error, error) {
+	return restoreRuntimeCleanupWithAccount(title, backendType, data, restoredAccount{})
+}
+
+// restoreRuntimeCleanupWithAccount is restoreRuntimeCleanup for a row that
+// carries a synced account: the sandbox's account workspace is rebuilt from the
+// row (#5948).
+func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCleanupData, account restoredAccount) (Backend, func() error, error) {
 	if data == nil {
 		return nil, nil, fmt.Errorf("no runtime cleanup handle was stored")
 	}
@@ -337,6 +382,10 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		p.remoteAddr = data.SSH.RemoteAddr
 		p.agentServerVersion = data.SSH.AgentServerVersion
 		p.tokenRef = data.SSH.TokenRef
+		p.launchScript, p.adoptPending = data.SSH.LaunchScript, data.SSH.AdoptPending
+		p.restoreCallbackIdentity(data.SSH.CallbackRef, data.SSH.CallbackReverse)
+		p.launchAttempted = data.SSH.LaunchUnconfirmed
+		p.restoreAccountWorkspace(account, data.SSH.HostName)
 		// The accept-new store is prepared inside each ATTEMPT, never here: this
 		// function composes a closure while persisted instances are being loaded,
 		// and a transiently unwritable AF home must not be captured as a permanently
@@ -373,7 +422,12 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 			remoteAddr:         data.Sandbox.RemoteAddr,
 			agentServerVersion: data.Sandbox.AgentServerVersion,
 			tokenRef:           data.Sandbox.TokenRef,
+			launchScript:       data.Sandbox.LaunchScript,
+			adoptPending:       data.Sandbox.AdoptPending,
 		}
+		p.restoreCallbackIdentity(data.Sandbox.CallbackRef, data.Sandbox.CallbackReverse)
+		p.launchAttempted = data.Sandbox.LaunchUnconfirmed
+		p.restoreAccountWorkspace(account, data.Sandbox.AccountSyncHost)
 		teardown := p.reap
 		return &sandboxBackend{
 			provisioner: p,

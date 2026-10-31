@@ -161,7 +161,7 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 		}
 		return m, m.handleError(fmt.Errorf("failed to delete project '%s': %w", msg.name, msg.err))
 	}
-	if m.appConfig != nil {
+	if m.appConfig != nil && !isRemoteTarget() { // root_agents is this machine's config
 		for path := range m.appConfig.RootAgents {
 			if repo, err := config.RepoFromPath(config.ExpandTilde(path)); err == nil && repo.ID == msg.repoID {
 				delete(m.appConfig.RootAgents, path)

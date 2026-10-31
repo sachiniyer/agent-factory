@@ -307,6 +307,18 @@ type Tab struct {
 	// It is what lets restore treat "session gone" as finished evidence
 	// instead of a command to re-execute.
 	Exit *TabExit
+	// gen is this incarnation's identity (see TabData.Gen). Not persisted: it
+	// scopes a live process, and a restart that loses the process loses it too.
+	gen string
+	// sandboxTmux is the tmux session the sandbox spawned for this off-box tab,
+	// as the sandbox reported it at create. The daemon holds no tmux binding for
+	// such a tab (tmux stays nil); the name is what a restarted agent-server is
+	// handed to rebind the survivor (W1.4, #6162). Persisted as TabData.SandboxTmux.
+	sandboxTmux string
+	// restoreState is where an off-box tab stands after an agent-server restart:
+	// restored (zero), confirmed gone, or unknown (see restore_tabs.go).
+	// Persisted as TabData.RestoreState.
+	restoreState TabRestoreState
 	// tmux is the tab's tmux session. nil until the instance is started, and
 	// always nil for remote/hook-backed instances, which drive their agent
 	// session through hook commands rather than a local tmux session.
@@ -348,7 +360,7 @@ func newAgentTab(ts *tmux.TmuxSession) *Tab {
 // (#1100); the only automatic use is setupTabs replacing a persisted shell tab
 // that restored dead (#991).
 func newShellTab(ts *tmux.TmuxSession) *Tab {
-	return &Tab{ID: newTabID(), Name: shellTabName, Kind: TabKindShell, tmux: ts}
+	return &Tab{ID: newTabID(), Name: shellTabName, Kind: TabKindShell, tmux: ts, gen: newTabID()}
 }
 
 // newRemoteAgentTab returns the Agent tab for a remote/hook-backed instance
@@ -723,6 +735,9 @@ func (i *Instance) appendPendingMetadataTabsLocked() {
 	pending := i.pendingMetadataTabs
 	i.pendingMetadataTabs = nil
 	for _, td := range pending {
+		if isRestorableRow(td) {
+			continue // a dead sandbox's terminal: only a reattach hands it back (#6162)
+		}
 		id := td.ID
 		if id == "" {
 			// Rollforward, as restoreLocalTabs does: a row persisted before #1738 has

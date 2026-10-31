@@ -300,6 +300,41 @@ func (s *Store) AddDoc(slug, name string, by Committer) (string, string, error) 
 	return docFile(n), commit, err
 }
 
+// RemoveDoc deletes doc from proposal slug and commits the deletion, so the doc
+// stays in the store's history. It returns the doc file name and the new commit.
+func (s *Store) RemoveDoc(slug, doc string, by Committer) (string, string, error) {
+	if err := by.validate(); err != nil {
+		return "", "", err
+	}
+	var file, commit string
+	err := s.withLock(func() error {
+		_, f, err := s.docPath(slug, doc)
+		if err != nil {
+			return err
+		}
+		file = f
+		if _, err := s.snapshot(); err != nil {
+			return err
+		}
+		old, err := s.readDoc(slug, file)
+		if err != nil {
+			return err
+		}
+		if err := s.removeDoc(slug, file); err != nil {
+			return err
+		}
+		commit, err = s.commitPaths("remove "+slug+"/"+file, by.Author, by.SessionID, slug+"/"+file)
+		if err != nil {
+			// Put the doc back so a retry is not snapshotted as an external delete.
+			if rerr := s.createDoc(slug, file, old); rerr != nil {
+				return fmt.Errorf("%w (and failed to restore %s: %v)", err, file, rerr)
+			}
+		}
+		return err
+	})
+	return file, commit, err
+}
+
 // docPath validates slug and doc and returns the doc's absolute path and file
 // name. The doc must be a regular file reached without following a link.
 func (s *Store) docPath(slug, doc string) (string, string, error) {

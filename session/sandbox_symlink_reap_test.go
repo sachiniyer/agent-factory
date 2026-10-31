@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
+
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,9 +56,7 @@ func localRunCommandFn() func(time.Duration, string, io.Reader, bool) ([]byte, e
 // is reaped on test completion if still alive.
 func startAgentServerLikeProcess(t *testing.T, argv0 string) *exec.Cmd {
 	t.Helper()
-	sleep, err := exec.LookPath("sleep")
-	require.NoError(t, err, "sleep is needed to hold a live process for the identity-kill")
-	cmd := exec.Command(sleep, "30")
+	cmd := exec.Command(sleeper.Path(t), "30")
 	cmd.Args[0] = argv0
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {
@@ -313,4 +313,93 @@ func TestSandboxReapScriptExpectedUsesResolvedSessionDir(t *testing.T) {
 			"agent-server carries as argv[0]")
 	assert.NotContains(t, script, "/root/.af-sessions/",
 		"and must NOT carry the unresolved mktemp spelling, or the identity check mismatches")
+}
+
+// W1.7: a SIGTERM the agent-server takes ~1s to honour must not be escalated to
+// SIGKILL after 0.3s — the process should exit on its own terms.
+func TestRemotePIDIdentityKillScriptGivesSlowSIGTERMTimeToTakeEffect(t *testing.T) {
+	resolvedAfPath := filepath.Join(testguard.CanonicalTempDir(t), "session", "af")
+	require.NoError(t, os.MkdirAll(filepath.Dir(resolvedAfPath), 0o755))
+
+	proc := exec.Command("/bin/sh", "-c", `trap 'sleep 1; exit 0' TERM; while :; do sleep 0.1; done`)
+	proc.Args[0] = resolvedAfPath
+	require.NoError(t, proc.Start())
+	waited := make(chan error, 1)
+	go func() { waited <- proc.Wait() }() // reap promptly so the exit is not a zombie
+	t.Cleanup(func() { _ = proc.Process.Kill() })
+	require.True(t, pidAlive(proc.Process.Pid))
+
+	out, err := exec.Command("sh", "-c", remotePIDIdentityKillScript(strconv.Itoa(proc.Process.Pid), resolvedAfPath, "")).CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	select {
+	case werr := <-waited:
+		assert.NoError(t, werr, "the process must exit by its own SIGTERM handler, not be SIGKILLed after 0.3s")
+	case <-time.After(5 * time.Second):
+		t.Fatal("process never exited")
+	}
+}
+
+// A server that ignores SIGTERM must still be reaped: the kill script waits out
+// the grace window, escalates to SIGKILL, and exits 0 only once it has SEEN the
+// process die (#5571 W1.7) — never on a process it merely stopped watching.
+// Ported from the closed #5633, adapted to the tokenRef-aware script.
+func TestRemotePIDIdentityKillScriptEscalatesToKillWhenTermIgnored(t *testing.T) {
+	afPath := filepath.Join(testguard.CanonicalTempDir(t), "session", "af")
+	require.NoError(t, os.MkdirAll(filepath.Dir(afPath), 0o755))
+	cmd := exec.Command("sh", "-c", `trap '' TERM; while :; do sleep 0.2; done`)
+	cmd.Args[0] = afPath
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+	pid := cmd.Process.Pid
+	require.True(t, pidAlive(pid), "premise: the process must be alive")
+
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	out, err := exec.Command("sh", "-c", remotePIDIdentityKillScript(strconv.Itoa(pid), afPath, "")).CombinedOutput()
+	require.NoError(t, err, "a SIGTERM-ignoring server is killed and confirmed gone: %s", out)
+	require.Error(t, <-waited, "the process must have died by signal")
+}
+
+// A restart records the PID it launched on the HOST before af learns it. When the
+// daemon exits in that window the row still names the DEAD server while the
+// restarted one runs, and a reap that checked only the row's PID would remove the
+// session directory under it. The reap consults the host's launch record too
+// (#5995 review).
+func TestSandboxReapStopsTheServerOnlyTheHostRecorded(t *testing.T) {
+	dir := testguard.CanonicalTempDir(t)
+	afPath := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(afPath, []byte("dummy"), 0o755))
+
+	live := startAgentServerLikeProcess(t, afPath)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, agentServerPIDName), []byte(strconv.Itoa(live.Process.Pid)+"\n"), 0o600))
+
+	// The row names a PID that is long gone.
+	p := &sandboxProvisioner{sessionDir: dir, remotePID: "2999999"}
+	script, expect := p.reapScript("deadbeef")
+	out, err := exec.Command("sh", "-c", script).CombinedOutput()
+
+	require.NoError(t, err, "reap output: %s", out)
+	assert.Contains(t, string(out), expect)
+	require.Error(t, live.Wait(), "the host-recorded server must have been stopped, not orphaned")
+	_, statErr := os.Stat(dir)
+	assert.True(t, os.IsNotExist(statErr), "and only then is the session directory removed")
+}
+
+func TestSandboxReapRefusesWhenTheHostRecordIsNotAPID(t *testing.T) {
+	dir := testguard.CanonicalTempDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, agentServerPIDName), []byte("not-a-pid\n"), 0o600))
+
+	p := &sandboxProvisioner{sessionDir: dir, remotePID: "2999999"}
+	script, expect := p.reapScript("deadbeef")
+	out, err := exec.Command("sh", "-c", script).CombinedOutput()
+
+	require.Error(t, err, "an unreadable launch record cannot prove nothing runs there")
+	assert.NotContains(t, string(out), expect)
+	_, statErr := os.Stat(dir)
+	assert.NoError(t, statErr, "the session directory is left in place")
 }

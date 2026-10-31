@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -178,4 +181,41 @@ func TestDockerReadBannerFailsFastOnDeadProcess(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exited before reporting a startup banner")
 	assert.Contains(t, err.Error(), "not found")
+}
+
+// #5877: after login-PATH adoption the pane must still resolve the af it was
+// provisioned with, not an older install the login profile puts first. Checked
+// against a real shell's lookup, with the unpinned PATH as the control.
+func TestPinPATHDirKeepsTheStagedAfFirst(t *testing.T) {
+	root := t.TempDir()
+	write := func(dir, id string) string {
+		d := filepath.Join(root, dir)
+		require.NoError(t, os.MkdirAll(d, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(d, "af"), []byte("#!/bin/sh\necho "+id+"\n"), 0o755))
+		return d
+	}
+	sessionDir, installed := write("sess", "staged"), write("usr-local-bin", "old-install")
+	login := installed + ":/usr/bin:/bin"
+	lookup := func(path string) string {
+		cmd := exec.Command("/bin/sh", "-c", "af")
+		cmd.Env = []string{"PATH=" + path}
+		out, err := cmd.Output()
+		require.NoError(t, err)
+		return strings.TrimSpace(string(out))
+	}
+	merged := mergeHostPATH(login, sessionDir+":/usr/bin")
+	require.Equal(t, "old-install", lookup(merged), "control: adoption alone lets the older install win")
+	pinned := PinPATHDir(merged, sessionDir)
+	assert.Equal(t, "staged", lookup(pinned))
+	assert.Equal(t, 1, strings.Count(pinned, sessionDir), "no duplicate entry")
+
+	assert.Equal(t, "/a:/b", PinPATHDir("/a:/b", ""))
+	assert.Equal(t, "/s:/a::/a", PinPATHDir("/a::/s:/a:/s", "/s"), "only the dir itself moves; other entries keep their order")
+}
+
+func TestSessionBinDirOnlyForTheStagedAf(t *testing.T) {
+	assert.Equal(t, "/home/u/.af-sessions/s", SessionBinDir("/home/u/.af-sessions/s/af"))
+	for _, argv0 := range []string{"af", "./af", "/usr/bin/other", ""} {
+		assert.Empty(t, SessionBinDir(argv0), argv0)
+	}
 }

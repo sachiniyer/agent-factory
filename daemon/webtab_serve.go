@@ -238,6 +238,13 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 		// a failure: render the install hint INTO the pane (the iframe shows this
 		// document) rather than an error page, and log nothing — this resolves on
 		// every request, so an error log here would spam once per asset fetch.
+		// A relayed editor missing on the session's HOST names that host and its
+		// install step: the local hint below would send the user to the wrong machine.
+		var remoteMissing *remoteEditorMissingError
+		if errors.As(err, &remoteMissing) {
+			writeVSCodeNoticePage(w, remoteMissing.Error())
+			return
+		}
 		if errors.Is(err, errVSCodeBinaryMissing) {
 			writeVSCodeNoticePage(w, vscodeInstallHint)
 			return
@@ -290,7 +297,7 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 	// stronger guarantee than the string check the TCP path settles for — under
 	// which the old editor target passed precisely because it WAS loopback, the
 	// confused-deputy hole this transport closes.
-	if !target.isUnixSocket() && !session.IsLoopbackWebTarget(target.URL) {
+	if !target.isServerOwnedEditor() && !session.IsLoopbackWebTarget(target.URL) {
 		writeHTTPError(w, r, http.StatusBadRequest,
 			fmt.Errorf("web tab target %q is not loopback; external URLs are iframed directly, not proxied",
 				agentproto.RedactAccessTokenURL(target.URL)))
@@ -455,7 +462,7 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 			// would learn only a label authorizing its own tab. Found on #2743's review;
 			// applied here too, since this PR extends the same rewrite to two more
 			// headers and would otherwise reintroduce it through them.
-			if route.previewOrigin && !target.isUnixSocket() {
+			if route.previewOrigin && !target.isServerOwnedEditor() {
 				pr.Out.Header.Set("X-Forwarded-Host", targetURL.Host)
 				// X-Forwarded-Host was one INSTANCE of a class, not the whole of it.
 				// ReverseProxy clones the inbound headers, so every header that carries

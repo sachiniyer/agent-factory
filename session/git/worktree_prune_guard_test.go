@@ -16,7 +16,7 @@ import (
 // path — the smallest origin the bounded git probes can run against.
 func newPruneGuardRepo(t *testing.T) string {
 	t.Helper()
-	repo := filepath.Join(t.TempDir(), "repo")
+	repo := filepath.Join(tempRoot(t), "repo")
 	require.NoError(t, exec.Command("git", "init", "-b", "main", repo).Run())
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "a.txt"), []byte("x"), 0o644))
 	commit := exec.Command("git", "-C", repo, "add", "-A")
@@ -33,7 +33,7 @@ func newPruneGuardRepo(t *testing.T) string {
 // unanswerable path (dead gitdir) is an error — never silently clean.
 func TestWorktreeDirtyFiles(t *testing.T) {
 	repo := newPruneGuardRepo(t)
-	wt := filepath.Join(t.TempDir(), "wt")
+	wt := filepath.Join(tempRoot(t), "wt")
 	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/guard", wt).Run())
 
 	n, err := WorktreeDirtyFiles(wt)
@@ -59,7 +59,7 @@ func TestWorktreeDirtyFiles_FailsClosedOnTraversalWarnings(t *testing.T) {
 		t.Skip("chmod-based unreadability is bypassed by root")
 	}
 	repo := newPruneGuardRepo(t)
-	wt := filepath.Join(t.TempDir(), "wt")
+	wt := filepath.Join(tempRoot(t), "wt")
 	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/guard", wt).Run())
 	blocked := filepath.Join(wt, "blocked")
 	require.NoError(t, os.Mkdir(blocked, 0o755))
@@ -85,7 +85,7 @@ func TestWorktreeDirtyFiles_CountsIgnored(t *testing.T) {
 	require.NoError(t, exec.Command("git", "-C", repo,
 		"-c", "user.email=t@t", "-c", "user.name=t",
 		"commit", "-qm", "ignore secrets").Run())
-	wt := filepath.Join(t.TempDir(), "wt")
+	wt := filepath.Join(tempRoot(t), "wt")
 	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/ign", wt).Run())
 
 	n, err := WorktreeDirtyFiles(wt)
@@ -106,11 +106,11 @@ func TestWorktreeDirtyFiles_CountsIgnored(t *testing.T) {
 // file is the observable proof.
 func TestWorktreeDirtyFiles_DisablesFsmonitor(t *testing.T) {
 	repo := newPruneGuardRepo(t)
-	wt := filepath.Join(t.TempDir(), "wt")
+	wt := filepath.Join(tempRoot(t), "wt")
 	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/fsm", wt).Run())
 
-	marker := filepath.Join(t.TempDir(), "fsmonitor-ran")
-	hook := filepath.Join(t.TempDir(), "fsm-hook.sh")
+	marker := filepath.Join(tempRoot(t), "fsmonitor-ran")
+	hook := filepath.Join(tempRoot(t), "fsm-hook.sh")
 	require.NoError(t, os.WriteFile(hook, []byte(
 		"#!/bin/sh\necho ran >> \""+marker+"\"\nprintf '2\\n\\n\\n'\n"), 0o755))
 	require.NoError(t, exec.Command("git", "-C", repo, "config", "core.fsmonitor", hook).Run())
@@ -153,7 +153,7 @@ func TestWorktreeDirtyFiles_SeesPastSubmoduleIgnore(t *testing.T) {
 	require.NoError(t, exec.Command("git", "-C", repo,
 		"config", "submodule.vendor/sub.ignore", "all").Run())
 
-	wt := filepath.Join(t.TempDir(), "wt")
+	wt := filepath.Join(tempRoot(t), "wt")
 	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/sub", wt).Run())
 	init := exec.Command("git", "-C", wt, "-c", "protocol.file.allow=always",
 		"submodule", "update", "--init")
@@ -183,7 +183,7 @@ func TestWorktreeDirtyFiles_SeesPastSubmoduleIgnore(t *testing.T) {
 // different session's checkout and must be refused (#5136 Codex round 2).
 func TestVerifyRegisteredWorktreeOccupantBranch(t *testing.T) {
 	repo := newPruneGuardRepo(t)
-	wt := filepath.Join(t.TempDir(), "wt")
+	wt := filepath.Join(tempRoot(t), "wt")
 	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/mine", wt).Run())
 
 	require.NoError(t, VerifyRegisteredWorktreeOccupantBranch(wt, repo, "af/mine"),
@@ -198,7 +198,7 @@ func TestVerifyRegisteredWorktreeOccupantBranch(t *testing.T) {
 	// A foreign repo's worktree parked at the path is refused before the
 	// branch is even compared — the pointer does not bind into this origin.
 	foreign := newPruneGuardRepo(t)
-	foreignWt := filepath.Join(t.TempDir(), "fwt")
+	foreignWt := filepath.Join(tempRoot(t), "fwt")
 	require.NoError(t, exec.Command("git", "-C", foreign, "worktree", "add", "-b", "af/x", foreignWt).Run())
 	err = VerifyRegisteredWorktreeOccupantBranch(foreignWt, repo, "af/x")
 	assert.Error(t, err, "a foreign repo's worktree must not satisfy the binding")
@@ -211,7 +211,7 @@ func TestVerifyRegisteredWorktreeOccupantBranch(t *testing.T) {
 // alone would delete the replacement (#5136 Codex round 4).
 func TestVerifyWorktreeRegistrationPredates(t *testing.T) {
 	repo := newPruneGuardRepo(t)
-	wt := filepath.Join(t.TempDir(), "wt")
+	wt := filepath.Join(tempRoot(t), "wt")
 	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/orig", wt).Run())
 
 	// The original's leaf predates any archive time that comes later.

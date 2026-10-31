@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -53,6 +54,11 @@ type backendChoice struct {
 	// callbackless marks an available choice that will create WITHOUT an af
 	// callback, so the list row can flag it before the user selects.
 	callbackless bool
+	// host is non-empty on a row that places the session on that listed host
+	// (CreateSessionRequest.Host, #5571 W6.3); value is then repoDefaultBackend,
+	// because a host pick IS the ssh placement and the daemon refuses a host sent
+	// with any other backend.
+	host string
 }
 
 // backendChoicesFrom turns the daemon's catalog into the picker's rows: the
@@ -84,11 +90,19 @@ func backendChoicesFrom(catalog daemon.ListBackendsResponse) []backendChoice {
 	// on an available choice — the selection handler proceeds with an available
 	// choice AND shows its reason as a notice, which is exactly the advisory's
 	// semantics ("this will create, just without a callback", #5571 W3.1).
-	advisory := func(reason string) string {
-		if reason == "" {
-			return ""
+	//
+	// The host-readiness note (an unprobed or stale sandbox host) rides beside it,
+	// as on the web: the choice stays available, the notice says the host is
+	// unverified (#5785).
+	advisory := func(opt daemon.BackendOption) string {
+		var parts []string
+		if opt.Note != "" {
+			parts = append(parts, "Host "+opt.Note)
 		}
-		return session.CallbackUnavailablePrefix + reason
+		if opt.CallbackUnavailableReason != "" {
+			parts = append(parts, session.CallbackUnavailablePrefix+opt.CallbackUnavailableReason)
+		}
+		return strings.Join(parts, " · ")
 	}
 	choices := []backendChoice{{
 		value:  repoDefaultBackend,
@@ -100,7 +114,7 @@ func backendChoicesFrom(catalog daemon.ListBackendsResponse) []backendChoice {
 		choices[0].reason = ""
 		for _, opt := range catalog.Backends {
 			if opt.Name == catalog.Default {
-				choices[0].reason = advisory(opt.CallbackUnavailableReason)
+				choices[0].reason = advisory(opt)
 				choices[0].callbackless = opt.CallbackUnavailableReason != ""
 				break
 			}
@@ -110,10 +124,23 @@ func backendChoicesFrom(catalog daemon.ListBackendsResponse) []backendChoice {
 	for _, opt := range catalog.Backends {
 		choice := backendChoice{value: opt.Name, label: opt.Label, status: opt.Status, reason: opt.Reason}
 		if opt.Status == daemon.BackendAvailable {
-			choice.reason = advisory(opt.CallbackUnavailableReason)
+			choice.reason = advisory(opt)
 			choice.callbackless = opt.CallbackUnavailableReason != ""
 		}
 		choices = append(choices, choice)
+	}
+	// One row per host in the operator's global list, after the backends. Like the
+	// backend rows these are the daemon's answer verbatim: an unusable host is
+	// listed with its reason and refused on choose, never hidden or offered.
+	for _, h := range catalog.Hosts {
+		label := "host: " + h.Name
+		if h.Address != "" {
+			label += " (" + h.Address + ")"
+		}
+		if h.Name == catalog.DefaultHost {
+			label += " · default"
+		}
+		choices = append(choices, backendChoice{value: repoDefaultBackend, host: h.Name, label: label, status: h.Status, reason: h.Reason})
 	}
 	return choices
 }
@@ -217,7 +244,7 @@ func (m *home) handleBackendCatalog(msg backendCatalogMsg) (tea.Model, tea.Cmd) 
 
 	selected := 0
 	for i, choice := range choices {
-		if choice.value == m.pendingBackend {
+		if choice.value == m.pendingBackend && choice.host == m.pendingHost {
 			selected = i
 			break
 		}
@@ -302,8 +329,8 @@ func (m *home) handleStateSelectBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.handleNotice(errors.New(choice.reason))
 	}
-	m.pendingBackend = choice.value
-	m.menu.SetNamingBackend(m.pendingBackend != repoDefaultBackend)
+	m.pendingBackend, m.pendingHost = choice.value, choice.host
+	m.menu.SetNamingBackend(m.backendPicked())
 	if choice.reason != "" {
 		// An AVAILABLE choice's reason is the callback advisory, not a refusal:
 		// the create succeeds, and the notice says it will have no af callback —
@@ -312,6 +339,12 @@ func (m *home) handleStateSelectBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(errors.New(choice.reason))
 	}
 	return m, nil
+}
+
+// backendPicked reports whether the naming form carries an explicit runtime
+// choice: a backend or a listed host.
+func (m *home) backendPicked() bool {
+	return m.pendingBackend != repoDefaultBackend || m.pendingHost != ""
 }
 
 // startNewInstanceAtBackend preserves configured new_remote keys through the

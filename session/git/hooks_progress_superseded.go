@@ -26,7 +26,7 @@ func cleanupSupersededHookProgress(directory string) {
 	removeAll := supersededHookProgressRemoveAll
 	done := make(chan error, 1)
 	go func() { done <- removeAll(directory) }()
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case err := <-done:
@@ -35,6 +35,6 @@ func cleanupSupersededHookProgress(directory string) {
 		}
 	case <-timer.C:
 		log.WarningLog.Printf("cannot remove superseded hook receipts %s: %v; deferring cleanup to retention", directory,
-			fmt.Errorf("timed out after %s: %w", relocationIdentityTimeout, context.DeadlineExceeded))
+			fmt.Errorf("timed out after %s: %w", relocationIdentityTimeout.Load(), context.DeadlineExceeded))
 	}
 }

@@ -137,6 +137,39 @@ interface Pass {
   seededRows: number;
 }
 
+// The Config view prints the config manifest's size twice: the header count
+// ("Config 40") and the folded advanced tier's button ("Show 39 advanced
+// settings"). Every PR that adds a key therefore changed pixels in every config
+// golden — #5849, #5836, #5802, #5580 and #4536 all went red on it at once, and
+// each refresh was invalidated by the next key-adding merge. Visual captures
+// state both numbers as a fixed "N" instead. The header, the button, their boxes
+// and the layout around them are still captured; only the number — data, not
+// layout — is normalised, and only for the instant of the screenshot: the DOM
+// text is put back, so the app's own copy stays under test elsewhere.
+async function withManifestSizeFrozen<T>(page: Page, capture: () => Promise<T>): Promise<T> {
+  const swap = (freeze: boolean) => page.evaluate((freeze) => {
+    const targets: Array<[string, RegExp, (m: RegExpExecArray) => string]> = [
+      [".af-config-head .af-view-count", /^(\d+|N)$/, () => "N"],
+      [".af-config-toggle", /^Show (\d+|N) advanced settings$/, () => "Show N advanced settings"],
+    ];
+    for (const [selector, pattern, frozen] of targets) {
+      for (const el of document.querySelectorAll<HTMLElement>(selector)) {
+        if (freeze) {
+          const m = pattern.exec(el.textContent ?? "");
+          if (!m) continue;
+          el.dataset.afRealText = el.textContent ?? "";
+          el.textContent = frozen(m);
+        } else if (el.dataset.afRealText !== undefined) {
+          el.textContent = el.dataset.afRealText;
+          delete el.dataset.afRealText;
+        }
+      }
+    }
+  }, freeze);
+  await swap(true);
+  try { return await capture(); } finally { await swap(false).catch(() => {}); }
+}
+
 function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: string) => Promise<void> {
   return async (name: string) => {
     if (visual) {
@@ -180,10 +213,10 @@ function screenshotFor(page: Page, suffix: string, seededRows?: number): (name: 
           // Validate both sides so update mode cannot bless a transient Working row.
           const ready = await observe();
           expect(ready.states.every(state => state === "needs-you")).toBe(true);
-          const pixels = await page.screenshot({
+          const pixels = await withManifestSizeFrozen(page, () => page.screenshot({
             animations: "disabled", caret: "hide", style: visualStyle,
             timeout: remaining(5_000),
-          });
+          }));
           expect(await observe()).toEqual(ready);
           expect(pixels).toMatchSnapshot(`${name}${suffix}.png`, { maxDiffPixels: 0, threshold: 0.2 });
         }).toPass({ timeout: remaining(30_000) });
@@ -370,17 +403,13 @@ async function record(browser: Browser, pass: Pass): Promise<void> {
 }
 
 async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<unknown>, prefix: string): Promise<void> {
-  const actions = page.getByRole("button", { name: prefix ? "More app controls" : "Session actions", exact: true });
+  const actions = page.getByRole("button", { name: prefix ? "More app controls" : "More session actions", exact: true });
   await actions.click();
   await expect(page.locator(prefix ? ".af-appbar-tools" : ".af-term-head .af-term-menu")).toBeVisible();
   await shot(`${prefix}session-actions`);
-  if (!prefix) await page.locator(".af-tab-new").click();
-  await expect(page.locator(".af-tab-menu")).toBeVisible();
-  await shot(`${prefix}tab-types`);
-  if (!prefix) await page.locator(".af-tab-new").click();
   await actions.click();
   await page.locator(".af-pane-host .xterm").first().click();
-  await expect(page.locator(".af-term-keyboard")).toBeVisible();
+  await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
   if (!prefix) await expect(page.locator(".af-terminal-keybar")).toHaveCount(0);
   await shot(`${prefix}terminal-keyboard`);
   if (prefix === "phone-") {
@@ -391,7 +420,7 @@ async function recordTerminalChrome(page: Page, shot: (name: string) => Promise<
     await ctrl.click();
   }
   await page.keyboard.press("Control+]");
-  await expect(page.locator(".af-term-keyboard")).toBeHidden();
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 }
 
 /** Phone geometry and keyboard access supplement the pixel oracle. */
@@ -404,9 +433,10 @@ async function assertPhoneHeader(page: Page): Promise<void> {
   await more.focus();
   await page.keyboard.press("Enter");
   const menu = page.locator(".af-appbar-tools");
-  for (const selector of [".af-viewnav", ".af-project-menu", ".af-tab-menu", ".af-copy-link-phone"]) {
+  for (const selector of [".af-viewnav", ".af-project-menu", ".af-copy-link"]) {
     await expect(menu.locator(selector)).toBeVisible();
   }
+  await expect(header.locator(".af-term-new-shell")).toBeVisible();
   const controls = menu.locator("button:visible:not(:disabled), a:visible[href]");
   const states = page.locator(".af-rail-list .af-row");
   const seededRows = await states.count();
@@ -897,7 +927,7 @@ for (const scoped of [true, false]) {
     }, error: null } }));
     await openAfterInitialResync(page, async () => { await page.goto("/"); });
     await row(page, SESSION_JSON).click();
-    await page.getByRole("button", { name: "Session actions", exact: true }).click();
+    await page.getByRole("button", { name: "More session actions", exact: true }).click();
     await page.getByRole("button", { name: "Handoff", exact: true }).click();
     const dialog = page.getByRole("dialog");
     const agent = dialog.getByRole("combobox", { name: "New agent", exact: true });

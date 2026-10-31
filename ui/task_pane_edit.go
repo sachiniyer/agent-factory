@@ -42,6 +42,16 @@ func (s *TaskPane) validateForm() (string, int) {
 		}
 	}
 
+	// The cap field is editable only while the shape can carry one, so an
+	// inapplicable buffer never reaches this check — and an applicable one is
+	// parsed by the same rule the web form uses (task.ParseCapInput, pinned by
+	// the shared vectors in task/testdata/cap_vectors.json).
+	if s.capApplies() {
+		if _, ok := task.ParseCapInput(s.editMaxRuns.Value()); !ok {
+			return "max runs must be a non-negative integer", taskFocusMaxRuns
+		}
+	}
+
 	// Expand a leading ~ (filepath.Abs does not), resolve to absolute, and
 	// require a real git repo — the same check RunTask/the watcher apply at
 	// fire time (git.IsGitRepo). Persist the normalized value back into the
@@ -50,9 +60,15 @@ func (s *TaskPane) validateForm() (string, int) {
 	if rawPath == "" {
 		return "project path is required", taskFocusPath
 	}
-	absPath, err := config.ResolveUserPath(rawPath)
+	absPath, err := ResolveTaskProjectPath(rawPath)
 	if err != nil {
 		return fmt.Sprintf("invalid path: %v", err), taskFocusPath
+	}
+	if isRemoteTaskTarget() {
+		// The path is on the daemon's host: this machine's git cannot vouch for
+		// it, and the daemon refuses a non-repository when it takes the task.
+		s.editPath.SetValue(absPath)
+		return "", -1
 	}
 	if err := git.CheckGitRepo(absPath); err != nil {
 		if config.RepoProbeUnanswered(err) {
@@ -76,13 +92,20 @@ func (s *TaskPane) validateForm() (string, int) {
 // schedule picker's Custom/raw-cron cell is a free-text input that r/x/D must
 // reach — so the verbs never fire while the trigger value is focused.
 func (s *TaskPane) textFocusStop() bool {
-	return textStopAt(s.focusIndex)
+	return textStopAt(s.focusIndex, s.capApplies())
 }
 
-func textStopAt(focusIndex int) bool {
+// textStopAt is the pure form of textFocusStop. capApplies is whether the form's
+// current shape carries a run cap, which decides if the cap row is a text stop.
+func textStopAt(focusIndex int, capApplies bool) bool {
 	switch focusIndex {
-	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusPath:
+	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusHost, taskFocusPath:
 		return true
+	case taskFocusMaxRuns:
+		// The cap row is a live text input only when the shape carries one;
+		// inapplicable it renders a reason line and routes verbs like a
+		// selector, matching the input gate in handleEditMode (#4180).
+		return capApplies
 	}
 	return false
 }
@@ -95,7 +118,7 @@ func textStopAt(focusIndex int) bool {
 // stops; it always terminates because non-text stops exist.
 func (s *TaskPane) tabsToVerbStop() int {
 	for n := 1; n <= taskFocusCount; n++ {
-		if !textStopAt((s.focusIndex + n) % taskFocusCount) {
+		if !textStopAt((s.focusIndex+n)%taskFocusCount, s.capApplies()) {
 			return n
 		}
 	}
@@ -186,7 +209,7 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			// relative value behaves the same when the scheduler fires
 			// as it does in the TUI trigger (#641, #924). validateForm
 			// already normalized editPath, so this is idempotent.
-			absPath, err := config.ResolveUserPath(s.editPath.Value())
+			absPath, err := ResolveTaskProjectPath(s.editPath.Value())
 			if err != nil {
 				s.editError = fmt.Sprintf("invalid path: %v", err)
 				s.editErrorField = taskFocusPath
@@ -198,6 +221,8 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.tasks[s.selectedIdx].WatchCmd = watch
 			s.tasks[s.selectedIdx].TargetSession = s.editTarget.Value()
 			s.tasks[s.selectedIdx].OnComplete = s.onCompleteValue()
+			s.tasks[s.selectedIdx].MaxConcurrentRuns = s.capValue()
+			s.tasks[s.selectedIdx].Host = strings.TrimSpace(s.editHost.Value())
 			s.tasks[s.selectedIdx].ProjectPath = absPath
 			s.tasks[s.selectedIdx].Program = s.programValue()
 			s.markTaskDirty(s.tasks[s.selectedIdx].ID)
@@ -222,6 +247,15 @@ func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 			s.editTarget, _ = s.editTarget.Update(msg)
 		case taskFocusOnComplete:
 			s.handleOnCompleteKey(msg)
+		case taskFocusMaxRuns:
+			// Same refusal as the lifecycle selector's: a shape that cannot
+			// carry a cap must not accept digits for one either — its row
+			// renders the reason instead of the input.
+			if s.capApplies() {
+				s.editMaxRuns, _ = s.editMaxRuns.Update(msg)
+			}
+		case taskFocusHost:
+			s.editHost, _ = s.editHost.Update(msg)
 		case taskFocusPath:
 			s.editPath, _ = s.editPath.Update(msg)
 		case taskFocusProgram:
@@ -294,6 +328,8 @@ func (s *TaskPane) updateEditFocus() {
 	s.editPrompt.Blur()
 	s.editWatch.Blur()
 	s.editTarget.Blur()
+	s.editMaxRuns.Blur()
+	s.editHost.Blur()
 	s.editPath.Blur()
 	// The schedule picker is active only while it is the focused trigger value
 	// on a cron task; blur it otherwise so its raw-cron cursor stays hidden.
@@ -310,6 +346,10 @@ func (s *TaskPane) updateEditFocus() {
 		s.editPrompt.Focus()
 	case taskFocusTarget:
 		s.editTarget.Focus()
+	case taskFocusMaxRuns:
+		s.editMaxRuns.Focus()
+	case taskFocusHost:
+		s.editHost.Focus()
 	case taskFocusPath:
 		s.editPath.Focus()
 	}
@@ -347,6 +387,8 @@ func (s *TaskPane) renderEditMode() string {
 	s.schedule.setWidth(s.width)
 	s.editWatch.Width = inputWidth
 	s.editTarget.Width = inputWidth
+	s.editMaxRuns.Width = inputWidth
+	s.editHost.Width = inputWidth
 	s.editPath.Width = inputWidth
 
 	// The prompt's role depends on the trigger: cron tasks require it, watch
@@ -450,6 +492,18 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString(s.renderOnCompleteSelector())
 	b.WriteString("\n")
 	markEnd(taskFocusOnComplete)
+	markStart(taskFocusMaxRuns)
+	b.WriteString(label("Max runs:"))
+	b.WriteString(s.renderCapField())
+	b.WriteString("\n")
+	b.WriteString(fieldErr(taskFocusMaxRuns))
+	markEnd(taskFocusMaxRuns)
+	markStart(taskFocusHost)
+	b.WriteString(label("Host:"))
+	b.WriteString(s.editHost.View())
+	b.WriteString("\n")
+	b.WriteString(fieldErr(taskFocusHost))
+	markEnd(taskFocusHost)
 	markStart(taskFocusPath)
 	b.WriteString(label("Path:"))
 	b.WriteString(s.editPath.View())
@@ -666,7 +720,7 @@ func (s *TaskPane) renderOnCompleteSelector() string {
 	t := CurrentTheme()
 	hintStyle := DialogHintStyle()
 	if !s.onCompleteApplies() {
-		return hintStyle.Render(s.wrapOnCompleteText("Target session is kept."))
+		return hintStyle.Render(s.wrapFieldText("Target session is kept."))
 	}
 
 	focused := s.focusIndex == taskFocusOnComplete
@@ -681,18 +735,31 @@ func (s *TaskPane) renderOnCompleteSelector() string {
 		picker := SelectionMarker("◂ ") + selectedStyle.Render(value) + SelectionMarker(" ▸")
 		hint := "←/→ " + onCompleteHint(value)
 		if s.width > 0 && 9+lipgloss.Width(picker)+3+lipgloss.Width(hint) > s.width {
-			return picker + "\n         " + hintStyle.Render(s.wrapOnCompleteText(hint))
+			return picker + "\n         " + hintStyle.Render(s.wrapFieldText(hint))
 		}
 		return picker + hintStyle.Render("   "+hint)
 	}
 	return dimSelectedStyle.Render(value)
 }
 
+// renderCapField renders the watch-task concurrency-cap input, or the reason
+// the current shape cannot carry one — the same inapplicable-row pattern as
+// renderOnCompleteSelector: showing an editable field there would offer a cap
+// ValidateTrigger refuses, so the row says why instead. The reason text is
+// task.CapUnavailableReason — the same words the daemon's validator gives and
+// the web modal shows (#4180).
+func (s *TaskPane) renderCapField() string {
+	if reason := task.CapUnavailableReason(s.editTriggerIsWatch, s.editTarget.Value()); reason != "" {
+		return DialogHintStyle().Render(s.wrapFieldText(reason))
+	}
+	return s.editMaxRuns.View()
+}
+
 // Keep consequences readable in the actual modal content width, which is
 // narrower than the terminal. Continuations align with the value after the
 // nine-cell label; the form's focus range includes these lines so scrolling
 // keeps the whole explanation visible when this field is selected.
-func (s *TaskPane) wrapOnCompleteText(text string) string {
+func (s *TaskPane) wrapFieldText(text string) string {
 	if s.width <= 0 {
 		return text
 	}

@@ -68,7 +68,10 @@ var keyEffectClasses = map[string]EffectClass{
 	"default_accounts":               EffectAppliedLive,
 	"session_env_passthrough":        EffectAppliedLive,
 	"on_archive_command":             EffectAppliedLive,
+	"move_cmd":                       EffectAppliedLive,
+	"sandbox_agent_config":           EffectAppliedLive,
 	"worktree_root":                  EffectAppliedLive,
+	"projects_root":                  EffectAppliedLive,
 	"vscode_server_binary":           EffectAppliedLive,
 	"daemon_poll_interval":           EffectAppliedLive,
 	"log_max_size_mb":                EffectAppliedLive,
@@ -81,6 +84,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"docker.mount_agent_credentials": EffectAppliedLive,
 	"ssh.host_key_verification":      EffectAppliedLive,
 	"sandbox.ssh":                    EffectAppliedLive,
+	"sandbox.binary":                 EffectAppliedLive,
 	"hosts":                          EffectAppliedLive,
 	"default_host":                   EffectAppliedLive,
 	// The network listener keys apply live since #2480 PR2: require_token /
@@ -89,8 +93,11 @@ var keyEffectClasses = map[string]EffectClass{
 	// (bind-new-before-close). A listen_addr rebind that FAILS is surfaced as a
 	// warning and reported as deferred to the next daemon start — the class here is
 	// the success case; the runtime outcome overrides the notice on failure.
-	"network.listen_addr":            EffectAppliedLive,
-	"network.preview_listen_addr":    EffectAppliedLive,
+	"network.listen_addr":         EffectAppliedLive,
+	"network.preview_listen_addr": EffectAppliedLive,
+	// The editor-origin pool is read when a session's editor origin is first
+	// allocated and its listener bound; listeners already up keep serving.
+	"network.editor_origin_ports":    EffectNextDaemonStart,
 	"network.require_token":          EffectAppliedLive,
 	"network.require_loopback_token": EffectAppliedLive,
 	// The #5137 opt-in is posture, not an address, but reconcile consults it on

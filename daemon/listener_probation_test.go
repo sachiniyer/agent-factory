@@ -445,13 +445,11 @@ func TestApplyConfigExposureNoticeReadsProbationFloor(t *testing.T) {
 	}
 }
 
-// TestApplyConfigSandboxRevokeWarningReadsProbationFloor: turning
-// require_token off revokes sandbox callback credentials and says what the
-// operator is left with. Under the probation floor the kept socket still
-// demands the token, so the generic "the control plane now answers
-// unauthenticated callers" would be a false claim about the socket answering
-// right now — the warning must name the floor and when it ends instead.
-func TestApplyConfigSandboxRevokeWarningReadsProbationFloor(t *testing.T) {
+// TestApplyConfigRequireTokenOffKeepsSandboxCredentialsUnderProbationFloor:
+// turning require_token off no longer revokes sandbox callback credentials
+// (#5571 W3.6), including under the probation floor, where the kept socket still
+// demands the token and no unauthenticated-exposure claim may be made about it.
+func TestApplyConfigRequireTokenOffKeepsSandboxCredentialsUnderProbationFloor(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0"
 	cfg.RequireToken = true
@@ -460,7 +458,7 @@ func TestApplyConfigSandboxRevokeWarningReadsProbationFloor(t *testing.T) {
 	failed, err := wl.reconcile(m.Config())
 	require.NoError(t, err)
 	require.Empty(t, failed)
-	_, err = m.sandboxTokens.mint("sess-a")
+	secret, err := m.sandboxTokens.mint("sess-a")
 	require.NoError(t, err)
 
 	writeProbationConfig(t, "[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\n")
@@ -473,9 +471,9 @@ func TestApplyConfigSandboxRevokeWarningReadsProbationFloor(t *testing.T) {
 		"precondition: the socket still demands the token")
 
 	joined := strings.Join(result.Warnings, "\n")
-	require.Contains(t, joined, "revoked 1 sandbox callback credential(s)",
-		"anti-vacuous: the transition revoked the minted credential")
-	require.Contains(t, joined, "keeps demanding the bearer token")
+	_, kept := m.sandboxTokens.sessionFor(secret)
+	require.True(t, kept, "the credential rides the sandbox-only endpoint and survives the posture change")
+	require.NotContains(t, joined, "sandbox callback credential", "nothing was revoked")
 	require.NotContains(t, joined, "answers unauthenticated callers",
 		"the floored socket authenticates every caller — no live unauthenticated claim")
 }

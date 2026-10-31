@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -69,6 +70,28 @@ type terminalHandback struct {
 	stopWatch func()
 }
 
+// restoreTermios is term.Restore; a var so tests can observe and gate the step.
+var restoreTermios = term.Restore
+
+// activeHandback is the hand-back of the attach in flight, if any. It exists so a
+// caller that must die on a signal while an attach owns the terminal (the TUI's
+// exit guard, #6072) restores termios through THIS owner instead of racing it: a
+// second signal handler that re-raised first killed the process before the
+// attach's own term.Restore ran, leaving the terminal raw.
+var activeHandback atomic.Pointer[terminalHandback]
+
+// RestoreAttachedTerminal hands the terminal back through the in-flight attach's
+// own restore, and is a no-op when no attach is running or it already restored
+// (restore is idempotent under h.mu, so racing the attach's watcher, its deferred
+// release and any number of callers restores exactly once and never re-applies a
+// stale state). Callers that are about to terminate the process call it BEFORE
+// re-raising the signal.
+func RestoreAttachedTerminal() {
+	if h := activeHandback.Load(); h != nil {
+		h.restore()
+	}
+}
+
 // handbackRetakeGrace is how long the signal watcher waits after re-raising a
 // signal before concluding that it could not terminate the process. A fatal
 // disposition kills us well inside this window; anything still running after it
@@ -84,8 +107,42 @@ var handbackRetakeGrace = 200 * time.Millisecond
 // to guard.
 func beginTerminalHandback(out io.Writer, oldState *term.State) *terminalHandback {
 	h := &terminalHandback{out: out, oldState: oldState}
-	if oldState == nil {
-		return h
+	activeHandback.Store(h)
+	h.armWatch()
+	return h
+}
+
+// beginRawTerminalHandback takes the terminal (makeRaw) AND arms the hand-back as
+// one step, with the owner reachable BEFORE the terminal is borrowed (#6083): the
+// handback is published and h.mu is held across makeRaw, so a signal arriving
+// while the terminal is being taken (or at any instant after) reaches an owner.
+// Its restore blocks on h.mu until the raw mode and the termios to restore are
+// both recorded, then restores them — there is no instant between "raw" and
+// "someone can restore it" for a signal to fall into. A failed makeRaw borrowed
+// nothing, so the owner is retired and the error returned.
+func beginRawTerminalHandback(out io.Writer, makeRaw func() (*term.State, error)) (*terminalHandback, error) {
+	h := &terminalHandback{out: out}
+	h.mu.Lock()
+	activeHandback.Store(h)
+	oldState, err := makeRaw()
+	if err != nil {
+		h.finished, h.restored = true, true // nothing was borrowed
+		h.mu.Unlock()
+		activeHandback.CompareAndSwap(h, nil)
+		return nil, err
+	}
+	h.oldState = oldState
+	h.mu.Unlock()
+	h.armWatch()
+	return h, nil
+}
+
+// armWatch starts watching for the signals that would otherwise kill the process
+// with the terminal still borrowed. A hand-back with no termios (a non-TTY, or a
+// test driving the proxy over pipes) borrowed nothing and guards nothing.
+func (h *terminalHandback) armWatch() {
+	if h.oldState == nil {
+		return
 	}
 	// Watch only the signals that could actually kill this process. One inherited
 	// as ignored (nohup, a disowned job, a shell trap that ignores HUP — SIG_IGN
@@ -104,7 +161,7 @@ func beginTerminalHandback(out io.Writer, oldState *term.State) *terminalHandbac
 		watched = append(watched, sig)
 	}
 	if len(watched) == 0 {
-		return h
+		return
 	}
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, watched...)
@@ -153,7 +210,6 @@ func beginTerminalHandback(out io.Writer, oldState *term.State) *terminalHandbac
 			}
 		}
 	}()
-	return h
 }
 
 // restore hands the terminal back, at most once however many exits race for it.
@@ -176,7 +232,7 @@ func (h *terminalHandback) restoreLocked() {
 	h.restored = true
 	_, _ = io.WriteString(h.out, tmux.NeutralTerminalRestore)
 	if h.oldState != nil {
-		_ = term.Restore(int(os.Stdin.Fd()), h.oldState)
+		_ = restoreTermios(int(os.Stdin.Fd()), h.oldState)
 	}
 }
 
@@ -214,6 +270,13 @@ func (h *terminalHandback) release() {
 	h.finished = true // no retake can follow the final hand-back
 	h.restoreLocked()
 	h.mu.Unlock()
+	// Ownership is given up only AFTER the restore it guards has completed (#6083).
+	// Unpublishing first left a window — a signal after the swap but before (or
+	// while) the restore ran found no owner, and the exit guard re-raised with the
+	// termios still raw. Published through the restore, a concurrent
+	// RestoreAttachedTerminal either blocks on h.mu behind it or finds the
+	// terminal already restored.
+	activeHandback.CompareAndSwap(h, nil)
 	if h.stopWatch != nil {
 		h.stopWatch()
 	}

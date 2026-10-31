@@ -31,17 +31,17 @@ func TestEnsurePluginDirWritesProposalSkill(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
-	pluginDir, err := ensurePluginDir(false)
+	pluginDir, err := ensurePluginDir(fullGuidanceCaps)
 	require.NoError(t, err)
 
 	got, err := os.ReadFile(filepath.Join(pluginDir, "skills", afProposalSkillName, "SKILL.md"))
 	require.NoError(t, err)
-	assert.Equal(t, pluginSkills(false)[afProposalSkillName], string(got))
+	assert.Equal(t, pluginSkills(fullGuidanceCaps)[afProposalSkillName], string(got))
 	assert.Equal(t, afProposalSkillName, frontmatterField(t, string(got), "name"))
 }
 
 func TestProposalSkillCarriesTheSharedProposalsText(t *testing.T) {
-	doc := pluginSkills(false)[afProposalSkillName]
+	doc := pluginSkills(fullGuidanceCaps)[afProposalSkillName]
 	assert.Contains(t, doc, afUsageProposalsInside)
 	assert.Contains(t, afUsageReference, afUsageProposalsInside)
 	for _, cmd := range []string{"af proposal start", "af proposal list", "af proposal attach"} {
@@ -51,7 +51,7 @@ func TestProposalSkillCarriesTheSharedProposalsText(t *testing.T) {
 
 func TestProposalTriggersReachEveryOnDemandSurface(t *testing.T) {
 	descriptions := map[string]string{
-		"claude proposal skill":           frontmatterField(t, pluginSkills(false)[afProposalSkillName], "description"),
+		"claude proposal skill":           frontmatterField(t, pluginSkills(fullGuidanceCaps)[afProposalSkillName], "description"),
 		"amp/codex/gemini/devin SKILL.md": frontmatterField(t, afSkillDoc, "description"),
 	}
 	for surface, desc := range descriptions {
@@ -59,15 +59,15 @@ func TestProposalTriggersReachEveryOnDemandSurface(t *testing.T) {
 			assert.Contains(t, desc, word, "%s description must trigger on %q", surface, word)
 		}
 	}
-	assert.Contains(t, frontmatterField(t, pluginCommands(false)["af.md"], "description"), "proposals")
+	assert.Contains(t, frontmatterField(t, pluginCommands(fullGuidanceCaps)["af.md"], "description"), "proposals")
 }
 
 // Frontmatter values are unquoted YAML scalars, where ": " or " #" would end or
 // break the value.
 func TestPluginDescriptionsAreSafeYAMLScalars(t *testing.T) {
 	docs := map[string]string{
-		"af.md":          pluginCommands(false)["af.md"],
-		"proposal":       pluginSkills(false)[afProposalSkillName],
+		"af.md":          pluginCommands(fullGuidanceCaps)["af.md"],
+		"proposal":       pluginSkills(fullGuidanceCaps)[afProposalSkillName],
 		"agent SKILL.md": afSkillDoc,
 	}
 	for name, doc := range docs {
@@ -95,7 +95,7 @@ func TestEnsurePluginDirPrunesStaleSkills(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(keptDir, "SKILL.md"), []byte("old"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(keptDir, "notes.txt"), []byte("keep"), 0644))
 
-	_, err := ensurePluginDir(false)
+	_, err := ensurePluginDir(fullGuidanceCaps)
 	require.NoError(t, err)
 
 	_, err = os.Stat(stale)
@@ -117,7 +117,7 @@ func TestEnsurePluginDirRefusesASymlinkedSkillFile(t *testing.T) {
 	link := filepath.Join(dir, "SKILL.md")
 	require.NoError(t, os.Symlink(target, link))
 
-	_, err := ensurePluginDir(false)
+	_, err := ensurePluginDir(fullGuidanceCaps)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, config.ErrManagedFileSymlink)
 

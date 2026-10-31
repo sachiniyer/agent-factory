@@ -1,7 +1,6 @@
 package session
 
 import (
-	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,7 +34,7 @@ func TestInjectSystemPrompt_Claude(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("claude", skillTarget{}, false)
+	result := injectSystemPrompt("claude", skillTarget{}, fullGuidanceCaps)
 
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir flag, got %q", result)
@@ -54,7 +53,7 @@ func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 
 	// The resolved form (from program_overrides) carries the path-and-flags;
 	// injectSystemPrompt appends --plugin-dir to it.
-	result := injectSystemPrompt("/usr/local/bin/claude --model opus", skillTarget{}, false)
+	result := injectSystemPrompt("/usr/local/bin/claude --model opus", skillTarget{}, fullGuidanceCaps)
 
 	if !strings.HasPrefix(result, "/usr/local/bin/claude --model opus") {
 		t.Errorf("expected resolved form preserved, got %q", result)
@@ -78,7 +77,7 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "") // force the ~/.codex fallback under the temp HOME
 
-	result := injectSystemPrompt("codex", skillTarget{}, false)
+	result := injectSystemPrompt("codex", ambientSkillTarget(t, "codex"), fullGuidanceCaps)
 
 	if result != "codex -c check_for_update_on_startup=false" {
 		t.Errorf("expected codex command carrying the startup update check suppression, got %q", result)
@@ -104,7 +103,7 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
 
-	result := injectSystemPrompt("codex --full-auto", skillTarget{}, false)
+	result := injectSystemPrompt("codex --full-auto", ambientSkillTarget(t, "codex"), fullGuidanceCaps)
 
 	if result != "codex -c check_for_update_on_startup=false --full-auto" {
 		t.Errorf("expected the update-check suppression in codex's global -c position (right after the executable), got %q", result)
@@ -122,7 +121,7 @@ func TestInjectSystemPrompt_CodexRespectsUserUpdateCheckSetting(t *testing.T) {
 		"codex -c check_for_update_on_startup=true",
 		"codex -c check_for_update_on_startup=false",
 	} {
-		if got := injectSystemPrompt(resolved, skillTarget{}, false); got != resolved {
+		if got := injectSystemPrompt(resolved, skillTarget{}, fullGuidanceCaps); got != resolved {
 			t.Errorf("expected %q untouched (user's own value wins), got %q", resolved, got)
 		}
 	}
@@ -134,7 +133,7 @@ func TestInjectSystemPrompt_Aider(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("aider", skillTarget{}, false)
+	result := injectSystemPrompt("aider", skillTarget{}, fullGuidanceCaps)
 
 	if !strings.HasPrefix(result, "aider --read ") {
 		t.Errorf("expected aider to gain a --read flag, got %q", result)
@@ -166,7 +165,7 @@ func TestInjectSystemPrompt_Gemini(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "") // force the ~/.gemini fallback under the temp HOME
 
-	result := injectSystemPrompt("gemini", skillTarget{}, false)
+	result := injectSystemPrompt("gemini", ambientSkillTarget(t, "gemini"), fullGuidanceCaps)
 
 	if result != "gemini" {
 		t.Errorf("expected gemini command unchanged (file seam, no flag), got %q", result)
@@ -196,7 +195,7 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("amp", skillTarget{}, false)
+	result := injectSystemPrompt("amp", skillTarget{}, fullGuidanceCaps)
 
 	// The launch command must come back byte-identical — that is what keeps the
 	// amp spawn safe (#1582), since amp dies on unknown flags (#1116/#1131).
@@ -228,7 +227,7 @@ func TestInjectSystemPrompt_DevinSkill(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("devin", skillTarget{}, false)
+	result := injectSystemPrompt("devin", skillTarget{}, fullGuidanceCaps)
 	if result != "devin --respect-workspace-trust false" {
 		t.Errorf("expected devin trust flag, got %q", result)
 	}
@@ -259,7 +258,7 @@ func TestInjectSystemPrompt_Opencode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("opencode", skillTarget{}, false)
+	result := injectSystemPrompt("opencode", skillTarget{}, fullGuidanceCaps)
 
 	// The command word must survive verbatim; only an env assignment leads it.
 	if !strings.HasSuffix(result, " opencode") {
@@ -318,7 +317,7 @@ func TestInjectSystemPrompt_OpencodeWritesNothingOutsideAf(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 
-	injectSystemPrompt("opencode", skillTarget{}, false)
+	injectSystemPrompt("opencode", skillTarget{}, fullGuidanceCaps)
 
 	// Nothing may appear in the user's opencode config dir — under either the
 	// XDG path or the $HOME/.config fallback.
@@ -354,7 +353,7 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 		// OPENCODE_CONFIG can arrive behind an env wrapper too.
 		"env OPENCODE_CONFIG=/home/me/mine.jsonc opencode",
 	} {
-		if got := injectSystemPrompt(resolved, skillTarget{}, false); got != resolved {
+		if got := injectSystemPrompt(resolved, skillTarget{}, fullGuidanceCaps); got != resolved {
 			t.Errorf("expected a user-set OPENCODE_CONFIG left untouched, got %q", got)
 		}
 	}
@@ -364,7 +363,7 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 	// case above with a bare strings.Contains, which would silently drop af
 	// guidance for anyone whose prompt mentions the variable.
 	arg := "opencode --prompt 'set OPENCODE_CONFIG=x'"
-	if got := injectSystemPrompt(arg, skillTarget{}, false); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
+	if got := injectSystemPrompt(arg, skillTarget{}, fullGuidanceCaps); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
 		t.Errorf("OPENCODE_CONFIG as an argument is not an assignment; af should still inject, got %q", got)
 	}
 }
@@ -386,7 +385,7 @@ func TestInjectSystemPrompt_OpencodeDoesNotClobberAfOwnedFiles(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if got := injectSystemPrompt("opencode", skillTarget{}, false); got != "opencode" {
+	if got := injectSystemPrompt("opencode", skillTarget{}, fullGuidanceCaps); got != "opencode" {
 		t.Errorf("expected no injection when our path holds a non-af file, got %q", got)
 	}
 	back, err := os.ReadFile(instructionsPath)
@@ -449,7 +448,7 @@ func TestInjectSystemPrompt_OpencodeRespectsExportedConfigEnv(t *testing.T) {
 		"OPENCODE_CONFIG=/home/me/other.jsonc opencode",
 		"env OPENCODE_CONFIG=/home/me/other.jsonc opencode",
 	} {
-		if got := injectSystemPrompt(resolved, skillTarget{}, false); got != resolved {
+		if got := injectSystemPrompt(resolved, skillTarget{}, fullGuidanceCaps); got != resolved {
 			t.Errorf("with OPENCODE_CONFIG=%q exported, expected %q returned unchanged (env channel); af shadowed it to %q",
 				userCfg, resolved, got)
 		}
@@ -494,7 +493,7 @@ func TestInjectSystemPrompt_OpencodeExportedConfigEnvUnattributableCommandStillI
 		"./opencode",
 		"ionice -c 3 opencode",
 	} {
-		got := injectSystemPrompt(resolved, skillTarget{}, false)
+		got := injectSystemPrompt(resolved, skillTarget{}, fullGuidanceCaps)
 		if !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
 			t.Errorf("for unattributable %q with OPENCODE_CONFIG exported, expected af to still inject (env does not reach the pane); got %q", resolved, got)
 			continue
@@ -539,7 +538,7 @@ func TestInjectSystemPrompt_OpencodeExportedConfigEnvDoesNotAffectOtherAgents(t 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := injectSystemPrompt(tt.resolved, skillTarget{}, false)
+			got := injectSystemPrompt(tt.resolved, skillTarget{}, fullGuidanceCaps)
 			if tt.wantSub == "" {
 				if got != tt.resolved {
 					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
@@ -564,9 +563,7 @@ func TestInjectSystemPrompt_OpencodeExportedConfigEnvDoesNotAffectOtherAgents(t 
 func captureOpencodeInfoLog(t *testing.T) *logtest.Buffer {
 	t.Helper()
 	var buf logtest.Buffer
-	orig := log.InfoLog
-	log.InfoLog = stdlog.New(&buf, "INFO: ", 0)
-	t.Cleanup(func() { log.InfoLog = orig })
+	log.CaptureOutput(t, log.InfoLog, "INFO: ", &buf)
 	return &buf
 }
 
@@ -613,7 +610,7 @@ func TestInjectSystemPrompt_Devin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := injectSystemPrompt(tt.resolved, skillTarget{}, false)
+			got := injectSystemPrompt(tt.resolved, skillTarget{}, fullGuidanceCaps)
 			if got != tt.want {
 				t.Errorf("injectSystemPrompt(%q) = %q, want %q", tt.resolved, got, tt.want)
 			}
@@ -695,7 +692,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := injectSystemPrompt(tt.resolved, skillTarget{}, false)
+			got := injectSystemPrompt(tt.resolved, skillTarget{}, fullGuidanceCaps)
 			if tt.want == "" {
 				if got != tt.resolved {
 					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
@@ -768,8 +765,8 @@ func TestAfUsageReference_NamesTheRemoteTabBoundaryPerKind(t *testing.T) {
 		t.Fatal("af usage still forbids every tab remotely after external web tabs became admissible")
 	}
 	for _, want := range []string{
-		"Shell, process, and VS Code tabs require a local session",
-		"web tabs work on remote sessions too",
+		"Shell and process tabs require a local session",
+		"web and VS Code tabs work on remote sessions too",
 		"shows whatever listens on that port inside the session's own workspace",
 	} {
 		if !strings.Contains(afUsageReference, want) {
@@ -935,7 +932,7 @@ func TestEnsureCodexSkillDir(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "")
 
-	skillDir, err := ensureCodexSkillDir(skillTarget{})
+	skillDir, err := ensureCodexSkillDir(ambientSkillTarget(t, "codex"))
 	if err != nil {
 		t.Fatalf("ensureCodexSkillDir() failed: %v", err)
 	}
@@ -963,7 +960,7 @@ func TestEnsureCodexSkillDir_HonorsCodexHome(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", codexHome)
 
-	skillDir, err := ensureCodexSkillDir(skillTarget{})
+	skillDir, err := ensureCodexSkillDir(ambientSkillTarget(t, "codex"))
 	if err != nil {
 		t.Fatalf("ensureCodexSkillDir() failed: %v", err)
 	}
@@ -984,7 +981,7 @@ func TestEnsureGeminiSkillDir(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "")
 
-	skillDir, err := ensureGeminiSkillDir(skillTarget{})
+	skillDir, err := ensureGeminiSkillDir(ambientSkillTarget(t, "gemini"))
 	if err != nil {
 		t.Fatalf("ensureGeminiSkillDir() failed: %v", err)
 	}
@@ -1012,7 +1009,7 @@ func TestEnsureGeminiSkillDir_HonorsGeminiCliHome(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GEMINI_CLI_HOME", geminiHome)
 
-	skillDir, err := ensureGeminiSkillDir(skillTarget{})
+	skillDir, err := ensureGeminiSkillDir(ambientSkillTarget(t, "gemini"))
 	if err != nil {
 		t.Fatalf("ensureGeminiSkillDir() failed: %v", err)
 	}
@@ -1043,7 +1040,7 @@ func TestWriteAfMarkedFile_NonDestructive(t *testing.T) {
 		t.Fatalf("seed user skill: %v", err)
 	}
 
-	if _, err := ensureCodexSkillDir(skillTarget{}); err != nil {
+	if _, err := ensureCodexSkillDir(ambientSkillTarget(t, "codex")); err != nil {
 		t.Fatalf("ensureCodexSkillDir() must not error on a foreign skill: %v", err)
 	}
 	got, err := os.ReadFile(path)
@@ -1058,7 +1055,7 @@ func TestWriteAfMarkedFile_NonDestructive(t *testing.T) {
 	if err := os.WriteFile(path, []byte("stale\n<!-- "+afSkillMarker+" -->\n"), 0644); err != nil {
 		t.Fatalf("seed af-owned skill: %v", err)
 	}
-	if _, err := ensureCodexSkillDir(skillTarget{}); err != nil {
+	if _, err := ensureCodexSkillDir(ambientSkillTarget(t, "codex")); err != nil {
 		t.Fatalf("ensureCodexSkillDir() on af-owned file: %v", err)
 	}
 	got, err = os.ReadFile(path)
@@ -1076,7 +1073,7 @@ func TestEnsureAiderReadFile(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	path, err := ensureAiderReadFile(false)
+	path, err := ensureAiderReadFile(fullGuidanceCaps)
 	if err != nil {
 		t.Fatalf("ensureAiderReadFile() failed: %v", err)
 	}
@@ -1100,7 +1097,7 @@ func TestEnsureAiderReadFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(userFile), 0644); err != nil {
 		t.Fatalf("seed user file: %v", err)
 	}
-	got, err := ensureAiderReadFile(false)
+	got, err := ensureAiderReadFile(fullGuidanceCaps)
 	if err != nil {
 		t.Fatalf("ensureAiderReadFile() on foreign file: %v", err)
 	}
@@ -1120,9 +1117,9 @@ func TestEnsurePluginDir(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	pluginDir, err := ensurePluginDir(false)
+	pluginDir, err := ensurePluginDir(fullGuidanceCaps)
 	if err != nil {
-		t.Fatalf("ensurePluginDir(false) failed: %v", err)
+		t.Fatalf("ensurePluginDir(fullGuidanceCaps) failed: %v", err)
 	}
 
 	expectedDir := filepath.Join(tmpDir, "plugin")
@@ -1159,12 +1156,12 @@ func TestEnsurePluginDir_Idempotent(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	dir1, err := ensurePluginDir(false)
+	dir1, err := ensurePluginDir(fullGuidanceCaps)
 	if err != nil {
 		t.Fatalf("first call failed: %v", err)
 	}
 
-	dir2, err := ensurePluginDir(false)
+	dir2, err := ensurePluginDir(fullGuidanceCaps)
 	if err != nil {
 		t.Fatalf("second call failed: %v", err)
 	}
@@ -1178,7 +1175,7 @@ func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	pluginDir, err := ensurePluginDir(false)
+	pluginDir, err := ensurePluginDir(fullGuidanceCaps)
 	if err != nil {
 		t.Fatalf("first call failed: %v", err)
 	}
@@ -1195,7 +1192,7 @@ func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
 		t.Fatalf("failed to seed keep file: %v", err)
 	}
 
-	if _, err := ensurePluginDir(false); err != nil {
+	if _, err := ensurePluginDir(fullGuidanceCaps); err != nil {
 		t.Fatalf("second call failed: %v", err)
 	}
 
@@ -1206,7 +1203,7 @@ func TestEnsurePluginDir_PrunesStaleFiles(t *testing.T) {
 		t.Errorf("expected non-.md file %s to survive prune: %v", keep, err)
 	}
 
-	for name := range pluginCommands(false) {
+	for name := range pluginCommands(fullGuidanceCaps) {
 		if _, err := os.Stat(filepath.Join(commandsDir, name)); err != nil {
 			t.Errorf("expected %s to still exist after prune: %v", name, err)
 		}

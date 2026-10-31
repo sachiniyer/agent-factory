@@ -59,7 +59,7 @@ for (const [backend, outcome] of [["local", "refused"], ["docker", "refused"], [
       await page.locator('.af-filter-item[data-kind="archived"]').click();
       await page.locator(".af-rail-title").click();
       await expect(row).toHaveCount(0);
-      await page.getByRole("button", { name: "Session actions", exact: true }).click();
+      await page.getByRole("button", { name: "More session actions", exact: true }).click();
       const headerRestore = page.locator(".af-term-actions").getByRole("button", { name: `Restore session “${session.title}”`, exact: true });
       await expect(headerRestore).toBeVisible();
       await expect(headerRestore).toBeDisabled();

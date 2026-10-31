@@ -94,31 +94,7 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 	i.mu.Unlock()
 
 	if firstTimeSetup {
-		var (
-			gitWorktree *git.GitWorktree
-			branchName  string
-			err         error
-		)
-		if i.inPlace {
-			// --here: attach to the repo's own working tree at its current
-			// branch. The worktree is external, so Setup() below is a no-op
-			// and Cleanup()/Kill never removes the user's tree or branch.
-			gitWorktree, branchName, err = git.NewGitWorktreeInPlace(i.Path)
-		} else {
-			branchPrefix := i.branchPrefix
-			if !i.branchPrefixResolved {
-				var cfg *config.Config
-				cfg, err = config.LoadConfig()
-				if err != nil {
-					err = fmt.Errorf("failed to load config: %w", err)
-				} else {
-					branchPrefix = cfg.BranchPrefix
-				}
-			}
-			if err == nil {
-				gitWorktree, branchName, err = git.NewGitWorktree(i.Path, i.Title, branchPrefix)
-			}
-		}
+		gitWorktree, branchName, err := i.newWorktreeHandle()
 		if err != nil {
 			return fmt.Errorf("failed to create git worktree: %w", err)
 		}
@@ -129,6 +105,8 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 			i.touchLocked()
 		}
 		i.mu.Unlock()
+	} else if err := i.adoptExistingWorktree(); err != nil {
+		return err
 	}
 	i.mu.RLock()
 	gitWorktree := i.gitWorktree
@@ -195,14 +173,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 		} else {
 			i.mu.Lock()
-			if !i.started {
-				i.started = true
-				// Start(false) reconstructs this process-local flag on load.
-				// Actual respawns record their own runtime mutation below.
-				if firstTimeSetup {
-					i.touchLocked()
-				}
-			}
+			// Start(false) reconstructs this process-local flag on load; actual
+			// respawns record their own runtime mutation below.
+			i.markStartedLocked(firstTimeSetup)
 			i.mu.Unlock()
 		}
 	}()
@@ -257,9 +230,12 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if workDir != "" {
 			resolution := resolveLaunchProgramForInstance(i)
 			runtimeProgram = resolution.command
-			program := injectSystemPrompt(resolution.command, resolveSkillTarget(i, resolution.command), i.CallbackUnavailable() != "")
+			program := injectSystemPromptWithEnv(prepareResumeConversation(i, resolution.command), resolveSkillTarget(i, resolution.command), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
+			// A re-spawn here resumes the session's own recorded conversation or
+			// starts fresh (#4797), never the latest one on a shared account home.
+			tmuxSession.SetExactResumeOnly(true)
 		}
 		// And a flagged row's reattach is recovery-inert (ReattachInert): it only
 		// keeps a live pane bound. Through RestoreWithResult it also refreshed the
@@ -362,7 +338,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			base := resolution.command
 			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
-			program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.CallbackUnavailable() != "")
+			program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}
 		setLaunchProgram(tmuxSession, program, proof)
@@ -677,6 +653,28 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				if account != "" {
 					return fmt.Errorf("restore account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
 				}
+				// A refused restore (restoreDeferred — tmux.ErrSpawnDirMissing or
+				// tmux.ErrSessionSocketUnverified) holds the contract "the session is
+				// kept as it was", never respawned, for non-account siblings too. The
+				// account branch above already returns on any error; this is the
+				// non-account path that used to log-and-continue. Continuing would let
+				// the dead-shell check below re-probe with pre-spawn semantics
+				// (ProbeSession: socket-ENOENT is plain absence), classify a
+				// possibly-live shell — its socket unlinked under a still-running
+				// server — as dead, and respawn it under the persisted name via Start,
+				// issuing new-session and recreating the socket path beside the live
+				// server. That orphans the live shell and, worse, makes the live
+				// agent's later liveness probe answer determinate-absent so the daemon
+				// respawns a second agent beside the orphaned one — precisely what
+				// ErrSessionSocketUnverified exists to prevent (#4135/#5765, the
+				// f6f19be5 refusal mechanism launch's agent-tab path already honors via
+				// preserveAgentHandle = ... || restoreDeferred(err)). Propagating the
+				// refusal out of setupTabs needs no new machinery: finishLaunchTabFailure
+				// spares the agent pane and FromInstanceData loads the row Lost so the
+				// lost-restore loop defers instead of respawning.
+				if restoreDeferred(err) {
+					return fmt.Errorf("restore tab %q for %q: %w", tab.Name, i.Title, err)
+				}
 				log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
 			} else if refreshUnknownScope && restoreResult != tmux.RestoreRespawned {
 				if _, cleanupErr := tab.tmux.CloseAndWaitForPaneExit(); cleanupErr != nil {
@@ -956,4 +954,43 @@ func (b *LocalBackend) AgentModelChange(i *Instance) *AgentModelChange {
 		return nil
 	}
 	return NewAgentModelChange(before, after)
+}
+
+// newWorktreeHandle derives this instance's worktree handle — the in-place tree,
+// or the placement the branch name and config determine — without touching the
+// filesystem. It is the one derivation both a first-time create and the
+// adoption of an existing workspace use, so they can never disagree about where
+// the worktree lives.
+func (i *Instance) newWorktreeHandle() (*git.GitWorktree, string, error) {
+	var (
+		gitWorktree *git.GitWorktree
+		branchName  string
+		err         error
+	)
+	if i.inPlace {
+		// --here: attach to the repo's own working tree at its current
+		// branch. The worktree is external, so Setup() below is a no-op
+		// and Cleanup()/Kill never removes the user's tree or branch.
+		gitWorktree, branchName, err = git.NewGitWorktreeInPlace(i.Path)
+	} else {
+		branchPrefix := i.branchPrefix
+		if i.branchName == "" && !i.branchPrefixResolved {
+			var cfg *config.Config
+			cfg, err = config.LoadConfig()
+			if err != nil {
+				err = fmt.Errorf("failed to load config: %w", err)
+			} else {
+				branchPrefix = cfg.BranchPrefix
+			}
+		}
+		if err == nil {
+			if i.branchName != "" {
+				// The daemon already named this branch (#5571 W2.4).
+				gitWorktree, branchName, err = git.NewGitWorktreeNamed(i.Path, i.Title, i.branchName)
+			} else {
+				gitWorktree, branchName, err = git.NewGitWorktree(i.Path, i.Title, branchPrefix)
+			}
+		}
+	}
+	return gitWorktree, branchName, err
 }

@@ -252,6 +252,19 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 	unlock := m.lockTarget(repo.ID, req.Title)
 	defer unlock()
 	testHookDeliverAfterTargetLock()
+	var sandboxTargetID string
+	if req.SandboxOwner != "" {
+		// Provenance of a sandbox-created task (#5571 W3.5): the target must STILL
+		// be an existing off-box, unarchived session in the owner's project. The
+		// check returns the authorized session's ID and the send below goes to
+		// exactly that ID (re-verified under the op lock by the guard), so a title
+		// that is re-pointed at another session after this check is never reached.
+		id, err := m.checkSandboxTaskDelivery(req.SandboxOwner, repo.ID, req.Title)
+		if err != nil {
+			return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		}
+		sandboxTargetID = id
+	}
 
 	exists, deleting, err := m.targetSessionState(repo.ID, req.Title)
 	if err != nil {
@@ -281,9 +294,15 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 			}
 			return StatusDeferredAttached, session.PromptNotDelivered, false, nil
 		}
-		deliveryStatus, err := m.SendPromptWithStatus(SendPromptRequest{
+		send := SendPromptRequest{
 			Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
-		})
+		}
+		var guard func(*session.Instance, string) error
+		if req.SandboxOwner != "" {
+			send.ID = sandboxTargetID
+			guard = m.sandboxDeliveryGuard(sandboxTargetID, repo.ID)
+		}
+		deliveryStatus, err := m.sendPromptGuarded(send, guard)
 		if err != nil {
 			if errors.Is(err, errTargetLimitReached) {
 				return TaskStatusLimitParked, session.PromptNotDelivered, false, nil
@@ -291,6 +310,13 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 			return "", session.PromptCouldNotConfirm, false, err
 		}
 		return "sent", deliveryStatus, false, nil
+	}
+
+	if req.SandboxOwner != "" {
+		// Defense in depth: the check above proved the target exists, so reaching
+		// here means it vanished under us. A sandbox-created task never creates.
+		return "", session.PromptCouldNotConfirm, false, notAttempted(fmt.Errorf("%w; %s", sandboxRefusal(
+			"the target session no longer exists; a sandbox-created task never creates one"), notDeliveredMarker))
 	}
 
 	// If the absent target is this repo's daemon-managed root agent — only
@@ -378,6 +404,7 @@ func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session
 		Title:      req.Title,
 		RepoPath:   req.RepoPath,
 		Program:    req.Program,
+		Host:       req.Host,
 		Prompt:     req.Prompt,
 		TaskRepoID: req.TaskRepoID,
 		TaskOrigin: req.TaskOrigin,

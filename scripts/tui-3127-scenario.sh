@@ -75,10 +75,15 @@ else
     printf 'PLAYTEST-IDENTITY: ambient\n'
 fi
 case "$identity" in
-*/swap-target) : ;;   # the one identity with quota
+*/swap-target)
+    # The one identity with quota. Render the composer glyph claude's readiness
+    # check waits for ("❯", task.isReadyContent): without it the daemon's
+    # settle step times out on a healthy replacement pane (#5735).
+    printf '❯ \n'
+    ;;
 *) printf 'PLAYTEST-QUOTA-WALL: this playtest identity is out of quota\n' ;;
 esac
-exec bash --noprofile --norc -i
+PS1='❯ ' exec bash --noprofile --norc -i
 STANDIN
     chmod +x "$HOME/bin/claude"
     _af_log "installed provable claude stand-in at $HOME/bin/claude"
@@ -91,14 +96,10 @@ STANDIN
 # It deliberately writes NO program_overrides, and deletes the play-test config
 # the sandbox shipped with, because the account boundary will not scope a program
 # it cannot prove af itself chose. `trustBase` (session/program_resolution.go) is
-# true only when the effective program_overrides entry is BYTE-FOR-BYTE af's own
-# detected built-in, and af detects the stand-in above as
-# the quoted $HOME/bin/claude followed by --dangerously-skip-permissions. Writing
-# the bare path instead — the obvious thing, and what the first draft of this
-# scenario did — is a different string, so the base arguments stop being declared
-# and every candidate
-# is refused with "could not be proven to be a direct claude invocation". Letting
-# the built-in win is what makes this sandbox able to exercise the feature at all.
+# true only when the effective program_overrides entry parses to the same argv
+# as af's own detected built-in, and af detects the stand-in above as the quoted
+# $HOME/bin/claude followed by --dangerously-skip-permissions. Letting the
+# built-in win is what makes this sandbox able to exercise the feature at all.
 #
 # TOML rather than JSON because af materializes config.toml on first run and reads
 # it in preference afterwards: a stale program_overrides left there outranks
@@ -176,6 +177,25 @@ wait_for_session_field() {
     return 1
 }
 
+# dump_replacement_panes prints what the daemon's tmux panes actually run, so a
+# replacement that never becomes ready can be told apart as a launch failure
+# (wrong command, dead pane) from a pane that runs fine but never renders what
+# the readiness check waits for (#5735).
+dump_replacement_panes() {
+    local s
+    tmux list-sessions 2>&1 || true
+    for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^af_' || true); do
+        echo "=== $s"
+        tmux list-panes -t "=$s" -F 'pane=#{pane_id} pid=#{pane_pid} dead=#{pane_dead} status=#{pane_dead_status} cmd=#{pane_current_command}' 2>&1 || true
+        tmux display -p -t "=$s:" 'start_command: #{pane_start_command}' 2>&1 || true
+        echo '--- capture-pane -p -J'
+        tmux capture-pane -p -J -t "=$s:" 2>&1 || true
+        echo '--- process tree'
+        ps -eo pid,ppid,args --forest 2>/dev/null | grep -E 'claude|bash --noprofile' | grep -v grep || true
+    done
+    grep -E 'ambient-swap' "$AGENT_FACTORY_HOME/agent-factory.log" | tail -30 || true
+}
+
 # ---------------------------------------------------------------------------
 # Case 1 — a candidate is available: the unpinned session moves to it.
 # ---------------------------------------------------------------------------
@@ -199,23 +219,21 @@ drive_swap_to_candidate() {
         'the daemon committed the configured candidate as the new identity' 180 || return 1
     wait_for_session_field ambient-swap account_auto_selected true \
         'the move is recorded as an af choice, not an explicit pin' 60 || return 1
-    # The account field flips when the daemon COMMITS the swap; the completion
-    # line is written only after the replacement panes are up and the pending
-    # swap is finalized, a few seconds later. Reading the log once right after
-    # the field flips raced that, so poll it (#5625 made the swap succeed, which
-    # is what exposed the race).
-    local log_deadline; log_deadline=$(( $(_af_now) + 90 ))
-    until grep -q "auto-resumed limit-blocked session \"ambient-swap\".*on claude account \"$CANDIDATE_ACCOUNT\"" \
-        "$AGENT_FACTORY_HOME/agent-factory.log"; do
-        if [ "$(_af_now)" -ge "$log_deadline" ]; then
-            _af_fail 'the identity change did not come from the usage-limit path'
-            grep -E 'ambient-swap' "$AGENT_FACTORY_HOME/agent-factory.log" | tail -20 >&2
-            (cd "$AF_DRIVER_REPO" && "$(_af_resolve_bin)" sessions get ambient-swap --json) >&2 || true
-            (cd "$AF_DRIVER_REPO" && "$(_af_resolve_bin)" sessions preview ambient-swap) >&2 || true
-            return 1
-        fi
+    # The account field flips when the identity is committed; the completion line
+    # lands only after the replacement pane settles, which can take the daemon's
+    # whole readiness budget. Poll for it rather than racing it (#5735).
+    local resumed_re="auto-resumed limit-blocked session \"ambient-swap\".*on claude account \"$CANDIDATE_ACCOUNT\""
+    local log_deadline; log_deadline=$(( $(_af_now) + 120 ))
+    while [ "$(_af_now)" -lt "$log_deadline" ] \
+        && ! grep -q "$resumed_re" "$AGENT_FACTORY_HOME/agent-factory.log"; do
         sleep 2
     done
+    if ! grep -q "$resumed_re" "$AGENT_FACTORY_HOME/agent-factory.log"; then
+        _af_fail 'the identity change did not come from the usage-limit path'
+        dump_replacement_panes >&2
+        grep -E 'ambient-swap' "$AGENT_FACTORY_HOME/agent-factory.log" | tail -20 >&2
+        return 1
+    fi
     _af_log 'assert OK: the daemon logged the move as a limit-blocked auto-resume'
 
     af_select ambient-swap || return 1
@@ -230,6 +248,11 @@ drive_swap_to_candidate() {
     # told at exec, an echo proves what it still has — and necessary: the notice
     # above is long enough to push that line out of the visible pane.
     af_enter_interactive || return 1
+    # The stand-in is a bash, and the identity notice af pastes into it contains an
+    # apostrophe ("account's"), which leaves bash inside an open quote waiting for
+    # a continuation line. Ctrl-C abandons that, so the probe below runs as its own
+    # command instead of being swallowed into the notice (#5735).
+    af_send C-c
     af_send_to_pane 'printf "PLAYTEST-ENV: %s\\n" "${CLAUDE_CONFIG_DIR:-none}"'
     af_wait_for "PLAYTEST-ENV: .*accounts/claude/$CANDIDATE_ACCOUNT" "$AF_DRIVER_TIMEOUT" \
         'the replacement pane is running with the selected account root' || return 1

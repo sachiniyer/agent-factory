@@ -155,7 +155,7 @@ func buildSymlinkedHomeSSHDImage(t *testing.T) string {
 	// Same as sshdRoundTripDockerfile but with /root replaced by a symlink to
 	// /realroot BEFORE sshd's host-key generation and the entrypoint run.
 	dockerfile := "FROM " + base + "\n" +
-		apkAddRun("git", "tmux", "bash", "openssh-server") +
+		apkAddRun("git", "tmux", "bash", "openssh-server") + trustBindMountedRepoRun +
 		// Make /root a symlink to /realroot — the automounter symlink form.
 		"RUN mkdir /realroot && rm -rf /root && ln -s /realroot /root\n" +
 		"RUN ssh-keygen -A && mkdir -p /root/.ssh && chmod 700 /root/.ssh\n" +

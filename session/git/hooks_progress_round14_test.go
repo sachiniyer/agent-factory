@@ -137,7 +137,7 @@ func TestAdoptRunningHooksSharesOneJournalReadBudget(t *testing.T) {
 	started := time.Now()
 	AdoptRunningHooks(worktrees)
 	elapsed := time.Since(started)
-	if elapsed > 3*relocationIdentityTimeout {
+	if elapsed > 3*relocationIdentityTimeout.Load() {
 		t.Fatalf("four adoption reads consumed serial budgets: %s", elapsed)
 	}
 	for i, candidate := range candidates[:3] {

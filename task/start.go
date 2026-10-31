@@ -54,6 +54,24 @@ func SetTrustPromptTimingForTest(retryDelay time.Duration) func() {
 	}
 }
 
+// SetWaitForReadyTimingForTest compresses the readiness wait's timing — its
+// overall timeout and, when non-zero, its poll interval — so a test outside this
+// package can exercise a readiness burn without sleeping through the full 60s
+// budget. Returns a restore func, matching SetTrustPromptTimingForTest. A
+// regression that re-admitted a row into a readiness burn would then burn this
+// short budget rather than a minute, keeping the assertion that proves the burn
+// never started fast. Test-only.
+func SetWaitForReadyTimingForTest(timeout, poll time.Duration) func() {
+	oldTimeout, oldPoll := waitForReadyTimeout, waitForReadyPollInterval
+	waitForReadyTimeout = timeout
+	if poll > 0 {
+		waitForReadyPollInterval = poll
+	}
+	return func() {
+		waitForReadyTimeout, waitForReadyPollInterval = oldTimeout, oldPoll
+	}
+}
+
 // TrustPromptTarget is a ReadinessTarget that can also dismiss its own first-run
 // trust dialog — the narrow contract DismissTrustPrompt drives, implemented both
 // by a full session.Instance and by the daemon's bare tmux config agent.
@@ -245,7 +263,7 @@ func WaitForReadyAndSubmitPrompt(
 		// they skip the watch as well.
 		if turnSignaturedAgent(instance.ResolvedAgent()) &&
 			(status == session.PromptSentUnverified ||
-				(status == session.PromptDelivered && instance.TaskRunActive())) &&
+				(status == session.PromptDelivered && instance.RunGateActive())) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
 			instance.RecordTaskRunTurn(time.Now())
 			if status == session.PromptSentUnverified {

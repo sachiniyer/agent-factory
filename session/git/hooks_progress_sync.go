@@ -62,7 +62,7 @@ func boundedSyncHookProgressDirectory(path string) error {
 }
 
 func waitForHookProgressSync(path string, flight *hookProgressSyncFlight) error {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -72,7 +72,7 @@ func waitForHookProgressSync(path string, flight *hookProgressSyncFlight) error 
 		if hookProgressSyncFlights.byPath[path] == flight {
 			flight.timedOut = true
 			hookProgressSyncFlights.Unlock()
-			return fmt.Errorf("timed out after %s while syncing hook directory %s: %w", relocationIdentityTimeout, path, context.DeadlineExceeded)
+			return fmt.Errorf("timed out after %s while syncing hook directory %s: %w", relocationIdentityTimeout.Load(), path, context.DeadlineExceeded)
 		}
 		hookProgressSyncFlights.Unlock()
 		<-flight.done

@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,7 +12,19 @@ import (
 
 func (i *Instance) RepoName() (string, error) {
 	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
-		return "", fmt.Errorf("remote instances do not have a local repo")
+		// An off-box row owns no local worktree, but the daemon records which
+		// project it belongs to; that identity is what a multi-repo rail
+		// disambiguates by (W8.8).
+		i.mu.RLock()
+		repoPath := i.repoIdentityPath
+		if repoPath == "" {
+			repoPath = i.Path
+		}
+		i.mu.RUnlock()
+		if repoPath == "" {
+			return "", fmt.Errorf("remote instance has no recorded repo")
+		}
+		return filepath.Base(filepath.Clean(repoPath)), nil
 	}
 	i.mu.RLock()
 	started := i.started
@@ -160,6 +173,12 @@ func (i *Instance) SetSandboxBranch(branch string) {
 	defer i.mu.Unlock()
 	if i.Branch != branch {
 		i.Branch = branch
+		i.touchLocked()
+	}
+	// The caller learned this name from a push that just landed, so it is a
+	// restore checkpoint now, not just a chosen name (#5972).
+	if branch != "" && i.branchUnpushed {
+		i.branchUnpushed = false
 		i.touchLocked()
 	}
 }
@@ -450,12 +469,12 @@ func (i *Instance) ResolvedPaneProgram() string {
 // ResolvedPaneGeneratedArgs returns the af-authored argument words recorded for
 // the local agent pane's frozen program, or nil when the instance has no local
 // tmux binding. It surfaces TmuxSession.GeneratedArgs through the instance so
-// validateAccountSwapPlan can seed a launch proof whose base came from
-// ResolvedPaneProgram instead of RuntimeProgram: that pane command already
-// carries af's own injected flags, so re-deriving the declaration from that base
-// treats af's words as undeclared user arguments and the swap is refused
-// (#5433). The recorded declaration is the provenance the pane carries beside
-// the command string, and is exactly what the proof needs to trust them.
+// validateAccountSwapPlan can seed a launch proof whose base is the pane's
+// frozen program: that pane command already carries af's own injected flags,
+// so re-deriving the declaration from that base treats af's words as undeclared
+// user arguments and the swap is refused (#5433). The recorded declaration is
+// the provenance the pane carries beside the command string, and is exactly
+// what the proof needs to trust them.
 func (i *Instance) ResolvedPaneGeneratedArgs() []string {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
@@ -837,6 +856,15 @@ func (i *Instance) AddTabForTest(name string, kind TabKind) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.Tabs = append(i.Tabs, &Tab{Name: name, Kind: kind})
+	i.touchLocked()
+}
+
+// AddTabWithIDForTest is AddTabForTest with a chosen stable id — the identity an
+// off-box tab is streamed by (#5571 W4.8), which a bare AddTabForTest leaves empty.
+func (i *Instance) AddTabWithIDForTest(id, name string, kind TabKind) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Tabs = append(i.Tabs, &Tab{ID: id, Name: name, Kind: kind})
 	i.touchLocked()
 }
 

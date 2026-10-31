@@ -2,6 +2,7 @@ package ui
 
 import (
 	"testing"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/schedule"
@@ -30,6 +31,10 @@ func TestEditLine(t *testing.T) {
 		{"backspace on empty", "", tea.KeyMsg{Type: tea.KeyBackspace}, "", true},
 		{"space appends", "a", tea.KeyMsg{Type: tea.KeySpace}, "a ", true},
 		{"runes append", "a", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("bc")}, "abc", true},
+		{"paste drops control runes", "", tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune("alpha\nbeta\r\tx")}, "alphabetax", true},
+		{"paste drops control runes after value", "q", tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune("a\nb")}, "qab", true},
+		{"paste of only control runes is a no-op on value", "q", tea.KeyMsg{Type: tea.KeyRunes, Paste: true, Runes: []rune("\n\r\t\x1b")}, "q", true},
+		{"getKeyRunes strips control runes without Paste flag", "a", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b\nc")}, "abc", true},
 		{"other keys pass through", "a", tea.KeyMsg{Type: tea.KeyLeft}, "a", false},
 	}
 	for _, tc := range cases {
@@ -38,6 +43,27 @@ func TestEditLine(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 			assert.Equal(t, tc.ok, ok)
 		})
+	}
+}
+
+// TestEditLineStripsControlRunesFromPaste is the EditLine half of the #2640
+// paste hardening, mirroring TestHandleStateNewMultiLinePasteKeepsTitleSingleLine
+// for the naming field. A bracketed paste is ONE KeyRunes message whose runes
+// bubbletea preserves verbatim — including '\n'/'\r'/'\t' — so the shared
+// single-line helper must drop control runes before appending or a pasted
+// query/path/command splits into several physical rows, breaks the mouse-zone
+// geometry, and never matches a sanitized title.
+func TestEditLineStripsControlRunesFromPaste(t *testing.T) {
+	value, ok := EditLine("", tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Paste: true,
+		Runes: []rune("alpha\nbeta\r\t\x1b"),
+	})
+	require.True(t, ok)
+	assert.Equal(t, "alphabeta", value,
+		"a single pasted KeyRunes payload must not retain layout-breaking control characters")
+	for _, r := range value {
+		assert.False(t, unicode.IsControl(r), "no control rune may remain: %U", r)
 	}
 }
 

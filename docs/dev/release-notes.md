@@ -8,6 +8,25 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
+## Breaking: unknown `[docker]`/`[ssh]` keys in in-repo config fail the load (v1.0.331)
+
+- **A config that printed the unknown-key warning since v1.0.297 now stops
+  loading.** A typo'd leaf under `[docker]` or `[ssh]` in
+  `.agent-factory/config.{toml,json}` (`docker.runargs` for `run_args`,
+  `ssh.hots` for `host`) used to warn and be ignored. It is now an error that
+  names the file, the key and the closest valid key, and every `af` command in
+  that repository fails with it until the file is fixed (#4845). Fix it by
+  renaming the key as the error says, or removing it.
+- **`af doctor` reports it as a failing finding** (`in-repo config`, exit code
+  non-zero) with the rename to make, instead of the advisory WARN it used to be.
+- **Unaffected:** known leaves, in any letter case (`Image` still loads); the
+  global config, which still tolerates unknown nested keys; and the personal
+  per-project `[root_agent]` table, which still only warns.
+- **Why now:** the owner decided on #4599 to warn first and reject after the
+  warning had shipped in at least one stable release. It has shipped in every
+  stable release since v1.0.297. Name the exact release in the announcement: this
+  entry assumes v1.0.331, the first stable release that carries the change.
+
 ## Sessions stuck in `loading` after a handoff recover on upgrade (fixed in v1.0.298)
 
 - **Sessions stuck in `loading` recover on their own when you upgrade.** A
@@ -50,9 +69,9 @@ consult the relevant notes below when preparing the announcement.
   the closest known key, and it appears on CLI stderr (not under `--json`), in
   the log and daemon log as WARNING, and in `af doctor` as an advisory WARN
   (exit code unchanged) (#4599).
-- **Planned break:** a later release will make an unknown `[docker]`/`[ssh]` key
-  a load error, as unknown top-level in-repo keys already are (#4845). Name that
-  release in its own notes when it lands.
+- **Planned break (landed in v1.0.331):** an unknown `[docker]`/`[ssh]` key is now
+  a load error, as unknown top-level in-repo keys already are (#4845); see the
+  breaking entry above.
 
 ## A caught-up reconnect after a recovery keeps the recovered pane's output (fixed in v1.0.292)
 

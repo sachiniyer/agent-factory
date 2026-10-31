@@ -57,7 +57,7 @@ func TestPrepareRelocationClaimForCleanup_BoundsGenerationInstall(t *testing.T) 
 		if !errors.Is(err, ErrRelocateStateUnknown) {
 			t.Fatalf("generation timeout must fail closed; err=%v", err)
 		}
-	case <-time.After(3 * relocationIdentityTimeout):
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
 		close(release)
 		<-result
 		t.Fatal("generation installation exceeded its outer deadline")

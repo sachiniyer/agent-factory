@@ -72,7 +72,9 @@ type relayTransportEntry struct {
 // evictRelayTransport drops a session's cached relay transport and closes its
 // idle relayed connections. A no-op for a session that never opened one.
 func (m *Manager) evictRelayTransport(key string) {
-	if old, ok := m.relayTransports.LoadAndDelete(key); ok {
-		old.(relayTransportEntry).transport.CloseIdleConnections()
+	for _, k := range []string{key, editorRelayTransportKey(key)} {
+		if old, ok := m.relayTransports.LoadAndDelete(k); ok {
+			old.(relayTransportEntry).transport.CloseIdleConnections()
+		}
 	}
 }

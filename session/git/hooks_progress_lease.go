@@ -48,7 +48,7 @@ func boundedOpenHookProgressLease(path string, flags int, mode os.FileMode) (*os
 	openFile := hookProgressOpenLeaseFile
 	closeLeaseFile := hookProgressCloseLeaseFile
 	closeFile := func(file *os.File) { closeHookProgressFileWith(file, closeLeaseFile) }
-	return boundedOpenHookProgressLeaseWith(path, flags, mode, openFile, closeFile, relocationIdentityTimeout)
+	return boundedOpenHookProgressLeaseWith(path, flags, mode, openFile, closeFile, relocationIdentityTimeout.Load())
 }
 
 func boundedOpenHookProgressLeaseWith(
@@ -228,7 +228,7 @@ func boundedHookProgressLeaseStat(file *os.File, path string) (os.FileInfo, erro
 		close(flight.done)
 		hookProgressLeaseStatFlights.Unlock()
 	}()
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -237,7 +237,7 @@ func boundedHookProgressLeaseStat(file *os.File, path string) (os.FileInfo, erro
 		hookProgressLeaseStatFlights.Lock()
 		if hookProgressLeaseStatFlights.byPath[path] == flight {
 			hookProgressLeaseStatFlights.Unlock()
-			return nil, fmt.Errorf("timed out after %s while inspecting hook runner lease %s: %w", relocationIdentityTimeout, path, context.DeadlineExceeded)
+			return nil, fmt.Errorf("timed out after %s while inspecting hook runner lease %s: %w", relocationIdentityTimeout.Load(), path, context.DeadlineExceeded)
 		}
 		hookProgressLeaseStatFlights.Unlock()
 		<-flight.done

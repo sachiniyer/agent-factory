@@ -1,9 +1,14 @@
 package app
 
 import (
+	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -39,6 +44,9 @@ const killCheckPendingNote = "Checking for unsaved work…"
 type killLossAssessment struct {
 	warnings []string
 	severe   string
+	// remote is set for an off-box session: its recovery hint describes what an
+	// off-box archive does, not the local worktree-move one (#5966).
+	remote bool
 }
 
 // assessKillLoss runs the git reads behind the kill confirmation. It blocks —
@@ -86,21 +94,35 @@ type killLossCheckedMsg struct {
 // bare prompt may only show with positive evidence that nothing unmerged is lost
 // (#2022). It returns the cmd that runs the checks.
 func (m *home) openPendingKillConfirm(title string, reserved bool, impact *session.WorktreeCleanupImpact, base killLossAssessment, action tea.Cmd) tea.Cmd {
-	cmd := m.confirmAction(killConfirmMessage(title, "", reserved, impact), action)
-	dialog := m.confirmationOverlay
-	dialog.SetPending(killCheckPendingNote)
 	// Read the seam here, on the event loop: reading it inside the cmd goroutine
 	// would race a parallel test's swap (#960 PR 4 race-fix class).
 	check := killLossCheck
 	worktree := *impact
+	return m.openPendingKillConfirmWith(title, reserved, impact, base, action, func() killLossAssessment { return check(worktree) })
+}
+
+// openPendingRemoteKillConfirm is openPendingKillConfirm for an off-box
+// session: its workspace is on another host, so the loss is measured by the
+// session's agent-server through the daemon (#5571 W8.2) instead of by git on
+// this machine's disk.
+func (m *home) openPendingRemoteKillConfirm(title string, reserved bool, target sessionActionTarget, base killLossAssessment, action tea.Cmd) tea.Cmd {
+	check := remoteKillLossCheck
+	return m.openPendingKillConfirmWith(title, reserved, nil, base, action, func() killLossAssessment { return check(target) })
+}
+
+func (m *home) openPendingKillConfirmWith(title string, reserved bool, impact *session.WorktreeCleanupImpact, base killLossAssessment, action tea.Cmd, measure func() killLossAssessment) tea.Cmd {
+	cmd := m.confirmAction(killConfirmMessage(title, "", reserved, impact), action)
+	dialog := m.confirmationOverlay
+	dialog.SetPending(killCheckPendingNote)
 	return tea.Batch(cmd, func() tea.Msg {
-		loss := check(worktree)
+		loss := measure()
 		// In-memory warnings captured at open — the unreachable-sandbox notice
-		// (#5571 W1.3) — lead; the assessed git findings trail them.
+		// (#5571 W1.3) — lead; the assessed findings trail them.
 		loss.warnings = append(base.warnings, loss.warnings...)
 		if loss.severe == "" {
 			loss.severe = base.severe
 		}
+		loss.remote = loss.remote || base.remote
 		return killLossCheckedMsg{
 			dialog:   dialog,
 			title:    title,
@@ -110,6 +132,89 @@ func (m *home) openPendingKillConfirm(title string, reserved bool, impact *sessi
 			action:   action,
 		}
 	})
+}
+
+// remoteKillLossCheckTimeout bounds the daemon round-trip (itself a hop to the
+// workspace host) the off-box kill dialog waits on, so an unreachable host
+// leaves the dialog pending for a bounded time, never forever.
+var remoteKillLossCheckTimeout = 20 * time.Second
+
+// workspaceFactsThroughDaemon asks the daemon to measure an off-box session's
+// workspace. A package var so tests can substitute a fake.
+var workspaceFactsThroughDaemon = func(target sessionActionTarget) (daemon.WorkspaceFactsResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), remoteKillLossCheckTimeout)
+	defer cancel()
+	var resp daemon.WorkspaceFactsResponse
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		resp, e = c.WorkspaceFacts(ctx, daemon.WorkspaceFactsRequest{ID: target.id, Title: target.title, RepoID: target.repoID})
+		return e
+	})
+	return resp, err
+}
+
+// remoteKillLossCheck is the seam openPendingRemoteKillConfirm runs; production
+// never reassigns it.
+var remoteKillLossCheck = func(target sessionActionTarget) killLossAssessment {
+	return assessWorkspaceFacts(workspaceFactsThroughDaemon(target))
+}
+
+// assessWorkspaceFacts turns a measured off-box workspace into the same
+// assessment a local worktree gets: commits that exist only in the workspace are
+// severe (the distinct confirm key), everything else a warning. A workspace that
+// could not be measured is a fail-closed warning, never silence.
+func assessWorkspaceFacts(resp daemon.WorkspaceFactsResponse, err error) killLossAssessment {
+	loss := killLossAssessment{remote: true}
+	if err != nil || !resp.Measured {
+		reason := resp.Reason
+		if err != nil {
+			reason = err.Error()
+		}
+		loss.warnings = append(loss.warnings, fmt.Sprintf("Warning: Could not verify the workspace (%s); it may contain unsaved work that will be lost!", reason))
+		return loss
+	}
+	f := resp.Facts
+	if !f.Exists {
+		loss.warnings = append(loss.warnings, "The workspace is already missing from its host, so there is no work left in it to lose.")
+		return loss
+	}
+	if f.CheckoutMissing {
+		// The linked checkout is gone but its clone is not: the session branch, its
+		// commits and the stash live in the clone's git directory, which teardown
+		// removes with the rest of the session directory.
+		loss.warnings = append(loss.warnings, "The agent's checkout is already missing from its host, but the clone it was made from is not: its branches, commits and stashes will be deleted with the session.")
+	}
+	if f.UnpushedCommits > 0 {
+		loss.severe = fmt.Sprintf("Warning: %s exist only in this workspace (not pushed to any remote) and will be permanently lost!", plural(f.UnpushedCommits, "commit"))
+	}
+	if f.DirtyFiles > 0 {
+		loss.warnings = append(loss.warnings, fmt.Sprintf("Warning: This workspace has %s that will be lost!", plural(f.DirtyFiles, "uncommitted file")))
+	}
+	if f.ExtraBranches > 0 {
+		loss.warnings = append(loss.warnings, fmt.Sprintf("It also holds %s that will be deleted.", plural(f.ExtraBranches, "other local branch")))
+	}
+	if f.Stashes > 0 {
+		loss.warnings = append(loss.warnings, fmt.Sprintf("It also holds %s that will be deleted.", plural(f.Stashes, "stash entry")))
+	}
+	if len(f.Unverified) > 0 {
+		// A fact git could not answer is unknown, and unknown is not safe: the
+		// counts above are lower bounds for it.
+		loss.warnings = append(loss.warnings, fmt.Sprintf("Warning: Could not verify %s; the workspace may hold more work than is listed here and it will be lost!", strings.Join(f.Unverified, ", ")))
+	}
+	return loss
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", noun)
+	}
+	if noun == "other local branch" {
+		return fmt.Sprintf("%d other local branches", n)
+	}
+	if noun == "stash entry" {
+		return fmt.Sprintf("%d stash entries", n)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // handleKillLossChecked replaces the pending dialog with the complete one, or
@@ -130,7 +235,7 @@ func (m *home) openKillConfirm(title string, reserved bool, impact *session.Work
 		// elaboration — goes in the clippable detail.
 		critical := killConfirmMessage(title, joinWarnings(append([]string{loss.severe}, loss.warnings...)), reserved, impact)
 		archiveKey := keys.GlobalKeyBindings[keys.KeyArchive].Help().Key
-		detail := fmt.Sprintf("Archive (%s) preserves the worktree and its refs — kill removes the worktree for good.", archiveKey)
+		detail := killArchiveHint(loss.remote, archiveKey)
 		cmd := m.confirmActionWithDetail(critical, detail, action)
 		m.confirmationOverlay.SetConfirmKey(unmergedKillConfirmKey)
 		return cmd
@@ -145,4 +250,17 @@ func (m *home) openKillConfirm(title string, reserved bool, impact *session.Work
 		m.confirmationOverlay.SetConfirmKey(rootKillConfirmKey)
 	}
 	return cmd
+}
+
+// killArchiveHint is the recovery hint under a severe kill dialog, true to the
+// backend being killed. A local archive moves the worktree aside, keeping it and
+// every ref. Off-box, archive is not a full backup: a docker or hook archive
+// pushes only the current branch before its sandbox is removed, so other branches
+// and stashes are lost, and an ssh or sandbox archive leaves the workspace on its
+// host rather than copying anything. Kill removes the workspace for good.
+func killArchiveHint(remote bool, archiveKey string) string {
+	if remote {
+		return fmt.Sprintf("Archive (%s) is not a full backup of a remote workspace: a docker or hook archive pushes only the current branch, so other branches and stashes are lost; copy those off the host first. Kill removes the workspace for good.", archiveKey)
+	}
+	return fmt.Sprintf("Archive (%s) preserves the worktree and its refs — kill removes the worktree for good.", archiveKey)
 }

@@ -121,12 +121,14 @@ var globalConfigReadOrder = []string{
 	"program_overrides",
 	"default_accounts",
 	"session_env_passthrough",
+	"sandbox_agent_config",
 	"auto_update",
 	"network.listen_addr",
 	"network.require_token",
 	"network.require_loopback_token",
 	"network.allow_unauthenticated_network",
 	"network.preview_listen_addr",
+	"network.editor_origin_ports",
 	"network.cors_allowed_origins",
 	"daemon_poll_interval",
 	"watcher_events_per_minute",
@@ -135,7 +137,9 @@ var globalConfigReadOrder = []string{
 	"log_max_backups",
 	"branch_prefix",
 	"on_archive_command",
+	"move_cmd",
 	"worktree_root",
+	"projects_root",
 	"detach_keys",
 	"update_channel",
 	"upgrade_clear_unverifiable_artifacts",
@@ -149,6 +153,7 @@ var globalConfigReadOrder = []string{
 	"docker.mount_agent_credentials",
 	"ssh.host_key_verification",
 	"sandbox.ssh",
+	"sandbox.binary",
 	"hosts",
 	"default_host",
 	"limit_retry_interval",
@@ -498,6 +503,7 @@ Settable keys:
   program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
   session_env_passthrough    compact JSON array of exact environment variable names
+  sandbox_agent_config       compact JSON array of agent:file entries (claude:settings.json, claude:CLAUDE.md, claude:.claude.json, codex:config.toml, codex:AGENTS.md) placed in a sandbox session's account scope
   root_agents                compact JSON object keyed by repository path
   root_agent                 compact JSON object with enabled and optional program
   root_agent.enabled         true | false
@@ -523,6 +529,9 @@ Settable keys:
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as network.listen_addr.
+  network.editor_origin_ports  port pool for per-session VS Code editor origins, e.g. "9100-9119" or "9100,9105-9107", or ""
+                             to disable (default ""). Each session's editor gets one loopback port, kept across restarts;
+                             expose the same ports behind your front door (tailscale serve --https=<port>). Next daemon start.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   watcher_events_per_minute  positive integer (per-task watch delivery cap; default 10; next daemon start)
   debug_pprof                true | false  (serve Go runtime profiles at GET /v1/debug/pprof/{profile}; default false,
@@ -534,6 +543,7 @@ Settable keys:
   branch_prefix              string
   on_archive_command         shell command run before a local worktree moves into the archive, or "" to disable
   worktree_root              subdirectory | sibling
+  projects_root              absolute path on the daemon host where af projects add <git-url> clones (default <af home>/projects)
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
@@ -547,7 +557,7 @@ Settable keys:
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
-  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root} (global-only)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config} (global-only)
   default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,

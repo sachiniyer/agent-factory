@@ -277,7 +277,7 @@ not list. They fall into three groups:
   account-login stream `GET /v1/account-login/stream` (bare-session PTY WebSockets
   that serve no Instance); `GET /v1/auth-info`, the tokenless probe that reports
   whether this peer must present a token (see
-  [remote daemon access](remote-http-auth.md)); `GET /v1/preview-auth`; and the
+  [remote daemon access](remote-http-auth.md)); `GET /v1/preview-auth`; `POST /v1/editor-origin`, which mints a session's editor-origin bootstrap URL for a remote viewer (see [Web UI](web.md#per-session-editor-origins-for-remote-viewers)); and the
   web-tab reverse proxy under `/v1/webtab/`.
 - **The profiling endpoint**, `GET /v1/debug/pprof/{profile}`, when it is switched
   on. It is **off by default**, is served on **this socket only** and never on
@@ -297,12 +297,26 @@ did not render exact prompt content; `could-not-confirm` means the pane observer
 itself was unavailable. Neither status claims delivery.
 `PruneSessions` returns
 `{ "ok": true, "older_than": "<duration>", "archived_before": "<rfc3339>", "candidates": [<entry>…], "skipped"?: [<entry>…], "reclaimable_bytes": <int>, "warnings"?: [<string>…] }`:
-the read-only dry run for the archived-session reclaim — it lists in
-`candidates` each archived session a reclaim would remove —
-`{ "id"?, "title", "repo_id", "branch", "archived_at", "reclaimable_bytes" }` —
-while af writes nothing: no deletion, no record update, no git write. (The apply
-half lands in the follow-up to #5142.) `skipped` entries
-(`{ "title", "repo_id", "reason" }`) were evaluated and refused. An archived
+without `"apply"` it is the read-only dry run for the archived-session
+reclaim — it lists in `candidates` each archived session a reclaim would
+remove — `{ "id"?, "title", "repo_id", "branch", "archived_at",
+"reclaimable_bytes" }` — while af writes nothing: no deletion, no record
+update, no git write. With `"apply": true` it deletes exactly the
+worktrees that same verdict lists — the branch is always kept and each
+deleted row stays as a tombstone marked pruned — and the response gains
+`"applied": true`, `"pruned": [<entry>…]` (the rows whose worktree was
+deleted), `"incomplete": [<entry>…]` (deletion started but the record is
+not final; a re-run finishes them), `"reclaimed_estimate_bytes"` (an
+"up to" sum of the pruned rows' allocated-size estimates, never measured
+free space), and `"free_bytes_before"`/`"free_bytes_after"`/
+`"free_bytes_known"` (the measured free space on the archive
+filesystem(s) around the run, so reflinks and shared extents surface as a
+visible gap rather than silent credit). `"only": [<session id>…]` binds an
+apply to the plan a caller already saw and confirmed — the CLI sends it
+after the operator approves the dry-run listing — and is refused on a dry
+run. `skipped` entries (`{ "id"?, "title", "repo_id", "reason" }`) were
+evaluated and refused; one marked `"interrupted": true` had an earlier
+apply not finish and belongs in a re-run's plan. An archived
 worktree still holding uncommitted or ignored files is **refused**, not
 counted: the kept branch does not contain them and they are the only copy —
 restore the session or clean the tree first. `older_than` is required and
@@ -323,8 +337,15 @@ returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?
 web/vscode tab that owns no PTY; it normally tracks the name but diverges
 after a rename, so read it from the response rather than re-deriving it);
 `CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `RenameTab` returns `{ "name": "<resolved-tab-name>" }`; `ReorderTab` returns `{ "name": "<resolved-tab-name>", "index": <int> }`; `ListTasks` returns
-`{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`
-(the merged record); the rest return `{ "ok": true }`. The `task` field of
+`{ "tasks": [<task>…] }`; `AddTask` and `UpdateTask` return
+`{ "ok": true, "task": <task> }` (the stored record; an older daemon omits
+`AddTask`'s); the rest return `{ "ok": true }`. `AddTask`'s `task` is the bare
+stored record — the daemon sets it before reloading schedules and, unlike
+`UpdateTask`'s live-enriched record, never attaches the live schedule-health
+fields (`arming`, `next_run_at`) that the next sentence attributes to every
+returned task; and a sandbox-credential `AddTask` receives a narrowed
+projection (`sandboxSafeTask`) that withholds persisted fields such as
+`project_path`, `repo_id`, `host`, and `program`. The request `task` field of
 `AddTask` is a full task object — the CLI/TUI build and validate it, and the
 daemon re-validates and owns the write. `UpdateTask` instead takes a target `id`
 and a FIELD-LEVEL `update` patch carrying only the fields to change (e.g.
@@ -369,6 +390,12 @@ checks scope in one request and mutates in another cannot act on a task that
 moved projects in between. Omitting `expect` (or sending `enforce: false`) skips
 the check, which is what a caller with no project context does — existing
 clients are unaffected.
+
+### Backlog
+
+Eleven POST routes serve a project's backlog (the `af backlog` CLI calls them): `GetBacklog`, `AddBacklogItems`, `UpdateBacklogItem`, `MoveBacklogItem`, `SetBacklogItemStatus`, `DeleteBacklogItem`, `PostBacklogMessage`, `StartBacklogItem`, `SetBacklogSettings`, `GetBudget` and `SetBudget`. `StartBacklogItem` returns at once with a run that is still starting; the session is created on a daemon-tracked goroutine, and an item left starting by a restart is settled on the daemon's first poll. The per-route fields are in [the generated reference](reference/api.md). A project request names its project with exactly one of `repo_id` or `repo_path` (a path on the daemon host). None of these routes accepts the scoped sandbox credential.
+
+Every write publishes a `backlog.changed` event on `GET /v1/events` with `{repo_id, ids}`: the ids the write touched, including items whose waits-on link was removed by a delete and both parents of a move. The frame names the project and the ids the write touched, not the new rows or their derived state, and a write that changes a parent's roll-up (queueing or finishing a child) does not name the parent; re-read `GetBacklog` on any frame. An empty `ids` means a project-level change (the runner settings): refresh the project. The global budget publishes no event. Refusals are ordinary `500` envelopes with the reason in `error.message`; an invalid budget amount (non-finite, negative or out of range) is refused before anything is written.
 
 ### Session state names
 
@@ -441,7 +468,7 @@ work. The vocabulary is closed:
 | `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
 | `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
 | `restore-gave-up` | The process is gone and automatic Lost-session recovery has stopped — either it exhausted its failed-attempt budget, or it confirmed enough restore-and-die cycles to conclude the agent cannot stay up. See `lost_restore_failure` below for the two verdicts. |
-| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a machine-level resource condition such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
+| `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a condition outside the session itself, such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
 | `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
 | `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
 | `delivery-unconfirmed` | The last send ended `sent-unverified` or `could-not-confirm` (uncertainty, not failure — see `SendPrompt` above), and no pane change has been observed since. |

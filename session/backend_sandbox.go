@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -75,11 +74,20 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=sandbox: cannot resolve repo config for %q: %w", spec.RepoRoot, err)
 	}
-	if err := BackendConfigError(BackendSandbox, cfg); err != nil {
-		return ProvisionResult{}, err
-	}
-	if spec.CloneURL == "" {
-		return ProvisionResult{}, missingOriginError(BackendSandbox, spec.RepoRoot)
+	adopting := spec.Adopt != nil
+	if adopting {
+		// The archived row's own recorded transport reaches the host, whatever the
+		// current sandbox.ssh says (#5571 W8.6); there is nothing to clone.
+		if spec.Adopt.Transport == nil || strings.TrimSpace(spec.Adopt.Transport.SSHCmd) == "" {
+			return ProvisionResult{}, errors.New("backend=sandbox: the archived row recorded no transport to reach its preserved workspace")
+		}
+	} else {
+		if err := BackendConfigError(BackendSandbox, cfg); err != nil {
+			return ProvisionResult{}, err
+		}
+		if spec.CloneURL == "" {
+			return ProvisionResult{}, missingOriginError(BackendSandbox, spec.RepoRoot)
+		}
 	}
 	afBin, err := sshSelfBinary()
 	if err != nil {
@@ -88,16 +96,20 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 
 	p := &sandboxProvisioner{
 		spec:   spec,
-		sshCmd: strings.TrimSpace(cfg.SandboxSSH),
+		sshCmd: adoptedTransportOr(spec, strings.TrimSpace(cfg.SandboxSSH)),
 		afBin:  afBin,
 		// The wire program is the configured name and flags — never af's
 		// auto-detected daemon path, which the sandbox's filesystem does not
 		// have. The agent-server resolves it on the host's login PATH (#5571).
 		program: remoteProgramForHost(cfg, spec.Program),
+		// sandbox.binary is the operator's daemon-local override for air-gapped
+		// or unbuilt hosts (#5571 W2.2) — global-only config, so it can never be
+		// repo-supplied.
+		sandboxBinary: strings.TrimSpace(cfg.Config.SandboxBinary),
 	}
 	res, err := p.provision()
 	if err != nil {
-		return ProvisionResult{}, p.reapProvisionFailure(err)
+		return p.failedProvision(err)
 	}
 	return res, nil
 }
@@ -106,10 +118,20 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // and (since #3052) `backend = "ssh"` alike. There is no persistent client: every
 // step is its own `ssh` invocation, so the only long-lived child is the tunnel.
 type sandboxProvisioner struct {
-	spec    ProvisionSpec
-	sshCmd  string
-	afBin   string
-	program string
+	spec   ProvisionSpec
+	sshCmd string
+	// readinessKey is where this provisioner's prerequisite probe records its
+	// verdict. Empty means the ssh command, the key an unnamed sandbox.ssh host
+	// has always used; a session on a LISTED host sets HostReadinessKey(name) so
+	// create, CheckHost and the supervisor refresh all write the one key the
+	// catalog reads (#5840).
+	readinessKey string
+	afBin        string
+	program      string
+	// sandboxBinary is the operator's sandbox.binary override — a daemon-local
+	// af build to stream instead of the daemon's own binary or a release
+	// fetch (#5571 W2.2). Empty in production means "platform selection".
+	sandboxBinary string
 	// backendLabel is the name the OWNING backend puts on this transport's errors.
 	// Empty means "sandbox". Since #3052 `backend = "ssh"` provisions through this
 	// same type, and an auth, host-key, clone, tunnel or cleanup failure reported
@@ -146,7 +168,16 @@ type sandboxProvisioner struct {
 	//	remoteAddr         the agent-server's loopback address on the sandbox
 	//	                   (the banner's addr) — the -L forward's destination.
 	//	agentServerVersion the version the remote binary reported in its banner.
-	tokenRef           string
+	tokenRef string
+	// launchScript is the exact command that started the agent-server, persisted
+	// so a crashed one can be relaunched from the row alone (W1.4). It names the
+	// session dir's env files and flags, never a secret.
+	launchScript string
+	adoptPending bool // a restarted server has not adopted its workspace yet (W1.4)
+	// persistIdentity is the daemon-installed durable write of the row a W1.4
+	// restart fires before it spawns, before it adopts and when adoption ends.
+	// In memory only; the daemon reinstalls it per reattach attempt.
+	persistIdentity    func(*Instance) error
 	remoteAddr         string
 	agentServerVersion string
 
@@ -156,13 +187,27 @@ type sandboxProvisioner struct {
 	// endpoint every consumer dials, fixed at provision and re-bound verbatim
 	// on every re-dial so a consumer's cached URL is never stale — and forward
 	// embeds the remote agent-server's listen address it targets. reverseFwds
-	// is W3.4's -R slot (the in-sandbox callback): empty here; each element is
-	// composed into the spawn as `-R "$N"` so a future reverse forward gets
-	// the same ExitOnForwardFailure fatality, group teardown, and supervision.
+	// is W3.4's -R slot (the in-sandbox callback), set at provision when a
+	// credential was granted; each element is composed into the spawn as
+	// `-R "$N"` so the reverse forward gets the same ExitOnForwardFailure
+	// fatality, group teardown, and supervision.
 	tunnel      *tunnelChild
 	forward     string
 	localAddr   string
 	reverseFwds []string
+	// callbackRef is the reference the granted callback credential derives from
+	// (W3.6). It persists with the runtime identity, together with the -R spec in
+	// reverseFwds, so a reattach after a daemon restart re-registers the credential
+	// and re-establishes the same forward. Empty when no callback was granted.
+	callbackRef string
+	// callbackSocket is the sandbox-side socket the -R slot creates, removed
+	// before a re-dial so a socket file a killed sshd left behind cannot make the
+	// bind fail forever (the client would otherwise retry a dead path).
+	callbackSocket string
+
+	// account is the workspace that carries this provision's synced account, for
+	// the teardown's write-back and removal (W7.3). nil without an account.
+	account *sandboxWorkspace
 
 	reapMu  sync.Mutex
 	reaped  bool
@@ -183,6 +228,12 @@ type sandboxProvisioner struct {
 	stopped   bool
 	stoppedCh chan struct{}
 
+	// runCtx, when set, parents every command Run starts, so cancelling it kills
+	// the ssh process group. nil means context.Background (a create, which must
+	// not be torn down by anything but its own timeout). Set only by an advisory
+	// probe (CheckHost), which a daemon shutdown has to be able to abandon.
+	runCtx context.Context
+
 	// runCommandFn is a per-instance seam so a test can drive the traps below
 	// without a real sshd. Production leaves it nil.
 	runCommandFn func(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error)
@@ -191,35 +242,48 @@ type sandboxProvisioner struct {
 	startTunnelFn func(remoteAddr string) (localAddr string, err error)
 }
 
+// hostReadinessKey is the readiness-cache key this provisioner's probe records
+// under: the listed host's canonical key when it has one, else the ssh command.
+func (p *sandboxProvisioner) hostReadinessKey() string {
+	if p.readinessKey != "" {
+		return p.readinessKey
+	}
+	return p.sshCmd
+}
+
 func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	w := &sandboxWorkspace{shell: p, spec: p.spec, program: p.program}
 	// Before anything is created on the host: a missing tool refuses the create
 	// with its fix instead of failing a later step half-provisioned (#5571 W2.3).
-	if err := w.checkHostPrereqs(sshShortStepTimeout); err != nil {
+	if err := w.checkHostPrereqs(p.hostReadinessKey(), sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
-	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
+	if p.spec.Adopt != nil {
+		if err := p.beginAdoption(w); err != nil {
+			return ProvisionResult{}, err
+		}
+	} else {
+		if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
+		w.resolveSessionDirSymlinks(sshShortStepTimeout)
+		p.sessionDir = w.SessionDir
+		// The identity is repo-local (#5571 W2.7), so it is written after the clone
+		// that creates the repository.
+		if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
+		if err := w.configureGit(sshShortStepTimeout); err != nil {
+			return ProvisionResult{}, p.sandboxWriteErr(err)
+		}
+	}
+	// The binary stage is platform-aware (#5571 W2.2): probe the host's uname,
+	// pick the af build it can actually run (sandbox.binary override / the
+	// daemon's own binary / a sha256-verified release artifact), install it
+	// into the host's shared cache, and run `af version` on the host before
+	// any agent-server launch is attempted.
+	if err := p.stageRemoteBinary(w); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
-	w.resolveSessionDirSymlinks(sshShortStepTimeout)
-	p.sessionDir = w.SessionDir
-	if err := w.configureGit(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
-	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(err)
-	}
-	binary, err := os.Open(p.afBin)
-	if err != nil {
-		return ProvisionResult{}, fmt.Errorf("backend=%s: opening the af binary %q to stream to the sandbox failed: %w", p.label(), p.afBin, err)
-	}
-	copyErr := w.copyAfBinary(sshProvisionStepTimeout, binary)
-	_ = binary.Close()
-	if copyErr != nil {
-		return ProvisionResult{}, p.sandboxWriteErr(copyErr)
-	}
-	if err := p.verifyCopiedBinary(); err != nil {
-		return ProvisionResult{}, err
 	}
 	// Mint the session's runtime identity BEFORE the agent-server launches
 	// (#5571 W1.1): the derived token reaches it only through the 0600 file
@@ -247,9 +311,38 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	// dead grant out of the launched agent-server's environment (#5571 W3.1,
 	// PR #5577 review — see revalidateCallbackBeforeEnv for why this point).
 	callbackLost := w.revalidateCallbackBeforeEnv()
+	// The callback's carrier is decided BEFORE its env is committed: a granted
+	// credential with no -R to ride is as dead as a revoked one, so it degrades
+	// the same way rather than leaving the agent a URL nothing answers (W3.4).
+	reverse, carrierLost := w.callbackReverseForward()
+	if callbackLost == "" {
+		callbackLost = carrierLost
+	}
+	p.reapMu.Lock()
+	p.reverseFwds, p.callbackRef = nil, ""
+	p.callbackSocket = ""
+	if reverse != "" {
+		p.reverseFwds = []string{reverse}
+		p.callbackRef = w.spec.CallbackRef
+		p.callbackSocket = w.CallbackSocketPath()
+	}
+	p.reapMu.Unlock()
+	p.clearStaleAdoptedCallbackSocket()
+	if err := w.writePolicy(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
+	// W7.3: the session-scoped account, before the agent-server can launch the
+	// agent. Refuses (sending nothing) when the target is not a listed host.
+	if err := w.syncAccountIn(sshProvisionStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
+	if err := w.syncAgentConfigIn(sshProvisionStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
+	p.account = w
 	// Reached only past the pre-launch steps (clone, binary copy, callback env),
 	// so a startAgentServer failure here is not the pre-launch empty-PID case: a
 	// nohup'd agent-server may have started even when the captured PID is empty or
@@ -259,7 +352,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.remotePID = w.RemotePID
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	p.remotePID = w.RemotePID
+	p.remotePID, p.launchScript = w.RemotePID, w.launchScript
 	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)
 	if err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
@@ -290,6 +383,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		return ProvisionResult{}, err
 	}
 
+	if err := p.awaitAdoptedServer(localAddr, token); err != nil {
+		return ProvisionResult{}, err
+	}
+
 	// The endpoint presents the token WE minted — identical to the banner's per
 	// the check above, but the provenance matters: the daemon must never adopt
 	// a credential the remote happened to report.
@@ -298,6 +395,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	log.InfoLog.Printf("sandbox runtime: session %q running via %q (dir %s), agent-server tunneled at %s",
 		p.spec.Title, p.sshCmd, p.sessionDir, endpoint.URL)
 	return ProvisionResult{
+		// Only the branch this runtime actually handed the agent-server via
+		// --branch is the one it ran on (#5971). A runtime that does not take
+		// the daemon's name leaves this empty rather than guess.
+		Branch: strings.TrimSpace(p.spec.Branch),
 		Backend: &sandboxBackend{
 			// The command the sandbox's agent-server was bound to launch
 			// (#5108) — recorded as runtime evidence when the launch RPC
@@ -312,6 +413,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 				RemoteAddr:         p.remoteAddr,
 				AgentServerVersion: p.agentServerVersion,
 				TokenRef:           p.tokenRef,
+				LaunchScript:       p.launchScript,
+				CallbackRef:        p.callbackRef,
+				CallbackReverse:    p.callbackReverse(),
+				AccountSyncHost:    p.accountSyncHost(),
 			},
 		},
 		Endpoint: endpoint,
@@ -355,7 +460,11 @@ func (p *sandboxProvisioner) Run(timeout time.Duration, script string, stdin io.
 }
 
 func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	parent := p.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	cmd := p.buildRunCommand(ctx, script, stdin)
@@ -430,9 +539,10 @@ func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string,
 	// much later somewhere unrelated. That reasoning holds ONLY while nothing else
 	// catches a truncated copy.
 	//
-	// Two things make bounding the right call here instead. verifyCopiedBinary now
-	// compares the byte count ON the sandbox, so a truncated copy fails AT the copy
-	// rather than silently. And a zero WaitDelay is not neutral: os/exec documents
+	// Two things make bounding the right call here instead. installRemoteBinary
+	// now compares the sha256 ON the sandbox (#5571 W2.2), so a truncated copy
+	// fails AT the copy rather than silently. And a zero WaitDelay is not neutral:
+	// os/exec documents
 	// that it makes Wait block until every orphaned descriptor-holder closes, which
 	// for this backend is precisely the ProxyCommand/wrapper it exists to support —
 	// so the copy's advertised timeout would not bound provisioning at all.
@@ -442,126 +552,6 @@ func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string,
 	// partial result the kill leaves behind.
 	cmd.WaitDelay = sandboxTunnelWaitDelay
 	return cmd
-}
-
-// verifyCopiedBinary re-checks the streamed `af` ON THE SANDBOX, because the
-// copy's failure mode is silent. A short write, a cut stream, or a full disk all
-// leave a binary that exists and is executable but is not the one we sent; the
-// next step would then fail with "exec format error" or a version mismatch far
-// from the cause. Comparing the byte count against the local file turns that
-// into an error naming the copy.
-func (p *sandboxProvisioner) verifyCopiedBinary() error {
-	local, err := os.Stat(p.afBin)
-	if err != nil {
-		return fmt.Errorf("backend=%s: cannot stat the local af binary %q: %w", p.label(), p.afBin, err)
-	}
-	remotePath := p.sessionDir + "/" + sshAfBinaryName
-	out, err := p.Run(sshShortStepTimeout, "wc -c < "+shellQuote(remotePath), nil, false)
-	if err != nil {
-		return fmt.Errorf("backend=%s: cannot verify the streamed af binary on the sandbox: %w", p.label(), err)
-	}
-	got := strings.TrimSpace(string(out))
-	want := fmt.Sprintf("%d", local.Size())
-	if got != want {
-		return fmt.Errorf("backend=%s: the af binary streamed to %s is %s bytes but the local one is %s — "+
-			"the copy was truncated, so the sandbox holds a binary that would fail later with an unrelated error; "+
-			"retry the session", p.label(), remotePath, got, want)
-	}
-	return nil
-}
-
-// startTunnel runs `<sandbox_ssh> -N -L <local>:<remote>` as a long-lived child.
-//
-// The local port is chosen by binding :0 and closing it, rather than asking ssh
-// for one: `ssh -L` has no "pick a port and tell me" form, so af must name the
-// port it will dial. The listener is closed before ssh binds it, which is a
-// small race — the readiness probe below is what actually establishes that the
-// forward came up, so a lost race fails the provision rather than handing back a
-// dead endpoint.
-//
-// The child is bound to this process's lifetime by the machinery in
-// sandbox_tunnel.go (#5564): spawned under the watch lifeline when this binary
-// can serve as one, registered for the daemon-exit stop, and env-stamped for
-// the next daemon's ownership-proven sweep.
-func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
-	if p.startTunnelFn != nil {
-		return p.startTunnelFn(remoteAddr)
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", fmt.Errorf("backend=%s: opening a local port for the tunnel failed: %w", p.label(), err)
-	}
-	localAddr := ln.Addr().String()
-	_ = ln.Close()
-
-	forward := fmt.Sprintf("%s:%s", localAddr, remoteAddr)
-	// Registered before the spawn so a daemon exit racing this provision —
-	// StopAllSandboxTunnels — has the entry it needs the moment the child is
-	// born; the entry is dropped by stopTunnel, which reap reaches on every
-	// failure path below.
-	registerSandboxTunnel(p)
-	// The transport contract the supervisor re-establishes on every re-dial is
-	// pinned here, once: every generation binds the same localAddr so the
-	// published endpoint is never stale, and W3.4's -R slot rides p.reverseFwds.
-	p.reapMu.Lock()
-	p.forward, p.localAddr = forward, localAddr
-	p.reapMu.Unlock()
-	// Spawn+publish happen atomically under reapMu (provisionTunnelChild), so
-	// a StopAllSandboxTunnels stop can never interleave between a born child
-	// and its publication — and a child born after that stop already ran is
-	// killed by its own spawner rather than left registered to nothing.
-	if _, err := p.provisionTunnelChild(); err != nil {
-		return "", fmt.Errorf("backend=%s: starting the ssh tunnel failed: %w", p.label(), err)
-	}
-
-	if err := waitForSandboxTunnelFn(p.label(), localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
-		return "", err
-	}
-	// The supervisor starts only after the FIRST generation proves ready: an
-	// ssh that cannot establish at all is a provision failure (reaped as one),
-	// not an outage to retry — the re-dial loop exists for transports that die
-	// AFTER they once worked.
-	go p.superviseTunnel()
-	return localAddr, nil
-}
-
-// sandboxTransportConfigKey names the setting that holds the ssh invocation for
-// this backend, so a transport failure points the operator at something they can
-// run by hand. The two backends reach the same transport from different config
-// surfaces, and telling an `ssh.host` user to check `sandbox_ssh` is worse than
-// saying nothing.
-func sandboxTransportConfigKey(label string) string {
-	if label == string(BackendSSH) {
-		return "ssh.host"
-	}
-	if label == string(BackendHook) {
-		return "remote_hooks.provision_cmd"
-	}
-	return "sandbox.ssh"
-}
-
-// waitForSandboxTunnelFn is the readiness probe both startTunnel and the
-// transport supervisor run after a spawn — a var so a supervisor test can give
-// its fake tunnel a working forward without standing up a real listener.
-var waitForSandboxTunnelFn = waitForSandboxTunnelWithin
-
-// waitForSandboxTunnel probes the local end until it answers. Without this the
-// provision would return an endpoint whose first request races the forward.
-func waitForSandboxTunnelWithin(label, localAddr string, timeout, poll time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		conn, err := net.DialTimeout("tcp", localAddr, poll)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("backend=%s: the ssh tunnel to %s never started listening within %s — "+
-				"check that the transport af runs for %s works by hand and that the remote permits port forwarding",
-				label, localAddr, timeout, sandboxTransportConfigKey(label))
-		}
-		time.Sleep(poll)
-	}
 }
 
 func (p *sandboxProvisioner) reapProvisionFailure(provisionErr error) error {
@@ -628,6 +618,16 @@ func (p *sandboxProvisioner) reap() error {
 			ErrWorkspaceStateUnknown, p.label(), p.sessionDir)
 		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
 		return reapErr
+	}
+
+	// W7.3: write the account back and remove it BEFORE the session dir goes, while
+	// the agent-server is still reachable. Best-effort — the session-dir removal
+	// below is the backstop — so a failure is logged, never a reason to leave the
+	// sandbox in place.
+	if p.account != nil {
+		if aerr := p.account.teardownAccount(sshShortStepTimeout); aerr != nil {
+			log.WarningLog.Printf("sandbox runtime: account teardown for %q: %v", p.sessionDir, aerr)
+		}
 	}
 
 	nonce, nonceErr := sandboxReapNonce()
@@ -755,10 +755,17 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// A subshell so `exit "$rc"` reports rm's status as this group's status
 	// without terminating anything that might follow it.
 	removeAndConfirm := "( " + rm + "; rc=$?; " + respond + `; exit "$rc" )`
+	afPath := p.sessionDir + "/" + sshAfBinaryName
+	// A restart records the PID it launched on the HOST before af learns it, so a
+	// daemon that exited in between leaves a row naming the dead server while the
+	// restarted one runs. Reaping removes the session directory under whatever
+	// still runs there, so the host's record is consulted too and a live match is
+	// stopped (or the reap refused) first.
+	hostKill := "( " + remoteRecordedPIDKillScript(p.agentServerPIDPath(), p.remotePID, afPath, p.tokenRef) + " )"
 	if p.remotePID == "" {
-		return removeAndConfirm, expect
+		return hostKill + " && " + removeAndConfirm, expect
 	}
-	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef)
+	kill := remotePIDIdentityKillScript(p.remotePID, afPath, p.tokenRef)
 	// A SUBSHELL, not a { } group. The identity-kill script ends in `exit 0` when
 	// the process is already gone — the common case after a clean shutdown — and a
 	// group command runs in the CURRENT shell, so that exit terminated the whole
@@ -766,7 +773,7 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// looked like "exited 0, never confirmed": the directory survived and the
 	// record was retained forever. A subshell contains the exit and yields it as
 	// the group's status, which is what `&&` needs.
-	return "( " + kill + " ) && " + removeAndConfirm, expect
+	return hostKill + " && ( " + kill + " ) && " + removeAndConfirm, expect
 }
 
 // sandboxReapNonce makes each reap's challenge unique, so a marker captured from

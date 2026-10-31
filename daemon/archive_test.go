@@ -999,7 +999,7 @@ func TestArchiveRemoteSession_FailedArchiveKeepsTheCallbackCredential(t *testing
 
 	// No remote client is wired, so ArchiveSandbox refuses before anything is
 	// pushed or reaped — the archive never commits.
-	_, aerr := manager.archiveRemoteSession(repoID, inst, "faraway")
+	_, aerr := manager.archiveRemoteSession(repoID, inst, "faraway", true)
 	require.Error(t, aerr, "an archive with no live client must fail rather than commit")
 
 	owner, ok := manager.sandboxTokens.sessionFor(callback)

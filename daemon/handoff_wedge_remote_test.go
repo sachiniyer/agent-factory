@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,50 @@ func withRemoteConfirmProbeTimeout(t *testing.T, timeout time.Duration) {
 // cleanup on the remainder of the delay.
 func delayedAliveRemoteServer(t *testing.T, delay time.Duration) *httptest.Server {
 	t.Helper()
+	return aliveRemoteServer(t, func(r *http.Request) bool {
+		if delay <= 0 {
+			return true
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return true
+		case <-r.Context().Done():
+			return false
+		}
+	})
+}
+
+// gatedAliveRemoteServer is the LIVE-BUT-SLOW remote with no wall-clock in it:
+// /v1/agent/alive answers {"alive": true} only once release is called (or never,
+// if the probe gives up first). A test that expects the probe budget to run out
+// calls release AFTER the verb has refused, so "the answer landed past the budget"
+// holds by construction rather than by a 200ms sleep racing a 50ms timer — under
+// scheduler load the timer can fire late and the sleep early, flipping the
+// outcome. release is idempotent and also runs at cleanup.
+func gatedAliveRemoteServer(t *testing.T) (srv *httptest.Server, release func()) {
+	t.Helper()
+	gate := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	srv = aliveRemoteServer(t, func(r *http.Request) bool {
+		select {
+		case <-gate:
+			return true
+		case <-r.Context().Done():
+			return false
+		}
+	})
+	t.Cleanup(release)
+	return srv, release
+}
+
+// aliveRemoteServer serves a fast idle snapshot and an /v1/agent/alive that
+// answers alive=true once wait returns true; false means the request was
+// abandoned and nothing is written.
+func aliveRemoteServer(t *testing.T, wait func(*http.Request) bool) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -42,14 +87,8 @@ func delayedAliveRemoteServer(t *testing.T, delay time.Duration) *httptest.Serve
 				"data": map[string]any{"updated": false, "has_prompt": false, "content": ""},
 			})
 		case "/v1/agent/alive":
-			if delay > 0 {
-				timer := time.NewTimer(delay)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-				case <-r.Context().Done():
-					return
-				}
+			if !wait(r) {
+				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": true}})
 		default:
@@ -93,7 +132,7 @@ func stageRemoteHandoffWedge(t *testing.T, m *Manager, repoID, repoPath, title, 
 func TestConfirmHandoffDelivery_RemoteProbeTimeoutRefusesLiveButSlowRuntime(t *testing.T) {
 	withRemoteConfirmProbeTimeout(t, 50*time.Millisecond)
 	manager, repoID, repoPath := newStatusTestManager(t)
-	srv := delayedAliveRemoteServer(t, 200*time.Millisecond)
+	srv, release := gatedAliveRemoteServer(t)
 	inst := stageRemoteHandoffWedge(t, manager, repoID, repoPath, "wedged-remote-slow", srv.URL, session.PromptSentUnverified)
 	require.True(t, inst.CanConfirmPendingHandoffDelivery(), "fixture: the wedge advertises its supported exit")
 	mission := inst.PendingHandoffMission()
@@ -103,13 +142,14 @@ func TestConfirmHandoffDelivery_RemoteProbeTimeoutRefusesLiveButSlowRuntime(t *t
 		ID: inst.ID, Title: inst.Title, RepoID: repoID,
 	})
 	elapsed := time.Since(start)
+	release() // the live answer lands only now, strictly past the budget
 
 	require.Error(t, err)
 	require.False(t, performed)
 	require.ErrorContains(t, err, "could not be confirmed live")
 	require.ErrorContains(t, err, "the liveness probe got no answer",
 		"the refusal must name the probeUnknown verdict in an operator's words")
-	require.Less(t, elapsed, 2*time.Second,
+	require.Less(t, elapsed, 10*time.Second,
 		"the refusal must come near the probe budget, not the 30s transport call timeout — the operator budget bounds the wait")
 
 	// The row stays exactly wedged: restore/kill still own it.
@@ -126,9 +166,12 @@ func TestConfirmHandoffDelivery_RemoteProbeTimeoutRefusesLiveButSlowRuntime(t *t
 // proving the budget line, not the remote, decided the refusal. This is the
 // exact contrast the bug report used to isolate the 5s budget as the cause.
 func TestConfirmHandoffDelivery_RemoteProbeFastAnswerSucceeds(t *testing.T) {
-	withRemoteConfirmProbeTimeout(t, 50*time.Millisecond)
+	// The answer is immediate and the budget is generous, so nothing but the
+	// answer can decide the outcome: a 10ms answer against a 50ms budget left 40ms
+	// of headroom that a loaded runner's dial or scheduling could eat (#6080).
+	withRemoteConfirmProbeTimeout(t, 30*time.Second)
 	manager, repoID, repoPath := newStatusTestManager(t)
-	srv := delayedAliveRemoteServer(t, 10*time.Millisecond) // under the 50ms budget
+	srv := delayedAliveRemoteServer(t, 0)
 	inst := stageRemoteHandoffWedge(t, manager, repoID, repoPath, "wedged-remote-fast", srv.URL, session.PromptSentUnverified)
 	require.True(t, inst.CanConfirmPendingHandoffDelivery())
 
@@ -214,7 +257,7 @@ func TestRetryHandoffDelivery_RemoteProbeTimeoutRefusesLiveButSlowRuntime(t *tes
 	withRemoteConfirmProbeTimeout(t, 50*time.Millisecond)
 
 	manager, repoID, repoPath := newStatusTestManager(t)
-	srv := delayedAliveRemoteServer(t, 200*time.Millisecond)
+	srv, release := gatedAliveRemoteServer(t)
 	inst := stageRemoteHandoffWedge(t, manager, repoID, repoPath, "wedged-remote-retry-slow", srv.URL, session.PromptSentUnverified)
 	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(),
 		"fixture: the wedge advertises the explicit retry exit")
@@ -225,6 +268,7 @@ func TestRetryHandoffDelivery_RemoteProbeTimeoutRefusesLiveButSlowRuntime(t *tes
 		ID: inst.ID, Title: inst.Title, RepoID: repoID,
 	})
 	elapsed := time.Since(start)
+	release() // the live answer lands only now, strictly past the budget
 
 	require.ErrorContains(t, err, "could not be confirmed live")
 	require.ErrorContains(t, err, "the liveness probe got no answer",

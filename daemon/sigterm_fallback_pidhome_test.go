@@ -117,7 +117,7 @@ func TestClassifyDaemonHome_ProcSelfHomeIsUnverifiable(t *testing.T) {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	if scope := classifyDaemonHome(pid); scope != daemonUnverifiable {
 		t.Errorf("AGENT_FACTORY_HOME=/proc/self/cwd/state classified %v; want daemonUnverifiable — "+
 			"a /proc/self home resolves in the caller's frame, not the daemon's, so the classifier "+
@@ -168,7 +168,7 @@ func TestClassifyDaemonHome_NonCanonicalProcSelfHomeIsUnverifiable(t *testing.T)
 				_ = syscall.Kill(-pid, syscall.SIGKILL)
 				_, _ = cmd.Process.Wait()
 			})
-			waitForArgv(t, pid, argv0)
+			waitForFakeDaemon(t, cmd, argv0)
 			if scope := classifyDaemonHome(pid); scope != daemonUnverifiable {
 				t.Errorf("AGENT_FACTORY_HOME=%s classified %v; want daemonUnverifiable — "+
 					"a non-canonical procfs home cleans to a /proc/self/... path that "+
@@ -225,7 +225,7 @@ func TestClassifyDaemonHome_ProcfsIndirectedSymlinkHomeIsUnverifiable(t *testing
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	if scope := classifyDaemonHome(pid); scope != daemonUnverifiable {
 		t.Errorf("AGENT_FACTORY_HOME=link (symlink to /proc/self/cwd/state) classified %v; "+
 			"want daemonUnverifiable — a symlink whose target is a process-relative procfs "+
@@ -376,7 +376,7 @@ func TestClassifyDaemonHome_ProcAncestorAliasHomeIsUnverifiable(t *testing.T) {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, pid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	if scope := classifyDaemonHome(pid); scope != daemonUnverifiable {
 		t.Errorf("AGENT_FACTORY_HOME=%s/self/cwd/state (alias to /proc) classified %v; "+
 			"want daemonUnverifiable — an ancestor alias to /proc rejoins to "+
@@ -426,7 +426,7 @@ func TestClassifyDaemonHome_ProcNumericPidCwdHomeIsUnverifiable(t *testing.T) {
 		_ = syscall.Kill(-daemonPid, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
 	})
-	waitForArgv(t, daemonPid, argv0)
+	waitForFakeDaemon(t, cmd, argv0)
 	if scope := classifyDaemonHome(daemonPid); scope != daemonUnverifiable {
 		t.Errorf("AGENT_FACTORY_HOME=/proc/%d/cwd/state classified %v; want daemonUnverifiable — "+
 			"a /proc/<pid>/cwd home resolves against <pid>, not the caller, so the classifier must "+

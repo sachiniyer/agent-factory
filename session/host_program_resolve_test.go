@@ -2,9 +2,7 @@ package session
 
 import (
 	"context"
-	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -12,14 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// probeReply renders what the real probe script prints: whatever the login
-// profile wrote, then the fenced report, then the login PATH. The fence nonce
-// is the probe's own argument ($2 for a lookup, $1 for the PATH-only probe).
-func probeReply(argv []string, profile, report, loginPATH string) []byte {
-	if len(argv) == 6 {
-		return []byte(profile + "\n" + argv[5] + "\n" + loginPATH + "\n")
-	}
-	return []byte(profile + "\n" + argv[6] + "\n" + report + "\n" + argv[6] + "\n" + loginPATH + "\n")
+// probeReply renders what the real probe prints: whatever the login profile
+// wrote, then the nonce fence, then the login PATH. The nonce is always the
+// trailing argv element across all shell families (POSIX/fish keep an af-probe
+// $0 placeholder; csh/tcsh do not), so it is read from the last slot.
+func probeReply(argv []string, profile, loginPATH string) []byte {
+	return []byte(profile + "\n" + argv[len(argv)-1] + "\n" + loginPATH + "\n")
 }
 
 // executableFile makes a real executable under dir and returns its path.
@@ -31,14 +27,20 @@ func executableFile(t *testing.T, dir, name string) string {
 	return path
 }
 
+// loginPATHProber answers the PATH probe with loginPATH after profile noise.
+func loginPATHProber(profile, loginPATH string) hostProgramProber {
+	return newTestProber(func(_ context.Context, _ string, argv []string, _ string) ([]byte, error) {
+		return probeReply(argv, profile, loginPATH), nil
+	})
+}
+
 func newTestProber(run hostProgramRunner) hostProgramProber {
 	return hostProgramProber{
 		shell:       "/bin/sh",
 		host:        "sandbox.example",
 		processPATH: "/spawn/bin",
-		lookPath:    func(string) (string, error) { return "", errors.New("not on the process PATH") },
 		run:         run,
-		statFile:    os.Stat,
+		canExecute:  canExecuteFile,
 		nonce:       func() string { return "NONCE" },
 	}
 }
@@ -46,135 +48,191 @@ func newTestProber(run hostProgramRunner) hostProgramProber {
 // The four merged-#5578 findings (#5725–#5728) and the plain command, in one
 // table: the executable word comes from the shared command reader, the lookup
 // honours the command's own PATH, profile noise never becomes the answer, and
-// only the executable word is rewritten.
+// only the executable word is rewritten. The argument cases are #5767: what
+// follows the executable may be computed without losing the resolution.
 func TestResolveProgramOnHostTable(t *testing.T) {
 	dir := t.TempDir()
-	login := executableFile(t, filepath.Join(dir, "login"), "claude")
-	custom := executableFile(t, filepath.Join(dir, "custom"), "claude")
-	codex := executableFile(t, filepath.Join(dir, "login"), "codex")
+	loginDir := filepath.Join(dir, "login")
+	customDir := filepath.Join(dir, "custom")
+	login := executableFile(t, loginDir, "claude")
+	custom := executableFile(t, customDir, "claude")
+	codex := executableFile(t, loginDir, "codex")
 
 	for _, tc := range []struct {
 		name        string
 		program     string
 		profile     string // login-profile output printed before the probe
-		report      string // what `command -v` printed
-		wantName    string // the $1 the probe must receive
-		wantLocal   string // the $3 command-local PATH the probe must receive
 		wantCommand string
 	}{
+		{name: "plain command", program: "claude --model opus", wantCommand: login + " --model opus"},
+		{name: "#5725 exec prefix resolves the agent, not exec", program: "exec claude --x", wantCommand: "exec " + login + " --x"},
 		{
-			name: "plain command", program: "claude --model opus",
-			report: login, wantName: "claude",
-			wantCommand: login + " --model opus",
+			name: "#5726 command-local PATH is the lookup path", program: "PATH=" + customDir + " claude",
+			wantCommand: "PATH=" + customDir + " " + custom,
 		},
 		{
-			name: "#5725 exec prefix probes the agent, not exec", program: "exec claude --x",
-			report: login, wantName: "claude",
-			wantCommand: "exec " + login + " --x",
-		},
-		{
-			name: "#5726 command-local PATH is the lookup path", program: "PATH=" + filepath.Dir(custom) + " claude",
-			report: custom, wantName: "claude", wantLocal: filepath.Dir(custom),
-			wantCommand: "PATH=" + filepath.Dir(custom) + " " + custom,
+			name: "#5726 env PATH is the lookup path", program: "env PATH=" + customDir + " claude -p",
+			wantCommand: "env PATH=" + customDir + " " + custom + " -p",
 		},
 		{
 			name: "#5727 login profile output is not the answer", program: "codex -c x=1",
-			profile: "/home/operator\nwelcome back", report: codex, wantName: "codex",
-			wantCommand: codex + " -c x=1",
+			profile: "/home/operator\nwelcome back", wantCommand: codex + " -c x=1",
 		},
 		{
 			name: "#5728 env wrapper and assignments survive", program: "env CLAUDE_CONFIG_DIR=/opt/profile claude --dangerously-skip-permissions",
-			report: login, wantName: "claude",
 			wantCommand: "env CLAUDE_CONFIG_DIR=/opt/profile " + login + " --dangerously-skip-permissions",
 		},
+		{name: "assignments and exec together", program: "FOO=1 exec claude", wantCommand: "FOO=1 exec " + login},
 		{
-			name: "assignments and exec together", program: "FOO=1 exec claude",
-			report: login, wantName: "claude",
-			wantCommand: "FOO=1 exec " + login,
+			name: "#5767 computed argument", program: `claude --add-dir "$HOME/project"`,
+			wantCommand: login + ` --add-dir "$HOME/project"`,
+		},
+		{
+			name: "#5767 command substitution argument", program: "exec claude --append-system-prompt \"$(cat /etc/motd)\"",
+			wantCommand: "exec " + login + " --append-system-prompt \"$(cat /etc/motd)\"",
+		},
+		{
+			name: "#5767 computed env assignment value", program: `env CLAUDE_CONFIG_DIR="$HOME/.claude" claude --x`,
+			wantCommand: `env CLAUDE_CONFIG_DIR="$HOME/.claude" ` + login + " --x",
+		},
+		{
+			name: "#5767 computed non-PATH assignment", program: `FOO="$HOME" claude`,
+			wantCommand: `FOO="$HOME" ` + login,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var got []string
-			prober := newTestProber(func(_ context.Context, argv []string) ([]byte, error) {
-				if len(argv) > 6 {
-					got = append([]string(nil), argv...)
-				}
-				return probeReply(argv, tc.profile, tc.report, "/login/bin"), nil
+			var argvs [][]string
+			prober := newTestProber(func(_ context.Context, _ string, argv []string, _ string) ([]byte, error) {
+				argvs = append(argvs, append([]string(nil), argv...))
+				return probeReply(argv, tc.profile, loginDir), nil
 			})
 			command, path, err := resolveProgramOnHost(context.Background(), tc.program, prober)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantCommand, command)
-			assert.Equal(t, "/login/bin:/spawn/bin", path)
-			require.Len(t, got, 8)
-			assert.Equal(t, tc.wantName, got[5], "$1 is the executable word, not exec/env/an assignment")
-			assert.Equal(t, tc.wantLocal, got[7], "$3 is the command's own PATH, or empty for the login PATH")
-			assert.NotContains(t, got[3], tc.wantName, "the -c script never carries the program text")
+			assert.Equal(t, loginDir+":/spawn/bin", path)
+			for _, argv := range argvs {
+				assert.Equal(t, hostProbePathOnly, argv[3])
+				assert.Len(t, argv, 6, "the only thing asked of the shell is its PATH — never the program name")
+			}
 		})
 	}
 }
 
-// Whatever is not exactly one absolute path to an executable regular file is a
-// failed resolution — it is never repaired into a guess, and a command that
-// names its own PATH never falls back to the process PATH (#5726).
-func TestResolveProgramOnHostRejectsAnythingButOneExecutablePath(t *testing.T) {
-	dir := t.TempDir()
-	good := executableFile(t, dir, "claude")
-	notExec := filepath.Join(dir, "plain")
-	require.NoError(t, os.WriteFile(notExec, []byte("x"), 0o644))
+// The pane's sh finds files, not shell functions: a login profile that defines
+// a `claude` function (or prints anything else) cannot change the answer
+// (#5768). Real shell, real function, env-wrapped PATH.
+func TestResolveProgramOnHostIgnoresShellFunctions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bin := executableFile(t, filepath.Join(home, "opt", "agent", "bin"), "claude")
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".profile"),
+		[]byte("claude() { echo shadowed; }\nexport -f claude 2>/dev/null\n"), 0o644))
 
-	for _, tc := range []struct {
-		name   string
-		report string
-	}{
-		{"nothing", ""},
-		{"alias text", "alias claude='claude --x'"},
-		{"relative path", "bin/claude"},
-		{"directory", dir},
-		{"not executable", notExec},
-		{"two answers", good + "\n" + good},
-		{"missing file", filepath.Join(dir, "gone")},
+	prober := newTestProber(execProbeRunner)
+	prober.nonce = randomProbeNonce
+	prober.processPATH = "/usr/bin:/bin"
+
+	program := "env PATH=" + filepath.Dir(bin) + " claude --x"
+	command, _, err := resolveProgramOnHost(context.Background(), program, prober)
+	require.NoError(t, err)
+	assert.Equal(t, "env PATH="+filepath.Dir(bin)+" "+bin+" --x", command)
+}
+
+// A computed executable word or PATH is refused with an actionable error — it
+// is never sent on as a daemon-local path (#5767). A computed word that still
+// contains a slash is a path, which runs as written.
+func TestResolveProgramOnHostComputedExecutable(t *testing.T) {
+	for _, program := range []string{
+		"$AGENT --x",
+		`"$(command -v claude)" --x`,
+		"exec $AGENT",
+		"env FOO=1 $AGENT",
+		`env -u "$NAME" claude`,
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			prober := newTestProber(func(_ context.Context, argv []string) ([]byte, error) {
-				return probeReply(argv, "/home/operator", tc.report, "/login/bin"), nil
+		t.Run(program, func(t *testing.T) {
+			prober := newTestProber(func(context.Context, string, []string, string) ([]byte, error) {
+				t.Fatal("a refused command must not probe")
+				return nil, nil
 			})
-			_, _, err := resolveProgramOnHost(context.Background(), "claude", prober)
+			_, _, err := resolveProgramOnHost(context.Background(), program, prober)
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), `"claude"`)
+			assert.Contains(t, err.Error(), "literal name or an absolute path")
+			assert.Contains(t, err.Error(), "sandbox.example")
 		})
 	}
 
-	t.Run("own PATH never falls back to the process PATH", func(t *testing.T) {
-		prober := newTestProber(func(_ context.Context, argv []string) ([]byte, error) {
-			return probeReply(argv, "", "", "/login/bin"), nil
+	// A computed PATH is refused only for a bare name it would resolve; a
+	// slash word never consults PATH (#5781).
+	for _, program := range []string{`PATH="$HOME/bin" claude`, `env PATH="$HOME/bin" claude`, `env "PATH=$HOME/bin" claude`} {
+		_, _, err := resolveProgramOnHost(context.Background(), program, loginPATHProber("", "/login/bin"))
+		require.Error(t, err, program)
+		assert.Contains(t, err.Error(), "computes its PATH at run time", program)
+	}
+	for _, program := range []string{`PATH=$HOME/bin:$PATH /abs/claude --x`, `env "PATH=$X" /abs/claude`} {
+		command, _, err := resolveProgramOnHost(context.Background(), program, loginPATHProber("", "/login/bin"))
+		require.NoError(t, err, program)
+		assert.Equal(t, program, command)
+	}
+
+	for _, program := range []string{`"$HOME/bin/claude" --x`, `exec $HOME/.local/bin/claude`} {
+		t.Run("path-shaped "+program, func(t *testing.T) {
+			command, _, err := resolveProgramOnHost(context.Background(), program, loginPATHProber("", "/login/bin"))
+			require.NoError(t, err)
+			assert.Equal(t, program, command)
 		})
-		prober.lookPath = func(string) (string, error) { return good, nil }
+	}
+}
+
+// Whatever is not exactly an absolute path to an executable regular file on
+// the searched PATH is a failed resolution — never repaired into a guess — and
+// a command that names its own PATH never falls back to the process PATH.
+func TestResolveProgramOnHostRejectsAnythingButAnExecutableFile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "plain"), []byte("x"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "adir"), 0o755))
+
+	for _, name := range []string{"plain", "adir", "gone"} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := resolveProgramOnHost(context.Background(), name, loginPATHProber("/home/operator", dir))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `"`+name+`"`)
+		})
+	}
+
+	t.Run("a relative PATH entry leaves the lookup to the shell", func(t *testing.T) {
+		executableFile(t, dir, "claude")
+		for _, program := range []string{"PATH=rel:" + dir + " claude", "PATH=:" + dir + " claude"} {
+			command, _, err := resolveProgramOnHost(context.Background(), program, loginPATHProber("", dir))
+			require.NoError(t, err, program)
+			assert.Equal(t, program, command, "a cwd-relative entry precedes the absolute one")
+		}
+	})
+
+	t.Run("own PATH never falls back to the process PATH", func(t *testing.T) {
+		good := executableFile(t, dir, "claude")
+		prober := loginPATHProber("", dir)
+		prober.processPATH = filepath.Dir(good)
 		_, _, err := resolveProgramOnHost(context.Background(), "PATH=/opt/nowhere claude", prober)
-		require.Error(t, err, "claude exists on the process PATH, but the command named a different PATH")
+		require.Error(t, err, "claude exists on the login and process PATH, but the command named a different PATH")
 		assert.Contains(t, err.Error(), "/opt/nowhere")
 	})
 }
 
-// A bare name resolved only by the process PATH (a docker image's ENV PATH)
-// still works, and must also be a real executable.
+// A bare name found only on the process PATH (a docker image's ENV PATH) still
+// resolves, and must be a real executable.
 func TestResolveProgramOnHostProcessPATHFallback(t *testing.T) {
 	bin := executableFile(t, t.TempDir(), "my-agent")
-	prober := newTestProber(func(_ context.Context, argv []string) ([]byte, error) {
-		return probeReply(argv, "", "", "/login/bin"), nil
-	})
+	prober := loginPATHProber("", "/login/bin")
 	prober.processPATH = filepath.Dir(bin)
-	prober.lookPath = func(string) (string, error) { return bin, nil }
 	command, path, err := resolveProgramOnHost(context.Background(), "my-agent", prober)
 	require.NoError(t, err)
 	assert.Equal(t, bin, command)
-	assert.Equal(t, filepath.Dir(bin), path)
+	assert.Equal(t, "/login/bin:"+filepath.Dir(bin), path)
 }
 
 // Not found names the program, the host and the PATH searched.
 func TestResolveProgramOnHostNotFoundNamesProgramPathAndHost(t *testing.T) {
-	prober := newTestProber(func(_ context.Context, argv []string) ([]byte, error) {
-		return probeReply(argv, "", "", "/login/a:/login/b"), nil
-	})
+	prober := loginPATHProber("", "/login/a:/login/b")
 	prober.host = "sandbox-42.example"
 	_, _, err := resolveProgramOnHost(context.Background(), "my-agent", prober)
 	require.Error(t, err)
@@ -183,8 +241,7 @@ func TestResolveProgramOnHostNotFoundNamesProgramPathAndHost(t *testing.T) {
 	assert.Contains(t, err.Error(), "/login/a:/login/b")
 }
 
-// Commands af cannot resolve honestly run as written; none of them is probed
-// for an executable.
+// Commands af cannot resolve honestly run as written; none of them is searched.
 func TestResolveProgramOnHostRunsVerbatimWhatItCannotResolve(t *testing.T) {
 	for _, program := range []string{
 		"/opt/company/agent --x",   // path-qualified: the operator's explicit choice
@@ -194,23 +251,17 @@ func TestResolveProgramOnHostRunsVerbatimWhatItCannotResolve(t *testing.T) {
 		"FOO=1 /opt/company/agent", // assignment before an explicit path
 	} {
 		t.Run(program, func(t *testing.T) {
-			var scripts []string
-			prober := newTestProber(func(_ context.Context, argv []string) ([]byte, error) {
-				scripts = append(scripts, argv[3])
-				return probeReply(argv, "", "", "/login/bin"), nil
-			})
-			command, path, err := resolveProgramOnHost(context.Background(), program, prober)
+			command, path, err := resolveProgramOnHost(context.Background(), program, loginPATHProber("", "/login/bin"))
 			require.NoError(t, err)
 			assert.Equal(t, program, command)
 			assert.Equal(t, "/login/bin:/spawn/bin", path)
-			assert.Equal(t, []string{hostProbePathOnly}, scripts)
 		})
 	}
 }
 
 // A command with no executable word fails like an empty program.
 func TestResolveProgramOnHostAllAssignmentsIsNoExecutable(t *testing.T) {
-	prober := newTestProber(func(context.Context, []string) ([]byte, error) {
+	prober := newTestProber(func(context.Context, string, []string, string) ([]byte, error) {
 		t.Fatal("no executable word — no probe may run")
 		return nil, nil
 	})
@@ -219,20 +270,17 @@ func TestResolveProgramOnHostAllAssignmentsIsNoExecutable(t *testing.T) {
 	assert.Contains(t, err.Error(), "no executable word")
 }
 
-// The program name reaches the shell only as a positional argument. The REAL
-// shell runs: if the name were ever interpolated the sentinels would exist.
+// The program name never reaches a shell at all. The REAL shell runs: if the
+// name were ever interpolated the sentinels would exist.
 func TestResolveProgramOnHostShellMetacharactersAreInert(t *testing.T) {
 	dir := t.TempDir()
 	sentinels := []string{"pwned-subshell", "pwned-backtick"}
-	// One single-quoted literal word: a real shell would never run it, so any
-	// sentinel that appears means the name was interpolated into a script.
 	name := "'-rf;$(touch " + sentinels[0] + ")`touch " + sentinels[1] + "`\"z'"
 
 	t.Setenv("HOME", dir) // `sh -l` reads ~/.profile — keep the probe hermetic.
 	t.Chdir(dir)
 	prober := newTestProber(execProbeRunner)
 	prober.processPATH = "/nonexistent"
-	prober.lookPath = exec.LookPath
 	prober.nonce = randomProbeNonce
 
 	_, _, err := resolveProgramOnHost(context.Background(), name, prober)
@@ -279,4 +327,13 @@ func TestRemoteProgramForHostKeepsTheEnvWrapperAroundADetectedAlias(t *testing.T
 	exec := "exec /home/u/.local/bin/claude --x"
 	resolved = resolvedConfigWithBuiltIn(t, "claude", exec, exec)
 	assert.Equal(t, "exec claude --x", remoteProgramForHost(resolved, "claude"))
+}
+
+// #5767 on the daemon side: a detected path followed by a computed argument is
+// still stripped to the bare agent name.
+func TestRemoteProgramForHostStripsTheDetectedPathBeforeComputedArguments(t *testing.T) {
+	cmd := `/home/u/.local/bin/claude --add-dir "$HOME/project" --dangerously-skip-permissions`
+	resolved := resolvedConfigWithBuiltIn(t, "claude", cmd, cmd)
+	assert.Equal(t, `claude --add-dir "$HOME/project" --dangerously-skip-permissions`,
+		remoteProgramForHost(resolved, "claude"))
 }

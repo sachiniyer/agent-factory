@@ -48,25 +48,24 @@ ports**, no access to the host tmux server, and no touch of the real
 
 ## In CI
 
-Since #2069 a PR touching `web/`, `daemon/`, `agentproto/`, `apiproto/`, the
-harness itself or the CI wiring around it also runs this on a GitHub runner
+Since #2069 a GitHub runner has also run this
 (`.github/workflows/web-selftest.yml`), using the same `make` target — CI does
 not keep its own copy of the steps.
 
-Since #2762 it **gates, and it runs on master**:
+Since #2762 it gates, and since #5615 it gates **off the PR**: the web selftest
+never runs on a `pull_request` — it is one of the heavy jobs that verify on
+master, the nightly schedule (04:37 UTC), `merge_group` and `workflow_dispatch`
+instead of gating each PR.
 
-- **On a PR** `pr.yml` calls the workflow as a job and lists it in `Build`'s
-  `needs`, so a red run turns a required check red. A cheap `Web selftest scope`
-  job decides first whether the change can reach the web client — the decision
-  lives in `.github/scripts/web-selftest-scope.js`, whose tests run in `Lint` — and
-  the expensive job is `skipped` when it cannot. Every way of failing to work out
-  the diff resolves to *run it*.
 - **On master** a `push` trigger runs the same definition with the same path
   filter. It blocks nothing (master has already merged); its job is to name the
   commit. Before #2762 nothing ran the suite on master at all, so a regression
-  stayed invisible until some later PR happened to touch these paths — and then it
-  looked like that PR's fault. Master runs are not cancelled by a newer push, so
-  each commit keeps its own verdict.
+  stayed invisible until some later PR happened to touch these paths — and then
+  it looked like that PR's fault. A stale master run is now cancelled by a newer
+  push (the tip is the question; a burst of merges verifies the last one).
+- **On `merge_group`, the nightly schedule and `workflow_dispatch`** `pr.yml`
+  calls this workflow as a job and lists it in `Build`'s `needs`, so a red run
+  turns the required check red (a red `merge_group` blocks the queue).
 
 A red run is worth investigating rather than re-running: twice on 2026-07-21 a
 "flake" here was a genuine web-client race (#2311, #2341).
@@ -98,7 +97,7 @@ Against the live SPA served over the daemon's plain-HTTP listener:
 | **Attach** | Click-to-attach opens the xterm terminal and shows the fake agent's live output (a real binary PTY frame decoded by the TS codec and painted in the browser). |
 | **Keyboard (#1694/#2517)** | In the sessions view's rail mode `j`/`k` navigate the rail; `Enter` attaches the selection; `ctrl+]` returns to the rail; `Escape` forwards to the agent as its interrupt (the ESC byte reaches the PTY and focus stays in the terminal). |
 | **View cycling (#1694/PR8)** | In rail mode `]` cycles the top-level view forward (sessions → tasks) and `[` cycles it back (tasks → sessions), the active view tab following each step. |
-| **Tabs (#1592 PR7)** | The tab bar opens the New tab picker (`+` / `t`), creates a Terminal or VS Code tab when supported, switches to it (click / `1`-`9`), and deletes it after confirmation (`×` / `w` → Delete tab) — the agent tab stays undeletable. |
+| **Tabs (#1592 PR7)** | The header's **Terminal** and **VS Code** buttons, and `t` / Shift+`T` in rail mode, each create that tab directly when supported; the tab bar switches to it (click / `1`-`9`), and deletes it after confirmation (`×` / `w` → Delete tab) — the agent tab stays undeletable. |
 | **Create** | The **+ New** modal creates a session and its row appears in the rail. |
 | **Delete session** | The Delete session confirmation removes the session's row. |
 | **Archive** | The archive confirm moves a session into the archived group. |

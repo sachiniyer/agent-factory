@@ -75,13 +75,26 @@ func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *Regist
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	// Enforce RegisterProjectRequest's contract here, before the registry is
-	// touched (#4821): config.RegisterProject would resolve a relative path
-	// against THIS process's cwd. The normalized value is the one registered, so
-	// what was checked is exactly what is stored.
-	path, err := config.ResolveDaemonHostPath(req.Path)
-	if err != nil {
-		return fmt.Errorf("project %w", err)
+	var path string
+	var err error
+	if req.URL != "" {
+		// Register by git URL (W9.10): clone on THIS host, with THIS host's
+		// credentials, under projects_root — never anything the caller names.
+		if strings.TrimSpace(req.Path) != "" {
+			return fmt.Errorf("project: give either a path or a git URL, not both")
+		}
+		if path, err = cloneProjectForURL(req.URL); err != nil {
+			return fmt.Errorf("project %w", err)
+		}
+	} else {
+		// Enforce RegisterProjectRequest's contract here, before the registry is
+		// touched (#4821): config.RegisterProject would resolve a relative path
+		// against THIS process's cwd. The normalized value is the one registered, so
+		// what was checked is exactly what is stored.
+		path, err = config.ResolveDaemonHostPath(req.Path)
+		if err != nil {
+			return fmt.Errorf("project %w", err)
+		}
 	}
 	project, err := config.RegisterProject(path)
 	if err != nil {

@@ -23,12 +23,6 @@ func SetStatPathForTest(f func(string) (os.FileInfo, error)) func() {
 	return func() { statPath = old }
 }
 
-// StatPathForTest returns the current underlying metadata syscall so a test
-// can snapshot and restore it around its own overrides.
-func StatPathForTest() func(string) (os.FileInfo, error) {
-	return statPath
-}
-
 // SetProbeTimeoutForTest overrides the per-flight bound. Callers must
 // restore the original via the returned function. Useful for keeping an
 // integration test that exercises a wedged flight fast.

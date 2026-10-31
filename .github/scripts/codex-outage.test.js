@@ -884,3 +884,52 @@ test('#4629: a rate-limit refusal waits at least GitHub\'s documented minimum be
       `secondary-limit retries take the documented ≥60s floor, not the transport schedule: ${stderr}`);
   }
 });
+
+// #5776: a stacked PR's recorded base branch is deleted when the stack
+// collapses, so the gate's compare 404s. That one PR is unprovable; the sweep
+// completes. A 5xx (or a 404 with the base ref still present) still aborts.
+test('#5776: a deleted stacked base branch does not abort the sweep', async () => {
+  const MERGE = '0bc834a39427bd57adc64e4c3c6d0bc8bea55c11';
+  const BASE = '9ac0ffee00000000000000000000000000000000';
+  const PARENT = 'aaaa000000000000000000000000000000000000';
+  const run = async ({ compare, ref }) => {
+    const writes = [];
+    const api = async (route, options = {}) => {
+      if (options.method) { writes.push(options.body); return { body: options.body }; }
+      if (route.includes('/issues/3932/comments')) return [];
+      if (route.includes('/pulls?')) return [{ number: 5454, created_at: t(0), updated_at: t(5),
+        merged_at: t(5), head: { sha: MERGE }, base: { ref: 'matt/project-colors' } }];
+      if (route.includes('/issues/5454/comments')) return [comment(3, limits[0])];
+      if (route.includes('/pulls/5454/comments') || route.includes('/pulls/5454/reviews')) return [];
+      if (route.includes('/compare/')) return compare();
+      if (route.includes('/git/ref/heads/')) return ref();
+      if (route.includes(`/commits/${MERGE}`)) return { sha: MERGE, parents: [{ sha: PARENT }, { sha: BASE }],
+        commit: { committer: { date: t(5) } } };
+      throw new Error(route);
+    };
+    const logs = [];
+    const orig = console.error;
+    console.error = (m) => logs.push(m);
+    try { await sweep(api, 'owner/repo', t(6)); } finally { console.error = orig; }
+    return { body: writes[0], logs };
+  };
+  const notFound = () => { throw ghFailure('gh: Not Found (HTTP 404)'); };
+
+  // Base ref gone: complete record, the PR counted on its merged head only.
+  const done = await run({ compare: notFound, ref: notFound });
+  assert.doesNotMatch(done.body, /sweep incomplete/);
+  assert.match(done.body, /Degraded merges: 1 \(#5454\)/);
+  assert.ok(done.logs.some(l => /#5454 content head unprovable.*project-colors/.test(l)));
+
+  // 5xx on the compare: still fails the sweep closed.
+  const flake = await run({ compare: () => { throw ghFailure('gh: Server Error (HTTP 502)'); }, ref: notFound });
+  assert.match(flake.body, /sweep incomplete/);
+
+  // A 404 while the base ref still exists is not "deleted base": fail closed.
+  const present = await run({ compare: notFound, ref: () => ({ ref: 'refs/heads/matt/project-colors' }) });
+  assert.match(present.body, /sweep incomplete/);
+
+  // The confirming ref read failing for any reason but 404 also fails closed.
+  const authFail = await run({ compare: notFound, ref: () => { throw ghFailure('gh: Bad credentials (HTTP 401)'); } });
+  assert.match(authFail.body, /sweep incomplete/);
+});

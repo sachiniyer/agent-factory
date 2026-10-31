@@ -35,6 +35,18 @@ type home struct {
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
+	// remote caches the target's registry and tasks in remote mode (W9.7); the
+	// poll refreshes it off the event loop.
+	remote remoteCache
+	// pendingPaneNotice is a one-shot message a save queued for the next frame
+	// that can show it (a discarded unsaveable edit, W9.7).
+	pendingPaneNotice string
+	// quitSaveFailure is the text of the save error that last aborted a quit; the
+	// same error again on the next quit is the user's choice to discard and leave.
+	quitSaveFailure string
+	// quitAttempted marks that handleQuit ran during the current input message, so
+	// Update can tell a repeated quit from any other input (#5898).
+	quitAttempted bool
 	// projectPathResolutions retains successful Git identity lookups across the
 	// 750ms Projects poll. It is event-loop-owned like the rest of home state.
 	projectPathResolutions map[string]projectPathResolution
@@ -88,6 +100,10 @@ type home struct {
 	// See releaseTerminalToAttach for why a raw-proxy attach must have them.
 	releaseTerminal func() error
 	restoreTerminal func() error
+	// tookTerminal records that a full-screen attach (raw proxy or tea.ExecProcess
+	// takeover) has had the real terminal at least once, so Run's exit path knows
+	// to leave it the way the shell expects (#6063).
+	tookTerminal atomic.Bool
 	// appConfig stores persistent application configuration
 	appConfig *config.Config
 	// appState stores persistent application state like seen help screens
@@ -324,7 +340,10 @@ type home struct {
 	// attached to, as `af config set` has since #3679.
 	configPane *ui.ConfigPane
 	// Identifies the current opening and its latest remote accounts operation.
+	// quotaGeneration does the same for the Usage read (#2983), so a report
+	// fetched for an earlier opening cannot land on the pane after a reopen.
 	accountGeneration uint64
+	quotaGeneration   uint64
 	// A remote mutation outlives the overlay and is released only on completion.
 	accountRegisterInFlight *daemon.RegisterAccountRequest
 	// menu displays the key hints inside the status bar (shared handle for
@@ -417,6 +436,9 @@ type home struct {
 	// so an untouched field keeps today's behavior byte-identical. Reset by
 	// startNewInstance so a cancelled create cannot leak a backend into the next.
 	pendingBackend string
+	// pendingHost is the listed host picked in the same field (#5571 W6.3), or ""
+	// for none. It is cleared everywhere pendingBackend is.
+	pendingHost string
 	// backendPickerPending prevents submitting or switching fields before the
 	// configured new_remote binding has delivered its promised backend picker.
 	backendPickerPending bool
@@ -601,6 +623,12 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 	h.restoreTUIViewStateOnLaunch()
 	// Populate the sidebar's Projects section from the cross-repo discovery so it
 	// renders (collapsed) at launch with the active project marked.
+	if isRemoteTarget() {
+		// Pre-loop (bubbletea has not started), bounded by remoteReadTimeout: seeds
+		// the cache the first render reads. Every later refresh is the poll's.
+		h.remote.apply(fetchRemoteReads(ctx), h.remote.seq)
+		h.hooksPane.SetReadOnly(remoteHooksReadOnlyReason())
+	}
 	h.refreshSidebarProjects()
 	// In registry mode (launched outside a repo, #2477) the session tree is empty
 	// — there is no active project — so land focus on the Projects section, the

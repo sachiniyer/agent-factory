@@ -96,31 +96,33 @@ func TestAuthGate_BindsTheCredentialToItsOwningSession(t *testing.T) {
 	assert.Empty(t, owner, "the operator's own token must carry no sandbox owner, or it would be narrowed like one")
 }
 
-// THE ACCEPTANCE TEST for #3056, driven through the real mux rather than by
-// calling the handler: a credential minted for session A must not be able to see
-// session B.
+// THE ACCEPTANCE TEST for #3056, widened to the project by W3.5, driven through
+// the real mux rather than by calling the handler: a credential minted for a
+// session in project A must not be able to see a session in project B.
 //
 // It goes through newHTTPMux + the real gate on purpose. The binding is a chain —
 // registry to gate to request context to handler — and every link is somewhere a
 // regression would silently restore full visibility while every unit test still
 // passed. Calling s.snapshot with a hand-built context would prove the filter and
 // none of the wiring.
-func TestSnapshot_SandboxCredentialSeesOnlyItsOwnSession(t *testing.T) {
+func TestSnapshot_SandboxCredentialSeesOnlyItsOwnProject(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
+	const otherRepoID = "zz-other-project-0002"
 
-	mk := func(title string) *session.Instance {
+	mk := func(rid, title string) *session.Instance {
 		inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoPath, Program: "claude"})
 		require.NoError(t, err)
 		inst.SetStartedForTest(true)
 		inst.SetStatusForTest(session.Ready)
-		seedDiskInstance(t, repoID, title, repoPath)
+		seedDiskInstance(t, rid, title, repoPath)
 		manager.mu.Lock()
-		manager.instances[daemonInstanceKey(repoID, title)] = inst
+		manager.instances[daemonInstanceKey(rid, title)] = inst
 		manager.mu.Unlock()
 		return inst
 	}
-	mine := mk("mine")
-	theirs := mk("theirs")
+	mine := mk(repoID, "mine")
+	sibling := mk(repoID, "sibling")
+	theirs := mk(otherRepoID, "theirs")
 	require.NotEqual(t, mine.ID, theirs.ID)
 
 	secret, err := manager.sandboxTokens.mint(mine.ID)
@@ -155,18 +157,18 @@ func TestSnapshot_SandboxCredentialSeesOnlyItsOwnSession(t *testing.T) {
 	for _, d := range all.Instances {
 		titles[d.Title] = true
 	}
-	require.True(t, titles["mine"] && titles["theirs"],
-		"the operator must see both sessions, or this test cannot show the sandbox saw fewer; got %v", titles)
+	require.True(t, titles["mine"] && titles["sibling"] && titles["theirs"],
+		"the operator must see every session, or this test cannot show the sandbox saw fewer; got %v", titles)
 
-	// The sandbox sees exactly its own.
+	// The sandbox sees its project's sessions and nobody else's.
 	own := snapshotAs(secret)
-	require.Len(t, own.Instances, 1,
-		"a sandbox credential must see ONLY its own session; it saw %d", len(own.Instances))
-	assert.Equal(t, mine.ID, own.Instances[0].ID)
-	assert.Equal(t, "mine", own.Instances[0].Title)
+	seen := map[string]bool{}
 	for _, d := range own.Instances {
-		assert.NotEqual(t, theirs.ID, d.ID, "session B leaked into session A's snapshot")
+		seen[d.ID] = true
 	}
+	assert.True(t, seen[mine.ID] && seen[sibling.ID], "the project's own sessions must be visible; saw %v", seen)
+	assert.False(t, seen[theirs.ID], "a session of another project leaked into the snapshot")
+	assert.Len(t, own.Instances, 2)
 	assert.Empty(t, own.DeliveryAlarms,
 		"delivery alarms name their target by TITLE, so they are withheld from a sandbox entirely rather than filtered by an id-to-title mapping")
 }
@@ -182,7 +184,7 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	allowed := map[string]bool{
 		"ID": true, "TaskID": true, "Title": true, "Branch": true, "Status": true,
 		"Liveness": true, "InFlightOp": true, "LifecycleAction": true,
-		"CurrentAgent": true, "Program": true, "BackendType": true,
+		"CurrentAgent": true, "BackendType": true,
 		"TaskRunActive": true, "LimitResetAt": true, "CreatedAt": true, "UpdatedAt": true,
 		"IdleReason": true, "LastPromptAttemptAt": true,
 		"LastPromptDeliveryStatus": true, "LastPaneChurnAt": true,

@@ -118,9 +118,12 @@ installable plugin, so for Devin the push is the only route `af` provides.
 
 Everything under `plugins/`, plus `.agents/plugins/marketplace.json` and
 `.claude-plugin/marketplace.json`, is **generated**. The source is
-`afUsageReference` in `session/systemprompt.go` — the one text every af surface
-teaches. `commands/plugins_gen.go` reframes it for a plugin audience (the canonical text opens "You are an AI coding agent running inside Agent Factory (af)", which is false
-for a plugin user) and emits each agent's artifacts from that single body.
+`afUsageReference` in `session/systemprompt.go`; a session the daemon could not
+give a callback credential gets `afUsageReferenceCallbackless` instead, on the
+per-instance seams only. `commands/plugins_gen.go` reframes it for a plugin
+audience (the canonical text opens "You are an AI coding agent running inside
+Agent Factory (af)", which is false for a plugin user) and emits each agent's
+artifacts from that single body.
 
 Change the guidance in `session/systemprompt.go`, then:
 

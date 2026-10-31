@@ -43,6 +43,9 @@ type snapshotFetchedMsg struct {
 	// disk task read still succeeds.
 	tasks    []task.Task
 	tasksErr error
+	// remote is the target's registry and tasks read on this poll, nil locally.
+	remote    *remoteReads
+	remoteSeq uint64
 	// alarms carries any persistent watch-task delivery-failure alarms projected
 	// on the same daemon snapshot (#1238). It rides the session snapshot because
 	// it is a field of the one authoritative Snapshot response, not a separate
@@ -92,6 +95,8 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	repoID := m.repoID
 	repoRoot := m.repoRoot
 	fetch := m.snapshotFetcher
+	lifetime := m.ctx
+	remoteSeq := m.remote.seq // the task-mutation count this poll starts from
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {
@@ -102,7 +107,17 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// reads the switched-to project's tasks — not the launch repo's. Its own
 		// error is carried separately so a warming-daemon RPC failure never
 		// suppresses a successful disk task read.
-		tasks, tasksErr := task.LoadTasksForKnownRepo(repoRoot, repoID)
+		var remote *remoteReads
+		var tasks []task.Task
+		var tasksErr error
+		if isRemoteTarget() {
+			remote = fetchRemoteReads(lifetime)
+			if repoID != "" {
+				tasks, tasksErr = filterTasksToProject(remote.tasks, repoRoot, repoID), remote.tasksErr
+			}
+		} else {
+			tasks, tasksErr = task.LoadTasksForKnownRepo(repoRoot, repoID)
+		}
 		// The disk read is the DEFINITION and stays authoritative; what it cannot
 		// see is whether the running scheduler is holding each task, which is
 		// observable only inside the daemon. Fetched here, beside the snapshot,
@@ -123,7 +138,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		allReposData, allReposErr := allRepos(context.Background())
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
-			tasks: tasks, tasksErr: tasksErr, repoID: repoID,
+			tasks: tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
 			allRepos: allReposData, allReposErr: allReposErr,
 		}
 	}
@@ -166,6 +181,9 @@ func (m *home) coldStartFromSnapshot() error {
 // A single unrestorable record is logged and skipped, never aborting the batch.
 func (m *home) materializeSnapshot(data []session.InstanceData) {
 	for _, d := range data {
+		if snapshotAwaitingWorktree(d) {
+			continue
+		}
 		inst, err := buildInstanceFromSnapshot(d)
 		if err != nil {
 			// The session's tmux/worktree may have been destroyed externally;
@@ -560,11 +578,25 @@ func sameSession(inst *session.Instance, d session.InstanceData) bool {
 	return inst.CreatedAt.Equal(d.CreatedAt)
 }
 
+// snapshotAwaitingWorktree reports whether a record is the daemon's pending
+// create projection: published (so clients see the session at once) before the
+// worktree exists, so its empty worktree path is an expected transient and the
+// next reconcile picks the row up. The same empty path on a record with no
+// create in flight stays a real fault and keeps its warning, whatever its
+// liveness says (the pending projection itself claims LiveReady).
+func snapshotAwaitingWorktree(d session.InstanceData) bool {
+	return d.InFlightOp == session.OpCreating && d.Worktree.WorktreePath == ""
+}
+
 // addInstanceFromSnapshot builds a live instance from a snapshot record and adds
 // it to the projection store. Returns true on success (a real change). A build
 // failure is logged and skipped — a single unrestorable record must not abort
 // the whole reconcile.
 func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
+	if snapshotAwaitingWorktree(d) {
+		log.InfoLog.Printf("deferring instance %q: create in flight, worktree not populated yet", d.Title)
+		return false
+	}
 	inst, err := buildInstanceFromSnapshot(d)
 	if err != nil {
 		log.WarningLog.Printf("failed to build instance %q from snapshot: %v", d.Title, err)
@@ -582,6 +614,9 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 // sidebar cursor rested on at the start of this reconcile ("" while it rested on
 // a section header), captured once before the per-row loop — see reconcileSnapshot.
 func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle string) bool {
+	if snapshotAwaitingWorktree(d) {
+		return false
+	}
 	inst, err := buildInstanceFromSnapshot(d)
 	if err != nil {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
@@ -667,6 +702,12 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle st
 // Returns whether anything changed.
 func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.InstanceData) bool {
 	changed := false
+	if inst.ReconcilePlacementSnapshot(d.Placement) {
+		changed = true
+	}
+	if inst.ReconcileTabManagementSnapshot(d.TabManagement) {
+		changed = true
+	}
 	// A combined agent+account handoff replaces the process behind the same row
 	// and tmux address. Reconcile every source CurrentAgentName consults before
 	// later action predicates choose which agent's accounts to load.
@@ -701,6 +742,9 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		changed = true
 	}
 	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {
+		changed = true
+	}
+	if inst.ReconcileBacklogRunState(d.BacklogRunActive) {
 		changed = true
 	}
 	// The outage flag is daemon truth on every snapshot: this is the reconcile
@@ -805,9 +849,10 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileRootRecreateContext(d.RootRecreateContext) {
 		changed = true
 	}
-	// Backends without user-managed tabs (the off-box docker/ssh/hook runtimes)
-	// have a tab list their runtime owns — a single agent tab, fixed at Launch —
-	// so there is nothing for the snapshot to reconcile against. Skipping is a
+	// Backends without user-managed tabs (the off-box docker/ssh/sandbox/hook
+	// runtimes) have a tab list their runtime owns: the agent tab, plus any
+	// metadata-only external web tabs the daemon admits (#3062). There is no
+	// local tmux session behind those for the snapshot to reconcile against. Skipping is a
 	// no-op rather than a behavior change: ReconcileTabsFromData already returns
 	// early for an instance with no local worktree, which is every sandbox
 	// instance (#1874).

@@ -29,32 +29,24 @@ jobs:
     name: Merge ready PRs
     # Kill switch: set the repository variable AUTO_MERGE_ENABLED to 'false'.
     if: vars.AUTO_MERGE_ENABLED != 'false'
-    runs-on: ubuntu-latest
+    # Pinned to 24.04 until #6281 (26.04 compatibility) lands.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - name: Check out master
+        uses: actions/checkout@v6
+        with:
+          ref: master
+
       - name: Debounce workflow_run triggers
         id: debounce
         uses: actions/github-script@v8
         with:
           script: |
-            // Inline: no checkout yet. Skips a workflow_run-triggered run when
-            // another auto-merge run started in the last 3 minutes.
-            if (context.eventName !== 'workflow_run') return core.setOutput('skip', 'false');
-            const { owner, repo } = context.repo;
-            const res = await github.rest.actions.listWorkflowRuns({
-              owner, repo, workflow_id: 'auto-merge.yml', per_page: 10,
-            });
-            const recent = res.data.workflow_runs.find((r) =>
-              r.id !== context.runId && r.conclusion !== 'cancelled' &&
-              Date.now() - Date.parse(r.run_started_at || r.created_at) < 3 * 60 * 1000);
-            if (recent) core.notice(`Debounced: run ${recent.id} started within the last 3 minutes.`);
-            core.setOutput('skip', recent ? 'true' : 'false');
-
-      - name: Check out master
-        if: steps.debounce.outputs.skip != 'true'
-        uses: actions/checkout@v6
-        with:
-          ref: master
+            // Skips a workflow_run trigger only when a merger run that started
+            // after the triggering run completed (or one already queued) will read
+            // state at least as new. Never merely because a run was "recent".
+            await require('./.github/scripts/auto-merge.js').checkDebounce({ github, core, context });
 
       - name: Check for a broken-master halt
         id: halt

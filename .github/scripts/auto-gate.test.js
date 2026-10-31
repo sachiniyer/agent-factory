@@ -12867,7 +12867,7 @@ test("a head with no PR Validation run is dispatched once and the decision names
     validation,
     /^ {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/m,
   );
-  assert.match(validation, /^ {2}cancel-in-progress: true$/m);
+  assert.match(validation, /^ {2}cancel-in-progress: \$\{\{ github\.ref != 'refs\/heads\/master' \}\}$/m);
 });
 
 test("a head whose PR Validation run is queued or running is left alone", async () => {
@@ -13247,6 +13247,7 @@ test("merge invalidates the old-head aggregate before dispatching docs", async (
     "dispatch:docs.yml",
     "dispatch:lint.yml",
     "dispatch:pr.yml",
+    "dispatch:sandbox-e2e.yml",
     "dispatch:tui-driver-selftest.yml",
     "dispatch:web-selftest.yml",
   ]);
@@ -13498,7 +13499,7 @@ test("the trigger scan asks a question no YAML spelling can hide", () => {
     "on:\n  pull_request:\n    branches: [master]\n\njobs:\n",
     "on:\n  workflow_dispatch:\n\njobs:\n",
     "on:\n  # we deliberately do not run on push here\n  pull_request:\n\njobs:\n",
-    "on:\n  pull_request:\n\njobs:\n  push:\n    runs-on: ubuntu-latest\n",
+    "on:\n  pull_request:\n\njobs:\n  push:\n    runs-on: ubuntu-24.04\n",
   ]) {
     assert.equal(
       mentionsPushTrigger(onSection(form)),
@@ -13509,7 +13510,7 @@ test("the trigger scan asks a question no YAML spelling can hide", () => {
 
   // A file with no readable `on:` section at all is null, which the anti-rot
   // test turns into a failure naming the file rather than a silent exclusion.
-  assert.equal(onSection("name: x\njobs:\n  a:\n    runs-on: ubuntu-latest\n"), null);
+  assert.equal(onSection("name: x\njobs:\n  a:\n    runs-on: ubuntu-24.04\n"), null);
 });
 
 
@@ -13563,6 +13564,26 @@ test("the dispatch contract survives the spellings that hid from the parser", ()
     true,
   );
   assert.equal(admitsDispatch("'workflow_dispatch' == github.event_name"), true);
+  // A dispatch-ONLY job (build.yml's kick-auto-merge) gates nothing a push would
+  // have run, so it is not a violation — but a push-only or mixed gate still is.
+  const kick = "if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' }}";
+  assert.equal(requiresDispatchOnly(kick), true);
+  assert.equal(requiresDispatchOnly("github.event_name == 'workflow_dispatch'"), true);
+  for (const gate of [
+    "if: ${{ !cancelled() && github.event_name == 'push' }}",
+    "if: github.event_name == 'push' && github.ref == 'refs/heads/master'",
+    "if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}", // admitted by admitsDispatch instead
+    "if: ${{ github.event_name == 'workflow_dispatch' && github.event.head_commit != null }}",
+    "if: ${{ github.event_name != 'workflow_dispatch' }}",
+    "if: github.event.head_commit != null",
+  ]) {
+    assert.equal(requiresDispatchOnly(gate), false, gate);
+  }
+  // The combined rule the loop applies: a push-only gate is still caught.
+  const passes = (c) => admitsDispatch(c) || requiresDispatchOnly(c);
+  assert.equal(passes("if: ${{ !cancelled() && github.event_name == 'push' }}"), false);
+  assert.equal(passes("if: github.event_name == 'push'"), false);
+  assert.equal(passes(kick), true);
   // A bare dispatch test nested inside a conjunction is not a top-level disjunct.
   assert.equal(
     admitsDispatch("(github.event_name == 'workflow_dispatch' || github.event_name == 'push') && vars.ENABLED"),
@@ -13757,7 +13778,7 @@ test("the master-verify list names every workflow that gates master on push", ()
         continue;
       }
       assert.ok(
-        admitsDispatch(condition),
+        admitsDispatch(condition) || requiresDispatchOnly(condition),
         `${name} gates a job or step on the event without admitting workflow_dispatch, so ` +
           `the re-raised run would skip it: ${condition.trim()}`,
       );
@@ -17854,6 +17875,56 @@ function admitsDispatch(condition) {
       disjunct,
     ),
   );
+}
+
+// A condition that can only be true for a dispatch: no top-level `||`, one
+// top-level `&&` conjunct that IS the dispatch test, and no other conjunct that
+// consults the event at all (so it cannot be a push gate in disguise). Such a
+// job runs only on the re-raised run and gates nothing a push would have run, so
+// "admit a dispatch" is vacuously met — e.g. build.yml's `kick-auto-merge`, which
+// exists to announce a dispatched verification run. A push-only or mixed
+// condition does not qualify.
+function requiresDispatchOnly(condition) {
+  const text = condition
+    .replace(/^\s*if:\s*/, "")
+    .trim()
+    .replace(/^\$\{\{/, "")
+    .replace(/\}\}$/, "")
+    .trim();
+  if (topLevelDisjuncts(text).length > 1) {
+    return false;
+  }
+  const conjuncts = topLevelConjuncts(text);
+  const isDispatchTest = (conjunct) =>
+    /^github\.event_name\s*==\s*'workflow_dispatch'$|^'workflow_dispatch'\s*==\s*github\.event_name$/.test(conjunct);
+  return (
+    conjuncts.some(isDispatchTest) &&
+    conjuncts.filter((conjunct) => !isDispatchTest(conjunct)).every((conjunct) => !consultsEvent(conjunct))
+  );
+}
+
+// Top-level `&&` operands, depth-aware like topLevelDisjuncts.
+function topLevelConjuncts(condition) {
+  const operands = [];
+  let depth = 0;
+  let current = "";
+  for (let index = 0; index < condition.length; index += 1) {
+    const character = condition[index];
+    if (character === "(") {
+      depth += 1;
+    } else if (character === ")") {
+      depth -= 1;
+    }
+    if (depth === 0 && character === "&" && condition[index + 1] === "&") {
+      operands.push(current);
+      current = "";
+      index += 1;
+      continue;
+    }
+    current += character;
+  }
+  operands.push(current);
+  return operands.map((operand) => operand.trim().replace(/\s+/g, " "));
 }
 
 // A condition's top-level `||` operands, with wrapping parentheses stripped.

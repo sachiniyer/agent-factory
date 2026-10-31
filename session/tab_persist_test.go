@@ -1,10 +1,12 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -52,6 +54,9 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 	for k, v := range alive {
 		existing[k] = v
 	}
+	// Concurrent spawns can drive the same mock from two goroutines (a raced
+	// same-id tab create), so every read/write of the maps goes through mu.
+	var mu sync.Mutex
 	nameOf := func(cmd *exec.Cmd) string {
 		for i, a := range cmd.Args {
 			switch {
@@ -71,6 +76,8 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
 			n := nameOf(cmd)
+			mu.Lock()
+			defer mu.Unlock()
 			switch {
 			case strings.Contains(s, "has-session"):
 				if existing[n] {
@@ -78,6 +85,12 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 				}
 				return assertNoSession
 			case strings.Contains(s, "new-session"):
+				// Real tmux can never create a session over a name that already
+				// exists — the duplicate rejection is exactly what dedupes two
+				// concurrent spawns that derived the same name (#5571 W4.3).
+				if existing[n] {
+					return fmt.Errorf("duplicate session: %s", n)
+				}
 				existing[n] = true
 				return nil
 			case strings.Contains(s, "kill-session"):
@@ -87,6 +100,8 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
 			if pane, ok := finished[tmuxTarget(cmd)]; ok && existing[tmuxTarget(cmd)] {
 				if answer, ok := pane.answer(cmd); ok {
 					return []byte(answer), nil

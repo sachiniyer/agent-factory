@@ -12,7 +12,13 @@ import (
 // SwapAgent consumes the returned plan and cannot drift to a different override
 // in the destructive close/start gap.
 func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPlan, error) {
-	resolved := resolveProgramForAgent(i, target)
+	return prepareAgentSwapFrom(i, target, resolveProgramForAgent(i, target))
+}
+
+// prepareAgentSwapFrom is PrepareAgentSwap for an already-resolved command: an
+// account swap restarts the command that was proven and is running, not whatever
+// its agent name resolves to under today's overrides.
+func prepareAgentSwapFrom(i *Instance, target, resolved string) (AgentSwapPlan, error) {
 	// A plain handoff never carries the outgoing scope: a scoped session can
 	// only reach this preflight when the target cannot hold an account —
 	// scoped-to-scopable without --account is refused at admission — so the
@@ -20,9 +26,9 @@ func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPl
 	// skill against the still-recorded outgoing account would mark a
 	// non-scopable target unresolved and drop the ambient af skill the
 	// replacement pane should read (#4430 review round 7).
-	program := injectSystemPrompt(resolved, resolveSkillTargetForAccount(resolved, "", ""), i.CallbackUnavailable() != "")
-	program, conversation := planLaunchConversation(i.ID, program)
 	workDir := i.GetWorktreePath()
+	program := injectSystemPromptWithEnv(resolved, resolveSkillTargetForAccount(resolved, "", "", workDir), i.guidanceCaps(), launchEnvFor(i, workDir))
+	program, conversation := planLaunchConversation(i.ID, program)
 	if workDir == "" {
 		return AgentSwapPlan{}, fmt.Errorf("handoff target %s has no worktree path for launch preflight", target)
 	}

@@ -155,7 +155,7 @@ func (i *Instance) validateHandoffTargetLocked(target, effective string) error {
 	if !tmux.IsSupportedProgram(target) {
 		return fmt.Errorf("unknown agent %q: handoff target must be one of %s", target, tmux.SupportedProgramsString())
 	}
-	if current := i.currentAgentNameLocked(); HandoffTargetIsCurrent(current, target, effective, i.Program) {
+	if current := i.currentAgentNameLocked(); !i.restartingSameAgent && HandoffTargetIsCurrent(current, target, effective, i.Program) {
 		return fmt.Errorf("session is already running %s", current)
 	}
 	return nil

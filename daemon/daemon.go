@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -493,16 +492,22 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	} else {
 		restoreTmuxServerConfig := sessiontmux.ConfigureDaemonServer(home)
 		defer restoreTmuxServerConfig()
-		if serverErr := sessiontmux.EnsureDaemonServer(); serverErr != nil {
-			log.WarningLog.Printf("dedicated tmux server launch failed; session creation will use its fallback: %v", serverErr)
-		}
+		startupStep("dedicated tmux server", func() {
+			if serverErr := sessiontmux.EnsureDaemonServer(); serverErr != nil {
+				log.WarningLog.Printf("dedicated tmux server launch failed; session creation will use its fallback: %v", serverErr)
+			}
+		})
 	}
 	log.InfoLog.Printf("control socket bound; restoring instances")
 	restoreDone := make(chan error, 1)
 	// Capture the seam on the main flow: reading the package var inside the
 	// goroutine would race with tests restoring it after RunDaemon returns.
 	restore := restoreManagerForStartup
-	go func() { restoreDone <- restore(manager) }()
+	go func() {
+		var restoreErr error
+		startupStep("restore instances", func() { restoreErr = restore(manager) })
+		restoreDone <- restoreErr
+	}()
 	// The startup watcher was retired once the control-socket cleanup was
 	// armed (above); a signal landing since then sits buffered in sigChan for
 	// this select.
@@ -544,11 +549,19 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 
 	// Remove per-task timer units left behind by pre-#782 versions; the
 	// in-process scheduler below replaces them.
-	sweepLegacyTaskUnits()
+	startupStep("legacy task unit sweep", sweepLegacyTaskUnits)
 
-	sweepStartupOrphanSandboxTunnels()
-	sweepStartupOrphanContainers(manager)
-	sweepStartupTabCleanup(manager)
+	startupStep("orphan tunnel sweep", sweepStartupOrphanSandboxTunnels)
+	// After the tunnel sweep, never before: the sweep would kill the tunnels
+	// reattachment opens (#5571 W1.5). The reattach itself runs in the background.
+	startupStep("start sandbox reattach", manager.reattachRestoredRuntimes)
+	// Arms the orphan-container sweep; it runs after readiness (see
+	// sweepStartupOrphanContainers), so a hung Docker engine cannot hold the
+	// daemon in "starting" (#5815).
+	startupStep("arm orphan container sweep", func() { sweepStartupOrphanContainers(manager) })
+	startupStep("tab cleanup sweep", func() { sweepStartupTabCleanup(manager) })
+	// Background and read-only until it proves an orphan; see sandbox_dir_sweep.go.
+	startupStep("sandbox orphan dir sweep", manager.sweepStartupOrphanSandboxDirs)
 	manager.finishInstanceRestore()
 
 	// Start task automation only after the control server is up and restore has
@@ -559,7 +572,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// policy can no longer materialize it. One preflight owns both cron and watch:
 	// on failure neither starts, and one actionable log replaces a permanent
 	// per-fire retry loop (#2646).
-	taskArmErr := armTaskAutomation(manager, scheduler, watchers)
+	var taskArmErr error
+	startupStep("arm task automation", func() { taskArmErr = armTaskAutomation(manager, scheduler, watchers) })
 	if taskArmErr != nil {
 		log.WarningLog.Printf("task automation not armed: %v", taskArmErr)
 	}
@@ -577,6 +591,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
 	startInstancePollLoop(manager, time.Duration(cfg.DaemonPollInterval)*time.Millisecond, stopCh, wg)
+	startHostReadinessRefresh(manager, stopCh)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an
@@ -608,6 +623,13 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return fmt.Errorf("failed to mark daemon ready: %w", err)
 	}
 	log.InfoLog.Printf("daemon ready")
+	// The destructive Docker orphan pass was deferred past the readiness barrier
+	// (it can spend 30s per Docker call on an unavailable engine). Launch it now
+	// rather than waiting for the first poll tick; createSweepMu keeps a create
+	// admitted after this point out of the protected-slug window (#2632).
+	launchDeferredOrphanSweepIfReady(manager, stopCh, wg)
+	// Finish a prune the previous daemon began (#5189): bounded, logged, off readiness.
+	launchPruneIntentResume(manager, stopCh, wg)
 
 	// Start the daemon-owned release check only now, past the readiness barrier:
 	// a box that never opens the TUI never reaches the launch-path updater, so
@@ -640,7 +662,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("quiescing for a daemon-owned upgrade hand-off")
 	}
 
-	drainDaemon(manager, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
+	joined := drainDaemon(manager, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under
@@ -650,6 +672,13 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return nil
 	}
 
+	if !joined {
+		// A joined goroutine is wedged. Whatever it holds, the final save would
+		// queue behind it past the SIGKILL grace, and a write taken while
+		// admitted writers can still commit is unsound (see drainDaemon), so
+		// nothing is written; drainDaemon logged what was left behind (#5846).
+		return nil
+	}
 	if err := manager.SaveInstancesForShutdown(); err != nil {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
@@ -875,24 +904,92 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	}
 	refreshRowOutcomes.prune(allInstances)
 
-	// Preserve in-memory instances whose repo directory vanished from disk
-	// entirely (#736). LoadAllRepoInstances only returns repos that still have
-	// an on-disk instances directory, so an externally-deleted repo dir is
-	// simply absent from allInstances and would otherwise be dropped from
-	// `next`. This is a recoverable disk inconsistency — SaveInstances recreates
-	// missing repo directories — so we re-hydrate the prior instances and log
-	// loudly rather than silently abandoning running sessions. This
-	// parallels the corrupted-JSON handling above, which also re-hydrates from
-	// `existing`. On startup (existing == nil) there is nothing to preserve.
+	// Preserve in-memory instances whose repo storage vanished from disk (#736):
+	// either the repo's instances directory was deleted entirely OR the repo's
+	// instances.json file was deleted while its directory remains. A deleted
+	// directory makes the repo simply absent from allInstances, while a deleted
+	// FILE is still reported by the loader as present-but-empty ("[]") with
+	// Missing[repoID]=true — so the empty branch above calls continue without
+	// touching `existing` either way, and `next` would otherwise drop the repo's
+	// live in-memory sessions. The mid-life write path opens up a second arm: when
+	// a preserved session next performs any targeted write, UpdateRepoInstances
+	// reads the still-missing file as "[]" and unconditionally saves that result
+	// back, so the file reappears on disk as a real empty "[]" even though
+	// persistence returned "not found". On the following poll Missing[repoID] is
+	// false and the repo is present in allInstances, so without provenance the
+	// guard would skip preservation and drop every formerly preserved live session
+	// again — preserving only until the next write. To keep the protection alive
+	// after the file is recreated WITHOUT also preserving a repo that was
+	// LEGITIMATELY emptied (another process killed the last session, or an
+	// administrator replaced the roster with "[]"), a present-but-empty file is
+	// preserved only when the daemon previously OBSERVED it as missing
+	// (preservedMissingFileRepos). A genuinely empty file the daemon never saw
+	// vanish is the authoritative state, so its stale in-memory sessions are
+	// dropped rather than held forever. A present repo that carries REAL rows is
+	// left to the normal load path (an external rewrite that replaces the rows is
+	// observed, not papered over) and clears any stale provenance so a later
+	// legitimate emptying is not over-preserved. Both the missing-directory and
+	// missing-file cases are recoverable disk inconsistencies — SaveInstances
+	// recreates missing repo directories and files — so we re-hydrate the prior
+	// instances and log loudly rather than silently abandoning running sessions.
+	// This parallels the corrupted-JSON handling above, which also re-hydrates
+	// from `existing`, and keeps the repo's in-flight task runs counted against
+	// max_concurrent_runs via the preserved instance itself (#1892). On startup
+	// (existing == nil) there is nothing to preserve.
 	if existing != nil {
 		warnedRepos := make(map[string]bool)
+		preservedMissingFileRepos.mu.Lock()
+		// Record which repos we OBSERVED as missing this poll, so a file that is
+		// later recreated as an empty "[]" by a preserved session's targeted
+		// write stays protected on the next tick via provenance rather than by
+		// treating every present empty file as data loss.
+		for key := range existing {
+			repoID, _ := splitDaemonInstanceKey(key)
+			if missing[repoID] {
+				preservedMissingFileRepos.oweLocked(repoID, key)
+			}
+		}
+		// Drop provenance for repos whose records are all back on disk, so a later
+		// legitimate emptying is not over-preserved. Real rows alone are not
+		// enough: the restore checkpoint omits in-flight rows (a Deleting or
+		// pre-push archive), which stay protected until their record lands.
+		for repoID := range preservedMissingFileRepos.repos {
+			if raw, ok := allInstances[repoID]; ok && !missing[repoID] && !(raw == nil || string(raw) == "[]" || string(raw) == "null") && preservedMissingFileRepos.landedLocked(repoID, existing, next) {
+				preservedMissingFileRepos.forgetLocked(repoID)
+			}
+		}
+		// Snapshot the owed identities under the lock so the preserve loop reads
+		// a stable view.
+		owedKeys := preservedMissingFileRepos.owedSnapshotLocked()
+		preservedMissingFileRepos.mu.Unlock()
 		for key, inst := range existing {
 			repoID, _ := splitDaemonInstanceKey(key)
-			if _, ok := allInstances[repoID]; ok {
-				continue
+			raw, ok := allInstances[repoID]
+			// Skip preservation only when the repo is present, NOT missing, AND
+			// either carries real rows on disk or was never observed missing
+			// while empty. Absent (deleted directory) and flagged missing
+			// (deleted file) are recoverable disk inconsistencies we re-hydrate
+			// from `existing`. A present-but-empty file is preserved only with
+			// provenance (it was observed missing then recreated empty by a
+			// preserved session's targeted write); a present-but-empty file the
+			// daemon never saw vanish is the authoritative state and its stale
+			// in-memory sessions are dropped.
+			if ok && !missing[repoID] {
+				if raw == nil || string(raw) == "[]" || string(raw) == "null" {
+					if !owedKeys[key] {
+						continue
+					}
+					// Present-but-empty AND previously observed missing: keep
+					// protecting the recreated-empty file.
+				} else if !owedKeys[key] || next[key] != nil {
+					// Real rows: normal load path. Under provenance, an
+					// existing session whose record never landed (omitted by
+					// the restore checkpoint) is still preserved.
+					continue
+				}
 			}
 			if !warnedRepos[repoID] && !unreadableRepos[repoID] {
-				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory: %s", repoID)
+				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory or missing/empty instances.json: %s", repoID)
 				warnedRepos[repoID] = true
 			}
 			next[key] = inst
@@ -900,34 +997,4 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	}
 
 	return next, ghostTaskRuns, skipped, reread, nil
-}
-
-func daemonInstanceKey(repoID, title string) string {
-	return repoID + "\x00" + title
-}
-
-// splitDaemonInstanceKey is the inverse of daemonInstanceKey: it splits a
-// "<repoID>\x00<title>" key back into (repoID, title). A key with no NUL
-// separator (unexpected) is returned as ("", key).
-func splitDaemonInstanceKey(key string) (string, string) {
-	for i := 0; i < len(key); i++ {
-		if key[i] == 0 {
-			return key[:i], key[i+1:]
-		}
-	}
-	return "", key
-}
-
-func daemonInstances(instanceMap map[string]*session.Instance) []*session.Instance {
-	keys := make([]string, 0, len(instanceMap))
-	for key := range instanceMap {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	instances := make([]*session.Instance, 0, len(keys))
-	for _, key := range keys {
-		instances = append(instances, instanceMap[key])
-	}
-	return instances
 }

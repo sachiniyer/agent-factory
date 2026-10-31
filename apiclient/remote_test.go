@@ -2,6 +2,7 @@ package apiclient
 
 import (
 	"context"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,12 +18,10 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
-// TestParseDaemonURL_AcceptsHTTPSchemesRejectsTLS proves the URL parser derives
-// the http/ws authorities from either plaintext scheme and refuses a TLS scheme
-// (with the actionable HTTP-only error) or malformed input — the whole point
-// being that a stale wss:// config from the old pinned-TLS listener fails loudly
-// rather than mysteriously.
-func TestParseDaemonURL_AcceptsHTTPSchemesRejectsTLS(t *testing.T) {
+// TestParseDaemonURL_AcceptsPlainAndTLSSchemes proves the URL parser derives
+// the REST/WS authorities from either plaintext scheme or either TLS scheme and
+// refuses malformed input and unknown schemes.
+func TestParseDaemonURL_AcceptsPlainAndTLSSchemes(t *testing.T) {
 	ok := []struct {
 		in, http, ws string
 	}{
@@ -40,15 +39,19 @@ func TestParseDaemonURL_AcceptsHTTPSchemesRejectsTLS(t *testing.T) {
 			t.Fatalf("parseDaemonURL(%q) = (%q,%q), want (%q,%q)", tc.in, gotHTTP, gotWS, tc.http, tc.ws)
 		}
 	}
-	// A TLS scheme is rejected with the HTTP-only migration message.
-	for _, in := range []string{"wss://host:8443", "https://host:8443"} {
-		_, _, err := parseDaemonURL(in)
-		if err == nil {
-			t.Fatalf("parseDaemonURL(%q): want error, got nil", in)
+	// TLS schemes select the verified-TLS family; they are interchangeable.
+	for _, tc := range []struct{ in, http, ws string }{
+		{"https://host:8443", "https://host:8443", "wss://host:8443"},
+		{"wss://host:8443", "https://host:8443", "wss://host:8443"},
+		{"HTTPS://box.tail1234.ts.net/ignored", "https://box.tail1234.ts.net", "wss://box.tail1234.ts.net"},
+	} {
+		gotHTTP, gotWS, err := parseDaemonURL(tc.in)
+		if err != nil || gotHTTP != tc.http || gotWS != tc.ws {
+			t.Fatalf("parseDaemonURL(%q) = (%q,%q,%v), want (%q,%q)", tc.in, gotHTTP, gotWS, err, tc.http, tc.ws)
 		}
-		if !strings.Contains(err.Error(), "HTTP-only") {
-			t.Fatalf("parseDaemonURL(%q): want HTTP-only guidance, got %v", in, err)
-		}
+	}
+	if _, _, err := parseDaemonURL("ftp://host:1"); err == nil {
+		t.Fatal("parseDaemonURL(ftp://): want error")
 	}
 	bad := []string{"host:8443", "http://", ""}
 	for _, in := range bad {
@@ -183,14 +186,40 @@ func TestNewRemote_WrongToken401(t *testing.T) {
 	}
 }
 
-// TestNewRemote_RejectsTLSURL proves NewRemote refuses a wss:///https:// target
-// up front with the HTTP-only guidance, so a stale TLS config never silently
-// half-dials.
-func TestNewRemote_RejectsTLSURL(t *testing.T) {
-	for _, in := range []string{"wss://host:8443", "https://host:8443"} {
-		if _, err := NewRemote(in, "tok"); err == nil {
-			t.Fatalf("NewRemote(%q): want HTTP-only error, got nil", in)
-		}
+// W9.5: an https:// target is verified against the system CAs. A server whose
+// certificate the client does not trust fails with an actionable hint (and the
+// WS dial fails the same way, proving wss:// dials TLS); a client that trusts
+// the server's CA completes the round trip. There is no insecure option.
+func TestNewRemote_HTTPSVerifiesAgainstTrustRoots(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{OK: true, Version: "9.9.9"}))
+	}))
+	defer srv.Close()
+
+	c, err := NewRemote(srv.URL, "tok") // https://127.0.0.1:port
+	if err != nil {
+		t.Fatalf("NewRemote(%q): %v", srv.URL, err)
+	}
+	defer c.CloseIdleConnections()
+	if c.remoteTransport.TLSClientConfig == nil || c.remoteTransport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("the remote transport must verify certificates")
+	}
+
+	_, err = c.Health(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not trusted by this machine's system CAs") {
+		t.Fatalf("untrusted server: want the system-CA hint, got %v", err)
+	}
+	if _, err := c.DialStream(context.Background(), StreamSession{Title: "t"}, "", 0, 0); err == nil ||
+		!strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("wss dial to an untrusted server: want a certificate error, got %v", err)
+	}
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	c.remoteTransport.TLSClientConfig.RootCAs = pool
+	resp, err := c.Health(context.Background())
+	if err != nil || resp.Version != "9.9.9" {
+		t.Fatalf("trusted server: want a clean round trip, got %+v %v", resp, err)
 	}
 }
 
@@ -501,5 +530,36 @@ func TestDialStream_RemoteThreadsTokenHeaderAndQuery(t *testing.T) {
 	}
 	if gotQueryTok != "secret-token" {
 		t.Fatalf("?access_token= = %q, want secret-token", gotQueryTok)
+	}
+}
+
+// A URL registration clones inside the request, so its wait must come from the
+// daemon's clone budget, not the generic REST bound: a daemon that answers after
+// remoteRequestTimeout but within the clone budget SUCCEEDS, while an ordinary
+// registration on the same slow daemon still times out (#6093).
+func TestRegisterProjectURL_WaitsForTheCloneBudgetNotTheRestBound(t *testing.T) {
+	withShrunkRemoteTimeouts(t) // remoteRequestTimeout is now 2s
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/RegisterProject", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(remoteRequestTimeout + time.Second):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.RegisterProjectResponse{OK: true}))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c, err := NewRemote(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+
+	if _, err := c.RegisterProject("/srv/repo"); err == nil {
+		t.Fatal("the control: a path registration past the REST bound must time out")
+	}
+	if _, err := c.RegisterProjectURL("https://github.com/o/r.git"); err != nil {
+		t.Fatalf("a clone inside the daemon's budget must not time out client-side: %v", err)
 	}
 }

@@ -77,7 +77,7 @@ var boundedReadFileFlights = struct {
 }{byPath: map[string]*boundedReadFileFlight{}}
 
 func waitForBoundedReadFile(path string, flight *boundedReadFileFlight) ([]byte, error) {
-	timer := time.NewTimer(relocationIdentityTimeout)
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -89,7 +89,7 @@ func waitForBoundedReadFile(path string, flight *boundedReadFileFlight) ([]byte,
 			boundedReadFileFlights.Unlock()
 			return nil, fmt.Errorf(
 				"timed out after %s while reading file %s: %w",
-				relocationIdentityTimeout, path, context.DeadlineExceeded,
+				relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
 			)
 		}
 		boundedReadFileFlights.Unlock()

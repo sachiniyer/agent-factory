@@ -169,10 +169,9 @@ test("projectAccent reaches 4.5:1 against every surface it is given, after round
   assert.ok(contrastRatio(light, "#eceff4") >= 4.5, light);
 });
 
-test("app bar focus rings and the phone keyboard label take the project ink", () => {
+test("app bar focus rings take the project ink", () => {
   const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
   assert.match(css, /\.af-app\[data-project-color\] \.af-appbar :is\(button, summary, a\):focus-visible \{\s*outline-color: var\(--af-project-ink\);/);
-  assert.match(css, /\.af-app\[data-project-color\] \.af-appbar \.af-term-keyboard \{\s*color: inherit;/);
   assert.match(css, /\.af-app\[data-project-color\] \.af-appbar-tools :is\(button, summary, a\):focus-visible \{\s*outline-color: var\(--af-accent\);/);
 });
 
@@ -255,10 +254,4 @@ test("the favicon blink follows a reduced-motion change", (t) => {
   motion.set(false);
   t.mock.timers.tick(FAVICON_BLINK_MS);
   assert.equal(frame(), "plain", "the blink resumes");
-});
-
-test("body-mounted controls take the project accent too", () => {
-  const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
-  assert.match(css, /body\[data-project-color\] \[data-af-theme="light"\] \{\s*--af-accent: var\(--af-project-accent-light\);/);
-  assert.match(css, /body\[data-project-color\] \[data-af-theme="dark"\] \{\s*--af-accent: var\(--af-project-accent-dark\);/);
 });

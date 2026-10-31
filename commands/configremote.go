@@ -168,3 +168,12 @@ func configWriteLocation(path string) string {
 	}
 	return prettyPath(path)
 }
+
+// globalHostsEdit applies one per-entry host-table edit through the local
+// daemon (or the local file when none is running). Local only: `af hosts` is.
+func globalHostsEdit(edit config.HostsEdit) (daemon.SetConfigValueResponse, error) {
+	if apiclient.IsRemoteTarget() {
+		return daemon.SetConfigValueResponse{}, fmt.Errorf("a host-list edit is local-only")
+	}
+	return daemon.EditGlobalHosts(edit)
+}

@@ -100,11 +100,12 @@ func captureVSCodeOwner(key, instanceID string, pid int, processNonce string) (v
 	}, nil
 }
 
-// allPersistedVSCodeOwners returns only regular files with the exact owner-file
-// shape. Callers decode and validate their contents before acting; the filename
-// is discovery, never destructive authority.
-func allPersistedVSCodeOwners() ([]string, error) {
-	dir, err := vscodeSocketDirPath()
+// allPersistedVSCodeOwnersIn lists the owner records of one namespace only:
+// regular files with the exact owner-file shape. Callers decode and validate
+// their contents before acting; the filename is discovery, never destructive
+// authority.
+func allPersistedVSCodeOwnersIn(ns string) ([]string, error) {
+	dir, err := vscodeSocketDirPathIn(ns)
 	if err != nil {
 		return nil, err
 	}
@@ -135,8 +136,8 @@ func allPersistedVSCodeOwners() ([]string, error) {
 	return paths, nil
 }
 
-func persistedVSCodeOwners(key string) ([]string, error) {
-	paths, err := allPersistedVSCodeOwners()
+func persistedVSCodeOwnersIn(ns, key string) ([]string, error) {
+	paths, err := allPersistedVSCodeOwnersIn(ns)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +387,7 @@ func (v *vscodeSupervisor) stopPersistedForInstance(key, instanceID string) erro
 // may treat a matching, conclusively cleaned durable owner as the stronger
 // result; a clean scan that found nothing is not evidence of cleanup.
 func (v *vscodeSupervisor) reconcilePersistedForInstance(key, instanceID string) (bool, error) {
-	paths, err := persistedVSCodeOwners(key)
+	paths, err := persistedVSCodeOwnersIn(v.namespace, key)
 	if err != nil {
 		return false, err
 	}
@@ -433,7 +434,7 @@ func removePersistedVSCodeOwner(path string) error {
 // and current in-memory servers have already stopped, so every remaining valid
 // owner is stale daemon infrastructure rather than an active editor to preserve.
 func (v *vscodeSupervisor) stopAllPersisted() error {
-	paths, err := allPersistedVSCodeOwners()
+	paths, err := allPersistedVSCodeOwnersIn(v.namespace)
 	if err != nil {
 		return err
 	}

@@ -154,6 +154,9 @@ func ValidateHosts(hosts map[string]HostConfig, defaultHost string) error {
 	return nil
 }
 
+// SortedHostNames is the host names in order.
+func SortedHostNames(hosts map[string]HostConfig) []string { return sortedHostNames(hosts) }
+
 func sortedHostNames(hosts map[string]HostConfig) []string {
 	names := make([]string, 0, len(hosts))
 	for name := range hosts {
@@ -186,6 +189,22 @@ func sanitizeHosts(config *Config) {
 	}
 }
 
+// ValidateHostPick reports why name cannot be picked from hosts: it must name an
+// entry of the operator's global list. It is the ONE refusal every pick surface
+// uses (create, the catalog, send-prompt --create, task definitions, the TUI
+// and the web), so they cannot word or decide it differently. An empty name is
+// not a pick and is not an error.
+func ValidateHostPick(hosts map[string]HostConfig, name string) error {
+	if name == "" {
+		return nil
+	}
+	if _, ok := hosts[name]; !ok {
+		return fmt.Errorf("host %q is not in the host list %v; add it under [hosts.%s] in the global config or pick a listed host",
+			name, sortedHostNames(hosts), name)
+	}
+	return nil
+}
+
 // HostByName returns the named host from the list.
 func (c *Config) HostByName(name string) (HostConfig, bool) {
 	h, ok := c.Hosts[name]
@@ -206,4 +225,13 @@ func ValidateHostsInTOML(data []byte) error {
 		return nil // a parse error is the final gate's to report, with its own wording
 	}
 	return ValidateHosts(raw.Hosts, raw.DefaultHost)
+}
+
+// validateOptionalHostName accepts the empty default_host (no default) and
+// otherwise checks the name's shape.
+func validateOptionalHostName(v string) error {
+	if v == "" {
+		return nil
+	}
+	return ValidateHostName(v)
 }

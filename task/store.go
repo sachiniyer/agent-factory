@@ -337,6 +337,7 @@ func saveTasks(tasks []Task) error {
 // off the write is exact and costs nothing; re-reading the file afterwards would
 // be a second read that a concurrent writer could make disagree.
 func writeTasks(tasks []Task) (string, error) {
+	noteTaskLayout(tasks)
 	path, err := getTasksPathFn()
 	if err != nil {
 		return "", err

@@ -40,8 +40,12 @@ prompt; its **×** dismisses the offer. See [Install it as an app](#install-it-a
 If the project list is empty, choose **+ Add project** in the switcher. Browse the
 filesystem on the daemon's host: click directories to descend, **Up** for the
 parent, and **Home** for its home directory. **Use** on a git checkout fills
-**Repository path**; you can also type an absolute or `~`-prefixed path. Click
-**Add project** to register it. **Cancel** leaves it unchanged. The switcher's
+**Repository path or git URL**; you can also type an absolute or `~`-prefixed
+path on the daemon host, or a git URL (`https://host/owner/repo`,
+`ssh://host/owner/repo`, or `git@host:owner/repo`) for the daemon to clone and
+register — a clone can take a while, so the dialog closes and the project
+appears when it finishes. Click **Add project** to register it. **Cancel**
+leaves it unchanged. The switcher's
 **Delete project** asks for confirmation, then archives ordinary live sessions
 (restorable) and tears down in-place or external-worktree sessions, including
 the root agent, removing their session records (not restorable). Those in-place
@@ -72,12 +76,14 @@ such as `[lost]`, `[deleting]`, `[limit]`, and `[remote]` add context.
 
 Agents learn `af sessions attention --self` from the af skill, and run it only when
 they are blocked on a decision or question that only you can answer. The yellow
-circle clears when you type into the agent pane, view the agent tab, or when the
-agent starts work again after it went idle. While any session in the selected
-project needs attention, the browser tab's favicon also swaps its tile and mark
-colors every second, so you can see it from another tab. When your system asks for
-reduced motion, neither blinks and the circle has a ring around it. The TUI rail does
-not show the request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
+circle clears when you submit a line in the agent pane, dismiss it with the **×** on
+the **Attention** chip in the session header, or when the agent starts work again
+after it went idle. Typing a draft or just viewing the tab does not clear it. While
+any session in the selected project needs attention, the browser tab's favicon also
+swaps its tile and mark colors every second, so you can see it from another tab.
+When your system asks for reduced motion, neither the circle nor the favicon blinks,
+the circle has a ring around it, and the chip's bell is still. The TUI rail does not show the
+request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
 
 The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting
 on a limit · Broken · Archived**. Archived sessions start hidden. The filter applies inside the
@@ -85,9 +91,9 @@ selected project and is remembered by this browser; a dot on the funnel marks a
 non-default filter. If it hides everything, the empty state reports hidden rows.
 
 On a phone, selecting a terminal gives it the screen: one compact row holds
-**Toggle sessions**, the truncating session title, static Keyboard state and **…**.
-The menu contains project choices, Sessions · Tasks · Config, session actions
-and tabs. Escape closes it and returns focus.
+**Toggle sessions**, the truncating session title, the
+**Terminal** and **VS Code** icon buttons, and **…**. The menu contains project
+choices, Sessions · Tasks · Config, session actions and tabs. Escape closes it and returns focus.
 **Toggle sessions** opens the rail drawer; selecting a session or tapping its
 backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
@@ -113,8 +119,8 @@ attached to this daemon.
 
 ![Session-first phone terminal](assets/design/3981/after-phone-session-390.png)
 
-**Share a link to a session.** Click the link icon (**Copy link**) beside the selected session's
-header title to copy its link, or copy the address bar: it follows your selection.
+**Share a link to a session.** Open **…** in the pane header and choose **Copy link**,
+or copy the address bar: it follows your selection.
 Links use the stable session ID (`/#/session/<id>`) and open on this daemon,
 switching projects and revealing Archived when needed. Login preserves the target;
 a missing session shows a notice and returns to the dashboard.
@@ -180,8 +186,7 @@ as the explicit override while automatic redelivery stays suppressed, and
 **Mark delivered** to retire it without resending when the pane shows the mission
 already landed. If that retry delivers the mission while its final disk
 settlement remains pending, the web keeps a confirmed-mutation warning on screen
-because the mission has already landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
-on a phone) for **Handoff**, which appears when the session supports swapping
+because the mission has already landed and must not be retried. Open **…** in the pane header for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local
 session can offer both; see [usage limits](usage-limits.md).
@@ -190,14 +195,18 @@ Open a rail row’s **…** menu for **Archive** and **Delete session**. Other a
 reveal the menu on hover or keyboard focus. Archive and Delete session each open a confirmation:
 
 - **Archive** tears down a local session's terminal and moves its worktree into
-  the archive. For Docker, SSH, or remote-hook sessions, it pushes the branch to
-  origin and tears down the remote sandbox; there is no local worktree to move.
+  the archive. Docker and remote-hook sessions push the branch to `origin` and
+  tear down the remote sandbox (no local worktree to move); an SSH or sandbox
+  session stops the agent and leaves the workspace on its host.
 - **Restore**, in the archive action's place on an archived row, moves a local
   worktree back and respawns the agent. A local restore starts at once, with no
   confirmation: a dialog shows its progress and offers **Retry restore** if the
   daemon refuses it. For a remote session, it asks for confirmation first, then
   provisions a fresh sandbox from the pushed branch and relaunches the agent; the
-  old sandbox's conversation does not return. Reveal **Archived** in the filter first.
+  old sandbox's conversation does not return. Restoring an SSH or sandbox session
+  archived without a push reattaches its preserved workspace — the tree, index and
+  ignored files come back exactly as archived and the agent resumes its
+  conversation. Reveal **Archived** in the filter first.
 - **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
@@ -218,11 +227,11 @@ whose button you clicked, even when a different session is selected.
 </figure>
 
 Click an existing process tab, such as **diff** in the still, to attach it. To
-inspect changes yourself, choose **Actions → + New tab → Terminal** and run `git diff` in
+inspect changes yourself, click **Terminal** in the pane header and run `git diff` in
 the shell. The still's diff is terminal output, not a separate diff-view control.
 Tabs run in the session's worktree. Click **Agent** to return to the agent.
 
-**Actions → + New tab** also offers **VS Code**, which opens an editor for the worktree;
+**VS Code**, beside it, opens an editor for the worktree;
 see [VS Code tabs](#vs-code-tabs) for the required host editor. The **×** on a
 deletable tab opens a confirmation naming the tab and session; the Agent tab
 cannot be deleted independently. Confirm with **Delete tab** or choose Cancel.
@@ -231,14 +240,20 @@ a process, web, or VS Code tab's label to rename it. Drag a tab onto a pane edge
 to split that pane, or onto its center to replace the displayed tab.
 
 There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,
-`t` opens the **New tab** picker, where **Terminal** and **VS Code** appear when
-supported. `w` asks to delete the active deletable tab, and `1`–`9` select a tab
+`t` opens a terminal tab and `T` (shift) a VS Code tab, when the session supports
+that kind. `w` asks to delete the active deletable tab, and `1`–`9` select a tab
 without attaching. Clicking a tab selects and attaches it.
 
-When a backend cannot create local tabs, the bar explains the restriction.
+When a backend cannot create local tabs, the **Terminal** button is hidden, the
+**VS Code** button stays when the backend offers the editor relay, and **…**
+explains the restriction only when no menu kind remains available. The button
+reflects the backend's capability, not whether an editor binary is installed: a
+remote backend projects the `vscode` kind as long as its host supports it, and
+the binary is detected only when the pane opens — a missing one leaves the tab
+created and shows an install hint (see [VS Code tabs](#vs-code-tabs)).
 Archived sessions must be restored before creating tabs. Agents can also create
 [web tabs](#web-tabs) for dev-server previews through the CLI or API; these do not
-appear as a creation option in the menu.
+appear as a creation button in the pane header.
 
 ### Tasks view
 
@@ -390,7 +405,7 @@ through to the agent unless a modal or menu handles them.
 | `ctrl+]` | Detach the terminal and return to navigation |
 | `Escape` | Close an open modal or menu; otherwise pass through to an attached agent |
 | `1`–`9` | Select a tab in navigation mode |
-| `t` | Open the New tab picker for the supported tab types |
+| `t` · `T` | Open a terminal tab · a VS Code tab, when the session supports that kind |
 | `w` | Ask to delete the active tab; confirm with Delete tab, or cancel; never the Agent tab |
 | `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
 | `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |
@@ -441,10 +456,10 @@ dev-server preview**: an agent runs a dev server in its worktree and injects a t
 pointing at it, so you watch the app render in the browser as the agent builds it.
 
 Web tabs are created from inside a session (by an agent or by you) with the
-CLI/API — they are not in the tab bar's **New tab** menu, because their target
+CLI/API — the pane header has no button for them, because their target
 comes from whatever the agent is running rather than from anything the UI could
 ask you for (a [VS Code tab](#vs-code-tabs), which always targets the worktree,
-*is* in that menu):
+*does* have one):
 
 ```bash
 # a local dev server on port 5173 (Vite/Next/CRA/…)
@@ -586,6 +601,55 @@ What to know before turning it on:
 - **It is off by default.** No second port opens unless you set the key, and a bind
   conflict is logged and skipped, never fatal.
 
+### Per-session editor origins for remote viewers
+
+A VS Code editor keeps its workbench state, terminal history included, in the browser's
+origin-scoped storage, so each session's editor needs its own origin. On the daemon's own
+machine that is a `*.localhost` name; a viewer on another machine resolves `*.localhost` to
+*its* loopback, so behind a single front-door hostname the only thing left to separate origins
+is the **port**. Declare a pool and each session's editor gets one port from it:
+
+```toml
+[network]
+editor_origin_ports = "9100-9119"
+```
+
+The editor then lives at `https://<same hostname>:<port>`. The daemon persists each
+session's port (`editor-origin-ports.json` in the af home), so the origin, and the storage
+under it, survive daemon restarts; the port is taken back once the session is archived or
+gone and the pool is full. It binds the ports on **loopback only**; you expose them the way you
+expose the main UI, for example:
+
+```sh
+for p in $(seq 9100 9119); do tailscale serve --bg --https=$p 127.0.0.1:$p; done
+```
+
+**The credential is a per-session key, not network reachability.** An editor is a shell in the
+worktree, so a port anyone on the tailnet can open would be a side door around the operator
+token. The web UI asks `POST /v1/editor-origin?session=<id>` (behind the operator token) for a
+single-use bootstrap URL on the editor's origin; opening it sets an `HttpOnly`,
+`SameSite=Strict` cookie (`Secure` behind an HTTPS front door) and redirects, so the key does not
+stay in a URL. A port serves only its own session's editor and accepts only that session's
+cookie: another session's key, a replayed bootstrap URL, or the key of an archived or killed
+session is refused. Keys are in memory, so a daemon restart means the next editor open
+bootstraps again. The path `/_af/editor-bootstrap` is reserved on these ports.
+
+**A reassigned port never shows a previous session's storage.** Browser storage belongs to the
+origin, and an origin is a port, so when a full pool hands the port of an archived or gone
+session to a new one, every browser that visited the old editor still holds its localStorage,
+IndexedDB, caches and service workers for that origin. Each assignment therefore gets a fresh
+epoch, remembered per browser in a second `HttpOnly` cookie. A bootstrap from a browser whose
+epoch is missing or older is answered with a page that clears the origin's storage before
+entering the editor, using `Clear-Site-Data` where the browser honours it (secure contexts) and
+a script everywhere else, including a plain-HTTP tailnet origin. A browser that already carries
+the current epoch, for example after a daemon restart, keeps its storage. Reassignment prefers the
+port that has been free longest, which shortens the window in which any browser can still hold an
+old owner's state.
+
+Unset (the default), nothing is bound and a remote viewer keeps the same-origin editor. If the
+pool is full the editor stays on the same-origin mirror and the daemon's error names
+`network.editor_origin_ports`. See [`network.editor_origin_ports`](configuration.md).
+
 ##### VS Code tabs get one too — per session
 
 A **VS Code tab** moves onto a per-**session** origin, not a per-tab one: there is one
@@ -645,8 +709,8 @@ without leaving the web UI. It renders as a pane like any other tab, and works i
 splits and drag/drop.
 
 Unlike a web tab it takes **no target**: the session's worktree is always what it
-opens. That is what makes it offerable from the tab bar's labelled **New tab**
-menu, which lists **Terminal** and **VS Code**. From the CLI:
+opens. That is what makes it offerable from the pane header's **VS Code** button,
+next to **Terminal**. From the CLI:
 
 ```bash
 af sessions tab-create my-session --kind vscode --name editor
@@ -668,16 +732,39 @@ af sessions tab-create my-session --kind vscode --name editor
     This key is **global-only**: it names a binary the daemon executes, so a
     repo's checked-in config can never choose what af runs on your machine.
 
-**How it runs.** The daemon starts **one** code-server per session — shared by
+    For an **off-box** session (docker, ssh, sandbox, or a remote-hook backend)
+    the editor is detected, started, and stopped on the **session's host** by the
+    agent-server running there — not on the daemon's machine — so the `PATH`
+    search runs on the workspace host: install `code-server`/`openvscode-server`
+    there, and the daemon only relays the editor's socket to the browser (see
+    [Remote hooks](remote-hooks.md#capabilities-the-agent-server)). The
+    `vscode_server_binary` override is read from the host's
+    `~/.agent-factory/config.toml` only by an agent-server launched **without**
+    the install policy — a launch-style remote hook. The built-in `docker`,
+    `ssh`, and `sandbox` backends start the agent-server with `--policy-file`,
+    whose policy does not carry `vscode_server_binary`, so on those the editor is
+    selected by the `PATH` lookup alone, which only recognises the names
+    `code-server` and `openvscode-server`: to use a renamed or out-of-PATH binary
+    there, put it on the workspace host's `PATH` under one of those names (a
+    symlink or wrapper works).
+
+**How it runs.** Locally the daemon starts **one** code-server per session — shared by
 every VS Code tab and pane in it — the first time a pane renders, listening on
 a **0600 unix socket** in a `0700` directory under the af home (no TCP listener
-at all). The browser reaches the editor through the daemon's `/v1/webtab/` proxy,
+at all). For an off-box session the agent-server on the session's host starts
+that code-server instead, and the daemon relays its socket. The browser reaches the editor through the daemon's `/v1/webtab/` proxy,
 which is what makes it work for a **remote viewer** (Tailscale/SSH) and what puts
 the daemon's auth policy in front of that route. On a cold start the pane briefly
 shows "VS Code is still starting…" and resolves itself.
 
 The editor is stopped when its last VS Code tab is closed, and when the session is
-archived or killed — and on daemon shutdown, so nothing is left running. If it
+archived or killed — and, **locally**, on daemon shutdown, so nothing is left
+running. For an off-box session the stop on tab close is best effort: if the
+agent-server is unreachable at that moment the tab still closes and the failure
+is only logged, so the host-side editor keeps running until the session is
+archived or killed (or the agent-server itself is torn down). An **off-box** editor is owned by the agent-server on the session's
+host, which uses a separate namespace from the daemon's, so a daemon restart does
+not stop it: it keeps running and is relayed again on the next render. If it
 ever dies, the next render starts a fresh one. Nothing about it is persisted: the
 tab survives a restart and simply starts a new editor when you next open it.
 
@@ -689,6 +776,16 @@ tab survives a restart and simply starts a new editor when you next open it.
     the protection, not the proxy. Your browser reaches it through the daemon's
     `/v1/webtab/` proxy, so the daemon's auth policy applies to that route. It
     runs as **you**, with your `PATH` and your code-server settings/extensions.
+
+    That filesystem boundary is the protection only **locally**, where the
+    editor's socket never leaves the daemon host. For an **off-box** session the
+    editor is instead reached through the agent-server's `/v1/agent/relay`
+    route, which `startTCPListener` token-gates with the agent-server's bearer
+    token over the same plain-HTTP listener its other routes use — so the
+    boundary there is that token plus the private transport the agent-server
+    is reached over — the tunnel or network the built-in `docker`, `ssh` and
+    `sandbox` backends set up themselves, or, for a launch-style remote hook,
+    whatever your `launch_cmd` exposes it on — not a same-user socket.
 
     Note that a VS Code pane is deliberately **not** origin-sandboxed the way a web
     tab is: VS Code cannot run under an opaque origin. That is acceptable because

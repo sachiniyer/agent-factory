@@ -604,10 +604,10 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	if w.preview != nil && w.preview.instance != nil {
 		inst := w.preview.instance
 		label := tabLabelFor(inst, w.preview.tab)
-		text = fmt.Sprintf(" %s · %s · preview ", inst.Title, label)
+		text = fmt.Sprintf(" %s · %s%s · preview ", inst.Title, label, placementClause(inst))
 	} else if inst := w.boundInstance(); inst != nil {
 		label := tabLabelFor(inst, w.activeTab())
-		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
+		text = fmt.Sprintf(" %s · %s%s ", inst.Title, label, placementClause(inst))
 		bound = true
 	} else {
 		text = " Select a session "
@@ -682,4 +682,15 @@ func (w *TabbedWindow) String() string {
 		layout.ClampToRect(content, layout.Rect{W: iw, H: ih}),
 	)
 	return layout.ClampToRect(w.frameStyle().Render(inner), w.rect)
+}
+
+// placementClause names where an off-box session runs, as a header clause
+// (" · on host1"), and is empty for a local one (#5571 W6.4). The header's own
+// ellipsis trims it on a narrow pane; the full place, workspace location
+// included, is in the session's JSON and the web detail.
+func placementClause(inst *session.Instance) string {
+	if place := inst.Placement().Short(); place != "" {
+		return " · on " + place
+	}
+	return ""
 }

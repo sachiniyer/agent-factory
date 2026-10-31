@@ -442,16 +442,25 @@ func (m *home) liveBindCandidate(p *store.OpenPane) (key string, addr apiclient.
 	return fmt.Sprintf("%d/%d/%s/%s", p.ID(), tab, name, tabID), streamAddress(inst, m.repoID), tabID, tab, true
 }
 
-// liveSessionName resolves an (instance, tab) to the tmux session a live
-// attachment would stream, or "" when embedding is not possible: remote instances
-// (streamed via daemon Preview capture, not WS), not-started/transitional/dead/
-// lost instances, and tabs with no session. It doubles as the eligibility
-// predicate the Enter path uses to choose in-pane interactive vs full-screen
-// attach.
+// liveSessionName resolves an (instance, tab) to the name a live attachment would
+// stream, or "" when embedding is not possible: not-started/transitional/dead/
+// lost instances, tabs with no stream, and remote workspaces that have no daemon
+// stream (the remote hook backend, which attaches through its terminal_cmd). It
+// doubles as the eligibility predicate the Enter path uses to choose in-pane
+// interactive vs full-screen attach.
+//
+// Two shapes qualify. A local-worktree tab streams under its tmux session name.
+// A sandbox tab (ssh/sandbox/docker, #5571 W4.8) has no local tmux session, so
+// its bind identity is the tab's stable id: the daemon already serves its PTY
+// over the same WS by that id (W4.4), with the grid repaint, cursor and size
+// from W4.2, so the pane streams exactly like a local one instead of polling
+// Preview.
 func liveSessionName(inst *session.Instance, tab int) string {
-	// Only a local-worktree backend has a local tmux session to stream; other
-	// workspaces (remote hook) render through the daemon Preview capture path.
-	if inst == nil || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree || !inst.Started() {
+	if inst == nil || !inst.Started() {
+		return ""
+	}
+	local := inst.Capabilities().Workspace == session.WorkspaceLocalWorktree
+	if !local && !inst.StreamsViaAgentServer() {
 		return ""
 	}
 	// No live stream for a row with an in-flight op (create/kill/archive) or a
@@ -464,7 +473,18 @@ func liveSessionName(inst *session.Instance, tab int) string {
 	case session.LiveDead, session.LiveLost:
 		return ""
 	}
-	return inst.TabTmuxName(tab)
+	if local {
+		return inst.TabTmuxName(tab)
+	}
+	// Only a PTY-bearing tab can stream. Web and docs tabs own no process and
+	// vscode tabs are a browser surface, so attaching one would blank the pane
+	// that otherwise shows the tab's placeholder (#5825).
+	tabs := inst.GetTabs()
+	if tab < 0 || tab >= len(tabs) || !tabBearsPTY(tabs[tab].Kind) {
+		return ""
+	}
+	id, _ := inst.TabIDAt(tab)
+	return id
 }
 
 // closeLiveTermPaneFor releases one pane's live attachment: unbind the window's
@@ -494,4 +514,13 @@ func (m *home) closeAllLiveTermPanes() {
 	for id := range m.liveTerms {
 		m.closeLiveTermPaneFor(id)
 	}
+}
+
+// tabBearsPTY reports whether a tab of this kind runs a process behind a PTY.
+func tabBearsPTY(kind session.TabKind) bool {
+	switch kind {
+	case session.TabKindAgent, session.TabKindShell, session.TabKindProcess:
+		return true
+	}
+	return false
 }

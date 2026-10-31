@@ -313,11 +313,13 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	r.noteWorktreeRoot(d.Worktree.WorktreePath)
 	for _, tab := range d.Tabs {
 		r.noteTmuxName(tab.TmuxName)
+		r.noteTmuxName(tab.SandboxTmux)
 	}
 	// PendingTabs is the durability staging area for metadata-only rows. It uses
 	// the same TabData shape as Tabs, so its names need the same log treatment.
 	for _, tab := range d.PendingTabs {
 		r.noteTmuxName(tab.TmuxName)
+		r.noteTmuxName(tab.SandboxTmux)
 	}
 	// A pending-teardown handle names a tmux session the same way a live tab
 	// does, and the retry logs it on every daemon start until the kill is
@@ -372,6 +374,16 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// to diagnose the session shape, and unlike ordinary snapshots instances.json
 	// carries it specifically so teardown can resume after restart.
 	d.RuntimeCleanup = nil
+	// ArchivedWorkspace names the host alias, the session directory on that host
+	// and the branch of a preserved off-box workspace (#5571 W8.5). Whether the
+	// archive published is diagnosable from the archive report; the locators are not.
+	d.ArchivedWorkspace = nil
+	// Placement (#5571 W6.4) is a derived projection of fields this redactor
+	// already handles: Host is the redacted host pick, Location a workspace or
+	// worktree path, and Kind/Backend restate BackendType. Dropping it, rather than
+	// redacting it field by field, keeps a second copy of those locators out of the
+	// bundle.
+	d.Placement = nil
 	if d.Title != "" {
 		d.Title = redactedMarker
 	}
@@ -537,6 +549,25 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	d.Path = r.collapsePathField(d.Path)
 	d.Worktree.RepoPath = r.collapsePathField(d.Worktree.RepoPath)
 	d.Worktree.WorktreePath = r.collapsePathField(d.Worktree.WorktreePath)
+	// The prune tombstone and its durable intent (#5189). The two paths are the
+	// archived worktree's location and its renamed sibling: WorktreePath's own
+	// treatment. LeafName is git's registration directory name, derived from the
+	// worktree directory (so from the session title): redacted. The nonces are
+	// random occupancy proofs, not user text, but they exist to be unguessable
+	// evidence, so a shared bundle does not carry them. Branch and Head stay
+	// verbatim under the same policies as Branch and BaseCommitSHA.
+	if d.ArchiveNonce != "" {
+		d.ArchiveNonce = redactedMarker
+	}
+	if d.PruneIntent != nil {
+		d.PruneIntent.WorktreePath = r.collapsePathField(d.PruneIntent.WorktreePath)
+		d.PruneIntent.TombstonePath = r.collapsePathField(d.PruneIntent.TombstonePath)
+		for _, f := range []*string{&d.PruneIntent.LeafName, &d.PruneIntent.LeafNonce, &d.PruneIntent.Nonce} {
+			if *f != "" {
+				*f = redactedMarker
+			}
+		}
+	}
 	if d.Worktree.RelocationRecovery != nil {
 		d.Worktree.RelocationRecovery.AlternatePath =
 			r.collapsePathField(d.Worktree.RelocationRecovery.AlternatePath)
@@ -656,6 +687,11 @@ func redactTabData(tab *session.TabData) {
 	if tab.TmuxName != "" {
 		tab.TmuxName = redactedMarker
 	}
+	// SandboxTmux is the sandbox's tmux session name for an off-box tab: the same
+	// title-bearing name, on another host.
+	if tab.SandboxTmux != "" {
+		tab.SandboxTmux = redactedMarker
+	}
 	// A proposal slug is user-chosen, like a tab name, and names the work.
 	if tab.Proposal != "" {
 		tab.Proposal = redactedMarker
@@ -740,7 +776,6 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 	r.noteTitle(t.TargetSession)
 	rt := redactedTask{
 		ID:            t.ID,
-		Name:          t.Name,
 		CronExpr:      t.CronExpr,
 		ProjectPath:   r.collapsePathField(t.ProjectPath),
 		Program:       redactProgram(t.Program),
@@ -750,6 +785,11 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 	}
 	if t.TargetSession != "" {
 		rt.TargetSession = redactedMarker
+	}
+	if t.Name != "" {
+		// The name is free text the user typed (a client, codename or person),
+		// like a tab name, so it is dropped rather than shipped (#4318).
+		rt.Name = redactedMarker
 	}
 	if strings.TrimSpace(t.Prompt) != "" {
 		rt.HasPrompt = true

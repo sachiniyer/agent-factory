@@ -1250,3 +1250,37 @@ func TestPreviewListenerSamePortNarrowingAppliesLive(t *testing.T) {
 	require.Empty(t, failed)
 	require.Equal(t, newAddr, m.lifecycle.snapshot().listeners.PreviewBoundAddr)
 }
+
+// A listener rebind, an opt-out and an unexpected death no longer revoke sandbox
+// callback credentials (#5571 W3.6): the callback rides the dedicated endpoint,
+// not the client listener those events change.
+func TestWebListenerChangesKeepSandboxCredentials(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	m, wl, _ := boundWebListeners(t, cfg)
+	secret, err := m.sandboxTokens.mint("session-1")
+	require.NoError(t, err)
+	before := m.sandboxTokens.invalidationCount()
+	stillRegistered := func(step string) {
+		t.Helper()
+		_, ok := m.sandboxTokens.sessionFor(secret)
+		require.True(t, ok, "%s must not revoke the sandbox callback credential", step)
+		require.Equal(t, before, m.sandboxTokens.invalidationCount(), "%s must not invalidate outstanding credentials", step)
+	}
+
+	moved := *m.Config()
+	moved.ListenAddr = grabFreeLoopbackAddr(t)
+	m.storeLivePosture(&moved)
+	failed, err := wl.reconcile(&moved)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	stillRegistered("a listener rebind")
+
+	off := *m.Config()
+	off.ListenAddr = ""
+	m.storeLivePosture(&off)
+	failed, err = wl.reconcile(&off)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	stillRegistered("turning the client listener off")
+}

@@ -1,0 +1,56 @@
+name: Sandbox end-to-end
+
+# W10.3 of the sandbox-parity epic (#5571). A real `af --daemon` on a default
+# config drives a backend = "sandbox" session on a containerized sshd host
+# (create → prompt → preview → tab → archive → restore → kill, then a task-fired
+# create) through the daemon's own RPCs. See integration/sandbox_daemon_e2e_test.go.
+#
+# CI only, never a local gate: the test builds an image and starts an sshd
+# container, which the shared dev box must not do routinely (CLAUDE.md). Later
+# W10 slices add their cases to the same job.
+#
+# Triggers: every master push (verification happens on master), nightly, a manual
+# dispatch, and PRs that touch the sandbox path.
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'session/*sandbox*'
+      - 'session/ssh*'
+      - 'session/runtime.go'
+      - 'session/agentserver*'
+      - 'session/remote*'
+      - 'daemon/*sandbox*'
+      - 'integration/sandbox_*'
+      - 'integration/backend_ssh*'
+      - '.github/workflows/sandbox-e2e.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox-e2e:
+    name: Sandbox end-to-end
+    # Pinned to 24.04 until #6281 (26.04 compatibility) lands.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Run the sandbox end-to-end
+        run: go test ./integration -run 'TestSandbox(Daemon|Disruptions)E2E' -v -count=1 -timeout 30m

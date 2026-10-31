@@ -3,7 +3,6 @@ package git
 import (
 	"context"
 	"fmt"
-	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,9 +119,7 @@ func TestArchiveWorktree_ReportsResidueAtTheVacatedPath(t *testing.T) {
 	t.Cleanup(func() { worktreeMoveFast = prev })
 
 	var warnings logtest.Buffer
-	origWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = origWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	gw, _, srcPath := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
@@ -151,9 +148,7 @@ func TestArchiveWorktree_ReportsResidueAtTheVacatedPath(t *testing.T) {
 // ignore the one that matters.
 func TestArchiveWorktree_SilentWhenTheVacatedPathStaysGone(t *testing.T) {
 	var warnings logtest.Buffer
-	origWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = origWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	gw, _, srcPath := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
@@ -308,9 +303,7 @@ func TestArchiveWorktree_ReportsResidueAtTheRecoveryAlternatePath(t *testing.T) 
 	gw.beginRelocationRecovery(dest, srcPath, identity)
 
 	var warnings logtest.Buffer
-	origWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = origWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	require.NoError(t, gw.ArchiveWorktree(dest))
 
@@ -328,9 +321,7 @@ func TestReportRelocationResidue_UnreadableProbeIsNotAssumedClear(t *testing.T) 
 	t.Cleanup(restore)
 
 	var warnings logtest.Buffer
-	origWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = origWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	reportRelocationResidue(vacated, filepath.Join(t.TempDir(), "relocated"))
 
@@ -366,9 +357,7 @@ func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
 	})
 
 	var warnings logtest.Buffer
-	origWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = origWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	done := make(chan struct{})
 	go func() {

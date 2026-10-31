@@ -161,6 +161,7 @@ func changedFields(before, after Task) []string {
 	add(before.MaxConcurrentRuns != after.MaxConcurrentRuns, "max_concurrent_runs")
 	add(CanonicalOnComplete(before.OnComplete) != CanonicalOnComplete(after.OnComplete), "on_complete")
 	add(before.ProjectPath != after.ProjectPath, "project_path")
+	add(before.Host != after.Host, "host")
 	add(before.Program != after.Program, "program")
 	add(before.Enabled != after.Enabled, "enabled")
 	return fields

@@ -391,31 +391,31 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 	case isAccountCommandName(words[0], "nohup"):
 		var unsafe bool
 		words, unsafe = unwrapNohup(words[1:])
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "nice"):
 		var unsafe bool
 		words, unsafe = unwrapNice(words[1:], names, memo)
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "timeout"):
 		var unsafe bool
 		words, unsafe = unwrapTimeout(words[1:], names, memo)
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "setsid"):
 		var unsafe bool
 		words, unsafe = unwrapSetsid(words[1:], names, memo)
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "stdbuf"):
 		var unsafe bool
 		words, unsafe = unwrapStdbuf(words[1:], names, memo)
-		if unsafe {
+		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "ionice"):
@@ -481,7 +481,7 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 // per enclosing env word (#4966).
 func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	strace := isAccountCommandName(words[0], "strace")
-	if strace && straceOptionsRefused(words[1:], names) {
+	if strace && straceOptionsRefused(words[1:], names, memo) {
 		return true
 	}
 	return wrapperTailHidesAccountAssignment(words[1:], strace, names, memo)
@@ -516,6 +516,12 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 // reports how many words it consumed.
 func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) (int, bool) {
 	word := words[0]
+	if isAccountCommandName(word, "strace") && straceOptionRunRefused(words[1:], names, false, memo) {
+		// A strace in an unrecognized wrapper's — or another strace's — child
+		// command position gets the same option-run judgement the outermost one
+		// does (#5033); the recognized wrappers reach it through the default arm.
+		return 1, true
+	}
 	if isAccountCommandName(word, "env") {
 		// A nested env only mutates the child it execs; requireCommand
 		// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
@@ -591,9 +597,26 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	// `--opt=DENIED=value` is refused when its value names a denied
 	// variable or carries a denied assignment.
 	if _, value, ok := strings.Cut(literal, "="); ok {
-		return 1, accountEnvironmentOperandDenied(value, names)
+		return 1, accountEnvironmentFreeTextOptionValueDenied(value, names)
 	}
 	return 1, false
+}
+
+// childTailBuriesMutation scans the tail a modeled wrapper returns for a
+// LITERAL buried suffix a PATH-shadowed wrapper (`shift N; exec "$@"`) would
+// promote to the executed command, as unwrapIonice and unwrapTaskset do for
+// their own tails (#4708). The five siblings returned the tail unscanned, so
+// `nice echo a a a xargs --process-slot-var CODEX_HOME codex` passed where the
+// same payload under ionice was refused (#5034). words[0] is the child command
+// the main walk judges next; the scan covers what follows it.
+//
+// Only literal boundaries are judged. ionice also treats a non-literal word as
+// a possible boundary, which refuses every `ionice codex "$PROMPT"`; applying
+// that to nohup, nice, timeout, setsid and stdbuf would refuse the ordinary
+// `nohup claude "$ARGS"` launch, so the dynamic-boundary reading stays open
+// (see #5034) and the literal payloads the report names are closed here.
+func childTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+	return len(words) > 1 && laterLiteralChildSuffixMutates(words[1:], names, memo)
 }
 
 // stracePrefixMutates judges a strace option word that carries an expansion by

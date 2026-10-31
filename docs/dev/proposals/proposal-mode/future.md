@@ -52,7 +52,7 @@ send path as push.
 
 ## Cross-references
 
-Links between docs (`[API](api.md#endpoints)`) work as plain markdown. Later,
+Links between docs (`[API](api.md#routes)`) work as plain markdown. Later,
 the Docs tab could follow them to the right sub-tab and heading.
 
 ## Things the current design does not try to support

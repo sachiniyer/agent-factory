@@ -281,8 +281,9 @@ func TestConfigAgentAttachCommandScrubsTMUXAndPinsSocket(t *testing.T) {
 
 	// The socket is pinned BEFORE the subcommand (a tmux global option), and the
 	// session is addressed by name.
-	assert.Equal(t, []string{"tmux", "-S", "/tmp/tmux-1000/default", "attach-session", "-t", "af-config-3"}, cmd.Args,
-		"the attach must pin the reported socket with -S and address the session by name")
+	head := []string{"tmux", "-S", "/tmp/tmux-1000/default", "has-session", "-t", "=af-config-3", ";"}
+	require.Equal(t, head, cmd.Args[:len(head)], "the takeover first requires the shared session to exist")
+	assert.Contains(t, strings.Join(cmd.Args, " "), "bind-key -T af-detach-af-takeover-")
 
 	// Env is set explicitly (nil would inherit the parent's, TMUX and all).
 	require.NotNil(t, cmd.Env, "the attach must set an explicit child env, not inherit $TMUX")
@@ -309,8 +310,9 @@ func TestConfigAgentAttachWithoutSocketOmitsPin(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
 
 	cmd := execConfigAgentAttach("af-config-4", "")
-	assert.Equal(t, []string{"tmux", "attach-session", "-t", "af-config-4"}, cmd.Args,
-		"an empty socket path must omit -S entirely, never pass -S \"\"")
+	head := []string{"tmux", "has-session", "-t", "=af-config-4", ";"}
+	require.Equal(t, head, cmd.Args[:len(head)], "the takeover first requires the shared session to exist")
+	assert.Contains(t, strings.Join(cmd.Args, " "), "bind-key -T af-detach-af-takeover-")
 	_, hasTMUX := envValue(cmd.Env, "TMUX")
 	assert.False(t, hasTMUX, "TMUX must be scrubbed even on the default-socket fallback path (#2019)")
 }

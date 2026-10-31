@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The endpoint admits only a per-session sandbox credential, on routes the
@@ -76,4 +77,129 @@ func TestSandboxEndpointAdmitsOnlySandboxCredentials(t *testing.T) {
 
 	reg.revoke("sess-a")
 	require.Equal(t, http.StatusUnauthorized, do(allowed, token), "revocation takes effect on this endpoint too")
+}
+
+// dialUnix returns an HTTP client whose every request goes to sock.
+func sandboxUnixClient(sock string) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+		},
+	}}
+}
+
+// The operator's token is refused on the sandbox endpoint, on every route — the
+// endpoint has no operator credential at all, and a unix peer is not a loopback
+// exemption (#5571 W3.4, owner-approved constraint).
+func TestSandboxEndpointRefusesTheOperatorToken(t *testing.T) {
+	const operatorToken = "operator-token-0123456789abcdef"
+	var reg sandboxTokenRegistry
+	sandboxToken, err := reg.mint("sess-a")
+	require.NoError(t, err)
+
+	reached := false
+	mux := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	sock := filepath.Join(testguard.SocketTempDir(t), "cb.sock")
+	ep, err := startSandboxEndpoint(mux, &reg, sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ep.close() })
+	client := sandboxUnixClient(sock)
+
+	do := func(path, bearer string) int {
+		req, err := http.NewRequest(http.MethodPost, "http://sandbox"+path, nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// The gate itself: even a gate that is handed the operator token's value
+	// elsewhere in the process has none configured here.
+	gate := sandboxOnlyGate(&reg)
+	expected, err := gate.expectedToken()
+	require.NoError(t, err)
+	require.Empty(t, expected, "the sandbox-only gate must hold no operator credential")
+
+	for _, r := range servedHTTPRoutes() {
+		reached = false
+		require.Equalf(t, http.StatusUnauthorized, do(r.Path, operatorToken), "operator token on %s", r.Path)
+		require.Falsef(t, reached, "the handler for %s must not run for the operator token", r.Path)
+	}
+	// Anti-vacuous: the sandbox credential is admitted on an in-scope route.
+	var allowed string
+	for path := range sandboxAllowedPaths {
+		allowed = path
+		break
+	}
+	require.Equal(t, http.StatusOK, do(allowed, sandboxToken))
+	require.True(t, reached)
+}
+
+// A session-A credential cannot act on session B (#5571 W3.4, owner-approved
+// constraint): the endpoint identifies the caller by credential alone, and the
+// owner constraint hands each handler only that session's own row.
+func TestSandboxEndpointCredentialIsBoundToItsOwnSession(t *testing.T) {
+	var reg sandboxTokenRegistry
+	tokenA, err := reg.mint("sess-a")
+	require.NoError(t, err)
+	tokenB, err := reg.mint("sess-b")
+	require.NoError(t, err)
+	require.NotEqual(t, tokenA, tokenB)
+
+	rows := []session.InstanceData{{ID: "sess-a", Title: "a", Path: "/host/a"}, {ID: "sess-b", Title: "b", Path: "/host/b"}}
+	var seen []string
+	var seenOwner string
+	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		owner, _ := sandboxOwner(r.Context())
+		seenOwner, seen = owner, nil
+		for _, d := range onlyOwnedBySandbox(rows, owner) {
+			seen = append(seen, d.ID)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	sock := filepath.Join(testguard.SocketTempDir(t), "cb.sock")
+	ep, err := startSandboxEndpoint(mux, &reg, sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ep.close() })
+	client := sandboxUnixClient(sock)
+
+	var allowed string
+	for path := range sandboxAllowedPaths {
+		allowed = path
+		break
+	}
+	call := func(bearer string) {
+		req, err := http.NewRequest(http.MethodPost, "http://sandbox"+allowed, nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	call(tokenA)
+	require.Equal(t, "sess-a", seenOwner)
+	require.Equal(t, []string{"sess-a"}, seen, "session A's credential must see only session A")
+	call(tokenB)
+	require.Equal(t, "sess-b", seenOwner)
+	require.Equal(t, []string{"sess-b"}, seen, "session B's credential must see only session B")
+
+	// Re-minting for A voids A's old credential and leaves B's alone.
+	newA, err := reg.mint("sess-a")
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, "http://sandbox"+allowed, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+tokenA)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	call(newA)
+	call(tokenB)
 }

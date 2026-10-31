@@ -26,15 +26,18 @@ func reconcileHookProgressBatch(worktrees, terminal []*GitWorktree) map[*GitWork
 	if total == 0 {
 		return adopted
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), relocationIdentityTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), relocationIdentityTimeout.Load())
 	defer cancel()
 	results := make(chan hookProgressAdoptionRead, total)
 	pending := make(map[*GitWorktree]hookProgressAdoptionRead, total)
+	// Read here, not in the worker: the budget may expire and abandon it, and a
+	// test restoring this seam must not race a worker still starting up.
+	readFinished := hookProgressBatchReadFinished
 	startRead := func(g *GitWorktree, abandon bool) {
 		read := hookProgressAdoptionRead{worktree: g, path: g.worktreePath, sessionID: g.hookScopeSessionID, abandon: abandon}
 		pending[g] = read
 		go func() {
-			defer hookProgressBatchReadFinished()
+			defer readFinished()
 			if read.abandon {
 				read.progress, _, read.err = readOwnedHookProgress(read.path, read.sessionID)
 			} else {

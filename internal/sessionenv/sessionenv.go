@@ -85,6 +85,19 @@ const PanePidStampFormat = "#{pane_pid}:#{" + PaneDeathsUserOption + "}:#{pane_t
 // names; the trusted code performs both operations as one transition.
 const AgentServerExecMarker = "__af-agent-server-env-exec"
 
+// AgentServerAccountExecMarker is AgentServerExecMarker for an agent-server that
+// serves an account-bound session (#5863). It carries the account's agent and
+// scopes the filtered environment to ONE account the way ApplyAccount does for a
+// local launch: every competing credential the host or image environment holds
+// is removed, and the account's own root (already delivered through the launch's
+// identity file) is kept.
+//
+// A SEPARATE marker, for the reason AccountExecMarker is one: the shim is the
+// staged or copied af, which may be an older build. An older shim does not know
+// this marker and exits non-zero, so an account-bound session fails loudly; a
+// flag or variable it merely ignored would launch on the host's ambient identity.
+const AgentServerAccountExecMarker = "__af-agent-server-env-exec-account"
+
 // AccountExecMarker is the account-scoped variant of ExecMarker.
 //
 // A SEPARATE marker rather than an extra argument, because the shim may be a

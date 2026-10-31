@@ -277,94 +277,6 @@ type taskRunTurnWatchEntry struct {
 	watch    *task.TurnWatch
 }
 
-// noteTaskRunTurnEvidence feeds this tick's pane capture through the run's
-// chrome watcher and, when the agent's own in-turn chrome is demonstrated,
-// stamps the run's turn boundary (#5219). Boot output, the prompt's own echo,
-// and ACP init all arrive as ordinary churn — only the chrome proves the agent
-// took the turn, so only it (or the fallback's sustained quiet) may release a
-// held idle edge. Returns true when the boundary was newly recorded, so the
-// caller can force the row durable even while the session stays Running.
-//
-// The watcher state lives under pausedMu — the paused-path observation feeds
-// the same map — while the evidence write follows the observation epoch fence,
-// same as RecordPaneChurnCheckpointAtEpoch above.
-func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance, obs session.Observation, capturedAt time.Time, epoch uint64) bool {
-	// Only a confirmed frame feeds the watch: an unanswered capture
-	// (obs.Captured false — a local capture-pane failure the backend swallows
-	// into an all-false frame) carries no pane evidence at all. A confirmed
-	// EMPTY frame does feed it — a scoped agent needs an indicator-absent
-	// capture before a present one can prove the turn, and for the timed
-	// agents an empty frame merely clears the row baseline (#5221 review).
-	if !instance.TaskRunActive() || !obs.Captured {
-		return false
-	}
-	content := obs.Content
-	// ResolvedAgent, not Program: the pane runs what the last handoff or
-	// program override installed, and only that agent's chrome proves a turn.
-	// Read under i.mu BEFORE pausedMu — the sweep takes the two separately and
-	// never nests them.
-	agent := instance.ResolvedAgent()
-	boundary := instance.TaskRunPromptAttemptAt()
-	// The frame must predate nothing: if a redelivery stamped a boundary
-	// AFTER this capture started, the pane in `content` never saw the new
-	// prompt — feeding it now would arm a fresh watcher off a pre-boundary
-	// frame (an indicator-absent capture primes the scoped agents' absent→
-	// present contract), after which unrelated pre-boundary chrome can pass
-	// as the redelivery's turn. The epoch fence below guards the write; this
-	// timestamp fence guards the watcher's mutation itself (#5221 review).
-	if boundary.After(capturedAt) {
-		return false
-	}
-	m.pausedMu.Lock()
-	entry, ok := m.taskRunTurnWatches[key]
-	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) {
-		// A mid-run handoff swaps the signatures the pane can produce, and a
-		// redelivery retires primed state from the previous window — either way
-		// the watcher must be rebuilt rather than read the pane through rules
-		// or a prev frame that no longer belong to this boundary (#5221 review).
-		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent, boundary)}
-		m.taskRunTurnWatches[key] = entry
-	}
-	turning := entry.watch.Observe(content, capturedAt)
-	m.pausedMu.Unlock()
-	if !turning {
-		return false
-	}
-	return instance.RecordTaskRunTurnAtEpoch(nowFunc(), epoch)
-}
-
-// sweepTaskRunTurnWatches drops per-run chrome watchers whose run is no longer
-// in flight — the watcher exists only to fence the run's completion edge, so a
-// finished run or a torn-down row never needs it again. The map is keyed by
-// stableSessionKey, so a same-title replacement session cannot inherit the old
-// run's partially-fed watcher either. Called once per poll from
-// RefreshStatuses, beside sweepRemoteLossStates; m.mu and pausedMu are taken
-// separately, never nested, per pausedPolls' lock discipline.
-func (m *Manager) sweepTaskRunTurnWatches() {
-	m.pausedMu.Lock()
-	size := len(m.taskRunTurnWatches)
-	m.pausedMu.Unlock()
-	if size == 0 {
-		return // nothing armed: skip the instance walk in the common case
-	}
-	m.mu.Lock()
-	live := make(map[string]struct{}, size)
-	for key, inst := range m.instances {
-		if inst.TaskRunActive() {
-			repoID, _ := splitDaemonInstanceKey(key)
-			live[stableSessionKey(repoID, inst)] = struct{}{}
-		}
-	}
-	m.mu.Unlock()
-	m.pausedMu.Lock()
-	defer m.pausedMu.Unlock()
-	for key := range m.taskRunTurnWatches {
-		if _, ok := live[key]; !ok {
-			delete(m.taskRunTurnWatches, key)
-		}
-	}
-}
-
 // isPollPaused reports whether an instance's poll is currently paused (#1160).
 // A present-but-expired lease is lazily deleted and reported unpaused, so a
 // crashed TUI that never sent Resume auto-resumes within one lease — the
@@ -435,6 +347,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
 	taskRunWasActive := instance.TaskRunActive()
+	backlogRunWasActive := instance.BacklogRunActive()
 	// Paired with the op axis, and skipped on, for the same reason as the plain poll
 	// (#2997). This is a SECOND path out of refreshInstanceStatus and it returns
 	// before that one's paired check, so it needs its own: the op skip up there ran
@@ -515,7 +428,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// Ready→Ready observation moves no liveness, and nothing else on this
 	// path writes — a restart would resurrect the finished run into its held
 	// concurrency slot until the fallback matured again (#5221 review).
-	if taskRunWasActive && !instance.TaskRunActive() {
+	if (taskRunWasActive && !instance.TaskRunActive()) || (backlogRunWasActive && !instance.BacklogRunActive()) {
 		churnCheckpoint = true
 	}
 	// A run that ended failed — its initial delivery proven undelivered (#5278)
@@ -530,6 +443,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// attach owns this session's tmux. Park the declared lifecycle so the first
 	// unpaused tick applies it, instead of losing the edge entirely (#2595).
 	m.deferTaskSessionLifecycleWhilePaused(repoID, instance, taskRunWasActive)
+	m.noteBacklogRunEnd(repoID, instance, backlogRunWasActive)
 }
 
 // RefreshStatuses recomputes every started instance's status the way the TUI
@@ -720,7 +634,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// observeTaskRunWhilePaused for why it can end a run but never conclude
 		// death, and taskRunPollBackstop for why this is not a return to per-tick
 		// probing.
-		if instance.TaskRunActive() && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
+		if instance.TaskRunObservable(nowFunc()) && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
 			m.observeTaskRunWhilePaused(repoID, key, instance)
 			return
 		}
@@ -769,6 +683,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// the completion edge observable: taskRunActive flips true→false exactly once,
 	// inside a Transition below, and nothing else in the tick reports it (#2595).
 	taskRunWasActive := instance.TaskRunActive()
+	backlogRunWasActive := instance.BacklogRunActive()
 	// Snapshot dismisses a pending trust prompt then reads the pane in one probe
 	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
@@ -900,7 +815,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
 		// so this is affirmative on its own, no probe needed.
 		observedAlive = true
-		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch))
+		m.settleChurnedLiveness(instance, obs.Captured, content, epoch)
 	case hasPrompt:
 		// A matched prompt means the CAPTURE SUCCEEDED: hasPrompt is a substring test
 		// over content, and every failure path in HasUpdated returns content "". So
@@ -967,7 +882,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// nothing below writes either — a restart would resurrect the finished
 	// run into its held concurrency slot until the fallback matured again
 	// (#5221 review).
-	if taskRunWasActive && !instance.TaskRunActive() {
+	if (taskRunWasActive && !instance.TaskRunActive()) || (backlogRunWasActive && !instance.BacklogRunActive()) {
 		settlementCheckpoint = true
 	}
 	// A run that ended failed — its initial delivery proven undelivered (#5278)
@@ -988,6 +903,8 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// And drain a lifecycle owed from a run that finished while this session was
 	// attached, now that it is being polled normally again.
 	m.applyDeferredTaskSessionLifecycle(repoID, instance)
+	m.noteBacklogRunEnd(repoID, instance, backlogRunWasActive)
+	m.drainBacklogDeferredArchive(repoID, instance)
 }
 
 // SaveInstances writes the manager's authoritative in-memory instances to disk

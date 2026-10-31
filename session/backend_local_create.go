@@ -17,7 +17,7 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 	resolution := resolveLaunchProgramForInstance(i)
 	resolved := resolution.command
 	program, conversation := planCreateConversation(i, resolved)
-	program = injectSystemPrompt(program, resolveSkillTarget(i, program), i.CallbackUnavailable() != "")
+	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
 	proof := accountLaunchProof(resolved, program, resolution.trustBase, nil, "")
 	if account := strings.TrimSpace(i.Account); account != "" {
 		accountAgent := sessionenv.AgentForCommand(i.AgentProgram())

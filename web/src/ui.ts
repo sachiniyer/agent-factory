@@ -23,7 +23,7 @@ import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
-import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure, placeMenu } from "./components.js";
+import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, applyTerminalTitle, applyTerminalPlacement, actionsDisclosure, placeMenu } from "./components.js";
 import { type DragPayload, type TabDropResult, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
@@ -31,21 +31,23 @@ import {
   filterSessions,
   hiddenCount,
   isDefaultFilter,
-  kindCounts,
   type StatusFilter,
 } from "./filter.js";
+import { type ArchiveState, archiveHasMore, archivedCount, railKindCounts } from "./archive.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
+import { serializeProjectRoute } from "./route.js";
 import { applyProjectColor, applyProjectFavicon, projectColor, projectColorRow } from "./project_color.js";
 import {
   archiveWarningText,
   attentionReason,
+  hasAttention,
   callbackUnavailableText,
   canHandoff,
-  hasAttention,
   compareSessionsForRail,
   isArchived,
+  hasInFlightOp,
   isCreating,
   idleReasonDetail,
   unreachableDetail,
@@ -55,6 +57,8 @@ import {
   isPendingManualHandoffDeliveryUnconfirmed,
   isPendingManualSwapDeliveryConfirmable,
   OPERATOR_KIND_LABELS,
+  placementDetail,
+  placementShort,
   type OperatorKind,
   operatorKind,
   rowDot,
@@ -64,6 +68,7 @@ import {
   sessionWarningText,
 } from "./status.js";
 import type { AccountsState } from "./accounts.js";
+import type { QuotaState } from "./quota.js";
 import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
@@ -156,6 +161,32 @@ export function isActionableSession(s: SessionData): s is ActionableSession {
   );
 }
 
+/** Whether a row may be opened (selected into a pane, attached, walked by j/k).
+ *  Every lifecycle-actionable row can. The reserved root agent can too, though the
+ *  daemon withholds archive/restore from it by design (#5406), so lifecycle_action
+ *  alone would leave a healthy root unclickable. Root still fails closed on the same
+ *  durable causes that make any other row inert (#4394). Opening is deliberately
+ *  separate from the lifecycle verbs: those stay keyed to isActionableSession, so
+ *  root never grows an Archive or Restore control. The root exception is "openable
+ *  unless an op is in flight or it is gone" (#6104): the optimistic kill/archive
+ *  projection sets in_flight_op but not user_killed, and it clears the verbs that
+ *  keep ordinary rows inert, so root must read the op itself. */
+export function isOpenableSession(s: SessionData): s is SessionData & { id: string } {
+  if (isActionableSession(s)) {
+    return true;
+  }
+  return (
+    s.is_root === true &&
+    typeof s.id === "string" &&
+    s.id !== "" &&
+    !hasInFlightOp(s) &&
+    s.user_killed !== true &&
+    s.startup_state_unknown !== true &&
+    s.pending_account_swap === undefined &&
+    !s.unreachable
+  );
+}
+
 export type RetryActionPresentation = {
   kind: "limit" | "handoff";
   label: string;
@@ -242,6 +273,9 @@ export interface AppState {
   projectsError?: string;
   /** the live session projection (Snapshot + /v1/events), the rail's data. */
   sessions: SessionData[];
+  /** What is known of the archived sessions the startup snapshot left out, and how
+   *  far each project's archive has been read (#6178). */
+  archive: ArchiveState;
   /** Repos the daemon dropped at startup (SnapshotResponse.skipped_repos, #4742),
    *  so the rail can surface their missing sessions as a persistent incompleteness
    *  notice instead of presenting the truncated projection as a complete list.
@@ -312,6 +346,12 @@ export interface AppState {
    *  daemon host, not a manifest key, and merging the two would be the category
    *  error #3385 asks this surface to avoid. */
   accounts: AccountsState;
+  /** the daemon's usage/quota report (QuotaReport, #2983), the Usage section's
+   *  data. It rides in the config view's state for the same reason `accounts`
+   *  does — it renders there — and is not config: it is computed from the
+   *  daemon host's session records, so merging it into `config` would be the
+   *  same category error. */
+  quota: QuotaState;
   /** the persisted theme preference (redesign PR1): System follows the OS, Light/Dark
    *  force a mode. The config view's Theme picker sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
@@ -356,6 +396,8 @@ export interface Actions {
    *  TUI: it is not destructive (it re-delivers the prompt the session was already
    *  going to run) and it is the obvious next step for a session that is stuck. */
   retryLimit(): void;
+  /** Dismisses the selection's attention request — the × on the header chip. */
+  clearAttention(): void;
   /** Retires the selection's pending handoff mission WITHOUT resending it
    *  (#4429) — the web half of the TUI resolve picker's "Mark delivered" row.
    *  Opens a confirm modal: the attestation is the operator's, so the click must
@@ -475,12 +517,14 @@ export interface Actions {
   setStatusFilter(kind: OperatorKind, on: boolean): void;
   /** Restores the default filter — every state but archived. */
   resetStatusFilter(): void;
+  /** Reads the next page of the selected project's archive (#6178), or retries a failed read. */
+  loadMoreArchived(): void;
   /** Opens the add-task modal (#1592 Phase 5 PR8). */
   addTask(): void;
   /** Opens the edit-task modal seeded from the task, submitting via UpdateTask (#1935). */
   editTask(task: TaskData): void;
   /** Enables/disables a task via UpdateTask. */
-  toggleTask(task: TaskData): void;
+  toggleTask(task: TaskData): Promise<boolean>;
   /** Fires a task now via TriggerTask (enabled cron tasks). */
   triggerTask(task: TaskData): void;
   /** Removes a task via RemoveTask. */
@@ -489,8 +533,9 @@ export interface Actions {
    *  index.ts calls DeleteProject, which removes the project registration and
    *  archives each restorable live session. */
   deleteProject(root: string, label: string): void;
-  /** Opens the add-project modal (#2456): register a git checkout by path via
-   *  RegisterProject so it appears as an empty project you can create into. */
+  /** Opens the add-project modal (#2456): register a git checkout by path or
+   *  git URL via RegisterProject so it appears as an empty project you can
+   *  create into. */
   addProject(): void;
   /** Opens the rebind-project modal (`af projects rebind`): repoint a registered
    *  project's stable identity at the checkout it should track now — the repair
@@ -615,6 +660,12 @@ export function canMutateTabRoster(s: SessionData): boolean {
  *  agree because one gate serves both. */
 export function canCloseTabs(s: SessionData): boolean {
   return canMutateTabRoster(s);
+}
+
+/** The kinds the header buttons and the t/T shortcuts may create right now. */
+export function offeredNewTabKinds(s: SessionData): NewTabKind[] {
+  if (tabCreationUnavailableReason(s) !== null) return [];
+  return NEW_TAB_MENU_KINDS.filter((kind) => canCreateTabKind(s, kind));
 }
 
 /** A visible explanation for every state in which the tab bar cannot offer its
@@ -959,7 +1010,6 @@ export class AppShell {
     focusedTabSynth: string | null;
     focusedKind: number | null;
   } | null = null;
-  private newTabPickerPosition: (() => void) | null = null;
   private phoneSyncQueued = false;
   private readonly schedulePhoneSync = (): void => {
     if (this.phoneSyncQueued) return;
@@ -971,40 +1021,8 @@ export class AppShell {
   };
   private syncPhone(): void {
     const active = this.phone.matches && this.terminalSelected === true;
-    const compositionChanged = this.el.classList.contains("af-session-first") !== active;
-    const pickerTrigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
-    // appbarControls captures this before its media listener closes the phone
-    // disclosure. The composition pass is deliberately deferred until every
-    // owner-specific listener has run, so neither picker state nor its shortcut
-    // return may be sampled from the already-mutated DOM here.
-    const responsiveState = this.responsiveNewTabState;
-    this.responsiveNewTabState = null;
-    const pickerOpen = responsiveState?.trigger === pickerTrigger
-      ? responsiveState.open
-      : pickerTrigger?.getAttribute("aria-expanded") === "true";
-    const pickerCancelReturn = pickerTrigger ? this.newTabCancelReturn.get(pickerTrigger) ??
-      (responsiveState?.trigger === pickerTrigger ? responsiveState.cancel : undefined) : undefined;
-    const reopenPicker = (): void => {
-      this.openNewTabPicker();
-      // Closing the old owner can synchronously close the picker and clear its
-      // return. Preserve a shortcut transaction across this intentional reparent.
-      if (pickerCancelReturn && pickerTrigger?.getAttribute("aria-expanded") === "true") {
-        this.newTabCancelReturn.set(pickerTrigger, pickerCancelReturn);
-      }
-    };
-    if (!compositionChanged) {
-      // A store update can observe the new media-query value and recompose before
-      // the query's change listeners run. The owner listener then closes the picker,
-      // leaving this deferred pass with no composition work but a real open capture.
-      if (responsiveState?.trigger === pickerTrigger && responsiveState.open &&
-          pickerTrigger?.getAttribute("aria-expanded") !== "true") reopenPicker();
-      return;
-    }
+    if (this.el.classList.contains("af-session-first") === active) return;
     const focus = document.activeElement as HTMLElement | null;
-    // Escape can finish the shortcut before this deferred composition pass. Its
-    // return has already closed an incidental Session actions disclosure, while
-    // leaving a user-opened one expanded. Carry that settled state through the
-    // move even when there is no longer an open picker to restore it for us.
     const sessionActionsOpen = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
     this.appControls.close();
     this.terminalChrome?.menu.close();
@@ -1012,15 +1030,7 @@ export class AppShell {
     this.sessionFirst?.setActive(active);
     this.el.classList.toggle("af-session-first", active);
     if (sessionActionsOpen) this.terminalChrome?.menu.open();
-    // Reparenting closes the old enclosing disclosure. Reopen through the new
-    // owner and capture its return state before restoring the focused item.
-    if (pickerOpen) {
-      reopenPicker();
-    }
-    // openNewTabPicker has restored focus to its first item. Do not overwrite it
-    // with the app-controls trigger focused by the preceding media listener: that
-    // focusout would immediately close the picker we just reopened.
-    if (!pickerOpen && focus && focus !== document.activeElement) {
+    if (focus && focus !== document.activeElement) {
       if (focus.getClientRects().length) focus.focus();
       else this.appControls.trigger.focus();
     }
@@ -1090,6 +1100,7 @@ export class AppShell {
   // treatment, and for the same reason, as lifecycleBtn above: a session hits the
   // limit wall — or is resumed off it — WITHOUT a selection change, which is the
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
+  private attentionChip: ReturnType<typeof terminalChrome>["attention"] | null = null;
   private retryBtn: HTMLElement | null = null;
   private retryKind: RetryActionPresentation["kind"] | null = null;
   // The "Mark delivered" button and whether it is currently shown (#4429). Same
@@ -1107,23 +1118,6 @@ export class AppShell {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   private tabBar: HTMLElement | null = null;
-  // Scoped to the trigger so a detached menu cannot clear a newer picker's return.
-  // Escape restores every enclosing disclosure a keyboard open changed before
-  // returning to navigation. Pointer opens have no entry and return to the button.
-  private readonly newTabCancelReturn = new WeakMap<HTMLElement, () => void>();
-  private responsiveNewTabState: {
-    trigger: HTMLElement;
-    cancel?: () => void;
-    open: boolean;
-  } | null = null;
-  private readonly captureNewTabCancelReturn = (): void => {
-    const trigger = this.terminalChrome?.newTabSlot.querySelector<HTMLElement>(".af-tab-new") ?? null;
-    this.responsiveNewTabState = trigger ? {
-      trigger,
-      cancel: this.newTabCancelReturn.get(trigger),
-      open: trigger.getAttribute("aria-expanded") === "true",
-    } : null;
-  };
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -1234,15 +1228,14 @@ export class AppShell {
     this.navToggle.addEventListener("click", () => this.toggleNav());
 
     // Share one MediaQueryList so app-controls closes its old layout before
-    // syncPhone reparents and reopens the picker. Separate lists can dispatch
-    // in creation order and close the disclosure after syncPhone reopened it.
+    // syncPhone reparents the session controls.
     this.appControls = appbarControls([
       ...(this.installEl ? [this.installEl] : []),
-    ], this.phone, this.captureNewTabCancelReturn, () => {
-      // The phone disclosure owns the carried desktop actions. A user dismissal
-      // retires that state, unlike layout and picker-return programmatic closes.
-      const slot = this.terminalChrome?.newTabSlot;
-      if (slot && this.appControls.panel.contains(slot)) this.terminalChrome?.menu.dismiss();
+    ], this.phone, () => {}, () => {
+      // The phone disclosure owns the carried session actions. A user dismissal
+      // retires that state, unlike layout-driven programmatic closes.
+      const panel = this.terminalChrome?.menu.panel;
+      if (panel && this.appControls.panel.contains(panel)) this.terminalChrome?.menu.dismiss();
     }, () => this.projectSwitchBtn);
     this.appControls.trigger.addEventListener("click", () => this.closeProjectMenu());
 
@@ -1427,6 +1420,11 @@ export class AppShell {
   update(state: AppState, prioritizeTerminal = false): void {
     const restoresChanged = this.pendingRestores !== state.pendingRestores;
     this.pendingRestores = state.pendingRestores;
+    // Archive state is replaced, never mutated, so identity is the honest gate: any
+    // transition (loading, a page's cursor, exhausted, error, retry) repaints the
+    // rail's footer even when no session changed in the same update (#6201).
+    const archiveChanged = archiveRepaintNeeded(this.lastArchive, state);
+    this.lastArchive = state.archive;
     this.syncDocumentTitle(state);
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
@@ -1523,7 +1521,7 @@ export class AppShell {
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
     // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.themeChoice);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
@@ -1572,7 +1570,7 @@ export class AppShell {
     // the terminal host (it lives in the main pane), so events never blur it.
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged) {
       // Mount/bind a routed terminal before spending the first frame on the rail.
       // Further updates coalesce into that first paint; later gestures stay immediate.
       if (!this.railPainted && prioritizeTerminal) {
@@ -1692,7 +1690,7 @@ export class AppShell {
     const visible = visibleRailSessions(state);
     const count = String(visible.length);
     if (this.railCount.textContent !== count) this.railCount.textContent = count;
-    const filterSignature = JSON.stringify([kindCounts(scoped), state.statusFilter]);
+    const filterSignature = JSON.stringify([railKindCounts(state.archive, state.selectedProject, scoped), state.statusFilter]);
     if (filterSignature !== this.lastFilterSignature) {
       this.lastFilterSignature = filterSignature;
       this.renderFilterMenu(state, scoped);
@@ -1724,11 +1722,12 @@ export class AppShell {
     );
     // Preserve the notice too: its controls may own focus during a snapshot.
     const noticeSignature = JSON.stringify([state.selectedProject, scoped.length,
-      scoped.some(s => !isArchived(s)), scoped.filter(isArchived).length,
-      visible.length, state.statusFilter]);
+      scoped.some(s => !isArchived(s)), archivedCount(state.archive, state.selectedProject, scoped),
+      visible.length, state.statusFilter, archiveFooterSignature(state)]);
     if (noticeSignature !== this.lastRailNoticeSignature) {
       this.lastRailNoticeSignature = noticeSignature;
       this.cachedRailNotice = state.selectedProject ? this.railNotice(state, scoped, visible) : null;
+      this.cachedArchiveFooter = state.selectedProject ? this.archiveFooter(state) : null;
     }
     // The skipped-repos notice is independent of the project scope and the status
     // filter: it reports snapshot incompleteness the daemon carried alongside the
@@ -1755,7 +1754,8 @@ export class AppShell {
     }
     const head: HTMLElement[] = [];
     if (this.cachedRailNotice) head.push(this.cachedRailNotice);
-    orderChildren(this.railList, [...head, ...rows]);
+    const foot: HTMLElement[] = this.cachedArchiveFooter ? [this.cachedArchiveFooter] : [];
+    orderChildren(this.railList, [...head, ...rows, ...foot]);
     // The skipped-repos notice is a role="alert": it must be a SIBLING of the
     // role="listbox", not one of its owned children (which the ARIA listbox contract
     // expects to be role="option" session rows). Mounting it inside the listbox made
@@ -1786,6 +1786,7 @@ export class AppShell {
   private lastFilterSignature = "";
   private lastRailNoticeSignature = "";
   private cachedRailNotice: HTMLElement | null = null;
+  private cachedArchiveFooter: HTMLElement | null = null;
   private lastSkippedNoticeSignature = "";
   private cachedSkippedNotice: HTMLElement | null = null;
   // The element currently mounted as a sibling of the rail listbox; null when the
@@ -1910,9 +1911,34 @@ export class AppShell {
    *    with the way back, rather than a rail that looks broken.
    *  - otherwise nothing: rows are showing.
    */
+  /** The control under the archived rows (#6178): the archive is read a page at a
+   *  time, so the rail says how many older sessions are still on the daemon and
+   *  offers the next page, reports a read in flight, or names a failed one and
+   *  offers the retry. Null while the archived group is hidden or fully loaded. */
+  private lastArchive: ArchiveState | undefined;
+
+  private archiveFooter(state: AppState): HTMLElement | null {
+    const a = state.archive;
+    if (!a.lazy || !state.statusFilter.archived) return null;
+    if (a.error) {
+      const retry = h("button", { type: "button", class: "af-rail-empty-new af-rail-archive-retry" }, "Retry");
+      retry.addEventListener("click", () => this.actions.loadMoreArchived());
+      return h("li", { class: "af-rail-archive-status" }, `Could not load archived sessions: ${a.error} `, retry);
+    }
+    if (a.loading) return h("li", { class: "af-rail-archive-status" }, "Loading archived sessions…");
+    if (!archiveHasMore(a, state.selectedProject)) return null;
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const remaining = Math.max(0, archivedCount(a, state.selectedProject, scoped) - scoped.filter(isArchived).length);
+    const more = h("button", { type: "button", class: "af-rail-empty-new af-rail-archive-more" },
+      remaining > 0 ? `Show older archived · ${remaining} more` : "Show older archived");
+    more.addEventListener("click", () => this.actions.loadMoreArchived());
+    return h("li", { class: "af-rail-archive-status" }, more);
+  }
+
   private railNotice(state: AppState, scoped: SessionData[], visible: SessionData[]): HTMLElement | null {
     // The pane owns zero-data guidance; keep only the rail count for that state.
-    if (scoped.length === 0) return null;
+    const archived = archivedCount(state.archive, state.selectedProject, scoped);
+    if (scoped.length === 0 && archived === 0) return null;
     const name = projectName(state.selectedProject ?? "");
     const hasActive = scoped.some((s) => !isArchived(s));
     if (!hasActive) {
@@ -1924,7 +1950,6 @@ export class AppShell {
       );
       newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
       const empty = h("li", { class: "af-rail-empty-project" }, `No active sessions in ${name} — `, newBtn);
-      const archived = scoped.filter(isArchived).length;
       if (archived > 0 && !state.statusFilter.archived) {
         const show = h("button", { type: "button", class: "af-rail-empty-new af-rail-show-archived" }, "Show archived");
         show.addEventListener("click", () => this.actions.setStatusFilter("archived", true));
@@ -2000,7 +2025,7 @@ export class AppShell {
    *  the menu governs. Rebuilt in place — the menu's open state is preserved across
    *  rebuilds so a live event never snaps it shut mid-narrowing. */
   private renderFilterMenu(state: AppState, scoped: SessionData[]): void {
-    const counts = kindCounts(scoped);
+    const counts = railKindCounts(state.archive, state.selectedProject, scoped);
     const narrowed = !isDefaultFilter(state.statusFilter);
     this.filterDot.classList.toggle("af-rail-filter-dot-on", narrowed);
     this.filterBtn.classList.toggle("af-rail-filter-narrowed", narrowed);
@@ -2072,7 +2097,7 @@ export class AppShell {
 
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
     add.dataset.projectFocus = "add";
-    add.setAttribute("title", "Register a git checkout by path as a project");
+    add.setAttribute("title", "Register a git checkout by path or git URL as a project");
     add.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closeProjectMenu();
@@ -2144,6 +2169,9 @@ export class AppShell {
     replaceProjectMenuChildren(this.projectMenu, children, focusFallback);
   }
 
+  /** The project whose Space press is armed, awaiting its release (see projectItem). */
+  private projectSpaceArmed: string | null = null;
+
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
    *  switches the active project and closes the menu. `record` is the registry
@@ -2177,15 +2205,51 @@ export class AppShell {
         ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` · ${projectMeta(p)}`]
         : [projectMeta(p)]),
     );
-    const item = h("button", { type: "button", class: cls }, check, label, meta);
+    // An anchor, not a button, so the browser's link affordances work: right-click
+    // "Open in new tab", middle-click, and Ctrl/Cmd-click open the project in a new
+    // tab via its #/project/ route. A plain left click still switches in place.
+    const item = h("a", { class: cls, href: serializeProjectRoute({ project: p.root }) }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", current ? "true" : "false");
-    item.addEventListener("click", (e) => {
+    const activate = (e: Event): void => {
+      e.preventDefault();
       e.stopPropagation();
       this.closeProjectMenu();
       this.appControls.dismiss();
       this.actions.switchProject(p.root);
+    };
+    // Ctrl/Cmd/Shift-click keep the browser's new tab/window. Alt-click is NOT
+    // let through: browsers treat it as "download link", which would save the page.
+    item.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) {
+        // Let the browser open the tab, but keep the phone panel open behind it.
+        e.stopPropagation();
+        return;
+      }
+      activate(e);
+    });
+    // A button activated on Space and a listbox option is chosen with it; an anchor
+    // only answers Enter, so restore Space here. Like a button, act on release:
+    // acting on press lets held-key repeats land on the switcher button that takes
+    // focus after the menu closes, and reopen the menu.
+    // The armed press lives on the shell, keyed by project root, not in this row's
+    // closure: a live refresh rebuilds the menu between press and release and hands
+    // focus to a fresh row for the same project, which must still see the release.
+    item.addEventListener("keydown", (e) => {
+      if (e.key !== " " || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault(); // no page scroll
+      if (!e.repeat) this.projectSpaceArmed = p.root;
+    });
+    item.addEventListener("keyup", (e) => {
+      if (e.key !== " " || this.projectSpaceArmed !== p.root) return;
+      this.projectSpaceArmed = null;
+      activate(e);
+    });
+    // Focus genuinely leaving the menu disarms; a rebuild's blur (no related target) does not.
+    item.addEventListener("blur", (e) => {
+      const to = e.relatedTarget;
+      if (to instanceof Node && !this.projectMenu.contains(to)) this.projectSpaceArmed = null;
     });
     return item;
   }
@@ -2268,201 +2332,6 @@ export class AppShell {
     return drop.landed;
   }
 
-  /** Keyboard twin of the New tab button, including its per-kind availability. */
-  openNewTabPicker(shortcutReturn?: () => void): void {
-    const slot = this.terminalChrome?.newTabSlot;
-    const trigger = slot?.querySelector<HTMLButtonElement>(".af-tab-new");
-    if (!trigger || !slot) return;
-    // Capture the whole pre-shortcut state before exposing either nested control.
-    // Responsive recomposition calls this method again without a return callback;
-    // keep the original record until the picker itself closes.
-    if (shortcutReturn) {
-      const preserveAppControls = this.appControls.panel.contains(slot) &&
-        this.appControls.trigger.getAttribute("aria-expanded") === "true";
-      const preserveSessionActions = this.terminalChrome?.menu.trigger.getAttribute("aria-expanded") === "true";
-      this.newTabCancelReturn.set(trigger, () => {
-        // Close inside-out before restoring focus outside either disclosure.
-        if (!preserveSessionActions) this.terminalChrome?.menu.close();
-        // Recomposition may have opened app controls after the shortcut began.
-        // Preserve it only when the user had already opened the phone disclosure.
-        if (this.appControls.panel.contains(slot) && !preserveAppControls) this.appControls.close();
-        shortcutReturn();
-      });
-    }
-    // Phone composition moves these controls into the app-controls disclosure.
-    // Ask the DOM owner, rather than guessing from viewport width.
-    if (this.appControls.panel.contains(slot)) {
-      if (!this.newTabCancelReturn.has(trigger)) {
-        const wasHidden = this.appControls.panel.hidden;
-        this.newTabCancelReturn.set(trigger, () => {
-          // Recomposition can move the slot home and close its desktop disclosure.
-          if (!this.appControls.panel.contains(slot)) {
-            this.terminalChrome?.menu.open();
-            trigger.focus();
-            return;
-          }
-          if (wasHidden) this.appControls.close(true);
-          else this.appControls.trigger.focus(); // the phone's New tab button is hidden
-        });
-      }
-      this.appControls.open();
-    }
-    this.terminalChrome?.menu.open();
-    if (trigger.getAttribute("aria-expanded") === "true") this.newTabPickerPosition?.();
-    else trigger.click();
-    slot?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-  }
-
-  /** The visible New tab button and its kind menu.
-   *
-   *  The old split control created a terminal from a plus and hid VS Code behind a
-   *  separate, unlabeled caret. Even the project's maintainer could not find that
-   *  path (#2077), so the labelled button now makes the choice explicit where the
-   *  editor will appear. The `t` shortcut opens this same picker.
-   *
-   *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
-   *  are bound to THIS instance and torn down with it — see the isConnected check
-   *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
-  private newTabControl(selected: SessionData | null): HTMLElement {
-    const wrap = h("div", { class: "af-tab-new-wrap" });
-    const trigger = h(
-      "button",
-      { type: "button", class: "af-tab-new", title: "New terminal or VS Code tab" },
-      icon("plus", "af-tab-new-plus"),
-      h("span", {}, "New tab"),
-      icon("chevron-down", "af-tab-new-caret"),
-    );
-    trigger.setAttribute("aria-haspopup", "menu");
-    trigger.setAttribute("aria-expanded", "false");
-    trigger.setAttribute("aria-label", "New tab · Terminal or VS Code");
-    const menu = h("div", { class: "af-tab-menu" });
-    menu.setAttribute("role", "menu");
-    menu.setAttribute("aria-label", "Tab type");
-    menu.hidden = true;
-
-    let scrollParent: HTMLElement | null = null;
-    const positionMenu = (): void => {
-      // The menu is fixed so the tab bar's horizontal overflow cannot clip it. Anchor
-      // its right edge to the trigger's caret, then keep the whole box in the viewport.
-      const anchor = trigger.getBoundingClientRect();
-      const menuBox = menu.getBoundingClientRect();
-      const maxLeft = Math.max(0, window.innerWidth - menuBox.width);
-      const left = Math.min(Math.max(0, anchor.right - menuBox.width), maxLeft);
-      const gap = parseFloat(getComputedStyle(trigger).getPropertyValue("--af-space-2"));
-      const below = anchor.bottom + gap;
-      const above = anchor.top - menuBox.height - gap;
-      const top = below + menuBox.height <= window.innerHeight ? below : Math.max(0, above);
-      menu.style.left = `${left}px`;
-      menu.style.top = `${top}px`;
-    };
-    const close = (): void => {
-      menu.hidden = true;
-      this.newTabCancelReturn.delete(trigger);
-      trigger.setAttribute("aria-expanded", "false");
-      document.removeEventListener("mousedown", onDocMouseDown);
-      window.removeEventListener("keydown", onKeyDown, true);
-      scrollParent?.removeEventListener("scroll", positionMenu);
-      scrollParent = null;
-      window.removeEventListener("resize", positionMenu);
-      wrap.removeEventListener("focusout", onFocusOut);
-      if (this.newTabPickerPosition === positionMenu) this.newTabPickerPosition = null;
-    };
-    const onFocusOut = (e: FocusEvent): void => {
-      // Keyboard focus can leave the menu without a pointer event. Close before
-      // a sibling action receives Enter/Space so the capture listener cannot eat
-      // the modal's next Escape or navigate hidden menu items.
-      const next = e.relatedTarget as Node | null;
-      if (!next || !wrap.contains(next)) close();
-    };
-    const onDocMouseDown = (e: MouseEvent): void => {
-      // A rerender can detach this control while the menu is open; closing on a
-      // detached wrap is what unregisters these document listeners, so they can
-      // never accumulate across renders.
-      if (!wrap.isConnected || !wrap.contains(e.target as Node)) {
-        close();
-      }
-    };
-    const onKeyDown = (e: KeyboardEvent): void => {
-      if (!wrap.isConnected) {
-        close();
-        return;
-      }
-      if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) return;
-      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
-      const current = items.indexOf(document.activeElement as HTMLButtonElement);
-      // Tab can leave the picker open. Preserve the focused control's native
-      // activation rather than claiming Enter/Space for a nonexistent item.
-      if ((e.key === "Enter" || e.key === " ") && current < 0) return;
-      // Own these keys before document's rail handler or xterm can act on them.
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.key === "Escape") {
-        const returnAfterCancel = this.newTabCancelReturn.get(trigger);
-        close();
-        if (returnAfterCancel) returnAfterCancel();
-        else trigger.focus();
-        return;
-      }
-      if (!items.length) return;
-      if (e.key === "Enter" || e.key === " ") {
-        items[current]?.click();
-        return;
-      }
-      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
-        : e.key === "ArrowDown" ? (current + 1) % items.length
-        : current <= 0 ? items.length - 1 : current - 1;
-      items[next].focus();
-    };
-    const open = (): void => {
-      this.newTabPickerPosition = positionMenu;
-      menu.hidden = false;
-      positionMenu();
-      trigger.setAttribute("aria-expanded", "true");
-      scrollParent = wrap.closest<HTMLElement>(".af-tabbar");
-      scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
-      window.addEventListener("resize", positionMenu);
-      document.addEventListener("mousedown", onDocMouseDown);
-      wrap.addEventListener("focusout", onFocusOut);
-      // Window capture precedes the app's document capture listener, so menu
-      // navigation cannot also navigate sessions or send input to the agent.
-      window.addEventListener("keydown", onKeyDown, true);
-    };
-
-    const item = (label: string, kind: NewTabKind): HTMLElement => {
-      const b = h("button", { type: "button", class: "af-tab-menu-item" }, label);
-      b.setAttribute("role", "menuitem");
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        close();
-        this.terminalChrome?.menu.close();
-        this.appControls.close();
-        this.actions.newTab(kind);
-      });
-      return b;
-    };
-    // Offer only kinds the daemon would accept. The control itself is shown when
-    // ANY kind is creatable, so without this a session allowing only `web` would
-    // render a menu whose every entry createSessionTab silently rejects (#3060).
-    const offered: HTMLElement[] = [];
-    for (const [label, kind] of NEW_TAB_MENU_ITEMS) {
-      if (!selected || canCreateTabKind(selected, kind)) {
-        offered.push(item(label, kind));
-      }
-    }
-    menu.append(...offered);
-
-    trigger.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (menu.hidden) {
-        open();
-      } else {
-        close();
-      }
-    });
-    wrap.append(trigger, menu);
-    return wrap;
-  }
-
   private toggleFilterMenu(): void {
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
@@ -2513,6 +2382,7 @@ export class AppShell {
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
+      this.attentionChip = null;
       this.archiveWarning = null;
       this.headActions = null;
       this.headActionSig = "";
@@ -2544,15 +2414,22 @@ export class AppShell {
     }
     const chrome = terminalChrome({
       title: selected.title,
+      placement: { detail: placementDetail(selected), remote: selected.placement?.kind === "remote" },
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
+      newTab: (kind) => {
+        if (this.appControls.trigger.getAttribute("aria-expanded") === "true") this.appControls.dismiss();
+        this.actions.newTab(kind);
+      },
       retry: () => this.actions.retryLimit(),
       markDelivered: () => this.actions.markDelivered(),
+      clearAttention: () => this.actions.clearAttention(),
       closePane: () => this.actions.closePane?.(),
       fontSizeStep: (delta) => this.actions.stepTerminalFontSize(delta),
     });
     this.terminalChrome = chrome;
     this.headTitle = chrome.title;
+    this.attentionChip = chrome.attention;
     this.retryBtn = chrome.retry;
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
@@ -2602,10 +2479,12 @@ export class AppShell {
       this.main.replaceChildren(head, archiveWarning, this.termHost);
     }
     this.sessionFirst = sessionFirstComposition([
-      [chrome.title, this.header], [chrome.keyboard, this.header],
+      // Restore runs in reverse and inserts each node before its old next sibling,
+      // so a node must be listed before the sibling that follows it.
+      [chrome.title, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
-      [chrome.tabs, this.appControls.panel],
+      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header], [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
     ]);
     this.renderTabBar(state);
@@ -2672,13 +2551,16 @@ export class AppShell {
       tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions,
         () => this.openTab(i), () => this.closeTab(i), () => this.liveTabIdentity(i), selected.id ?? ""),
     );
-    const unavailable = tabCreationUnavailableReason(selected);
-    if (unavailable === null) {
-      this.terminalChrome?.newTabSlot.replaceChildren(this.newTabControl(selected));
-    } else {
-      const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
-      reason.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
-      this.terminalChrome?.newTabSlot.replaceChildren(reason);
+    const chrome = this.terminalChrome;
+    if (chrome) {
+      const unavailable = tabCreationUnavailableReason(selected);
+      const offered = offeredNewTabKinds(selected);
+      chrome.newTerminal.hidden = !offered.includes("shell");
+      chrome.newVSCode.hidden = !offered.includes("vscode");
+      chrome.tabUnavailable.hidden = unavailable === null;
+      chrome.tabUnavailable.textContent = unavailable ?? "";
+      chrome.tabUnavailable.title = unavailable ?? "";
+      if (unavailable !== null) chrome.tabUnavailable.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
     }
     // Replacing every child resets a horizontally scrolled bar to its left edge.
     // Preserve the stable container's viewport so activating an off-screen tab does
@@ -3128,13 +3010,12 @@ export class AppShell {
     if (!selected || !this.headTitle) {
       return;
     }
-    this.headTitle.textContent = selected.title;
-    this.headTitle.title = selected.title;
-    this.headTitle.setAttribute("aria-label", selected.title);
+    applyTerminalTitle(this.headTitle, selected.title);
+    if (this.terminalChrome) applyTerminalPlacement(this.terminalChrome.placement, placementDetail(selected), selected.placement?.kind === "remote");
     if (this.terminalChrome) {
-      this.terminalChrome.keyboard.hidden = state.focus !== "terminal";
       this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
     }
+    this.attentionChip?.patch(hasAttention(selected), attentionReason(selected));
     const warningText = sessionWarningText(selected);
     if (this.archiveWarning) {
       if (this.archiveWarning.textContent !== warningText) {
@@ -3554,6 +3435,18 @@ function inertRowReason(s: SessionData): string {
  *  only a lifecycle-actionable session by stable id; a kill-only startup-unknown row
  *  retains its button without becoming attachable. Every inert row carries
  *  aria-disabled, and a managed-but-inert one's title says why (#4394). */
+/** Whether the rail must repaint because the archive state moved. */
+export function archiveRepaintNeeded(last: ArchiveState | undefined, state: Pick<AppState, "archive">): boolean {
+  return last !== state.archive;
+}
+
+/** The inputs archiveFooter reads, as a string, so the rail rebuilds it only when
+ *  they change. */
+function archiveFooterSignature(state: AppState): string {
+  const a = state.archive;
+  return JSON.stringify([a.lazy, a.loading, a.error ?? "", archiveHasMore(a, state.selectedProject), state.statusFilter.archived]);
+}
+
 export function sessionRow(
   s: SessionData,
   selected: boolean,
@@ -3564,9 +3457,9 @@ export function sessionRow(
   const status = rowStatus(s);
   const operator = operatorKind(s);
   const creating = isCreating(s);
-  const actionable = isActionableSession(s);
+  const actionable = isOpenableSession(s);
   const killable = isKillableSession(s);
-  const managed = actionable || killable;
+  const managed = isActionableSession(s) || killable;
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   // The outage detail outranks the idle reason: it explains why every other
@@ -3574,11 +3467,9 @@ export function sessionRow(
   // TUI keeps it for the same reason (#5571 W1.3).
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
-  const branchParts: Array<Node | string> = [
-    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
-  ];
+  const branchParts: Array<Node | string> = [];
   if ((selected || outageDetail !== "") && idleDetail) {
-    const idle = h("span", { class: "af-idle-reason" }, ` · ${idleDetail}`);
+    const idle = h("span", { class: "af-idle-reason" }, idleDetail);
     idle.dataset.idleReason = s.idle_reason ?? "";
     if (outageDetail !== "" && s.unreachable) {
       // Repaint hook: refreshIdleReasonAges re-ages the outage without a
@@ -3597,6 +3488,12 @@ export function sessionRow(
     branchParts.push(
       h("span", { class: "af-row-branch-name" }, icon("git-branch", "af-branch-icon"), s.branch),
     );
+  }
+  const place = placementShort(s);
+  if (place) {
+    const placed = h("span", { class: "af-row-place" }, place);
+    placed.title = placementDetail(s);
+    branchParts.push(" · ", placed);
   }
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   // The glyph is aria-hidden and the rail shows no state words, so the option's
@@ -3676,7 +3573,7 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       } as SessionData,
       now,
     );
-    idle.textContent = detail ? ` · ${detail}` : "";
+    idle.textContent = detail;
     const row = idle.closest(".af-row") as HTMLElement | null;
     if (row) {
       const reason = detail ? `; ${detail}` : "";

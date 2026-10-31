@@ -207,3 +207,50 @@ func TestSuppliedAgentServerToken(t *testing.T) {
 		t.Fatal("a directory at the token path must be refused")
 	}
 }
+
+// The callback credential derives from (key, session, ref) so a restarted
+// daemon can re-register the secret a sandbox already holds (#5571 W3.6).
+func TestDeriveCallbackToken(t *testing.T) {
+	key := make([]byte, keyRawBytes)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	ref, err := NewTokenRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	derive := func(k []byte, session, r string) string {
+		t.Helper()
+		tok, err := DeriveCallbackToken(k, session, r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+
+	a := derive(key, "sess-a", ref)
+	if again := derive(key, "sess-a", ref); again != a {
+		t.Fatal("deriving twice from the same inputs must give the same secret; restart durability rests on it")
+	}
+	if derive(key, "sess-b", ref) == a {
+		t.Fatal("one ref must never yield the same credential for two sessions")
+	}
+	otherRef, _ := NewTokenRef()
+	if derive(key, "sess-a", otherRef) == a {
+		t.Fatal("a new ref must be a new credential")
+	}
+	if server, _ := DeriveAgentServerToken(key, ref); server == a {
+		t.Fatal("the callback and agent-server credentials must never be interchangeable")
+	}
+	otherKey := append([]byte(nil), key...)
+	otherKey[0] ^= 0xff
+	if derive(otherKey, "sess-a", ref) == a {
+		t.Fatal("a different key must derive a different credential")
+	}
+	if _, err := DeriveCallbackToken(key, "sess-a", "v9.abc"); err == nil {
+		t.Fatal("an unknown scheme must fail closed")
+	}
+	if _, err := DeriveCallbackToken(key, " ", ref); err == nil {
+		t.Fatal("no session id must mean no credential")
+	}
+}

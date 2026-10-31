@@ -104,9 +104,10 @@ func TestProjectsAddResolvesPathAgainstClientCwd(t *testing.T) {
 	require.Equal(t, wantCwd, gotPath, "`af projects add .` must register the client's cwd repo")
 }
 
-// The registry RPC is local even when a remote target is selected, so paths
-// must still be resolved against the caller's directory.
-func TestProjectsAddResolvesClientCwdWithRemoteTarget(t *testing.T) {
+// W9.3: with a remote target the registry write reaches that daemon, so the path
+// is a DAEMON-host path: sent as typed, and a caller-relative one ('.') is refused
+// rather than resolved against this shell's cwd.
+func TestProjectsAddSendsDaemonHostPathAsTypedWithRemoteTarget(t *testing.T) {
 	t.Setenv("AF_DAEMON_URL", "http://remote.example:8443")
 	require.True(t, apiclient.IsRemoteTarget(), "precondition: the target must read as remote")
 
@@ -119,10 +120,12 @@ func TestProjectsAddResolvesClientCwdWithRemoteTarget(t *testing.T) {
 	t.Cleanup(func() { registerProjectViaDaemon = restore })
 
 	add := findSubcommand(t, "add")
-	_ = captureJSON(t, func() error { return add.RunE(add, []string{"."}) })
-	cwd, err := os.Getwd()
-	require.NoError(t, err)
-	require.Equal(t, cwd, gotPath, "the local registry RPC must receive the caller directory, even with a remote target")
+	_ = captureJSON(t, func() error { return add.RunE(add, []string{"~/src/alpha"}) })
+	require.Equal(t, "~/src/alpha", gotPath, "sent as typed; ~ is the daemon host's home, not ours")
+
+	gotPath = ""
+	require.Error(t, add.RunE(add, []string{"."}), "a caller-relative path means nothing to the daemon")
+	require.Empty(t, gotPath)
 }
 
 // TestProjectsAddSurfacesDaemonError: a daemon-side rejection (not a git repo,

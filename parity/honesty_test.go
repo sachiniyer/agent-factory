@@ -269,9 +269,9 @@ func TestDerivationTracksPreviewTabUse(t *testing.T) {
 //
 // #1935 landed for the web, and the CLI now sends the same project_path field.
 // The fixture therefore proves both positive paths — inline web values and
-// field-by-field CLI assignments — while retaining a negative control: the web
-// still does not send max_concurrent_runs. A walk that credits the wrapper as
-// every nested field would fail that live task.max-concurrent-runs assertion.
+// field-by-field CLI assignments — and pins the web's max_concurrent_runs reach
+// by value too (#4180 landed), so a walk that drops the inline literal cannot
+// silently under-credit a field the web really does send.
 func TestDerivationSeesNestedTaskUpdateFields(t *testing.T) {
 	paths := jsonFieldPaths(auditedRequests["UpdateTaskRequest"])
 	var nested []string
@@ -321,9 +321,14 @@ func TestDerivationSeesNestedTaskUpdateFields(t *testing.T) {
 				f, reach.Sites)
 		}
 	}
-	if reach.Fields["max_concurrent_runs"] {
-		t.Error("derivation says the web reaches TaskUpdate.max_concurrent_runs, but its " +
-			"task form never sends that field — the nested value walk is over-crediting.")
+	// #4180 landed the cap on the web: openEditTask sends max_concurrent_runs in
+	// the same inline literal the audit derives reach from. If it disappears the
+	// fix was reverted — flip task.max-concurrent-runs's web cell back to `no`
+	// and its verdict off parity.
+	if !reach.Fields["max_concurrent_runs"] {
+		t.Errorf("the web does not reach TaskUpdate.max_concurrent_runs by value (sites: %v) — "+
+			"#4180's edit call site must send it as an inline literal, or the coverage credit is fiction.",
+			reach.Sites)
 	}
 
 	// The CLI reaches the payload field-by-field (`patch.Name = …`), not as a

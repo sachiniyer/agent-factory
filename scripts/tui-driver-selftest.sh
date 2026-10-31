@@ -1358,6 +1358,31 @@ _expect_task_editor_footer_ladder() {
     fi
 }
 
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+# #6017: at the 40x10 floor the task LIST's footer is clipped to
+# "r run now · x toggle · D delete · ? bac…", so the footer-anchored marker misses
+# it and a still-open list read as "closed". The titled list must count as an open
+# task dialog, and af_assert_no_overlay must refuse a view it holds.
+_expect_clipped_list_counts_as_open() {
+    local frame
+    frame="$(_task_dialog_frame 34 'Tasks' '▸ [✓] selftest-task' 'r run now · x toggle · D delete · ? bac…')"
+    if printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
+        _af_fail 'premise: the clipped list footer is expected to MISS the footer marker'
+        return 1
+    fi
+    if ! printf '%s\n' "$frame" | _af_task_dialog_open; then
+        _af_fail 'a titled task list with a clipped footer was not recognized as open (#6017)'
+        printf '%s\n' "$frame" >&2
+        return 1
+    fi
+    local square
+    square=$'┌──────────────────────────────┐\n│ Tasks                        │\n└──────────────────────────────┘'
+    if printf '%s\n' "$square" | _af_task_dialog_open; then
+        _af_fail 'a square-cornered pane saying Tasks counted as an open task dialog'
+        return 1
+    fi
+}
+
 # #4048 explicitly tests list-to-editor entry. A populated #4006 reopen can
 # already be editing, so establish list mode before that Enter step.
 # shellcheck disable=SC2317
@@ -1398,10 +1423,14 @@ _expect_task_edit_title_scrolled() {
 _expect_task_overlay_closed() {
     local screen
     screen="$(af_capture)"
-    if _af_tasks_overlay_visible <<<"$screen"; then
+    # Either signal: at 40x10 the list's clipped footer misses the footer marker,
+    # so a footer-only check passed while the list was still open (#6017).
+    if _af_task_dialog_open <<<"$screen"; then
         _af_fail 'the compact task overlay remained visible after af_close_tasks'
+        printf '%s\n' "$screen" >&2
         return 1
     fi
+    af_assert_no_overlay 'at 40x10 after closing the task overlay'
 }
 
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
@@ -1575,6 +1604,9 @@ _expect_root_agent_config_set_copy() {
 # returns control to the TUI without guessing a nested prefix key.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_config_agent_attaches_in_tmux() {
+    # C is a global key: an overlay that survived the previous steps would swallow
+    # it and this step would burn its whole 75s budget (#6017).
+    af_assert_no_overlay 'at the self-test launch size, before C' || return 1
     af_ensure_nav
     af_focus_tree || return 1
 
@@ -1605,16 +1637,24 @@ _expect_config_agent_attaches_in_tmux() {
         sleep "$AF_DRIVER_POLL"
     done
 
-    # We are inside the config agent's tmux session now. Detach its client so
+    # We are inside the config agent's tmux session now, on this client's PRIVATE
+    # grouped session (#6075), with the configured detach key advertised in its
+    # status line. Leave the way a user does — the detach key itself (#6064) — so
     # control returns to the TUI (the app then reaps the session and reloads
-    # config). The session is af_af-config-<n> on this same server.
+    # config). `tmux detach-client -s <af_af-config-n>` is no longer a way out: the
+    # client is attached to its own private session, not to that one. The shared
+    # session is af_af-config-<n> on this same server.
     local cfg
     cfg="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^af_af-config-' | head -1)"
     if [ -z "$cfg" ]; then
         _af_log "#2019: takeover landed but no af_af-config-* session was found to detach"
         return 1
     fi
-    tmux detach-client -s "$cfg" 2>/dev/null || true
+    # The chrome vanishing says the takeover began, not that its client has drawn
+    # its status line; wait for the hint (bounded, on the screen — never the clock).
+    # If it never appears the takeover is not advertising its key, a real failure.
+    af_wait_for 'ctrl\+w leaves' "$AF_DRIVER_TIMEOUT" 'the takeover names its detach key (#6064)' || return 1
+    af_send C-w
 
     # Back in the TUI, and NOT via the error path.
     af_wait_for 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'returned to the TUI after the config-agent takeover' || return 1
@@ -1623,6 +1663,7 @@ _expect_config_agent_attaches_in_tmux() {
 }
 
 step "task marker rejects a pane's bare Tasks line"         _expect_task_overlay_marker_context
+step "a clipped task-list footer still counts as an open dialog (#6017)" _expect_clipped_list_counts_as_open
 step "task marker recognizes every task-editor footer tier (#5538)" _expect_task_editor_footer_ladder
 step "seed a task via the create form"                      af_add_task selftest-task
 step "close the tasks overlay after create"                 af_close_tasks

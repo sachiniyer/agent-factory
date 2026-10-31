@@ -7,6 +7,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -446,16 +448,43 @@ func TestSwapSameTitle_PartialRosterThenTabArrives(t *testing.T) {
 	}))
 	require.Equal(t, "b", recreated.GetTabs()[h.store.ActiveTab()].Name)
 
-	// A later poll: "a" now exists on the daemon's row (same CreatedAt, so an
-	// in-place update, not another swap).
-	recreated.AddTabForTest("a", session.TabKindShell)
-	recreated.GetTabs()[2].ID = "fresh-a"
+	// A later poll: "a" now exists on the daemon's row (same ID and CreatedAt, so
+	// an in-place update, not another swap). It must arrive through the SNAPSHOT:
+	// `recreated` is the live instance in the TUI projection now, so adding the tab
+	// to it directly would put "a" in updateInstanceFromSnapshot's oldKeys and the
+	// roster-change branch (active-tab remap + cursor sync) this test claims to pin
+	// would never run (#5729). The daemon's row is a separate instance whose data
+	// carries the new roster.
+	require.Len(t, recreated.GetTabs(), 2, "precondition: the live row has not seen 'a' yet")
+	// ReconcileTabsFromData is a no-op for an instance with no agent tmux session
+	// or git worktree (a bare fake-backend row), so give the live row both — a
+	// mock-exec session, never a real tmux — before the snapshot lands. "a" is a
+	// web tab: it needs no tmux sibling to reconnect.
+	cmdExec, _ := nameKeyedTmuxExec()
+	recreated.SetTmuxSession(tmux.NewTmuxSessionWithDeps("dup-agent", "claude",
+		tabHotkeysPty{t: t, cmdExec: cmdExec}, cmdExec))
+	gw, err := git.NewGitWorktreeFromStorage(t.TempDir(), t.TempDir(), "dup", "dup", "", false, true)
+	require.NoError(t, err)
+	recreated.SetGitWorktreeForTest(gw)
+	daemonRow := instanceWithFakeBackend(t, "dup")
+	daemonRow.ID = recreated.ID
+	daemonRow.CreatedAt = recreated.CreatedAt
+	addSwapTabs(t, daemonRow, "fresh", "agent", "b")
+	daemonRow.AddWebTabForTest("a", "http://localhost:3000")
+	daemonRow.GetTabs()[2].ID = "fresh-a"
 	h.reconcileSnapshot([]session.InstanceData{
-		first.ToInstanceData(), recreated.ToInstanceData(), last.ToInstanceData(),
+		first.ToInstanceData(), daemonRow.ToInstanceData(), last.ToInstanceData(),
 	})
-	require.Same(t, recreated, h.sidebar.GetSelectedInstance())
+	require.Same(t, recreated, h.sidebar.GetSelectedInstance(), "the row updated in place")
+	require.Len(t, recreated.GetTabs(), 3, "the snapshot delivered 'a' as a genuinely new key")
+	assert.Equal(t, "a", recreated.GetTabs()[2].Name)
 	assert.Equal(t, "b", recreated.GetTabs()[h.store.ActiveTab()].Name,
 		"a tab arriving after the swap must not move the active tab")
+	// The swap removed the cursor's tab "a", so the cursor fell back to the
+	// replacement's instance row; appending "a" later leaves the active "b" in the
+	// same slot, so nothing re-syncs the cursor. It must stay on the instance row.
+	sel := h.sidebar.GetSelection()
+	assert.False(t, sel.IsTab, "a tab arriving after the swap must not pull the cursor onto a tab row")
 }
 
 // TestSwapSameTitle_TabReorderedWithOpenPane is the second pane-open repro: the

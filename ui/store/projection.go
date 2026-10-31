@@ -221,15 +221,28 @@ func (p *Projection) sortInstances() {
 // RegisterRepoForInstance records the instance's repo after the instance has
 // started and its worktree is available.
 func (p *Projection) RegisterRepoForInstance(instance *session.Instance) {
-	if !instance.Started() {
-		return
+	if repoName, ok := repoKeyOf(instance); ok {
+		p.addRepo(repoName)
 	}
-	repoName, err := instance.RepoName()
-	if err != nil {
-		log.ErrorLog.Printf("could not get repo name: %v", err)
-		return
+}
+
+// repoKeyOf names the repo a row is counted under in the multi-repo indicator.
+// A local row counts once started (its worktree exists); an off-box row counts
+// from the moment it is listed, because the inert snapshot row that represents
+// it is never "started" on the TUI side (W8.8). Add, remove, kill and replace
+// all key through here so the counts stay symmetric.
+func repoKeyOf(inst *session.Instance) (string, bool) {
+	if inst == nil {
+		return "", false
 	}
-	p.addRepo(repoName)
+	if inst.Capabilities().Workspace == session.WorkspaceLocalWorktree && !inst.Started() {
+		return "", false
+	}
+	name, err := inst.RepoName()
+	if err != nil || name == "" {
+		return "", false
+	}
+	return name, true
 }
 
 // KillInstance kills the given instance by pointer identity, independent of
@@ -261,17 +274,11 @@ func (p *Projection) KillInstance(target *session.Instance) error {
 	// Capture repo name before Kill(), because Kill() sets started=false
 	// which causes RepoName() to fail. Unstarted placeholders were never
 	// registered in the repo counts, so there is nothing to decrement.
-	var repoName string
-	var repoErr error
-	if target.Started() {
-		repoName, repoErr = target.RepoName()
-	}
+	repoName, counted := repoKeyOf(target)
 	if err := target.Kill(); err != nil {
 		return fmt.Errorf("could not kill instance: %w", err)
 	}
-	if repoErr != nil {
-		log.ErrorLog.Printf("could not get repo name: %v", repoErr)
-	} else if repoName != "" {
+	if counted {
 		p.rmRepo(repoName)
 	}
 	p.instances = append(p.instances[:idx], p.instances[idx+1:]...)
@@ -301,11 +308,11 @@ func (p *Projection) ReplaceInstance(target, replacement *session.Instance) bool
 		if inst != target {
 			continue
 		}
-		if repoName, err := inst.RepoName(); err == nil {
+		if repoName, ok := repoKeyOf(inst); ok {
 			p.rmRepo(repoName)
 		}
 		p.instances[i] = replacement
-		if repoName, err := replacement.RepoName(); err == nil {
+		if repoName, ok := repoKeyOf(replacement); ok {
 			p.addRepo(repoName)
 		}
 		if p.selected == target {
@@ -359,13 +366,8 @@ func (p *Projection) ReplaceInstanceByTitle(title string, replacement *session.I
 func (p *Projection) RemoveInstance(target *session.Instance) bool {
 	for i, inst := range p.instances {
 		if inst == target {
-			if inst.Started() {
-				repoName, err := inst.RepoName()
-				if err != nil {
-					log.ErrorLog.Printf("could not get repo name: %v", err)
-				} else {
-					p.rmRepo(repoName)
-				}
+			if repoName, ok := repoKeyOf(inst); ok {
+				p.rmRepo(repoName)
 			}
 			p.instances = append(p.instances[:i], p.instances[i+1:]...)
 			p.bump()

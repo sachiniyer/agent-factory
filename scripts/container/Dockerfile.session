@@ -9,7 +9,7 @@
 #
 # Base — glibc, deliberately. The `af` binary copied in at session start is the
 # daemon's OWN executable, and the install/release artifacts are a plain `go
-# build` (cgo on) on ubuntu-latest, i.e. dynamically linked against glibc 2.39.
+# build` (cgo on) on ubuntu-24.04, i.e. dynamically linked against glibc 2.39.
 # Such a binary will NOT run on a musl base (alpine) or an older glibc (debian
 # bookworm = 2.36). node:22-trixie-slim is Debian 13 (glibc 2.41 — >= 2.39, with
 # headroom) and carries Node 22, which the codex CLI requires. If you rebuild the

@@ -165,6 +165,14 @@ export function isWorking(s: SessionData): boolean {
   return rowStatus(s).kind === "working";
 }
 
+/** True while ANY client-visible op is in flight (create, kill, archive, restore,
+ * replace, respawn). Every one of them either has no live pane yet or is about to
+ * end the current one, so a row carrying one is not a place to open or stay bound
+ * to. One predicate rather than a list, so a new op is fenced by default (#6104). */
+export function hasInFlightOp(s: SessionData): boolean {
+  return (s.in_flight_op ?? InFlightOp.None) !== InFlightOp.None;
+}
+
 /** True only for the daemon-owned create operation. Unlike isWorking (which also
  * includes a running agent and every other in-flight operation), this is used to
  * keep a not-yet-attachable row inert until its completed projection arrives. */
@@ -510,10 +518,10 @@ export function compareSessionsForRail(a: SessionData, b: SessionData): number {
 }
 
 /** The backend types whose workspace lives off-box (session/archive_sandbox.go
- *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
- *  them can service tab management: every Add*Tab path needs a daemon-side git
- *  worktree they do not have, so the daemon's Capabilities().TabManagement is
- *  false for all three (#1874).
+ *  backendKindForType: docker, ssh, "sandbox", and "remote" — the hook runtime).
+ *  None of them can service tab management: every Add*Tab path needs a
+ *  daemon-side git worktree they do not have, so the daemon's
+ *  Capabilities().TabManagement is false for all four (#1874).
  *
  *  This list is the ONE place the web names backend types. It exists only because
  *  the session envelope carries `backend_type` but not the daemon's capability
@@ -645,4 +653,28 @@ function formatLimitReset(reset: Date, now: Date): string {
   }
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
+/** One word for a narrow rail row: the host's name, else the runtime type; empty
+ *  for a local session or a daemon that projects no placement. Mirrors Go
+ *  PlacementData.Short. */
+export function placementShort(s: SessionData): string {
+  const p = s.placement;
+  if (!p || p.kind !== "remote") return "";
+  return p.host || p.backend || "";
+}
+
+/** The full one-line place for a detail view. Mirrors Go PlacementData.Detail. */
+export function placementDetail(s: SessionData): string {
+  const p = s.placement;
+  if (!p) return "";
+  const parts: string[] = [];
+  if (p.kind === "remote") {
+    parts.push(placementShort(s));
+    if (p.host && p.backend) parts.push(p.backend);
+  } else {
+    parts.push("local");
+  }
+  if (p.location) parts.push(p.location);
+  return parts.filter(Boolean).join(" · ");
 }

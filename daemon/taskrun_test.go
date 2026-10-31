@@ -103,9 +103,22 @@ func TestRunTask_RefusesDisabledTask(t *testing.T) {
 
 // setupTaskRepo creates a throwaway git repo so config.RepoFromPath inside
 // the delivery path succeeds. Returns the repo path.
+// resolvedTempDir is t.TempDir() with symlinks resolved AT CREATION. macOS hands
+// out /var/folders/…, and /var is a symlink to /private/var; production records
+// the physical path, so a test that asserts on a path derived from an unresolved
+// root compares /var/… against /private/var/… (#6279).
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return dir
+}
+
 func setupTaskRepo(t *testing.T) string {
 	t.Helper()
-	repo := filepath.Join(t.TempDir(), "repo")
+	repo := filepath.Join(resolvedTempDir(t), "repo")
 	cloneRepoTemplate(t, repo)
 	return repo
 }
@@ -141,7 +154,7 @@ func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]DeliverPromptRe
 			return taskPromptDeliveryResult{}, err
 		}
 		if exists {
-			return taskPromptDeliveryResult{status: "sent"}, nil
+			return taskPromptDeliveryResult{status: "sent", deliveryStatus: session.PromptDelivered}, nil
 		}
 		return taskPromptDeliveryResult{status: "started"}, nil
 	}

@@ -50,7 +50,7 @@ func boundedHookEntryRecoveryWrite(ctx context.Context, receipt string, write fu
 }
 
 func waitForHookEntryRecoveryWrite(ctx context.Context, receipt string, flight *hookEntryRecoveryWriteFlight) error {
-	timeout := relocationIdentityTimeout
+	timeout := relocationIdentityTimeout.Load()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
@@ -72,5 +72,5 @@ func waitForHookEntryRecoveryWrite(ctx context.Context, receipt string, flight *
 }
 
 func hookEntryRecoveryWriteTimeout(receipt string) error {
-	return fmt.Errorf("timed out after %s while recording terminal hook receipt %s: %w", relocationIdentityTimeout, receipt, context.DeadlineExceeded)
+	return fmt.Errorf("timed out after %s while recording terminal hook receipt %s: %w", relocationIdentityTimeout.Load(), receipt, context.DeadlineExceeded)
 }

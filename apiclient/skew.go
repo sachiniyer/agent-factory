@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -50,9 +51,43 @@ type VersionSkewError struct {
 }
 
 func (e *VersionSkewError) Error() string {
+	if IsRemoteTarget() {
+		// `af daemon restart` acts on THIS machine, so recommending it for a
+		// remote daemon sends the operator to restart the wrong host (W9.4).
+		return fmt.Sprintf(
+			"the daemon at %s is out of date and rejected the %q field this client sent — upgrade and restart af on that host (%s), or use an af client that matches it (daemon said: %s)",
+			skewTargetName(), e.Field, remoteRestartRemedy(), e.Detail)
+	}
 	return fmt.Sprintf(
 		"daemon is out of date and rejected the %q field this client sent — restart it with `af daemon restart` (daemon said: %s)",
 		e.Field, e.Detail)
+}
+
+// skewTargetName is the remote target as the operator typed it, falling back to
+// a generic noun when the target is configured but unresolvable.
+func skewTargetName() string {
+	if url := RemoteTargetURL(); url != "" {
+		return url
+	}
+	return "the configured remote target"
+}
+
+// remoteRestartRemedy is a remedy runnable FROM THIS CLIENT: it names the
+// daemon's host (taken from the target URL) so the operator runs the restart
+// there, not here.
+func remoteRestartRemedy() string {
+	if host := remoteTargetHost(); host != "" {
+		return fmt.Sprintf("for example `ssh %s 'af upgrade && af daemon restart'`", host)
+	}
+	return "run `af upgrade && af daemon restart` on the daemon host"
+}
+
+func remoteTargetHost() string {
+	u, err := url.Parse(RemoteTargetURL())
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // interpretEnvelopeError converts a daemon envelope error into a Go error,
@@ -79,7 +114,7 @@ func interpretEnvelopeError(route string, status int, envErr *apiproto.EnvelopeE
 		// A committed envelope omits daemon_rejected (daemon/httpserver.go), so
 		// the gateway-status check is the whole provenance rule.
 		if !gatewayStatus {
-			return &mutationCommittedError{detail: envErr.Message}
+			return &mutationCommittedError{detail: envErr.Message, storedID: envErr.StoredID}
 		}
 	case apiproto.ErrorCodeProjectRebound:
 		if envErr.DaemonRejected && !gatewayStatus {
@@ -102,13 +137,17 @@ func interpretEnvelopeError(route string, status int, envErr *apiproto.EnvelopeE
 // their change before the reported follow-up failure. Its marker method keeps
 // the classification usable through errors.Join and other wrappers.
 type mutationCommittedError struct {
-	detail string
+	detail   string
+	storedID string
 }
 
 var _ apiproto.MutationCommittedError = (*mutationCommittedError)(nil)
 
 func (e *mutationCommittedError) Error() string           { return e.detail }
 func (e *mutationCommittedError) MutationCommitted() bool { return true }
+func (e *mutationCommittedError) StoredID() string        { return e.storedID }
+
+var _ apiproto.StoredIDCarrier = (*mutationCommittedError)(nil)
 
 // IsMutationCommitted is apiproto.IsMutationCommitted under this package's name,
 // so client callers classify an outcome without importing the wire package. The
@@ -143,6 +182,10 @@ type RouteNotServedError struct {
 }
 
 func (e *RouteNotServedError) Error() string {
+	if IsRemoteTarget() {
+		return fmt.Sprintf("the daemon at %s does not serve %s (it answered 404: %s) — it is older than this client; upgrade and restart af on that host (%s)",
+			skewTargetName(), e.Route, e.Detail, remoteRestartRemedy())
+	}
 	return fmt.Sprintf("daemon does not serve %s (it answered 404: %s)", e.Route, e.Detail)
 }
 

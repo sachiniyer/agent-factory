@@ -313,7 +313,7 @@ func scanVersionStamps(files map[string]string) versionStampScan {
 }
 
 func TestVersionStampLintFixtures(t *testing.T) {
-	const head = "on:\n  schedule:\n    - cron: '0 */3 * * *'\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+	const head = "on:\n  schedule:\n    - cron: '0 */3 * * *'\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n"
 	const dynamicBuild = `    - name: Build
       env:
         VERSION: ${{ inputs.version }}

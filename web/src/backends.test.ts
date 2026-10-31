@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { REPO_DEFAULT, type BackendCatalog, backendChoices, backendNotice, backendSelectable } from "./backends.js";
+import { REPO_DEFAULT, type BackendCatalog, HOST_VALUE_PREFIX, backendChoices, backendNotice, backendSelectable, hostFromChoiceValue } from "./backends.js";
 
 /** A catalog in the daemon's own shape: canonical order, availability per backend. */
 function catalog(over: Partial<BackendCatalog> = {}): BackendCatalog {
@@ -232,4 +232,44 @@ test("an unavailable catalog degrades to the repo default alone", () => {
   assert.deepEqual(choices.map((c) => c.value), [REPO_DEFAULT]);
   assert.equal(choices[0].label, "Repo default");
   assert.equal(backendSelectable(choices, REPO_DEFAULT), true, "a create must still be possible when the catalog is unknown");
+});
+
+test("a stale or unprobed host note rides beside an available backend without blocking it", () => {
+  const choices = backendChoices({
+    backends: [{ name: "sandbox", label: "sandbox", status: "available", readiness: "unprobed", note: "not probed yet — the host is checked when a session is created" }],
+    default: "",
+    default_status: "available",
+  });
+  const sandbox = choices.find((c) => c.value === "sandbox");
+  assert.match(sandbox?.reason ?? "", /not probed yet/);
+  assert.equal(backendSelectable(choices, "sandbox"), true);
+});
+
+test("listed hosts are rows after the backends, with the daemon's availability verbatim", () => {
+  const choices = backendChoices(catalog({
+    hosts: [
+      { name: "box1", address: "box1.example", status: "available" },
+      { name: "box2", address: "box2.example", status: "unavailable", reason: "host \"box2\": ssh identity file is missing" },
+    ],
+    default_host: "box1",
+  }));
+  const box1 = choices.find((c) => c.value === HOST_VALUE_PREFIX + "box1");
+  const box2 = choices.find((c) => c.value === HOST_VALUE_PREFIX + "box2");
+  assert.equal(box1?.label, "host: box1 (box1.example) · default");
+  assert.equal(backendSelectable(choices, HOST_VALUE_PREFIX + "box1"), true);
+  assert.equal(backendSelectable(choices, HOST_VALUE_PREFIX + "box2"), false, "an unusable host is blocked, not offered");
+  assert.match(backendNotice(choices, HOST_VALUE_PREFIX + "box2"), /identity file is missing/);
+  assert.equal(box2?.status, "unavailable");
+  assert.equal(choices.findIndex((c) => c.value === HOST_VALUE_PREFIX + "box1") > choices.findIndex((c) => c.value === "ssh"), true, "hosts follow the backends");
+});
+
+test("a host choice value maps to the listed-host name and nothing else does", () => {
+  assert.equal(hostFromChoiceValue("host:box1"), "box1");
+  assert.equal(hostFromChoiceValue("ssh"), "");
+  assert.equal(hostFromChoiceValue(REPO_DEFAULT), "");
+});
+
+test("no hosts configured adds no rows", () => {
+  const base = backendChoices(catalog());
+  assert.equal(base.some((c) => c.value.startsWith(HOST_VALUE_PREFIX)), false);
 });

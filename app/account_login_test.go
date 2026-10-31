@@ -274,7 +274,11 @@ func TestAccountLoginAttachPinsTheSocketAndScrubsTmux(t *testing.T) {
 	cmd := execAccountLoginAttach("af_af-login-codex-work", "/tmp/tmux-1000/default")
 	joined := strings.Join(cmd.Args, " ")
 	assert.Contains(t, joined, "-S /tmp/tmux-1000/default")
-	assert.Contains(t, joined, "attach-session -t af_af-login-codex-work")
+	// The takeover attaches a PRIVATE grouped session of the login session (so its
+	// detach binding is per client, #6075), after requiring the login session to
+	// exist; the socket pin and the $TMUX scrub below are unchanged.
+	assert.Contains(t, joined, "has-session -t =af_af-login-codex-work ; new-session -d -t af_af-login-codex-work -s af-takeover-")
+	assert.Contains(t, joined, "attach-session -t af-takeover-")
 	for _, kv := range cmd.Env {
 		assert.False(t, strings.HasPrefix(kv, "TMUX="),
 			"$TMUX survived into the attach; tmux refuses to nest and the takeover exits 1")

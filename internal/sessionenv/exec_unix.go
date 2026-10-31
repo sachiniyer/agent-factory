@@ -73,6 +73,30 @@ func WrapAgentServerCommand(executable string, extras, agentServerArgs []string)
 	return strings.Join(quoted, " "), nil
 }
 
+// WrapAgentServerAccountCommand is WrapAgentServerCommand for an account-bound
+// session: the receiving af scopes the agent-server's environment to the account
+// agent's single identity before it execs (see AgentServerAccountExecMarker).
+func WrapAgentServerAccountCommand(executable, accountAgent string, extras, agentServerArgs []string) (string, error) {
+	if _, ok := SupportsAccounts(accountAgent); !ok {
+		return "", fmt.Errorf("agent %q does not support multiple accounts", accountAgent)
+	}
+	normalized, err := NormalizeExtraNames(extras)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := agentServerProgram(agentServerArgs); !ok {
+		return "", fmt.Errorf("malformed generated agent-server handoff")
+	}
+	args := []string{executable, AgentServerAccountExecMarker, accountAgent, strconv.Itoa(len(normalized))}
+	args = append(args, normalized...)
+	args = append(args, agentServerArgs...)
+	quoted := make([]string, len(args))
+	for idx, arg := range args {
+		quoted[idx] = shellquote.Quote(arg)
+	}
+	return strings.Join(quoted, " "), nil
+}
+
 func wrapCommand(executable, agent, account string, proof AccountLaunchProof, extras []string, command string) (string, error) {
 	marker := ExecMarker
 	if account != "" {
@@ -113,8 +137,14 @@ func HandleInternalExec() {
 	if len(os.Args) < 2 {
 		return
 	}
-	if os.Args[1] == AgentServerExecMarker {
-		if err := agentServerExecInvocation(os.Args[2:]); err != nil {
+	if os.Args[1] == AgentServerExecMarker || os.Args[1] == AgentServerAccountExecMarker {
+		var err error
+		if os.Args[1] == AgentServerAccountExecMarker {
+			err = agentServerAccountExecInvocation(os.Args[2:])
+		} else {
+			err = agentServerExecInvocation(os.Args[2:])
+		}
+		if err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, "af: could not start the filtered agent-server")
 			os.Exit(127)
 		}
@@ -344,7 +374,38 @@ func paneWorkingDirectory() string {
 	return dir
 }
 
+// agentServerArgv0 is the argv[0] the re-exec'd agent-server keeps. On Linux
+// os.Executable resolves symlinks, so a sandbox session whose <sessionDir>/af
+// links into the shared binary cache would otherwise re-exec as the cache path
+// and the reaper's argv[0] identity check (remotePIDIdentityKillScript) would
+// no longer recognise the server (#5571 W2.2). An absolute original spelling is
+// preserved; anything else falls back to the resolved executable.
+func agentServerArgv0(executable string) string {
+	if len(os.Args) > 0 && strings.HasPrefix(os.Args[0], "/") {
+		return os.Args[0]
+	}
+	return executable
+}
+
 func agentServerExecInvocation(args []string) error {
+	return execAgentServer(args, "")
+}
+
+// agentServerAccountExecInvocation is the account-bound variant: args[0] is the
+// account's agent, the rest is the ordinary agent-server handoff.
+func agentServerAccountExecInvocation(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("malformed internal agent-server environment invocation")
+	}
+	if _, ok := SupportsAccounts(args[0]); !ok {
+		return fmt.Errorf("malformed internal agent-server environment invocation")
+	}
+	return execAgentServer(args[1:], args[0])
+}
+
+// execAgentServer filters the environment for the program the arguments launch
+// and, when accountAgent is set, scopes it to that agent's one account.
+func execAgentServer(args []string, accountAgent string) error {
 	if err := stampPaneRootPid(); err != nil {
 		return err
 	}
@@ -370,9 +431,16 @@ func agentServerExecInvocation(args []string) error {
 	// would grant credentials to a repository-controlled executable.
 	agent := credentialAgentForCommand(program)
 	environ := FilterForCommand(os.Environ(), agent, program, extras)
+	if accountAgent != "" {
+		scoped, err := ScopeAgentServerAccount(environ, accountAgent, program)
+		if err != nil {
+			return err
+		}
+		environ = scoped
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve current af executable: %w", err)
 	}
-	return processExec(executable, append([]string{executable}, serverArgs...), environ)
+	return processExec(executable, append([]string{agentServerArgv0(executable)}, serverArgs...), environ)
 }

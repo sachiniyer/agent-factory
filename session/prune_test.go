@@ -55,6 +55,7 @@ func TestPruneSkipReason_Table(t *testing.T) {
 		want   string
 	}{
 		{"kill tombstone", func(d *InstanceData) { d.UserKilled = true }, "kill tombstone"},
+		{"already pruned", func(d *InstanceData) { d.PrunedAt = time.Now() }, "already pruned"},
 		{"live running", func(d *InstanceData) {
 			d.Liveness = LiveRunning
 			d.Status = Running

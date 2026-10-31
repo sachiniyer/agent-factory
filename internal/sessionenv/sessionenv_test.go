@@ -372,6 +372,31 @@ func TestAgentServerProgramAcceptsOnlyGeneratedGrammar(t *testing.T) {
 	if got, ok := agentServerProgram(withEnv); !ok || got != "claude" {
 		t.Fatalf("generated default handoff with session env = (%q, %v), want (claude, true)", got, ok)
 	}
+	withBranch := append(append([]string(nil), withProgram...), "--branch", "af/my-session")
+	if got, ok := agentServerProgram(withBranch); !ok || got != "opencode --model test" {
+		t.Fatalf("handoff with the daemon-named branch = (%q, %v), want (opencode command, true)", got, ok)
+	}
+	if _, ok := agentServerProgram(append(append([]string(nil), base...), "--branch")); ok {
+		t.Fatal("--branch without a value must be rejected")
+	}
+	withPolicy := append(append([]string(nil), withBranch...), "--policy-file", "/srv/af-session/af-policy.json")
+	if got, ok := agentServerProgram(withPolicy); !ok || got != "opencode --model test" {
+		t.Fatalf("handoff with the operator policy file = (%q, %v), want (opencode command, true)", got, ok)
+	}
+	for _, bad := range []string{"", "relative.json"} {
+		if _, ok := agentServerProgram(append(append([]string(nil), base...), "--policy-file", bad)); ok {
+			t.Fatalf("--policy-file %q must be rejected: only an absolute path is read", bad)
+		}
+	}
+	withAdopt := append(append([]string(nil), withBranch...), "--adopt-worktree", "/srv/af-session/workspace-wt")
+	if got, ok := agentServerProgram(withAdopt); !ok || got != "opencode --model test" {
+		t.Fatalf("handoff reattaching a preserved worktree = (%q, %v), want (opencode command, true)", got, ok)
+	}
+	for _, bad := range []string{"", "relative", "-rf"} {
+		if _, ok := agentServerProgram(append(append([]string(nil), base...), "--adopt-worktree", bad)); ok {
+			t.Fatalf("--adopt-worktree %q must be rejected: only an absolute path is bound", bad)
+		}
+	}
 	malformed := append(append([]string(nil), base...), "--program-resolved")
 	if got, ok := agentServerProgram(malformed); ok || got != "" {
 		t.Fatalf("malformed handoff = (%q, %v), want no program", got, ok)

@@ -138,6 +138,9 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			run.onProgressPublished(run.progress)
 		}
 	}
+	// Seams read at spawn: the runner can outlive its caller, and a test restoring
+	// them must not race a runner still working through its commands.
+	openLog, stopScopeUnits := openHookLog, stopHookScopeUnits
 	go func() {
 		journalTerminal := false
 		defer close(done)
@@ -185,7 +188,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 				return
 			default:
 			}
-			outputFile, outputErr := openHookLog(hooklog.PostWorktree)
+			outputFile, outputErr := openLog(hooklog.PostWorktree)
 			if outputErr != nil {
 				log.ErrorLog.Printf("post-worktree hook %q was not started: create daemon-independent output log: %v", commandForLog, outputErr)
 				if !run.progress.recordLaunchFailure(ctx, index, outputErr) {
@@ -291,7 +294,7 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 			scopeCanStop := ctx.Err() != nil || waitErr == nil || state == hookEntryFinished
 			var scopeStopErr error
 			if scopeUnit != "" && scopeCanStop {
-				if err := stopHookScopeUnits(scopeUnit); err != nil {
+				if err := stopScopeUnits(scopeUnit); err != nil {
 					scopeStopErr = err
 					log.WarningLog.Printf("post-worktree hook scope %s did not stop (full output: %s): %v", scopeUnit, outputPath, err)
 				}

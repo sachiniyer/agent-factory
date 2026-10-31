@@ -28,14 +28,6 @@ func (u *UnreachableData) valid() bool {
 	return u != nil && !u.Since.IsZero() && u.Error != ""
 }
 
-func cloneUnreachableData(u *UnreachableData) *UnreachableData {
-	if !u.valid() {
-		return nil
-	}
-	clone := *u
-	return &clone
-}
-
 func unreachableSinceFromData(u *UnreachableData) time.Time {
 	if !u.valid() {
 		return time.Time{}

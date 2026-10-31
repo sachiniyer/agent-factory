@@ -125,9 +125,8 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// The preview origin's bind address (#1856). Same address grammar as
 	// listen_addr, so the identical validator — an empty value disables the
 	// second listener, any host:port binds it.
-	"network.preview_listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error {
-		return validateListenAddrValue(v)
-	}},
+	"network.preview_listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error { return validateListenAddrValue(v) }},
+	"network.editor_origin_ports": {kind: cfgString, section: "network", validate: validateEditorOriginPorts},
 	// A []string written as a single-line TOML array, comma-separated on the CLI
 	// (empty clears it). Each element must be a well-formed browser origin
 	// (scheme://host[:port]); the writer rejects a malformed one eagerly so a typo
@@ -163,17 +162,19 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// Free-form: any ssh invocation the operator already uses. Its usability is
 	// checked at create time (BackendConfigError), like ssh.host — not here.
 	"sandbox.ssh": {kind: cfgString, section: "sandbox"},
+	// Daemon-local path streamed to remote hosts; a bad file surfaces at create.
+	"sandbox.binary": {kind: cfgString, section: "sandbox"},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},
-	"daemon_poll_interval": {kind: cfgDuration, validate: func(_, v string) error { return validateDaemonPollIntervalValue(v) }},
-	"watcher_events_per_minute": {kind: cfgInt, validate: func(_, v string) error {
-		return requirePositiveInt("watcher_events_per_minute", v)
-	}},
-	"log_max_size_mb":    {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
-	"log_max_backups":    {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
-	"branch_prefix":      {kind: cfgString},
-	"on_archive_command": {kind: cfgString},
+	"daemon_poll_interval":      {kind: cfgDuration, validate: func(_, v string) error { return validateDaemonPollIntervalValue(v) }},
+	"watcher_events_per_minute": {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("watcher_events_per_minute", v) }},
+	"log_max_size_mb":           {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
+	"log_max_backups":           {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
+	"branch_prefix":             {kind: cfgString},
+	"on_archive_command":        {kind: cfgString},
+	"move_cmd":                  {kind: cfgString},
+	"projects_root":             {kind: cfgString, validate: validateProjectsRoot},
 	"worktree_root": {kind: cfgString, validate: func(_, v string) error {
 		if !validateWorktreeRootValue(v) {
 			return fmt.Errorf("worktree_root must be one of [%s, %s], got %q", WorktreeRootSubdirectory, WorktreeRootSibling, v)
@@ -220,12 +221,10 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// table writer; the leaf writer checks the name's shape.
 	"hosts": {structured: true},
 	"default_host": {kind: cfgString, validate: func(_, v string) error {
-		if v == "" {
-			return nil
-		}
-		return ValidateHostName(v)
+		return validateOptionalHostName(v)
 	}},
 	"session_env_passthrough": {structured: true},
+	"sandbox_agent_config":    {structured: true},
 	"root_agents":             {structured: true},
 	"root_agent": {structured: true, subkeys: map[string]settableLeafSpec{
 		"enabled": {kind: cfgBool},

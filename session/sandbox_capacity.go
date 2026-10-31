@@ -37,7 +37,7 @@ func (p *sandboxProvisioner) remoteCapacityEvidence(provisionErr error) error {
 	if errors.As(provisionErr, &exitErr) && exitErr.ExitCode() == sshBinaryExitAmbiguous {
 		return nil
 	}
-	dir := `"$HOME/` + sshSessionRoot + `"`
+	dir := sessionRootDir(p.spec)
 	if p.sessionDir != "" {
 		dir = shellQuote(p.sessionDir)
 	}

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,14 +152,8 @@ func TestMoveWorktree_FallbackRepairsRegistration(t *testing.T) {
 	t.Cleanup(func() { worktreeMoveFast = prev })
 
 	var info, warnings logtest.Buffer
-	previousInfo := aflog.InfoLog
-	previousWarning := aflog.WarningLog
-	aflog.InfoLog = stdlog.New(&info, "INFO: ", 0)
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() {
-		aflog.InfoLog = previousInfo
-		aflog.WarningLog = previousWarning
-	})
+	aflog.CaptureOutput(t, aflog.InfoLog, "INFO: ", &info)
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	gw, _, srcPath := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
@@ -197,9 +190,7 @@ func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *test
 	t.Cleanup(func() { renamePath = prevRename })
 
 	var warnings logtest.Buffer
-	origWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = origWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	gw, _, srcPath := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
@@ -273,9 +264,7 @@ func TestRelocate_CopySucceedsCleanupFails_NoErrorNoRetryOrphan(t *testing.T) {
 	t.Cleanup(func() { renamePath = prevRename })
 
 	var warnings logtest.Buffer
-	origWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = origWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	gw, repoRoot, srcPath := archiveTestWorktree(t)
 
@@ -354,9 +343,7 @@ func TestMoveWorktree_UnverifiedCleanupPathOmitsDeleteAdvice(t *testing.T) {
 	t.Cleanup(func() { renamePath = previousRename })
 
 	var warnings logtest.Buffer
-	originalWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = originalWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	worktree, _, sourcePath := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
@@ -407,9 +394,7 @@ func TestMoveWorktree_CleanupErrorRechecksQuarantineIdentity(t *testing.T) {
 	t.Cleanup(func() { renamePath = previousRename })
 
 	var warnings logtest.Buffer
-	originalWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = originalWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	worktree, _, sourcePath := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
@@ -483,9 +468,7 @@ func TestRestoreWorktreeTo_SubmoduleRepairFailureIsBestEffort(t *testing.T) {
 	}
 	t.Cleanup(func() { worktreeRepairSubmodules = prevSubmoduleRepair })
 	var warnings logtest.Buffer
-	origWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = origWarning })
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
 	gw, _, _ := archiveTestWorktree(t)
 	archiveDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")

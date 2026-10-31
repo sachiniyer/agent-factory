@@ -63,6 +63,10 @@ type Capabilities struct {
 	// through the agent-server's port relay (W5.1, #5571), so a web tab pointing
 	// at 127.0.0.1:N is served from the workspace rather than the daemon host.
 	LoopbackRelay bool
+	// RemoteEditor: the workspace's host can run the editor and relay it to the
+	// daemon (W5.4, #5571), so a vscode tab is served from the workspace rather
+	// than from a daemon-host directory.
+	RemoteEditor bool
 	// Handoff: the session's agent program can be swapped in place, keeping the
 	// same workspace and branch (#2013). Local-worktree only for now — a sandbox
 	// backend would have to re-launch the agent inside the provisioned sandbox
@@ -150,7 +154,7 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		// across a sandbox restart, so it no longer disappears after a restart.
 		return nil
 	case TabNeedsLocalWorktreeRead:
-		if c.Workspace != WorkspaceLocalWorktree {
+		if c.Workspace != WorkspaceLocalWorktree && !c.RemoteEditor {
 			// Names the missing EDITOR, not the missing worktree path. The path is
 			// how today's implementation happens to fail — the daemon's
 			// code-server is rooted at a daemon-host directory — but it is not
@@ -172,7 +176,7 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 // ErrHandoffUnsupported is returned when an agent handoff (#2013) is requested
 // on a backend that cannot swap its agent in place. It is a typed sentinel so
 // callers can render the restriction rather than match on prose.
-var ErrHandoffUnsupported = errors.New("agent handoff is only supported for local-worktree sessions")
+var ErrHandoffUnsupported = errors.New("agent handoff is only supported for local-worktree sessions and ssh/sandbox sessions whose agent-server supports it")
 
 // Backend abstracts the session lifecycle so instances can be backed by local
 // tmux+git worktrees (the default) or an off-box docker, SSH, or hook runtime.

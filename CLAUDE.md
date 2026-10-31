@@ -58,7 +58,7 @@ Working style:
   stays restorable. Use `af sessions kill` only when you explicitly mean to
   permanently destroy the session and prune its owned branch. Don't let sessions
   accumulate.
-- Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
+- Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`. `TMUX_TMPDIR` alone is not isolation: inside an af pane `$TMUX` is set and tmux addresses that server, so `TMUX_TMPDIR=… tmux kill-server` kills the production server (2026-10-29, #6180). Isolation is `env -u TMUX tmux -S <your own socket>`; print `#{pid}` and `#{socket_path}` before any `kill-server`.
 - Before opening a PR run the **cheap local checks** — `gofmt -l .`,
   `go build ./...`, `go vet ./...`, `golangci-lint run --timeout=3m --fast`,
   `scripts/lint-file-length.sh` — and, when the diff touches a generated-docs
@@ -105,8 +105,10 @@ Working style:
   on Codex, play-tests or a maintainer. P1 Codex findings must be fixed (reply
   `RESOLVED in <sha>`); P2/P3 are advisory — fix if cheap, else reply
   `ACCEPTED: <reason>`. Play-tests and the wider suites verify on master, not
-  before merge, and a regression they find is fixed forward on master as the
-  highest-priority work. The nightly stable release preflight (full `go vet`
+  before merge, except `Performance and visual baselines` and the `TUI driver
+  selftest`, which additionally gate PRs whose diffs touch their surface; a
+  regression they find is fixed forward on master as the highest-priority work.
+  The nightly stable release preflight (full `go vet`
   plus the `-race` suite) remains the hard gate between master and users. To
   keep a PR from merging, label it `no-auto-merge` (or `hold`). The audit trail
   is in PR descriptions and issue close-out comments, not pre-approval. The old
@@ -221,6 +223,8 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
 - `schedule/` — UI-agnostic schedule model behind the task pickers (preset shapes ↔ cron expressions)
 - `quota/` — usage-limit evidence and account selection for limited sessions
+- `proposal/` — proposal store: per-project folders of markdown docs a user and agent sessions edit together, backed by a private git repo under the AF home
+- `move/` — moving a live local worktree session to a sandbox: worktree snapshot, the `move_cmd` contract, all-or-nothing orchestration
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, session monitor, control-socket RPCs, autostart unit
 - `preflight/` — pre-launch checks (tmux presence, agent command executables)
 - `doctor/` — `af doctor` diagnostics and verified `--fix` remediations
@@ -231,6 +235,7 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `log/` — logging
 - `internal/` — implementation-only helper packages (af home, autoupdate, ssh relay, program privacy, redaction, test guards, …)
 - `design/` — design tokens and the style-guide template (generator inputs for web/ui/doc CSS)
+- `plugins/` — generated per-agent plugin packagings of the `agent-factory` skill (gen-docs output — do not hand-edit)
 - `scripts/` — dev/CI scripts (gen-docs.sh, lint-file-length.sh, container harnesses, tmux scenario drivers)
 - `docs/` — documentation (remote hooks, etc.)
 - `examples/` — example configurations
@@ -486,7 +491,10 @@ otherwise — see #1826.
   clause.
 - **No caps-shouting** for emphasis — write the emphasis into the sentence. CAPS
   are reserved for env vars (`AF_HOME`) and literal flag/command names.
-- **No animated indicators** (spinners, blink, pulse) — state reads from a static
-  glyph (#1766). One named exception: the needs-attention blink on the web
-  rail's dot and on the favicon (static under reduced motion), because an agent
-  blocked on the user must stand out from idle rows and from another tab.
+- **Animated indicators are allowed where they carry state a static glyph
+  cannot** (a blink that pulls the eye to an agent blocked on the user, as on the
+  web rail's needs-attention dot and the favicon) — not as decoration, and never
+  a spinner for work that is merely in progress (#1766: state reads from a static
+  glyph). Every animation must honour `prefers-reduced-motion: reduce` with a
+  static fallback that still carries the state (the rail dot becomes a ring, the
+  favicon holds still), and must be pinned by a test under both settings.

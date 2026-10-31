@@ -168,8 +168,8 @@ same fixed light/dark values, never a derived or user-supplied palette.
 ### Terminal chrome
 
 Use surface and a border outline, with heading-sized ink for the one-line
-Session · Tab title. Keyboard ownership replaces that outline with accent and
-adds the word Keyboard. Green is never focus. Preview is a word in the same
+Session · Tab title. Keyboard ownership replaces that outline with accent; the
+TUI title also adds · keyboard, and the web adds no label. Green is never focus. Preview is a word in the same
 title, not another frame colour. Chrome uses space-2 insets; the agent terminal
 grid gets no decorative inset and retains its own ANSI output. Enter and ctrl+]
 continue to transfer keyboard ownership; Escape still reaches the attached agent.
@@ -375,10 +375,12 @@ TUI focus is an accent frame plus text. Web touch targets are at least 44px high
 
 ## Motion and copy
 
-No animated indicators: no spinner, pulse or cycling glyph. The one exception is
-the needs-attention blink, on the web rail's dot and on the favicon, so an agent
-blocked on the user is visible from across the screen or from another tab. Both
-are static under reduced motion, where the dot gets a ring. Connecting…,
+No decorative or progress animation: no spinner, pulse or cycling glyph. An
+animation is allowed when it carries state a static glyph cannot, and it must
+have a static fallback under reduced motion. The needs-attention blink, on the
+web rail's dot and on the favicon, is the one in use: it makes a waiting agent
+visible from across the screen or from another tab, and under reduced motion the
+dot is a static ring and the favicon holds still. Connecting…,
 Creating… and Running are static. This includes connection chrome; agent-owned
 terminal output is not an af indicator. User-caused web disclosure may take at
 most 120ms, with 0ms under reduced motion. TUI transitions are immediate.

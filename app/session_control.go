@@ -150,6 +150,8 @@ type sessionStartRequest struct {
 	// or "" to let the repo's `backend` config key decide — the same defaulting
 	// `af sessions create` applies when --backend is absent.
 	Backend string
+	// Host is the listed host picked in the same field (#5571 W6.3), or "".
+	Host string
 	// Account is the credential account picked in the naming form's account field
 	// (#3844), or "" for the ambient identity — the same default `af sessions
 	// create` applies with no --account. It is a directory name in the DAEMON's
@@ -170,20 +172,49 @@ type sessionStartRequest struct {
 	AccountChosen bool
 }
 
+// daemonHealth is the Ping the host-pick gate reads — the daemon's capability
+// bits and version. A package var so a test can stand in for an older daemon.
+var daemonHealth = func(c *apiclient.Client) (daemon.PingResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return c.Health(ctx)
+}
+
+// gateHostPick runs send only when the daemon affirmed it honors the host field
+// on this surface (#5571 W6.3). An older daemon drops the field silently, so a
+// session or task the user pinned to a host would run on the repo's default
+// backend instead, with the TUI reporting success. Refusing here, before anything
+// is sent, leaves the user's input retained and tells them to upgrade the daemon.
+// An empty host is no pick and is never gated, so every non-host write is
+// byte-for-byte what it was.
+func gateHostPick(c *apiclient.Client, surface daemon.HostPickSurface, host string, send func() error) error {
+	if host == "" {
+		return send()
+	}
+	resp, err := daemonHealth(c)
+	if err := surface.Require("the host pick", resp, err, host); err != nil {
+		return err
+	}
+	return send()
+}
+
 var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartRequest) (*session.Instance, error) {
 	var data *session.InstanceData
 	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
-		var e error
-		data, e = c.CreateSession(daemon.CreateSessionRequest{
-			Title:     req.Title,
-			TitleBase: req.TitleBase,
-			RepoPath:  req.RepoPath,
-			Program:   req.Program,
-			Prompt:    req.Prompt,
-			Backend:   req.Backend,
-			Account:   req.Account,
+		return gateHostPick(c, daemon.HostPickOnCreate, req.Host, func() error {
+			var e error
+			data, e = c.CreateSession(daemon.CreateSessionRequest{
+				Title:     req.Title,
+				TitleBase: req.TitleBase,
+				RepoPath:  req.RepoPath,
+				Program:   req.Program,
+				Prompt:    req.Prompt,
+				Backend:   req.Backend,
+				Host:      req.Host,
+				Account:   req.Account,
+			})
+			return e
 		})
-		return e
 	})
 	if err != nil {
 		return nil, err
@@ -280,6 +311,16 @@ var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeletePro
 var registerProjectThroughDaemon = func(path string) error {
 	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		_, e := c.RegisterProject(path)
+		return e
+	})
+}
+
+// registerProjectURLThroughDaemon is the add-project verb for a git URL (W9.10):
+// the daemon clones it on its own host and registers the checkout. A package var
+// for the same reason as registerProjectThroughDaemon.
+var registerProjectURLThroughDaemon = func(url string) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
+		_, e := c.RegisterProjectURL(url)
 		return e
 	})
 }
@@ -389,12 +430,29 @@ var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectatio
 // the snapshot fetcher / poll-pause seams).
 var (
 	addTaskThroughDaemon = func(t task.Task) error {
-		return withDaemonHTTPMutation(func(c *apiclient.Client) error { return c.AddTask(t, task.ActorTUI) })
+		taskAck = taskMutationAck{}
+		return withDaemonHTTPMutation(func(c *apiclient.Client) error {
+			return gateHostPick(c, daemon.HostPickOnTask, t.Host, func() error {
+				rec, err := c.AddTaskResult(t, task.ActorTUI)
+				taskAck.record = rec
+				return err
+			})
+		})
 	}
 	updateTaskThroughDaemon = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+		taskAck = taskMutationAck{}
+		host := ""
+		if update.Host != nil {
+			host = *update.Host
+		}
 		return withDaemonHTTPMutation(func(c *apiclient.Client) error {
-			_, err := c.UpdateTask(id, update, expect, task.ActorTUI)
-			return err
+			return gateHostPick(c, daemon.HostPickOnTask, host, func() error {
+				rec, err := c.UpdateTask(id, update, expect, task.ActorTUI)
+				if err == nil {
+					taskAck.record = &rec
+				}
+				return err
+			})
 		})
 	}
 	removeTaskThroughDaemon = func(id string, expect task.ProjectExpectation) error {

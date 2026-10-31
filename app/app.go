@@ -31,6 +31,11 @@ func Run(ctx context.Context, program, configuredDefault string, repo *config.Re
 	// terminal. Set here rather than in newHome because only Run has the Program.
 	h.releaseTerminal = p.ReleaseTerminal
 	h.restoreTerminal = p.RestoreTerminal
+	// Leave the terminal the way the shell expects on every way out of here — a
+	// normal quit, an error, a panic, and the signals that end Run or the process —
+	// whenever an attach ever drove it (#6063).
+	defer h.restoreTerminalAtExit(terminalExitWriter)
+	defer h.guardTerminalOnSignal(terminalExitWriter)()
 	_, err := p.Run()
 	return err
 }

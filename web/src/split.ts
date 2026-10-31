@@ -34,6 +34,7 @@ import {
   type TabDropResult,
   type Edge,
   findLeaf,
+  focusSuccessorAfterDrop,
   type LayoutNode,
   type LeafNode,
   leafCount,
@@ -46,13 +47,14 @@ import {
   setRatio,
   siblingSubtreeOf,
   singleLeaf,
+  synthIdentities,
   type SplitNode,
   splitLeaf,
   TAB_DND_MIME,
   tabsRebound,
   validate,
 } from "./layout.js";
-import { fetchPreviewOrigin, pauseStatusPoll, probeWebTab } from "./api.js";
+import { fetchEditorPortOrigin, fetchPreviewOrigin, pauseStatusPoll, probeWebTab } from "./api.js";
 import type { HoldAction } from "./delivery_hold.js";
 import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
@@ -148,6 +150,8 @@ function webFallbackMs(): number {
  *  previewProbeLabel/previewProbeMessage. */
 const PREVIEW_PROBE_HOST = "afprobe.localhost";
 export const PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+export const EDITOR_PROBE_MESSAGE = "af-editor-origin-ok";
+const EDITOR_PROBE_PATH = "/_af/editor-probe";
 
 /** How long to wait for the probe frame to report. Overridable for tests. */
 function previewProbeMs(): number {
@@ -193,19 +197,37 @@ export function previewOriginReachable(origin: string, fresh = false): Promise<b
   } catch {
     return Promise.resolve(false);
   }
-  // A user-initiated ↻ bypasses the cache. A success is pinned for the SPA's lifetime
-  // (see below) — the right thing between two ordinary loads of the same pane, but
-  // `fresh` is the explicit "give me the CURRENT page" gesture. A port that was
-  // reachable when first probed may have stopped being BROWSER-reachable since: the
-  // daemon's preview listener stays bound and keeps vending the same origin, but the
-  // browser's own path to the port can break — the preview-port ssh forward drops
-  // while the main forward stays up. A cached `true` would then navigate the frame to
-  // a dead origin with no fallback; re-probing on demand restores the "fails CLOSED"
-  // path the cache exists to preserve.
-  //
-  // Only the port THIS origin names is dropped — a port that moved is a different key
-  // and was never cached against the new one — so the dedup across panes that share a
-  // port (one probe answers for the whole page) is kept for every non-fresh load.
+  return framedReachable(port, `http://${PREVIEW_PROBE_HOST}:${port}/`, PREVIEW_PROBE_MESSAGE, fresh);
+}
+
+/** Whether THIS BROWSER can reach a W5.2 editor-port origin (#6002). Same framed
+ *  probe and fail-closed contract as `previewOriginReachable`, against the editor
+ *  listener's own probe page; keyed on the full origin (scheme+host+port), since
+ *  that listener sits on the front-door host and may be https. */
+export function editorOriginReachable(origin: string, fresh = false): Promise<boolean> {
+  let key: string;
+  try {
+    key = "editor:" + new URL(origin).origin;
+  } catch {
+    return Promise.resolve(false);
+  }
+  return framedReachable(key, new URL(EDITOR_PROBE_PATH, origin).href, EDITOR_PROBE_MESSAGE, fresh);
+}
+
+/** What the pane tells the user when the editor port cannot be reached and the
+ *  same-origin mirror is used instead. */
+export function editorOriginUnreachableMessage(origin: string): string {
+  let port = "";
+  try {
+    port = new URL(origin).port;
+  } catch {
+    // fall through with an empty port
+  }
+  const which = port !== "" ? `port ${port}` : "the editor port";
+  return `This editor's own address (${which}) is not reachable from this browser, so it is shown on the shared address instead. Expose ${which} the same way as the af port (for example \`tailscale serve --tcp=${port} tcp://127.0.0.1:${port}\`).`;
+}
+
+function framedReachable(port: string, probeSrc: string, probeMessage: string, fresh: boolean): Promise<boolean> {
   if (fresh) {
     previewReachable.delete(port);
   } else {
@@ -247,7 +269,7 @@ export function previewOriginReachable(origin: string, fresh = false): Promise<b
     };
     const onMessage = (e: MessageEvent): void => {
       // Only the frame we just created may answer, and only with the fixed string.
-      if (e.source === frame.contentWindow && e.data === PREVIEW_PROBE_MESSAGE) {
+      if (e.source === frame.contentWindow && e.data === probeMessage) {
         finish(true);
       }
     };
@@ -255,7 +277,7 @@ export function previewOriginReachable(origin: string, fresh = false): Promise<b
     window.addEventListener("message", onMessage);
     // No `load` handler: a browser that cannot resolve the name still fires load on
     // its own error page, so the POSTED MESSAGE is the only trustworthy signal.
-    frame.src = `http://${PREVIEW_PROBE_HOST}:${port}/`;
+    frame.src = probeSrc;
     document.body.appendChild(frame);
   });
   previewReachable.set(port, probe);
@@ -445,6 +467,7 @@ export class SplitView {
     const archivedChanged = archived !== this.archived;
     this.archived = archived;
     const tabCount = tabIds.length > 0 ? tabIds.length : 1;
+    const nextSynth = synthIdentities(tabKinds, tabNames);
     if (sessionId === null || token === null) {
       this.teardown();
       this.sessionId = null;
@@ -467,7 +490,7 @@ export class SplitView {
       // tab took that slot — the misroute this whole change exists to close. A pane
       // whose tab merely MOVED then finds its identity already matching and is left
       // streaming untouched; only a genuinely replaced tab rebuilds.
-      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds);
+      const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds, nextSynth);
       this.tree = validate(settled, tabCount);
       // Always re-retain: `ids` must track the roster even when the remap left the
       // tree identical, or the record would claim ordinals were bound against a list
@@ -512,7 +535,7 @@ export class SplitView {
     // another window's close — now delivered live by #1815) moved the tabs out from
     // under them. validate() alone only clamps a too-high ordinal, so a pane would
     // come back bound to whatever tab slid into its slot.
-    this.tree = validate(this.retainedTree(sessionId, tabIds) ?? singleLeaf(initialTab), tabCount);
+    this.tree = validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount);
     this.retain(sessionId, this.tree, tabIds);
     // Focus the first pane of the newly shown session by default.
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
@@ -532,7 +555,7 @@ export class SplitView {
    *  bar then highlights Agent over a pane showing tab N, and the next close computes
    *  its shift from the stale 0 and yanks the pane to Agent (#1855). Reading the
    *  settled tab keeps the store's claim and the pane's binding the same statement. */
-  settledTab(sessionId: string, tabIds: string[]): number {
+  settledTab(sessionId: string, tabIds: string[], nextSynth?: readonly string[]): number {
     if (sessionId === this.sessionId) {
       if (!this.tree || !this.focusedId) {
         return 0;
@@ -541,25 +564,25 @@ export class SplitView {
       // rerender. Resolve the focused leaf against that incoming identity list now;
       // reading its old ordinal would briefly name a neighbour and make observers
       // mistake a roster repaint for a user focus change.
-      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds);
+      const remapped = remapByIdentity(this.tree, this.tabIds, tabIds, nextSynth);
       return findLeaf(remapped, this.focusedId)?.tab ?? 0;
     }
     // Read the REMAPPED tree, exactly as setSession will: this answers "which tab will
     // that pane show once selected?", and the two must agree or the bar highlights one
     // tab while the pane binds another (#1855). Passing the same ids setSession gets is
     // what keeps the answers identical.
-    const retained = this.retainedTree(sessionId, tabIds);
+    const retained = this.retainedTree(sessionId, tabIds, nextSynth);
     return retained ? (leaves(retained)[0]?.tab ?? 0) : 0;
   }
 
   /** The retained tree for `sessionId`, remapped onto `tabIds` — the only supported
    *  way to read one. Returns null for a session never shown. */
-  private retainedTree(sessionId: string, tabIds: string[]): LayoutNode | null {
+  private retainedTree(sessionId: string, tabIds: string[], nextSynth?: readonly string[]): LayoutNode | null {
     const rec = this.trees.get(sessionId);
     if (!rec) {
       return null;
     }
-    return remapByIdentity(rec.tree, rec.ids, tabIds);
+    return remapByIdentity(rec.tree, rec.ids, tabIds, nextSynth);
   }
 
   /** Retains `tree` for `sessionId` together with the identities it is bound against. */
@@ -853,7 +876,14 @@ export class SplitView {
 
     // Keep a valid focus.
     if (!this.focusedId || !wanted.has(this.focusedId)) {
-      this.focusedId = desired[0]?.id ?? null;
+      // A focused leaf dropped out-of-band hands the keyboard to the pane that grew
+      // into its region (closePane's sibling rule, #5983), read from the tree the DOM
+      // was last built from — never the root-first leaf of an unrelated branch.
+      const successor =
+        this.focusedId && this.builtTree
+          ? focusSuccessorAfterDrop(this.builtTree, this.focusedId, wanted)
+          : null;
+      this.focusedId = successor ?? desired[0]?.id ?? null;
     }
 
     // Rebuild the split wrappers, inserting the persistent containers. Containers now
@@ -1435,15 +1465,41 @@ export class SplitView {
     // mirror — unchanged from every release before this one, and the only thing that
     // works through a single forwarded port.
     let previewSrcOnce: Promise<string> | null = null;
+    // The editor-port origin (W5.2) answers with a SINGLE-USE bootstrap URL, so it is
+    // re-asked on every load; its plain origin is what "Open" should hand the user.
+    let editorPortBootstrap = false;
+    let editorPortOpenHref = "";
     const resolvePreviewSrc = (fresh: boolean): Promise<string> => {
-      if (fresh) {
-        // A user-initiated ↻ / Retry re-asks. `preview_listen_addr` applies LIVE
+      if (fresh || editorPortBootstrap) {
+        // A user-initiated ↻ / Retry re-asks. An editor-port bootstrap URL is
+        // single-use (W5.2), so it is never replayed: every load asks again. `preview_listen_addr` applies LIVE
         // (#2480), so between two loads of the SAME pane the listener may have moved
         // port or been turned off — and a cached answer would keep pointing the frame
         // at a dead port instead of falling back to the mirror or picking up the new
         // one. Re-asking is what ↻ already means for the liveness probe and the cache
         // buster; the origin is the third thing "give me the current page" covers.
         previewSrcOnce = null;
+        editorPortBootstrap = false;
+        editorPortOpenHref = "";
+      }
+      if (previewSrcOnce === null && isVSCode && mayUsePreviewOrigin && !this.archived && !canUsePreviewOrigin(window.location)) {
+        // A remote viewer resolves *.localhost to its own machine, so the per-session
+        // label cannot partition its editor storage. When the operator declared a port
+        // pool, the editor gets its own port on the front-door host instead.
+        previewSrcOnce = fetchEditorPortOrigin(sessionId, this.token ?? "").then(async (r) => {
+          if (r === null) {
+            return "";
+          }
+          // The daemon allocated a port; only the browser can say whether it can
+          // reach it (#6002). Unreachable keeps the same-origin mirror and says why.
+          if (!(await editorOriginReachable(r.origin, fresh))) {
+            console.warn(editorOriginUnreachableMessage(r.origin));
+            return "";
+          }
+          editorPortBootstrap = true;
+          editorPortOpenHref = r.origin;
+          return r.bootstrapUrl;
+        });
       }
       if (previewSrcOnce === null) {
         previewSrcOnce =
@@ -1505,8 +1561,9 @@ export class SplitView {
       // address that actually renders the app correctly, so "Open" must hand the user
       // that one rather than the mirror it was built from.
       if (previewSrc !== "") {
-        open.href = previewSrc;
-        fbLink.href = previewSrc;
+        const openTo = editorPortOpenHref !== "" ? editorPortOpenHref : previewSrc;
+        open.href = openTo;
+        fbLink.href = openTo;
       } else {
         open.href = openHref;
         fbLink.href = openHref;

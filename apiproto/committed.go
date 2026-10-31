@@ -37,3 +37,19 @@ func IsMutationCommitted(err error) bool {
 	var outcome MutationCommittedError
 	return errors.As(err, &outcome) && outcome.MutationCommitted()
 }
+
+// StoredIDCarrier is implemented by a committed-mutation error that knows the id
+// of the record it stored.
+type StoredIDCarrier interface {
+	StoredID() string
+}
+
+// StoredID returns the stored record's id carried by err, or "" when none is.
+// It matches through wrappers, like IsMutationCommitted.
+func StoredID(err error) string {
+	var c StoredIDCarrier
+	if errors.As(err, &c) {
+		return c.StoredID()
+	}
+	return ""
+}

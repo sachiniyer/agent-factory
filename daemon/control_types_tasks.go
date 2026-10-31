@@ -41,9 +41,22 @@ type AddTaskRequest struct {
 	// human reading the trail, not an authentication claim: every caller that can
 	// reach this RPC can already write the task store.
 	Actor string `json:"actor,omitempty"`
+	// ValidatePath asks THIS daemon to check the task's project path on its own
+	// host before storing it (#5859): the path must be a git repository here. It is
+	// opt-in because the daemon has always stored unresolved paths for callers that
+	// validated on their own machine; a REMOTE client cannot (the path is on the
+	// daemon's host), so the apiclient sets it for every remote target.
+	ValidatePath bool `json:"validate_path,omitempty"`
 }
 type AddTaskResponse struct {
 	OK bool `json:"ok"`
+	// Task is the record as stored — ID, expanded ProjectPath and bound RepoID
+	// included (W9.7 follow-up). A client that keeps a local view of the task
+	// list updates it from THIS, not from the request it sent, so a path the
+	// daemon expanded or a binding it resolved is the one the client scopes by.
+	// Absent from daemons that predate it, and from a committed-with-warning
+	// reply (an error carries no body).
+	Task *task.Task `json:"task,omitempty"`
 	MutationOutcome
 }
 
@@ -67,6 +80,9 @@ type UpdateTaskRequest struct {
 	// Actor is the surface this patch came from — see AddTaskRequest.Actor. It is
 	// what makes "who disabled this task, and when?" answerable at all (#3623).
 	Actor string `json:"actor,omitempty"`
+	// ValidatePath: see AddTaskRequest.ValidatePath. It applies only when the
+	// patch changes the project path.
+	ValidatePath bool `json:"validate_path,omitempty"`
 }
 
 // UpdateTaskResponse returns the merged record the write produced, so the CLI

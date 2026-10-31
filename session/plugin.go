@@ -52,11 +52,8 @@ const legacyGuardNoop = "#!/bin/sh\nexit 0\n"
 // drift. A callbackless session gets afUsageReferenceCallbackless instead: the
 // file lives under this host's af config dir, and a host whose sessions cannot
 // reach the daemon must not be taught af verbs that all fail (#5571 W3.1).
-func pluginCommands(callbackUnavailable bool) map[string]string {
-	body := afUsageReference
-	if callbackUnavailable {
-		body = afUsageReferenceCallbackless
-	}
+func pluginCommands(caps guidanceCaps) map[string]string {
+	body := caps.Reference()
 	return map[string]string{
 		"af.md": "---\n" +
 			"allowed-tools: Bash(af:*)\n" +
@@ -80,8 +77,8 @@ const afProposalSkillName = "proposal"
 // A callbackless session gets none: every skill here teaches af verbs, which is
 // exactly the content a session that cannot reach the daemon must not see
 // (#5571 W3.1).
-func pluginSkills(callbackUnavailable bool) map[string]string {
-	if callbackUnavailable {
+func pluginSkills(caps guidanceCaps) map[string]string {
+	if !caps.Callback {
 		return nil
 	}
 	return map[string]string{
@@ -103,7 +100,7 @@ func pluginSkills(callbackUnavailable bool) map[string]string {
 // stray .md in commands/ that isn't in the map, and disarms the stale hook an
 // older af wrote — so inserts, edits, and removes all propagate on the next
 // session start.
-func ensurePluginDir(callbackUnavailable bool) (string, error) {
+func ensurePluginDir(caps guidanceCaps) (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
@@ -115,8 +112,8 @@ func ensurePluginDir(callbackUnavailable bool) (string, error) {
 	// rewrites the plugin the earlier session is about to read (#5571 W3.1,
 	// PR #5577 review).
 	pluginName := "plugin"
-	if callbackUnavailable {
-		pluginName = "plugin-callbackless"
+	if key := caps.key(); key != "" {
+		pluginName = "plugin-" + key
 	}
 	pluginDir := filepath.Join(configDir, pluginName)
 	commandsDir := filepath.Join(pluginDir, "commands")
@@ -155,7 +152,7 @@ func ensurePluginDir(callbackUnavailable bool) (string, error) {
 		return "", err
 	}
 
-	commands := pluginCommands(callbackUnavailable)
+	commands := pluginCommands(caps)
 
 	// Prune stale command files no longer declared in pluginCommands so
 	// removed/renamed skills don't linger as orphan slash commands.
@@ -183,7 +180,7 @@ func ensurePluginDir(callbackUnavailable bool) (string, error) {
 		}
 	}
 
-	if err := syncPluginSkills(filepath.Join(pluginDir, "skills"), pluginSkills(callbackUnavailable)); err != nil {
+	if err := syncPluginSkills(filepath.Join(pluginDir, "skills"), pluginSkills(caps)); err != nil {
 		return "", err
 	}
 

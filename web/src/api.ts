@@ -25,7 +25,7 @@
 // a stored token (see shouldForgetToken) — a rotated token re-prompts once instead
 // of wedging the app.
 
-import type { BackendCatalog } from "./backends.js";
+import { type BackendCatalog, hostFromChoiceValue } from "./backends.js";
 import type { ProgramCatalog } from "./programs.js";
 import type {
   OnCompleteOption,
@@ -34,11 +34,13 @@ import type {
   ConfigResponse,
   ConfigSetResponse,
   ExplainConfigResponse,
+  QuotaReportResponse,
   RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
   SkippedRepo,
   SnapshotResponse,
+  SnapshotCursor,
   TaskData,
   TaskMutationRef,
   TasksResponse,
@@ -307,6 +309,10 @@ export async function af<T>(method: string, body: unknown, token: string, signal
  */
 export interface SessionSnapshot {
   sessions: SessionData[];
+  /** The archived sessions the response leaves out (#6178). Absent when the daemon
+   *  predates the lazy-archive request shape: `sessions` is then the whole list,
+   *  archived rows included, exactly as before. */
+  archived?: ArchivedSummary;
   operationLockTimeoutMs?: number;
   operationClockMs?: number;
   daemonBootId?: string;
@@ -316,15 +322,60 @@ export interface SessionSnapshot {
   skippedRepos?: SkippedRepo[];
 }
 
+/** How many archived sessions the daemon holds, in total and per project root. */
+export interface ArchivedSummary {
+  total: number;
+  byProject: Record<string, number>;
+}
+
+/** Page size for the archived view. */
+export const ARCHIVED_PAGE_SIZE = 50;
+
 export async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
-  const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
+  // The first screen needs the live rows; the archive is most of a long-lived
+  // daemon's rows and loads on demand (fetchArchivedPage). A daemon that predates
+  // `lazy_archive` ignores it and answers with every row and no archived_total.
+  const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "", lazy_archive: true }, token);
   return {
     sessions: resp.instances ?? [],
+    archived: resp.archived_total === undefined ? undefined
+      : { total: resp.archived_total, byProject: resp.archived_by_project ?? {} },
     operationLockTimeoutMs: resp.operation_lock_timeout_ms,
     operationClockMs: resp.operation_clock_ms,
     daemonBootId: resp.boot_id,
     skippedRepos: resp.skipped_repos,
   };
+}
+
+/** One page of a project's archived sessions, newest first. `next` is the cursor of
+ *  the following page, or null when this was the last. */
+export interface ArchivedPage {
+  sessions: SessionData[];
+  next: SnapshotCursor | null;
+}
+
+export async function fetchArchivedPage(
+  token: string,
+  opts: { project: string | null; before: SnapshotCursor | null; limit?: number },
+): Promise<ArchivedPage> {
+  const resp = await af<SnapshotResponse>("Snapshot", {
+    repo_id: "",
+    statuses: ["archived"],
+    newest_first: true,
+    limit: opts.limit ?? ARCHIVED_PAGE_SIZE,
+    ...(opts.project ? { project_path: opts.project } : {}),
+    ...(opts.before ? { before: opts.before } : {}),
+  }, token);
+  return { sessions: resp.instances ?? [], next: resp.next_before ?? null };
+}
+
+/** The rows with these stable ids, whatever their state: how a deep link to an
+ *  archived session, and the refresh of the already-loaded archive window, read
+ *  rows the live-only startup snapshot left out. */
+export async function fetchSessionsById(token: string, ids: string[]): Promise<SessionData[]> {
+  if (ids.length === 0) return [];
+  const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "", ids }, token);
+  return resp.instances ?? [];
 }
 
 export async function fetchSnapshot(token: string): Promise<SessionData[]> {
@@ -449,7 +500,13 @@ export async function createSession(input: CreateSessionInput, token: string): P
   // default that `af sessions create` (with no --backend) honours. Absent is the
   // only way to mean "let the repo decide" (#1933).
   const backend = (input.backend ?? "").trim();
-  if (backend !== "") {
+  const host = hostFromChoiceValue(backend);
+  if (host !== "") {
+    // A listed-host row of the same <select> (#5571 W6.3): the pick is `host`, and
+    // NO backend is sent — a host IS the ssh placement, and the daemon refuses a
+    // host paired with any other backend.
+    body.host = host;
+  } else if (backend !== "") {
     body.backend = backend;
   }
   // `account` is sent ONLY when the user picked one, for the same reason: absent is
@@ -741,6 +798,37 @@ export interface RegisteredProject {
  *  message, for inline display next to the input. */
 export async function registerProject(path: string, token: string): Promise<RegisteredProject> {
   const resp = await af<{ ok: boolean; project: RegisteredProject }>("RegisterProject", { path }, token);
+  return resp.project;
+}
+
+/** Reports whether a user-typed add-project value routes to the URL half of
+ *  RegisterProject rather than the path half — the mirror of
+ *  internal/projectclone.LooksLikeURL, which the CLI and TUI route on the same
+ *  way. ROUTING only: a scheme-bearing value ("https://…", "ssh://…", and yes
+ *  "file://…") or an scp-like "user@host:path" is sent as `url`; anything else
+ *  ("./repo", "/srv/repo", "~/repo", "a:b") stays a `path`. The VERDICT stays
+ *  where it is on the other two surfaces too — the daemon's
+ *  projectclone.Validate refuses what routing let through (file://, a
+ *  password-embedded URL, an option-like value), and its message surfaces
+ *  verbatim. There is deliberately no client copy of Validate to drift. */
+const SCP_LIKE_GIT_URL = /^[A-Za-z0-9._-]+@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~/-]+$/;
+export function looksLikeGitURL(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.includes("://") || SCP_LIKE_GIT_URL.test(trimmed);
+}
+
+/** Registers a project by git URL (mirrors `af projects add <url>`, W9.10): the
+ *  RegisterProject RPC's `url` half, so the DAEMON clones it on its own host,
+ *  with its own credentials (ssh keys, credential helper), under its
+ *  projects_root, then registers the checkout — never anything the caller
+ *  names. The clone runs INSIDE the request, so this is by far the slowest RPC
+ *  the client can make (projectclone.Budget bounds it server-side): callers
+ *  must not hold a form open on the reply. Same envelope and error contract as
+ *  registerProject — a refused URL or a failed clone throws an ApiError
+ *  carrying the daemon's actionable message, and the echoed projects.changed
+ *  refetches the registry when it lands. */
+export async function registerProjectURL(url: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RegisterProject", { url }, token);
   return resp.project;
 }
 
@@ -1101,6 +1189,42 @@ export async function fetchPreviewOrigin(sessionId: string, tabId: string, token
   }
 }
 
+/** A session editor's own origin for a REMOTE viewer (W5.2): the origin itself, and a
+ *  single-use bootstrap URL on it that sets the session's HttpOnly key cookie and
+ *  redirects to the editor root. */
+export interface EditorPortOrigin {
+  origin: string;
+  bootstrapUrl: string;
+}
+
+/**
+ * Asks the daemon for a session's editor-port origin (POST /v1/editor-origin, behind
+ * the operator token). Returns null when the feature is off (network.editor_origin_ports
+ * unset), the pool is full, or anything fails — the caller keeps the same-origin
+ * mirror, which is what every release before this one used. Each call mints a NEW
+ * single-use bootstrap URL, so callers must not cache or replay the result.
+ */
+export async function fetchEditorPortOrigin(sessionId: string, token: string): Promise<EditorPortOrigin | null> {
+  const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
+  const headers: Record<string, string> = {};
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  try {
+    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    if (!resp.ok) {
+      return null;
+    }
+    const env = (await resp.json()) as Envelope<{ origin?: string; bootstrap_url?: string }>;
+    if (env?.error != null || !env?.data?.origin || !env?.data?.bootstrap_url) {
+      return null;
+    }
+    return { origin: env.data.origin, bootstrapUrl: env.data.bootstrap_url };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Probes a proxied web tab's mirror path and reports whether its dev server is up.
  *
@@ -1220,9 +1344,14 @@ function requireTaskID(id: string, action: string): void {
 }
 
 /** Adds a task (mirrors `af tasks add`). The daemon re-validates (trigger, program)
- *  and owns the write; the created task also arrives via a task.created event. */
+ *  and owns the write; the created task also arrives via a task.created event.
+ *  validate_path asks the daemon to check the picked project is still a git repo
+ *  on ITS host (#5859): the select's options are derived from live state, so a
+ *  path gone stale since it was read — a checkout deleted out from under a
+ *  project row — would otherwise save silently and only fail when the task
+ *  fires. The refusal renders in the modal. */
 export async function addTask(task: TaskData, token: string): Promise<void> {
-  await af("AddTask", { task }, token);
+  await af("AddTask", { task, validate_path: true }, token);
 }
 
 /** Builds the project compare-and-swap from the record the caller displayed —
@@ -1245,10 +1374,13 @@ function projectExpectation(task: TaskMutationRef): ProjectExpectation {
  *  (last_run_*, created_at) untouched. Refuses a task with no stable id, before
  *  issuing the request. Takes the DISPLAYED record: the request pins its project
  *  binding, so a task rebound by another client while this pane was stale is
- *  refused rather than patched (#3230). */
+ *  refused rather than patched (#3230). validate_path rides every patch; the
+ *  daemon applies it only when the patch carries project_path — which the edit
+ *  form always sends — so an edit re-checks the submitted repo the same way
+ *  the TUI form's validateForm re-checks it on every save (#5859). */
 export async function updateTask(task: TaskMutationRef, update: TaskUpdate, token: string): Promise<void> {
   requireTaskID(task.id, "update a task");
-  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token);
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task), validate_path: true }, token);
 }
 
 /** Fires a task NOW (mirrors `af tasks trigger`). The daemon runs it through the same
@@ -1257,7 +1389,13 @@ export async function updateTask(task: TaskMutationRef, update: TaskUpdate, toke
  *  DISPLAYED record and pins its project binding (#3230). */
 export async function triggerTask(task: TaskMutationRef, token: string): Promise<void> {
   requireTaskID(task.id, "trigger a task");
-  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  const result = await af<{ warning?: string }>("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
+  if (result.warning) {
+    // The run reached a committed outcome — e.g. it auto-created its target
+    // session but could not confirm the start. Surface it through the shared
+    // mutation-committed path like every sibling mutation, not as plain success.
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** Removes a task (mirrors `af tasks remove`). Refuses a task with no stable
@@ -1391,6 +1529,15 @@ export async function listAccounts(token: string, repoPath = ""): Promise<Accoun
   // targets by the agent the resolved command launches, and dropping the map
   // here would silently return them to enum semantics (#4430 review round 5).
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
+}
+
+/** Reads the daemon's per-agent usage/quota report (#2983): the same
+ *  records→quota.Build read `af quota` makes, with the words rendered
+ *  server-side — so this surface shows exactly what the CLI prints rather than
+ *  re-deriving vocabulary from fields. */
+export async function quotaReport(token: string): Promise<QuotaReportResponse> {
+  const resp = await af<QuotaReportResponse>("QuotaReport", {}, token);
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.
