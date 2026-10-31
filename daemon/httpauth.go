@@ -253,6 +253,10 @@ type requestPosture struct {
 	// cors is the exact-match browser-origin allow-list; empty ⇒ no
 	// Access-Control-Allow-Origin is emitted.
 	cors []string
+	// allowedHosts is network.allowed_hosts from the same config read, judged by
+	// withLiveHostGuard before routing (hostguard.go). servePosture never consults
+	// it: by the time a request reaches the gate its Host has been admitted.
+	allowedHosts []string
 	// previewOrigin marks a listener that carries NO control plane and whose whole
 	// path space belongs to the previewed app (#1856 step 3b). It changes three
 	// things below, and all three follow from that one fact:
@@ -365,9 +369,18 @@ func withAuth(next http.Handler, gate *authGate, corsOrigins []string) http.Hand
 // rebind succeeds, so a security change can never fail in the permissive direction
 // because a socket operation failed. buildPosture must read its config snapshot
 // exactly once and derive the whole returned posture from it.
+//
+// When withLiveHostGuard sits outside (the control listener), it has already made
+// that one read to judge the Host and passes the posture in on the request
+// context; this serves THAT posture rather than reading a second time, so the
+// Host verdict and the auth decision always come from one config generation.
 func withLivePosture(next http.Handler, buildPosture func() requestPosture) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		servePosture(w, r, next, buildPosture())
+		p, ok := requestPostureFrom(r.Context())
+		if !ok {
+			p = buildPosture()
+		}
+		servePosture(w, r, next, p)
 	})
 }
 
