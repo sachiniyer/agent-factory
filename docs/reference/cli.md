@@ -2981,7 +2981,8 @@ Hand a session's work over to another agent or account without losing it.
 Use --account to choose a registered account. Omit --to to keep the same
 agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
-respects it. Targets with current usage-limit evidence are refused.
+respects it. Targets with current usage-limit evidence are refused on a
+local session; an off-box account rotation does not re-check the ledger.
 
 An account belongs to one agent, so a scoped session that changes agents
 must name the incoming agent's account with --account — unless the target
@@ -3019,7 +3020,9 @@ handoff the incoming agent cannot read what its predecessor was thinking, only
 the working tree and the git history. The brief points it at both. Because of
 that, a handoff is recorded — the swap and the branch tip at the moment it
 happened — so a reviewer reading the resulting diff can tell which agent wrote
-which part.
+which part. An off-box account rotation is the exception: it updates the
+session's account and runtime metadata only, with no handoff record and no
+recorded branch tip.
 
 Local-worktree sessions, ssh/sandbox sessions whose agent-server advertises
 agent-swap, and an already account-scoped listed-host ssh/sandbox session whose

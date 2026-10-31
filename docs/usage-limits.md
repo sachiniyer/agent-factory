@@ -456,12 +456,18 @@ af sessions handoff fix-auth --account personal
 ```
 
 The session keeps its identity, worktree, branch tip, and stored prompt. For
-claude and codex it also keeps the conversation. Each account has its own
-provider home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so after stopping the
-outgoing agent af copies that conversation's file into the new account's home:
-the transcript for claude, the rollout for codex. The new account then resumes
-the same conversation id. The copy only ever adds to the new account's home;
-nothing in the previous account's home changes.
+claude and codex **on a local worktree** it also keeps the conversation. Each
+account has its own provider home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so
+after stopping the outgoing agent af copies that conversation's file into the
+new account's home: the transcript for claude, the rollout for codex. The new
+account then resumes the same conversation id. The copy only ever adds to the
+new account's home; nothing in the previous account's home changes.
+
+An off-box (listed-host ssh/sandbox) `--account` swap is different: af cannot
+reach the previous account's provider store on the host, so the new account
+always starts a **fresh conversation** with a notice saying the earlier
+messages are unavailable — and handing back starts fresh again, since nothing
+was carried either way.
 
 The copied transcript is kept in the new account's home, and from then on the
 provider replays that history under the new account, whose credentials send
