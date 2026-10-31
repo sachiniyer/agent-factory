@@ -251,3 +251,18 @@ test("a restore that completes after its tab was closed does not bring the tab b
   assert.equal(r.fx.some((f) => f.t === "save" || f.t === "arm"), false);
   assert.equal(r.m.gone, true, "it stays with the stored draft for the next pane");
 });
+
+test("a refused save keeps its error visible when a reconcile read completes (#6372)", () => {
+  let r = run(loaded(), { t: "edit", text: "mine" }, { t: "timer" }); // the save goes out
+  r = run(r.m, { t: "save_fatal", error: "413 doc is larger than the limit" });
+  assert.equal(statusOf(r.m).status, "error");
+  assert.equal(r.m.fatal, true);
+  // An earlier timed-out save is still owed a read: the daemon's head is read after the refusal.
+  r.m.unknown = true;
+  r = run(r.m, { t: "timer" });
+  const read = r.fx.find((f) => f.t === "load");
+  assert.ok(read, "the owed reconcile read starts under a refusal");
+  r = run(r.m, { t: "reconcile_ok", doc: { text: "v1", commit: "c1" } });
+  assert.equal(r.m.fatal, true, "the refusal still blocks the autosave");
+  assert.equal(statusOf(r.m).status, "error", "the pane still says the save was refused, not that it is about to save");
+});

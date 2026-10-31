@@ -7,6 +7,7 @@ import type { DocText, SaveResult } from "./proposal_api.js";
 import { hasConflictMarkers } from "./text_diff.js";
 import {
   AUTOSAVE_DELAY_MS,
+  SAVE_DROP_GIVE_UP_MS,
   SAVE_GIVE_UP_MS,
   SAVE_RETRY_MS,
   type Conflict,
@@ -393,7 +394,12 @@ export class DocSync {
             this.deps.clearTimer(timeout);
             if (statusOf404(e)) this.dispatch({ t: "gone", of: "save", seq });
             else if (refused(e)) this.dispatch({ t: "save_fatal", seq, error: errorMessage(e) });
-            else this.dispatch({ t: "save_fail", seq, error: errorMessage(e) });
+            else if (mayStillLand(e)) {
+              // The connection broke or a gateway gave up, and the daemon does not cancel a save when its
+              // client leaves: the request can still commit, like one that timed out.
+              this.dispatch({ t: "save_fail", seq, error: errorMessage(e), outstanding: true });
+              giveUp = this.deps.setTimer(ended, SAVE_DROP_GIVE_UP_MS);
+            } else this.dispatch({ t: "save_fail", seq, error: errorMessage(e) });
           },
         );
         return;
@@ -462,6 +468,14 @@ function httpStatus(e: unknown): number | null {
 
 function statusOf404(e: unknown): boolean {
   return httpStatus(e) === 404;
+}
+
+/** No reply from the daemon at all (the connection dropped) or one from a gateway in front of it
+ *  (408, 502, 504): the request may have reached the daemon and can still commit. A reply from the
+ *  daemon itself (a 503 it sends before it starts, a 4xx refusal) ends the request. */
+function mayStillLand(e: unknown): boolean {
+  const status = httpStatus(e);
+  return status === null || status === 408 || status === 502 || status === 504;
 }
 
 /** A 4xx other than a timeout or a rate limit: the daemon refused, and did not apply, the save. */

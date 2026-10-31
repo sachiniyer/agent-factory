@@ -21,6 +21,9 @@ export const SAVE_RETRY_MS = 5000;
 /** A save that timed out and is still unanswered this long after is treated as ended: the
  *  browser's own request timeout is about as long, and a doubt must not outlive its tab. */
 export const SAVE_GIVE_UP_MS = 5 * 60_000;
+/** A save whose connection dropped is dead for the client, and the daemon either never got it or
+ *  finishes it in the seconds a save takes: its doubt ends this long after the drop. */
+export const SAVE_DROP_GIVE_UP_MS = 25_000;
 /** How long to wait before the next attempt after `fails` saves in a row went unanswered. */
 export function retryDelay(fails: number): number {
   return Math.min(SAVE_RETRY_MS * 2 ** Math.max(0, fails - 1), 60_000);
@@ -690,15 +693,16 @@ function reduce(m: Model, e: Event, fx: Effect[]): void {
       // while it was in flight may have landed after it, and is read for again.
       const endedLater = m.late.some((l) => l.ended !== null && l.ended >= e.seq);
       m.unknown = endedLater;
-      m.note = null;
+      if (!m.fatal) m.note = null; // a refusal stays visible: the pane shows the error, not "pending"
       // An unknown save landed if the daemon's head already contains its edits:
       // merging them onto the head changes nothing.
       // (a request still out was made against the text current when it was sent)
       const baseOf = (s: string): string => m.late.find((l) => l.text === s)?.baseText ?? m.saved;
       const landed = [...m.inDoubt].reverse().find((s) => s !== m.saved && mergeWithMarkers(baseOf(s), s, head.text) === head.text);
       const baseText = landed ?? m.saved;
-      m.late = m.late.filter((l) => l.ended === null || l.ended >= e.seq);
-      m.inDoubt = m.late.map((l) => l.text); // a request still out can land later
+      // A request still out can land later; one the head already holds has landed, and cannot again.
+      m.late = m.late.filter((l) => l.text !== landed && (l.ended === null || l.ended >= e.seq));
+      m.inDoubt = m.late.map((l) => l.text);
       if (head.text === m.buffer) {
         m.base = head.commit;
         m.saved = head.text;
