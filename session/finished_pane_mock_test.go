@@ -20,6 +20,14 @@ type finishedPane struct {
 	// status, signal and at are pane_dead_status, pane_dead_signal and
 	// pane_dead_time; tmux fills at least one once it has reaped the root.
 	status, signal, at string
+	// unstamped models a pane af did not launch — one the user created by
+	// splitting the window and then focused. It carries no @af_pane_pid
+	// stamp, no deaths counter, and no @af_pane_cmd pin, so its collected
+	// exit status is not evidence of the recorded command's exit. Under
+	// remain-on-exit such a pane can be dead, reaped, and the session's
+	// active pane — exactly the shape the exit probe must not attribute to
+	// the command.
+	unstamped bool
 }
 
 // answer expands a pane query's format the way tmux would for this pane, and
@@ -33,16 +41,23 @@ func (p finishedPane) answer(c *exec.Cmd) (string, bool) {
 	if pid == 0 {
 		pid = absentPID
 	}
+	stamp, deaths, tty, cmdMatch := strconv.Itoa(pid)+":0:/dev/pts/0", "1", "/dev/pts/0", "1"
+	if p.unstamped {
+		// A pane af did not launch: no @af_pane_pid stamp, no deaths counter,
+		// no @af_pane_cmd pin, and its own start command does not byte-match
+		// the unset pin.
+		stamp, deaths, tty, cmdMatch = "", "", "/dev/pts/3", "0"
+	}
 	return strings.NewReplacer(
 		"#{pane_pid}", strconv.Itoa(pid),
 		"#{pane_dead}", "1",
 		"#{pane_dead_status}", p.status,
 		"#{pane_dead_signal}", p.signal,
 		"#{pane_dead_time}", p.at,
-		"#{@af_pane_pid}", strconv.Itoa(pid)+":0:/dev/pts/0",
-		"#{@af_pane_deaths}", "1",
-		"#{pane_tty}", "/dev/pts/0",
-		"#{==:#{@af_pane_cmd},#{pane_start_command}}", "1",
+		"#{@af_pane_pid}", stamp,
+		"#{@af_pane_deaths}", deaths,
+		"#{pane_tty}", tty,
+		"#{==:#{@af_pane_cmd},#{pane_start_command}}", cmdMatch,
 	).Replace(c.Args[len(c.Args)-1]) + "\n", true
 }
 

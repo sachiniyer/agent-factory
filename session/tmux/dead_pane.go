@@ -471,6 +471,13 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 // dead. When tmux reports none of status, signal or death time, the pane pid
 // decides.
 //
+// The reading comes from the session's active pane, but under remain-on-exit a
+// user who attaches can split the window and end up focused on a pane af did
+// not launch. Only a pane carrying a proven @af_pane_pid stamp is the recorded
+// command's pane; an unstamped foreign pane's death is not the command's exit
+// and reports not-dead, so a split pane the user killed can never be stamped
+// as how the command ended (readPaneExit).
+//
 // A root that has exited but that tmux has not collected yet is dead, and tmux
 // will report how it ended as soon as it collects it: tmux marks the pane dead
 // when its terminal closes, which can come first (#4682). The probe waits for
@@ -641,6 +648,41 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 			return paneExit{known: true}, false
 		}
 		return exit, true
+	}
+	// The collected status belongs to the session's ACTIVE pane — what
+	// `=name:` resolves to (see exactTarget) — and under remain-on-exit a
+	// user who attaches can split the window and end up focused on a pane
+	// af did not launch. That pane inherits remain-on-exit, exits, and is
+	// held dead as the active pane, so tmux reports its collected status on
+	// the very target the recorded command never ran on. Only a pane af
+	// launched — one carrying a proven @af_pane_pid stamp — can supply the
+	// recorded command's exit. An unstamped pane's death is not evidence of
+	// how the command ended: stamping it would fabricate an exit a live root
+	// never earned, and the first-wins guard on Tab.Exit would make the
+	// wrong record permanent. This is the same active-pane hazard the
+	// session-wide scan PaneRootProcessMatches exists to reject (#5066
+	// review: "the user can split the window or focus a shell tab, moving
+	// the active-pane pointer"), and a pane without a stamp must never be
+	// the source of a Tab.Exit.
+	switch _, verdict := paneStampPID(field(6), field(7), field(8), field(9)); verdict {
+	case stampFresh:
+		// Proven af-launched: the collected status is the recorded command's
+		// exit.
+	case stampPending:
+		// The deaths counter has not caught up to the collected status yet
+		// (#5335): keep probing so a resolving stamp records the exit rather
+		// than misses it for a probe cycle. dead:true with known unset mirrors
+		// the uncollected-root fallback's pending fold — a hook that never
+		// lands answers unknown rather than recording an exit the root
+		// earned.
+		return paneExit{dead: true, version: exit.version}, true
+	default:
+		// Unstamped (a user's split pane) or a stale stamp that cannot name
+		// this incarnation: not the recorded command's exit. Answering
+		// not-dead leaves the row unstamped rather than recording one a live
+		// root never earned — the same invariant the uncollected-root
+		// fallback keeps above.
+		return paneExit{known: true}, false
 	}
 	return exit, false
 }

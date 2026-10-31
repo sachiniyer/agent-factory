@@ -100,6 +100,58 @@ func TestAccountScopedFinishedProcessPaneIsKeptWithItsExit(t *testing.T) {
 	assert.Equal(t, time.Unix(1726000000, 0), exit.At)
 }
 
+// A user who attaches to a process tab's session can split the window for a
+// shell and exit it; that split pane inherits remain-on-exit, is held dead, and
+// stays the session's active pane. Before the fix the roster read's probe read
+// that active pane's collected status and stamped it as the recorded command's
+// exit while the command kept running — a wrong, first-wins, uncorrectable
+// record. The probe now refuses a pane af did not launch (one carrying no
+// @af_pane_pid stamp), so the roster read leaves the row unstamped and the
+// command's own stop or exit can still be recorded.
+func TestRecordProcessTabExitsIgnoresAnUnstampedForeignPane(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
+
+	const agentName = "af_foreign_pane"
+	procName := agentName + tmuxTabSeparator + "deploy"
+	// The mock answers the deploy session's ACTIVE pane the way tmux does for
+	// a user's split pane that exited with status 7: dead, reaped, and
+	// carrying no @af_pane_pid stamp af would have written at launch.
+	cmdExec := nameKeyedExecWithFinishedPanes(
+		map[string]bool{agentName: true, procName: true},
+		map[string]finishedPane{procName: {status: "7", at: "1726000000", unstamped: true}})
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	gw, err := git.NewGitWorktreeFromStorage("/tmp/foreign-pane-repo", t.TempDir(), "foreign",
+		"foreign-branch", "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{
+		Title:       "foreign",
+		Path:        "/tmp/foreign-pane-repo",
+		Program:     "claude",
+		backend:     &LocalBackend{},
+		started:     true,
+		gitWorktree: gw,
+		Tabs: []*Tab{
+			newAgentTab(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, cmdExec)),
+			{ID: "deploy", Name: "deploy", Kind: TabKindProcess, Command: "./deploy.sh",
+				tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(procName, "./deploy.sh", pty, cmdExec)},
+		},
+	}
+
+	before := inst.TabsData()
+	require.NotNil(t, before[1])
+	require.Nil(t, before[1].Exit, "the roster reports no exit until something looks")
+
+	inst.RecordProcessTabExits()
+
+	after := inst.TabsData()
+	require.NotNil(t, after[1])
+	require.Nil(t, after[1].Exit,
+		"an unstamped foreign pane's death is not the recorded command's exit; the row stays unstamped so the command's real exit can still be recorded")
+}
+
 // An account swap stops a process tab and never relaunches it, so the command
 // it ran is not a replacement command and cannot be a reason to refuse the swap.
 func TestValidateAccountSwapIgnoresACommandThatWillNotRestart(t *testing.T) {
