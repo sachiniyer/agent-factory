@@ -37,8 +37,9 @@ func resolveLaunchProgramForInstance(i *Instance) launchProgramResolution {
 }
 
 func resolveResolvedConfigForInstance(i *Instance) *config.ResolvedConfig {
-	if repo, err := config.RepoFromPath(i.Path); err == nil {
-		if resolved, rerr := config.ResolveConfigForRepo(repo); rerr == nil {
+	rc := i.restoreContext() // nil outside a batched restore: resolves exactly as before
+	if repo, err := rc.RepoFromPath(i.Path); err == nil {
+		if resolved, rerr := rc.ResolveConfigForRepo(repo); rerr == nil {
 			return resolved
 		} else {
 			log.WarningLog.Printf("failed to resolve repo config when resolving program for %q: %v", i.Title, rerr)
@@ -111,7 +112,8 @@ func ResolveProgramForPath(path, agent string) string {
 }
 
 func resolveConfigForInstance(i *Instance) *config.Config {
-	return resolveConfigForPath(i.Path)
+	rc := i.restoreContext()
+	return resolveConfigForPathVia(i.Path, rc.RepoFromPath, rc.ResolveConfigForRepo)
 }
 
 func resolveConfigForPath(path string) *config.Config {
@@ -129,8 +131,18 @@ func resolveConfigForPathInspection(path string) *config.Config {
 }
 
 func resolveConfigForPathResolving(path string, resolveRepo func(*config.RepoContext) (*config.ResolvedConfig, error)) *config.Config {
+	return resolveConfigForPathVia(path, config.RepoFromPath, resolveRepo)
+}
+
+// resolveConfigForPathVia is resolveConfigForPathResolving with the repo lookup
+// injected, so a batched restore can answer both from its RestoreContext.
+func resolveConfigForPathVia(
+	path string,
+	repoFromPath func(string) (*config.RepoContext, error),
+	resolveRepo func(*config.RepoContext) (*config.ResolvedConfig, error),
+) *config.Config {
 	var cfg *config.Config
-	if repo, err := config.RepoFromPath(path); err == nil {
+	if repo, err := repoFromPath(path); err == nil {
 		if resolved, rerr := resolveRepo(repo); rerr == nil {
 			cfg = &resolved.Config
 		} else {
