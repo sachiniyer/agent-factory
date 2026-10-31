@@ -18378,11 +18378,11 @@ var ItemPanel = class {
     this.titles = new SerialSaver((title) => actions2.update(id, { title }), (title, ok) => {
       if (this.titleDraft !== title) return;
       this.titleDraft = null;
-      if (!ok && this.view) this.render(this.view, this.sessions);
+      if (!ok) this.repaint();
     }, queueFor(`${root2}\0${id}\0title`));
     this.waits = new SerialSaver((waits_on) => actions2.update(id, { waits_on }), (list, ok) => {
       if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
-      if (!ok && this.view) this.render(this.view, this.sessions);
+      if (!ok) this.repaint();
     }, queueFor(`${root2}\0${id}\0waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
     this.title.setAttribute("aria-label", "Title");
@@ -18480,7 +18480,7 @@ ${this.note.value}` : text;
     for (const id of missing) this.lookups.set(id, "pending");
     const settle = (state) => {
       for (const id of missing) this.lookups.set(id, state);
-      if (this.view) this.render(this.view, this.sessions);
+      this.repaint();
     };
     this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
   }
@@ -18491,6 +18491,10 @@ ${this.note.value}` : text;
   setWaits(it, list) {
     this.waitsDraft = list;
     this.waits.submit(list);
+    this.repaint();
+  }
+  /** Draws again from what the panel last rendered, for a change that arrives on its own (a lookup, a write's outcome). */
+  repaint() {
     if (this.view) this.render(this.view, this.sessions);
   }
   item() {

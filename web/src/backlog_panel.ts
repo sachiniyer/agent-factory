@@ -110,11 +110,11 @@ export class ItemPanel {
       if (this.titleDraft !== title) return;   // a newer submission owns the draft
       this.titleDraft = null;
       // A refused rename gives the field back its stored title.
-      if (!ok && this.view) this.render(this.view, this.sessions);
+      if (!ok) this.repaint();
     }, queueFor(`${root}\u0000${id}\u0000title`));
     this.waits = new SerialSaver((waits_on) => actions.update(id, { waits_on }), (list, ok) => {
       if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
-      if (!ok && this.view) this.render(this.view, this.sessions);
+      if (!ok) this.repaint();
     }, queueFor(`${root}\u0000${id}\u0000waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
     this.title.setAttribute("aria-label", "Title");
@@ -175,7 +175,7 @@ export class ItemPanel {
     for (const id of missing) this.lookups.set(id, "pending");
     const settle = (state: "done" | "failed"): void => {
       for (const id of missing) this.lookups.set(id, state);
-      if (this.view) this.render(this.view, this.sessions);
+      this.repaint();
     };
     this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
   }
@@ -188,6 +188,11 @@ export class ItemPanel {
   private setWaits(it: Item, list: number[]): void {
     this.waitsDraft = list;
     this.waits.submit(list);
+    this.repaint();
+  }
+
+  /** Draws again from what the panel last rendered, for a change that arrives on its own (a lookup, a write's outcome). */
+  private repaint(): void {
     if (this.view) this.render(this.view, this.sessions);
   }
 
