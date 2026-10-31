@@ -3946,6 +3946,51 @@ textarea[class] {
   font-style: italic;
   color: var(--af-ink-muted);
 }
+.af-term-conn {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--af-space-1);
+  padding: 0 var(--af-space-2);
+  border: calc(var(--af-space-1) / 4) solid var(--af-lost);
+  border-radius: var(--af-radius-control);
+  color: var(--af-lost);
+  font-size: var(--af-type-body);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.af-term-conn[hidden] {
+  display: none;
+}
+.af-rail-conn {
+  padding: var(--af-space-1) var(--af-space-3);
+  color: var(--af-lost);
+  font-size: var(--af-type-body);
+}
+.af-rail-conn[hidden] {
+  display: none;
+}
+@media (max-width: 768px) {
+  .af-session-first .af-term-conn {
+    order: 1;
+    flex: 1 1 0;
+    min-width: 0;
+    justify-content: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0;
+    font-size: var(--af-type-caption);
+  }
+  .af-session-first .af-term-conn-glyph {
+    display: none;
+  }
+  .af-session-first .af-appbar:has(.af-term-conn:not([hidden])) .af-term-title {
+    display: none;
+  }
+  .af-rail-conn {
+    display: none;
+  }
+}
 
 /* src/tokens.css */
 [data-af-theme=light] {

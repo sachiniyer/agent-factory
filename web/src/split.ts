@@ -94,7 +94,7 @@ function phoneWidth(): boolean {
 
 export interface SplitCallbacks {
   /** The FOCUSED pane's connection state, for the pane-header status line. */
-  onStatus(status: TerminalStatus): void;
+  onStatus(status: TerminalStatus, retryAt?: number): void;
   /** Real DOM focus of any pane's terminal, for the nav-vs-terminal mode (#1693):
    *  true when a pane's xterm gains the keyboard, false when focus leaves every pane. */
   onFocusChange(focused: boolean): void;
@@ -124,6 +124,8 @@ interface Pane {
   // this against the current identity at pane.tab and rebuilds on a mismatch.
   identity: string;
   status: TerminalStatus;
+  /** epoch ms of the next reconnect attempt while `status` is "reconnecting" (#6430) */
+  retryAt?: number;
   // A web/iframe pane (TabKind.Web) has no AttachTerminal: it mounts an iframe in
   // `host` instead. webUrl is the target currently mounted (so reconcile can tell
   // a same-tab no-op from a target change), and webDispose tears down the iframe's
@@ -1059,7 +1061,7 @@ export class SplitView {
           this.token,
           sessionStreamEndpoint(this.sessionId, realId, leaf.tab),
           {
-            onStatus: (s) => this.onPaneStatus(leaf.id, s),
+            onStatus: (s, retryAt) => this.onPaneStatus(leaf.id, s, retryAt),
             onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
             // Only the AGENT tab (#3025 review): an automated DeliverPrompt reaches
             // the session through its agent server, so a half-typed command in an
@@ -1997,7 +1999,7 @@ export class SplitView {
     // The focused pane's status becomes the header status.
     const pane = this.panes.get(leafId);
     if (pane) {
-      this.cb.onStatus(pane.status);
+      this.cb.onStatus(pane.status, pane.status === "reconnecting" ? pane.retryAt : undefined);
     }
     this.report();
   }
@@ -2040,10 +2042,11 @@ export class SplitView {
     void pauseStatusPoll(sessionID, token).catch(() => {});
   }
 
-  private onPaneStatus(leafId: string, status: TerminalStatus): void {
+  private onPaneStatus(leafId: string, status: TerminalStatus, retryAt?: number): void {
     const pane = this.panes.get(leafId);
     if (pane) {
       pane.status = status;
+      pane.retryAt = status === "reconnecting" ? retryAt : undefined;
     }
     // A status flip moves a tab in or out of openTabs; report() dedups when it
     // does not. It must run before onStatus: that callback updates the store
@@ -2051,7 +2054,7 @@ export class SplitView {
     // to see THIS session's layout, not the previous one's.
     this.report();
     if (leafId === this.focusedId) {
-      this.cb.onStatus(status);
+      this.cb.onStatus(status, retryAt);
     }
   }
 

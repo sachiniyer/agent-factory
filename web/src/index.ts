@@ -325,7 +325,7 @@ const installAffordance = new InstallAffordance();
 // layout changes (see syncSplit). It diffs the session internally, so syncSplit can
 // call setSession on every store change without tearing down unchanged panes.
 const splitView = new SplitView(termHost, {
-  onStatus: (s: TerminalStatus) => store.set({ termStatus: s }),
+  onStatus: (s: TerminalStatus, retryAt?: number) => store.set({ termStatus: s, termRetryAt: retryAt ?? null }),
   // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
   // pane, so a click straight into a pane enters terminal mode (and clicking/tabbing
   // away from all panes returns to rail mode) without going through Enter/Escape.
@@ -3276,9 +3276,9 @@ function startStream(tok: string): void {
       // Missed events are not replayed, so open Docs tabs refresh themselves.
       publishProposalResync();
     },
-    onStatus: (s: EventStreamStatus) => {
+    onStatus: (s: EventStreamStatus, retryAt?: number) => {
       if (s !== "open") markArchiveDirty();
-      store.set({ live: s });
+      store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
