@@ -31,34 +31,69 @@ func (e *StaleSaveError) Error() string {
 func (e *StaleSaveError) APIErrorCode() string { return ErrorCodeStaleSave }
 func (e *StaleSaveError) HTTPStatus() int      { return http.StatusConflict }
 
-// fenceTable remembers, per writer and doc, the highest save sequence seen. A save with a
-// sequence at or below it is refused. It is in memory: after a daemon restart a writer
-// is unfenced until its next save, which is the same exposure as before the fence.
+// fenceTable remembers, per writer and doc, the highest save sequence that has committed.
+// A save with a sequence at or below it is refused. It is in memory: after a daemon restart
+// a writer is unfenced until its next save, which is the same exposure as before the fence.
+//
+// The table is only read and written from inside Store's lock (see SaveGuard), so a check, the
+// save it admits and the update that follows are one critical section.
 type fenceTable struct {
 	mu    sync.Mutex
 	seen  map[string]int64
 	order []string
 }
 
-// admit records seq for key and reports whether the save may proceed, with the sequence
-// that fenced it when not.
-func (f *fenceTable) admit(key string, seq int64) (ok bool, last int64) {
+// check reports whether a save with seq may proceed, and the high-water mark when not.
+func (f *fenceTable) check(key string, seq int64) (ok bool, last int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last, known := f.seen[key]
+	return !known || seq > last, last
+}
+
+// advance raises the high-water mark of key to seq.
+func (f *fenceTable) advance(key string, seq int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.seen == nil {
 		f.seen = map[string]int64{}
 	}
-	last, known := f.seen[key]
-	if known && seq <= last {
-		return false, last
-	}
-	if !known {
-		f.order = append(f.order, key)
-		if len(f.order) > fenceCap {
-			delete(f.seen, f.order[0])
-			f.order = f.order[1:]
+	if last, known := f.seen[key]; known {
+		if seq > last {
+			f.seen[key] = seq
 		}
+		return
+	}
+	f.order = append(f.order, key)
+	if len(f.order) > fenceCap {
+		delete(f.seen, f.order[0])
+		f.order = f.order[1:]
 	}
 	f.seen[key] = seq
-	return true, 0
 }
+
+// SaveGuard lets a caller hold a save to a condition that must hold at the moment the store
+// commits it. Admit runs first inside the store's lock, before anything is written, and a
+// non-nil error refuses the save. Committed runs inside the same lock once the save has
+// succeeded, and only then.
+type SaveGuard interface {
+	Admit() error
+	Committed()
+}
+
+// writerGuard is the fence of one writer's save.
+type writerGuard struct {
+	table  *fenceTable
+	key    string
+	writer string
+	seq    int64
+}
+
+func (g *writerGuard) Admit() error {
+	if ok, last := g.table.check(g.key, g.seq); !ok {
+		return &StaleSaveError{Writer: g.writer, Seq: g.seq, Last: last}
+	}
+	return nil
+}
+
+func (g *writerGuard) Committed() { g.table.advance(g.key, g.seq) }

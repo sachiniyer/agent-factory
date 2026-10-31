@@ -627,17 +627,18 @@ func (s *Service) SaveFenced(t Target, slug, doc, text, base, writer string, seq
 	if n, err := NormalizeDocName(doc); err == nil {
 		file = docFile(n)
 	}
+	var guard SaveGuard
 	if writer != "" && seq > 0 {
-		key := r.repoID + "\x00" + slug + "\x00" + file + "\x00" + writer
-		if ok, last := s.fence.admit(key, seq); !ok {
-			return nil, &StaleSaveError{Writer: writer, Seq: seq, Last: last}
-		}
+		// Checked, saved and recorded inside the store's lock: two saves of one writer cannot both
+		// pass, and a save that does not commit (a conflict, an I/O error) leaves the mark where it
+		// was, so the writer can send it again with the same seq.
+		guard = &writerGuard{table: &s.fence, key: r.repoID + "\x00" + slug + "\x00" + file + "\x00" + writer, writer: writer, seq: seq}
 	}
 	before, err := r.store.Head()
 	if err != nil {
 		return nil, err
 	}
-	res, err := r.store.Save(slug, doc, text, base)
+	res, err := r.store.SaveGuarded(slug, doc, text, base, guard)
 	if err != nil {
 		var conflict *ConflictError
 		if errors.As(err, &conflict) {
