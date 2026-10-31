@@ -16,6 +16,29 @@ type testHost struct {
 	lookups int
 	slots   int
 	facts   Facts
+	// attention is each session's mirrored attention reason.
+	attention map[string]string
+	target    AnswerTarget
+	delivered []PendingAnswer
+	// onTarget runs inside AnswerTarget, between the service reading the item and
+	// its transaction.
+	onTarget func()
+}
+
+func (h *testHost) SetAttention(_, sessionID string, _ int, reason string) {
+	if h.attention == nil {
+		h.attention = map[string]string{}
+	}
+	h.attention[sessionID] = reason
+}
+func (h *testHost) AnswerTarget(string, string) AnswerTarget {
+	if h.onTarget != nil {
+		h.onTarget()
+	}
+	return h.target
+}
+func (h *testHost) DeliverAnswer(_ string, a PendingAnswer) {
+	h.delivered = append(h.delivered, a)
 }
 
 func (h *testHost) Facts(string) Facts          { return h.facts }
@@ -406,6 +429,18 @@ func TestServiceRunnerView(t *testing.T) {
 		v, err := s.Get(GetRequest{RepoID: repoID})
 		if err != nil || v.Runner != st.want {
 			t.Fatalf("step %d: %+v %v", i, v.Runner, err)
+		}
+	}
+}
+
+// The backlog RPCs resolve repo_path like the other daemon routes: a relative
+// path is refused instead of resolved against the daemon's working directory
+// (Codex P2 on #6295).
+func TestResolveRefusesARelativeRepoPath(t *testing.T) {
+	s := NewService(&testHost{})
+	for _, rel := range []string{".", "repo", "../x"} {
+		if _, err := s.Resolve("", rel); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+			t.Errorf("Resolve(%q) = %v, want a refusal", rel, err)
 		}
 	}
 }

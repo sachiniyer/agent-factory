@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,7 @@ func TestBacklogGuardRails(t *testing.T) {
 	*methods = nil
 	for _, args := range [][]string{
 		{"queue", "1"}, {"draft", "1"}, {"review", "1"}, {"reopen", "1"}, {"start", "1"}, {"done", "1"}, {"drop", "1"}, {"delete", "1"},
+		{"answer", "1", "yes"},
 		// Plan editing: an agent leaves a note instead (Codex P2 on #6294).
 		{"add", "another"}, {"add", "--file", "-"}, {"edit", "1", "--title", "x"}, {"move", "1", "--top"},
 	} {
@@ -100,7 +102,7 @@ func TestBacklogGuardRails(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{{"runner", "on"}, {"runner", "--max-running", "2"}, {"budget", "--share", "40"}, {"budget", "--usd-limit", "5"}} {
-		if _, err := runBacklogCmd(t, args...); err == nil || !strings.Contains(err.Error(), "cannot change the runner or budget") {
+		if _, err := runBacklogCmd(t, args...); err == nil || err.Error() != `item sessions cannot change the runner or budget; ask the user with "af backlog ask --self"` {
 			t.Errorf("%v: %v", args, err)
 		}
 	}
@@ -132,6 +134,61 @@ func TestBacklogDoneSelfFromOlderRun(t *testing.T) {
 	}
 	if _, err := runBacklogCmd(t, "done", "--self"); err == nil || !strings.Contains(err.Error(), "older run of B-1") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestBacklogAskAndAnswer(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	self := &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 1}
+	withRunningItem(t, self)
+	if _, err := runBacklogCmd(t, "ask", "which", "db?"); err == nil || !strings.Contains(err.Error(), "needs --self") {
+		t.Fatal(err)
+	}
+	out, err := runBacklogCmd(t, "ask", "--self", "which", "db?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := decodeOut[backlog.Message](t, out)
+	if q.Kind != backlog.KindQuestion || q.Text != "which db?" || q.Author != "agent:s1" {
+		t.Fatalf("%+v", q)
+	}
+	backlogSelfSession = func() (*session.InstanceData, error) { return nil, errors.New("not in an af session") }
+	*methods = nil
+	out, err = runBacklogCmd(t, "answer", "B-1", "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := decodeOut[backlog.Message](t, out); a.Kind != backlog.KindAnswer || a.Answers != q.ID || a.Text != "postgres" {
+		t.Fatalf("%+v", a)
+	}
+	if strings.Join(*methods, ",") != "PostBacklogMessage" {
+		t.Fatal(*methods)
+	}
+	if _, err := runBacklogCmd(t, "answer", "1", "again"); err == nil || !strings.Contains(err.Error(), "no open question") {
+		t.Fatal(err)
+	}
+	backlogSelfSession = func() (*session.InstanceData, error) { return self, nil }
+	for _, text := range []string{"first", "second"} {
+		if _, err := runBacklogCmd(t, "ask", "--self", text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backlogSelfSession = func() (*session.InstanceData, error) { return nil, errors.New("not in an af session") }
+	out, err = runBacklogCmd(t, "answer", "1", "--question", "4", "to the second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := decodeOut[backlog.Message](t, out); a.Answers != 4 {
+		t.Fatalf("%+v", a)
+	}
+}
+
+func TestBacklogAskOutsideItemSession(t *testing.T) {
+	stubBacklogDaemon(t)
+	withRunningItem(t, &session.InstanceData{ID: "other", Title: "foo"})
+	_, err := runBacklogCmd(t, "ask", "--self", "q")
+	if err == nil || err.Error() != "--self needs an item session; this session (foo) was not started from the backlog" {
+		t.Fatal(err)
 	}
 }
 

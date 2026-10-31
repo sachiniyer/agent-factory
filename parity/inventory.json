@@ -1868,6 +1868,25 @@
       "notes": "Backlog PR 4 starts items as sessions from the CLI; the web Start now button arrives in PR 8. Item sessions are ordinary sessions, so open, archive and restore use the session routes. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
+      "id": "backlog.questions",
+      "title": "Ask and answer questions on backlog items",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_self.go backlogAskCmd (ask --self) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; the web answer box arrives in PR 8. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
       "id": "backlog.runner",
       "title": "Show and change a project's backlog runner and the global budget",
       "tui": {
@@ -1902,6 +1921,8 @@
       "af backlog move": "backlog.items",
       "af backlog delete": "backlog.items",
       "af backlog note": "backlog.items",
+      "af backlog ask": "backlog.questions",
+      "af backlog answer": "backlog.questions",
       "af backlog queue": "backlog.status",
       "af backlog draft": "backlog.status",
       "af backlog review": "backlog.status",
@@ -2184,6 +2205,8 @@
       "af backlog move --help": "meta.discovery",
       "af backlog delete --help": "meta.discovery",
       "af backlog note --help": "meta.discovery",
+      "af backlog ask --help": "meta.discovery",
+      "af backlog answer --help": "meta.discovery",
       "af backlog queue --help": "meta.discovery",
       "af backlog draft --help": "meta.discovery",
       "af backlog review --help": "meta.discovery",
@@ -2193,6 +2216,8 @@
       "af backlog done --self": "backlog.status",
       "af backlog done --pr": "backlog.status",
       "af backlog note --self": "backlog.items",
+      "af backlog ask --self": "backlog.questions",
+      "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
       "af backlog runner --help": "meta.discovery",
       "af backlog budget --help": "meta.discovery",
@@ -2576,13 +2601,6 @@
           }
         }
       },
-    "PostBacklogMessageRequest": {
-      "cli": {
-        "question_id": {
-          "ok": "Answers arrive in backlog PR 5 (af backlog answer); this af posts notes only."
-        }
-      }
-    },
       "SnapshotRequest": {
         "cli": {
           "before": {

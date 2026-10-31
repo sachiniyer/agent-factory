@@ -19,10 +19,15 @@ import (
 
 type backlogTestHost struct{}
 
-func (backlogTestHost) Facts(string) backlog.Facts { return nil }
-func (backlogTestHost) ProjectName(string) string  { return "" }
-func (backlogTestHost) Changed(string, []int)      {}
-func (backlogTestHost) SlotsUsed(string) int       { return 0 }
+func (backlogTestHost) Facts(string) backlog.Facts                { return nil }
+func (backlogTestHost) ProjectName(string) string                 { return "" }
+func (backlogTestHost) Changed(string, []int)                     {}
+func (backlogTestHost) SlotsUsed(string) int                      { return 0 }
+func (backlogTestHost) SetAttention(_, _ string, _ int, _ string) {}
+func (backlogTestHost) AnswerTarget(_, _ string) backlog.AnswerTarget {
+	return backlog.TargetLive
+}
+func (backlogTestHost) DeliverAnswer(string, backlog.PendingAnswer) {}
 func backlogRoute[Req, Resp any](call func(Req) (Resp, error)) func([]byte) (any, error) {
 	return func(raw []byte) (any, error) {
 		r, err := decodeInto[Req](raw)

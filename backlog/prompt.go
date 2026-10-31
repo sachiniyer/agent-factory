@@ -36,7 +36,7 @@ func (b *Backlog) ItemPrompt(it *Item, proposalDir string) string {
 	sb.WriteString("- Work on this session's branch and commit your changes.\n")
 	sb.WriteString("- Open a pull request if this project uses them.\n")
 	sb.WriteString("- When the work is done, run \"af backlog done --self\", with \"--pr <url>\" if you opened a pull request.\n")
-	sb.WriteString("- If you need the user, run \"af backlog note --self \\\"<question>\\\"\", then stop.\n")
+	sb.WriteString("- If you need the user, run \"af backlog ask --self \\\"<question>\\\"\", then stop. The answer arrives in this session.\n")
 	sb.WriteString("- Do not create other af sessions.\n")
 	return sb.String()
 }

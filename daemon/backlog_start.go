@@ -40,6 +40,10 @@ var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
 	switch {
 	case err == nil && status == session.PromptNotDelivered:
 		return errBacklogPromptNotDelivered
+	case err != nil && errors.Is(err, errTargetLimitReached):
+		// The session hit a usage limit between the caller's check and the send's
+		// fenced one: nothing was sent, and the caller should hold, not fail.
+		return fmt.Errorf("%w: %v", errBacklogTargetLimited, err)
 	case err != nil && isNotAttemptedErr(err):
 		return fmt.Errorf("%w: %v", errBacklogPromptNotDelivered, err)
 	case err != nil:
@@ -51,6 +55,7 @@ var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
 var (
 	errBacklogPromptNotDelivered = errors.New("the agent did not take the prompt")
 	errBacklogDeliveryUncertain  = errors.New("af could not confirm the prompt reached the agent")
+	errBacklogTargetLimited      = errors.New("the session is at a usage limit")
 )
 
 func (s *controlServer) StartBacklogItem(req StartBacklogItemRequest, resp *StartBacklogItemResponse) error {
@@ -92,7 +97,7 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 	// would fail where listing and adding items with that path succeeded.
 	root := ""
 	if strings.TrimSpace(req.RepoPath) != "" {
-		if root, err = config.ResolveUserPath(strings.TrimSpace(req.RepoPath)); err != nil {
+		if root, err = config.ResolveDaemonHostPath(req.RepoPath); err != nil {
 			return backlog.RunRef{}, err
 		}
 	}
@@ -244,9 +249,10 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 	}
 	inst := s.instance
 	var (
-		prev   backlog.Status
-		prompt string
-		armed  bool
+		prev     backlog.Status
+		prompt   string
+		armed    bool
+		armedGen int
 	)
 	out, err := svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
 		p, err := b.BeginStart(id, by, backlogHost{m: m}.Facts(ref.ID), svc.Now())
@@ -267,21 +273,21 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 		if !inst.ArmBacklogRun(time.Now()) {
 			return nil, fmt.Errorf("session %q is not an item session", inst.Title)
 		}
-		armed = true
+		armed, armedGen = true, inst.BacklogRunGeneration()
 		return []int{id}, nil
 	})
 	if err != nil {
 		if armed {
 			// The write failed after the closure armed the live session; the
 			// backlog change was discarded, the instance change was not.
-			m.disarmBacklogRun(ref.ID, inst)
+			m.disarmBacklogRunGen(ref.ID, inst, armedGen)
 		}
 		return backlog.RunRef{}, svc.Named(ref, err)
 	}
 	var sendErr error
 	if armed {
 		m.persistAndPublishInstance(ref.ID, inst)
-		sendErr = sendBacklogPrompt(m, SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt})
+		sendErr = m.sendBacklogPromptLocked(SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: ref.ID, Prompt: prompt, BacklogOrigin: true})
 		switch {
 		case errors.Is(sendErr, errBacklogDeliveryUncertain):
 			// It may have landed: keep the run marker and the running item, say so
@@ -289,7 +295,9 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 			m.noteBacklogUncertainDelivery(ref, id, sendErr)
 			sendErr = nil
 		case sendErr != nil:
-			m.disarmBacklogRun(ref.ID, inst)
+			// Only the run this continue armed: an answer worker that took the target
+			// lock first armed (and delivered) a newer generation of its own.
+			m.disarmBacklogRunGen(ref.ID, inst, armedGen)
 			sendErr = fmt.Errorf("send continue to session %q: %w", inst.Title, sendErr)
 		}
 	}
@@ -331,6 +339,14 @@ func (m *Manager) continueBacklogItem(ref backlog.ProjectRef, id int, by, sessio
 	return runs[len(runs)-1], nil
 }
 
+// sendBacklogPromptLocked sends under the per-target lock task deliveries
+// take, so backlog prompts never interleave with them.
+func (m *Manager) sendBacklogPromptLocked(req SendPromptRequest) error {
+	unlock := m.lockTarget(req.RepoID, req.Title)
+	defer unlock()
+	return sendBacklogPrompt(m, req)
+}
+
 // noteBacklogUncertainDelivery records on the item that af could not confirm a
 // prompt reached its session, so the user knows the run is open on a send that
 // may or may not have landed.
@@ -351,7 +367,11 @@ func (m *Manager) noteBacklogUncertainDelivery(ref backlog.ProjectRef, id int, c
 }
 
 func (m *Manager) disarmBacklogRun(repoID string, inst *session.Instance) {
-	if inst.DisarmBacklogRun() {
+	m.disarmBacklogRunGen(repoID, inst, -1)
+}
+
+func (m *Manager) disarmBacklogRunGen(repoID string, inst *session.Instance, gen int) {
+	if inst.DisarmBacklogRunGen(gen) {
 		m.persistAndPublishInstance(repoID, inst)
 	}
 }
