@@ -142,6 +142,9 @@ export class DocsPane {
   /** Docs deleted under a tab that still holds unsaved work. They stay in the strip,
    *  marked deleted, until the user restores or discards them. */
   private readonly goneDocs = new Map<string, ProposalDocRef>();
+  /** Docs missing from the daemon whose unsaved work this pane found in storage on
+   *  load: they open as deleted docs, from the stored draft. */
+  private readonly storedGone = new Set<string>();
   private generation = 0;
   private refreshTimer: number | null = null;
   private disposed = false;
@@ -238,7 +241,7 @@ export class DocsPane {
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     for (const name of [...this.syncs.keys()]) this.closeSync(name, false);
     // Its entries can be adopted by the pane that takes the docs over.
-    this.drafts.release();
+    this.drafts.close();
     liveDrafts.delete(this.drafts);
     this.sync = null;
     this.editor?.destroy();
@@ -389,9 +392,16 @@ export class DocsPane {
     }
     if (this.disposed || gen !== this.generation) return;
     this.applyInfo(info, seq);
+    this.findStoredGone();
     const remembered = lastDoc.get(this.memoryKey());
     const first = this.ordered.find((d) => d.name === remembered) ?? this.ordered[0] ?? null;
     if (!first) {
+      const gone = [...this.goneDocs.values()][0];
+      if (gone) {
+        this.renderStrip();
+        void this.openDoc(gone);
+        return;
+      }
       this.setStatus("saved");
       this.showNotice("This proposal has no docs yet. Add one with +.", null);
       return;
@@ -400,6 +410,18 @@ export class DocsPane {
     for (const doc of this.ordered) {
       if (doc.name !== first.name) void this.refreshText(doc);
     }
+  }
+
+  /** Unsaved work in storage for a doc the daemon no longer has (it was deleted while
+   *  this pane, or an earlier one, held edits): the doc comes back as a deleted tab,
+   *  with its work, to be restored or discarded. */
+  private findStoredGone(): void {
+    for (const name of this.drafts.docs()) {
+      if (this.ordered.some((d) => d.name === name) || this.syncs.has(name) || this.goneDocs.has(name)) continue;
+      this.goneDocs.set(name, { name, file: `${name}.md` });
+      this.storedGone.add(name);
+    }
+    this.renderStrip();
   }
 
   /** `pushSeq` is this.pushSeq when the GetProposal request went out. */
@@ -677,6 +699,10 @@ export class DocsPane {
         // still in flight (later reads must not: closing tabs would wait on each other).
         const priors = initial ? [...(closing.get(key) ?? [])].filter((p) => p !== sync) : [];
         await Promise.all(priors.map((p) => p.whenQuiet()));
+        const stored = initial && this.storedGone.has(doc.name) ? this.drafts.peek(doc.name) : null;
+        // A doc the daemon no longer has opens from what its stored draft was based on:
+        // the draft restores onto that, and the doc is then marked deleted.
+        if (stored) return { text: stored.base, commit: "" };
         return getDoc(this.opts.sessionId, this.opts.slug, doc.name, this.opts.token);
       },
       save: (text, base, final) => putDoc(this.opts.sessionId, this.opts.slug, doc.name, text, base,
@@ -708,6 +734,7 @@ export class DocsPane {
       // on it are redundant writers now, and must not save over what the user does next.
       for (const old of closing.get(key) ?? []) if (old !== sync) old.abandon(true);
       closing.delete(key);
+      if (this.storedGone.delete(doc.name)) sync.remoteDeleted();
     } catch (e) {
       if (this.sync !== sync) return;
       this.showNotice(`Could not load ${doc.file}: ${errorText(e)}`, () => void this.openDoc(doc, toQuestion, true));
@@ -768,7 +795,10 @@ export class DocsPane {
         }
         for (const name of [...this.goneDocs.keys()]) {
           // The doc is back (restored, or added again): its kept work saves onto it.
-          if (this.ordered.some((d) => d.name === name) && this.syncs.get(name)?.currentStatus !== "gone") this.goneDocs.delete(name);
+          if (this.ordered.some((d) => d.name === name) && this.syncs.get(name)?.currentStatus !== "gone") {
+            this.goneDocs.delete(name);
+            this.storedGone.delete(name);
+          }
         }
         if (current && !this.ordered.some((d) => d.name === current.name) && !this.goneDocs.has(current.name)) {
           this.current = null;
