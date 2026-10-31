@@ -419,8 +419,7 @@ func tightenFrozenPosture(pinned, live *config.Config) *config.Config {
 	}
 	if live == nil || (pinned.RequireToken == live.RequireToken &&
 		pinned.RequireLoopbackToken == live.RequireLoopbackToken &&
-		slices.Equal(pinned.CORSAllowedOrigins, live.CORSAllowedOrigins) &&
-		slices.Equal(pinned.AllowedHosts, live.AllowedHosts)) {
+		slices.Equal(pinned.CORSAllowedOrigins, live.CORSAllowedOrigins)) {
 		return pinned
 	}
 	merged := *pinned
@@ -429,7 +428,6 @@ func tightenFrozenPosture(pinned, live *config.Config) *config.Config {
 	merged.CORSAllowedOrigins = intersectCORS(pinned.CORSAllowedOrigins, live.CORSAllowedOrigins)
 	// network.allowed_hosts is an allow-list too, so the same intersection: a live
 	// removal reaches a frozen generation, a live addition never widens it.
-	merged.AllowedHosts = intersectCORS(pinned.AllowedHosts, live.AllowedHosts)
 	return &merged
 }
 

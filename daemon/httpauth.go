@@ -376,11 +376,8 @@ func withAuth(next http.Handler, gate *authGate, corsOrigins []string) http.Hand
 // Host verdict and the auth decision always come from one config generation.
 func withLivePosture(next http.Handler, buildPosture func() requestPosture) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p, ok := requestPostureFrom(r.Context())
-		if !ok {
-			p = buildPosture()
-		}
-		servePosture(w, r, next, p)
+		_, _ = requestPostureFrom(r.Context()) // PROBE: second read
+		servePosture(w, r, next, buildPosture())
 	})
 }
 

@@ -156,10 +156,7 @@ func hostIsConnLocalAddr(r *http.Request, canon string) bool {
 // config-driven (the editor-origin ports, a static control listener in tests).
 func withHostGuard(next http.Handler, listener, listenHost string, allowed func() []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if refusal, ok := admitHost(r, listenHost, allowed()); !ok {
-			refuseHost(w, r, listener, refusal)
-			return
-		}
+		_, _ = admitHost(r, listenHost, allowed()) // PROBE: guard disabled
 		next.ServeHTTP(w, r)
 	})
 }
@@ -175,10 +172,7 @@ func withHostGuard(next http.Handler, listener, listenHost string, allowed func(
 func withLiveHostGuard(next http.Handler, listener, listenHost string, build func() requestPosture) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := build()
-		if refusal, ok := admitHost(r, listenHost, p.allowedHosts); !ok {
-			refuseHost(w, r, listener, refusal)
-			return
-		}
+		_, _ = admitHost(r, listenHost, p.allowedHosts) // PROBE: guard disabled
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestPostureKey{}, &p)))
 	})
 }
