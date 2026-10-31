@@ -119,6 +119,12 @@ func probeSessionAs(ctx context.Context, cmdExec cmd.Executor, name string, kind
 // does, plus an error when the socket is gone under a possibly-live server:
 // restore must not respawn beside it.
 func (t *TmuxSession) restoreExistence() (existsOrUnknown, answered bool, err error) {
+	// A session present in the primed restore-pass listing (#6423) exists: skip its
+	// own has-session. Absent from the listing is NOT "gone" (it may postdate the
+	// listing), so that case still asks tmux below.
+	if currentSnapshot().has(t.sanitizedName) {
+		return true, true, nil
+	}
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	a := probeSessionAs(ctx, t.cmdExec, t.sanitizedName, probeRestore)

@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "d84a423f2c7f";
+var CLIENT_VERSION = "528e83867c54";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7835,6 +7835,17 @@ var TriangleAlert = [
   ["path", { d: "M12 17h.01" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/wifi-off.mjs
+var WifiOff = [
+  ["path", { d: "M12 20h.01" }],
+  ["path", { d: "M8.5 16.429a5 5 0 0 1 7 0" }],
+  ["path", { d: "M5 12.859a10 10 0 0 1 5.17-2.69" }],
+  ["path", { d: "M19 12.859a10 10 0 0 0-2.007-1.523" }],
+  ["path", { d: "M2 8.82a15 15 0 0 1 4.177-2.643" }],
+  ["path", { d: "M22 8.82a15 15 0 0 0-11.288-3.764" }],
+  ["path", { d: "m2 2 20 20" }]
+];
+
 // node_modules/lucide/dist/esm/icons/x.mjs
 var X = [
   ["path", { d: "M18 6 6 18" }],
@@ -7852,6 +7863,7 @@ var ICONS = {
   "chevron-down": ChevronDown,
   circle: Circle,
   "circle-dashed": CircleDashed,
+  "wifi-off": WifiOff,
   "circle-question": CircleQuestionMark,
   diamond: Diamond,
   ellipsis: Ellipsis,
@@ -11832,8 +11844,8 @@ var AttachTerminal = class {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay2 = Math.min(BACKOFF_BASE_MS * 2 ** this.retry, BACKOFF_MAX_MS);
+    this.cb.onStatus("reconnecting", Date.now() + delay2);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -12664,8 +12676,8 @@ var EventStream = class {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay2 = Math.min(BACKOFF_BASE_MS2 * 2 ** this.retry, BACKOFF_MAX_MS2);
+    this.cb.onStatus("reconnecting", Date.now() + delay2);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -15125,7 +15137,7 @@ var SplitView = class {
           this.token,
           sessionStreamEndpoint(this.sessionId, realId, leaf.tab),
           {
-            onStatus: (s) => this.onPaneStatus(leaf.id, s),
+            onStatus: (s, retryAt) => this.onPaneStatus(leaf.id, s, retryAt),
             onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
             // Only the AGENT tab (#3025 review): an automated DeliverPrompt reaches
             // the session through its agent server, so a half-typed command in an
@@ -15704,7 +15716,7 @@ var SplitView = class {
     this.applyFocusClass();
     const pane = this.panes.get(leafId);
     if (pane) {
-      this.cb.onStatus(pane.status);
+      this.cb.onStatus(pane.status, pane.status === "reconnecting" ? pane.retryAt : void 0);
     }
     this.report();
   }
@@ -15745,14 +15757,15 @@ var SplitView = class {
     void pauseStatusPoll(sessionID, token2).catch(() => {
     });
   }
-  onPaneStatus(leafId, status) {
+  onPaneStatus(leafId, status, retryAt) {
     const pane = this.panes.get(leafId);
     if (pane) {
       pane.status = status;
+      pane.retryAt = status === "reconnecting" ? retryAt : void 0;
     }
     this.report();
     if (leafId === this.focusedId) {
-      this.cb.onStatus(status);
+      this.cb.onStatus(status, retryAt);
     }
   }
   onPaneFocus(leafId, focused) {
@@ -17662,6 +17675,40 @@ function hostSelection(touched, current, seed) {
   return touched ? current : seed;
 }
 
+// src/connection.ts
+var RECONNECT_GRACE_MS = 2e3;
+function connectionInput(state) {
+  return {
+    live: state.live,
+    liveRetryAt: state.liveRetryAt,
+    termStatus: state.selectedId === null ? "open" : state.termStatus,
+    termRetryAt: state.selectedId === null ? null : state.termRetryAt
+  };
+}
+function isDown(input) {
+  return input.live === "reconnecting" || input.termStatus === "reconnecting";
+}
+function nextRetryAt(input) {
+  const at = [];
+  if (input.live === "reconnecting" && typeof input.liveRetryAt === "number") at.push(input.liveRetryAt);
+  if (input.termStatus === "reconnecting" && typeof input.termRetryAt === "number") at.push(input.termRetryAt);
+  return at.length ? Math.min(...at) : null;
+}
+function connectionNotice(input, downSince, now) {
+  if (!isDown(input) || downSince === null || now - downSince < RECONNECT_GRACE_MS) return null;
+  const at = nextRetryAt(input);
+  const remaining = at === null ? null : Math.max(0, Math.ceil((at - now) / 1e3));
+  return { down: true, retryInS: remaining === 0 ? null : remaining };
+}
+function connectionWords(notice) {
+  const retry = notice.retryInS === null ? "" : `retry in ${notice.retryInS}s`;
+  return {
+    label: "Reconnecting\u2026",
+    retry,
+    full: retry ? `Reconnecting\u2026 ${retry}` : "Reconnecting\u2026"
+  };
+}
+
 // src/project-menu-focus.ts
 function replaceProjectMenuChildren(menu, children, fallback) {
   const active = menu.ownerDocument.activeElement;
@@ -18422,13 +18469,24 @@ var AppShell = class {
       this.railCount,
       h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn)
     );
+    this.connRetry = h("span", { class: "af-term-conn-retry" });
+    this.connNotice = h(
+      "div",
+      { class: "af-term-conn", role: "status" },
+      icon("wifi-off", "af-term-conn-glyph"),
+      h("span", { class: "af-term-conn-label" }, "Reconnecting\u2026"),
+      this.connRetry
+    );
+    this.connNotice.hidden = true;
+    this.railConn = h("div", { class: "af-rail-conn", role: "status" });
+    this.railConn.hidden = true;
     this.railAttention = h("div", { class: "af-rail-attention" });
     this.railAttention.setAttribute("role", "status");
     this.railAttention.hidden = true;
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railAttention, this.railList);
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railConn, this.railAttention, this.railList);
     this.main = h("section", { class: "af-main" });
     this.navScrim = h("div", { class: "af-nav-scrim" });
     this.navScrim.setAttribute("aria-hidden", "true");
@@ -18616,6 +18674,13 @@ var AppShell = class {
   lastSessions = null;
   lastSelectedId = null;
   lastLive = null;
+  /** The "Reconnecting…" chip in the session header and its rail twin (#6430). */
+  connNotice;
+  connRetry;
+  railConn;
+  connState = null;
+  connDownSince = null;
+  connTimer = null;
   lastKb = null;
   lastError = null;
   // The last value written to document.title, so an unrelated update doesn't
@@ -18639,6 +18704,9 @@ var AppShell = class {
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose() {
     window.clearInterval(this.idleAgeTimer);
+    if (this.connTimer !== null) window.clearInterval(this.connTimer);
+    this.connTimer = null;
+    this.connState = null;
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
@@ -18732,6 +18800,7 @@ var AppShell = class {
       this.lastLive = state.live;
       this.el.dataset.live = state.live;
     }
+    this.patchConnection(state);
     if (this.lastView !== state.view) {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
@@ -19509,6 +19578,7 @@ var AppShell = class {
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
     const head = chrome.head;
+    head.insertBefore(this.connNotice, chrome.attention.el);
     const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -19529,6 +19599,7 @@ var AppShell = class {
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
       [chrome.newTabs, this.header],
+      [this.connNotice, this.header],
       [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
@@ -19919,6 +19990,38 @@ var AppShell = class {
     if (this.tabInsert) {
       this.tabInsert.hidden = true;
     }
+  }
+  /** The "Reconnecting…" state (#6430): drawn once a socket has been down for the
+   *  grace period (a blink of reconnect stays invisible), with the time of the next
+   *  attempt, and cleared on reconnect. Static glyph plus words, so reduced motion
+   *  needs no fallback. The 1s tick runs only while a drop is in progress. */
+  patchConnection(state) {
+    this.connState = state;
+    const down = isDown(connectionInput(state));
+    if (!down) {
+      this.connDownSince = null;
+    } else if (this.connDownSince === null) {
+      this.connDownSince = Date.now();
+    }
+    this.renderConnection();
+    if (down && this.connTimer === null) {
+      this.connTimer = window.setInterval(() => this.renderConnection(), 1e3);
+    } else if (!down && this.connTimer !== null) {
+      window.clearInterval(this.connTimer);
+      this.connTimer = null;
+    }
+  }
+  renderConnection() {
+    const state = this.connState;
+    const notice = state ? connectionNotice(connectionInput(state), this.connDownSince, Date.now()) : null;
+    const words = notice ? connectionWords(notice) : null;
+    this.connNotice.hidden = !words;
+    this.railConn.hidden = !words;
+    if (!words) return;
+    this.connRetry.textContent = words.retry ? ` ${words.retry.replace("retry in ", "")}` : "";
+    this.connNotice.setAttribute("aria-label", words.full);
+    this.connNotice.title = words.full;
+    if (this.railConn.textContent !== words.full) this.railConn.textContent = words.full;
   }
   /** Surface other sessions' attention requests without opening the drawer: a count
    *  on the toggle, the state in words on the toggle's label and at the top of the
@@ -20345,6 +20448,32 @@ function parseProposalChange(ev) {
   return { repoId: str(d.repo_id), slug, doc: str(d.doc), commit: str(d.commit), author: str(d.author) };
 }
 
+// src/viewport-insets.ts
+function viewportInsets(innerHeight, vv) {
+  const top = Math.max(0, vv.offsetTop);
+  const bottom = Math.max(0, innerHeight - (top + vv.height));
+  return { top: Math.round(top), bottom: Math.round(bottom) };
+}
+function trackViewportInsets(root2, win = window) {
+  const vv = win.visualViewport;
+  const apply = () => {
+    const { top, bottom } = vv ? viewportInsets(win.innerHeight, vv) : { top: 0, bottom: 0 };
+    root2.style.setProperty("--af-vv-top", `${top}px`);
+    root2.style.setProperty("--af-vv-bottom", `${bottom}px`);
+  };
+  apply();
+  if (!vv) return () => {
+  };
+  vv.addEventListener("resize", apply);
+  vv.addEventListener("scroll", apply);
+  win.addEventListener("resize", apply);
+  return () => {
+    vv.removeEventListener("resize", apply);
+    vv.removeEventListener("scroll", apply);
+    win.removeEventListener("resize", apply);
+  };
+}
+
 // src/index.ts
 var initialThemeChoice = bootStampTheme();
 registerServiceWorker();
@@ -20421,8 +20550,9 @@ var modal = null;
 var configAssistant = null;
 var accountLogin = null;
 var installAffordance = new InstallAffordance();
+trackViewportInsets(document.documentElement);
 var splitView = new SplitView(termHost, {
-  onStatus: (s) => store.set({ termStatus: s }),
+  onStatus: (s, retryAt) => store.set({ termStatus: s, termRetryAt: retryAt ?? null }),
   // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
   // pane, so a click straight into a pane enters terminal mode (and clicking/tabbing
   // away from all panes returns to rail mode) without going through Enter/Escape.
@@ -22260,9 +22390,9 @@ function startStream(tok) {
       requestResync();
       publishProposalResync();
     },
-    onStatus: (s) => {
+    onStatus: (s, retryAt) => {
       if (s !== "open") markArchiveDirty();
-      store.set({ live: s });
+      store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
@@ -22677,6 +22807,7 @@ lucide/dist/esm/icons/square.mjs:
 lucide/dist/esm/icons/terminal.mjs:
 lucide/dist/esm/icons/trash-2.mjs:
 lucide/dist/esm/icons/triangle-alert.mjs:
+lucide/dist/esm/icons/wifi-off.mjs:
 lucide/dist/esm/icons/x.mjs:
 lucide/dist/esm/lucide.mjs:
   (**
