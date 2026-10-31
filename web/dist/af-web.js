@@ -22817,3 +22817,4 @@ lucide/dist/esm/lucide.mjs:
    * See the LICENSE file in the root directory of this source tree.
    *)
 */
+// stale
