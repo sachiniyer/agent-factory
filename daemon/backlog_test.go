@@ -21,6 +21,12 @@ func newBacklogTestServer(t *testing.T) (*controlServer, string) {
 	ready := make(chan struct{})
 	close(ready)
 	m := &Manager{ready: ready, events: newEventsHub()}
+	// A metering pass runs on a background goroutine and resolves the AF home
+	// when it writes. Join it before this test's AGENT_FACTORY_HOME is restored
+	// (cleanups run last-in-first-out, and the Setenv above registered first), so
+	// no pass outlives the test that started it and writes into the next test's
+	// home (#6380). Joining, not waiting out a budget, is what makes this hold.
+	t.Cleanup(m.stopAndWaitBackgroundMutationsForShutdown)
 	return &controlServer{manager: m}, setupControlRepo(t)
 }
 

@@ -339,7 +339,8 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.syncAccountIn(sshProvisionStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
-	if err := w.syncAgentConfigIn(sshProvisionStepTimeout); err != nil {
+	agentConfigSkipped, err := w.syncAgentConfigIn(sshProvisionStepTimeout)
+	if err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	p.account = w
@@ -426,6 +427,9 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		// residual window after launch, and the later write must not clobber an
 		// earlier, more precise reason.
 		CallbackUnavailable: callbackLost,
+		// Every agent-config file the account-scope placement refused, so the
+		// session row can warn rather than appear fully provisioned (#6337).
+		AgentConfigSkipped: agentConfigSkipped,
 	}, nil
 }
 

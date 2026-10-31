@@ -315,6 +315,7 @@ func retainedArchiveLocation(warning string) string {
 func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, hasMultipleRepos bool, expanded bool) string {
 	archiveWarning := i.ArchiveWarning()
 	callbackWarning := i.CallbackUnavailable()
+	agentConfigSkipped := i.AgentConfigSkipped()
 	arrow := nonExpandableArrow
 	if Expandable(i) {
 		if expanded {
@@ -615,7 +616,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
 	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
 	// widths (#1772 review).
-	if !selected && !expanded && archiveWarning == "" && callbackWarning == "" && !restoreFailed && !restoreWaiting && !unreachableRow {
+	if !selected && !expanded && archiveWarning == "" && callbackWarning == "" && len(agentConfigSkipped) == 0 && !restoreFailed && !restoreWaiting && !unreachableRow {
 		description = ""
 	}
 	branchWidth := runewidth.StringWidth(description)
@@ -650,6 +651,11 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// and this row all name it identically so the user greps one string and
 		// finds every place af said it (#5571 W3.1).
 		warningTexts = append(warningTexts, session.CallbackUnavailablePrefix+callbackWarning)
+	}
+	if len(agentConfigSkipped) > 0 {
+		// Same cross-surface contract as the callback notice (#6337): the row
+		// names every declared config file af could not place, with the reason.
+		warningTexts = append(warningTexts, session.AgentConfigSkippedPrefix+strings.Join(agentConfigSkipped, "; "))
 	}
 	if len(warningTexts) == 0 {
 		if description != "" {

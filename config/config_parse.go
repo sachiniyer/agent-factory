@@ -277,6 +277,7 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 
 	sanitizeLimitPatterns(config)
 	sanitizeHosts(config)
+	sanitizeAllowedHosts(config, prettyConfigPath)
 	config.Appearance = NormalizeAppearance(config.Appearance)
 	config.Web.TerminalFontSizePhone = sanitizeWebTerminalFontSize(
 		"web.terminal_font_size_phone", config.Web.TerminalFontSizePhone, defaultWebTerminalFontSizePhone, prettyConfigPath)

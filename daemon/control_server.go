@@ -79,6 +79,7 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 		resp.Phase = state.phase
 		resp.Listeners = state.listeners
 	}
+	resp.RefusedHosts = hostRefusals.snapshot()
 	if s.manager != nil && s.manager.cfg != nil {
 		resp.BootConfig = &DaemonBootConfig{
 			ListenAddr:           s.manager.cfg.ListenAddr,

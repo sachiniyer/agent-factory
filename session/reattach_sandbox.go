@@ -177,13 +177,17 @@ func (i *Instance) ReattachSandbox() error {
 	// Adopting the same runtime provisions nothing, so the recorded callback
 	// state travels with it (#5974): bindProvisionResult installs the result's
 	// reason verbatim, and an empty one would read as a healthy reprovision.
+	// The skipped agent-config list is the same class of provision evidence
+	// (#6337): nothing re-staged the account scope, so the recorded skips are
+	// still true of it.
 	priorCallbackReason := i.callbackUnavailable
+	priorAgentConfigSkipped := append([]string(nil), i.agentConfigSkipped...)
 	i.mu.Unlock()
 	if !stillCurrent {
 		p.abandonUnadoptedTunnel()
 		return ErrReattachIneligible
 	}
-	if err := i.bindProvisionResult(ProvisionResult{Backend: b, Endpoint: endpoint, Teardown: p.reap, CallbackUnavailable: priorCallbackReason}); err != nil {
+	if err := i.bindProvisionResult(ProvisionResult{Backend: b, Endpoint: endpoint, Teardown: p.reap, CallbackUnavailable: priorCallbackReason, AgentConfigSkipped: priorAgentConfigSkipped}); err != nil {
 		p.abandonUnadoptedTunnel()
 		return fmt.Errorf("reattach %q: %w", i.Title, err)
 	}

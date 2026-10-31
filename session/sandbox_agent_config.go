@@ -67,8 +67,10 @@ const agentConfigMaxFileBytes = 64 << 20
 // syncAgentConfigIn places the declared files in the session's account scope. A
 // declared file that does not exist on the daemon box is skipped with a warning —
 // the operator's declaration must not fail a create — and nothing is sent when no
-// file resolves.
-func (w *sandboxWorkspace) syncAgentConfigIn(timeout time.Duration) error {
+// file resolves. The returned skip list is the user-visible form of that
+// warning (#6337): every file the placement refused, named as the operator
+// declared it, with the reason.
+func (w *sandboxWorkspace) syncAgentConfigIn(timeout time.Duration) ([]string, error) {
 	return w.syncAgentConfigInto(timeout, w.AccountDir())
 }
 
@@ -76,51 +78,63 @@ func (w *sandboxWorkspace) syncAgentConfigIn(timeout time.Duration) error {
 // account scope at provision, and the incoming scope during an account handoff, so
 // the personalization survives the swap exactly as it survives a restart (the
 // rotation replaces the whole live directory with the staged one).
-func (w *sandboxWorkspace) syncAgentConfigInto(timeout time.Duration, scopeDir string) error {
+//
+// Each skipped file is logged AND returned as one "agent:file: <reason>" entry —
+// the daemon log warns, but a session row that can never name its skip is a
+// session that appears fully provisioned while running a bare agent (#6337).
+// The entry leads with the declaration the operator wrote; the reason beside
+// it can name the resolved path, which is why bugreport redacts the field.
+func (w *sandboxWorkspace) syncAgentConfigInto(timeout time.Duration, scopeDir string) ([]string, error) {
 	files := w.sandboxAgentConfigEntries()
 	if len(files) == 0 {
-		return nil
+		return nil, nil
 	}
 	agent := w.spec.Account.Agent
 	home := operatorAgentHome(agent)
 	if home == "" {
-		return nil
+		return nil, nil
 	}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
+	var skipped []string
 	sent := 0
 	total := 0
 	for _, file := range files {
+		skip := func(reason error) {
+			entry := fmt.Sprintf("%s:%s: %v", agent, file, reason)
+			log.WarningLog.Printf("sandbox_agent_config: skipping %s", entry)
+			skipped = append(skipped, entry)
+		}
 		data, err := readOperatorAgentFile(agent, home, file)
 		if err != nil {
-			log.WarningLog.Printf("sandbox_agent_config: skipping %s:%s: %v", agent, file, err)
+			skip(err)
 			continue
 		}
 		if total+len(data) > agentConfigMaxFileBytes {
-			log.WarningLog.Printf("sandbox_agent_config: skipping %s:%s: %d bytes would take the archive over the %d-byte bound", agent, file, len(data), agentConfigMaxFileBytes)
+			skip(fmt.Errorf("%d bytes would take the archive over the %d-byte bound", len(data), agentConfigMaxFileBytes))
 			continue
 		}
 		if err := tw.WriteHeader(&tar.Header{Name: file, Mode: 0o600, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := tw.Write(data); err != nil {
-			return err
+			return nil, err
 		}
 		total += len(data)
 		sent++
 	}
 	if err := tw.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	if sent == 0 {
-		return nil
+		return skipped, nil
 	}
 	dir := shellQuote(scopeDir)
 	script := "umask 077 && mkdir -p " + dir + " && tar -xf - -C " + dir
 	if out, err := w.shell.Run(timeout, script, bytes.NewReader(buf.Bytes()), true); err != nil {
-		return fmt.Errorf("placing the operator's %s config on the host failed: %s: %w", agent, strings.TrimSpace(string(out)), err)
+		return nil, fmt.Errorf("placing the operator's %s config on the host failed: %s: %w", agent, strings.TrimSpace(string(out)), err)
 	}
-	return nil
+	return skipped, nil
 }
 
 // operatorAgentHome is the operator's own agent home on THIS machine — the place

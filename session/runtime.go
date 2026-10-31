@@ -216,6 +216,15 @@ type ProvisionResult struct {
 	// can render it rather than leaving the agent to discover af silently
 	// fails. Empty when a credential was delivered (or the kind injects none).
 	CallbackUnavailable string
+	// AgentConfigSkipped carries one "agent:file: <reason>" entry per declared
+	// sandbox_agent_config file the runtime could not place in the session's
+	// account scope (#6337, #5571 W7.7): missing, unreadable, non-regular,
+	// unparsable, or over agentConfigMaxFileBytes. Like CallbackUnavailable the
+	// provision deliberately still succeeded — a session missing personalization
+	// is more useful than none — but the row must name the skip on every
+	// surface rather than only in a daemon log the user never reads. Empty when
+	// every declared file landed (or none applied).
+	AgentConfigSkipped []string
 }
 
 // Runtime is the provision-and-expose seam (#1592 Phase 4 PR3): given a session

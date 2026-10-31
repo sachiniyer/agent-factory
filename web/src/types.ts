@@ -205,6 +205,11 @@ export interface SessionData {
    *  "af callback unavailable:" prefix; absent means callback was delivered or
    *  the backend never injects one. */
   callback_unavailable?: string;
+  /** The declared sandbox_agent_config files af could not place in this
+   *  session's account scope, one "agent:file: <reason>" entry each (#6337).
+   *  Surfaces render the joined entries under the "af agent config skipped:"
+   *  prefix; absent means every declared file landed (or none applied). */
+  agent_config_skipped?: string[];
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;

@@ -198,6 +198,15 @@ var httpRoutes = []HTTPRoute{
 		// see whether the caller is a sandbox and narrow to its own session (#3056).
 		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.snapshot) },
 	},
+	// Not sandboxAllowed: it reads any session's agent tab by id, and a sandbox
+	// must not read another session's screen.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/PreviewSession",
+		Description: "Read the last lines (1-40, default 40) of a session's agent tab, by stable id, as plain text with escapes and control characters removed; read only.",
+		requestType: reflect.TypeOf(PreviewSessionRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PreviewSession) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/KillSession",
@@ -471,7 +480,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/UnsetConfigValue",
-		Description: "Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically).",
+		Description: "Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins, allowed_hosts) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically).",
 		requestType: reflect.TypeOf(UnsetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UnsetConfigValue) },
 	},
@@ -486,28 +495,28 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/GetProposal",
-		Description: "Describe one proposal for the Docs tab: head commit, docs, unused templates, open question count, and attached sessions.",
+		Description: "Describe one proposal for the Proposal tab: head commit, docs, unused templates, open question count, and attached sessions.",
 		requestType: reflect.TypeOf(GetProposalRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetProposal) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/StartProposal",
-		Description: "Create a proposal from templates, attach the session to it, open its Docs tab, and return the rules for the agent.",
+		Description: "Create a proposal from templates, attach the session to it, open its Proposal tab, and return the rules for the agent.",
 		requestType: reflect.TypeOf(StartProposalRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.StartProposal) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/AttachProposal",
-		Description: "Attach the session to a proposal (or, with no slug, report its current one), open its Docs tab, and return the rules.",
+		Description: "Attach the session to a proposal (or, with no slug, report its current one), open its Proposal tab, and return the rules.",
 		requestType: reflect.TypeOf(AttachProposalRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AttachProposal) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/DetachProposal",
-		Description: "Remove the session's proposal attachment and cursor, and close its Docs tab.",
+		Description: "Remove the session's proposal attachment and cursor, and close its Proposal tab.",
 		requestType: reflect.TypeOf(DetachProposalRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DetachProposal) },
 	},
@@ -563,7 +572,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetProposalPushMode",
-		Description: "Set the push mode (auto or manual) of the session's Docs tabs for its proposal, and return its push status.",
+		Description: "Set the push mode (auto or manual) of the session's Proposal tabs for its proposal, and return its push status.",
 		requestType: reflect.TypeOf(SetProposalPushModeRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetProposalPushMode) },
 	},

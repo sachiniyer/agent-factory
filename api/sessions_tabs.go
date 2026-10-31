@@ -25,10 +25,10 @@ var (
 func bindTabCreateFlags(c *cobra.Command) {
 	c.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in a process tab (required when --kind is empty)")
 	c.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell)")
-	c.Flags().StringVar(&tabCreateKindFlag, "kind", "", "Tab kind: \"shell\" for a $SHELL terminal, empty for a process command, \"web\" for a URL/iframe, \"vscode\" for VS Code, or \"docs\" for a proposal's Docs tab")
+	c.Flags().StringVar(&tabCreateKindFlag, "kind", "", "Tab kind: \"shell\" for a $SHELL terminal, empty for a process command, \"web\" for a URL/iframe, \"vscode\" for VS Code, or \"docs\" for a Proposal tab")
 	c.Flags().StringVar(&tabCreateURLFlag, "url", "", "Web tab target URL (with --kind web): a localhost dev-server address or an external https URL")
 	c.Flags().IntVar(&tabCreatePortFlag, "port", 0, "Web tab convenience for --url http://localhost:<port> (with --kind web)")
-	c.Flags().StringVar(&tabCreateProposalFlag, "proposal", "", "Proposal `slug` the Docs tab edits (required with --kind docs)")
+	c.Flags().StringVar(&tabCreateProposalFlag, "proposal", "", "Proposal `slug` the tab edits (required with --kind docs)")
 }
 
 // bindTabDeleteFlags registers the tab-delete flag on c, bound to the shared

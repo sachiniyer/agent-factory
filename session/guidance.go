@@ -34,11 +34,18 @@ type guidanceCaps struct {
 	// WebHTTPSOnly: the admitted web tabs are external HTTPS targets only — a
 	// loopback target (--port) is refused, as it is on a remote workspace.
 	WebHTTPSOnly bool
+	// HostStores: the session's af calls reach the daemon host's proposal and
+	// backlog stores. A local worktree's agent calls af over the host's own
+	// socket; an agent in a remote workspace calls it with the scoped sandbox
+	// credential, and no proposal or backlog route admits that credential
+	// (daemon/httproutes.go: none is sandboxAllowed). False drops the proposal
+	// and backlog verbs, and the proposal skill, from the guidance.
+	HostStores bool
 }
 
 // fullGuidanceCaps is what a local session with a callback is shown — the
 // reference af has always injected, byte for byte.
-var fullGuidanceCaps = guidanceCaps{Callback: true, SelfArchive: true, Shell: true, Web: true, VSCode: true}
+var fullGuidanceCaps = guidanceCaps{Callback: true, SelfArchive: true, Shell: true, Web: true, VSCode: true, HostStores: true}
 
 // noCallbackGuidanceCaps is the W3.1 callbackless variant.
 var noCallbackGuidanceCaps = guidanceCaps{}
@@ -48,7 +55,7 @@ func guidanceCapsFor(callbackUnavailable bool, c Capabilities) guidanceCaps {
 	if callbackUnavailable {
 		return noCallbackGuidanceCaps
 	}
-	g := guidanceCaps{Callback: true, SelfArchive: c.Archive}
+	g := guidanceCaps{Callback: true, SelfArchive: c.Archive, HostStores: c.Workspace == WorkspaceLocalWorktree}
 	for _, a := range tabKindAllowances(c) {
 		switch a.Kind {
 		case "shell":
@@ -105,7 +112,7 @@ func (g guidanceCaps) String() string {
 		}
 		return "0"
 	}
-	return "cb" + b(g.Callback) + "sa" + b(g.SelfArchive) + "sh" + b(g.Shell) + "w" + b(g.Web) + "ws" + b(g.WebHTTPSOnly) + "vs" + b(g.VSCode)
+	return "cb" + b(g.Callback) + "sa" + b(g.SelfArchive) + "sh" + b(g.Shell) + "w" + b(g.Web) + "ws" + b(g.WebHTTPSOnly) + "vs" + b(g.VSCode) + "hs" + b(g.HostStores)
 }
 
 // afSelfArchiveLine and afUsageOutroInsideNoSelfArchive are the two places the
@@ -125,6 +132,13 @@ func (g guidanceCaps) Reference() string {
 	if !g.SelfArchive {
 		out = strings.Replace(out, afSelfArchiveLine, "", 1)
 		out = strings.Replace(out, afUsageOutroInside, afUsageOutroInsideNoSelfArchive, 1)
+	}
+	if !g.HostStores {
+		// Each section is its own paragraph, so it goes with the blank line
+		// that separates it from the next one.
+		for _, section := range []string{afBacklogSection, afUsageProposalsInside, afUsageBacklogInside} {
+			out = strings.Replace(out, section+"\n\n", "", 1)
+		}
 	}
 	if g.Shell && g.Web && g.VSCode {
 		return out

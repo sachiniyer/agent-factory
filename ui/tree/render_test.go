@@ -130,6 +130,53 @@ func TestInstanceRendererShowsBothWarnings(t *testing.T) {
 	assert.Contains(t, out, session.CallbackUnavailablePrefix+callbackReason)
 }
 
+// TestInstanceRendererShowsAgentConfigSkipped is the TUI half of #6337: a
+// sandbox whose declared agent-config file could not be placed still runs, but
+// its row must carry the shared "af agent config skipped: …" phrase — the same
+// cross-surface contract the callback notice holds (#5571 W3.1).
+func TestInstanceRendererShowsAgentConfigSkipped(t *testing.T) {
+	skipped := []string{
+		"claude:CLAUDE.md: stat /home/op/.claude/CLAUDE.md: no such file or directory",
+		"claude:.claude.json: /home/op/.claude.json is 99999999 bytes, over the 67108864-byte bound",
+	}
+	inst, err := session.FromInstanceData(session.InstanceData{
+		ID: "agent-config-skipped", Title: "feature", Branch: "af-feature",
+		Status: session.Running, Liveness: session.LiveRunning,
+		Program: "test", BackendType: "sandbox",
+		AgentConfigSkipped: skipped,
+	})
+	require.NoError(t, err)
+
+	r := NewInstanceRenderer()
+	r.SetWidth(220)
+	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
+	assert.Contains(t, out, session.AgentConfigSkippedPrefix+skipped[0],
+		"the skip notice must render under the cross-surface prefix")
+	assert.Contains(t, out, skipped[1], "every skipped entry renders, not only the first")
+}
+
+// TestInstanceRendererKeepsDescriptionWithAgentConfigSkipped is the
+// description-clearing half of #6337: a collapsed row that carries ONLY the
+// skip warning must still keep its branch/location description beside it —
+// the same visibility rule archive and callback warnings already hold.
+func TestInstanceRendererKeepsDescriptionWithAgentConfigSkipped(t *testing.T) {
+	inst, err := session.FromInstanceData(session.InstanceData{
+		ID: "agent-config-skipped-desc", Title: "feature", Branch: "af-feature",
+		Status: session.Running, Liveness: session.LiveRunning,
+		Program: "test", BackendType: "sandbox",
+		AgentConfigSkipped: []string{"claude:CLAUDE.md: missing"},
+	})
+	require.NoError(t, err)
+
+	r := NewInstanceRenderer()
+	r.SetWidth(220)
+	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
+	assert.Contains(t, out, "af-feature",
+		"a collapsed row warning about skipped config must keep its branch line")
+	assert.Contains(t, out, session.AgentConfigSkippedPrefix,
+		"and still carries the warning itself")
+}
+
 // TestInstanceRendererNamePlaceholder pins the autocreate-name shadow text
 // (#2470): the row of the instance being named shows the suggested name while its
 // title is empty, and only that row, and only while empty.

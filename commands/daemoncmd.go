@@ -308,6 +308,11 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 			fmt.Fprintf(w, "    refused:      %s\n", info.Listeners.TCPRefusalReason)
 		default:
 			fmt.Fprintf(w, "  tcp listener:   %s (%s)\n", info.Listeners.TCPListenAddr, notBoundNote(info.Listeners.TCPBindError, info.Listeners.BindRetrying))
+			if info.Listeners.WebListenerUnbound() {
+				// The README sends a first-run user to this address; say it is not
+				// served and what to do (#6386).
+				fmt.Fprintf(w, "    web UI:       not served at http://%s — %s\n", info.Listeners.TCPListenAddr, daemon.WebListenerRemedy)
+			}
 		}
 		// The web-tab preview listener (#1856). Only printed when configured, so an
 		// operator who never set network.preview_listen_addr sees no extra line.
