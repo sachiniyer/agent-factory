@@ -151,13 +151,6 @@ func (r *sandboxTokenRegistry) stillGrants(sessionID, secret string) bool {
 	return ok && owner == sessionID
 }
 
-// grantFor is the credential sessionID holds right now, "" for none.
-func (r *sandboxTokenRegistry) grantFor(sessionID string) string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.bySession[sessionID]
-}
-
 // revoke drops the credential a session holds. Idempotent: a session that never
 // had one, or whose credential was already replaced, is a no-op success, because
 // every teardown path calls this and none of them should fail for it.

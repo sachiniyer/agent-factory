@@ -88,7 +88,10 @@ func startSandboxEndpoint(mux http.Handler, reg *sandboxTokenRegistry, path stri
 			// The marker is how a route that must never answer on the main
 			// listener (GitCredential, #5571 W7.8) tells the two apart: the
 			// main listener admits sandbox credentials to the scope too.
-			Handler:           markSandboxEndpoint(withAuth(mux, sandboxOnlyGate(reg), nil)),
+			Handler: markSandboxEndpoint(withAuth(mux, sandboxOnlyGate(reg), nil)),
+			// The peer of each connection names the forward it arrived through
+			// (#5571 W7.8): the ssh client of one session's supervised tunnel.
+			ConnContext:       carrierConnContext,
 			ReadHeaderTimeout: httpReadHeaderTimeout,
 		},
 		ln:   ln,

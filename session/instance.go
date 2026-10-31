@@ -57,6 +57,9 @@ type Instance struct {
 	// source of truth for the item ↔ session link; this is a cache for clients
 	// and the one input restart recovery matches a starting run against.
 	BacklogItem int
+	// createdBySandbox is InstanceData.CreatedBySandbox. Immutable after
+	// construction.
+	createdBySandbox string
 	// Title is the title of the instance.
 	Title string
 	// Path is the path to the workspace.

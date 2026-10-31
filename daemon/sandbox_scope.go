@@ -147,6 +147,9 @@ func (s *controlServer) sendPromptScoped(ctx context.Context, req SendPromptRequ
 	if err != nil {
 		return err
 	}
+	if err := s.manager.refusePushEscalation(owner, inst); err != nil {
+		return err
+	}
 	req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
 	req.TaskOrigin = false
 	if testHookSandboxAfterAuthorize != nil {
@@ -155,7 +158,14 @@ func (s *controlServer) sendPromptScoped(ctx context.Context, req SendPromptRequ
 	// Addressed by the authorized session's ID, never re-resolved by title, and
 	// re-validated under the target's op lock on the instance the send reaches:
 	// authorization is atomic with the action.
-	return s.sendPrompt(req, resp, s.manager.sandboxSessionGuard(inst.ID, proj.repoID))
+	base := s.manager.sandboxSessionGuard(inst.ID, proj.repoID)
+	guard := func(current *session.Instance, resolvedRepo string) error {
+		if err := base(current, resolvedRepo); err != nil {
+			return err
+		}
+		return s.manager.refusePushEscalation(owner, current)
+	}
+	return s.sendPrompt(req, resp, guard)
 }
 
 func (s *controlServer) archiveSessionScoped(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
@@ -167,14 +177,27 @@ func (s *controlServer) archiveSessionScoped(ctx context.Context, req *ArchiveSe
 	if err != nil {
 		return err
 	}
+	if req.Push {
+		// A push archive runs the target's own push, answered with push
+		// credentials when the target has them (#5571 W7.8).
+		if err := s.manager.refusePushEscalation(owner, inst); err != nil {
+			return err
+		}
+	}
 	req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
 	if testHookSandboxAfterAuthorize != nil {
 		testHookSandboxAfterAuthorize()
 	}
-	id := inst.ID
+	id, push := inst.ID, req.Push
 	guard := func(current *session.Instance) error {
 		// Inside the archive fence, on the instance the manager holds right now.
-		return sandboxSessionStillAuthorized(current, id)
+		if err := sandboxSessionStillAuthorized(current, id); err != nil {
+			return err
+		}
+		if push {
+			return s.manager.refusePushEscalation(owner, current)
+		}
+		return nil
 	}
 	return s.archiveSessionGuarded(ctx, req, resp, guard)
 }
@@ -255,6 +278,9 @@ func (s *controlServer) createSessionScoped(ctx context.Context, req CreateSessi
 		// The project is the owner's, never the caller's: the sandbox's own
 		// working directory is not a path on this host.
 		req.RepoPath = proj.path
+		// Durable provenance (#5571 W7.8): a session a sandbox credential created
+		// never receives push credentials, whatever host it lands on.
+		req.createdBySandbox = owner
 		create := s.createSession
 		if s.createSessionFn != nil {
 			create = s.createSessionFn
@@ -345,6 +371,9 @@ func (s *controlServer) addTaskScoped(ctx context.Context, req AddTaskRequest, r
 		}
 		proj, inst, err := s.manager.authorizeSandboxSession(owner, "", t.TargetSession, false)
 		if err != nil {
+			return err
+		}
+		if err := s.manager.refusePushEscalation(owner, inst); err != nil {
 			return err
 		}
 		req.Actor = fmt.Sprintf("sandbox session %s", owner)
@@ -494,6 +523,11 @@ func (m *Manager) checkSandboxTaskDelivery(owner, deliveryRepoID, title string) 
 	if inst.IsArchived() {
 		return "", sandboxRefusal("the target session is archived")
 	}
+	// Re-checked at every firing: the target may have become eligible (or the
+	// task's creator ineligible, or gone) since the task was added.
+	if err := m.refusePushEscalation(owner, inst); err != nil {
+		return "", err
+	}
 	return inst.ID, nil
 }
 
@@ -503,7 +537,7 @@ func (m *Manager) checkSandboxTaskDelivery(owner, deliveryRepoID, title string) 
 // replaced by another with the same title between the check and the send is
 // refused rather than reached: authorization is by ID and delivery is by that
 // same ID, never a second title resolution.
-func (m *Manager) sandboxDeliveryGuard(id, repoID string) func(*session.Instance, string) error {
+func (m *Manager) sandboxDeliveryGuard(owner, id, repoID string) func(*session.Instance, string) error {
 	base := m.sandboxSessionGuard(id, repoID)
 	return func(inst *session.Instance, resolvedRepo string) error {
 		if err := base(inst, resolvedRepo); err != nil {
@@ -512,7 +546,7 @@ func (m *Manager) sandboxDeliveryGuard(id, repoID string) func(*session.Instance
 		if inst.IsArchived() {
 			return sandboxRefusal("the target session is archived")
 		}
-		return nil
+		return m.refusePushEscalation(owner, inst)
 	}
 }
 

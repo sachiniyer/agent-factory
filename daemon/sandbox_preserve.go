@@ -135,8 +135,15 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 	// credential lives: until a replacement runtime gets a new one, or the
 	// session ends. The fence is persisted BEFORE the push starts; if it cannot
 	// be, the push does not run.
-	grant := m.sandboxTokens.grantFor(instance.ID)
-	endFence, ferr := m.pushCreds.beginAutoPush(instance.ID, grant, m.sandboxTokens.grantFor)
+	// Fenced against the runtime's callback IDENTITY, not the token the registry
+	// happens to hold right now: a row the daemon has no token for yet (one not
+	// reattached since a restart) is fenced all the same, and the token it gets
+	// re-derived later is still fenced.
+	var callbackRef string
+	if placement, ok := instancePushPlacement(instance); ok {
+		callbackRef = placement.CallbackRef
+	}
+	endFence, ferr := m.pushCreds.beginAutoPush(instance.ID, callbackRef, m.callbackRefSnapshot())
 	if ferr != nil {
 		return fmt.Errorf(
 			"refusing to replace the sandbox for %q: the record that keeps push credentials away from af's own "+
