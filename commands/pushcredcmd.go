@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,9 +107,18 @@ func runGitCredential(in io.Reader, out, errw io.Writer, sessionDir, op string) 
 		}
 		err = errors.New("the daemon's answer is not a single printable credential")
 	}
-	if user, pass, ok := hostCredentialFill(req); ok {
+	if user, pass, ok := hostCredentialFill(sessionDir, req); ok {
 		if werr := pushcred.WriteCredential(out, user, pass); werr == nil {
 			fmt.Fprintf(errw, "af: no push credential (%v); using the host's own git login\n", err)
+			return nil
+		}
+	}
+	// Then the host user's own token variables, as the value-free clone helper
+	// read them before af wired the workspace (it came last in git's helper list,
+	// after the global helpers, so it comes last here too).
+	if token, ok := pushcred.EnvironmentToken(os.Getenv, hostnameOf(req.Host), os.Getenv("GH_HOST")); ok {
+		if werr := pushcred.WriteCredential(out, "x-access-token", token); werr == nil {
+			fmt.Fprintf(errw, "af: no push credential (%v); using the host's own token\n", err)
 			return nil
 		}
 	}
@@ -128,16 +138,51 @@ var hostOnlyGitEnvDrop = map[string]bool{
 	"GIT_ASKPASS": true, "SSH_ASKPASS": true, "GIT_TERMINAL_PROMPT": true, "GCM_INTERACTIVE": true,
 }
 
+// hostnameOf is a credential request's host without its port.
+func hostnameOf(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+// pathWithout returns a PATH list without the entries that name dir (as given
+// or symlink-resolved), so nothing the fallback runs can reach this session's gh
+// shim, which would hand the operator's token to whatever asked.
+func pathWithout(list, dir string) string {
+	if dir == "" {
+		return list
+	}
+	skip := map[string]bool{filepath.Clean(dir): true}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		skip[filepath.Clean(resolved)] = true
+	}
+	var kept []string
+	for _, entry := range filepath.SplitList(list) {
+		if entry != "" && skip[filepath.Clean(entry)] {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return strings.Join(kept, string(os.PathListSeparator))
+}
+
 // hostCredentialFill asks the host user's own git credential helpers, from the
 // system and global config only, for what git asked af for: `git credential
 // fill` run from "/" with every repository and command-line override stripped,
-// prompts off, bounded in time. A seam so tests never reach a real login.
-var hostCredentialFill = func(req pushcred.CredentialRequest) (username, password string, ok bool) {
+// prompts off, bounded in time. The session directory is taken off PATH and the
+// fallback guard is set, so a host helper that runs gh (`gh auth
+// git-credential`) reaches the host's real gh with the host's own login, never
+// this session's shim. A seam so tests never reach a real login.
+var hostCredentialFill = func(sessionDir string, req pushcred.CredentialRequest) (username, password string, ok bool) {
 	env := make([]string, 0, len(os.Environ())+4)
 	for _, kv := range os.Environ() {
-		name, _, _ := strings.Cut(kv, "=")
+		name, value, _ := strings.Cut(kv, "=")
 		if hostOnlyGitEnvDrop[name] || strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
 			continue
+		}
+		if name == "PATH" {
+			kv = "PATH=" + pathWithout(value, sessionDir)
 		}
 		env = append(env, kv)
 	}
@@ -183,6 +228,10 @@ func readPushOrigin(sessionDir string) (pushcred.Origin, error) {
 // no credential can be had, gh still runs, on whatever login the host has, and
 // stderr says so: the shim never makes gh less usable than it was without it.
 func runGHShim(errw io.Writer, sessionDir string, args []string) error {
+	// Inside the helper's host-login fallback (a host helper such as `gh auth
+	// git-credential` reached this shim), only the host's own login may answer:
+	// fetch nothing, and run the real gh exactly as the host would.
+	fallback := os.Getenv(hostCredentialDelegatedEnv) != ""
 	skip := []string{sessionDir}
 	if resolved, err := filepath.EvalSymlinks(sessionDir); err == nil {
 		skip = append(skip, resolved)
@@ -193,6 +242,13 @@ func runGHShim(errw io.Writer, sessionDir string, args []string) error {
 		return err
 	}
 	env := os.Environ()
+	if fallback {
+		if err := execGH(exe, append([]string{"gh"}, args...), env); err != nil {
+			fmt.Fprintf(errw, "af: running %s: %v\n", exe, err)
+			return err
+		}
+		return nil
+	}
 	origin, err := readPushOrigin(sessionDir)
 	if err == nil {
 		var resp daemon.GitCredentialResponse

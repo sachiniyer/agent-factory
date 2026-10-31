@@ -44,9 +44,12 @@ func pushSessionDir(t *testing.T, fake *fakePushClient) string {
 		fake.gotURL, fake.gotToken = url, token
 		return fake, nil
 	}
-	// Never the developer's or runner's real git login.
+	// Never the developer's or runner's real git login or token.
 	prevFill := hostCredentialFill
-	hostCredentialFill = func(pushcred.CredentialRequest) (string, string, bool) { return "", "", false }
+	hostCredentialFill = func(string, pushcred.CredentialRequest) (string, string, bool) { return "", "", false }
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", pushcred.ShimTokenEnv, hostCredentialDelegatedEnv} {
+		t.Setenv(name, "")
+	}
 	t.Cleanup(func() { newPushCredentialClient, hostCredentialFill = prev, prevFill })
 	return dir
 }
@@ -190,7 +193,7 @@ func TestGitCredentialHelperFallsBackToTheHostsOwnLogin(t *testing.T) {
 	fake := &fakePushClient{err: errors.New("not permitted for a sandbox credential: push credentials are withheld while af runs an automatic preserve-push for this session")}
 	dir := pushSessionDir(t, fake)
 	var asked pushcred.CredentialRequest
-	hostCredentialFill = func(req pushcred.CredentialRequest) (string, string, bool) {
+	hostCredentialFill = func(_ string, req pushcred.CredentialRequest) (string, string, bool) {
 		asked = req
 		return "host-user", "host-own-token", true
 	}
@@ -233,13 +236,92 @@ func TestHostCredentialFillAsksOnlyTheHostsOwnHelpers(t *testing.T) {
 	t.Setenv("GIT_CONFIG_PARAMETERS", "'credential.helper=!"+wrong+"'")
 	t.Chdir(ws)
 
-	user, pass, ok := hostCredentialFill(pushcred.CredentialRequest{Protocol: "https", Host: "github.com", Path: "owner/repo.git"})
+	user, pass, ok := hostCredentialFill("", pushcred.CredentialRequest{Protocol: "https", Host: "github.com", Path: "owner/repo.git"})
 	require.True(t, ok)
 	assert.Equal(t, "host-user", user)
 	assert.Equal(t, "host-own-token", pass)
 
 	// Nothing on the host: no answer, and no prompt.
 	require.NoError(t, os.Remove(stored))
-	_, _, ok = hostCredentialFill(pushcred.CredentialRequest{Protocol: "https", Host: "github.com", Path: "owner/repo.git"})
+	_, _, ok = hostCredentialFill("", pushcred.CredentialRequest{Protocol: "https", Host: "github.com", Path: "owner/repo.git"})
 	assert.False(t, ok)
+}
+
+// Codex P2 on #6442: inside the helper's host-login fallback, a host helper such
+// as `gh auth git-credential` can reach this shim. It must fetch nothing and run
+// the real gh on the host's own login — never hand the operator's token to a
+// request the daemon refused.
+func TestGHShimFetchesNothingInsideTheHostFallback(t *testing.T) {
+	fake := &fakePushClient{resp: daemon.GitCredentialResponse{Username: "x-access-token", Password: shimTestToken}}
+	sessionDir, realGH, got := installShimFixture(t, fake)
+	t.Setenv(hostCredentialDelegatedEnv, "1")
+	var errw bytes.Buffer
+	require.NoError(t, runGHShim(&errw, sessionDir, []string{"auth", "git-credential", "get"}))
+	assert.Equal(t, realGH, got.exe)
+	assert.Empty(t, fake.reqs, "no credential is fetched inside the fallback")
+	assert.Equal(t, []string{"host-own-token"}, envValues(got.env, "GH_TOKEN"), "the host's own environment, untouched")
+	assert.NotContains(t, envValues(got.env, pushcred.ShimTokenEnv), "1", "the shim did not mark an operator token, because it set none")
+}
+
+// And the fallback never reaches the shim at all: the session directory is off
+// PATH, so a host helper that runs `gh` gets the host's real gh.
+func TestHostCredentialFillNeverReachesTheSessionsShim(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential]\n\thelper = !gh auth git-credential\n"), 0o644))
+	ghScript := func(user, pass string) []byte {
+		return []byte("#!/bin/sh\n[ \"$1 $2 $3\" = \"auth git-credential get\" ] && printf 'username=" + user + "\\npassword=" + pass + "\\n'\nexit 0\n")
+	}
+	sessionDir, realDir := t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "gh"), ghScript("x-access-token", "OPERATOR-TOKEN"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "gh"), ghScript("host-user", "host-gh-token"), 0o755))
+	gitDir := filepath.Dir(mustLookPath(t, "git"))
+	t.Setenv("PATH", strings.Join([]string{sessionDir, realDir, gitDir, "/usr/bin", "/bin"}, string(os.PathListSeparator)))
+
+	user, pass, ok := hostCredentialFill(sessionDir, pushcred.CredentialRequest{Protocol: "https", Host: "github.com", Path: "other/repo.git"})
+	require.True(t, ok)
+	assert.Equal(t, "host-user", user)
+	assert.Equal(t, "host-gh-token", pass, "the fallback reached the session's shim, which serves the operator's token")
+}
+
+func mustLookPath(t *testing.T, name string) string {
+	t.Helper()
+	p, err := exec.LookPath(name)
+	require.NoError(t, err)
+	return p
+}
+
+// Codex P2 on #6442: a host authenticated only through its own token variables
+// (which the value-free clone helper read before af wired the workspace) keeps
+// that login when af cannot answer — but never the operator's token the shim
+// put in a gh process's environment.
+func TestGitCredentialHelperFallsBackToTheHostsOwnTokenVariables(t *testing.T) {
+	fake := &fakePushClient{err: errors.New("not permitted for a sandbox credential: push credentials are withheld while af runs an automatic preserve-push for this session")}
+	dir := pushSessionDir(t, fake)
+	in := "protocol=https\nhost=github.com\npath=owner/repo.git\n\n"
+
+	t.Setenv("GITHUB_TOKEN", "host-env-token")
+	var out, errw bytes.Buffer
+	require.NoError(t, runGitCredential(strings.NewReader(in), &out, &errw, dir, "get"))
+	assert.Equal(t, "username=x-access-token\npassword=host-env-token\n", out.String())
+	assert.Contains(t, errw.String(), "using the host's own token")
+
+	// Inside gh's process tree the variable is the operator's: not a host login.
+	t.Setenv(pushcred.ShimTokenEnv, "1")
+	out.Reset()
+	errw.Reset()
+	require.NoError(t, runGitCredential(strings.NewReader(in), &out, &errw, dir, "get"))
+	assert.Equal(t, "quit=1\n", out.String())
+
+	// Enterprise hosts use the enterprise variables.
+	t.Setenv(pushcred.ShimTokenEnv, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_HOST", "ghe.example")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "host-ghe-token")
+	out.Reset()
+	require.NoError(t, runGitCredential(strings.NewReader("protocol=https\nhost=ghe.example:8443\npath=t/s.git\n\n"), &out, &errw, dir, "get"))
+	assert.Equal(t, "username=x-access-token\npassword=host-ghe-token\n", out.String())
 }

@@ -155,6 +155,38 @@ func unquoteSingle(s string) (string, error) {
 	return b.String(), nil
 }
 
+// ShimTokenEnv marks an environment whose token variable the gh shim set: the
+// OPERATOR's token, handed to one gh process. A git that gh runs inherits it,
+// and must never mistake it for a token the host user set (EnvironmentToken).
+const ShimTokenEnv = "AF_PUSH_CREDENTIAL_FROM_GH_SHIM"
+
+// EnvironmentToken is the token a host user's own environment holds for a GitHub
+// host: GH_TOKEN / GITHUB_TOKEN for github.com and *.ghe.com tenants, or
+// GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN for the host GH_HOST configures.
+// These are the names, in the order, the value-free clone helper
+// (session.githubEnvironmentCredential) expanded, so a host authenticated that
+// way before af wired the workspace keeps that login. Nothing when the gh shim
+// set the variable: that token is the operator's, not the host's.
+func EnvironmentToken(getenv func(string) string, hostname, ghHost string) (string, bool) {
+	if getenv(ShimTokenEnv) != "" {
+		return "", false
+	}
+	ok, enterprise := GitHubHost(hostname, ghHost)
+	if !ok {
+		return "", false
+	}
+	names := publicTokenNames
+	if enterprise {
+		names = enterpriseTokenNames
+	}
+	for _, name := range names {
+		if v := strings.TrimSpace(getenv(name)); v != "" {
+			return v, plausibleToken(v)
+		}
+	}
+	return "", false
+}
+
 // tokenVars are every variable gh reads a token from.
 var tokenVars = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
 
@@ -164,7 +196,7 @@ var tokenVars = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GIT
 // enterprise host. gh then authenticates as the operator to that host only; a
 // host env token is never mixed in.
 func GHEnv(environ []string, o Origin, token string) []string {
-	drop := map[string]bool{}
+	drop := map[string]bool{ShimTokenEnv: true}
 	for _, name := range tokenVars {
 		drop[name] = true
 	}
@@ -178,6 +210,7 @@ func GHEnv(environ []string, o Origin, token string) []string {
 			out = append(out, kv)
 		}
 	}
+	out = append(out, ShimTokenEnv+"=1")
 	if o.Enterprise {
 		return append(out, "GH_HOST="+o.Host, "GH_ENTERPRISE_TOKEN="+token)
 	}

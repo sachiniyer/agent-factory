@@ -87,15 +87,40 @@ func TestGHEnvSetsExactlyOneTokenForTheOriginsHostKind(t *testing.T) {
 	pane := []string{"PATH=/usr/bin", "GH_TOKEN=host-own", "GITHUB_TOKEN=ci", "GH_ENTERPRISE_TOKEN=x", "GITHUB_ENTERPRISE_TOKEN=y", "GH_HOST=other.example", "HOME=/h"}
 	got := GHEnv(pane, Origin{Host: "github.com", Path: "o/r"}, "gho_op")
 	sort.Strings(got)
-	want := []string{"GH_HOST=other.example", "GH_TOKEN=gho_op", "HOME=/h", "PATH=/usr/bin"}
+	want := []string{ShimTokenEnv + "=1", "GH_HOST=other.example", "GH_TOKEN=gho_op", "HOME=/h", "PATH=/usr/bin"}
+	sort.Strings(want)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("public GHEnv = %q; want %q", got, want)
 	}
 
 	got = GHEnv(pane, Origin{Host: "ghe.example:8443", Path: "o/r", Enterprise: true}, "ghe_op")
 	sort.Strings(got)
-	want = []string{"GH_ENTERPRISE_TOKEN=ghe_op", "GH_HOST=ghe.example:8443", "HOME=/h", "PATH=/usr/bin"}
+	want = []string{ShimTokenEnv + "=1", "GH_ENTERPRISE_TOKEN=ghe_op", "GH_HOST=ghe.example:8443", "HOME=/h", "PATH=/usr/bin"}
+	sort.Strings(want)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("enterprise GHEnv = %q; want %q", got, want)
+	}
+}
+
+func TestEnvironmentTokenIsTheHostsOwnAndNeverTheShims(t *testing.T) {
+	vars := map[string]string{"GH_TOKEN": "gh-host", "GITHUB_TOKEN": "github-host", "GH_ENTERPRISE_TOKEN": "ghe-host"}
+	get := func(name string) string { return vars[name] }
+	if tok, ok := EnvironmentToken(get, "github.com", ""); !ok || tok != "gh-host" {
+		t.Fatalf("public = %q, %v", tok, ok)
+	}
+	if tok, ok := EnvironmentToken(get, "ghe.example", "ghe.example"); !ok || tok != "ghe-host" {
+		t.Fatalf("enterprise = %q, %v", tok, ok)
+	}
+	if _, ok := EnvironmentToken(get, "gitlab.com", ""); ok {
+		t.Fatal("a host that is not GitHub has no GitHub token")
+	}
+	vars[ShimTokenEnv] = "1"
+	if tok, ok := EnvironmentToken(get, "github.com", ""); ok {
+		t.Fatalf("the shim's (operator's) token was offered as the host's: %q", tok)
+	}
+	delete(vars, ShimTokenEnv)
+	vars["GH_TOKEN"] = "two\nlines"
+	if _, ok := EnvironmentToken(get, "github.com", ""); ok {
+		t.Fatal("an implausible token was offered")
 	}
 }

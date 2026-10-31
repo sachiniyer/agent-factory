@@ -1050,10 +1050,13 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
 - **When af can't supply it**, because the switch is off, the daemon machine
   has no login, the daemon is unreachable, or one of af's own pushes is
   running, the helper asks the host user's **own** git credential helpers
-  instead. It asks them from outside the workspace, with prompts off, exactly
-  as git would have before af was wired in. A host login therefore keeps
-  working, and af's token still never reaches those helpers. If they have
-  nothing either, git stops rather than prompting, and says why.
+  instead, and then the host user's own `GH_TOKEN` / `GITHUB_TOKEN` (or the
+  enterprise pair). It asks them from outside the workspace, with prompts off
+  and the session directory off `PATH`, in the order git used before af was
+  wired in. A host login therefore keeps working, and af's token still never
+  reaches those helpers: inside that fallback the gh shim fetches nothing, and
+  the token it gives a `gh` process is never mistaken for the host's own. If
+  they have nothing either, git stops rather than prompting, and says why.
 - **What gh gets.** The shim runs the host's real `gh`, found on absolute `PATH`
   entries only. The token goes into that one process's environment: `GH_TOKEN`,
   or `GH_HOST` plus `GH_ENTERPRISE_TOKEN`. So **gh carries the daemon machine's
