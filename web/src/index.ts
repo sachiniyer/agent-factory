@@ -67,6 +67,7 @@ import {
   restoreSession,
   resumeFromLimit,
   confirmHandoffDelivery,
+  fetchKeptBranch,
   shouldForgetToken,
   storeToken,
   triggerTask,
@@ -92,6 +93,7 @@ import {
   confirmDeleteProjectModal,
   confirmModal,
   handoffModal,
+  type KeptBranch,
   markDeliveredModal,
   type ModalHandle,
   newSessionModal,
@@ -888,10 +890,15 @@ function selectedSession(): { id: string; title: string } | null {
 }
 
 let restoreModalFocus: (() => void) | null = null;
+/** Advances on every dialog open and close, so an async read that mounts a dialog
+ *  (the delete confirm's branch read, #6233) can tell a newer dialog or a close
+ *  superseded it while it was in flight. */
+let modalGeneration = 0;
 let stopModalProjectionWatch: (() => void) | null = null;
 
 /** Closes and clears the open modal, if any. */
 function closeModal(): void {
+  modalGeneration++;
   if (modal) {
     const restoreFocus = restoreModalFocus;
     restoreModalFocus = null;
@@ -954,6 +961,7 @@ function captureModalInvoker(): ModalInvoker {
 /** Mounts a fresh modal, replacing any currently open overlay. Controllers are
  *  reaped before their DOM is replaced so no hidden terminal keeps streaming. */
 function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInvoker): void {
+  modalGeneration++;
   mountOverlay((mountHost) => {
     const focused = document.activeElement as HTMLElement | null;
     const invoker = explicitInvoker ?? captureModalInvoker();
@@ -1136,6 +1144,7 @@ function openConfirm(
 ): void {
   if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
+  const dialogGeneration = ++modalGeneration;
   const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest: SessionData | undefined): boolean => {
@@ -1267,8 +1276,10 @@ function openConfirm(
       } else showRefusal();
     });
   };
+  const mountWith = (keptBranch?: KeptBranch): void => {
   mountConfirmation(
     confirmModal({
+      keptBranch,
       action,
       sessionTitle: target.title,
       immediateRestore,
@@ -1282,6 +1293,21 @@ function openConfirm(
     }),
   );
   if (immediateRestore) onConfirm();
+  };
+  // The delete copy names a branch the delete leaves in the repo, so read the
+  // worktree's HEAD now, before the user is asked (#6233).
+  if (action === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
+    // The read can outlive the gesture: it mounts only while this is still the
+    // newest dialog request and no navigation has happened (#6205's ticket).
+    const ticket = createSelectionIntent.snapshot();
+    const generation = connectionGeneration;
+    void fetchKeptBranch(target.id, target.title, token ?? "").then((kept) => {
+      if (modalGeneration !== dialogGeneration || !createSelectionIntent.isCurrent(ticket) || connectionGeneration !== generation) return;
+      mountWith(kept);
+    });
+  } else {
+    mountWith();
+  }
 }
 
 /** Opens the delete-project confirm for a project row (#1735). On confirm it

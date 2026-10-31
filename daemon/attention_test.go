@@ -186,3 +186,43 @@ func TestAttentionSurvivesTypingADraftIntoClaudesComposer(t *testing.T) {
 	pending[0]()
 	require.False(t, inst.HasAttention())
 }
+
+// A poll captures a working frame and decides at an epoch; the agent raises a
+// request before the poll settles it. The frame predates the request, so it must
+// not queue a clear for it, even though a request raised at Ready inherits a
+// satisfied idle spell. The settle runs the real call site (the transition
+// rejects the stale observation and the attention check must too).
+func TestStaleWorkingFrameCannotClearARequestRaisedAfterTheCapture(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, "asker", "af_attention_stale")
+	require.Equal(t, "claude", inst.ResolvedAgent(), "premise: the session runs Claude")
+
+	var pending []func()
+	prev := runAttentionClear
+	runAttentionClear = func(clear func()) { pending = append(pending, clear) }
+	t.Cleanup(func() { runAttentionClear = prev })
+
+	inst.SetStatusForTest(session.Ready)
+	_, captureEpoch := inst.InFlightOpAndEpoch() // the poll captures the working frame here
+
+	_, err = inst.SetAttention("pick A or B", time.Unix(100, 0)) // the agent asks after the capture
+	require.NoError(t, err)
+	require.True(t, inst.Attention().SeenIdle, "premise: the request inherits a satisfied idle spell")
+
+	manager.settleChurnedLiveness(inst, true, fixturePane(t, "claude_working_tool.ansi"), captureEpoch)
+	require.Empty(t, pending, "a frame from before the request queues no clear for it")
+	require.True(t, inst.HasAttention())
+
+	// Control: the same frame decided after the request answers it.
+	inst.SetStatusForTest(session.Ready)
+	_, epoch := inst.InFlightOpAndEpoch()
+	manager.settleChurnedLiveness(inst, true, fixturePane(t, "claude_working_tool.ansi"), epoch)
+	require.Len(t, pending, 1, "a frame observed after the request answers it")
+	pending[0]()
+	require.False(t, inst.HasAttention())
+}

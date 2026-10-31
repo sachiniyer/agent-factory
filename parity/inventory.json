@@ -989,7 +989,7 @@
         "pointer": "api/sessions_lifecycle.go:20 sessionsKillCmd"
       },
       "verdict": "parity",
-      "notes": ""
+      "notes": "The delete confirm of every surface names a branch af does not own that the worktree is on and says it is kept (#6233): TUI via assessKillLoss, web via the WorkspaceFacts read (web/src/api.ts fetchKeptBranch), CLI via kept_branch/note in the kill result."
     },
     {
       "id": "session.limit-retry",
@@ -2170,6 +2170,7 @@
       "ExplainConfig": "config.explain",
       "HandoffSessionV2": "session.handoff",
       "KillSession": "session.kill",
+      "WorkspaceFacts": "session.kill",
       "ListBackends": "backend.list",
       "ListDirectory": "project.browse",
       "ListOnComplete": "task.on-complete",
