@@ -2280,6 +2280,9 @@ body[data-project-color] [data-af-theme="dark"] {
 /* Modal overlay layer (#1592 Phase 5 PR5): a dimmed backdrop centering a surface
  * card. The host is a passive layer — empty and non-interactive until a modal
  * mounts into it. */
+/* Published by viewport-insets.ts; 0 means the visual viewport fills the layout one. */
+:root { --af-vv-top: 0; --af-vv-bottom: 0; }
+
 .af-modal-host {
   position: relative;
   z-index: var(--af-z-modal);
@@ -2287,7 +2290,10 @@ body[data-project-color] [data-af-theme="dark"] {
 
 .af-modal-backdrop {
   position: fixed;
-  inset: 0;
+  /* The visible area: a soft keyboard shrinks the visual viewport, not the layout
+   * one, so a plain inset: 0 would centre the card partly under it (#6431). Both
+   * variables are 0 on desktop and with the keyboard closed. */
+  inset: var(--af-vv-top) 0 var(--af-vv-bottom) 0;
   background: var(--af-surface);
   display: flex;
   align-items: center;
@@ -2299,7 +2305,7 @@ body[data-project-color] [data-af-theme="dark"] {
 .af-modal-card {
   width: 100%;
   max-width: calc(var(--af-space-1) * 120);
-  max-height: 90vh;
+  max-height: min(90vh, 100%);
   overflow-y: auto;
   /* Keep a scroll inside the modal from chaining into the page behind it (#2493). */
   overscroll-behavior: contain;
@@ -3180,7 +3186,8 @@ body[data-project-color] [data-af-theme="dark"] {
   }
 
   .af-modal-card {
-    max-height: 92vh;
+    /* Never taller than the visible area above a soft keyboard (#6431). */
+    max-height: min(92vh, 100%);
   }
 }
 

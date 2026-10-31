@@ -1774,13 +1774,17 @@ body[data-project-color] [data-af-theme=dark] {
 .af-danger:disabled {
   opacity: 1;
 }
+:root {
+  --af-vv-top: 0;
+  --af-vv-bottom: 0;
+}
 .af-modal-host {
   position: relative;
   z-index: var(--af-z-modal);
 }
 .af-modal-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--af-vv-top) 0 var(--af-vv-bottom) 0;
   background: var(--af-surface);
   display: flex;
   align-items: center;
@@ -1791,7 +1795,7 @@ body[data-project-color] [data-af-theme=dark] {
 .af-modal-card {
   width: 100%;
   max-width: calc(var(--af-space-1) * 120);
-  max-height: 90vh;
+  max-height: min(90vh, 100%);
   overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--af-surface-raised);
@@ -2474,7 +2478,7 @@ body[data-project-color] [data-af-theme=dark] {
     padding: var(--af-space-2);
   }
   .af-modal-card {
-    max-height: 92vh;
+    max-height: min(92vh, 100%);
   }
 }
 .af-config {
