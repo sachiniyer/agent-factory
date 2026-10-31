@@ -245,3 +245,32 @@ func TestRuntimeMachineReadsTheRecordedRuntime(t *testing.T) {
 		assert.False(t, ok, name)
 	}
 }
+
+// Codex P2 on #6433 at 50552b4: an archive af confirmed stopped while keeping its
+// workspace runs nothing, so it blocks no host — but only while every condition
+// of "confirmed stopped" holds.
+func TestStoppedPreservedArchiveNeedsEveryConditionOfAConfirmedStop(t *testing.T) {
+	stopped := func() *Instance {
+		return &Instance{Title: "a", liveness: LiveArchived, archivedWorkspace: &ArchivedWorkspaceData{Host: "box1", Dir: "/s"}}
+	}
+	assert.True(t, stopped().StoppedPreservedArchive())
+	for name, mutate := range map[string]func(*Instance){
+		"no preserved workspace":        func(i *Instance) { i.archivedWorkspace = nil },
+		"not archived (being restored)": func(i *Instance) { i.liveness = LiveReady },
+		"started":                       func(i *Instance) { i.started = true },
+		"an agent server attached":      func(i *Instance) { i.agentSrv = &remoteAgentServer{} },
+		"stop not confirmed":            func(i *Instance) { i.runtimeCleanupStateUnknown = true },
+	} {
+		i := stopped()
+		mutate(i)
+		assert.False(t, i.StoppedPreservedArchive(), name)
+	}
+
+	// And it survives storage: a restarted daemon still knows the archive stopped.
+	data := InstanceData{ID: "a1", Title: "a", Path: t.TempDir(), Status: Archived, BackendType: "ssh", CreatedBySandbox: "p",
+		Worktree:          GitWorktreeData{RepoPath: "/r", WorktreePath: "/r/wt"},
+		ArchivedWorkspace: &ArchivedWorkspaceData{Host: "box1", Dir: "/s"}}
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	assert.True(t, restored.StoppedPreservedArchive())
+}

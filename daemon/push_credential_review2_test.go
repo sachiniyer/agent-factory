@@ -103,19 +103,26 @@ func (pf *pushFixture) placeOn(t *testing.T, title string, m session.RuntimeMach
 }
 
 // track adds a row to the owner's project from data (so its provenance is
-// exactly what the data says).
+// exactly what the data says). A row whose data is Archived stays an archive;
+// any other is a started, ready row.
 func (pf *pushFixture) track(t *testing.T, data session.InstanceData) *session.Instance {
 	t.Helper()
+	archived := data.Status == session.Archived
 	// The fixture's backend seam, not the row's own type, decides the backend.
-	data.Path, data.Status = pf.me.Path, session.Ready
+	data.Path = pf.me.Path
+	if !archived {
+		data.Status = session.Ready
+	}
 	if data.BackendType == "" {
 		data.BackendType = "local"
 	}
 	data.Worktree = session.GitWorktreeData{RepoPath: pf.me.Path, WorktreePath: pf.me.Path}
 	inst, err := session.FromInstanceData(data)
 	require.NoError(t, err)
-	inst.SetStartedForTest(true)
-	inst.SetStatusForTest(session.Ready)
+	if !archived {
+		inst.SetStartedForTest(true)
+		inst.SetStatusForTest(session.Ready)
+	}
 	pf.backends[data.Title] = "ssh"
 	pf.mgr.mu.Lock()
 	pf.mgr.instances[daemonInstanceKey(pf.repoA, data.Title)] = inst
@@ -136,6 +143,10 @@ func TestGitCredential_WithheldWhileASessionTheOperatorDidNotCreateSharesTheMach
 		"sandbox-created, another machine":     {session.InstanceData{ID: "t1", Title: "t", CreatedBySandbox: "x"}, &session.RuntimeMachine{Host: "box9.example"}, false},
 		"sandbox-created, no runtime":          {session.InstanceData{ID: "t1", Title: "t", CreatedBySandbox: "x"}, nil, false},
 		"operator-created, same machine":       {session.InstanceData{ID: "t1", Title: "t", CreatedByOperator: true}, &box1Machine, false},
+		// Codex P2 on #6433 at 50552b4: an archive af confirmed stopped runs
+		// nothing; its recorded runtime only lets a later kill reap the directory.
+		"sandbox-created, confirmed-stopped preserved archive": {session.InstanceData{ID: "t1", Title: "t", CreatedBySandbox: "x",
+			Status: session.Archived, ArchivedWorkspace: &session.ArchivedWorkspaceData{Host: "box1", Dir: "/s"}}, &box1Machine, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pf := newPushFixture(t)
