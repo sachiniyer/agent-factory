@@ -6,7 +6,7 @@
 // DocSync surface, so it can run against any engine with that surface.
 
 import type { DocText, SaveResult } from "./proposal_api.js";
-import { DraftStorage, newWindowId, type KV } from "./docs_draft_store.js";
+import { DRAFT_STALE_MS, DraftStorage, newWindowId, type KV } from "./docs_draft_store.js";
 import { ClosingTabs } from "./docs_closing.js";
 import { missingFrom, RosterOrder } from "./docs_roster.js";
 import { CONFLICT_MINE, CONFLICT_SPLIT, CONFLICT_THEIRS, hasConflictMarkers } from "./text_diff.js";
@@ -543,7 +543,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
    *  adopts them and resolves its copy, and the page comes back. What it held unsaved must be in
    *  storage again, because its sync stashed it once and will not store it a second time.
    *  (AF_NO_BFCACHE_REVIVE is the pane that only refreshes the entries that still exist.) */
-  function bfcacheReturn(adopted = false): void {
+  function bfcacheReturn(adopted = false, stall = false): void {
     if (adopted) {
       // The page holds these as drafts it adopted from a closed window, not ones it stored: the
       // sync restored them without storing them again.
@@ -562,12 +562,25 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       return own ? [{ doc, buffer: (JSON.parse(own) as { draft: Draft }).draft.buffer }] : [];
     });
     if (!mine.length) return;
-    storageA.release();
+    if (stall) {
+      // (Entries a closed page left are another window's to adopt first; leave the run alone while any remain.)
+      if (ghostBox.cur) return; // a live second window would look stale too, and its draft is its own
+      if ([...kvMap.keys()].some((k) => closedOwners.has(k.split("\n").pop()!))) return;
+      // No pagehide: the page's heartbeat was throttled for longer than the staleness window, so
+      // its entries look dead (and are not released).
+      for (const doc of names) {
+        const k = `af.docs.draft\ns\nplan\n${doc}\n${storageA.owner}`;
+        const raw = kvMap.get(k);
+        if (raw) kvMap.set(k, JSON.stringify({ ...(JSON.parse(raw) as object), at: now, released: false }));
+      }
+      now += DRAFT_STALE_MS + 1;
+    } else storageA.release();
     const other = new DraftStorage(kv, `wBF${++winSeq}`, () => now, "s\nplan");
     for (const { doc } of mine) {
       if (other.load(doc)) other.clear(doc);
     }
     if (process.env.AF_NO_BFCACHE_REVIVE) storageA.touch();
+    else if (stall) storageA.touch();
     else storageA.revive();
     for (const { doc, buffer } of mine) {
       if (!stashedBuffers(doc).includes(buffer)) fail("bfcache-draft-lost", `${doc}: the page came back from the back-forward cache without ${JSON.stringify(buffer)} in storage`);
@@ -703,7 +716,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     // I19: the page that opens next takes over what the closed page left for this doc (its
     // entry is released, however late its final save wrote it), unless storage was full.
     const left = [...kvMap.keys()].filter((k) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`) && k.endsWith(`\n${oldOwner}`));
-    if (!fullAtReopen && left.length && syncs.get(doc) && isLoaded(syncs.get(doc)!)) fail("closed-page-draft-not-adopted", `${doc}: the closed page's draft was left behind when the page reopened`);
+    if (!fullAtReopen && left.length && syncs.get(doc) && isLoaded(syncs.get(doc)!)) fail("closed-page-draft-not-adopted", `${doc}: the closed page's draft was left behind when the page reopened ${JSON.stringify(left)} all=${JSON.stringify([...kvMap.entries()].map(([k,v])=>[k.split("\n").slice(-2).join("/"), (JSON.parse(v) as {released:boolean,at:number}).released, (JSON.parse(v) as {at:number}).at]))} now=${now}`);
     const back = syncs.get(doc)!;
     // I6: unsaved edits that survive only in storage come back, and say so.
     if (unsaved.length && isLoaded(back) && !["recovered", "conflict", "saving", "saved", "merged"].includes(back.currentStatus)) {
@@ -1359,6 +1372,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 40 || step === 80 || step === 120)) {
       bfcacheReturn(true);
     }
+    // The heartbeat stalls past the staleness window, another window adopts the draft, and it resumes.
+    if (o.chaos && (o.faults ?? 0) > 0 && (step === 50 || step === 90 || step === 130)) bfcacheReturn(false, true);
     const r = rand();
     trace.push(`step ${step} r=${r.toFixed(3)} attached=${attached} status=${syncs.get(attached)?.currentStatus} text=${JSON.stringify(syncs.get(attached)?.text)}`);
     if (r < 0.28) userEdit();

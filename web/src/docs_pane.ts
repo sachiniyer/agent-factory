@@ -136,6 +136,9 @@ export class DocsPane {
   /** One sync per doc this pane opened. A doc that is not shown keeps its state,
    *  an unresolved conflict draft included. */
   private readonly syncs = new Map<string, DocSync>();
+  /** Docs whose delete request is out. Opening one would start a sync that the delete's reply
+   *  then clears the draft of; the tab does nothing until the request settles. */
+  private readonly deleting = new Set<string>();
   private editor: DocsEditor | null = null;
   private freshBuffer = true;
   private readonly texts = new Map<string, string>();
@@ -532,14 +535,17 @@ export class DocsPane {
 
   private async removeDoc(doc: ProposalDocRef): Promise<void> {
     const wasOpen = this.current?.name === doc.name;
+    this.deleting.add(doc.name);
     const suspended = this.suspendDoc(doc.name);
     try {
       await removeDoc(this.opts.sessionId, this.opts.slug, doc.name, this.opts.token);
     } catch (e) {
+      this.deleting.delete(doc.name);
       this.finishDelete(doc.name, suspended, false);
       if (wasOpen && !this.disposed) void this.openDoc(doc, false, true);
       throw e;
     }
+    this.deleting.delete(doc.name);
     this.finishDelete(doc.name, suspended, true);
     if (this.disposed) return;
     this.texts.delete(doc.name);
@@ -660,6 +666,7 @@ export class DocsPane {
   }
 
   private async openDoc(doc: ProposalDocRef, toQuestion = false, force = false): Promise<void> {
+    if (this.deleting.has(doc.name)) return;
     if (!force && this.current?.name === doc.name && this.sync) {
       if (toQuestion) this.editor?.goToFirstQuestion();
       return;

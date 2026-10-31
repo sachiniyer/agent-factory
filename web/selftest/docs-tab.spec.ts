@@ -132,6 +132,54 @@ test("docs tab: right-click Delete removes a doc", async ({ page, request }) => 
   expect(existsSync(join(started.path, "api.md"))).toBe(true);
 });
 
+// A doc whose delete is still out cannot be reopened: a sync started now would have its
+// stored draft cleared by the delete's reply, and closing it would lose what was typed.
+test("docs tab: a doc whose delete is pending does not open from its tab", async ({ page, request }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const af = (...args: string[]): string =>
+    execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+  const title = "docs-pending-delete-probe";
+  const slug = "docs-pending-delete-plan";
+  af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
+  const started = JSON.parse(af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title,
+    "--docs", "goals,api")) as { path: string; tab_error?: string };
+  expect(started.tab_error ?? "", "start must create the Docs tab").toBe("");
+
+  const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
+  expect(session).toBeTruthy();
+
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route("**/v1/RemoveProposalDoc", async (route) => {
+    await held;
+    await route.continue();
+  });
+
+  await page.goto(`/#/session/${session.id}`);
+  await page.locator(".af-tab", { hasText: "Docs" }).click();
+  const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
+  await expect(pane.locator(".cm-content")).toBeVisible();
+  const goalsTab = pane.locator(".af-docs-tab", { hasText: "goals" });
+  const apiTab = pane.locator(".af-docs-tab", { hasText: "api" });
+  await expect(goalsTab).toHaveAttribute("aria-selected", "true");
+
+  await apiTab.click({ button: "right" });
+  await pane.locator(".af-docs-docmenu").getByRole("menuitem", { name: "Delete" }).click();
+  // The delete request is held: the tab is still there, and clicking it opens nothing.
+  await expect(apiTab).toBeVisible();
+  await apiTab.click();
+  await expect(goalsTab, "the doc being deleted must not open").toHaveAttribute("aria-selected", "true");
+  await expect(apiTab).not.toHaveAttribute("aria-selected", "true");
+
+  release();
+  await expect(pane.locator(".af-docs-tab")).toHaveText(["goals"]);
+  await expect.poll(() => existsSync(join(started.path, "api.md"))).toBe(false);
+});
+
 // Switching docs mid-edit keeps the keystrokes: the unsaved text is saved on the
 // switch and the doc comes back with it, not with the daemon's older text.
 test("docs tab: switching docs mid-edit keeps what was typed", async ({ page, request }) => {

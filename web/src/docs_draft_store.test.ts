@@ -225,3 +225,20 @@ test("a bfcache restore writes back a legacy-adopted draft", () => {
   a.revive();
   assert.equal(a.load("goals")?.buffer, "legacy work");
 });
+
+test("a heartbeat that resumes after a stall writes back a draft another window adopted as dead", () => {
+  const kv = memory();
+  let now = 1000;
+  const a = new DraftStorage(kv, "wA", () => now, "s\nplan");
+  a.store("goals", draft("unresolved conflict"));
+  now += DRAFT_STALE_MS + 1; // the page was throttled: no heartbeat for over 30 s
+  const b = new DraftStorage(kv, "wB", () => now, "s\nplan");
+  assert.equal(b.load("goals")?.buffer, "unresolved conflict", "B adopts what looks like a dead window's draft");
+  b.clear("goals"); // B resolves or discards its copy
+  assert.equal(a.load("goals"), null);
+  a.touch(); // the heartbeat resumes: no pageshow, so revive() is never reached
+  assert.equal(a.load("goals")?.buffer, "unresolved conflict", "A's unresolved work is stored again");
+  a.clear("goals");
+  a.touch();
+  assert.equal(a.load("goals"), null, "a draft the sync cleared is not written back");
+});
