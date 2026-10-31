@@ -67,23 +67,37 @@ func startLaunchEndpoint(lookup PaneLookup, alive SessionLiveness) (*CapabilityB
 	stop := make(chan struct{})
 	launchStop, launchLn, launchDir = stop, ln, dir
 	go b.Serve(ln)
-	if alive != nil {
-		go func() {
-			ticker := time.NewTicker(capabilitySweepInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-stop:
-					return
-				case <-ticker.C:
+	go func() {
+		ticker := time.NewTicker(capabilitySweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				keepClaimEndpointFresh(socket, dir, time.Now())
+				if alive != nil {
 					ctx, cancel := context.WithTimeout(context.Background(), claimIOTimeout)
 					b.Sweep(ctx, alive)
 					cancel()
 				}
 			}
-		}()
-	}
+		}
+	}()
 	return b, socket, nil
+}
+
+// keepClaimEndpointFresh marks the claim socket and its directory as recently used.
+// They live under os.TempDir(), and on macOS that is /var/folders/xx/yyyy/T/,
+// which the system prunes by age: nothing in this process touches the socket after
+// bind and a connect does not update it, so a daemon that outlives the prune window
+// (days, on a Mac that stays up) would have its endpoint unlinked while a session
+// still holds a default-command naming it, and that session's new windows would
+// exit 127. Errors are ignored: a path that is already gone is reported by the
+// shim's own dial, with the restart hint.
+func keepClaimEndpointFresh(socket, dir string, now time.Time) {
+	_ = os.Chtimes(socket, now, now)
+	_ = os.Chtimes(dir, now, now)
 }
 
 // ShutdownLaunchCapabilities stops the endpoint LaunchCapabilities started: it

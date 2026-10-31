@@ -5,7 +5,9 @@ package sessionenv
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -70,4 +72,35 @@ func TestCapability_ARestartedBrokerRefusesAnOlderProcessesToken(t *testing.T) {
 	require.ErrorContains(t, err, "unknown or already used")
 	_, perPane := restarted.Capabilities("s")
 	require.Zero(t, perPane)
+}
+
+// A long-lived daemon's claim socket sits under the system temp dir, which macOS
+// prunes by age. The periodic keep-alive must move both the socket's and its
+// directory's access and modification times to now, or the endpoint disappears
+// while sessions still name it in their default-command (#6384).
+func TestCapability_KeepClaimEndpointFreshRefreshesAgedSocketAndDir(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "claim.sock")
+	if err := os.WriteFile(socket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * 24 * time.Hour)
+	for _, p := range []string{socket, dir} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	keepClaimEndpointFresh(socket, dir, now)
+	for _, p := range []string{socket, dir} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if age := now.Sub(fi.ModTime()); age > time.Second {
+			t.Fatalf("%s mtime is %v old after the keep-alive, want fresh", p, age)
+		}
+	}
+	// A path that is already gone must not panic or error out the sweep goroutine.
+	keepClaimEndpointFresh(filepath.Join(dir, "missing.sock"), filepath.Join(dir, "missing"), now)
 }
