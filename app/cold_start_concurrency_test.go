@@ -142,3 +142,30 @@ func TestMaterializeSnapshot_PrimesTheTmuxSnapshotAroundTheBatchOnce(t *testing.
 		require.Equal(t, "build", e, "prime and release each happen exactly once per batch")
 	}
 }
+
+// #6446: every restore of a batch shares ONE RestoreContext, so the project's
+// repo and config resolution runs once per batch rather than once per session.
+func TestMaterializeSnapshot_ShareOneRestoreContextAcrossTheBatch(t *testing.T) {
+	h := newTestHome(t)
+	h.snapshotBuildWorkers = 0 // the production default: concurrent
+	data, insts := snapshotRecords(t, 12)
+
+	var mu sync.Mutex
+	seen := map[*session.RestoreContext]int{}
+	t.Cleanup(SetInstanceBuilderWithContextForTest(func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
+		mu.Lock()
+		seen[rc]++
+		mu.Unlock()
+		return insts[d.Title], nil
+	}))
+
+	h.materializeSnapshot(data)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, seen, 1, "all restores in a batch must share one context")
+	for rc, n := range seen {
+		require.NotNil(t, rc, "a batch must pass a context, not nil")
+		require.Equal(t, len(data), n)
+	}
+}
