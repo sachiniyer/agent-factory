@@ -17,6 +17,8 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af backlog`](#af-backlog) — Keep an ordered backlog of work items for a project
 - [`af backlog add`](#af-backlog-add) — Add a draft item, or add and update many items from JSON
+- [`af backlog answer`](#af-backlog-answer) — Answer an item's open question
+- [`af backlog ask`](#af-backlog-ask) — From an item session, ask the user a question
 - [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
 - [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
 - [`af backlog done`](#af-backlog-done) — Mark an item done after review, or, from an item session, send it to review
@@ -497,6 +499,8 @@ af backlog
 **Subcommands**
 
 - [`af backlog add`](#af-backlog-add) — Add a draft item, or add and update many items from JSON
+- [`af backlog answer`](#af-backlog-answer) — Answer an item's open question
+- [`af backlog ask`](#af-backlog-ask) — From an item session, ask the user a question
 - [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
 - [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
 - [`af backlog done`](#af-backlog-done) — Mark an item done after review, or, from an item session, send it to review
@@ -558,14 +562,64 @@ af backlog add <title> | add --file <path or -> [flags]
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af backlog answer
+
+Answer an item's open question
+
+Answer the item's oldest open question, or the one --question names. af adds the answer to the thread and sends it to the item's session, restoring the session first if it is archived, and waiting while a client is attached to it. If the session is gone, the answer stays in the thread.
+
+```
+af backlog answer <id> [--question <n>] <text> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--question` | `int` | The `id` of the question to answer, from "af backlog show"; default the oldest open one (default `0`) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog ask
+
+From an item session, ask the user a question
+
+Run from inside an item session: add a question to the item's thread and set the session's attention to it. The item shows Needs you until the user answers; the answer arrives in this session. Stop working after you ask.
+
+```
+af backlog ask --self <text> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--self` |  | Ask on the item of the session this runs in |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af backlog budget
 
 Show or change the global budget
 
-The budget is the share of your Claude plan the backlog may use, for all projects. --share is the percent of each plan window (5-hour and weekly) the backlog may use. --stop-at is the plan percent, from any use, at which the runner stops. --max-per-run is the percent of the 5-hour window one run may use. --usd-limit is a dollar limit at API prices for accounts with no plan readings (an API key); 0 turns it off. With no flags, print the settings.
+The budget is the share of your Claude plan the backlog may use, in each plan window (5-hour and weekly), for all projects. With no flags, print it with each window's plan %, the backlog's part of it, the reset time and the age of the newest reading. --share sets the backlog's % of each window (default 50). --stop-at sets the plan % at which the runner stops (default 90). --max-per-run sets the % of the 5-hour window one run may use (default 10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 turns it off.
 
 ```
-af backlog budget [flags]
+af backlog budget [--share <pct>] [--stop-at <pct>] [--max-per-run <pct>] [--usd-limit <usd>] [flags]
 ```
 
 **Flags**

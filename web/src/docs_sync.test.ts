@@ -490,3 +490,18 @@ test("every save names its writer and counts its saves upward", async () => {
   assert.ok(fences[1]!.seq > fences[0]!.seq, "and its saves count upward");
   assert.ok(fences[0]!.writer.length >= 8);
 });
+
+test("whenSaved settles when its doc is abandoned mid-save, so Send now does not hang", async () => {
+  const h = await started();
+  h.type("v2");
+  await h.fire();
+  let verdict: string | null = null;
+  void h.sync.whenSaved().then((v) => (verdict = v));
+  await tick();
+  assert.equal(verdict, null, "the save is still in flight");
+  h.sync.abandon(false); // the doc was deleted
+  h.saves[0]!.reply.resolve({ kind: "saved", text: "v2", commit: "c2", merged: false });
+  await tick();
+  assert.equal(verdict, "blocked", "an abandoned sync never saves: the waiter is released, not left pending");
+  assert.equal(await h.sync.whenSaved(), "blocked");
+});

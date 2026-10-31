@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/planusage"
 )
 
 type testHost struct {
@@ -16,11 +18,36 @@ type testHost struct {
 	lookups int
 	slots   int
 	facts   Facts
+	// attention is each session's mirrored attention reason.
+	attention map[string]string
+	target    AnswerTarget
+	delivered []PendingAnswer
+	usage     planusage.Usage
+	// onTarget runs inside AnswerTarget, between the service reading the item and
+	// its transaction.
+	onTarget func()
+}
+
+func (h *testHost) SetAttention(_, sessionID string, _ int, reason string) {
+	if h.attention == nil {
+		h.attention = map[string]string{}
+	}
+	h.attention[sessionID] = reason
+}
+func (h *testHost) AnswerTarget(string, string) AnswerTarget {
+	if h.onTarget != nil {
+		h.onTarget()
+	}
+	return h.target
+}
+func (h *testHost) DeliverAnswer(_ string, a PendingAnswer) {
+	h.delivered = append(h.delivered, a)
 }
 
 func (h *testHost) Facts(string) Facts          { return h.facts }
 func (h *testHost) ProjectName(string) string   { h.lookups++; return h.name }
 func (h *testHost) SlotsUsed(string) int        { return h.slots }
+func (h *testHost) Usage() planusage.Usage      { return h.usage }
 func (h *testHost) Changed(_ string, ids []int) { h.changed = append(h.changed, ids) }
 func (h *testHost) last() []int                 { return h.changed[len(h.changed)-1] }
 func ptr[T any](v T) *T                         { return &v }
@@ -347,15 +374,17 @@ func TestServiceLooksUpNameOnlyForNotFound(t *testing.T) {
 }
 
 func TestServiceBudget(t *testing.T) {
-	s, _ := newTestService(t)
+	s, h := newTestService(t)
+	reset := time.Date(2026, 10, 20, 14, 0, 0, 0, time.UTC)
+	h.usage = planusage.Usage{Account: "default", Windows: planusage.Windows{FiveHour: planusage.PlanWindow{Plan: 30, Backlog: 12, ResetsAt: &reset}}}
 	b, err := s.GetBudget(GetBudgetRequest{})
 	want := Budget{SchemaVersion: BudgetSchemaVersion, Share: 50, StopAt: 90, MaxPerRun: 10}
-	if err != nil || b.Budget != want {
+	if err != nil || b.Budget != want || b.Windows.FiveHour.Backlog != 12 || b.Account != "default" {
 		t.Fatal(b, err)
 	}
 	out, err := s.SetBudget(SetBudgetRequest{Share: ptr(30.0), StopAt: ptr(100.0)})
 	want.Share, want.StopAt = 30, 100
-	if err != nil || out.Budget != want {
+	if err != nil || out.Budget != want || out.Windows.FiveHour.Plan != 30 {
 		t.Fatal(out, err)
 	}
 	out, err = s.SetBudget(SetBudgetRequest{MaxPerRun: ptr(0.0), USDLimit: ptr(10.0)})
@@ -406,6 +435,18 @@ func TestServiceRunnerView(t *testing.T) {
 		v, err := s.Get(GetRequest{RepoID: repoID})
 		if err != nil || v.Runner != st.want {
 			t.Fatalf("step %d: %+v %v", i, v.Runner, err)
+		}
+	}
+}
+
+// The backlog RPCs resolve repo_path like the other daemon routes: a relative
+// path is refused instead of resolved against the daemon's working directory
+// (Codex P2 on #6295).
+func TestResolveRefusesARelativeRepoPath(t *testing.T) {
+	s := NewService(&testHost{})
+	for _, rel := range []string{".", "repo", "../x"} {
+		if _, err := s.Resolve("", rel); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+			t.Errorf("Resolve(%q) = %v, want a refusal", rel, err)
 		}
 	}
 }

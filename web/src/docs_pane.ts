@@ -83,7 +83,7 @@ function newPaneDrafts(sessionId: string, slug: string): DraftStorage {
     draftsWired = true;
     window.setInterval(() => liveDrafts.forEach((x) => x.touch()), DRAFT_HEARTBEAT_MS);
     window.addEventListener("pagehide", () => liveDrafts.forEach((x) => x.release()));
-    window.addEventListener("pageshow", () => liveDrafts.forEach((x) => x.touch()));
+    window.addEventListener("pageshow", () => liveDrafts.forEach((x) => x.revive()));
   }
   return d;
 }

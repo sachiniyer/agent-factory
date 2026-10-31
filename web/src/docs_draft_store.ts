@@ -40,6 +40,8 @@ export class DraftStorage {
   /** Where each doc's adopted draft came from, until this pane's own copy is the
    *  only one that matters. */
   private readonly adopted = new Map<string, string>();
+  /** What this pane last stored per doc, for a bfcache restore to write back. */
+  private readonly held = new Map<string, Draft>();
   /** The pane is gone for good: whatever its still-closing syncs write later is
    *  released at once. */
   private closed = false;
@@ -176,10 +178,12 @@ export class DraftStorage {
   store(doc: string, draft: Draft): void {
     if (!this.write(this.key(doc, this.owner), { owner: this.owner, at: this.now(), released: this.closed || this.unloading, draft })) return;
     this.dropAdopted(doc); // this pane's copy now holds the work
+    this.held.set(doc, draft);
   }
 
   /** Removes this pane's entry only, and the adopted source it was still holding. */
   clear(doc: string): void {
+    this.held.delete(doc);
     this.remove(this.key(doc, this.owner));
     this.dropAdopted(doc);
   }
@@ -206,6 +210,20 @@ export class DraftStorage {
       const e = this.read(key);
       if (e) this.write(key, { ...e, at: t, released: false });
     }
+  }
+
+  /** The page came back from the back-forward cache. Its pagehide released its entries, and
+   *  another window may have adopted one and removed it; the sync here still holds that work
+   *  as a stashed draft and will not store it again. Entries that are gone are written back
+   *  (two copies of a draft are harmless, a lost one is not), then the rest are refreshed. */
+  revive(): void {
+    if (this.closed) return;
+    this.unloading = false;
+    for (const [doc, draft] of this.held) {
+      const key = this.key(doc, this.owner);
+      if (!this.read(key)) this.write(key, { owner: this.owner, at: this.now(), released: false, draft });
+    }
+    this.touch();
   }
 
   /** The pane is gone for good. Its entries can be adopted at once, and what its syncs

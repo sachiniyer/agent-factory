@@ -161,7 +161,7 @@
         "pointer": "commands/configmigratecmd.go config migrate (config.MigrateGlobalConfig)"
       },
       "verdict": "deliberate",
-      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place — their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling — so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
+      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place \u2014 their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling \u2014 so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
     },
     {
       "id": "config.read-project",
@@ -507,7 +507,7 @@
         "pointer": "commands/docs_gen.go:29 (hidden); commands/docs_gen.go:61 (--plugin-root); commands/agentservercmd.go:34; commands/legacy_tmuxguardcmd.go"
       },
       "verdict": "deliberate",
-      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio↔TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes — running it by hand does nothing useful. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
+      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio\u2194TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes \u2014 running it by hand does nothing useful. af internal plan-tap is hidden too: it is the Claude Code status line command af injects into the Claude sessions it launches, so Claude Code runs it, not a person; it records plan usage and runs the user's own status line. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
       "id": "task.path-validate",
@@ -750,7 +750,7 @@
       },
       "verdict": "parity",
       "issue": "#3844",
-      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have. #3386 added the `default_accounts` config key — a per-agent map admitted globally and in the machine-local personal per-project layer, never in a checked-in repo file — which the DAEMON applies at CreateSession (daemon/accounts_default.go applyDefaultAccount, through agentaccount.Resolve), so explicit > project default > global default > ambient holds on every surface without any of them re-implementing it. A default af cannot honour refuses the create naming the key and its file rather than falling back to the ambient identity, and both pickers PRESELECT the default from ListAccountsResponse.Defaults and mark its row, so a scoped create is visible before it is made."
+      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have. #3386 added the `default_accounts` config key \u2014 a per-agent map admitted globally and in the machine-local personal per-project layer, never in a checked-in repo file \u2014 which the DAEMON applies at CreateSession (daemon/accounts_default.go applyDefaultAccount, through agentaccount.Resolve), so explicit > project default > global default > ambient holds on every surface without any of them re-implementing it. A default af cannot honour refuses the create naming the key and its file rather than falling back to the ambient identity, and both pickers PRESELECT the default from ListAccountsResponse.Defaults and mark its row, so a scoped create is visible before it is made."
     },
     {
       "id": "session.archive",
@@ -1485,11 +1485,11 @@
       "title": "Inspect whether a task is actually firing on its schedule, and who last changed it",
       "tui": {
         "status": "yes",
-        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue · missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
+        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue \u00b7 missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue · missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
+        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue \u00b7 missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
       },
       "cli": {
         "status": "yes",
@@ -1497,8 +1497,7 @@
       },
       "verdict": "parity",
       "issue": "#3626",
-      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight — the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see — so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."
-    },
+      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight \u2014 the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see \u2014 so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."    },
     {
       "id": "task.list",
       "title": "List tasks",
@@ -1703,7 +1702,7 @@
       "title": "Address a session by its stable id rather than by title",
       "tui": {
         "status": "yes",
-        "pointer": "app/session_action_target.go — captured sessionActionTarget builds every retained-intent session request {ID,Title,RepoID}; streamAddress (same file) id-addresses both WS stream paths — the live-pane dialer via liveBindCandidate (app/live_termpane.go) and deferred full-screen attach via attachStreamFn (app/handle_actions.go) — sending the instance's stable id with an empty repo scope so the daemon's id-first stream resolver applies"
+        "pointer": "app/session_action_target.go \u2014 captured sessionActionTarget builds every retained-intent session request {ID,Title,RepoID}; streamAddress (same file) id-addresses both WS stream paths \u2014 the live-pane dialer via liveBindCandidate (app/live_termpane.go) and deferred full-screen attach via attachStreamFn (app/handle_actions.go) \u2014 sending the instance's stable id with an empty repo scope so the daemon's id-first stream resolver applies"
       },
       "web": {
         "status": "yes",
@@ -1715,7 +1714,7 @@
       },
       "verdict": "deliberate",
       "issue": "#2358",
-      "notes": "#2358 closed as delivered; the action-by-action audit this row reserved is now done and the two residual holes it missed are closed. TUI: every session-targeting request flows through sessionActionTarget — captured at intent (handle_actions.go, handle_handoff.go, handle_tabs.go, restore_confirm.go, live_termpane.go) and re-resolved by that identity at completion (resolveSessionActionTarget), never by title alone. The interactive WS stream joins the same contract: streamAddress sends the instance's stable id with an EMPTY repo scope — the daemon reads an unscoped /v1/sessions/{idOrTitle}/stream segment as an id first (authoritativeStreamTarget), while a non-empty repo_id would re-select the title namespace — for both the live-pane dialer (liveBindCandidate) and the deferred full-screen attach (handle_actions.go). Enumerating every Title+RepoID wire type: all 13 mutation types carry `id`; the only session-targeting type without one is PreviewRequest — a continuous READ bound to the visible row (its tab axis already carries tab_id), and no mutation can be mistargeted through it. DeliverPromptRequest is scheduler-internal (keyed by repo_path). CLI: one-shot commands remain deliberately {title,repo_id}-scoped — they resolve the target from their own arguments inside a single dispatch, so no retained boundary exists for an id to protect — and `sessions archive --self` sends the resolved row's id because the caller's identity cannot come from the arguments. `send-prompt --all` is NOT one-shot: it materializes the target list, then dispatches, so it now carries each enumerated row's id (scopedInstance.ID) or a killed-and-recreated same-title row could inherit the prompt. The five remaining cli `id` field declarations (CreateTab/CloseTab/KillSession/RenameTab/ReorderTab) stay `ok` on the one-shot grounds already accepted on RestoreSession/ResumeFromLimit/HandoffSession; SendPromptRequest's decl was removed outright once the broadcast reached `id`. A user-facing --id selector would be a new CLI contract, not this capability."
+      "notes": "#2358 closed as delivered; the action-by-action audit this row reserved is now done and the two residual holes it missed are closed. TUI: every session-targeting request flows through sessionActionTarget \u2014 captured at intent (handle_actions.go, handle_handoff.go, handle_tabs.go, restore_confirm.go, live_termpane.go) and re-resolved by that identity at completion (resolveSessionActionTarget), never by title alone. The interactive WS stream joins the same contract: streamAddress sends the instance's stable id with an EMPTY repo scope \u2014 the daemon reads an unscoped /v1/sessions/{idOrTitle}/stream segment as an id first (authoritativeStreamTarget), while a non-empty repo_id would re-select the title namespace \u2014 for both the live-pane dialer (liveBindCandidate) and the deferred full-screen attach (handle_actions.go). Enumerating every Title+RepoID wire type: all 13 mutation types carry `id`; the only session-targeting type without one is PreviewRequest \u2014 a continuous READ bound to the visible row (its tab axis already carries tab_id), and no mutation can be mistargeted through it. DeliverPromptRequest is scheduler-internal (keyed by repo_path). CLI: one-shot commands remain deliberately {title,repo_id}-scoped \u2014 they resolve the target from their own arguments inside a single dispatch, so no retained boundary exists for an id to protect \u2014 and `sessions archive --self` sends the resolved row's id because the caller's identity cannot come from the arguments. `send-prompt --all` is NOT one-shot: it materializes the target list, then dispatches, so it now carries each enumerated row's id (scopedInstance.ID) or a killed-and-recreated same-title row could inherit the prompt. The five remaining cli `id` field declarations (CreateTab/CloseTab/KillSession/RenameTab/ReorderTab) stay `ok` on the one-shot grounds already accepted on RestoreSession/ResumeFromLimit/HandoffSession; SendPromptRequest's decl was removed outright once the broadcast reached `id`. A user-facing --id selector would be a new CLI contract, not this capability."
     },
     {
       "id": "worktree.hooks.edit",
@@ -1762,15 +1761,16 @@
         "pointer": ""
       },
       "web": {
-        "status": "yes",
-        "pointer": "web/src/docs_pane.ts DocsPane (doc strip, + menu, doc context menu, editor) → web/src/proposal_api.ts GetProposal, ReadProposalDoc, SaveProposalDoc, AddProposalDoc, RemoveProposalDoc"
+        "status": "no",
+        "pointer": ""
       },
       "cli": {
         "status": "yes",
         "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalRemoveDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, RemoveProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
       },
-      "verdict": "parity",
-      "notes": "Not yet: proposal mode step 2a adds the daemon routes (docs/dev/proposals/proposal-mode/api.md) and moves this CLI onto them. SaveProposalDoc, the three-way human save, has no CLI verb: it is for the web editor. The web Docs tab (step 2b) has the doc strip, the live-preview editor and the add-doc menu over those routes, and saves with SaveProposalDoc. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal, and future.md lists a read-only TUI view as later work."
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Step 2a added the daemon routes (docs/dev/proposals/proposal-mode/api.md) and moved this CLI onto them. SaveProposalDoc, the three-way human save, has no CLI verb: it is for the web editor. The remaining gap is web-only: step 2b adds the web Docs tab (doc strip, live-preview editor, add-doc menu) over those routes. The tui cell is n/a rather than a gap: goals.md lists a TUI editor as a non-goal, and future.md's read-only TUI view is a different, later capability — it would flip this cell to partial for the read half if it lands, not to yes."
     },
     {
       "id": "proposal.docs-tab",
@@ -1780,8 +1780,8 @@
         "pointer": "ui/tab_pane.go:582 docsTabPlaceholder"
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/split.ts reconcile → web/src/docs_tab.ts mountDocsTab (lazy web/dist/lazy/docs-editor.js)"
+        "status": "no",
+        "pointer": ""
       },
       "cli": {
         "status": "yes",
@@ -1789,7 +1789,7 @@
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Proposal mode step 2a adds the docs tab kind (session.TabKindDocs) and creates it from af proposal start and attach. The web UI renders it as the proposal editor (step 2b). The web renders Docs tabs but cannot create one: CreateTab.proposal is a gap, and start and attach create the tab. The TUI shows a placeholder that says the tab is web only: goals.md lists a TUI editor as a non-goal."
+      "notes": "Step 2a added the docs tab kind (session.TabKindDocs), created by af proposal start/attach; step 2b renders it in the web UI as the proposal editor — the remaining gap is that web cell. The tui cell is n/a: goals.md lists a TUI editor as a non-goal ('The Docs tab is web only'), and the TUI's handling of an existing docs tab IS docsTabPlaceholder — a pane that says so and hands the user `af proposal path <slug>` for a terminal view, which is the surface's designed analogue rather than a missing editor."
     },
     {
       "id": "proposal.push",
@@ -1799,15 +1799,16 @@
         "pointer": ""
       },
       "web": {
-        "status": "yes",
-        "pointer": "web/src/docs_pane.ts DocsPane push chip (web/src/docs_push.ts PushChip) → web/src/proposal_api.ts HoldProposalPush, SendProposalChanges"
+        "status": "no",
+        "pointer": ""
       },
       "cli": {
         "status": "yes",
         "pointer": "api/proposals_push.go proposalPushModeCmd/proposalSendCmd → POST /v1/SetProposalPushMode, SendProposalChanges (daemon/proposals_push.go)"
       },
-      "verdict": "parity",
-      "notes": "Proposal mode step 3a (docs/dev/proposals/proposal-mode/api.md, Push) adds the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready. The CLI sets the mode and sends now. Step 3b adds the web push chip (countdown, Hold, Send now) over these routes. The web has no Auto / Manual switch: the tab always pushes in auto mode, and manual mode is CLI-only (af proposal push-mode); a tab whose session is in manual mode still shows Send now. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The TUI is not planned to edit proposals: goals.md lists a TUI editor as a non-goal."
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Step 3a (docs/dev/proposals/proposal-mode/api.md, Push) added the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready; the CLI sets the mode and sends now. Step 3b adds the web push chip (mode switch, countdown, Hold, Send now) over these routes — the remaining gap is that web cell. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The tui cell is n/a: goals.md lists a TUI editor as a non-goal, and with no TUI proposal edits there is nothing for a TUI push affordance to send."
     },
     {
       "id": "backlog.items",
@@ -1867,6 +1868,25 @@
       "notes": "Backlog PR 4 starts items as sessions from the CLI; the web Start now button arrives in PR 8. Item sessions are ordinary sessions, so open, archive and restore use the session routes. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
+      "id": "backlog.questions",
+      "title": "Ask and answer questions on backlog items",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_self.go backlogAskCmd (ask --self) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go)"
+      },
+      "verdict": "real-gap",
+      "issue": "TBD",
+      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; the web answer box arrives in PR 8. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
       "id": "backlog.runner",
       "title": "Show and change a project's backlog runner and the global budget",
       "tui": {
@@ -1901,6 +1921,8 @@
       "af backlog move": "backlog.items",
       "af backlog delete": "backlog.items",
       "af backlog note": "backlog.items",
+      "af backlog ask": "backlog.questions",
+      "af backlog answer": "backlog.questions",
       "af backlog queue": "backlog.status",
       "af backlog draft": "backlog.status",
       "af backlog review": "backlog.status",
@@ -1937,6 +1959,7 @@
       "af gen-docs": "meta.internal",
       "af help": "meta.discovery",
       "af hook-guard-tmux": "meta.internal",
+      "af internal plan-tap": "meta.internal",
       "af keys": "meta.discovery",
       "af projects add": "project.add",
       "af projects delete": "project.delete",
@@ -2137,10 +2160,6 @@
       "ListAccounts": "session.accounts",
       "RegisterAccount": "session.accounts",
       "AddTask": "task.add",
-      "AddProposalDoc": "proposal.docs",
-      "RemoveProposalDoc": "proposal.docs",
-      "GetProposal": "proposal.docs",
-      "ReadProposalDoc": "proposal.docs",
       "ArchiveSession": "session.archive",
       "CloseTab": "session.tab.close",
       "ConfirmHandoffDelivery": "session.handoff-delivery-confirm",
@@ -2174,9 +2193,7 @@
       "SuggestSessionName": "-",
       "TriggerTask": "task.trigger",
       "UpdateTask": "task.edit",
-      "config-assistant": "config-agent",
-      "HoldProposalPush": "proposal.push",
-      "SendProposalChanges": "proposal.push"
+      "config-assistant": "config-agent"
     },
     "cli_flags": {
       "af backlog --help": "meta.discovery",
@@ -2189,6 +2206,8 @@
       "af backlog move --help": "meta.discovery",
       "af backlog delete --help": "meta.discovery",
       "af backlog note --help": "meta.discovery",
+      "af backlog ask --help": "meta.discovery",
+      "af backlog answer --help": "meta.discovery",
       "af backlog queue --help": "meta.discovery",
       "af backlog draft --help": "meta.discovery",
       "af backlog review --help": "meta.discovery",
@@ -2198,6 +2217,8 @@
       "af backlog done --self": "backlog.status",
       "af backlog done --pr": "backlog.status",
       "af backlog note --self": "backlog.items",
+      "af backlog ask --self": "backlog.questions",
+      "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
       "af backlog runner --help": "meta.discovery",
       "af backlog budget --help": "meta.discovery",
@@ -2306,6 +2327,8 @@
       "af gen-docs --plugin-root": "meta.internal",
       "af help --help": "meta.discovery",
       "af hook-guard-tmux --help": "meta.internal",
+      "af internal --help": "meta.internal",
+      "af internal plan-tap --help": "meta.internal",
       "af keys --help": "meta.discovery",
       "af keys --json": "cli.json-envelope",
       "af projects --help": "meta.discovery",
@@ -2581,13 +2604,6 @@
           }
         }
       },
-    "PostBacklogMessageRequest": {
-      "cli": {
-        "question_id": {
-          "ok": "Answers arrive in backlog PR 5 (af backlog answer); this af posts notes only."
-        }
-      }
-    },
       "SnapshotRequest": {
         "cli": {
           "before": {
@@ -2692,7 +2708,7 @@
       "CreateTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           }
         },
         "tui": {
@@ -2716,7 +2732,7 @@
       "CloseTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon only consults when TabName is empty (daemon/control_types.go:248)."
@@ -2734,7 +2750,7 @@
       "KillSessionRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves one session by title under --repo scoping and dispatches it in the same call — a one-shot command has no retained intent boundary for a stable id to protect, the same contract RestoreSession/ResumeFromLimit/HandoffSession already declare `ok`. `sessions archive --self` is the exception that does send the resolved row's id: the caller's own identity cannot come from the arguments."
+            "ok": "The CLI resolves one session by title under --repo scoping and dispatches it in the same call \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract RestoreSession/ResumeFromLimit/HandoffSession already declare `ok`. `sessions archive --self` is the exception that does send the resolved row's id: the caller's own identity cannot come from the arguments."
           }
         }
       },
@@ -2980,7 +2996,7 @@
       "RenameTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_id": {
             "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
@@ -2998,7 +3014,7 @@
       "ReorderTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_id": {
             "ok": "The TAB's stable id (#1971): the web and TUI address tabs by it from their live projections so a reorder can't misroute another client's ordinal; the CLI addresses by --name and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
@@ -3249,38 +3265,6 @@
       "RestoreSession": {
         "force_reap": {
           "ok": "The force-reap override is deliberately CLI-only. It discards a reachable sandbox's unpushed work (#2923), so it must be a typed, per-invocation act with the consequence written next to it — not a button or a keystroke a mis-click can reach. The refusal it releases names the exact command, so the TUI and web point at the CLI rather than reproducing the hazard."
-        }
-      },
-      "AddProposalDoc": {
-        "repo_id": {
-          "ok": "The Docs tab is a tab of one session, so it addresses the proposal by session_id, which api.md says the Docs tab sends. The daemon finds the project from the session, so repo_id and repo_path would only repeat it."
-        },
-        "repo_path": {
-          "ok": "The Docs tab is a tab of one session, so it addresses the proposal by session_id, which api.md says the Docs tab sends. The daemon finds the project from the session, so repo_id and repo_path would only repeat it."
-        }
-      },
-      "RemoveProposalDoc": {
-        "repo_id": {
-          "ok": "The Docs tab is a tab of one session, so it addresses the proposal by session_id, which api.md says the Docs tab sends. The daemon finds the project from the session, so repo_id and repo_path would only repeat it."
-        },
-        "repo_path": {
-          "ok": "The Docs tab is a tab of one session, so it addresses the proposal by session_id, which api.md says the Docs tab sends. The daemon finds the project from the session, so repo_id and repo_path would only repeat it."
-        }
-      },
-      "GetProposal": {
-        "repo_id": {
-          "ok": "The Docs tab is a tab of one session, so it addresses the proposal by session_id, which api.md says the Docs tab sends. The daemon finds the project from the session, so repo_id and repo_path would only repeat it."
-        },
-        "repo_path": {
-          "ok": "The Docs tab is a tab of one session, so it addresses the proposal by session_id, which api.md says the Docs tab sends. The daemon finds the project from the session, so repo_id and repo_path would only repeat it."
-        }
-      },
-      "ReadProposalDoc": {
-        "repo_id": {
-          "ok": "The Docs tab is a tab of one session, so it addresses the proposal by session_id, which api.md says the Docs tab sends. The daemon finds the project from the session, so repo_id and repo_path would only repeat it."
-        },
-        "repo_path": {
-          "ok": "The Docs tab is a tab of one session, so it addresses the proposal by session_id, which api.md says the Docs tab sends. The daemon finds the project from the session, so repo_id and repo_path would only repeat it."
         }
       }
     }
