@@ -19,7 +19,7 @@ import (
 func TestPipePaneCommandUsesCatOnDarwin(t *testing.T) {
 	const fifo = "/tmp/af pane's output"
 	got := pipePaneCommandForGOOS(fifo, "darwin")
-	want := `cat > '/tmp/af pane'"'"'s output'`
+	want := `cat > '/tmp/af pane'\''s output'`
 	if got != want {
 		t.Fatalf("Darwin pipe-pane command = %q, want %q", got, want)
 	}
@@ -28,7 +28,7 @@ func TestPipePaneCommandUsesCatOnDarwin(t *testing.T) {
 func TestPipePaneCommandKeepsStreamingDDOutsideDarwin(t *testing.T) {
 	const fifo = "/tmp/af pane's output"
 	got := pipePaneCommandForGOOS(fifo, "linux")
-	want := `dd of='/tmp/af pane'"'"'s output' bs=65536 2>/dev/null`
+	want := `dd of='/tmp/af pane'\''s output' bs=65536 2>/dev/null`
 	if got != want {
 		t.Fatalf("Linux pipe-pane command = %q, want %q", got, want)
 	}

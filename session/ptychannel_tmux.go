@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -308,13 +307,7 @@ func pipePaneCommand(fifoPath string) string {
 
 func pipePaneCommandForGOOS(fifoPath, goos string) string {
 	if goos == "darwin" {
-		return "cat > " + shellSingleQuote(fifoPath)
+		return "cat > " + shellQuote(fifoPath)
 	}
-	return "dd of=" + shellSingleQuote(fifoPath) + " bs=65536 2>/dev/null"
-}
-
-// shellSingleQuote single-quotes s for safe interpolation into a /bin/sh command,
-// escaping any embedded single quotes.
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+	return "dd of=" + shellQuote(fifoPath) + " bs=65536 2>/dev/null"
 }
