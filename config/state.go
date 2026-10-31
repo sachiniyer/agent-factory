@@ -165,44 +165,6 @@ func SaveState(state *State) error {
 	})
 }
 
-// TrySaveState is SaveState without the wait: it takes the state lock with
-// TryWithFileLock and reports acquired=false rather than blocking when another
-// process holds it.
-//
-// It exists for the LAUNCH CRITICAL PATH. SaveState takes a blocking
-// WithFileLock with no timeout, and this repo has a documented bug class where
-// work moved in front of the TUI turns a benign lock into a launch hang — af
-// starting up while another af (or a daemon) holds state.json would simply never
-// draw. A marker write is not worth that risk: the cost of losing the lock race
-// is that onboarding is offered once more on the next launch, which is a far
-// better failure than a terminal that never comes back.
-//
-// Callers on the launch path must treat acquired=false as "skip this write",
-// never as an error to surface or retry.
-func TrySaveState(state *State) (bool, error) {
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return false, fmt.Errorf("failed to get config directory: %w", err)
-	}
-	// See SaveState: ahead of the lock, so it needs the #3845 guard itself.
-	if err := MkdirAllUnderAFHome(configDir, 0755); err != nil {
-		return false, fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	statePath := filepath.Join(configDir, StateFileName)
-	return TryWithFileLock(statePath, func() error {
-		if err := refuseStateDowngrade(statePath); err != nil {
-			return err
-		}
-		state.SchemaVersion = StateSchemaVersion
-		data, err := json.MarshalIndent(state, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal state: %w", err)
-		}
-		return AtomicWriteFile(statePath, data, 0644)
-	})
-}
-
 // refuseStateDowngrade blocks a save that would downgrade/clobber a state.json
 // this binary must not overwrite. It fails closed on ambiguity: the write is
 // only allowed when the on-disk schema is definitively same-or-older (or
