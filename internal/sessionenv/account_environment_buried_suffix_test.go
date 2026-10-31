@@ -62,6 +62,29 @@ func TestWrapperChildTailBuriedSuffixMatchesIonice(t *testing.T) {
 	}
 }
 
+// A replace marker that is itself a verdict word is substituted away in the
+// argv the walk continues with — `xargs -Iunset echo a unset CODEX_HOME`
+// reads as `echo a $xargs_item CODEX_HOME`, and the literal-boundary suffix
+// scan deliberately skips the synthetic word. The pre-substitution tail still
+// carries the literal suffix a shadowed xargs would shift to, so it must be
+// judged too (#6320).
+func TestXargsVerdictWordMarkerDoesNotHideTheLiteralTail(t *testing.T) {
+	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
+	for _, command := range []string{
+		"xargs -Iunset echo a unset CODEX_HOME",
+		"xargs -I unset echo a unset CODEX_HOME",
+		"xargs --replace=unset echo a unset CODEX_HOME",
+		"xargs --replace unset echo a unset CODEX_HOME",
+	} {
+		require.True(t, commandMutatesAccountEnvironment(command, names), "command %q", command)
+	}
+	// Controls: an inert marker over the same tail, and the denied payload
+	// arriving only through substitution input — both stay allowed/refused on
+	// their own rules.
+	require.False(t, commandMutatesAccountEnvironment("xargs -I{} echo a unset PORT", names))
+	require.False(t, commandMutatesAccountEnvironment("xargs -I{} echo a {} CODEX_HOME", names))
+}
+
 // The exec boundary is decided at COMMAND POSITION (#5034): a dynamic word
 // there refuses, but once the command word is literal its arguments are opaque,
 // and only a recognized wrapper in that position is recursed into.
