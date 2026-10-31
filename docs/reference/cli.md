@@ -1440,13 +1440,16 @@ Settable keys:
   docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
+  network.allowed_hosts      comma-separated extra host names (no scheme or port) the web UI and API answer to, e.g. the
+                             name tailscale serve forwards, or "" for none — the whole list is replaced. localhost,
+                             *.localhost and the listener's own address always work; any other Host is refused.
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
   hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config} (global-only)
   default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
 require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
-docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
+allowed_hosts, docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
 remain accepted and edit the same canonical grouped values.
 
 Structured values must be shell-quoted so the JSON remains one argument. A write
@@ -1519,7 +1522,7 @@ With --project, unset targets a project's machine-local config (a prj_ id from
 'af projects list', or a path inside a registered repository). Without
 --project, it clears one migrated global setting — a network.* key
 (listen_addr, preview_listen_addr, require_token, require_loopback_token,
-cors_allowed_origins) or a backend key (docker.mount_agent_credentials,
+cors_allowed_origins, allowed_hosts) or a backend key (docker.mount_agent_credentials,
 ssh.host_key_verification, sandbox.ssh). Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the

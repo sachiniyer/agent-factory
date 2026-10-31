@@ -486,6 +486,17 @@ type Config struct {
 	// client's only Phase-3 dependency). Non-browser clients (TUI/CLI, curl)
 	// are unaffected. Global-only, like listen_addr.
 	CORSAllowedOrigins []string `json:"cors_allowed_origins,omitempty" toml:"cors_allowed_origins,omitempty"`
+	// AllowedHosts names the extra hosts the daemon's browser-facing listeners
+	// answer for, beyond this machine's own names (loopback, *.localhost, the
+	// listener's own address). Every other Host is refused before routing, which
+	// is what stops a DNS-rebinding page from reaching the tokenless loopback API.
+	// An entry is a bare DNS name or IP literal, matched on any port — e.g.
+	// ["box.tailnet.ts.net"] for `tailscale serve`, which forwards the browser's
+	// Host unchanged. Canonicalized at load (lowercase, no trailing dot); an entry
+	// that is not a host is dropped with a warning. Read per request, so a change
+	// applies with no rebind. Global-only, like listen_addr. See
+	// config/allowed_hosts.go and docs/remote-http-auth.md.
+	AllowedHosts []string `json:"allowed_hosts,omitempty" toml:"allowed_hosts,omitempty"`
 	// RequireToken controls whether the daemon's HTTP TCP listener enforces the
 	// bearer token for NON-loopback (network) peers. It defaults to FALSE: the
 	// token is OFF and auth is strictly OPT-IN — set require_token = true to turn
