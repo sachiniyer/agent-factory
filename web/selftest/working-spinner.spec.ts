@@ -3,11 +3,24 @@
 // still under prefers-reduced-motion, and a row that is not working never animates.
 // Screenshots of the row in both modes land in the test output directory.
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 
-async function openWithWorkingRow(page: Page, reduced: boolean): Promise<void> {
+async function openWithWorkingRow(page: Page, request: APIRequestContext, reduced: boolean): Promise<void> {
+  // The rail shows one project at a time, and which one the app opens on depends on what earlier
+  // specs left in the daemon (in the full run it opens on mock-repo-3). Pin the project of the
+  // session the synthetic rows are cloned from, as hidden-client-resize.spec.ts does.
+  const seed = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const repo = (seed?.data?.instances ?? []).find((s: { title: string }) => s.title === SESSION_A)?.worktree?.repo_path;
+  expect(repo, `${SESSION_A} has a repo path`).toBeTruthy();
+  await page.addInitScript((r) => {
+    try {
+      localStorage.setItem("af-project", r);
+    } catch {
+      // Sandboxed documents can deny storage; the real app document does not.
+    }
+  }, repo as string);
   await page.emulateMedia({ reducedMotion: reduced ? "reduce" : "no-preference" });
   await page.route("**/v1/Snapshot", async (route) => {
     const resp = await route.fetch();
@@ -30,9 +43,9 @@ const glyph = (page: Page, title: string) => rowOf(page, title).locator(".af-dot
 const transform = (page: Page, title: string) => glyph(page, title).evaluate((el) => getComputedStyle(el).transform);
 
 for (const reduced of [false, true]) {
-  test(`working glyph ${reduced ? "is still under reduced motion" : "turns"}`, async ({ page }, info) => {
+  test(`working glyph ${reduced ? "is still under reduced motion" : "turns"}`, async ({ page, request }, info) => {
     await page.setViewportSize({ width: 1280, height: 800 });
-    await openWithWorkingRow(page, reduced);
+    await openWithWorkingRow(page, request, reduced);
     await expect(rowOf(page, "spin-working")).toBeVisible({ timeout: 15_000 });
     const dot = rowOf(page, "spin-working").locator(".af-dot");
     await expect(dot.locator('.af-icon[data-icon="loader-circle"]')).toHaveCount(1);
