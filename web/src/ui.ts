@@ -1225,6 +1225,13 @@ export class AppShell {
     this.projectMenu.setAttribute("aria-label", "Switch project");
     this.projectMenu.hidden = true;
     this.projectSwitchWrap = h("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
+    this.projectSwitchWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.projectMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.projectSwitchBtn.focus();
+    });
     // Dismiss the menu on any click outside the switcher (a click on the button or a
     // menu item is handled by their own listeners, which stopPropagation / close).
     document.addEventListener("click", (e) => {
@@ -1305,6 +1312,16 @@ export class AppShell {
     this.filterMenu.setAttribute("aria-label", "Filter sessions");
     this.filterMenu.hidden = true;
     this.filterWrap = h("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
+    // Escape closes the menu and hands focus back to its button, the same disclosure
+    // model components.ts gives the app controls. stopPropagation keeps the key from
+    // also reaching a terminal (index.ts forwards Escape to the agent).
+    this.filterWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.filterMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeFilterMenu();
+      this.filterBtn.focus();
+    });
     // Dismiss on any click outside (the button + the checkboxes stopPropagation), so
     // the menu stays open across several toggles — the common act is narrowing to a
     // couple of states, not one click.
@@ -2353,6 +2370,8 @@ export class AppShell {
   }
 
   private toggleFilterMenu(): void {
+    // One rail popover at a time: opening the filter dismisses the project menu.
+    if (!this.filterMenuOpen) this.closeProjectMenu();
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
     this.filterBtn.setAttribute("aria-expanded", this.filterMenuOpen ? "true" : "false");
@@ -2379,6 +2398,7 @@ export class AppShell {
     if (this.projectSwitchBtn.disabled) {
       return;
     }
+    this.closeFilterMenu();
     this.projectMenuOpen = true;
     this.projectMenu.hidden = false;
     this.projectSwitchBtn.setAttribute("aria-expanded", "true");

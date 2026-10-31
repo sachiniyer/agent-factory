@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -147,4 +148,25 @@ func TestJSONError_EnvelopeWrapsError(t *testing.T) {
 	require.True(t, SessionsCmd.SilenceErrors)
 	require.True(t, TasksCmd.SilenceUsage)
 	require.True(t, TasksCmd.SilenceErrors)
+}
+
+// TestBareOutputKeepsHTMLCharactersLiteral pins the human-facing bare forms:
+// the copy-paste hint in an error ("--prompt <prompt>") must reach the terminal
+// as typed, not as <prompt>, while the bytes still decode to the same
+// string for anything that parses them.
+func TestBareOutputKeepsHTMLCharactersLiteral(t *testing.T) {
+	require.False(t, envelopeOutput, "envelope must default OFF")
+	msg := "run: af sessions create --name x --prompt <prompt> & more"
+	escaped := "\\" + "u003c" // the spelling encoding/json would emit for "<"
+
+	errOut := captureStderr(t, func() { _ = jsonError(errors.New(msg)) })
+	require.Equal(t, "{\"error\":\""+msg+"\"}\n", errOut)
+	require.NotContains(t, errOut, escaped)
+
+	okOut := captureStdout(t, func() { require.NoError(t, jsonOut(map[string]string{"reason": msg})) })
+	require.Contains(t, okOut, msg)
+	require.NotContains(t, okOut, escaped)
+	var decoded map[string]string
+	require.NoError(t, json.Unmarshal([]byte(okOut), &decoded))
+	require.Equal(t, msg, decoded["reason"])
 }

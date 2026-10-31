@@ -39,8 +39,16 @@ func pidLooksAlive(pid int) bool {
 	if _, err := os.Stat("/proc"); err == nil {
 		// /proc is mounted (Linux). An empty cmdline means the task is a
 		// zombie or kernel thread; for our purposes either is "dead".
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-		if err == nil && len(strings.TrimRight(string(data), "\x00")) == 0 {
+		data, err := readProcCmdline(pid)
+		switch {
+		case err == nil && len(strings.TrimRight(string(data), "\x00")) == 0:
+			return false
+		case errors.Is(err, os.ErrNotExist):
+			// Signal 0 succeeded on a zombie and the process was reaped before this
+			// read: /proc/<pid> is gone, which is an exit, not "alive". Reading the
+			// failure as alive made a wait that had just observed the exit disagree
+			// with the very next check (#6381). Any other read error (EACCES, a
+			// transient failure) is still not evidence of death.
 			return false
 		}
 	}
@@ -50,6 +58,12 @@ func pidLooksAlive(pid int) bool {
 		}
 	}
 	return true
+}
+
+// readProcCmdline reads /proc/<pid>/cmdline; a var so a test can make the entry
+// vanish between signal 0 and the read, a window a real reap opens for microseconds.
+var readProcCmdline = func(pid int) ([]byte, error) {
+	return os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 }
 
 // pidExitObserved reports whether pid has provably exited, for a wait that
