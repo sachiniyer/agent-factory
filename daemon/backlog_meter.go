@@ -376,6 +376,13 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	// good once it is readable again (Codex P2 on #6299).
 	if runsComplete {
 		state.KeepRunSeen(metered)
+	} else {
+		// The unread projects' runs still own their remembered directories: classify
+		// those as backlog spend now, since a message counted as plain spend is never
+		// reclassified once the backlog is readable again (Codex P2 on #6300).
+		for _, dirs := range state.RunDirs {
+			backlogDirs = append(backlogDirs, dirs...)
+		}
 	}
 	state.PruneRunBuckets(now)
 	m.meterAccounts(home, state, backlogDirs, runConfigs, overrides, now, &usage)

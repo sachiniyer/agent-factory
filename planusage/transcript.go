@@ -26,6 +26,10 @@ type FileMark struct {
 	// ModTime is the file's modification time, in Unix nanoseconds, when it
 	// was last read; an unchanged file is not opened again.
 	ModTime int64 `json:"mtime,omitempty"`
+	// Size is the file's size when it was last read. A file with an unchanged
+	// modification time but a different size has grown: coarse-timestamp
+	// filesystems do not move the time on every append.
+	Size int64 `json:"size,omitempty"`
 	// Skipped lists (comma-joined, sorted) the models whose messages in this
 	// file were read past because they had no price. When one of them gets a
 	// price the file is read again from the start; Seen keeps what was already
@@ -154,6 +158,7 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 	}
 	res := ReadResult{Mark: mark}
 	res.Mark.ModTime = info.ModTime().UnixNano()
+	res.Mark.Size = info.Size()
 	if info.Size() == mark.Offset {
 		return res, nil
 	}

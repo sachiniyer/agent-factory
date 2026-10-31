@@ -301,3 +301,27 @@ func TestRunWindowCostPartitionsByAccount(t *testing.T) {
 		t.Fatal("buckets outlived the session")
 	}
 }
+
+// A transcript that grew without its modification time moving (a coarse-timestamp
+// filesystem) is still read (Codex P2 on #6299).
+func TestScanReadsAGrownFileWithAnUnchangedModTime(t *testing.T) {
+	home(t)
+	dir := t.TempDir()
+	f := filepath.Join(dir, "projects", "-p", "c.jsonl")
+	write(t, f, assistant("m1", opus, 1_000_000, 0))
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(f, now, now); err != nil {
+		t.Fatal(err)
+	}
+	s := NewMeterState()
+	s.ScanAll(map[string][]string{"acct": {dir}}, nil, nil, now)
+	appendTo(t, f, assistant("m2", opus, 1_000_000, 0)+"\n")
+	if err := os.Chtimes(f, now, now); err != nil {
+		t.Fatal(err)
+	}
+	s.ScanAll(map[string][]string{"acct": {dir}}, nil, nil, now)
+	all, _ := s.Accounts["acct"].costIn(now.Add(-5*time.Hour), now.Add(time.Hour))
+	if !near(all, 8) {
+		t.Fatalf("cost %v, want both messages (8)", all)
+	}
+}

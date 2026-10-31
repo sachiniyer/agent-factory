@@ -37,7 +37,10 @@ func TestClaudeLaunchRunsThePlanTapAsItsStatusLine(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(value), &settings))
 	require.Equal(t, "command", settings.StatusLine.Type)
-	require.Equal(t, `'/opt/it'\''s af/af' internal plan-tap`, settings.StatusLine.Command)
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	require.Equal(t, "AGENT_FACTORY_HOME="+shellQuote(home)+` '/opt/it'\''s af/af' internal plan-tap`, settings.StatusLine.Command,
+		"the tap pins the daemon's af home")
 	require.Equal(t, 60, settings.StatusLine.RefreshInterval)
 
 	afExecutable = func() (string, error) { return "", errors.New("no binary") }
@@ -94,7 +97,8 @@ func TestPlanTapSettingsKeepsTheUsersRefreshAndPadding(t *testing.T) {
 	sl := tapStatusLine(t, planTapSettings(root))
 	require.Equal(t, float64(5), sl["refreshInterval"])
 	require.Equal(t, float64(2), sl["padding"])
-	require.Equal(t, "'/opt/af' internal plan-tap", sl["command"])
+	require.Equal(t, tapCommand("/opt/af"), sl["command"])
+	require.Contains(t, sl["command"], "AGENT_FACTORY_HOME=")
 
 	t.Setenv("CLAUDE_CONFIG_DIR", root)
 	require.Equal(t, float64(2), tapStatusLine(t, planTapSettings(""))["padding"], "the ambient config dir is read when unscoped")

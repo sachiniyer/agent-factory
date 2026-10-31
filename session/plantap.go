@@ -85,7 +85,7 @@ func planTapSettings(configRoot string) string {
 	warnManagedStatusLine()
 	statusLine := map[string]any{
 		"type":            "command",
-		"command":         shellQuote(exe) + " " + planusage.TapCommandArgs,
+		"command":         tapCommand(exe),
 		"refreshInterval": defaultTapRefresh,
 	}
 	if user, ok := planusage.ReadStatusLine(filepath.Join(claudeUserConfigDir(configRoot), "settings.json")); ok {
@@ -126,4 +126,16 @@ func warnManagedStatusLine() {
 			}
 		}
 	})
+}
+
+// tapCommand is the status line command. It pins the daemon's resolved af home:
+// a Claude launch that overrides HOME would otherwise make the tap resolve a
+// different default home, find plan usage disabled there (or record into the
+// wrong home) (Codex P2 on #6299).
+func tapCommand(exe string) string {
+	cmd := shellQuote(exe) + " " + planusage.TapCommandArgs
+	if home, err := config.GetConfigDir(); err == nil && home != "" {
+		cmd = "AGENT_FACTORY_HOME=" + shellQuote(home) + " " + cmd
+	}
+	return cmd
 }
