@@ -113,6 +113,65 @@ export function applyChanges(text: string, changes: readonly TextChange[]): stri
   return out + text.slice(pos);
 }
 
+/** Whether a save of `text`, made against `base`, has landed in `head`: every change it made is there,
+ *  in order, between the lines `head` still shares with `base` on either side of it. Unlike the
+ *  three-way merge this holds when another writer has edited the lines next to the save's, which the
+ *  merge folds into one conflicting chunk. A save that changed nothing, or only removed lines, cannot be
+ *  shown to have landed, so it is not. */
+export function landedIn(base: string, text: string, head: string): boolean {
+  const b = base.split("\n");
+  const o = text.split("\n");
+  const t = head.split("\n");
+  const mo = matchLines(b, o);
+  const mt = matchLines(b, t);
+  let changes = 0;
+  let i = 0;
+  let oi = 0;
+  // Where in the head the next change may be found: after the lines the previous one matched, so each
+  // inserted line is a distinct line of the head and the changes appear in document order.
+  let cursor = 0;
+  const check = (bEnd: number, oEnd: number): boolean => {
+    const inserted = o.slice(oi, oEnd);
+    if (i === bEnd && inserted.length === 0) return true; // nothing between these two matches
+    changes++;
+    if (inserted.length === 0) return false; // a removal leaves nothing to find in the head
+    // What the save removed must be gone from the head: a base line it replaced that the head still
+    // holds means the replacement was only added beside it (the removal never landed).
+    for (let k = i; k < bEnd; k++) if (mt[k]! >= 0) return false;
+    let left = i - 1;
+    while (left >= 0 && mt[left]! < 0) left--;
+    let right = bEnd;
+    while (right < b.length && mt[right]! < 0) right++;
+    const from = Math.max(cursor, left >= 0 ? mt[left]! + 1 : 0);
+    const to = right < b.length ? mt[right]! : t.length;
+    let at = 0;
+    let last = -1;
+    for (let j = from; j < to && at < inserted.length; j++) {
+      if (t[j] === inserted[at]) {
+        at++;
+        last = j;
+      }
+    }
+    if (at !== inserted.length) return false;
+    cursor = last + 1;
+    return true;
+  };
+  for (let k = 0; k < b.length; k++) {
+    if (mo[k]! < 0) continue;
+    if (!check(k, mo[k]!)) return false;
+    i = k + 1;
+    oi = mo[k]! + 1;
+  }
+  if (!check(b.length, o.length)) return false;
+  return changes > 0;
+}
+
+/** How many lines of `text` are not in `base`: the size of the edit a save of `text` made. */
+export function changedLines(base: string, text: string): number {
+  const o = text.split("\n");
+  return matchLines(o, base.split("\n")).filter((m) => m < 0).length;
+}
+
 export const CONFLICT_MINE = "<<<<<<< mine";
 export const CONFLICT_SPLIT = "=======";
 export const CONFLICT_THEIRS = ">>>>>>> agent";

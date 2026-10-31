@@ -229,6 +229,9 @@ func primeTmuxSessionSnapshot() func() {
 // and that must not fail the whole launch.
 func buildSnapshotInstances(data []session.InstanceData, workers int) []*session.Instance {
 	build := buildInstanceFromSnapshot // read once: a test seam, swapped on another goroutine
+	// One context for the whole batch: every restore of a project shares a single
+	// repo/config resolution instead of repeating it per session (#6446).
+	rc := session.NewRestoreContext()
 	built := make([]*session.Instance, len(data))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
@@ -240,7 +243,7 @@ func buildSnapshotInstances(data []session.InstanceData, workers int) []*session
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				inst, err := build(data[i])
+				inst, err := build(data[i], rc)
 				if err != nil {
 					log.WarningLog.Printf("skipping session %q from snapshot: %v", data[i].Title, err)
 					continue
@@ -665,7 +668,7 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 		log.InfoLog.Printf("deferring instance %q: create in flight, worktree not populated yet", d.Title)
 		return false
 	}
-	inst, err := buildInstanceFromSnapshot(d)
+	inst, err := buildInstanceFromSnapshot(d, nil)
 	if err != nil {
 		log.WarningLog.Printf("failed to build instance %q from snapshot: %v", d.Title, err)
 		return false
@@ -685,7 +688,7 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle st
 	if snapshotAwaitingWorktree(d) {
 		return false
 	}
-	inst, err := buildInstanceFromSnapshot(d)
+	inst, err := buildInstanceFromSnapshot(d, nil)
 	if err != nil {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
 		return false
