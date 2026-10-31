@@ -63,7 +63,7 @@ The rail shows state by glyph only. Hover a row to read its state in words.
 | --- | --- |
 | Blinking yellow circle | The agent asked for you with `af sessions attention`; hover the row for its reason |
 | No glyph | The agent is idle |
-| Muted filled circle | Work is in progress |
+| Muted spinner | Work is in progress |
 | Hollow circle | The agent process is dead, or a prompt was not delivered |
 | Dashed circle | The session is lost |
 | Diamond | A usage limit has been reached |
@@ -82,7 +82,7 @@ after it went idle. Typing a draft or just viewing the tab does not clear it. Wh
 any session in the selected project needs attention, the browser tab's favicon also
 swaps its tile and mark colors every second, so you can see it from another tab.
 When your system asks for reduced motion, neither the circle nor the favicon blinks,
-the circle has a ring around it, and the chip's bell is still. The TUI rail does not show the
+the circle has a ring around it, the working spinner does not turn, and the chip's bell is still. The TUI rail does not show the
 request yet ([#5461](https://github.com/sachiniyer/agent-factory/issues/5461)).
 
 The **funnel** opens state checkboxes: **Needs attention · Idle · Working · Waiting
