@@ -419,7 +419,7 @@ and remain lower-contrast than ink on both planes. A matching liveness colour ne
 a per-theme `sharesMuted` rationale in the source; running and archived share it
 intentionally in light only.
 Fonts, 400/600 weight, 1.5 web line height, 44px touch height and a 2px focus ring are
-fixed component rules, not more tokens. Indicators never animate. User-caused web
+fixed component rules, not more tokens. Indicators animate only to carry state, never as decoration. User-caused web
 disclosures may take at most 120ms; reduced motion and all TUI changes are immediate.
 
 ## Capture coverage
