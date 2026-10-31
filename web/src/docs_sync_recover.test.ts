@@ -215,3 +215,17 @@ test("a closed tab whose timed-out save ends later sends no corrective save of i
   assert.equal(r.fx.some((f) => f.t === "unstash"), false, "and the draft, which may be the only copy of the undo, stays");
   assert.ok(r.m.stashed !== null);
 });
+
+test("an adopted draft that equals the head but names a save that may still be out keeps it in doubt", () => {
+  // The closed pane stored buffer a (the undo) with the save of A possibly still out.
+  const draft = { buffer: "a", base: "a", theirs: "", head: "", kind: "unsent" as const, maybe: ["A"] };
+  let r = open({ text: "a", commit: "c1" }, draft);
+  assert.ok(!r.fx.some((f) => f.t === "unstash"), "the draft is kept");
+  assert.deepEqual(r.fx.filter((f) => f.t === "give_up").map((f) => (f as { ms: number }).ms), [300_000]);
+  // The request lands and the change event arrives: the head is read with A in doubt, and
+  // the undo goes back on top of it.
+  r = run(r.m, { t: "remote", commit: "c2" });
+  assert.deepEqual(r.fx.filter((f) => f.t === "load").map((f) => (f as { kind: string }).kind), ["reconcile"], "not a plain reload");
+  r = run(r.m, { t: "reconcile_ok", doc: { text: "A", commit: "c2" } });
+  assert.equal(r.m.buffer, "a", "the undo stands over what landed");
+});
