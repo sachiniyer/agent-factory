@@ -21,6 +21,7 @@ import { renderMutationOutcome, recoveryScreen, scopeRecovery, type MutationOutc
 
 import type { EventStreamStatus } from "./events.js";
 import { icon } from "./icon.js";
+import { connectionNotice, connectionWords, isDown } from "./connection.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
 import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, applyTerminalTitle, applyTerminalPlacement, actionsDisclosure, placeMenu } from "./components.js";
@@ -292,6 +293,10 @@ export interface AppState {
   live: EventStreamStatus;
   /** the attach terminal's connection state, shown in the pane header. */
   termStatus: TerminalStatus;
+  /** epoch ms of the next scheduled reconnect of each socket, for the "Reconnecting…"
+   *  chip's countdown (#6430); null/absent while no attempt is scheduled. */
+  liveRetryAt?: number | null;
+  termRetryAt?: number | null;
   /** which pane owns the keyboard (#1693): "rail" is the default nav mode (j/k move
    *  the selection); "terminal" means keys go to the agent — Escape included, as its
    *  interrupt (#2517) — until ctrl+] hands the keyboard back. Drives the visible
@@ -1148,6 +1153,13 @@ export class AppShell {
   private lastSessions: SessionData[] | null = null;
   private lastSelectedId: string | null = null;
   private lastLive: EventStreamStatus | null = null;
+  /** The "Reconnecting…" chip in the session header and its rail twin (#6430). */
+  private readonly connNotice: HTMLElement;
+  private readonly connRetry: HTMLElement;
+  private readonly railConn: HTMLElement;
+  private connState: AppState | null = null;
+  private connDownSince: number | null = null;
+  private connTimer: number | null = null;
   private lastKb: KeyboardFocus | null = null;
   private lastError: string | null = null;
   // The last value written to document.title, so an unrelated update doesn't
@@ -1309,10 +1321,16 @@ export class AppShell {
       this.railCount,
       h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn),
     );
+    this.connRetry = h("span", { class: "af-term-conn-retry" });
+    this.connNotice = h("div", { class: "af-term-conn", role: "status" },
+      icon("wifi-off", "af-term-conn-glyph"), h("span", { class: "af-term-conn-label" }, "Reconnecting…"), this.connRetry);
+    this.connNotice.hidden = true;
+    this.railConn = h("div", { class: "af-rail-conn", role: "status" });
+    this.railConn.hidden = true;
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railConn, this.railList);
 
     this.main = h("section", { class: "af-main" });
     // The drawer scrim: a tap-to-dismiss layer over the terminal while the mobile rail
@@ -1488,6 +1506,7 @@ export class AppShell {
       this.lastLive = state.live;
       this.el.dataset.live = state.live;
     }
+    this.patchConnection(state);
 
     // View switching: show the active view's body, hide the other, and highlight its
     // appbar tab. The sessions body is only HIDDEN (never removed), so the terminal
@@ -2465,6 +2484,7 @@ export class AppShell {
     this.attachTabTouchDrag(tabBar);
 
     const head = chrome.head;
+    head.insertBefore(this.connNotice, chrome.attention.el);
     const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -2485,7 +2505,7 @@ export class AppShell {
       [chrome.title, this.header],
       [this.viewNav, this.appControls.panel], [this.projectSwitchWrap, this.appControls.panel],
       ...Array.from(this.appControls.panel.children, node => [node as HTMLElement, this.appControls.panel] as [HTMLElement, HTMLElement]),
-      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header], [chrome.attention.el, this.header],
+      [chrome.tabs, this.appControls.panel], [chrome.newTabs, this.header], [this.connNotice, this.header], [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel], [chrome.menu.panel, this.appControls.panel],
     ]);
     this.renderTabBar(state);
@@ -3004,6 +3024,40 @@ export class AppShell {
     if (this.tabInsert) {
       this.tabInsert.hidden = true;
     }
+  }
+
+  /** The "Reconnecting…" state (#6430): drawn once a socket has been down for the
+   *  grace period (a blink of reconnect stays invisible), with the time of the next
+   *  attempt, and cleared on reconnect. Static glyph plus words, so reduced motion
+   *  needs no fallback. The 1s tick runs only while a drop is in progress. */
+  private patchConnection(state: AppState): void {
+    this.connState = state;
+    const down = isDown(state);
+    if (!down) {
+      this.connDownSince = null;
+    } else if (this.connDownSince === null) {
+      this.connDownSince = Date.now();
+    }
+    this.renderConnection();
+    if (down && this.connTimer === null) {
+      this.connTimer = window.setInterval(() => this.renderConnection(), 1000);
+    } else if (!down && this.connTimer !== null) {
+      window.clearInterval(this.connTimer);
+      this.connTimer = null;
+    }
+  }
+
+  private renderConnection(): void {
+    const state = this.connState;
+    const notice = state ? connectionNotice(state, this.connDownSince, Date.now()) : null;
+    const words = notice ? connectionWords(notice) : null;
+    this.connNotice.hidden = !words;
+    this.railConn.hidden = !words;
+    if (!words) return;
+    this.connRetry.textContent = words.retry ? ` ${words.retry.replace("retry in ", "")}` : "";
+    this.connNotice.setAttribute("aria-label", words.full);
+    this.connNotice.title = words.full;
+    if (this.railConn.textContent !== words.full) this.railConn.textContent = words.full;
   }
 
   private patchMainHead(state: AppState): void {
