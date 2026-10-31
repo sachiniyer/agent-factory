@@ -11,7 +11,7 @@ API economy is a hard requirement (the Actions `GITHUB_TOKEN` quota starved the 
 
 ## After a merge
 
-`GITHUB_TOKEN` merges do not fire push workflows, so after a run that merged anything the workflow dispatches `build.yml`, `docs.yml` (with `verify_sha`), `lint.yml`, `pr.yml` (the master-only heavy jobs since #5615), `sandbox-e2e.yml` (advisory, not a merge gate), `tui-driver-selftest.yml` and `web-selftest.yml` once on `master`. It then runs the **composition check** on the new head — `go build ./...`, `go vet ./...`, `scripts/lint-file-length.sh`. On failure it opens (or comments on) one issue titled `master broken by merge batch <sha>` and refuses further merges. Each later run re-checks master and closes the issue once it passes. Fix forward on master.
+`GITHUB_TOKEN` merges do not fire push workflows, so after a run that merged anything the workflow dispatches `build.yml`, `docs.yml` (with `verify_sha`), `lint.yml`, `pr.yml` (the master-only heavy jobs since #5615), `sandbox-e2e.yml` (advisory, not a merge gate), `tui-driver-selftest.yml`, `web-selftest.yml` and `web-dist-sync.yml` once on `master`. It then runs the **composition check** on the new head — `go build ./...`, `go vet ./...`, `scripts/lint-file-length.sh`. On failure it opens (or comments on) one issue titled `master broken by merge batch <sha>` and refuses further merges. Each later run re-checks master and closes the issue once it passes. Fix forward on master.
 
 ## Batch, then verify
 
@@ -41,6 +41,10 @@ Other halt: an open `master broken by merge batch <sha>` issue while master stil
 `GITHUB_TOKEN` cannot merge a PR whose diff touches `.github/workflows/` (GitHub refuses: "refusing to allow a GitHub App to create or update workflow … without workflows permission"). On `GITHUB_TOKEN` the merger runs one cheap files query for the merge candidates only, skips such PRs with the reason *workflow files — needs AUTO_MERGE_TOKEN or a maintainer merge*, and lists them in the job summary instead of failing the run.
 
 To let it merge those PRs too, the owner can add a repository secret `AUTO_MERGE_TOKEN`: a fine-grained PAT with **Contents**, **Pull requests** and **Workflows** read/write. The merge calls then use it (`secrets.AUTO_MERGE_TOKEN || github.token`), the files check is skipped, and — because a PAT merge fires push workflows itself — the post-merge dispatches are skipped to avoid duplicate runs.
+
+## The web/dist sync PR
+
+`web/dist` is committed (the binary embeds it) but no PR carries it: PR Validation's `Web` job rejects a pull request that touches it (#6447). `.github/workflows/web-dist-sync.yml` rebuilds it after web source lands and opens or updates one dist-only PR from the bot branch `web-dist-sync`, labelled `fix-master`, which this merger lands like any other (Build + Lint on its head; the `Web` job additionally proves the bundle is byte-identical to a fresh build of the PR's tree). The workflow authenticates with `AUTO_MERGE_TOKEN` so the PR's checks run; with no token it reports that in its job summary and does nothing — it never falls back to `GITHUB_TOKEN`. A stale bundle on a master push is a warning, not a red `Build`, so the minutes before the sync PR merges do not halt the merger; the nightly run errors if it is still stale, and both release workflows refuse to tag a stale bundle.
 
 ## Head-branch cleanup
 

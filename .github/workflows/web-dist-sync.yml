@@ -1,0 +1,252 @@
+name: Web dist sync
+
+# Keeps the committed web/dist bundle equal to a fresh build of web/src without
+# making any web PR carry it (#6447). web/dist stays in the tree because
+# web/embed.go embeds it and `go build` / `go install` / ./dev-install.sh must
+# stay Node-free. What changes is who writes it: pull requests never do (the Web
+# job in pr.yml rejects one that touches web/dist), and this workflow proposes it
+# after the source lands, as a dist-only PR on the bot branch `web-dist-sync`,
+# labelled `fix-master` so the existing auto-merger lands it.
+#
+# ── Security model (read before editing; this workflow can write to the repo) ──
+#
+#   * It never runs PR code. Triggers are `push` to master (already merged, already
+#     reviewed code), `workflow_dispatch` and `schedule`. There is NO
+#     `pull_request_target` and no checkout of a PR ref anywhere.
+#   * The job that runs repo-controlled scripts (`npm ci`, esbuild) is `build`. It
+#     has `contents: read`, persists no credentials and sees no secret.
+#   * The job that holds the write credential is `propose`. It executes NO repo
+#     code: no npm, no make, no script from the checkout except the guard, which it
+#     reads from the master tree it just checked out and which is data-validating
+#     shell. It treats the `build` artifact as untrusted data: the guard refuses
+#     anything but plain, safely named, size-bounded files, and only web/dist/ is
+#     ever staged (a second check refuses a staged path outside it).
+#   * The write credential is the repository secret AUTO_MERGE_TOKEN, used for
+#     exactly the push to the bot branch and the PR calls. If it is missing the job
+#     SAYS SO in its summary and does nothing; it never falls back to GITHUB_TOKEN,
+#     whose pushes and PRs would not start the checks the merger requires.
+#   * Defence in depth: the PR it opens runs the Web job in pr.yml, which rebuilds
+#     web/dist from the PR's own merge tree on a read-only runner and fails if it is
+#     not byte-identical. A tampered artifact cannot reach master without matching an
+#     independent build of the source on master.
+#   * The branch is only ever fast-forwarded (a `merge -s ours` of the old tip keeps
+#     it a descendant), never force-pushed.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'web/**'
+      - '!web/dist/**'
+      - 'design/**'
+      - '.github/workflows/web-dist-sync.yml'
+  # GITHUB_TOKEN merges (the auto-merger's) fire no push event (#3435), so
+  # auto-merge.js dispatches this after a batch; workflow_dispatch is the one event
+  # that token may start. No `paths:` filter applies to a dispatch.
+  workflow_dispatch:
+  # Backstop: heals a missed dispatch, a failed run, or a merge nobody re-raised.
+  # The run is idempotent, so a quiet repo pays only the build.
+  schedule:
+    - cron: '23 */3 * * *'
+
+concurrency:
+  # One sync at a time and never cancel one mid-push; a pending run builds from the
+  # newest head, so a batch of merges coalesces into one PR update.
+  group: web-dist-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build web/dist
+    if: github.repository == 'sachiniyer/agent-factory'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.head.outputs.sha }}
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - id: head
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Same toolchain as pr.yml's Web job (npm ci from the lockfile, then esbuild).
+      - name: Build the bundle
+        run: make web-build
+
+      - id: diff
+        name: Compare with the committed bundle
+        run: |
+          # porcelain, not diff: a new untracked chunk must count too.
+          if [ -n "$(git status --porcelain -- web/dist)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload the rebuilt bundle
+        if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: web/dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  propose:
+    name: Propose web/dist PR
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Reads only; the write credential below is the PAT, not this token.
+    permissions:
+      contents: read
+    env:
+      REPO: ${{ github.repository }}
+      BRANCH: web-dist-sync
+      SRC_SHA: ${{ needs.build.outputs.sha }}
+      CHANGED: ${{ needs.build.outputs.changed }}
+    steps:
+      - id: token
+        name: Require AUTO_MERGE_TOKEN
+        env:
+          AUTO_MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+        run: |
+          if [ -n "$AUTO_MERGE_TOKEN" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          if [ "$CHANGED" = "true" ]; then
+            echo "::warning title=web/dist is stale::AUTO_MERGE_TOKEN is not set, so web/dist cannot be synced."
+            {
+              echo "### web/dist is stale and was NOT synced"
+              echo
+              echo "A fresh build of \`web/src\` at \`$SRC_SHA\` differs from the committed \`web/dist\`, but the repository secret \`AUTO_MERGE_TOKEN\` is not set."
+              echo "This workflow deliberately does not fall back to \`GITHUB_TOKEN\`: its pushes and PRs start no checks, so the merger could never land them."
+              echo "Add \`AUTO_MERGE_TOKEN\` (a fine-grained PAT with Contents and Pull requests read/write; see .github/auto-merge.md) and re-run this workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "web/dist already matches web/src and AUTO_MERGE_TOKEN is unset; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.token.outputs.ok == 'true'
+        with:
+          ref: ${{ needs.build.outputs.sha }}
+          fetch-depth: 1
+          token: ${{ secrets.AUTO_MERGE_TOKEN }}
+
+      - name: Download the rebuilt bundle (untrusted data)
+        if: steps.token.outputs.ok == 'true' && needs.build.outputs.changed == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: web-dist
+          path: ${{ runner.temp }}/dist-in
+
+      - name: Validate the bundle shape
+        if: steps.token.outputs.ok == 'true' && needs.build.outputs.changed == 'true'
+        run: .github/scripts/web-dist-guard.sh "$RUNNER_TEMP/dist-in"
+
+      - name: Commit and push the bot branch
+        if: steps.token.outputs.ok == 'true' && needs.build.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+          git config user.name 'Captain Claude'
+          git config user.email 'noreply@anthropic.com'
+
+          git switch -q -c "$BRANCH"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            # Keep the branch a fast-forward of its old tip without taking any of
+            # its content: -s ours keeps master's tree, the dist is replaced below.
+            git fetch -q --depth=1 origin "$BRANCH:refs/remotes/origin/$BRANCH"
+            git merge -q -s ours --allow-unrelated-histories --no-edit \
+              -m "Merge previous $BRANCH tip" "refs/remotes/origin/$BRANCH"
+          fi
+
+          rm -rf web/dist
+          cp -R "$RUNNER_TEMP/dist-in" web/dist
+          git add -A -- web/dist
+
+          # Belt and braces: nothing outside web/dist/ may be staged.
+          if git diff --cached --name-only -z | grep -zv '^web/dist/' | grep -qz .; then
+            echo "::error::refusing to commit a path outside web/dist/" >&2
+            git diff --cached --name-only >&2
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo "Nothing staged; the committed bundle already matches."
+            exit 0
+          fi
+          # The open PR's tip may already hold exactly this tree (a scheduled or
+          # repeated run): do not push an identical commit and restart its checks.
+          if git rev-parse -q --verify "refs/remotes/origin/$BRANCH^{tree}" >/dev/null \
+            && [ "$(git write-tree)" = "$(git rev-parse "refs/remotes/origin/$BRANCH^{tree}")" ]; then
+            echo "The $BRANCH tip already holds this bundle; not pushing." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git commit -q -F - <<MSG
+          chore(web): sync web/dist with web/src at ${SRC_SHA:0:10}
+
+          Generated by .github/workflows/web-dist-sync.yml (#6447). Do not edit by
+          hand: the Web job rebuilds this bundle from the PR's own source and fails
+          on any byte that differs.
+
+          Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+          MSG
+          git push origin "$BRANCH"
+
+      - name: Open or update the PR
+        if: steps.token.outputs.ok == 'true' && needs.build.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          title="chore(web): sync web/dist with web/src (${SRC_SHA:0:10})"
+          printf '%s\n' \
+            "Generated by \`.github/workflows/web-dist-sync.yml\` (#6447): the committed \`web/dist\` bundle rebuilt from \`web/src\` at \`$SRC_SHA\`." \
+            "" \
+            "Dist-only. The Web job rebuilds the bundle from this PR's own tree and fails if it is not byte-identical, so a bundle that does not match the source cannot merge." \
+            "" \
+            "🤖 Generated with [Claude Code](https://claude.com/claude-code)" >body.md
+          n="$(gh pr list --repo "$REPO" --head "$BRANCH" --base master --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$n" ]; then
+            url="$(gh pr create --repo "$REPO" --head "$BRANCH" --base master --title "$title" --body-file body.md)"
+            n="${url##*/}"
+          else
+            gh api -X PATCH "repos/$REPO/pulls/$n" -f title="$title" -F body=@body.md >/dev/null
+          fi
+          # `gh pr edit --add-label` fails on this repo (Projects classic); REST works.
+          gh api -X POST "repos/$REPO/issues/$n/labels" -f 'labels[]=fix-master' >/dev/null
+          echo "web/dist sync PR: #$n (source $SRC_SHA)" >> "$GITHUB_STEP_SUMMARY"
+
+      # The bundle already matches: an open sync PR is now empty or obsolete.
+      - name: Close an obsolete sync PR
+        if: steps.token.outputs.ok == 'true' && needs.build.outputs.changed == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          n="$(gh pr list --repo "$REPO" --head "$BRANCH" --base master --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$n" ]; then
+            echo "web/dist matches web/src; no sync PR open." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh pr close "$n" --repo "$REPO" --delete-branch \
+            --comment "web/dist already matches a fresh build of web/src at \`$SRC_SHA\`; closing. — web-dist-sync"
+          echo "Closed obsolete sync PR #$n." >> "$GITHUB_STEP_SUMMARY"

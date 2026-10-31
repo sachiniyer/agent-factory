@@ -31,6 +31,9 @@ const MASTER_WORKFLOWS = [
   "sandbox-e2e.yml",
   "tui-driver-selftest.yml",
   "web-selftest.yml",
+  // Proposes the web/dist sync PR (#6447). A GITHUB_TOKEN merge fires no push, so
+  // without this entry a merged web change would wait for the 3-hourly backstop.
+  "web-dist-sync.yml",
 ];
 const DOCS_WORKFLOW = "docs.yml";
 const { latestMacosVerdict } = require("./macos-verdict.js");

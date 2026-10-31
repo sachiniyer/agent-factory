@@ -98,6 +98,30 @@ jobs:
         script: |
           await require('./.github/scripts/macos-verdict.js').gateRelease({ github, core, context });
 
+    # web/dist is committed (web/embed.go embeds it) but PRs no longer carry it:
+    # web-dist-sync.yml lands it after the source (#6447). A tag must never embed a
+    # bundle that lags web/src, so rebuild and fail on any difference. The wait is
+    # minutes; the next run picks the release up once the sync PR has merged.
+    - name: Set up Node
+      if: steps.check.outputs.should_release == 'true'
+      uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: web/package-lock.json
+
+    - name: Committed web/dist matches web/src
+      if: steps.check.outputs.should_release == 'true'
+      run: |
+        make web-build
+        dirty="$(git status --porcelain -- web/dist)"
+        if [ -n "$dirty" ]; then
+          echo "::error::web/dist is stale: it does not match a fresh build of web/src, so a release would embed an old web client."
+          echo "$dirty"
+          echo "web-dist-sync.yml proposes the fix as a dist-only PR (branch web-dist-sync); release once it has merged."
+          exit 1
+        fi
+
     - name: Release preflight
       if: steps.check.outputs.should_release == 'true'
       run: |
