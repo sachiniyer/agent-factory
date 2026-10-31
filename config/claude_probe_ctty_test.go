@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"testing"
@@ -41,10 +43,22 @@ func TestClaudeProbeDoesNotStallOnControllingTerminal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestClaudeProbeHelperProcess$", "-test.v")
+	home := t.TempDir() // no rc file, and no claude on PATH below
+	// The child is a test binary: depending on the toolchain it may populate a Go
+	// module cache under HOME, whose files are read-only, so make the tree
+	// removable before TempDir's own cleanup runs (registered earlier, runs later).
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(home, func(p string, _ fs.DirEntry, err error) error {
+			if err == nil {
+				_ = os.Chmod(p, 0o700)
+			}
+			return nil
+		})
+	})
 	cmd.Env = []string{
 		claudeProbeHelperEnv + "=1",
 		"SHELL=/bin/bash",
-		"HOME=" + t.TempDir(), // no rc file, and no claude on PATH below
+		"HOME=" + home,
 		"PATH=/usr/bin:/bin",
 	}
 	ptmx, err := pty.Start(cmd) // child gets ptmx's slave as its controlling terminal
