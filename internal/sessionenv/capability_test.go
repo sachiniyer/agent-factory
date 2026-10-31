@@ -18,15 +18,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// shortSocketDir is a directory under the platform's unix socket path limit.
+// sun_path holds 104 bytes on macOS, and t.TempDir() there is
+// /var/folders/<hash>/T/<TestName><rand>/001, which a long test name pushes over
+// ("bind: invalid argument"). Every test that BINDS (or dials) a unix socket takes
+// its directory from here, never from t.TempDir().
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "afse")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // startBroker serves a broker on a temp socket. lookup stands in for tmux; every
 // claim in these tests comes from THIS process, so its pid is the peer pid.
 func startBroker(t *testing.T, lookup PaneLookup) (*CapabilityBroker, string) {
 	t.Helper()
 	b := NewCapabilityBroker(lookup)
-	dir, err := os.MkdirTemp("", "afcap")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "c.sock")
+	sock := filepath.Join(shortSocketDir(t), "c.sock")
 	ln, err := net.Listen("unix", sock)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
@@ -100,7 +110,7 @@ func TestCapability_FailsClosed(t *testing.T) {
 		_, err := claimAs(t, sock, tc.token, tc.pane)
 		require.Error(t, err, name)
 	}
-	_, err = ClaimCapability(filepath.Join(t.TempDir(), "absent.sock"), token)
+	_, err = ClaimCapability(filepath.Join(shortSocketDir(t), "absent.sock"), token)
 	require.ErrorContains(t, err, "unreachable")
 }
 
@@ -193,7 +203,7 @@ func TestSameExecutableAsSelf_SwapWindow(t *testing.T) {
 // Measured on the CI runner for each OS: what the peer-identity primitives see.
 // Logged so a platform that cannot answer is visible rather than silent.
 func TestPeerIdentityPrimitivesAnswerOnThisPlatform(t *testing.T) {
-	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "p.sock"))
+	ln, err := net.Listen("unix", filepath.Join(shortSocketDir(t), "p.sock"))
 	require.NoError(t, err)
 	defer ln.Close()
 	accepted := make(chan net.Conn, 1)
@@ -228,14 +238,20 @@ func TestExeIdentitySurvivesABinarySwap(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("/proc/<pid>/exe is Linux-specific")
 	}
-	sleep, err := exec.LookPath("sleep")
+	// The child is this test binary re-exec'd in TestMain's "sleep" role, copied to
+	// the path under test. It is NOT the system `sleep`: on a multi-call coreutils
+	// (Ubuntu 26.04 ships uutils) a copy named "af" does not know its applet name,
+	// exits at once, and the zombie's /proc/<pid>/exe no longer reads. The role
+	// holds the process alive for a minute, far longer than the reads below.
+	self, err := os.Executable()
 	require.NoError(t, err)
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "af")
-	data, err := os.ReadFile(sleep)
+	data, err := os.ReadFile(self)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(bin, data, 0o755))
-	cmd := exec.Command(bin, "30")
+	cmd := exec.Command(bin)
+	cmd.Env = []string{"AF_ATTACK_ROLE=sleep"}
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 
@@ -252,7 +268,8 @@ func TestExeIdentitySurvivesABinarySwap(t *testing.T) {
 	// The spoof: a live file literally named "af (deleted)".
 	spoof := filepath.Join(dir, "af (deleted)")
 	require.NoError(t, os.WriteFile(spoof, data, 0o755))
-	sp := exec.Command(spoof, "30")
+	sp := exec.Command(spoof)
+	sp.Env = []string{"AF_ATTACK_ROLE=sleep"}
 	require.NoError(t, sp.Start())
 	t.Cleanup(func() { _ = sp.Process.Kill(); _, _ = sp.Process.Wait() })
 	got, err := exeIdentityOf(sp.Process.Pid)
