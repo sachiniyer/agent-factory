@@ -430,6 +430,13 @@ func GlobalConfigPath() (string, error) {
 // assert the next load treats config.toml as canonical (both files present).
 var convertRenameFailForTest func() error
 
+// convertRenameRaceHookForTest, when non-nil, runs after the pre-rename
+// confirm passes and before the renameSibling call — the check-then-act
+// window a home link retarget slips into (the source is concurrently
+// removed, or the link repointed). Tests use it to drive a retarget INTO
+// that window and pin the re-confirm the recheck below catches.
+var convertRenameRaceHookForTest func()
+
 // convertRaceHookForTest, when non-nil, runs at the top of the conversion
 // file-lock body — the point at which a concurrent process that won the lock
 // first would already have written config.toml (and renamed config.json).
@@ -485,9 +492,31 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 			return fmt.Errorf("failed to read config file %s: %w", prettyTomlPath, err)
 		}
 
+		// The pinned directory is the conversion's premise: config.toml is
+		// created beside the legacy config.json, so the lock this body holds
+		// covers the directory config.json lives in. A config.toml installed
+		// as a symlink to ANOTHER directory after LoadConfig observed it
+		// missing but before this lock pinned it points dirFD at the symlink
+		// target's directory instead, so readSibling and renameSibling below
+		// would act on an unrelated file (or, absent one there, leave the real
+		// legacy configuration unconverted) — the sibling hazard the pinned
+		// directory exists to close, reopened at the file instead of the home.
+		// Refuse that one-shot race up front rather than read the wrong file;
+		// the home link itself moving mid-operation is confirm's to name.
+		if err := locked.confirmSiblingDir(configPath); err != nil {
+			return err
+		}
+
 		// Re-read config.json under the lock: a racer may have renamed it to
-		// .bak, or it may have changed since our pre-lock read.
-		data, err := os.ReadFile(configPath)
+		// .bak, or it may have changed since our pre-lock read. Read it through
+		// the pinned directory, not by name: the lock covers config.toml, so
+		// os.ReadFile(configPath) resolves the home link afresh at open time, and
+		// a home that moved since the lock's confirm would feed this parse bytes
+		// from a directory this lock does not cover — the read half of the same
+		// sibling hazard migrate.go pins its body against, left path-based here
+		// when the conversion was first written and never converted (#3688,
+		// #3697).
+		data, err := locked.readSibling(configPath)
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to read config file %s: %w", prettyConfigPath, err)
 		}
@@ -547,24 +576,128 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 		// Pick the first free config.json.bak / .bak.1 / .bak.2 … so the
 		// oldest backup — the one most likely to hold real settings — is
 		// preserved and each later conversion lands beside it.
-		bakPath, bakErr := availableBackupPath(configPath + ".bak")
+		//
+		// The slot is chosen, and the move is made, against the pinned
+		// directory, the way migrate.go chooses and writes its own backup: the
+		// conversion locks config.toml and renames its sibling config.json, so
+		// a path-based availableBackupPath / os.Rename pair resolves the home
+		// link at each call and can act on a directory this lock does not cover
+		// after a mid-conversion retarget — silently renaming another home's
+		// active config.json to a .bak slot it never earned. The pinned
+		// availableBackupPathWith asks the fd the lock holds open whether a
+		// backup name is free, and renameSibling renames within that fd, so a
+		// link that moves mid-conversion is followed nowhere rather than
+		// somewhere the lock never reached (#3688, #3697).
+		bakPath, bakErr := availableBackupPathWith(configPath+".bak", locked.siblingOccupied)
 		renameErr := bakErr
+		retargetRefused := false
 		if renameErr == nil {
-			renameErr = func() error {
-				if convertRenameFailForTest != nil {
-					return convertRenameFailForTest()
-				}
-				return os.Rename(configPath, bakPath)
-			}()
+			// A retarget since the locked write has already been answered for the
+			// bytes — config.toml landed in the pinned directory whatever the
+			// link did — but the rename still mutates a sibling, and acting on it
+			// while the link names another home leaves the legacy config.json in
+			// place in the locked directory and reports a clean conversion of a
+			// home that is no longer this one. Confirm, the way migrate.go does
+			// before its backup, so a moved link is refused loudly. The move is
+			// best-effort — config.toml is canonical next load — so the refusal
+			// is logged, not fatal, the same as any other rename failure.
+			if cErr := locked.confirm(); cErr != nil {
+				renameErr = cErr
+				retargetRefused = true
+			} else {
+				renameErr = func() error {
+					if convertRenameFailForTest != nil {
+						return convertRenameFailForTest()
+					}
+					if convertRenameRaceHookForTest != nil {
+						convertRenameRaceHookForTest()
+					}
+					return locked.renameSibling(configPath, bakPath)
+				}()
+			}
 		}
 		if renameErr != nil {
 			// config.toml is already written and will be canonical next load;
 			// leaving config.json in place only costs a "both files" warning.
-			log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; delete %s yourself to silence the duplicate-config warning",
-				prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, prettyConfigPath)
+			// Re-check the link: confirm() passed before the rename, but the
+			// rename can still fail because the home link moved between confirm
+			// and renameSibling (the source was concurrently removed, or the
+			// link retargeted). In that case prettyConfigPath now names another
+			// home's active config.json, so a "delete it yourself" instruction
+			// aimed at it would delete the wrong file. Re-confirm to distinguish
+			// a retarget from an ordinary rename failure; on a retarget, name
+			// the pinned source the lock still covers and omit the deletion
+			// instruction, the same as a confirm failure up front.
+			if !retargetRefused {
+				if cErr := locked.confirm(); cErr != nil {
+					retargetRefused = true
+				}
+			}
+			pinnedToml := filepath.Join(locked.dirResolved, filepath.Base(tomlPath))
+			if retargetRefused {
+				// The link moved after the write, so prettyConfigPath and
+				// prettyTomlPath — the link — no longer reach the files this
+				// conversion touched: a "delete it yourself" instruction aimed
+				// at prettyConfigPath could remove another home's only config,
+				// and naming prettyTomlPath as canonical points the user at a
+				// file in the new home this conversion never wrote. Name the
+				// pinned locations the lock still covers instead, and let the
+				// next run move the original aside once the home is stable.
+				// Classify ENOENT independently of the retarget: a rename that
+				// returned ENOENT means the source was removed during
+				// conversion, so the original may no longer exist at the pinned
+				// source — do not assert it remains and recommend a rerun that
+				// has nothing to move.
+				pinnedSource := filepath.Join(locked.dirResolved, filepath.Base(configPath))
+				if os.IsNotExist(renameErr) {
+					log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original may no longer exist at %s (it was removed during conversion; the home moved, so %s no longer reaches it)",
+						pinnedToml, prettyConfigPath, renameErr, pinnedToml, pinnedSource, prettyConfigPath)
+				} else {
+					log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original remains at %s (the home moved, so %s no longer reaches it); re-run to move it aside once the home symlink is stable",
+						pinnedToml, prettyConfigPath, renameErr, pinnedToml, pinnedSource, prettyConfigPath)
+				}
+			} else {
+				// The link can move again between this recheck and the user
+				// acting on the message, so prettyConfigPath — the link — is
+				// not a safe target for a deletion instruction: by the time the
+				// user follows it, it could reach another home's active
+				// config. Name the pinned source the lock still covers, the
+				// same as a retarget refusal, and let the next run move it
+				// aside. An editor that removed config.json between the locked
+				// write and renameSibling surfaces here as an ENOENT rename
+				// with a stable home; the original no longer sits at the
+				// pinned source, so say it may remain rather than asserting it
+				// does and recommending a rerun that has nothing to move.
+				pinnedSource := filepath.Join(locked.dirResolved, filepath.Base(configPath))
+				if os.IsNotExist(renameErr) {
+					log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original may no longer exist at %s (it was removed during conversion), so there is nothing to move aside",
+						prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, pinnedSource)
+				} else {
+					log.WarningLog.Printf("migrated config to %s, but could not move the original %s aside: %v — %s is now canonical; the original remains at %s; re-run to move it aside",
+						prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, pinnedSource)
+				}
+			}
 		} else {
-			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
-				prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
+			// Re-confirm after a successful rename: renameSibling goes through
+			// the pinned fd, so a home link that retargeted between the
+			// pre-rename confirm and the rename still succeeds — the move
+			// landed in the locked directory whatever the link did. But
+			// prettyTomlPath and prettyHomePath(bakPath) resolve the link
+			// afresh, so after a retarget they name the NEW home, and the
+			// unqualified success below would report a clean move of paths
+			// that no longer reach the files this conversion touched. Confirm
+			// again and report the retarget (naming the pinned locations)
+			// rather than logging an unqualified success through the moved
+			// link.
+			if cErr := locked.confirm(); cErr != nil {
+				pinnedToml := filepath.Join(locked.dirResolved, filepath.Base(tomlPath))
+				pinnedBak := filepath.Join(locked.dirResolved, filepath.Base(bakPath))
+				log.WarningLog.Printf("migrated config to TOML in the locked directory (wrote %s and moved the original to %s), but the home symlink moved during the conversion: %s and %s now reach another home — %s is now canonical; re-run once the home symlink is stable to point it at %s",
+					pinnedToml, pinnedBak, prettyTomlPath, prettyHomePath(bakPath), pinnedToml, pinnedToml)
+			} else {
+				log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
+					prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
+			}
 		}
 		warnConvertedLegacyRootAgents(cfg.RootAgents, prettyConfigPath, prettyTomlPath)
 		result, err = parseLoadedConfigTOML(tomlBytes, prettyTomlPath, tomlPath)

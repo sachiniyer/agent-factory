@@ -7029,8 +7029,13 @@ function isProjectReboundError(e) {
 function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
+var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
+var CLIENT_VERSION = "10fc46814ccf";
 async function af(method, body, token2, signal) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = {
+    "Content-Type": "application/json",
+    [CLIENT_VERSION_HEADER]: CLIENT_VERSION
+  };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }

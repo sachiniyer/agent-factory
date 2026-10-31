@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -100,7 +102,7 @@ func (f *fakeTmux) run(t *testing.T, args []string) {
 				// the client's private session.
 				m := regexp.MustCompile(`set-option -t (af-takeover-\S+) `).FindStringSubmatch(script)
 				require.NotNil(t, m, "the options mirror names the client's own session: %s", script)
-				src := f.sessions[strings.Trim(regexp.MustCompile(`show-options -t '=([^']+)'`).FindStringSubmatch(script)[1], "'")]
+				src := f.sessions[strings.Trim(regexp.MustCompile(`show-options -t '=([^']+):'`).FindStringSubmatch(script)[1], "'")]
 				require.NotNil(t, src)
 				for k, v := range src.local {
 					f.sessions[m[1]].opts[k] = v
@@ -373,7 +375,7 @@ func TestTakeoverPrivateSessionKeepsTheSourceOptions(t *testing.T) {
 	assert.Equal(t, "ctrl+w leaves", g["status-right"])
 
 	script := r.mirrorSessionOptionsScript()
-	assert.Contains(t, script, "show-options -t '=login'")
+	assert.Contains(t, script, "show-options -t '=login:'", "a pane-target command needs the trailing colon for an exact session match (#6270)")
 	assert.Less(t, strings.Index(strings.Join(r.attachArgs(), " "), "show-options"), strings.Index(strings.Join(r.attachArgs(), " "), "key-table"),
 		"the copy runs before the routing options so they win")
 }
@@ -396,5 +398,30 @@ func TestTakeoverShellQuotingRoundTrips(t *testing.T) {
 	for _, script := range []string{r.mirrorSessionOptionsScript(), r.mirrorRootScript()} {
 		require.NoError(t, exec.Command("sh", "-n", "-c", script).Run(), "must parse as shell: %s", script)
 	}
-	assert.Contains(t, r.mirrorSessionOptionsScript(), `show-options -t '=it'\''s a login'`)
+	assert.Contains(t, r.mirrorSessionOptionsScript(), `show-options -t '=it'\''s a login:'`)
+}
+
+// #6270: a mirror that cannot read the source is never silent. The script records
+// the reason on the private session; the cleanup reads it and logs a warning.
+func TestTakeoverCleanupLogsAFailedOptionMirror(t *testing.T) {
+	cw, _ := config.ParseDetachKey("ctrl-w")
+	r := newTakeoverRoute("login", cw, "ctrl+w")
+	assert.Contains(t, r.mirrorSessionOptionsScript(), mirrorErrorOption, "the script records why it failed")
+	assert.Contains(t, r.mirrorSessionOptionsScript(), "|| {", "a failed show-options is handled, not swallowed")
+
+	var warnings logtest.Buffer
+	oldOut, oldFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
+	log.WarningLog.SetOutput(&warnings)
+	log.WarningLog.SetFlags(0)
+	t.Cleanup(func() { log.WarningLog.SetOutput(oldOut); log.WarningLog.SetFlags(oldFlags) })
+	oldRead, oldRun := readTakeoverMirrorError, runBareAttachCleanup
+	readTakeoverMirrorError = func(string, takeoverRoute) string { return "show-options on the source session failed" }
+	runBareAttachCleanup = func(*exec.Cmd) error { return nil }
+	t.Cleanup(func() { readTakeoverMirrorError, runBareAttachCleanup = oldRead, oldRun })
+
+	cmd := exec.Command("true")
+	registerTakeoverRoute(cmd, "", r)
+	bareAttachCleanup(cmd)
+	assert.Contains(t, warnings.String(), "were not mirrored")
+	assert.Contains(t, warnings.String(), "show-options on the source session failed")
 }
