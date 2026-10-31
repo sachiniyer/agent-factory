@@ -7030,7 +7030,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "38657857f798";
+var CLIENT_VERSION = "b9d84d5ffb08";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
