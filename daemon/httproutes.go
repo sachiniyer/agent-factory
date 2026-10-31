@@ -627,7 +627,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/PostBacklogMessage",
-		Description: "Add a note to an item's thread; notes are not delivered to a session.",
+		Description: "Add a note, a question, or an answer to an item's thread; a note is not delivered to a session, but an answer is.",
 		requestType: reflect.TypeOf(PostBacklogMessageRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PostBacklogMessage) },
 	},
