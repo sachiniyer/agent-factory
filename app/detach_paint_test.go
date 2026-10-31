@@ -2,13 +2,17 @@ package app
 
 import (
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 )
 
 // TestSelectionChanged_DispatchesPaneRefreshOffEventLoop is the regression
@@ -18,28 +22,112 @@ import (
 // so the post-detach repaint paid ~7–10ms of event-loop blocking on top of
 // waiting up to a full previewTickMsg cycle (~100ms) for the first paint.
 //
-// After the fix, selectionChanged returns a tea.Cmd that runs both captures
-// in a goroutine and emits panesRefreshedMsg{}. The Update goroutine itself
-// returns essentially instantly.
+// After the fix, selectionChanged returns a tea.Cmd that runs the captures in
+// a goroutine and emits panesRefreshedMsg{}.
+//
+// The property is an ordering one — selectionChanged returns WITHOUT waiting for
+// a capture — so it is asserted as one (#6375). The capture is held on a channel
+// the test controls: if selectionChanged calls it synchronously it blocks inside
+// the hold, the fetcher reports that it was entered before selectionChanged
+// returned, and the test fails. No stopwatch: a 5ms budget failed a loaded runner
+// that blocked on nothing (19.9ms on macOS, 5.9ms on 26.04) and would have passed
+// a regression whose capture happened to be fast.
 func TestSelectionChanged_DispatchesPaneRefreshOffEventLoop(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 	resizeHome(h, 120, 40)
+
+	// Every capture, once armed, announces itself and then waits for the test to
+	// release it. Unarmed, it answers at once, so opening the pane captures nothing
+	// held. The fetcher is read when a pane window is built, so it is installed
+	// BEFORE the pane opens.
+	var armed atomic.Bool
+	entered := make(chan struct{}, 16)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	h.previewFetcher = func(daemon.PreviewRequest) (daemon.PreviewResponse, error) {
+		if armed.Load() {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		return testPreviewResponse("held"), nil
+	}
 	openTestPane(t, h, inst, 0)
+	armed.Store(true)
 
-	start := time.Now()
-	cmd := h.selectionChanged()
-	elapsed := time.Since(start)
-
+	// Call selectionChanged off the test goroutine so a synchronous capture shows up
+	// as "entered the hold before it returned" instead of a hang.
+	returned := make(chan tea.Cmd, 1)
+	go func() { returned <- h.selectionChanged() }()
+	var cmd tea.Cmd
+	select {
+	case cmd = <-returned:
+	case <-entered:
+		unblock()
+		t.Fatal("selectionChanged blocked on a pane capture: it must return a cmd and leave the capture to run off the event loop")
+	}
 	require.NotNil(t, cmd, "selectionChanged must return the off-loop pane refresh cmd")
-	// 5ms is generous; the synchronous path on real tmux was 7–10ms total.
-	// FakeBackend's Preview/PreviewFullHistory return instantly so this is
-	// well below 1ms in practice — the budget exists to absorb scheduler
-	// noise on busy CI runners.
-	assert.Less(t, elapsed, 5*time.Millisecond,
-		"selectionChanged must not block on tmux captures; saw %s", elapsed)
+	select {
+	case <-entered:
+		t.Fatal("selectionChanged ran a capture before returning")
+	default:
+	}
+
+	// Run the returned cmds the way bubbletea does, off the loop. The capture must
+	// now start (so the hold above is wired to the real path and the test is not
+	// vacuous) and stay outstanding while the event loop remains free.
+	done := make(chan tea.Msg, 4)
+	runCmdTree(cmd, done)
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second): // liveness only: nothing here measures a duration
+		t.Fatal("the pane refresh cmd never reached the capture; the hold is not on the real path")
+	}
+	again := make(chan tea.Cmd, 1)
+	go func() { again <- h.selectionChanged() }()
+	select {
+	case <-again:
+	case <-time.After(30 * time.Second): // liveness only
+		t.Fatal("selectionChanged did not return while a capture was outstanding")
+	}
+	select {
+	case msg := <-done:
+		t.Fatalf("the refresh finished (%T) while its capture was still held", msg)
+	default:
+	}
+
+	unblock()
+	select {
+	case msg := <-done:
+		require.IsType(t, panesRefreshedMsg{}, msg)
+	case <-time.After(30 * time.Second): // liveness only
+		t.Fatal("the pane refresh did not complete after its capture was released")
+	}
+}
+
+// runCmdTree runs cmd the way bubbletea does, each cmd on its own goroutine,
+// flattening tea.Batch, and sends every non-batch result to out.
+func runCmdTree(cmd tea.Cmd, out chan<- tea.Msg) {
+	if cmd == nil {
+		return
+	}
+	go func() {
+		msg := cmd()
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, c := range batch {
+				runCmdTree(c, out)
+			}
+			return
+		}
+		out <- msg
+	}()
 }
 
 // TestRepaintAfterDetachMsg_KicksOffRefresh ensures the post-detach repaint
