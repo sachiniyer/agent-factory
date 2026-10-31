@@ -49,6 +49,8 @@ export function tabIcon(kind: number): IconName {
     case TabKind.Web:
     case TabKind.VSCode:
       return "panels";
+    case TabKind.Docs:
+      return "file-text";
     default:
       return "terminal";
   }

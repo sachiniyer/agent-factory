@@ -795,3 +795,30 @@ tab survives a restart and simply starts a new editor when you next open it.
 
 In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
 editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.
+
+### Docs tabs
+
+A **Docs tab** edits a proposal: a set of markdown docs that you and the agent
+write together. `af proposal start` and `af proposal attach` create it. From the
+CLI:
+
+```bash
+af sessions tab-create my-session --kind docs --proposal auth-rework
+```
+
+- The strip at the top has one tab for each doc. **+** adds a doc from a template
+  that the proposal does not use yet, or a blank doc.
+- The editor shows markdown rendered. The line with the cursor shows its source.
+  Callouts `> [!question]`, `> [!todo]` and `> [!decision]` each get a colour.
+- Your edits save 500 ms after you stop typing. The header shows "Saved",
+  "Saving…" or "Merged agent edits". The question count in the header goes to
+  the next open question, in any doc.
+- When the agent changes a doc that you have not edited, the tab reloads it and
+  keeps your cursor. When you both changed the same lines, a banner asks you to
+  keep yours, take the agent's, or show both. "Show both" puts both versions
+  between conflict markers, and autosave waits until you remove them. If you
+  close the tab or the page first, the doc saves with the markers in it, so no
+  edit is lost and the agent sees both sides.
+
+The editor loads the first time a Docs tab opens. In the **TUI** a Docs tab
+shows a placeholder.

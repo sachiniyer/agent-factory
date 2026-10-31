@@ -1,7 +1,7 @@
 # Interface style guide
 
 The [interface design](interface-design.md) prescribes one treatment for each component.
-There are **24 design tokens: 13 colour roles, five type steps, four spacing steps and
+There are **27 design tokens: 16 colour roles, five type steps, four spacing steps and
 two radii**. The six liveness bindings are fixed semantics, including the empty running
 glyph. The only user-facing theme choice is **Light / Dark / System**. These are internal
 product constants, not user-editable tokens, presets or a custom-palette API.
@@ -83,7 +83,7 @@ The examples above are the specification; this compact reference is for implemen
 not a palette picker. Every value below comes from `design/tokens.json`. Adding a role
 or step fails validation: revise a component rule before enlarging this contract.
 
-<details><summary>Exact internal values · 24 tokens</summary>
+<details><summary>Exact internal values · 27 tokens</summary>
 <table><thead><tr><th>Colour role</th><th>Light</th><th>Dark</th><th>Required use</th></tr></thead><tbody>
 {{range colorKeys}}{{$c := index $.Tokens.Colors .}}<tr><td>{{.}}</td><td>{{$c.Light}}</td><td>{{$c.Dark}}</td><td>{{$c.Role}}</td></tr>
 {{end}}</tbody></table>

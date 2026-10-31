@@ -13,55 +13,64 @@ type State struct {
 // Colors returns fresh semantic light/dark pairs; terminal capability resolution belongs to lipgloss.
 func Colors() map[string]lipgloss.AdaptiveColor {
 	return map[string]lipgloss.AdaptiveColor{
-		"accent":         {Light: "#2d6271", Dark: "#2296f3"},
-		"archived":       {Light: "#4c566a", Dark: "#d8dee9"},
-		"attention":      {Light: "#856200", Dark: "#f5c400"},
-		"border":         {Light: "#657084", Dark: "#3d3d3d"},
-		"dead":           {Light: "#883b43", Dark: "#e4c8cd"},
-		"ink":            {Light: "#2e3440", Dark: "#cccccc"},
-		"ink-muted":      {Light: "#4c566a", Dark: "#9d9d9d"},
-		"limit-reached":  {Light: "#73436b", Dark: "#dbb9d5"},
-		"lost":           {Light: "#705014", Dark: "#ebcb8b"},
-		"ready":          {Light: "#405430", Dark: "#d5e2cc"},
-		"running":        {Light: "#4c566a", Dark: "#d8dee9"},
-		"surface":        {Light: "#f8f9fc", Dark: "#1f1f1f"},
-		"surface-raised": {Light: "#eceff4", Dark: "#2b2b2b"},
+		"accent":           {Light: "#2d6271", Dark: "#2296f3"},
+		"archived":         {Light: "#4c566a", Dark: "#d8dee9"},
+		"attention":        {Light: "#856200", Dark: "#f5c400"},
+		"border":           {Light: "#657084", Dark: "#3d3d3d"},
+		"callout-decision": {Light: "#2c6440", Dark: "#a8d8b4"},
+		"callout-question": {Light: "#8a4600", Dark: "#f2b880"},
+		"callout-todo":     {Light: "#1d5c8f", Dark: "#9cc8f0"},
+		"dead":             {Light: "#883b43", Dark: "#e4c8cd"},
+		"ink":              {Light: "#2e3440", Dark: "#cccccc"},
+		"ink-muted":        {Light: "#4c566a", Dark: "#9d9d9d"},
+		"limit-reached":    {Light: "#73436b", Dark: "#dbb9d5"},
+		"lost":             {Light: "#705014", Dark: "#ebcb8b"},
+		"ready":            {Light: "#405430", Dark: "#d5e2cc"},
+		"running":          {Light: "#4c566a", Dark: "#d8dee9"},
+		"surface":          {Light: "#f8f9fc", Dark: "#1f1f1f"},
+		"surface-raised":   {Light: "#eceff4", Dark: "#2b2b2b"},
 	}
 }
 
 type Palette struct {
-	Accent        lipgloss.AdaptiveColor
-	Archived      lipgloss.AdaptiveColor
-	Attention     lipgloss.AdaptiveColor
-	Border        lipgloss.AdaptiveColor
-	Dead          lipgloss.AdaptiveColor
-	Ink           lipgloss.AdaptiveColor
-	InkMuted      lipgloss.AdaptiveColor
-	LimitReached  lipgloss.AdaptiveColor
-	Lost          lipgloss.AdaptiveColor
-	Ready         lipgloss.AdaptiveColor
-	Running       lipgloss.AdaptiveColor
-	Surface       lipgloss.AdaptiveColor
-	SurfaceRaised lipgloss.AdaptiveColor
+	Accent          lipgloss.AdaptiveColor
+	Archived        lipgloss.AdaptiveColor
+	Attention       lipgloss.AdaptiveColor
+	Border          lipgloss.AdaptiveColor
+	CalloutDecision lipgloss.AdaptiveColor
+	CalloutQuestion lipgloss.AdaptiveColor
+	CalloutTodo     lipgloss.AdaptiveColor
+	Dead            lipgloss.AdaptiveColor
+	Ink             lipgloss.AdaptiveColor
+	InkMuted        lipgloss.AdaptiveColor
+	LimitReached    lipgloss.AdaptiveColor
+	Lost            lipgloss.AdaptiveColor
+	Ready           lipgloss.AdaptiveColor
+	Running         lipgloss.AdaptiveColor
+	Surface         lipgloss.AdaptiveColor
+	SurfaceRaised   lipgloss.AdaptiveColor
 }
 
 // Roles returns the fixed palette with compile-time role names.
 func Roles() Palette {
 	c := Colors()
 	return Palette{
-		Accent:        c["accent"],
-		Archived:      c["archived"],
-		Attention:     c["attention"],
-		Border:        c["border"],
-		Dead:          c["dead"],
-		Ink:           c["ink"],
-		InkMuted:      c["ink-muted"],
-		LimitReached:  c["limit-reached"],
-		Lost:          c["lost"],
-		Ready:         c["ready"],
-		Running:       c["running"],
-		Surface:       c["surface"],
-		SurfaceRaised: c["surface-raised"],
+		Accent:          c["accent"],
+		Archived:        c["archived"],
+		Attention:       c["attention"],
+		Border:          c["border"],
+		CalloutDecision: c["callout-decision"],
+		CalloutQuestion: c["callout-question"],
+		CalloutTodo:     c["callout-todo"],
+		Dead:            c["dead"],
+		Ink:             c["ink"],
+		InkMuted:        c["ink-muted"],
+		LimitReached:    c["limit-reached"],
+		Lost:            c["lost"],
+		Ready:           c["ready"],
+		Running:         c["running"],
+		Surface:         c["surface"],
+		SurfaceRaised:   c["surface-raised"],
 	}
 }
 
