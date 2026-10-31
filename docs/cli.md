@@ -355,7 +355,8 @@ socket nobody answers on, directories af's own test harness left under the temp
 dir when a test run ended before its cleanup, pinned remote host-key directories
 no session owns, one row per host in the global `hosts` list (ready, blocked
 by a prerequisite problem, unknown, or unreachable) when the daemon can
-complete the host check, and daemon problems (stale socket, stale
+complete the host check — the daemon's probe can write here, pinning a newly
+learned host key under `accept-new` verification — and daemon problems (stale socket, stale
 pid file, a daemon still running a replaced binary). With `--fix` it kills
 orphans whose ancestry markers prove they came from a dead Agent Factory session,
 removes stale temp homes, stops daemons proven to be running a temp-dir binary,
