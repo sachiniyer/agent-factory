@@ -80,7 +80,7 @@ func TestCapability_ForkThenExecResponderIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	evil := filepath.Join(dir, "evil")
 	require.NoError(t, os.WriteFile(evil, data, 0o755))
-	sock := filepath.Join(dir, "c.sock")
+	sock := filepath.Join(shortSocketDir(t), "c.sock")
 
 	parent := exec.Command(self)
 	parent.Env = []string{"AF_ATTACK_ROLE=parent", "AF_ATTACK_SOCK=" + sock, "AF_ATTACK_EVIL=" + evil}

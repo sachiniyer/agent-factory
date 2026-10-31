@@ -17,7 +17,7 @@ import (
 // ancillary credentials ever do arrive, this fails and says so, so the residual
 // is re-evaluated instead of silently outliving its premise.
 func TestDarwinOffersNoPerMessageSenderAttestation(t *testing.T) {
-	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "d.sock"))
+	ln, err := net.Listen("unix", filepath.Join(shortSocketDir(t), "d.sock"))
 	require.NoError(t, err)
 	defer ln.Close()
 	accepted := make(chan net.Conn, 1)
