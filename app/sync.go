@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -174,29 +175,79 @@ func (m *home) coldStartFromSnapshot() error {
 	return nil
 }
 
+// defaultSnapshotBuildWorkers bounds how many snapshot records are restored at once.
+// Each restore spawns a few tmux subprocesses (has-session, list-panes,
+// display-message), so serial builds made the launch — and a project switch —
+// cost grow with the number of sessions in the project (#6423); an unbounded
+// fan-out would instead flood tmux with a subprocess per session.
+const defaultSnapshotBuildWorkers = 16
+
 // materializeSnapshot builds each snapshot record into a live instance and adds
 // it to the projection. Split out of coldStartFromSnapshot so switchProject can
 // fetch a target project's snapshot up front — while the outgoing project is
 // still intact — and only materialize it once the fetch has succeeded (#1788).
 // A single unrestorable record is logged and skipped, never aborting the batch.
+//
+// The restores overlap (defaultSnapshotBuildWorkers at a time) but the store is fed on
+// this goroutine in snapshot order, so the sidebar order, the adopted-op
+// bookkeeping and the store's own single-writer contract are unchanged.
 func (m *home) materializeSnapshot(data []session.InstanceData) {
-	for _, d := range data {
-		if snapshotAwaitingWorktree(d) {
-			continue
-		}
-		inst, err := buildInstanceFromSnapshot(d)
-		if err != nil {
-			// The session's tmux/worktree may have been destroyed externally;
-			// log and skip rather than failing the whole launch.
-			log.WarningLog.Printf("skipping session %q from snapshot: %v", d.Title, err)
-			continue
-		}
+	workers := m.snapshotBuildWorkers
+	if workers <= 0 {
+		workers = defaultSnapshotBuildWorkers
+	}
+	for _, inst := range buildSnapshotInstances(data, workers) {
 		// A row BUILT from a snapshot can already carry a daemon-owned op, and it is
 		// just as adopted as one mirrored onto an existing row — the cold-start
 		// variant of the same corpse (#3005).
 		m.adoptedOpsFor().note(inst, inst.GetInFlightOp())
 		m.store.AddInstance(inst)()
 	}
+}
+
+// buildSnapshotInstances restores the snapshot records with at most `workers`
+// builds in flight and returns the successes in snapshot order. Records still
+// awaiting their worktree are skipped, and a record that fails to build is logged
+// and dropped: the session's tmux/worktree may have been destroyed externally,
+// and that must not fail the whole launch.
+func buildSnapshotInstances(data []session.InstanceData, workers int) []*session.Instance {
+	build := buildInstanceFromSnapshot // read once: a test seam, swapped on another goroutine
+	built := make([]*session.Instance, len(data))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	if workers > len(data) {
+		workers = len(data)
+	}
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				inst, err := build(data[i])
+				if err != nil {
+					log.WarningLog.Printf("skipping session %q from snapshot: %v", data[i].Title, err)
+					continue
+				}
+				built[i] = inst
+			}
+		}()
+	}
+	for i, d := range data {
+		if snapshotAwaitingWorktree(d) {
+			continue
+		}
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	out := built[:0]
+	for _, inst := range built {
+		if inst != nil {
+			out = append(out, inst)
+		}
+	}
+	return out
 }
 
 // fetchColdStartSnapshot fetches the cold-start snapshot, tolerating a warming
@@ -818,6 +869,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// stamps it while liveness stays Ready/Running, and it never flips a status
 	// on its own (#5571 W3.1).
 	if inst.ReconcileCallbackUnavailable(d.CallbackUnavailable) {
+		changed = true
+	}
+	// The skipped agent-config list is the same class again (#6337): a
+	// (re)provision or an account swap rewrites it while liveness stays
+	// Ready/Running, and a placement that lands every file clears it.
+	if inst.ReconcileAgentConfigSkipped(d.AgentConfigSkipped) {
 		changed = true
 	}
 	// Automatic restore can exhaust its attempts while liveness stays Lost. Mirror

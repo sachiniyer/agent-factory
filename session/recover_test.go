@@ -185,6 +185,10 @@ func TestRecover_UnverifiedReattachClearsRuntimeProgram(t *testing.T) {
 func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
+	// The scoped default-command that proves restored panes launch inside the
+	// replacement account is written by the daemon alone (#4731); this test
+	// stands in for it.
+	t.Cleanup(tmux.SetLaunchCapabilityOwnerForTest(true))
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	cfg := config.DefaultConfig()

@@ -85,7 +85,8 @@ export type TerminalStatus = "connecting" | "open" | "reconnecting" | "exited";
 
 export interface TerminalCallbacks {
   /** Fired on every connection-state change, for the pane's status indicator. */
-  onStatus(status: TerminalStatus): void;
+  /** `retryAt` (epoch ms) accompanies a "reconnecting" that has an attempt scheduled (#6430). */
+  onStatus(status: TerminalStatus, retryAt?: number): void;
   /** Fired when the terminal gains/loses the keyboard (xterm's helper textarea
    *  focus/blur), so index.ts can keep its nav-vs-terminal mode (#1693) in sync
    *  with real DOM focus — e.g. a mouse click straight into the terminal. */
@@ -1514,8 +1515,8 @@ export class AttachTerminal {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay = Math.min(BACKOFF_BASE_MS * 2 ** this.retry, BACKOFF_MAX_MS);
+    this.cb.onStatus("reconnecting", Date.now() + delay);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;

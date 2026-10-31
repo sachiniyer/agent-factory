@@ -185,9 +185,9 @@ prints which target an invocation uses and why (never the token); `af target
 clear` forgets it. A saved file that is unreadable, malformed or readable by
 other users is refused rather than falling back to the local daemon.
 
-Flags take precedence over the environment. When `--daemon-url` (or
-`AF_DAEMON_URL`) is unset, `af` uses the local Unix socket exactly as before —
-the remote path is entirely opt-in.
+Flags take precedence over the environment. When no remote target is set,
+`af` uses the local Unix socket exactly as before — the remote path is
+entirely opt-in.
 
 ```bash
 # One-off command against a remote daemon
@@ -274,6 +274,12 @@ expose `network.listen_addr` to anything beyond loopback, put encryption in fron
 > `network.require_loopback_token = true`), while a **network-bound** af enforces the token
 > even for the proxy's loopback connection — so the proxy must forward the token.
 > A same-host proxy can never silently bypass the token on a network-bound listener.
+>
+> **A proxy that forwards the browser's `Host` needs that name allowed.** The daemon
+> answers only requests addressed to one of its own names, so add the proxy's public
+> name with `af config set network.allowed_hosts <name>` — `tailscale serve` and
+> Caddy forward the incoming `Host` by default. See [Host names the daemon answers
+> to](#host-names-the-daemon-answers-to).
 
 ### The web-tab preview cookie and `X-Forwarded-Proto`
 
@@ -581,6 +587,78 @@ After rotating, the **old token is dead**: a new connection presenting it gets a
 
 ---
 
+## Host names the daemon answers to
+
+**The guarantee:** every browser-facing listener the daemon serves answers a
+request only when its `Host` header names this daemon. Any other `Host` is
+refused before any route runs — the static web UI, every `/v1/...` route, and
+every WebSocket upgrade (the terminal stream and the events feed) alike.
+
+Why it matters: a browser decides "same origin" from the **name** in the URL,
+not from the address that name resolved to. Without this check, a web page whose
+own hostname was re-pointed at `127.0.0.1` after it loaded (DNS rebinding) would
+be same-origin with the tokenless loopback web UI, and could read every session
+and call every route, including the ones that create sessions and send prompts.
+A page cannot choose the `Host` its browser sends, so checking it closes that.
+
+These always work, on any port:
+
+- `localhost` and loopback IPs such as `127.0.0.1` and `[::1]`;
+- the host of the address the listener was bound from (`network.listen_addr`) —
+  for a wildcard bind such as `0.0.0.0:8443`, that is `http://0.0.0.0:8443` itself;
+- the IP address the client actually connected to — so a wildcard bind
+  (`0.0.0.0:8443`) reached as `http://192.168.1.5:8443` works with no entry;
+- a request with **no** `Host` header from this same machine (HTTP/1.0 tools;
+  browsers always send one).
+
+Anything else needs an entry in `network.allowed_hosts`. The usual case is a
+same-host reverse proxy that forwards the browser's `Host` unchanged:
+**`tailscale serve` does exactly that** (for a TCP backend it sets the proxied
+request's `Host` to the incoming one), so the daemon sees your
+`<machine>.<tailnet>.ts.net` name, and that name must be allowed. Caddy's
+`reverse_proxy` also forwards the incoming `Host` by default. nginx's
+`proxy_pass` sends its upstream address (`127.0.0.1:8443`) unless you set
+`proxy_set_header Host $host`, in which case add the public name too.
+
+```bash
+# On the daemon's machine — applies on the next request, no restart
+af config set network.allowed_hosts box.tailnet.ts.net
+```
+
+```toml
+# ~/.agent-factory/config.toml (global-only)
+[network]
+allowed_hosts = ["box.tailnet.ts.net"]
+```
+
+- An entry is a bare DNS name or IP literal — no scheme, path, or port — and
+  matches that host on any port, so one entry covers both the main UI
+  (`https://box.tailnet.ts.net`) and the per-session editor ports
+  (`https://box.tailnet.ts.net:9100`). Case and one trailing dot are ignored. There
+  are no wildcards.
+- `af config set` replaces the whole list (comma-separate several names) and
+  refuses a malformed entry, naming the spelling that works; a hand-edited
+  malformed entry is dropped at load with a warning, so it never admits anything.
+- A refused request gets **`421 Misdirected Request`** with a short plain-text body
+  naming the `Host` it refused and the exact line that would allow it. The daemon
+  logs one line per refused name (rate-limited), with the peer address and never
+  the request's path or body, and `af doctor` lists the names it has refused
+  recently.
+- If you see a refusal for a name you do **not** recognise, do not add it: that is
+  the check doing its job against a page that tried to reach af under its own
+  name.
+- A `*.localhost` **subdomain** is not allowed by default. Chromium and Firefox
+  resolve every `*.localhost` name to loopback themselves, but Safari before macOS
+  26 asks the ordinary macOS resolver, which falls through to the network's DNS
+  servers ([WebKit bug 160504](https://bugs.webkit.org/show_bug.cgi?id=160504)), so
+  a hostile network could point such a name at a page of its own and then rebind
+  it. Nothing in af needs one here; list it in `network.allowed_hosts` if you do.
+- The web-tab preview listener (`network.preview_listen_addr`) keeps its own,
+  stricter rule: it answers only the per-tab `af….localhost` names the web UI hands
+  out — each one a credential the daemon minted — and every other `Host` gets a
+  plain 404, so `network.allowed_hosts` does not apply there. The headless agent-server is not a browser surface; its token is
+  mandatory for every peer, and it has no `Host` rule.
+
 ## CORS (for the browser web client)
 
 Browsers enforce CORS, so a web client served from a different origin than the
@@ -642,6 +720,12 @@ plaintext backend.
   `network.require_token = true` or opt in with
   `network.allow_unauthenticated_network`. See [the unauthenticated network
   listener](#the-unauthenticated-network-listener).
+- **The daemon answers only its own names.** A request whose `Host` is not
+  `localhost`, a loopback IP, the listener's own address, the address the client reached, or a
+  `network.allowed_hosts` entry is refused with `421` before any route runs, so a
+  DNS-rebinding page cannot reach the tokenless loopback API. Add a name only if you
+  reach af through it on purpose. See [Host names the daemon answers
+  to](#host-names-the-daemon-answers-to).
 - **Rotate on suspected exposure.** `af token rotate` invalidates the old token
   for new connections at once — no restart, no downtime for live sessions.
 

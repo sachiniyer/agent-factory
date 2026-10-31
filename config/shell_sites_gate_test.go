@@ -94,7 +94,7 @@ type classifiedSite struct {
 // from had already gone stale on line numbers by the time it was implemented.
 var shellSiteRegistry = map[string][]classifiedSite{
 	// ---- operator config values: covered by warnExecSeparator ----
-	"internal/sessionenv/exec_unix.go:execInvocationMode": {{
+	"internal/sessionenv/exec_unix.go:execInvocation": {{
 		class: operatorConfig,
 		// THREE keys, not one. A root session's program comes from
 		// root_agent.program (or a legacy root_agents entry) and only falls back
@@ -103,6 +103,18 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		// three arrive here as the pane command.
 		keys: []string{"program_overrides", "root_agent.program", "root_agents"},
 		note: "the pane's program, run as `/bin/sh -c <command>` immediately before exec. This is the site " +
+			"#3566 is about: an unscoped session never reaches the account boundary, so an `exec --` prefix " +
+			"here dies with exit 127 and no explanation.",
+	}},
+	"internal/sessionenv/exec_unix.go:claimedExecInvocation": {{
+		class: operatorConfig,
+		// THREE keys, not one. A root session's program comes from
+		// root_agent.program (or a legacy root_agents entry) and only falls back
+		// to the program_overrides-resolved claude when that is empty —
+		// rootAgentProgramForProfile returns an explicit program verbatim. All
+		// three arrive here as the pane command.
+		keys: []string{"program_overrides", "root_agent.program", "root_agents"},
+		note: "the pane's program as the launcher ADMITTED it into the launch capability (not re-read from argv), run as `/bin/sh -c <command>` immediately before exec. Same operator keys as the unscoped site; this is the account-scoped half of the site " +
 			"#3566 is about: an unscoped session never reaches the account boundary, so an `exec --` prefix " +
 			"here dies with exit 127 and no explanation.",
 	}},
@@ -232,7 +244,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	}},
 
 	// ---- not a shell at all ----
-	"session/tmux/start.go:(*TmuxSession).Start": {{
+	"session/tmux/start.go:(*TmuxSession).start": {{
 		class: notAShell, note: "`tmux new-session -c <dir>` — tmux's start-directory flag",
 	}},
 	"internal/sessionenv/account_environment_builtins.go:unwrapIonice": {{

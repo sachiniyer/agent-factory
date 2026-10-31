@@ -6648,6 +6648,13 @@ function hasAttention(s) {
   const kind = rowKind(s);
   return kind === "ready" || kind === "working";
 }
+function otherAttentionCount(sessions, selectedId) {
+  return sessions.filter((s) => s.id !== selectedId && hasAttention(s)).length;
+}
+function attentionWords(count) {
+  if (count <= 0) return "";
+  return count === 1 ? "1 session needs attention" : `${count} sessions need attention`;
+}
 function attentionReason(s) {
   return hasAttention(s) ? (s.attention?.reason ?? "").trim() : "";
 }
@@ -6815,8 +6822,13 @@ function callbackUnavailableText(s) {
   const reason = s.callback_unavailable?.trim() ?? "";
   return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
 }
+var AGENT_CONFIG_SKIPPED_PREFIX = "af agent config skipped: ";
+function agentConfigSkippedText(s) {
+  const entries = (s.agent_config_skipped ?? []).map((entry) => entry.trim()).filter((entry) => entry !== "");
+  return entries.length === 0 ? "" : AGENT_CONFIG_SKIPPED_PREFIX + entries.join("; ");
+}
 function sessionWarningText(s) {
-  return [archiveWarningText(s), callbackUnavailableText(s)].filter((t) => t !== "").join(" \xB7 ");
+  return [archiveWarningText(s), callbackUnavailableText(s), agentConfigSkippedText(s)].filter((t) => t !== "").join(" \xB7 ");
 }
 function rootRecreateNote(s) {
   switch (s.root_recreate_context) {
@@ -7030,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "0211b04a5cd9";
+var CLIENT_VERSION = "66d702f58868";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7670,6 +7682,20 @@ var ExternalLink = [
   ["path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/file-text.mjs
+var FileText = [
+  [
+    "path",
+    {
+      d: "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"
+    }
+  ],
+  ["path", { d: "M14 2v5a1 1 0 0 0 1 1h5" }],
+  ["path", { d: "M10 9H8" }],
+  ["path", { d: "M16 13H8" }],
+  ["path", { d: "M16 17H8" }]
+];
+
 // node_modules/lucide/dist/esm/icons/folder-git-2.mjs
 var FolderGit2 = [
   ["path", { d: "M18 19a5 5 0 0 1-5-5v8" }],
@@ -7809,6 +7835,17 @@ var TriangleAlert = [
   ["path", { d: "M12 17h.01" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/wifi-off.mjs
+var WifiOff = [
+  ["path", { d: "M12 20h.01" }],
+  ["path", { d: "M8.5 16.429a5 5 0 0 1 7 0" }],
+  ["path", { d: "M5 12.859a10 10 0 0 1 5.17-2.69" }],
+  ["path", { d: "M19 12.859a10 10 0 0 0-2.007-1.523" }],
+  ["path", { d: "M2 8.82a15 15 0 0 1 4.177-2.643" }],
+  ["path", { d: "M22 8.82a15 15 0 0 0-11.288-3.764" }],
+  ["path", { d: "m2 2 20 20" }]
+];
+
 // node_modules/lucide/dist/esm/icons/x.mjs
 var X = [
   ["path", { d: "M18 6 6 18" }],
@@ -7826,16 +7863,18 @@ var ICONS = {
   "chevron-down": ChevronDown,
   circle: Circle,
   "circle-dashed": CircleDashed,
+  "wifi-off": WifiOff,
   "circle-question": CircleQuestionMark,
   diamond: Diamond,
   ellipsis: Ellipsis,
   "external-link": ExternalLink,
+  "file-text": FileText,
   folder: Folder,
   "folder-git": FolderGit2,
   funnel: Funnel,
+  "loader-circle": LoaderCircle,
   "git-branch": GitBranch,
   link: Link,
-  "loader-circle": LoaderCircle,
   menu: Menu,
   "octagon-x": OctagonX,
   panels: PanelsTopLeft,
@@ -10247,7 +10286,12 @@ var TerminalKeybar = class {
       this.bar.style.left = `${this.viewport?.offsetLeft ?? 0}px`;
       const width = this.viewport?.width ?? window.innerWidth;
       this.bar.style.width = `${width}px`;
-      this.bar.classList.toggle("af-keybar-narrow", width < 348);
+      const narrow = width < 348;
+      this.bar.classList.toggle("af-keybar-narrow", narrow);
+      for (const button of this.bar.querySelectorAll("button[aria-label='More keys']")) {
+        const text = narrow ? "More" : "More keys";
+        if (button.textContent !== text) button.textContent = text;
+      }
       this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
       const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
       this.host.style.maxHeight = `${height}px`;
@@ -11800,8 +11844,8 @@ var AttachTerminal = class {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay2 = Math.min(BACKOFF_BASE_MS * 2 ** this.retry, BACKOFF_MAX_MS);
+    this.cb.onStatus("reconnecting", Date.now() + delay2);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -12632,8 +12676,8 @@ var EventStream = class {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay2 = Math.min(BACKOFF_BASE_MS2 * 2 ** this.retry, BACKOFF_MAX_MS2);
+    this.cb.onStatus("reconnecting", Date.now() + delay2);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -13533,7 +13577,7 @@ function confirmDeleteTabModal(opts) {
     confirmClass: "af-danger",
     onCancel: opts.onCancel
   });
-  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
+  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : opts.kind === TabKind.Docs ? "This removes the Docs tab. The proposal and its docs stay. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
   asForm(handle.el.firstElementChild, opts.onConfirm);
   queueMicrotask(() => cancelBtn.focus());
   return handle;
@@ -14271,6 +14315,83 @@ function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
   return tab;
 }
 
+// src/docs_tab.ts
+var docsModule = null;
+function loadDocsModule() {
+  if (!docsModule) {
+    const url = new URL("./lazy/docs-editor.js", import.meta.url).href;
+    docsModule = import(url).catch((e) => {
+      docsModule = null;
+      throw e;
+    });
+  }
+  return docsModule;
+}
+var listeners2 = /* @__PURE__ */ new Set();
+function publishProposalChange(change) {
+  for (const fn of listeners2) fn(change);
+}
+function subscribe(fn) {
+  listeners2.add(fn);
+  return () => listeners2.delete(fn);
+}
+var pushListeners = /* @__PURE__ */ new Set();
+function publishProposalPush(status) {
+  for (const fn of pushListeners) fn(status);
+}
+var resyncListeners = /* @__PURE__ */ new Set();
+function publishProposalResync() {
+  for (const fn of resyncListeners) fn();
+}
+function subscribeResync(fn) {
+  resyncListeners.add(fn);
+  return () => resyncListeners.delete(fn);
+}
+function subscribePush(fn) {
+  pushListeners.add(fn);
+  return () => pushListeners.delete(fn);
+}
+function mountDocsTab(host, opts) {
+  let disposed = false;
+  let pane = null;
+  const notice = (text, retry) => {
+    const box = document.createElement("div");
+    box.className = "af-docs-notice";
+    const p = document.createElement("p");
+    p.className = "af-docs-notice-text";
+    p.textContent = text;
+    box.append(p);
+    if (retry) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "af-ghost";
+      btn.textContent = "Retry";
+      btn.addEventListener("click", load);
+      box.append(btn);
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "af-docs";
+    wrap.append(box);
+    host.replaceChildren(wrap);
+  };
+  function load() {
+    notice("Loading editor\u2026", false);
+    loadDocsModule().then(
+      (mod) => {
+        if (!disposed) pane = new mod.DocsPane(host, { ...opts, subscribe, subscribePush, subscribeResync });
+      },
+      (e) => {
+        if (!disposed) notice(`Could not load the editor: ${errorText(e)}`, true);
+      }
+    );
+  }
+  load();
+  return () => {
+    disposed = true;
+    pane?.dispose();
+  };
+}
+
 // src/tabaddr.ts
 function iframeIsProxied(spec) {
   if (spec.kind === TabKind.VSCode) {
@@ -14396,6 +14517,8 @@ function tabIcon(kind) {
     case TabKind.Web:
     case TabKind.VSCode:
       return "panels";
+    case TabKind.Docs:
+      return "file-text";
     default:
       return "terminal";
   }
@@ -14960,7 +15083,28 @@ var SplitView = class {
       const realId = this.tabRealIds[leaf.tab] ?? "";
       const moved = pane.tab !== leaf.tab;
       const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId);
-      if (spec !== null) {
+      const docsSlug = this.docsSlugAt(leaf.tab);
+      if (docsSlug !== null) {
+        const docsIdentity = `docs:${docsSlug}`;
+        if (pane.term || pane.webUrl !== docsIdentity || pane.identity !== identity) {
+          if (this.focusedId === leaf.id) {
+            focusedRebuilt = true;
+          }
+          pane.term?.dispose();
+          pane.term = null;
+          pane.webDispose?.();
+          pane.host.replaceChildren();
+          pane.tab = leaf.tab;
+          pane.identity = identity;
+          pane.webUrl = docsIdentity;
+          pane.webArchived = this.archived;
+          pane.webDispose = mountDocsTab(pane.host, { sessionId: this.sessionId, slug: docsSlug, token: this.token });
+          pane.status = "open";
+          this.onPaneStatus(leaf.id, "open");
+        } else if (moved) {
+          pane.tab = leaf.tab;
+        }
+      } else if (spec !== null) {
         if (pane.term || pane.webUrl !== iframeIdentity(spec) || pane.iframeProxied !== ((this.tabRealIds[leaf.tab] ?? "") !== "" && iframeIsProxied(spec)) || staleAddress || pane.webArchived !== this.archived) {
           if (this.focusedId === leaf.id) {
             focusedRebuilt = true;
@@ -14993,7 +15137,7 @@ var SplitView = class {
           this.token,
           sessionStreamEndpoint(this.sessionId, realId, leaf.tab),
           {
-            onStatus: (s) => this.onPaneStatus(leaf.id, s),
+            onStatus: (s, retryAt) => this.onPaneStatus(leaf.id, s, retryAt),
             onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
             // Only the AGENT tab (#3025 review): an automated DeliverPrompt reaches
             // the session through its agent server, so a half-typed command in an
@@ -15107,6 +15251,14 @@ var SplitView = class {
    *  A vscode tab deliberately carries NO target: its editor is a daemon-managed
    *  per-session code-server on an ephemeral port, so the only address is the
    *  daemon proxy path, which is derived from the session + tab, not stored. */
+  /** The proposal slug of the Docs tab at `idx`, or null for any other kind.
+   *  syncSplit passes a Docs tab's slug in the target list. */
+  docsSlugAt(idx) {
+    if (idx < 0 || idx >= this.tabIds.length || this.tabKinds[idx] !== TabKind.Docs) {
+      return null;
+    }
+    return this.tabTargets[idx] ?? "";
+  }
   iframeSpecAt(idx) {
     if (idx < 0 || idx >= this.tabIds.length) {
       return null;
@@ -15564,7 +15716,7 @@ var SplitView = class {
     this.applyFocusClass();
     const pane = this.panes.get(leafId);
     if (pane) {
-      this.cb.onStatus(pane.status);
+      this.cb.onStatus(pane.status, pane.status === "reconnecting" ? pane.retryAt : void 0);
     }
     this.report();
   }
@@ -15605,14 +15757,15 @@ var SplitView = class {
     void pauseStatusPoll(sessionID, token2).catch(() => {
     });
   }
-  onPaneStatus(leafId, status) {
+  onPaneStatus(leafId, status, retryAt) {
     const pane = this.panes.get(leafId);
     if (pane) {
       pane.status = status;
+      pane.retryAt = status === "reconnecting" ? retryAt : void 0;
     }
     this.report();
     if (leafId === this.focusedId) {
-      this.cb.onStatus(status);
+      this.cb.onStatus(status, retryAt);
     }
   }
   onPaneFocus(leafId, focused) {
@@ -17522,6 +17675,40 @@ function hostSelection(touched, current, seed) {
   return touched ? current : seed;
 }
 
+// src/connection.ts
+var RECONNECT_GRACE_MS = 2e3;
+function connectionInput(state) {
+  return {
+    live: state.live,
+    liveRetryAt: state.liveRetryAt,
+    termStatus: state.selectedId === null ? "open" : state.termStatus,
+    termRetryAt: state.selectedId === null ? null : state.termRetryAt
+  };
+}
+function isDown(input) {
+  return input.live === "reconnecting" || input.termStatus === "reconnecting";
+}
+function nextRetryAt(input) {
+  const at = [];
+  if (input.live === "reconnecting" && typeof input.liveRetryAt === "number") at.push(input.liveRetryAt);
+  if (input.termStatus === "reconnecting" && typeof input.termRetryAt === "number") at.push(input.termRetryAt);
+  return at.length ? Math.min(...at) : null;
+}
+function connectionNotice(input, downSince, now) {
+  if (!isDown(input) || downSince === null || now - downSince < RECONNECT_GRACE_MS) return null;
+  const at = nextRetryAt(input);
+  const remaining = at === null ? null : Math.max(0, Math.ceil((at - now) / 1e3));
+  return { down: true, retryInS: remaining === 0 ? null : remaining };
+}
+function connectionWords(notice) {
+  const retry = notice.retryInS === null ? "" : `retry in ${notice.retryInS}s`;
+  return {
+    label: "Reconnecting\u2026",
+    retry,
+    full: retry ? `Reconnecting\u2026 ${retry}` : "Reconnecting\u2026"
+  };
+}
+
 // src/project-menu-focus.ts
 function replaceProjectMenuChildren(menu, children, fallback) {
   const active = menu.ownerDocument.activeElement;
@@ -18194,6 +18381,13 @@ var AppShell = class {
     this.projectMenu.setAttribute("aria-label", "Switch project");
     this.projectMenu.hidden = true;
     this.projectSwitchWrap = h("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
+    this.projectSwitchWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.projectMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.projectSwitchBtn.focus();
+    });
     document.addEventListener("click", (e) => {
       if (this.projectMenuOpen && !this.projectSwitchWrap.contains(e.target)) {
         this.closeProjectMenu();
@@ -18204,6 +18398,10 @@ var AppShell = class {
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
+    this.navBadge = h("span", { class: "af-nav-badge" });
+    this.navBadge.setAttribute("aria-hidden", "true");
+    this.navBadge.hidden = true;
+    this.navToggle.append(this.navBadge);
     this.appControls = appbarControls([
       ...this.installEl ? [this.installEl] : []
     ], this.phone, () => {
@@ -18252,6 +18450,13 @@ var AppShell = class {
     this.filterMenu.setAttribute("aria-label", "Filter sessions");
     this.filterMenu.hidden = true;
     this.filterWrap = h("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
+    this.filterWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.filterMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeFilterMenu();
+      this.filterBtn.focus();
+    });
     document.addEventListener("click", (e) => {
       if (this.filterMenuOpen && !this.filterWrap.contains(e.target)) {
         this.closeFilterMenu();
@@ -18264,10 +18469,24 @@ var AppShell = class {
       this.railCount,
       h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn)
     );
+    this.connRetry = h("span", { class: "af-term-conn-retry" });
+    this.connNotice = h(
+      "div",
+      { class: "af-term-conn", role: "status" },
+      icon("wifi-off", "af-term-conn-glyph"),
+      h("span", { class: "af-term-conn-label" }, "Reconnecting\u2026"),
+      this.connRetry
+    );
+    this.connNotice.hidden = true;
+    this.railConn = h("div", { class: "af-rail-conn", role: "status" });
+    this.railConn.hidden = true;
+    this.railAttention = h("div", { class: "af-rail-attention" });
+    this.railAttention.setAttribute("role", "status");
+    this.railAttention.hidden = true;
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railConn, this.railAttention, this.railList);
     this.main = h("section", { class: "af-main" });
     this.navScrim = h("div", { class: "af-nav-scrim" });
     this.navScrim.setAttribute("aria-hidden", "true");
@@ -18455,6 +18674,13 @@ var AppShell = class {
   lastSessions = null;
   lastSelectedId = null;
   lastLive = null;
+  /** The "Reconnecting…" chip in the session header and its rail twin (#6430). */
+  connNotice;
+  connRetry;
+  railConn;
+  connState = null;
+  connDownSince = null;
+  connTimer = null;
   lastKb = null;
   lastError = null;
   // The last value written to document.title, so an unrelated update doesn't
@@ -18470,11 +18696,17 @@ var AppShell = class {
   idleAgeTimer;
   // Drawer state is local UI ephemera; closing it restores session-first chrome.
   navToggle;
+  /** Count pill on the drawer toggle, and the words line in the drawer (#6405). */
+  navBadge;
+  railAttention;
   navScrim;
   navOpen = false;
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose() {
     window.clearInterval(this.idleAgeTimer);
+    if (this.connTimer !== null) window.clearInterval(this.connTimer);
+    this.connTimer = null;
+    this.connState = null;
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
@@ -18530,6 +18762,7 @@ var AppShell = class {
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
+    this.patchNavAttention(state);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -18567,6 +18800,7 @@ var AppShell = class {
       this.lastLive = state.live;
       this.el.dataset.live = state.live;
     }
+    this.patchConnection(state);
     if (this.lastView !== state.view) {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
@@ -19223,6 +19457,7 @@ var AppShell = class {
     return drop.landed;
   }
   toggleFilterMenu() {
+    if (!this.filterMenuOpen) this.closeProjectMenu();
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
     this.filterBtn.setAttribute("aria-expanded", this.filterMenuOpen ? "true" : "false");
@@ -19246,6 +19481,7 @@ var AppShell = class {
     if (this.projectSwitchBtn.disabled) {
       return;
     }
+    this.closeFilterMenu();
     this.projectMenuOpen = true;
     this.projectMenu.hidden = false;
     this.projectSwitchBtn.setAttribute("aria-expanded", "true");
@@ -19342,6 +19578,7 @@ var AppShell = class {
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
     const head = chrome.head;
+    head.insertBefore(this.connNotice, chrome.attention.el);
     const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -19362,6 +19599,7 @@ var AppShell = class {
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
       [chrome.newTabs, this.header],
+      [this.connNotice, this.header],
       [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
@@ -19753,6 +19991,52 @@ var AppShell = class {
       this.tabInsert.hidden = true;
     }
   }
+  /** The "Reconnecting…" state (#6430): drawn once a socket has been down for the
+   *  grace period (a blink of reconnect stays invisible), with the time of the next
+   *  attempt, and cleared on reconnect. Static glyph plus words, so reduced motion
+   *  needs no fallback. The 1s tick runs only while a drop is in progress. */
+  patchConnection(state) {
+    this.connState = state;
+    const down = isDown(connectionInput(state));
+    if (!down) {
+      this.connDownSince = null;
+    } else if (this.connDownSince === null) {
+      this.connDownSince = Date.now();
+    }
+    this.renderConnection();
+    if (down && this.connTimer === null) {
+      this.connTimer = window.setInterval(() => this.renderConnection(), 1e3);
+    } else if (!down && this.connTimer !== null) {
+      window.clearInterval(this.connTimer);
+      this.connTimer = null;
+    }
+  }
+  renderConnection() {
+    const state = this.connState;
+    const notice = state ? connectionNotice(connectionInput(state), this.connDownSince, Date.now()) : null;
+    const words = notice ? connectionWords(notice) : null;
+    this.connNotice.hidden = !words;
+    this.railConn.hidden = !words;
+    if (!words) return;
+    this.connRetry.textContent = words.retry ? ` ${words.retry.replace("retry in ", "")}` : "";
+    this.connNotice.setAttribute("aria-label", words.full);
+    this.connNotice.title = words.full;
+    if (this.railConn.textContent !== words.full) this.railConn.textContent = words.full;
+  }
+  /** Surface other sessions' attention requests without opening the drawer: a count
+   *  on the toggle, the state in words on the toggle's label and at the top of the
+   *  drawer (#6405). Words, not hover: a touch screen has no hover. */
+  patchNavAttention(state) {
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const count = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
+    const words = attentionWords(count);
+    this.navBadge.hidden = count === 0;
+    if (this.navBadge.textContent !== String(count)) this.navBadge.textContent = count ? String(count) : "";
+    this.navToggle.setAttribute("aria-label", words ? `Toggle sessions, ${words}` : "Toggle sessions");
+    this.navToggle.toggleAttribute("data-attention", count > 0);
+    this.railAttention.hidden = count === 0;
+    if (this.railAttention.textContent !== words) this.railAttention.textContent = words;
+  }
   patchMainHead(state) {
     const selected = selectedSession(state);
     if (!selected || !this.headTitle) {
@@ -20027,16 +20311,18 @@ function sessionRow(s, selected, openSession, buildActions, previous) {
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
   const callbackWarning = callbackUnavailableText(s);
+  const agentConfigSkipped = agentConfigSkippedText(s);
   const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
   const reason = attentionReason(s);
   row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}${reason ? `: ${reason}` : ""}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
+  row.dataset.idleTitleAgentConfig = agentConfigSkipped === "" ? "" : `; ${agentConfigSkipped}`;
   row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${row.dataset.idleTitleAgentConfig}${inertReason}`
   );
   if (actionable) {
     row.onclick = () => openSession(s.id);
@@ -20059,7 +20345,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleAgentConfig ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }
@@ -20077,7 +20363,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleAgentConfig ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }
@@ -20119,6 +20405,47 @@ function captureTabDeleteTarget(target) {
   const identity = tabIdentity(target);
   const legacy = tabRealId(target) === "";
   return (tabs) => tabs.findIndex((tab) => tabIdentity(tab) === identity && (!legacy || tab === target));
+}
+
+// src/proposal_api.ts
+function isRecord(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function str(v) {
+  return typeof v === "string" ? v : "";
+}
+var PUSH_STATES = ["idle", "countdown", "waiting_agent", "held", "sent"];
+function parsePushStatus(d) {
+  if (!isRecord(d) || typeof d.state !== "string" || !PUSH_STATES.includes(d.state)) {
+    return null;
+  }
+  const due = typeof d.due_in_ms === "number" && Number.isFinite(d.due_in_ms) ? Math.max(0, d.due_in_ms) : null;
+  return {
+    sessionId: str(d.session_id),
+    slug: str(d.slug),
+    mode: d.mode === "manual" ? "manual" : "auto",
+    state: d.state,
+    dueInMs: due,
+    unsent: typeof d.unsent === "number" && d.unsent > 0 ? d.unsent : 0
+  };
+}
+function parseProposalPush(ev) {
+  if (!isRecord(ev) || ev.type !== "proposal.push") {
+    return null;
+  }
+  const status = parsePushStatus(ev.data);
+  return status && status.sessionId !== "" && status.slug !== "" ? status : null;
+}
+function parseProposalChange(ev) {
+  if (!isRecord(ev) || ev.type !== "proposal.changed" || !isRecord(ev.data)) {
+    return null;
+  }
+  const d = ev.data;
+  const slug = str(d.slug);
+  if (slug === "") {
+    return null;
+  }
+  return { repoId: str(d.repo_id), slug, doc: str(d.doc), commit: str(d.commit), author: str(d.author) };
 }
 
 // src/index.ts
@@ -20198,7 +20525,7 @@ var configAssistant = null;
 var accountLogin = null;
 var installAffordance = new InstallAffordance();
 var splitView = new SplitView(termHost, {
-  onStatus: (s) => store.set({ termStatus: s }),
+  onStatus: (s, retryAt) => store.set({ termStatus: s, termRetryAt: retryAt ?? null }),
   // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
   // pane, so a click straight into a pane enters terminal mode (and clicking/tabbing
   // away from all panes returns to rail mode) without going through Enter/Escape.
@@ -22006,7 +22333,7 @@ function syncSplit(state) {
   const runtimeSessionId = runtimeSelected ? selId : null;
   const tabIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabIdentity) : ["0:"];
   const tabRealIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabRealId) : [""];
-  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.url) : [];
+  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind === TabKind.Docs ? t.proposal : t.url) : [];
   const tabKinds = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind) : [];
   const tabNames = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.name) : [];
   const archived = runtimeSelected ? isArchived(runtimeSelected) : false;
@@ -22034,10 +22361,11 @@ function startStream(tok) {
     onResync: () => {
       markArchiveDirty();
       requestResync();
+      publishProposalResync();
     },
-    onStatus: (s) => {
+    onStatus: (s, retryAt) => {
       if (s !== "open") markArchiveDirty();
-      store.set({ live: s });
+      store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
@@ -22079,6 +22407,16 @@ function stopStream() {
   }
 }
 function onEvent(ev) {
+  if (ev.type === "proposal.changed") {
+    const change = parseProposalChange(ev);
+    if (change) publishProposalChange(change);
+    return;
+  }
+  if (ev.type === "proposal.push") {
+    const status = parseProposalPush(ev);
+    if (status) publishProposalPush(status);
+    return;
+  }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
     requestTaskResync();
     return;
@@ -22299,7 +22637,7 @@ function isNativeControl(el2) {
   if (!el2) {
     return false;
   }
-  return el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
+  return el2.isContentEditable || el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
 }
 function onKeydown(e) {
   if (tabShortcutRepeat.swallow(e)) {
@@ -22312,7 +22650,7 @@ function onKeydown(e) {
     return;
   }
   const target = e.target;
-  const inTerminal = target ? termHost.contains(target) : false;
+  const inTerminal = target ? termHost.contains(target) && !target.isContentEditable : false;
   const isTerminalTextarea = inTerminal && target?.tagName === "TEXTAREA";
   if (!isTerminalTextarea && e.key !== "Escape" && isNativeControl(target)) {
     return;
@@ -22423,6 +22761,7 @@ lucide/dist/esm/icons/circle.mjs:
 lucide/dist/esm/icons/diamond.mjs:
 lucide/dist/esm/icons/ellipsis.mjs:
 lucide/dist/esm/icons/external-link.mjs:
+lucide/dist/esm/icons/file-text.mjs:
 lucide/dist/esm/icons/folder-git-2.mjs:
 lucide/dist/esm/icons/folder.mjs:
 lucide/dist/esm/icons/funnel.mjs:
@@ -22441,6 +22780,7 @@ lucide/dist/esm/icons/square.mjs:
 lucide/dist/esm/icons/terminal.mjs:
 lucide/dist/esm/icons/trash-2.mjs:
 lucide/dist/esm/icons/triangle-alert.mjs:
+lucide/dist/esm/icons/wifi-off.mjs:
 lucide/dist/esm/icons/x.mjs:
 lucide/dist/esm/lucide.mjs:
   (**

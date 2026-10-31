@@ -48,6 +48,20 @@ test("the build wipes stale dist artifacts so the embedded set is a pure functio
   }
 });
 
+// The Docs tab's CodeMirror bundle loads on demand (docs_tab.ts). The shell must not
+// carry it, and must not import anything at startup: the service worker caches only
+// the shell files, so a static import of another file breaks the offline shell.
+test("the Docs editor is a separate lazy bundle that the shell does not import", () => {
+  execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
+  const shell = readFileSync(join(webRoot, "dist", "af-web.js"), "utf8");
+  const lazy = readFileSync(join(webRoot, "dist", "lazy", "docs-editor.js"), "utf8");
+  assert.ok(shell.includes('"./lazy/docs-editor.js"'), "the shell must load the Docs bundle by its path");
+  assert.doesNotMatch(shell, /^\s*import\s[^(]/m, "the shell must have no static imports");
+  assert.ok(!shell.includes("cm-scroller"), "CodeMirror must not be in the shell");
+  assert.ok(lazy.includes("cm-scroller"), "CodeMirror must be in the Docs bundle");
+  assert.match(lazy, /export\s*\{[^}]*DocsPane/, "the Docs bundle must export DocsPane");
+});
+
 // af() (src/api.ts) sends X-AF-Client-Version on every /v1/ request so the daemon
 // decodes the body with its tolerant (additive-field) decoder instead of the strict
 // DisallowUnknownFields path reserved for hand-authored curl (daemon/httpserver.go).

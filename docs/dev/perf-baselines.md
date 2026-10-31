@@ -98,6 +98,8 @@ under the `perf-baselines` artifact.
 | --- | ---: | ---: | ---: | ---: |
 | raw_bytes | 1126071.000 | 1126071.000–1126071.000 | 0.000 | 1182374.550 |
 | gzip_bytes | 255761.000 | 255761.000–255761.000 | 0.000 | 268549.050 |
+| lazy_raw_bytes | 368912.000 | 368912.000–368912.000 | 0.000 | 387357.600 |
+| lazy_gzip_bytes | 119387.000 | 119387.000–119387.000 | 0.000 | 125356.350 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -122,6 +124,16 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Lazy bundle provenance (proposal Docs tab)
+
+The Docs tab (proposal mode, step 2) ships its CodeMirror editor as
+`web/dist/lazy/docs-editor.js`, a separate esbuild build that `af-web.js` imports
+only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
+`lazy_*` entries measure it on its own, with the same 5% margin. Both lazy values
+were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
+`report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
+so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,149,376 raw and 260,459 gzip bytes over `web/dist` without `lazy/`. Both are inside the existing shell budgets (raw 1,182,374; gzip 268,549), so those baselines are not moved. Lazy bundle: 368,912 raw / 119,387 gzip.
 
 ### Bundle refresh provenance (#6289)
 

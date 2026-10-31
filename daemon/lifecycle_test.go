@@ -332,6 +332,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"ListTasks":      allowedDuringProbation,
 	"Ping":           allowedDuringProbation,
 	"Preview":        allowedDuringProbation,
+	"PreviewSession": allowedDuringProbation,
 	// Slice 1 (#5136) is a strictly read-only listing — the same admission
 	// class as Snapshot and ListTasks; the mutating --apply lands in the
 	// follow-up and must move this back.

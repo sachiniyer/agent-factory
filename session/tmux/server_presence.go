@@ -17,6 +17,27 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 )
 
+// socketTmuxArgs prepends tmux's `-S <socket>` server option to a command's
+// per-command args when socket is non-empty, pinning the command to that one
+// tmux server. An empty socket returns args unchanged so the client resolves
+// the server from its own environment ($TMUX, else $TMUX_TMPDIR, else the
+// default) — the historical behavior callers that already operate on their
+// own daemon's ambient socket keep.
+//
+// Pinned with `-S <path>` rather than named with `-L <name>` because the
+// daemon's sessions live on a socket PATH it records, not a socket NAME a
+// client re-resolves from TMUX_TMPDIR: a doctor process whose own
+// $TMUX/$TMUX_TMPDIR resolves a different server would still reach the wrong
+// one through `-L default`. This mirrors the `-S` pin app/config_agent.go
+// and commands/accountslogincmd.go already use for this same daemon-vs-client
+// divergence (#2019).
+func socketTmuxArgs(socket string, args ...string) []string {
+	if socket == "" {
+		return args
+	}
+	return append([]string{"-S", socket}, args...)
+}
+
 // missingTmuxSession recognizes tmux's explicit exact-target absence answer.
 // Exit status 1 alone is ambiguous: wrapper, policy, and unclassified connection
 // failures can return the same status while the named session remains unknown.
@@ -69,16 +90,21 @@ func missingTmuxSession(err error, name string) bool {
 // the package invariant intact rather than bending it: absence is still proved
 // by a read that happened, never inferred from one that failed.
 //
+// The corroboration listing is pinned to socket when non-empty, so a caller
+// that already pinned its own command to a recorded server corroborates
+// against that SAME server rather than re-resolving one from its ambient
+// environment and asking the wrong server whether the session is absent.
+//
 // Only tmux's own exit 1 is widened this way. Any other status is a failure mode
 // tmux documents no diagnostic for, and was never a candidate for absence.
-func tmuxProvedSessionAbsent(cmdExec cmd.Executor, err error, name string) bool {
+func tmuxProvedSessionAbsent(cmdExec cmd.Executor, err error, name, socket string) bool {
 	if missingTmuxSession(err, name) {
 		return true
 	}
 	if _, exitOne := tmuxExitOneDiagnostic(err); !exitOne {
 		return false
 	}
-	names, listErr := ListSessionNames(cmdExec)
+	names, listErr := ListSessionNamesOnSocket(cmdExec, socket)
 	if listErr != nil {
 		return false
 	}
@@ -256,19 +282,33 @@ func liveTmuxServerPIDs() []int {
 // A tripped deadline is an error, never an empty list: a server that did not
 // answer has told us nothing about what is running on it.
 func ListSessionNames(cmdExec cmd.Executor) ([]string, error) {
-	return listSessionField(cmdExec, "#{session_name}")
+	return listSessionField(cmdExec, "#{session_name}", "")
+}
+
+// ListSessionNamesOnSocket is ListSessionNames pinned to a specific tmux server
+// socket via `tmux -S <socket> ls`, exported for `af doctor` (#2874/#2910).
+// Doctor observes sessions a daemon in ANOTHER process created: the daemon and
+// the doctor process can resolve DIFFERENT $TMUX/$TMUX_TMPDIR values, so a bare
+// `tmux ls` lists whatever server doctor's ambient environment reaches, a live
+// session on the daemon's socket is absent from the result, and every process
+// carrying its marker reads as a verified orphan. Pinning to the socket the
+// daemon records makes the listing name the server that actually hosts this
+// home's sessions. An empty socket is the ambient listing of ListSessionNames,
+// so callers without a recorded socket keep that behavior.
+func ListSessionNamesOnSocket(cmdExec cmd.Executor, socket string) ([]string, error) {
+	return listSessionField(cmdExec, "#{session_name}", socket)
 }
 
 // listSessionIDs is the ListSessionNames contract for #{session_id}: the
 // generation probe's corroboration asks which IDS the server still knows,
 // and a name list cannot answer that.
 func listSessionIDs(cmdExec cmd.Executor) ([]string, error) {
-	return listSessionField(cmdExec, "#{session_id}")
+	return listSessionField(cmdExec, "#{session_id}", "")
 }
 
-func listSessionField(cmdExec cmd.Executor, format string) ([]string, error) {
+func listSessionField(cmdExec cmd.Executor, format, socket string) ([]string, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "ls", "-F", format)
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, socketTmuxArgs(socket, "ls", "-F", format)...)
 	timedOut := ctx.Err() != nil
 	cancel()
 	if err != nil {

@@ -1082,7 +1082,7 @@
         "pointer": "api/sessions.go:582 sessionsPreviewCmd"
       },
       "verdict": "parity",
-      "notes": "The CLI uses the internal Preview RPC; the UIs get the same content off the live stream."
+      "notes": "The CLI uses the internal Preview RPC; the UIs get the same content off the live stream. POST /v1/PreviewSession is the public, read-only short form for scripts: the last 1-40 lines of the agent tab as plain text, by stable id (#6284)."
     },
     {
       "id": "session.preview-full",
@@ -1497,7 +1497,8 @@
       },
       "verdict": "parity",
       "issue": "#3626",
-      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight \u2014 the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see \u2014 so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."    },
+      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight \u2014 the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see \u2014 so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."
+    },
     {
       "id": "task.list",
       "title": "List tasks",
@@ -1761,16 +1762,16 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/docs_pane.ts (doc strip, add and delete) and web/src/proposal_api.ts getProposal/getDoc/addDoc/removeDoc/putDoc \u2192 POST /v1/GetProposal, ReadProposalDoc, AddProposalDoc, RemoveProposalDoc, SaveProposalDoc"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalRemoveDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, RemoveProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Step 2a added the daemon routes (docs/dev/proposals/proposal-mode/api.md) and moved this CLI onto them. SaveProposalDoc, the three-way human save, has no CLI verb: it is for the web editor. The remaining gap is web-only: step 2b adds the web Docs tab (doc strip, live-preview editor, add-doc menu) over those routes. The tui cell is n/a rather than a gap: goals.md lists a TUI editor as a non-goal, and future.md's read-only TUI view is a different, later capability — it would flip this cell to partial for the read half if it lands, not to yes."
+      "verdict": "deliberate",
+      "issue": "#5848",
+      "notes": "The web Docs tab (step 2b) now reads, adds, removes and saves docs over the same daemon routes the CLI uses, so no cell is missing: the one n/a is the TUI, and it is deliberate. the TUI's proposal editor is a recorded non-goal (#5848; goals.md: 'The TUI does not get an editor. The Docs tab is web only.'); the TUI's analogue of an existing docs tab is the placeholder that hands the user `af proposal path <slug>`. The web addresses a proposal by session_id and the daemon resolves its repo, so it never sends repo_id or repo_path (see field_coverage.web_rpcs). SaveProposalDoc, the three-way human save, has no CLI verb: it is for the editor. It carries writer and seq (the per-writer fence, #6311), which only the web editor has a use for. Re-open if the read-only TUI view in future.md lands: that would flip the tui cell to partial for the read half."
     },
     {
       "id": "proposal.docs-tab",
@@ -1780,16 +1781,16 @@
         "pointer": "ui/tab_pane.go:582 docsTabPlaceholder"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/docs_pane.ts DocsPane (the Docs tab beside the agent)"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions_tabs.go --kind docs --proposal; api/proposals.go start/attach create it"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Step 2a added the docs tab kind (session.TabKindDocs), created by af proposal start/attach; step 2b renders it in the web UI as the proposal editor — the remaining gap is that web cell. The tui cell is n/a: goals.md lists a TUI editor as a non-goal ('The Docs tab is web only'), and the TUI's handling of an existing docs tab IS docsTabPlaceholder — a pane that says so and hands the user `af proposal path <slug>` for a terminal view, which is the surface's designed analogue rather than a missing editor."
+      "verdict": "deliberate",
+      "issue": "#5848",
+      "notes": "The web renders the docs tab kind (session.TabKindDocs) as the proposal editor. the TUI's proposal editor is a recorded non-goal (#5848; goals.md: 'The TUI does not get an editor. The Docs tab is web only.'); the TUI's handling of an existing docs tab IS docsTabPlaceholder, a pane that says so and hands the user `af proposal path <slug>` for a terminal view \u2014 the surface's designed analogue, not a missing editor."
     },
     {
       "id": "proposal.push",
@@ -1799,16 +1800,16 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/docs_push.ts PushChip (mode switch, countdown, Hold, Send now) \u2192 POST /v1/SetProposalPushMode, HoldProposalPush, SendProposalChanges"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/proposals_push.go proposalPushModeCmd/proposalSendCmd → POST /v1/SetProposalPushMode, SendProposalChanges (daemon/proposals_push.go)"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Step 3a (docs/dev/proposals/proposal-mode/api.md, Push) added the daemon push: auto mode sends the unseen edits 10 s after the last human save when the agent is Ready; the CLI sets the mode and sends now. Step 3b adds the web push chip (mode switch, countdown, Hold, Send now) over these routes — the remaining gap is that web cell. HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown, and the next save releases it. The tui cell is n/a: goals.md lists a TUI editor as a non-goal, and with no TUI proposal edits there is nothing for a TUI push affordance to send."
+      "verdict": "deliberate",
+      "issue": "#5848",
+      "notes": "The web push chip (step 3b) now sets the mode, holds the countdown and sends now over the daemon routes the CLI uses (HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown). the TUI's proposal editor is a recorded non-goal (#5848; goals.md: 'The TUI does not get an editor. The Docs tab is web only.'), so with no TUI proposal edits there is nothing for a TUI push affordance to send."
     },
     {
       "id": "backlog.items",
@@ -2077,6 +2078,7 @@
       "POST /v1/ListOnComplete": "task.on-complete",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
+      "POST /v1/PreviewSession": "session.preview",
       "POST /v1/PruneSessions": "session.prune",
       "POST /v1/QuotaReport": "quota.usage-report",
       "POST /v1/RegisterAccount": "session.accounts",
@@ -2195,7 +2197,13 @@
       "SuggestSessionName": "-",
       "TriggerTask": "task.trigger",
       "UpdateTask": "task.edit",
-      "config-assistant": "config-agent"
+      "config-assistant": "config-agent",
+      "AddProposalDoc": "proposal.docs",
+      "GetProposal": "proposal.docs",
+      "ReadProposalDoc": "proposal.docs",
+      "RemoveProposalDoc": "proposal.docs",
+      "HoldProposalPush": "proposal.push",
+      "SendProposalChanges": "proposal.push"
     },
     "cli_flags": {
       "af backlog --help": "meta.discovery",
@@ -3181,7 +3189,7 @@
           "gap": "session.tab.create.web"
         },
         "proposal": {
-          "gap": "proposal.docs-tab"
+          "ok": "A docs tab is created by StartProposal and AttachProposal, which open it beside the agent; the web renders the tab but never creates one through CreateTab. Whether the web should start or attach a proposal is the web cell of proposal.agent-workflow, a recorded gap there."
         }
       },
       "HandoffSessionV2": {
@@ -3274,6 +3282,38 @@
       "RestoreSession": {
         "force_reap": {
           "ok": "The force-reap override is deliberately CLI-only. It discards a reachable sandbox's unpushed work (#2923), so it must be a typed, per-invocation act with the consequence written next to it — not a button or a keystroke a mis-click can reach. The refusal it releases names the exact command, so the TUI and web point at the CLI rather than reproducing the hazard."
+        }
+      },
+      "AddProposalDoc": {
+        "repo_id": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        },
+        "repo_path": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        }
+      },
+      "GetProposal": {
+        "repo_id": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        },
+        "repo_path": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        }
+      },
+      "ReadProposalDoc": {
+        "repo_id": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        },
+        "repo_path": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        }
+      },
+      "RemoveProposalDoc": {
+        "repo_id": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        },
+        "repo_path": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
         }
       }
     }

@@ -9,8 +9,12 @@ import assert from "node:assert/strict";
 
 import type { IconName } from "./icon.js";
 import {
+  AGENT_CONFIG_SKIPPED_PREFIX,
+  agentConfigSkippedText,
   archiveWarningText,
   attentionReason,
+  attentionWords,
+  otherAttentionCount,
   callbackUnavailableText,
   canHandoff,
   type DotKind,
@@ -315,6 +319,24 @@ test("callback warning renders under the shared prefix (#5571 W3.1)", () => {
   assert.equal(callbackUnavailableText(sess({})), "");
 });
 
+test("agent-config skip list renders under the shared prefix (#6337)", () => {
+  const entries = [
+    "claude:CLAUDE.md: stat /home/op/.claude/CLAUDE.md: no such file or directory",
+    "claude:.claude.json: /home/op/.claude.json is 99999999 bytes, over the 67108864-byte bound",
+  ];
+  assert.equal(
+    agentConfigSkippedText(sess({ agent_config_skipped: entries })),
+    `${AGENT_CONFIG_SKIPPED_PREFIX}${entries.join("; ")}`,
+  );
+  // Blank entries and surrounding whitespace never reach the banner.
+  assert.equal(
+    agentConfigSkippedText(sess({ agent_config_skipped: ["  claude:CLAUDE.md: missing  ", "   "] })),
+    `${AGENT_CONFIG_SKIPPED_PREFIX}claude:CLAUDE.md: missing`,
+  );
+  assert.equal(agentConfigSkippedText(sess({ agent_config_skipped: [] })), "");
+  assert.equal(agentConfigSkippedText(sess({})), "");
+});
+
 test("the persistent banner joins archive and callback warnings without dropping either", () => {
   const session = sess({
     archive_warning: "restore completed with an incomplete archive",
@@ -328,6 +350,23 @@ test("the persistent banner joins archive and callback warnings without dropping
   assert.equal(sessionWarningText(sess({ callback_unavailable: "x" })), "af callback unavailable: x");
   assert.equal(sessionWarningText(sess({ archive_warning: "y" })), "y");
   assert.equal(sessionWarningText(sess({})), "");
+});
+
+test("the persistent banner joins every session warning kind (#6337)", () => {
+  const session = sess({
+    archive_warning: "restore completed with an incomplete archive",
+    callback_unavailable: "require_token is false",
+    agent_config_skipped: ["claude:CLAUDE.md: missing"],
+  });
+  assert.equal(
+    sessionWarningText(session),
+    "restore completed with an incomplete archive · af callback unavailable: require_token is false · af agent config skipped: claude:CLAUDE.md: missing",
+  );
+  // The skip notice alone renders bare too.
+  assert.equal(
+    sessionWarningText(sess({ agent_config_skipped: ["claude:CLAUDE.md: missing"] })),
+    "af agent config skipped: claude:CLAUDE.md: missing",
+  );
 });
 
 test("[fresh context] note mirrors session.RootRecreateContext.Note (#2629)", () => {
@@ -616,4 +655,22 @@ test("rowTitle prefixes [remote] for every off-box backend like the TUI (#4336)"
   }
   assert.equal(rowTitle(sess({ title: "w", backend_type: "local" })), "w");
   assert.equal(rowTitle(sess({ title: "w" })), "w");
+});
+
+test("otherAttentionCount counts only other live sessions asking for the user (#6405)", () => {
+  const asking = { reason: "x", set_at: "2026-10-20T12:00:00Z" };
+  const sessions = [
+    sess({ id: "a", liveness: Liveness.Ready, attention: asking }),
+    sess({ id: "b", liveness: Liveness.Running, attention: asking }),
+    sess({ id: "c", liveness: Liveness.Ready }),
+  ];
+  assert.equal(otherAttentionCount(sessions, "a"), 1);
+  assert.equal(otherAttentionCount(sessions, null), 2);
+  assert.equal(otherAttentionCount(sessions, "c"), 2);
+});
+
+test("attentionWords states the count in words (#6405)", () => {
+  assert.equal(attentionWords(0), "");
+  assert.equal(attentionWords(1), "1 session needs attention");
+  assert.equal(attentionWords(3), "3 sessions need attention");
 });

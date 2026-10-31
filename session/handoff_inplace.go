@@ -51,7 +51,7 @@ var (
 )
 
 // ErrSwapNeedsAccountHandoff refuses an in-place swap of a session that carries
-// an account: moving an account across agents is W7.6.
+// an account across agents (a same-agent swap is W7.6, account_swap_offbox.go; cross-agent is not supported).
 var ErrSwapNeedsAccountHandoff = errors.New("an account-scoped sandbox session cannot be handed off in place yet; account handoff is not supported off-box")
 
 // --- sandbox side ---

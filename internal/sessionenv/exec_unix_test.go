@@ -28,7 +28,7 @@ func TestExecInvocationPreservesPOSIXShellSemantics(t *testing.T) {
 	}
 	t.Cleanup(func() { processExec = previous })
 
-	err := execInvocation([]string{"codex", "0", "AF_TEST_ASSIGNMENT=yes command --flag"}, false)
+	err := execInvocation([]string{"codex", "0", "AF_TEST_ASSIGNMENT=yes command --flag"})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
 	}
@@ -56,7 +56,7 @@ func TestExecInvocationHonorsInlineClaudeCloudMode(t *testing.T) {
 	}
 	t.Cleanup(func() { processExec = previous })
 
-	err := execInvocation([]string{"claude", "0", "CLAUDE_CODE_USE_BEDROCK=1 claude"}, false)
+	err := execInvocation([]string{"claude", "0", "CLAUDE_CODE_USE_BEDROCK=1 claude"})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
 	}
@@ -232,7 +232,7 @@ func TestExecInvocationDoesNotTrustDiscoverableAgentServerPath(t *testing.T) {
 	}
 	command := shellquote.Quote(currentExecutable) +
 		" agent-server --listen :1 --repo /r --title t --program ./codex --program-resolved"
-	if err := execInvocation([]string{"codex", "0", command}, false); !errors.Is(err, wantErr) {
+	if err := execInvocation([]string{"codex", "0", command}); !errors.Is(err, wantErr) {
 		t.Fatalf("forged handoff error = %v, want test sentinel", err)
 	}
 	if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
@@ -346,7 +346,7 @@ func TestExecInvocationBindsCredentialGrantToAttributableExecutable(t *testing.T
 				}
 				t.Cleanup(func() { processExec = previous })
 
-				if err := execInvocation([]string{group.agent, "0", row.command}, false); !errors.Is(err, wantErr) {
+				if err := execInvocation([]string{group.agent, "0", row.command}); !errors.Is(err, wantErr) {
 					t.Fatalf("execInvocation() error = %v, want test sentinel", err)
 				}
 				if kept := slices.Contains(gotEnvironment, group.envName+"=fixture"); kept != row.want {
@@ -399,7 +399,7 @@ func TestExecInvocationSearchPathGrantFollowsFirstHit(t *testing.T) {
 			}
 			t.Cleanup(func() { processExec = previous })
 
-			if err := execInvocation([]string{"codex", "0", "codex"}, false); !errors.Is(err, wantErr) {
+			if err := execInvocation([]string{"codex", "0", "codex"}); !errors.Is(err, wantErr) {
 				t.Fatalf("execInvocation() error = %v, want test sentinel", err)
 			}
 			if kept := slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture"); kept != test.want {
@@ -426,7 +426,7 @@ func TestExecInvocationDeniesGrantForExecutableInsideWorkingDirectory(t *testing
 	t.Cleanup(func() { processExec = previous })
 
 	command := filepath.Join(inside, "codex")
-	if err := execInvocation([]string{"codex", "0", command}, false); !errors.Is(err, wantErr) {
+	if err := execInvocation([]string{"codex", "0", command}); !errors.Is(err, wantErr) {
 		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
 	}
 	if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
@@ -437,30 +437,6 @@ func TestExecInvocationDeniesGrantForExecutableInsideWorkingDirectory(t *testing
 // An account-scoped launch whose command cannot be attributed to the operator
 // must REFUSE rather than strip-and-continue: the account boundary would
 // still inject the selected account's material into the program (#5265).
-func TestExecInvocationRefusesScopedLaunchWhenGrantFails(t *testing.T) {
-	// A PATH that resolves the bare name into the pane's working directory —
-	// the repository-controlled resolution class the grant exists to deny.
-	t.Chdir(t.TempDir())
-	t.Setenv("PATH", ".")
-	processExecCalled := false
-	previous := processExec
-	processExec = func(_ string, _ []string, _ []string) error {
-		processExecCalled = true
-		return nil
-	}
-	t.Cleanup(func() { processExec = previous })
-
-	// scoped argv: agent, extraCount, account, trustedExecutable,
-	// generatedCount, generatedArgs..., extras..., command.
-	err := execInvocation([]string{"codex", "0", "work", "", "0", "codex"}, true)
-	if err == nil {
-		t.Fatal("scoped launch on a repository-controlled PATH hit was not refused")
-	}
-	if processExecCalled {
-		t.Fatal("refused scoped launch still reached exec")
-	}
-}
-
 func TestAgentServerExecInvocationDoesNotCompareSymlinkSpelling(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "fixture")
 	wantErr := errors.New("stop before exec")
@@ -564,7 +540,7 @@ func TestExecInvocationRefusesToLaunchUnderAStaleStamp(t *testing.T) {
 	}
 	t.Cleanup(func() { paneBookkeepingWrite, paneStampRead, processExec = prevWrite, prevRead, prevExec })
 
-	if err := execInvocation([]string{"codex", "0", "command --flag"}, false); err == nil ||
+	if err := execInvocation([]string{"codex", "0", "command --flag"}); err == nil ||
 		!strings.Contains(err.Error(), "stale identity stamp") {
 		t.Fatalf("execInvocation() error = %v, want the stale-stamp refusal", err)
 	}

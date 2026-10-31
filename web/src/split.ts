@@ -56,6 +56,7 @@ import {
 } from "./layout.js";
 import { fetchEditorPortOrigin, fetchPreviewOrigin, pauseStatusPoll, probeWebTab } from "./api.js";
 import type { HoldAction } from "./delivery_hold.js";
+import { mountDocsTab } from "./docs_tab.js";
 import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
 // iframeIsProxied, which also answers it for a vscode tab (always proxied, and with no
@@ -86,7 +87,7 @@ const EDGE_BAND = 0.3;
 
 export interface SplitCallbacks {
   /** The FOCUSED pane's connection state, for the pane-header status line. */
-  onStatus(status: TerminalStatus): void;
+  onStatus(status: TerminalStatus, retryAt?: number): void;
   /** Real DOM focus of any pane's terminal, for the nav-vs-terminal mode (#1693):
    *  true when a pane's xterm gains the keyboard, false when focus leaves every pane. */
   onFocusChange(focused: boolean): void;
@@ -116,6 +117,8 @@ interface Pane {
   // this against the current identity at pane.tab and rebuilds on a mismatch.
   identity: string;
   status: TerminalStatus;
+  /** epoch ms of the next reconnect attempt while `status` is "reconnecting" (#6430) */
+  retryAt?: number;
   // A web/iframe pane (TabKind.Web) has no AttachTerminal: it mounts an iframe in
   // `host` instead. webUrl is the target currently mounted (so reconcile can tell
   // a same-tab no-op from a target change), and webDispose tears down the iframe's
@@ -934,7 +937,31 @@ export class SplitView {
       const moved = pane.tab !== leaf.tab;
       const staleAddress =
         pane.identity !== identity || (moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId));
-      if (spec !== null) {
+      const docsSlug = this.docsSlugAt(leaf.tab);
+      if (docsSlug !== null) {
+        // A Docs tab is addressed by its proposal, not by an ordinal, so a moved
+        // tab is followed rather than rebuilt; a rebuild would drop the editor's
+        // cursor and undo history.
+        const docsIdentity = `docs:${docsSlug}`;
+        if (pane.term || pane.webUrl !== docsIdentity || pane.identity !== identity) {
+          if (this.focusedId === leaf.id) {
+            focusedRebuilt = true;
+          }
+          pane.term?.dispose();
+          pane.term = null;
+          pane.webDispose?.();
+          pane.host.replaceChildren();
+          pane.tab = leaf.tab;
+          pane.identity = identity;
+          pane.webUrl = docsIdentity;
+          pane.webArchived = this.archived;
+          pane.webDispose = mountDocsTab(pane.host, { sessionId: this.sessionId, slug: docsSlug, token: this.token });
+          pane.status = "open";
+          this.onPaneStatus(leaf.id, "open");
+        } else if (moved) {
+          pane.tab = leaf.tab;
+        }
+      } else if (spec !== null) {
         // A web/vscode tab: mount an iframe instead of an xterm. Rebuilding reloads
         // the frame and drops the dev server's in-page state — or a VS Code pane's
         // unsaved buffers — so it happens only on a real change: a different tab
@@ -991,7 +1018,7 @@ export class SplitView {
           this.token,
           sessionStreamEndpoint(this.sessionId, realId, leaf.tab),
           {
-            onStatus: (s) => this.onPaneStatus(leaf.id, s),
+            onStatus: (s, retryAt) => this.onPaneStatus(leaf.id, s, retryAt),
             onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
             // Only the AGENT tab (#3025 review): an automated DeliverPrompt reaches
             // the session through its agent server, so a half-typed command in an
@@ -1130,6 +1157,15 @@ export class SplitView {
    *  A vscode tab deliberately carries NO target: its editor is a daemon-managed
    *  per-session code-server on an ephemeral port, so the only address is the
    *  daemon proxy path, which is derived from the session + tab, not stored. */
+  /** The proposal slug of the Docs tab at `idx`, or null for any other kind.
+   *  syncSplit passes a Docs tab's slug in the target list. */
+  private docsSlugAt(idx: number): string | null {
+    if (idx < 0 || idx >= this.tabIds.length || this.tabKinds[idx] !== TabKind.Docs) {
+      return null;
+    }
+    return this.tabTargets[idx] ?? "";
+  }
+
   private iframeSpecAt(idx: number): IframeSpec | null {
     if (idx < 0 || idx >= this.tabIds.length) {
       return null;
@@ -1914,7 +1950,7 @@ export class SplitView {
     // The focused pane's status becomes the header status.
     const pane = this.panes.get(leafId);
     if (pane) {
-      this.cb.onStatus(pane.status);
+      this.cb.onStatus(pane.status, pane.status === "reconnecting" ? pane.retryAt : undefined);
     }
     this.report();
   }
@@ -1957,10 +1993,11 @@ export class SplitView {
     void pauseStatusPoll(sessionID, token).catch(() => {});
   }
 
-  private onPaneStatus(leafId: string, status: TerminalStatus): void {
+  private onPaneStatus(leafId: string, status: TerminalStatus, retryAt?: number): void {
     const pane = this.panes.get(leafId);
     if (pane) {
       pane.status = status;
+      pane.retryAt = status === "reconnecting" ? retryAt : undefined;
     }
     // A status flip moves a tab in or out of openTabs; report() dedups when it
     // does not. It must run before onStatus: that callback updates the store
@@ -1968,7 +2005,7 @@ export class SplitView {
     // to see THIS session's layout, not the previous one's.
     this.report();
     if (leafId === this.focusedId) {
-      this.cb.onStatus(status);
+      this.cb.onStatus(status, retryAt);
     }
   }
 

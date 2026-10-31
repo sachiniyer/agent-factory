@@ -3,7 +3,9 @@
 This is P0 of [the polish program](https://github.com/sachiniyer/agent-factory/issues/3906),
 implemented by [#3907](https://github.com/sachiniyer/agent-factory/issues/3907).
 Web is the primary surface. The TUI is a smaller operator surface, not a parity target.
-The web remains vanilla TypeScript with no new runtime dependencies.
+The web remains vanilla TypeScript with no new runtime dependencies. One exception:
+CodeMirror is allowed in the lazy Docs bundle (`web/dist/lazy/docs-editor.js`),
+which loads only when a proposal Docs tab opens. The shell stays dependency-free.
 The only user-facing theme choice will be **Light / Dark / System**: two fixed
 product palettes, with System selecting between them. No per-token overrides,
 custom palettes or colour configuration keys. This document
@@ -258,8 +260,9 @@ hints before the exit route. Connecting… is static body text, not a spinner.
 
 TUI colours follow tokens within termenv's rounding (at most one step per RGB channel); the web is exact.
 
-There are **13 colour roles per theme**: surface, surface-raised, ink, ink-muted,
-border, accent, running, ready, lost, dead, archived, limit-reached and attention. Accent
+There are **16 colour roles per theme**: surface, surface-raised, ink, ink-muted,
+border, accent, running, ready, lost, dead, archived, limit-reached, attention, and
+the three proposal callouts (callout-question, callout-todo and callout-decision). Accent
 also provides focus; dead also provides failed-operation/confirmation text.
 These are the only intentional reuse rules. Selection reuses surface-raised;
 primary-button text reuses surface. Do not derive extra shades or allow overrides.
@@ -268,7 +271,7 @@ The dark twin follows VS Code Dark Modern with near-black surfaces and grey ink 
 JSON is the source for exact values; the guide's [implementation reference](style-guide.md#implementation-reference)
 contains them for auditing. Users choose a mode, not these values. Generator
 validation rejects extra roles and checks ink, ink-muted, accent and all state
-labels at 4.5:1 on both backgrounds, body ink at 7:1 on surface, light border
+labels and the three callout colours at 4.5:1 on both backgrounds, body ink at 7:1 on surface, light border
 at 3:1 on both backgrounds, dark border at 1.5:1 on surface, and surface text on accent
 at 4.5:1. Agent-owned ANSI output is outside this shell contract.
 
@@ -343,7 +346,7 @@ working row draws a muted spinner, and a row whose agent asked for the user
 ## Type, spacing and radii
 
 There are **five type steps, four spacing steps and two radii**, shared by every
-component. These eleven metrics plus the thirteen colours are the entire **24-token**
+component. These eleven metrics plus the sixteen colours are the entire **27-token**
 contract. Fonts, weights, line height, touch height, focus width and motion are
 fixed implementation rules, not more tokens or user configuration.
 
@@ -381,8 +384,8 @@ to a static glyph that still carries the state, and each is pinned by a test und
 both settings. The needs-attention blink on the web rail's dot and on the favicon
 is in use today: it makes a waiting agent visible from across the screen or from
 another tab, and under reduced motion the dot is a static ring and the favicon
-holds still. Connecting…,
-Creating… and Running are static. This includes connection chrome; agent-owned
+holds still. Connecting… and
+Creating… are static. This includes connection chrome; agent-owned
 terminal output is not an af indicator. User-caused web disclosure may take at
 most 120ms, with 0ms under reduced motion. TUI transitions are immediate.
 Background events never start motion or resize content. There is no motion setting
@@ -428,16 +431,16 @@ P1 and the cold-reader walkthrough must check that disclosure remains discoverab
 ## Generation and ownership
 
 JSON uses Go's standard `encoding/json`, so this repo's existing Go generation
-pipeline needs no parser dependency or Node runtime. The source has thirteen
+pipeline needs no parser dependency or Node runtime. The source has sixteen
 light/dark colour pairs, eleven explicitly mapped web/TUI metrics and six fixed
-liveness bindings. Validation enforces the 13/5/4/2 budget and rejects extra
+liveness bindings. Validation enforces the 16/5/4/2 budget and rejects extra
 roles/steps. Treat changing that budget as a design decision, not a customization
 feature. No config, API or end-user editor exposes token values.
 
 `go run ./scripts/gen-design` produces `web/src/tokens.css`, `ui/theme/theme.go`,
 `docs/stylesheets/tokens.css` and `docs/design/style-guide.md`; it also stamps
 this page's contrast report, the HTML shell metas and the manifest colors. CSS has
-exactly 24 custom properties per theme, scoped to `[data-af-theme="light"]` and
+exactly 27 custom properties per theme, scoped to `[data-af-theme="light"]` and
 `[data-af-theme="dark"]`. The docs CSS adds Material's default/slate scheme
 selectors to the same declarations. System selects one of the two palettes. Go
 supplies the same adaptive light/dark roles and prescribed lipgloss component

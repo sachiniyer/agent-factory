@@ -383,4 +383,7 @@ event `Build` fails unless macOS, systemd and perf succeeded, so a skip can
 never stand in for a pass on master. A master push also runs
 `web-selftest.yml` directly (path-filtered), which is why `pr.yml` skips its own
 `Web selftest` call on `push` only. Push workflows cancel a superseded run
-(`concurrency` keyed on workflow + ref), so a burst of merges verifies the tip.
+(`concurrency` keyed on workflow + ref), so a burst of merges verifies the tip
+— `pr.yml` on master is the exception: it runs one at a time (newest pending
+kept) so the macOS verdict lands rather than being cancelled mid-merge
+(`.github/auto-merge.md`).

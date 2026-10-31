@@ -51,8 +51,8 @@ There is one git repository for each project:
 
 ## Templates
 
-- `af` embeds five built-in templates: `goals`, `technical`, `api`, `ui` and
-  `future`. `future` lists what later features or additions may need, so that
+- `af` embeds built-in templates: `goals`, `technical`, `api`, `ui`, `steps`
+  and `future`. `future` lists what later features or additions may need, so that
   the current design does not block them.
 - The user can override a template, or add a new one, at
   `<AF_HOME>/templates/proposal/<name>.md`. A user file overrides the

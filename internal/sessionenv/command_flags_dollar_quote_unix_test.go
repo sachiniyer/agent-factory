@@ -44,7 +44,7 @@ func TestExecInvocationFailsClosedOnDollarQuotedCloudModeSelector(t *testing.T) 
 	}
 	t.Cleanup(func() { processExec = previous })
 
-	err := execInvocation([]string{"claude", "0", "CLAUDE_CODE_USE_BEDROCK=$'0' claude"}, false)
+	err := execInvocation([]string{"claude", "0", "CLAUDE_CODE_USE_BEDROCK=$'0' claude"})
 	require.ErrorIs(t, err, wantErr)
 
 	for _, denied := range []string{
