@@ -281,7 +281,7 @@ func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k]
 // the guarantee af lacks, without asserting where a hook runs or which
 // mechanism could supply that guarantee.
 const AccountWriteBackRationale = "An account is a writable agent home, so the agent writes refreshed " +
-	"authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come " +
+	"authentication back into it. For sandbox and hook, af cannot establish that those writes come " +
 	"back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also " +
 	"invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could " +
 	"break it."
