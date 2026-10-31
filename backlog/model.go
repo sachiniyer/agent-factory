@@ -109,6 +109,13 @@ type RunRef struct {
 	StartedBy  string           `json:"started_by"`
 	StartedAt  time.Time        `json:"started_at"`
 	Meter      map[string]Meter `json:"meter,omitempty"`
+	// EndedAt is when a failed start failed.
+	EndedAt time.Time `json:"ended_at,omitzero"`
+	// CapReset names the 5-hour window the cap per run counts in, by its reset
+	// in epoch seconds; CapBase is the run's cost the cap counts from: at the
+	// window's start, or when af last stopped the run at the cap.
+	CapReset int64   `json:"cap_reset,omitempty"`
+	CapBase  float64 `json:"cap_base,omitempty"`
 }
 
 type Meter struct {
@@ -252,6 +259,16 @@ func (it *Item) answerPending() bool {
 func (it *Item) closeOpenQuestions(reason string) {
 	for q := it.OpenQuestion(); q != nil; q = it.OpenQuestion() {
 		q.Closed = reason
+	}
+}
+
+// closeAFQuestions closes the open questions af asked, such as the cap per
+// run question; the agent's own questions stay open.
+func (it *Item) closeAFQuestions(reason string) {
+	for i := range it.Thread {
+		if m := &it.Thread[i]; m.Kind == KindQuestion && m.Author == AuthorAF && it.questionOpen(m.ID) {
+			m.Closed = reason
+		}
 	}
 }
 

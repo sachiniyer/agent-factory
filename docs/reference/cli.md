@@ -31,6 +31,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af backlog queue`](#af-backlog-queue) — Make an item eligible for the runner
 - [`af backlog reopen`](#af-backlog-reopen) — Reopen a done or dropped item as a draft
 - [`af backlog review`](#af-backlog-review) — Send a running item to review
+- [`af backlog run`](#af-backlog-run) — Run one runner pass now
 - [`af backlog runner`](#af-backlog-runner) — Show or change this project's runner
 - [`af backlog show`](#af-backlog-show) — Print one item: body, state and reason, links, runs, and thread
 - [`af backlog start`](#af-backlog-start) — Start an item now
@@ -513,6 +514,7 @@ af backlog
 - [`af backlog queue`](#af-backlog-queue) — Make an item eligible for the runner
 - [`af backlog reopen`](#af-backlog-reopen) — Reopen a done or dropped item as a draft
 - [`af backlog review`](#af-backlog-review) — Send a running item to review
+- [`af backlog run`](#af-backlog-run) — Run one runner pass now
 - [`af backlog runner`](#af-backlog-runner) — Show or change this project's runner
 - [`af backlog show`](#af-backlog-show) — Print one item: body, state and reason, links, runs, and thread
 - [`af backlog start`](#af-backlog-start) — Start an item now
@@ -881,6 +883,31 @@ Set a running item's status to review, for you to check and mark done.
 ```
 af backlog review <id>
 ```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog run
+
+Run one runner pass now
+
+Start up to N queued items now (default 1), top first, in the project's free slots. It ignores the runner switch and the budget, so an af cron task can drive the runner with it. Prints the ids it started, and why when it started none.
+
+```
+af backlog run [--count N] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--count` | `int` | How many items to start at most (default `1`) |
 
 **Global flags**
 

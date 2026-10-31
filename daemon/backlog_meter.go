@@ -105,6 +105,11 @@ func (m *Manager) planUsageOn() bool {
 	return cfg != nil && cfg.Backlog.PlanUsage
 }
 
+// disabledUsage is what every reader gets while plan usage is off.
+func disabledUsage() planusage.Usage {
+	return planusage.Usage{Disabled: true, Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+}
+
 // MeterBacklog starts a metering pass on its own goroutine when one is due.
 func (m *Manager) MeterBacklog() {
 	if !m.planUsageOn() {
@@ -141,7 +146,7 @@ func (m *Manager) startMeterPass() {
 // pass can read a week of them.
 func (m *Manager) backlogUsage() planusage.Usage {
 	if !m.planUsageOn() {
-		return planusage.Usage{Disabled: true, Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+		return disabledUsage()
 	}
 	st := &m.backlog.meter
 	usage, fresh := st.last(time.Now())
@@ -152,12 +157,52 @@ func (m *Manager) backlogUsage() planusage.Usage {
 }
 
 func (s *meterState) last(now time.Time) (planusage.Usage, bool) {
+	u, at := s.result()
+	if at.IsZero() {
+		return u, false
+	}
+	return u, now.Sub(at) < meterFreshFor
+}
+
+// result is the last pass's usage, however old, and when it finished; zero
+// before the first pass.
+func (s *meterState) result() (planusage.Usage, time.Time) {
 	s.usageMu.Lock()
 	defer s.usageMu.Unlock()
 	if s.finished.IsZero() {
-		return planusage.Usage{Metering: true, Runs: map[string]float64{}, RunWindow: map[string]float64{}}, false
+		return planusage.Usage{Metering: true, Runs: map[string]float64{}, RunWindow: map[string]float64{}}, time.Time{}
 	}
-	return s.usage, now.Sub(s.finished) < meterFreshFor
+	return s.usage, s.finished
+}
+
+// current is the last pass's usage, however old.
+func (s *meterState) current() planusage.Usage {
+	u, _ := s.result()
+	return u
+}
+
+// meterUsageWithin meters on the caller's goroutine unless the last pass
+// finished within age, then returns the usage. A pass already running is
+// waited for. Only background work calls it: a pass can read a week of
+// transcripts.
+func (m *Manager) meterUsageWithin(age time.Duration) planusage.Usage {
+	if !m.planUsageOn() {
+		return disabledUsage()
+	}
+	st := &m.backlog.meter
+	if u, at := st.result(); !at.IsZero() && time.Since(at) < age {
+		return u
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if u, at := st.result(); !at.IsZero() && time.Since(at) < age {
+		return u
+	}
+	if _, admitted := m.beginBackgroundMutation(); admitted {
+		m.meterPassLocked(time.Now())
+		m.backgroundMutationWG.Done()
+	}
+	return st.current()
 }
 
 // itemSessionTranscriptDirs are the transcript directories of every live item
@@ -289,6 +334,12 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	state, err := planusage.LoadMeter()
 	if err != nil {
 		m.warn().Printf("plan meter: %v", err)
+		// Publish the failure, not the previous good result: the runner would
+		// otherwise gate on unchanged costs while new spend goes unseen.
+		st.usageMu.Lock()
+		st.usage = planusage.Usage{Unavailable: err.Error(), Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+		st.finished = now
+		st.usageMu.Unlock()
 		return
 	}
 	appliedDirs := st.applyPending(state)
@@ -440,10 +491,14 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	// Save the dedupe keys and buckets BEFORE the offsets and costs that depend
 	// on them advance in backlog.json: the other order leaves a failed save with
 	// offsets ahead of keys, and the next pass skips messages that were never
-	// priced into the run window (Codex P2 on #6299). A failed save advances
-	// nothing.
+	// priced into the run window (Codex P2 on #6300). A failed save advances
+	// nothing, and closes the runner until metering works again.
 	if err := state.Save(); err != nil {
 		m.warn().Printf("plan meter: %v", err)
+		st.usageMu.Lock()
+		st.usage = planusage.Usage{Unavailable: err.Error(), Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+		st.finished = now
+		st.usageMu.Unlock()
 		return
 	}
 	st.clearPending(appliedDirs)
@@ -498,6 +553,7 @@ func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlo
 			m.warn().Printf("plan meter: reading of account %s: %v", name, err)
 		}
 		au := planusage.AccountUsageOf(r, state.Accounts[name], overrides, now)
+		planusage.SetBacklogCosts(&au.Windows, state.Accounts[name], now)
 		usage.Accounts[name] = au
 		if au.ReadingAt != nil && (usage.ReadingAt == nil || au.ReadingAt.After(*usage.ReadingAt)) {
 			usage.Account, usage.Windows, usage.ReadingAt = name, au.Windows, au.ReadingAt

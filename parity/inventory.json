@@ -1899,11 +1899,11 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/backlog_status.go backlogRunnerCmd/backlogBudgetCmd → POST /v1/SetBacklogSettings, GetBudget, SetBudget, GetBacklog (daemon/backlog.go)"
+        "pointer": "api/backlog_status.go backlogRunnerCmd/backlogBudgetCmd, api/backlog_self.go backlogRunCmd → POST /v1/SetBacklogSettings, GetBudget, SetBudget, GetBacklog, RunBacklog (daemon/backlog.go, daemon/backlog_runner.go)"
       },
       "verdict": "real-gap",
       "issue": "TBD",
-      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (share of the Claude plan, stop-at, cap per run, dollar limit); plan readings arrive in PR 6 and the runner loop in PR 7. PR 3 shows a read-only runner bar on the web and PR 7 makes it editable. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (share of the Claude plan, stop-at, cap per run, dollar limit); plan readings arrive in PR 6; PR 7 adds the runner loop in the daemon poll loop, af backlog run, and the backlog.runner event. PR 3 shows a read-only runner bar on the web and PR 7 makes it editable. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     }
   ],
   "ledger": {
@@ -1931,6 +1931,7 @@
       "af backlog start": "backlog.sessions",
       "af backlog drop": "backlog.status",
       "af backlog runner": "backlog.runner",
+      "af backlog run": "backlog.runner",
       "af backlog budget": "backlog.runner",
       "af": "meta.discovery",
       "af accounts add": "session.accounts",
@@ -2038,6 +2039,7 @@
       "POST /v1/StartBacklogItem": "backlog.sessions",
       "POST /v1/GetBudget": "backlog.runner",
       "POST /v1/SetBudget": "backlog.runner",
+      "POST /v1/RunBacklog": "backlog.runner",
       "GET /v1/health": "-",
       "POST /v1/AddProposalDoc": "proposal.docs",
       "POST /v1/RemoveProposalDoc": "proposal.docs",
@@ -2221,6 +2223,7 @@
       "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
       "af backlog runner --help": "meta.discovery",
+      "af backlog run --help": "meta.discovery",
       "af backlog budget --help": "meta.discovery",
       "af backlog add --after": "backlog.items",
       "af backlog add --before": "backlog.items",
@@ -2243,6 +2246,7 @@
       "af backlog move --top": "backlog.items",
       "af backlog runner --max-running": "backlog.runner",
       "af backlog runner --on-done": "backlog.runner",
+      "af backlog run --count": "backlog.runner",
       "af backlog budget --max-per-run": "backlog.runner",
       "af backlog budget --share": "backlog.runner",
       "af backlog budget --stop-at": "backlog.runner",

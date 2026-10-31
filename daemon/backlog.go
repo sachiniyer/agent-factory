@@ -51,6 +51,7 @@ type backlogState struct {
 	recovering   bool
 	recoveryDone bool
 	meter        meterState
+	runner       runnerState
 }
 
 // restoreLock is the per-session restore mutex.
