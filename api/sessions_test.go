@@ -66,9 +66,9 @@ func TestSessionsKill_UnknownTitle(t *testing.T) {
 	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	prevKill := killSessionViaDaemon
-	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {
+	killSessionViaDaemon = withoutKept(func(req daemon.KillSessionRequest) error {
 		return errors.New("instance not found: " + req.Title)
-	}
+	})
 	defer func() { killSessionViaDaemon = prevKill }()
 
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
@@ -144,7 +144,7 @@ func TestSessionsKill_HonorsRepoScoping(t *testing.T) {
 
 	var gotReq daemon.KillSessionRequest
 	prevKill := killSessionViaDaemon
-	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {
+	killSessionViaDaemon = withoutKept(func(req daemon.KillSessionRequest) error {
 		gotReq = req
 		if req.RepoID == "" {
 			return errors.New("RepoID empty: --repo scoping was dropped")
@@ -162,7 +162,7 @@ func TestSessionsKill_HonorsRepoScoping(t *testing.T) {
 			}
 			return json.Marshal(kept)
 		})
-	}
+	})
 	defer func() { killSessionViaDaemon = prevKill }()
 
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
@@ -233,11 +233,11 @@ func TestSessionsKill_ForceFlagAcceptedButNotForwarded(t *testing.T) {
 	var gotReq daemon.KillSessionRequest
 	called := false
 	prevKill := killSessionViaDaemon
-	killSessionViaDaemon = func(req daemon.KillSessionRequest) error {
+	killSessionViaDaemon = withoutKept(func(req daemon.KillSessionRequest) error {
 		gotReq = req
 		called = true
 		return nil
-	}
+	})
 	t.Cleanup(func() { killSessionViaDaemon = prevKill })
 
 	// `--force` parses without error and the kill is still dispatched.

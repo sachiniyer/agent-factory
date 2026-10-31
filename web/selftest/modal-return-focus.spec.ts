@@ -33,7 +33,7 @@ for (const surface of ["drawer", "rebuilt header"] as const) {
       await expect(toggle).toBeFocused();
     } else {
       // Keep selection while filtering its row out, exposing header management.
-      for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
+      for (const kind of ["attention", "needs-you", "working", "waiting-limit", "broken"]) {
         await page.locator(".af-rail-filter").click();
         const item = page.locator(`.af-filter-item[data-kind="${kind}"]`);
         if (await item.getAttribute("aria-checked") === "true") await item.click();

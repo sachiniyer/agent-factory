@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -48,7 +47,7 @@ func TestLoadMissing(t *testing.T) {
 		t.Fatalf("%+v", b)
 	}
 	bud, err := LoadBudget()
-	if err != nil || *bud != *NewBudget() || !bud.Used() {
+	if err != nil || *bud != *NewBudget() || bud.Share != 50 || bud.StopAt != 90 || bud.MaxPerRun != 10 {
 		t.Fatalf("%+v %v", bud, err)
 	}
 }
@@ -128,7 +127,7 @@ func TestRefusesNewerSchema(t *testing.T) {
 
 	bp, _ := BudgetPath()
 	writeRaw(t, bp, `{"schema_version": 9}`)
-	if _, err := UpdateBudget(func(b *Budget) error { b.Limit = 1; return nil }); !errors.As(err, &unsupported) {
+	if _, err := UpdateBudget(func(b *Budget) error { b.Share = 1; return nil }); !errors.As(err, &unsupported) {
 		t.Fatalf("budget err = %v", err)
 	}
 }
@@ -183,9 +182,8 @@ func TestLockTimeoutIsBusy(t *testing.T) {
 
 func TestBudgetRoundTrip(t *testing.T) {
 	home(t)
-	reset := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
 	_, err := UpdateBudget(func(b *Budget) error {
-		b.Limit, b.Spent, b.MaxPerRun, b.ResetAt = 10, 2.5, 0, reset
+		b.Share, b.MaxPerRun, b.USDLimit, b.USDSpent = 30, 0, 10, 2.5
 		return nil
 	})
 	if err != nil {
@@ -195,8 +193,8 @@ func TestBudgetRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Budget{SchemaVersion: 1, Limit: 10, Spent: 2.5, MaxPerRun: 0, ResetAt: reset}
-	if *got != want || got.Used() {
+	want := Budget{SchemaVersion: 1, Share: 30, StopAt: DefaultStopAt, MaxPerRun: 0, USDLimit: 10, USDSpent: 2.5}
+	if *got != want {
 		t.Fatalf("%+v", got)
 	}
 }

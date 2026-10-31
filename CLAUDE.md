@@ -491,5 +491,8 @@ otherwise — see #1826.
   clause.
 - **No caps-shouting** for emphasis — write the emphasis into the sentence. CAPS
   are reserved for env vars (`AF_HOME`) and literal flag/command names.
-- **No animated indicators** (spinners, blink, pulse) — state reads from a static
-  glyph (#1766).
+- **Animated indicators are allowed, not as decoration.** Each one (a working
+  spinner, an attention blink) must carry state. Under `prefers-reduced-motion:
+  reduce` each falls back to a static glyph that still carries that state (the
+  rail dot becomes a ring, the favicon holds still), and each is pinned by a
+  test under both settings. Otherwise state reads from a static glyph (#1766).

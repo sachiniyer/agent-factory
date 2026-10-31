@@ -45,9 +45,9 @@ func validate(t Tokens) error {
 		}
 		delete(expected, s.Name)
 	}
-	requiredColors := []string{"surface", "surface-raised", "ink", "ink-muted", "border", "accent", "running", "ready", "lost", "dead", "archived", "limit-reached", "callout-question", "callout-todo", "callout-decision"}
+	requiredColors := []string{"surface", "surface-raised", "ink", "ink-muted", "border", "accent", "running", "ready", "lost", "dead", "archived", "limit-reached", "callout-question", "callout-todo", "callout-decision", "attention"}
 	if len(t.Colors) != len(requiredColors) {
-		return fmt.Errorf("keep the contract to fifteen colour roles")
+		return fmt.Errorf("keep the contract to sixteen colour roles")
 	}
 	for _, k := range requiredColors {
 		if _, ok := t.Colors[k]; !ok {
@@ -60,7 +60,7 @@ func validate(t Tokens) error {
 	// These are the only two component backgrounds. Selection uses raised with
 	// an accent marker, not a separate fill or a computed custom palette.
 	for _, bg := range []string{"surface", "surface-raised"} {
-		for _, fg := range append([]string{"ink", "ink-muted", "accent", "callout-question", "callout-todo", "callout-decision"}, stateColors(t)...) {
+		for _, fg := range append([]string{"ink", "ink-muted", "accent", "callout-question", "callout-todo", "callout-decision", "attention"}, stateColors(t)...) {
 			if err := contrastPair(t, fg, bg, 4.5); err != nil {
 				return err
 			}

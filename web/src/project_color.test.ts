@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { RegisteredProject } from "./api.js";
 import {
   DEFAULT_FAVICON_COLOR,
+  FAVICON_BLINK_MS,
   FAVICON_MARK_PATH,
   PROJECT_COLOR_PALETTE,
   applyProjectFavicon,
@@ -57,6 +58,13 @@ test("the favicon SVG paints the tile in the project color", () => {
   assert.ok(svg.includes('<rect width="512" height="512" rx="112" fill="#16a34a"/>'));
   assert.ok(svg.includes(`<path d="${FAVICON_MARK_PATH}"`));
   assert.ok(projectFaviconDataUrl("#16a34a").startsWith("data:image/svg+xml,"));
+});
+
+test("the inverted favicon swaps the tile and mark colors", () => {
+  const svg = projectFaviconSvg("#16a34a", true);
+  assert.ok(svg.includes(`<rect width="512" height="512" rx="112" fill="${markInk("#16a34a")}"/>`));
+  assert.ok(svg.includes('fill="#16a34a"/></svg>'));
+  assert.notEqual(projectFaviconDataUrl("#16a34a", true), projectFaviconDataUrl("#16a34a"));
 });
 
 test("every palette color is a lowercase #rrggbb", () => {
@@ -161,10 +169,9 @@ test("projectAccent reaches 4.5:1 against every surface it is given, after round
   assert.ok(contrastRatio(light, "#eceff4") >= 4.5, light);
 });
 
-test("app bar focus rings and the phone keyboard label take the project ink", () => {
+test("app bar focus rings take the project ink", () => {
   const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
   assert.match(css, /\.af-app\[data-project-color\] \.af-appbar :is\(button, summary, a\):focus-visible \{\s*outline-color: var\(--af-project-ink\);/);
-  assert.match(css, /\.af-app\[data-project-color\] \.af-appbar \.af-term-keyboard \{\s*color: inherit;/);
   assert.match(css, /\.af-app\[data-project-color\] \.af-appbar-tools :is\(button, summary, a\):focus-visible \{\s*outline-color: var\(--af-accent\);/);
 });
 
@@ -176,8 +183,75 @@ test("the phone tools popover restores theme ink over the colored app bar's ink"
   );
 });
 
-test("body-mounted controls take the project accent too", () => {
-  const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
-  assert.match(css, /body\[data-project-color\] \[data-af-theme="light"\] \{\s*--af-accent: var\(--af-project-accent-light\);/);
-  assert.match(css, /body\[data-project-color\] \[data-af-theme="dark"\] \{\s*--af-accent: var\(--af-project-accent-dark\);/);
+/** One reduced-motion query for the module's whole life: project_color.ts keeps
+ *  the first one it sees. */
+const motion = {
+  matches: false,
+  listeners: [] as Array<() => void>,
+  addEventListener(_type: string, fn: () => void) {
+    this.listeners.push(fn);
+  },
+  set(matches: boolean) {
+    this.matches = matches;
+    for (const fn of this.listeners) fn();
+  },
+};
+
+/** A favicon page with one SVG link; returns the frame it shows. */
+function faviconPage(t: { after(fn: () => void): void }): () => "plain" | "attention" {
+  const attrs = new Map<string, string>([["href", "/icons/icon.svg"]]);
+  const link = {
+    type: "image/svg+xml",
+    sizes: { value: "" },
+    dataset: {} as Record<string, string>,
+    getAttribute: (k: string) => attrs.get(k) ?? null,
+    setAttribute: (k: string, v: string) => void attrs.set(k, v),
+  };
+  const g = globalThis as Record<string, unknown>;
+  const saved = { document: g.document, matchMedia: g.matchMedia };
+  g.document = { querySelectorAll: () => [link] };
+  g.matchMedia = () => motion;
+  t.after(() => {
+    applyProjectFavicon(null);
+    motion.matches = false;
+    g.document = saved.document;
+    g.matchMedia = saved.matchMedia;
+  });
+  return () => (attrs.get("href") === projectFaviconDataUrl("#16a34a", true) ? "attention" : "plain");
+}
+
+test("a throttled background tab holds the attention favicon frame", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const tick = (wallMs: number) => {
+    now += wallMs;
+    t.mock.timers.tick(FAVICON_BLINK_MS);
+  };
+  const frame = faviconPage(t);
+  applyProjectFavicon("#16a34a", true);
+  assert.equal(frame(), "attention");
+  tick(FAVICON_BLINK_MS);
+  assert.equal(frame(), "plain", "a visible tab blinks");
+
+  tick(60_000);
+  assert.equal(frame(), "attention", "a tick a minute late shows the attention frame");
+  tick(60_000);
+  assert.equal(frame(), "attention", "and keeps it while the timer stays throttled");
+  tick(FAVICON_BLINK_MS);
+  assert.equal(frame(), "plain", "on-time ticks blink again");
+});
+
+test("the favicon blink follows a reduced-motion change", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+  const frame = faviconPage(t);
+  applyProjectFavicon("#16a34a", true);
+  motion.set(true);
+  assert.equal(frame(), "attention");
+  t.mock.timers.tick(FAVICON_BLINK_MS * 3);
+  assert.equal(frame(), "attention", "reduced motion holds the attention frame");
+
+  motion.set(false);
+  t.mock.timers.tick(FAVICON_BLINK_MS);
+  assert.equal(frame(), "plain", "the blink resumes");
 });

@@ -20,6 +20,7 @@ import {
   addTask,
   ApiError,
   archiveSession,
+  clearAttention,
   clearToken,
   closeTab,
   createSession,
@@ -66,6 +67,7 @@ import {
   restoreSession,
   resumeFromLimit,
   confirmHandoffDelivery,
+  fetchKeptBranch,
   shouldForgetToken,
   storeToken,
   triggerTask,
@@ -91,6 +93,7 @@ import {
   confirmDeleteProjectModal,
   confirmModal,
   handoffModal,
+  type KeptBranch,
   markDeliveredModal,
   type ModalHandle,
   newSessionModal,
@@ -200,6 +203,7 @@ const store = new Store<AppState>({
   focus: "rail",
   activeTab: 0,
   shownTabs: [0],
+  openTabs: [],
   tabError: null,
   tasks: [],
   registeredProjects: [],
@@ -234,7 +238,6 @@ const pendingRestores = new PendingRestores(
   requestPendingRestoreResync,
 );
 const connectionGate = createLatestRequestGate();
-
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
  *  offer a program picker: new session, add task, edit task. One helper rather than
  *  three copies of the token dance — the hardcoded-list bug this RPC exists to
@@ -322,7 +325,7 @@ const splitView = new SplitView(termHost, {
   // Mirror the layout into the store so the tab bar can highlight the focused pane's
   // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
   // on a real change, so this write never loops back through rerender → syncSplit.
-  onLayout: ({ focusedTab, shownTabs }) => store.set({ activeTab: focusedTab, shownTabs }),
+  onLayout: ({ focusedTab, shownTabs, openTabs }) => store.set({ activeTab: focusedTab, shownTabs, openTabs }),
 });
 
 let root: HTMLElement | null = null;
@@ -524,6 +527,7 @@ async function connect(candidate: string): Promise<void> {
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: undefined,
     tasks,
@@ -597,6 +601,7 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
     focus: "rail",
     activeTab: 0,
     shownTabs: [0],
+    openTabs: [],
     tabError: null,
     mutationError: undefined,
     tasks: [],
@@ -887,10 +892,15 @@ function selectedSession(): { id: string; title: string } | null {
 }
 
 let restoreModalFocus: (() => void) | null = null;
+/** Advances on every dialog open and close, so an async read that mounts a dialog
+ *  (the delete confirm's branch read, #6233) can tell a newer dialog or a close
+ *  superseded it while it was in flight. */
+let modalGeneration = 0;
 let stopModalProjectionWatch: (() => void) | null = null;
 
 /** Closes and clears the open modal, if any. */
 function closeModal(): void {
+  modalGeneration++;
   if (modal) {
     const restoreFocus = restoreModalFocus;
     restoreModalFocus = null;
@@ -953,6 +963,7 @@ function captureModalInvoker(): ModalInvoker {
 /** Mounts a fresh modal, replacing any currently open overlay. Controllers are
  *  reaped before their DOM is replaced so no hidden terminal keeps streaming. */
 function openModal(m: ModalHandle, focusCard = false, explicitInvoker?: ModalInvoker): void {
+  modalGeneration++;
   mountOverlay((mountHost) => {
     const focused = document.activeElement as HTMLElement | null;
     const invoker = explicitInvoker ?? captureModalInvoker();
@@ -1135,6 +1146,7 @@ function openConfirm(
 ): void {
   if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
+  const dialogGeneration = ++modalGeneration;
   const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
   const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest: SessionData | undefined): boolean => {
@@ -1266,8 +1278,10 @@ function openConfirm(
       } else showRefusal();
     });
   };
+  const mountWith = (keptBranch?: KeptBranch): void => {
   mountConfirmation(
     confirmModal({
+      keptBranch,
       action,
       sessionTitle: target.title,
       immediateRestore,
@@ -1281,6 +1295,21 @@ function openConfirm(
     }),
   );
   if (immediateRestore) onConfirm();
+  };
+  // The delete copy names a branch the delete leaves in the repo, so read the
+  // worktree's HEAD now, before the user is asked (#6233).
+  if (action === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
+    // The read can outlive the gesture: it mounts only while this is still the
+    // newest dialog request and no navigation has happened (#6205's ticket).
+    const ticket = createSelectionIntent.snapshot();
+    const generation = connectionGeneration;
+    void fetchKeptBranch(target.id, target.title, token ?? "").then((kept) => {
+      if (modalGeneration !== dialogGeneration || !createSelectionIntent.isCurrent(ticket) || connectionGeneration !== generation) return;
+      mountWith(kept);
+    });
+  } else {
+    mountWith();
+  }
 }
 
 /** Opens the delete-project confirm for a project row (#1735). On confirm it
@@ -2839,22 +2868,26 @@ function openEditTask(task: TaskData): void {
 /** Enables/disables a task (UpdateTask with `enabled` flipped), then refetches. A
  *  failure surfaces as the shared transient toast (task ops have no modal). Keys off
  *  the task's stable id — requireTaskID in the api layer refuses a missing one. */
-function toggleTask(task: TaskData): void {
+async function toggleTask(task: TaskData): Promise<boolean> {
   const tok = token;
   if (tok === null) {
-    return;
+    return false;
   }
   // Ship ONLY the flipped bit as a field-level patch (#1700): the toggle must
   // not carry the rest of this (possibly-stale) cached task, or it could revert a
   // concurrent edit another client made to the prompt/trigger/target.
-  void updateTask(task, { enabled: !task.enabled }, tok)
-    .then(refreshTasks)
-    .catch((e) => {
-      if (isMutationCommittedError(e)) {
-        refreshTasks();
-      }
-      surfaceTabError(e);
-    });
+  try {
+    await updateTask(task, { enabled: !task.enabled }, tok);
+  } catch (e) {
+    const committed = isMutationCommittedError(e);
+    if (committed) {
+      refreshTasks();
+    }
+    surfaceTabError(e);
+    return committed;
+  }
+  refreshTasks();
+  return true;
 }
 
 /** Fires a task now (TriggerTask), then refetches to pick up the new last-run. The
@@ -2875,6 +2908,19 @@ function doTriggerTask(task: TaskData): void {
       }
       surfaceTabError(e);
     });
+}
+
+/** Dismisses the selected session's attention request — the × on the header chip.
+ *  The clear names the request the chip showed, so an agent that raised a newer
+ *  one meanwhile keeps it. */
+function doClearAttention(): void {
+  const sel = selectedSessionData();
+  const tok = token;
+  const setAt = sel?.attention?.set_at;
+  if (!sel || tok === null || !setAt) {
+    return;
+  }
+  void clearAttention(sel.id ?? "", setAt, tok).catch(surfaceTabError);
 }
 
 /**
@@ -3096,6 +3142,7 @@ const actions = {
   archive: (session: ActionableSession) => openConfirm("archive", session),
   restore: (session: ActionableSession) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  clearAttention: doClearAttention,
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,

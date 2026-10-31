@@ -92,6 +92,7 @@ var pluginReleaseDigests = []string{
 	"e8e2c27752e1ef7b6bd6580f31de8a9a91a417ed61a7ee3b8e00af10e9c94a70", // 3.27 — Codex SessionStart af probe: child bash for exported-function wrappers, timeout --kill-after (#5648)
 	"5f477942a9e0dea27318416fa1a3ea33f29a9b7d23eac3ba5f2ec24b45eb6c12", // 3.28 — web tabs on remote sessions: loopback targets are served from the workspace through the agent-server port relay (W5.3)
 	"93d42e1fcb58d3da90594df0c172da0e175a822309db0d730612ef038ec45916", // 3.29 — VS Code tabs on remote sessions open the editor on the session host (W5.4)
+	"38f6a650cdda3eea952c88c4552daa11466b963310f6970fbecdfe2766876654", // 3.30 — sessions attention --self: ask the user for attention
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

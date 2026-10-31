@@ -143,6 +143,37 @@ Flags:
 - `restore`: restores an **archived**, **Lost**, or **Dead** session. Archived sessions move their worktree back next to the repo, re-register it, re-spawn the **agent** (shell/process tabs are not restored — their processes were torn down at archive time; **web tabs come back** with their target URLs, since a web tab is just a URL and has no process), and mark the session running. Lost/Dead sessions recover in place, rebuilding a missing worktree when possible and resuming the recorded agent conversation when required. Prints `{"ok": true, "title": "...", "worktree_path": "..."}`. Fails if the session is not restorable, or if its origin repo is gone (an archived worktree is left intact for manual recovery). Honors `--repo` like `kill`.
 - `prune`: the manual reclaim for archived sessions (#5136) — an archive keeps its moved worktree forever, and the dry run tells you what reclaiming it would give back. **Without `--apply`, af writes nothing** — no deletion, no record update, no git write — so it is safe to run at any time. **`--apply` (#5189) prints the same plan, asks you to confirm it** (`--yes` confirms non-interactively — required when stdin is not a terminal), **then deletes exactly the worktrees the plan listed** — the same verdict re-made under each session's lock just before it deletes. The branch is always kept and the session row stays as a **pruned tombstone** naming the branch: `restore` refuses it and says where the work is, a partly-failed run reports `incomplete` rows that a re-run finishes, and a refusal names the first offending paths so you can clean up and re-run. Nothing outside the archived worktree is touched — provider transcripts and other sessions' registrations are left alone. It reads the running daemon's in-flight claims and will not spawn one — a read must not write even a socket or a log — so with no daemon up it refuses with guidance; pass `--daemon-url` or start `af` first. `--older-than <duration>` is required (there is no default retention; e.g. `720h` for thirty days) and is measured from each session's **archive time** — the `archived_at` field, falling back to `updated_at` on rows archived before it existed. Scope follows the project rules: `--repo`, the current directory's project, or `--all` for every project (`--all` and `--repo` are mutually exclusive); outside a project and without `--all`, it refuses rather than guessing. Against a **remote** `--daemon-url`/`AF_DAEMON_URL`, only `--all` is accepted — a repo scope resolves against *this* machine's checkout paths and could name a different project on the remote. Prints `{"ok": true, "archived_before": ..., "candidates": [{"id", "title", "repo_id", "branch", "archived_at", "reclaimable_bytes"}...], "skipped": [...], "reclaimable_bytes": ...}` — `candidates` lists each archived session a reclaim would remove, `skipped` lists every refused row with its reason (a row marked `"interrupted": true` had an earlier apply not finish; re-running completes it from its durable intent). An apply run also reports `"applied": true`, `"pruned"`, `"incomplete"`, `"reclaimed_estimate_bytes"` (an up-to sum, never measured free space), and `"free_bytes_before"`/`"free_bytes_after"` — the measured free space on the archive filesystem around the run. `reclaimable_bytes` counts **allocated** disk blocks (`st_blocks` × 512, like `du`) — sparse holes and hard links whose other end lives outside the tree are not counted. It is an upper bound on what a reclaim frees: extents shared with a copy-on-write reflink clone outside the tree are still counted, so on Btrfs/XFS the free space recovered can be less than the total. A row is **refused rather than counted reclaimable** when it is live/lost/dead/in-flight, when it still owes an **undelivered handoff mission** — the takeover brief from its last handoff never confirmed delivery, so reclaiming would destroy it (restore the session to resolve it first), when its archive move is incomplete, when its worktree still holds **uncommitted or gitignored** files (an ignored `.env` exists nowhere else — restore the session or clean the tree first), when the occupant at the recorded path cannot be verified as that session's own worktree, when the record carries no branch for the kept-recovery-handle promise or the recorded branch no longer exists in the origin, and when the origin repository is gone — the archived tree may then be the work's last copy.
 
+## `af backlog`
+
+An ordered list of work items per project: items nest, can wait on other items, and carry a derived state. New items are drafts; queue an item to make it eligible for the runner, send it to review, and mark it done. Item ids are accepted as `12` or `B-12`. Commands follow the shared [project scoping](#project-scoping) rules and honor `--daemon-url`/`AF_DAEMON_URL`. The authoritative flag list is [`docs/reference/cli.md`](reference/cli.md#af-backlog) (generated).
+
+```bash
+af backlog list                 # the tree, in order, with each item's state
+af backlog list --json
+af backlog show 12
+af backlog add "Fix the login redirect"
+af backlog add --file items.json      # a batch; --file - reads stdin
+af backlog edit 12 --title "..." --waits-on 7
+af backlog move 12 --after 9
+af backlog queue 12
+af backlog start 12              # start it now: a new session, or "continue" in its live one
+af backlog review 12
+af backlog done 12
+af backlog done --self --pr https://…   # from inside an item session: send my item to review
+af backlog drop 12
+af backlog reopen 12
+af backlog delete 12            # a draft with no runs and no thread
+af backlog note 12 "text"       # a note on the item's thread
+af backlog note --self "text"   # from inside an item session: a note on my own item
+af backlog runner               # show or change this project's runner switch
+af backlog budget               # show or change the global budget
+```
+
+- Items live in `$AF_HOME/repos/<repo-id>/backlog.json`; the budget in `$AF_HOME/budget.json`. `af reset` removes the budget and keeps each project's backlog.
+- `start` ignores the runner switch and the budget. An item with a live session gets `continue` in that session; any other item gets a new session on a new branch from the default branch. The command returns at once and the run reads *starting* until the session exists. Item sessions are ordinary sessions: they archive, restore and hand off like any other, but they are kept out of `limit_auto_resume`'s account swap and park at a usage limit instead. `--self` commands act on the item of the session they run in; they are for the agent, and the user-facing commands refuse to run from inside an item session.
+- Notes are stored on the item; they are not delivered to a session.
+- `budget` takes `--share`, `--stop-at`, `--max-per-run` (percents from 0 to 100) and `--usd-limit` (finite, 0 or more; 0 turns it off). With no flags it shows the settings.
+
 ## `af tasks`
 
 Tasks deliver a prompt to an agent automatically — on a cron schedule or whenever a long-running watch script emits a stdout line. Full semantics (trigger × delivery matrix, watch-script contract, status model) live in [tasks.md](tasks.md). All subcommands honor `--repo <path>` and `--json`, follow the shared [project scoping](#project-scoping) rules, and honor `--daemon-url`/`AF_DAEMON_URL` — see [remote daemons](#remote-daemons).

@@ -680,6 +680,8 @@ func silenceCobraOutput() {
 	ProjectsCmd.SilenceErrors = true
 	ProposalCmd.SilenceUsage = true
 	ProposalCmd.SilenceErrors = true
+	BacklogCmd.SilenceUsage = true
+	BacklogCmd.SilenceErrors = true
 	if root := SessionsCmd.Root(); root != nil {
 		root.SilenceUsage = true
 		root.SilenceErrors = true
@@ -812,6 +814,7 @@ func init() {
 	SessionsCmd.AddCommand(sessionsWatchCmd)
 	SessionsCmd.AddCommand(sessionsKillCmd)
 	SessionsCmd.AddCommand(sessionsArchiveCmd)
+	SessionsCmd.AddCommand(newSessionsAttentionCmd())
 	SessionsCmd.AddCommand(sessionsHandoffCmd)
 	SessionsCmd.AddCommand(sessionsRetryLimitCmd)
 	// The escape hatch for recovery's refusal to reap a reachable sandbox without

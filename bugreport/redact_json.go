@@ -251,6 +251,10 @@ var sensitiveJSONKeys = map[string]bool{
 	// free-text prompt/goal verbatim, the same sensitivity class as prompt. A
 	// record that fails the typed decode must still drop it (#2419).
 	"pending_handoff_mission": true,
+	// attention mirrors the typed path, which blanks Attention.Reason: the agent
+	// writes it as free text about the user's work. The whole object goes here
+	// because a record the typed decode rejected may hold the reason elsewhere.
+	"attention": true,
 }
 
 // redactUnknownJSON recursively rebuilds a decoded JSON value, blanking any

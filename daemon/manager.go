@@ -43,6 +43,10 @@ type Manager struct {
 	live atomic.Pointer[livePosturePublication]
 	// configApplyMu serializes live config swaps and their side effects.
 	configApplyMu sync.Mutex
+	// attentionClears maps each instance with an input-driven attention clear in
+	// flight to the newest request a keystroke saw, so a burst of keystrokes
+	// starts one clear, not one per key, and a key for a newer request is kept.
+	attentionClears sync.Map
 	// accountSwapAfterManualPrecheckForTest pauses a manual handoff after its
 	// advisory launch check and before personal policy is locked.
 	accountSwapAfterManualPrecheckForTest func()
@@ -612,8 +616,8 @@ type Manager struct {
 	// relayTransports caches one workspace-loopback transport per off-box session
 	// (W5.3); see relayTransport.
 	relayTransports sync.Map
-	// proposals runs the proposal routes and the poll-time doc scan.
-	proposals proposalState
+	// routeServices runs the proposal and backlog routes.
+	routeServices
 	// configAgents owns the bare tmux sessions spawned for config agents. They
 	// have no Instance and so appear in no roster; this is the only thing that
 	// knows they exist, which is why its Stop() is wired into daemon teardown.
