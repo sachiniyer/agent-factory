@@ -241,7 +241,7 @@ reporting the one you asked for. Sessions on one host share its ssh user, so the
 read each other's synced credentials.
 
 sandbox and hook targets cannot be listed, so they refuse an explicit account. docker
-bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
+bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
 
 By default af never switches accounts on its own. With limit_auto_resume enabled,
 an explicit limit_account_candidates list may opt an unpinned local session into
