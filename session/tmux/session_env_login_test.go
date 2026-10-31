@@ -65,10 +65,12 @@ func TestLoginPaneEnvironmentSelectsTheBrowserFreeFlow(t *testing.T) {
 		pane.SetAccountLoginForAgent(tc.agent, "work")
 		pane.SetAccountLoginForAgent(tc.agent, "work")
 
-		wrapped, launchEnv, imports, sessionEnv, _, err := pane.prepareLaunchEnvironment("")
+		specs := observeLaunchSpecs(t)
+		_, launchEnv, imports, sessionEnv, _, err := pane.prepareLaunchEnvironment("")
 		if err != nil {
 			t.Fatalf("%s login pane: %v", tc.agent, err)
 		}
+		admitted := mainLaunchSpec(t, *specs)
 		configVar, _ := sessionenv.SupportsAccounts(tc.agent)
 		if got, ok := launchEnvironmentValue(sessionEnv, configVar); !ok || got != dir {
 			t.Fatalf("%s login pane %s = %q, %v; want the account directory %q", tc.agent, configVar, got, ok, dir)
@@ -81,9 +83,12 @@ func TestLoginPaneEnvironmentSelectsTheBrowserFreeFlow(t *testing.T) {
 			// The pane's exec shim re-filters os.Environ() against the default-deny
 			// allowlist immediately before exec, so a value tmux holds but the shim
 			// does not admit never reaches the agent.
-			if !slices.Contains(strings.Fields(wrapped), name) {
-				t.Fatalf("%s login pane sets %s but does not admit it through the exec shim's allowlist: %s",
-					tc.agent, name, wrapped)
+			//
+			// The allowlist is the launch capability's: the shim no longer reads it
+			// from argv, so it is checked on what the launcher admitted.
+			if !slices.Contains(admitted.extras, name) {
+				t.Fatalf("%s login pane sets %s but does not admit it through the exec shim's allowlist: %v",
+					tc.agent, name, admitted.extras)
 			}
 			// Named in update-environment so an EXISTING tmux server unsets its stale
 			// copy rather than reviving the daemon's own value in the new session.
@@ -100,9 +105,9 @@ func TestLoginPaneEnvironmentSelectsTheBrowserFreeFlow(t *testing.T) {
 			if launchEnvironmentHasName(sessionEnv, name) {
 				t.Fatalf("%s login pane carries %s, which is not its browser-free lever", tc.agent, name)
 			}
-			if slices.Contains(strings.Fields(wrapped), name) {
-				t.Fatalf("%s login pane allowlisted %s, which is not its browser-free lever: %s",
-					tc.agent, name, wrapped)
+			if slices.Contains(admitted.extras, name) {
+				t.Fatalf("%s login pane allowlisted %s, which is not its browser-free lever: %v",
+					tc.agent, name, admitted.extras)
 			}
 		}
 	}
@@ -170,12 +175,13 @@ func TestLoginPaneLeavesAnExplicitBrowserPassthroughAlone(t *testing.T) {
 	}
 	pane.SetAccountLoginForAgent(ProgramClaude, "work")
 
-	wrapped, launchEnv, _, sessionEnv, _, err := pane.prepareLaunchEnvironment("")
+	specs := observeLaunchSpecs(t)
+	_, launchEnv, _, sessionEnv, _, err := pane.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(strings.Fields(wrapped), "BROWSER") {
-		t.Fatalf("the operator's BROWSER pass-through lost its exec-shim allowlist entry: %s", wrapped)
+	if admitted := mainLaunchSpec(t, *specs); !slices.Contains(admitted.extras, "BROWSER") {
+		t.Fatalf("the operator's BROWSER pass-through lost its exec-shim allowlist entry: %v", admitted.extras)
 	}
 	if launchEnvironmentHasName(sessionEnv, "BROWSER") {
 		t.Fatal("af overrode an operator's explicit BROWSER pass-through on the login pane")
