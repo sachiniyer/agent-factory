@@ -973,17 +973,25 @@ after a daemon restart.
 
 ## Archive & restore
 
-For the disposable sandbox backends (`docker`, `ssh`, and `sandbox`), archive and restore
-are **push/pull of the session branch** — the durable workspace is the branch on
-GitHub (`origin`), not the sandbox:
+For the disposable sandbox backends (`docker`, `ssh`, and `sandbox`), a **push**
+archive (`docker`/`hook` by default; `ssh`/`sandbox` with `--push`) is **push/pull
+of the session branch** — the durable workspace is the branch on GitHub
+(`origin`), not the sandbox:
 
-- **Archive** (`af sessions archive`) pushes the session branch to `origin`, then
-  tears the sandbox down (reaps the container / removes the remote session dir +
-  closes the tunnel). The session record is preserved as an inert **Archived**
-  row — restorable, but consuming no container or remote process.
+- **Archive** (`af sessions archive` for `docker`/`hook`, or `af sessions
+  archive --push` for `ssh`/`sandbox`) pushes the session branch to `origin`,
+  then tears the sandbox down (reaps the container / removes the remote session
+  dir + closes the tunnel). The session record is preserved as an inert
+  **Archived** row — restorable, but consuming no container or remote process.
 - **Restore** (`af sessions restore`) re-provisions a **fresh** sandbox that
   clones the pushed branch back, restarts the `af agent-server`, and relaunches
   the agent. The session resumes from the pushed branch state.
+
+The `ssh`/`sandbox` `af sessions archive` default instead **preserves the
+workspace on its host** (W8.5): the agent stops and the session directory is kept
+where it is — nothing is pushed, committed or reaped — and restore **reattaches**
+that workspace (W8.6), so the branch, worktree, index and ignored files come back
+exactly as archived and the agent resumes its conversation.
 
 This is the same flow for every off-box backend (it is written once against the runtime
 seam), and it is why `docker`/`ssh`/`sandbox`/`hook` match `local` on the lifecycle
@@ -1085,8 +1093,8 @@ archived session does not depend on a push at all.
 
 ### What survives, and what doesn't
 
-Because the sandbox is thrown away, **only what reaches `origin` survives** an
-archive:
+For a push archive (`docker`/`hook` by default, or `ssh`/`sandbox` with
+`--push`), the sandbox is thrown away, so **only what reaches `origin` survives**:
 
 - **Committed work** on the session branch is pushed, so it is fully preserved.
 - **Uncommitted work** is snapshotted into a WIP commit
@@ -1096,13 +1104,18 @@ archive:
   carry that WIP commit, commit your work yourself before archiving.
 - **The agent's conversation history** lived only in the disposed sandbox and is
   **not** restored — a fresh agent runs on the restored branch. (The `local`
-  backend, which relocates the worktree in place, does resume the conversation;
-  this is the one place the disposable model differs.)
+  backend, which relocates the worktree in place, does resume the conversation,
+  as does an `ssh`/`sandbox` session archived by default, whose restore reattaches
+  the preserved workspace and resumes it (W8.5/W8.6); this is the difference the
+  push/clone flow has and the preserve path does not.)
 
 ### Requirements
 
-The sandbox must be able to **push** to the repo's `origin` — the same remote it
-cloned from. For a real repo that means the container/remote has git credentials
-for `origin` (an HTTPS token or an SSH deploy key); for a self-contained test a
-read-write `file://` remote works. If the push fails, the archive fails and the
-session is left running (nothing is torn down), so no work is lost.
+A push archive (`docker`/`hook`, or `ssh`/`sandbox` with `--push`) needs the
+sandbox to **push** to the repo's `origin` — the same remote it cloned from. For
+a real repo that means the container/remote has git credentials for `origin` (an
+HTTPS token or an SSH deploy key); for a self-contained test a read-write
+`file://` remote works. If the push fails, the archive fails and the session is
+left running (nothing is torn down), so no work is lost. The `ssh`/`sandbox`
+default archive (W8.5) does not push — the workspace stays on its host — so it
+imposes no such requirement.
