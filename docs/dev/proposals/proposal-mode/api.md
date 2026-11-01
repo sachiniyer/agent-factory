@@ -51,10 +51,17 @@ path filled in:
 7. To add a doc, run `af proposal add-doc`.
 8. If you lose track of the proposal, run `af proposal attach`.
 9. When the user asks you to make or update the proposal's backlog items,
-   write one `af backlog add --file -` batch: a sequential parent and one
-   draft child per PR-stack row. To update, first read this proposal's
-   items with `af backlog list --all --json` and reuse each item's source
-   key for the PR it stands for, even if its row moved or was renamed.
+   write one `af backlog add --file -` batch reading JSON on stdin:
+   `{"proposal": "<slug>", "items": [...]}`. Make a sequential parent
+   and one draft child per PR-stack row. To update, first read this
+   proposal's items with `af backlog list --all --json` and reuse each item's
+   source key for the PR it stands for, even if its row moved or was renamed;
+   with `proposal` set, a matching (proposal, key) is updated, not added
+   again. A batch does not reorder existing items and adds new ones last, so
+   after it compare the children in `af backlog list` with the stack and fix
+   the order with `af backlog move <id> --before <id>` or `--after <id>`.
+   Then tell the user the item ids it printed, and name any existing item of
+   this proposal that no longer matches a row.
 
 ### changes output
 
