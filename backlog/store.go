@@ -16,7 +16,7 @@ const (
 	BacklogFileName      = "backlog.json"
 	BudgetFileName       = "budget.json"
 	BacklogSchemaVersion = 2
-	BudgetSchemaVersion  = 1
+	BudgetSchemaVersion  = 2
 )
 
 // ErrBusy is returned when another writer held a store's lock too long. The
@@ -71,26 +71,25 @@ func Update(repoID string, fn func(*Backlog) error) (*Backlog, error) {
 	return updateFile(path, backlogStore, fn)
 }
 
-// Budget is the share of the user's Claude plan the runner may use, for all
-// projects. Percents are of a plan window; USDLimit is a dollar limit at API
-// prices for accounts with no plan readings.
+// Budget is when the runner may use the user's Claude plan, for all projects.
+// Limit is the total plan % (from any use) under which the runner starts
+// items, in both plan windows; MaxPerRun is a % of the 5-hour window. USDLimit
+// is a dollar limit at API prices for accounts with no plan readings.
 type Budget struct {
 	SchemaVersion int     `json:"schema_version"`
-	Share         float64 `json:"share"`
-	StopAt        float64 `json:"stop_at"`
+	Limit         float64 `json:"limit"`
 	MaxPerRun     float64 `json:"max_per_run"`
 	USDLimit      float64 `json:"usd_limit"`
 	USDSpent      float64 `json:"usd_spent"`
 }
 
 const (
-	DefaultShare     = 50
-	DefaultStopAt    = 90
+	DefaultLimit     = 50
 	DefaultMaxPerRun = 10
 )
 
 func NewBudget() *Budget {
-	return &Budget{SchemaVersion: BudgetSchemaVersion, Share: DefaultShare, StopAt: DefaultStopAt, MaxPerRun: DefaultMaxPerRun}
+	return &Budget{SchemaVersion: BudgetSchemaVersion, Limit: DefaultLimit, MaxPerRun: DefaultMaxPerRun}
 }
 
 // LoadBudget reads the global budget. A missing file is the default budget.
@@ -140,6 +139,64 @@ var budgetStore = store[Budget]{
 	empty:    NewBudget,
 	finish:   func(*Budget) error { return nil },
 	setStamp: func(b *Budget, v int) { b.SchemaVersion = v },
+	migrate:  map[int]config.SchemaMigrator{1: budgetToLimit},
+}
+
+// The share and stop_at defaults of a version 1 budget, for a file that left
+// one out.
+const (
+	v1DefaultShare  = 50
+	v1DefaultStopAt = 90
+)
+
+// budgetToLimit migrates a version 1 budget, which held the backlog to a share
+// of each plan window and stopped the runner at a stop_at on total plan use, to
+// one limit on total plan use: the lower of the two. That never starts an item
+// the old budget would have held. Total plan use is at least the backlog's part
+// of it, so it reaches the lower of the two whenever either old gate closed. A
+// hand-written file with no schema_version that already has a limit keeps it.
+func budgetToLimit(raw []byte) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, errors.New("the file must hold a JSON object")
+	}
+	_, hasShare := obj["share"]
+	_, hasStopAt := obj["stop_at"]
+	if _, hasLimit := obj["limit"]; !hasLimit || hasShare || hasStopAt {
+		share, err := v1Percent(obj, "share", v1DefaultShare)
+		if err != nil {
+			return nil, err
+		}
+		stopAt, err := v1Percent(obj, "stop_at", v1DefaultStopAt)
+		if err != nil {
+			return nil, err
+		}
+		l, err := json.Marshal(min(share, stopAt))
+		if err != nil {
+			return nil, err
+		}
+		obj["limit"] = l
+	}
+	delete(obj, "share")
+	delete(obj, "stop_at")
+	obj[config.SchemaVersionField] = json.RawMessage("2")
+	return json.MarshalIndent(obj, "", "  ")
+}
+
+// v1Percent reads one percent of a version 1 budget, or def when it is absent.
+func v1Percent(obj map[string]json.RawMessage, key string, def float64) (float64, error) {
+	raw, ok := obj[key]
+	if !ok {
+		return def, nil
+	}
+	var v float64
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return v, nil
 }
 
 func (s store[T]) plan(path string) config.SchemaMigrationPlan {

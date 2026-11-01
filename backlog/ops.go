@@ -85,15 +85,15 @@ func (b *Backlog) ApplySettings(c SettingsChange) error {
 // Apply validates and applies the settings that are set. On error b is
 // unchanged.
 func (c SetBudgetRequest) Apply(b *Budget) error {
-	if c.Share == nil && c.StopAt == nil && c.MaxPerRun == nil && c.USDLimit == nil {
-		return errors.New("nothing to change — use --share, --stop-at, --max-per-run or --usd-limit")
+	if c.Limit == nil && c.MaxPerRun == nil && c.USDLimit == nil {
+		return errors.New("nothing to change — use --limit, --max-per-run or --usd-limit")
 	}
 	next := *b
 	for _, pct := range []struct {
 		flag string
 		v    *float64
 		dst  *float64
-	}{{"--share", c.Share, &next.Share}, {"--stop-at", c.StopAt, &next.StopAt}, {"--max-per-run", c.MaxPerRun, &next.MaxPerRun}} {
+	}{{"--limit", c.Limit, &next.Limit}, {"--max-per-run", c.MaxPerRun, &next.MaxPerRun}} {
 		if pct.v == nil {
 			continue
 		}

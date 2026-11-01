@@ -654,19 +654,18 @@ af backlog ask --self <text> [--then wait|archive] [--handoff-file <path|->] [fl
 
 Show or change the global budget
 
-The budget is the share of your Claude plan the backlog may use, in each plan window (5-hour and weekly), for all projects. With no flags, print it with each window's plan %, the backlog's part of it, the reset time and the age of the newest reading. --share sets the backlog's % of each window (default 50). --stop-at sets the plan % at which the runner stops (default 90). --max-per-run sets the % of the 5-hour window one run may use (default 10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 turns it off.
+The budget keeps backlog work out of the way of your own: the runner starts items only while your total Claude plan use, from any source, is under the limit in both plan windows (5-hour and weekly), for all projects. With no flags, print it with each window's plan %, the backlog's part of it, the reset time and the age of the newest reading. --limit sets the plan % under which the runner starts items (default 50). Item sessions that are already running keep going when plan use passes the limit; only new starts wait. --max-per-run sets the % of the 5-hour window one run may use (default 10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 turns it off.
 
 ```
-af backlog budget [--share <pct>] [--stop-at <pct>] [--max-per-run <pct>] [--usd-limit <usd>] [flags]
+af backlog budget [--limit <pct>] [--max-per-run <pct>] [--usd-limit <usd>] [flags]
 ```
 
 **Flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--limit` | `string` | Plan percent, from any use, under which the runner starts items in both windows (0-100; default 50) |
 | `--max-per-run` | `string` | Percent of the 5-hour window one run may use (0-100; default 10) |
-| `--share` | `string` | Percent of each plan window the backlog may use (0-100; default 50) |
-| `--stop-at` | `string` | Plan percent, from any use, at which the runner stops (0-100; default 90) |
 | `--usd-limit` | `string` | Dollar limit at API prices for accounts with no plan readings; 0 turns it off |
 
 **Global flags**

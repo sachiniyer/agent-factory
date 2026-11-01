@@ -14,7 +14,7 @@ beforeEach(() => {
 
 afterEach(() => dom.restore());
 
-const OPTS = { title: "Budget gate closed", body: "The backlog used its 50% of the week.", confirmLabel: "Start anyway" };
+const OPTS = { title: "Budget gate closed", body: "The plan is at 60% of the week, over the 50% limit.", confirmLabel: "Start anyway" };
 
 function open(): { result: Promise<boolean>; modal: ModalHandle; dismissed: ModalHandle[] } {
   let modal: ModalHandle | null = null;
