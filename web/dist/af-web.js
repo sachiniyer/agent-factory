@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "f5890cb332cc";
+var CLIENT_VERSION = "7e0e7166fa8f";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18853,7 +18853,7 @@ var ItemPanel = class {
       this.repaint();
     }, queueFor(`${root2}\0${id}\0waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
-    this.title.setAttribute("aria-label", "Title");
+    this.title.setAttribute("aria-label", "Backlog item title");
     const commitTitle = () => {
       const it = this.item();
       const t = this.title.value.trim();
