@@ -705,8 +705,8 @@ A mirrored preview is sandboxed to an opaque origin, so it cannot reach the web 
 or read its token — framed, and opened on its own alike: the daemon sends a
 `Content-Security-Policy: sandbox …` with every mirrored response, carrying the
 same flags as the frame, so a mirror address opened in a browser tab, bookmarked
-or pasted runs exactly as it does in the pane. A preview on its **own** origin is sandboxed too, but with a real
-origin of its own (it needs one for `localStorage`, cookies and service workers) —
+or pasted runs exactly as it does in the pane. A preview on its **own** origin is
+sandboxed too, but with a real origin of its own (it needs one for `localStorage`, cookies and service workers) —
 safe because the browser's own cross-origin rules already keep it away from the web
 UI. A small **reload** control sits above every web tab for dev-preview refreshes.
 
@@ -815,9 +815,13 @@ tab survives a restart and simply starts a new editor when you next open it.
     `/absproxy/<port>/`) and VS Code's route for worktree files
     (`vscode-remote-resource`) answer as opaque-origin pages, so a dev server or a
     repository's HTML never runs as the web UI, or as the editor, whose origin is
-    its terminal. An **off-box** session's editor is never served on the web UI's
-    address at all (above). Do not expose the daemon's listener to a network you do
-    not trust.
+    its terminal. The editor's WebSocket, which carries that terminal, is accepted
+    only from the editor's own page: af refuses a handshake whose `Origin` names any
+    other origin, on every address the editor is served on. It works behind the
+    same front doors the web UI's own streams do: a proxy that rewrites `Host` must
+    forward the browser's in `X-Forwarded-Host`. An **off-box** session's editor is
+    never served on the web UI's address at all (above). Do not expose the daemon's
+    listener to a network you do not trust.
 
 In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
 editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.
