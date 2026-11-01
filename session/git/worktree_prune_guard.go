@@ -184,3 +184,30 @@ func WorktreeCommitsBeyondRepo(repoRoot, worktreePath string) (int, error) {
 	}
 	return n, nil
 }
+
+// WorktreePrivateRefs returns how much state lives in the worktree's own ref
+// namespace — its stash entries and anything under refs/worktree/ — which
+// neither `git status` nor the ahead-of probe can see. A stash made inside
+// the worktree holds work the tree no longer shows; a per-worktree ref is
+// likewise lost with the worktree's refdir. Any entry means the tree is not
+// empty in the sense teardown needs, and every probe failure is an error
+// out — the caller fails closed rather than reading "could not list" as
+// "clean".
+func WorktreePrivateRefs(worktreePath string) (int, error) {
+	n := 0
+	for _, args := range [][]string{
+		{"--no-optional-locks", "stash", "list"},
+		{"--no-optional-locks", "for-each-ref", "refs/worktree/"},
+	} {
+		out, err := runBoundedWorktreeGit(worktreePath, true, args...)
+		if err != nil {
+			return 0, err
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			if line != "" {
+				n++
+			}
+		}
+	}
+	return n, nil
+}

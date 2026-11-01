@@ -290,7 +290,9 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 //     marker recorded before the spawn, stamped at new-session), and the kill is
 //     bound to the probed tmux session id. A discovered worktree is torn down
 //     only when the marker bound its exact path before creation AND the tree is
-//     clean — no dirty files, no commits beyond the mainline — which tombstones
+//     clean — no modified, staged, untracked, or ignored files, no commits
+//     beyond the mainline, no stash or refs/worktree/* of its own — which
+//     tombstones
 //     the record for teardown (#6259). Anything unproven — no stamp, an
 //     unreadable environment, a probe that did not answer, a replaced session,
 //     an unbound or mismatched worktree, any bare branch residue — is
@@ -516,12 +518,13 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	if clean && wtPath != "" {
 		dirty, derr := git.WorktreeDirtyFiles(wtPath)
 		commits, cerr := git.WorktreeCommitsBeyondRepo(identityRoot, wtPath)
-		if derr != nil || cerr != nil {
-			log.WarningLog.Printf("task %s: cannot prove interrupted-fire worktree %q clean (dirty probe: %v, commits probe: %v) — quarantining it",
-				t.ID, wtPath, derr, cerr)
+		priv, perr := git.WorktreePrivateRefs(wtPath)
+		if derr != nil || cerr != nil || perr != nil {
+			log.WarningLog.Printf("task %s: cannot prove interrupted-fire worktree %q clean (dirty probe: %v, commits probe: %v, refs probe: %v) — quarantining it",
+				t.ID, wtPath, derr, cerr, perr)
 			clean = false
 		} else {
-			clean = dirty == 0 && commits == 0
+			clean = dirty == 0 && commits == 0 && priv == 0
 		}
 	}
 

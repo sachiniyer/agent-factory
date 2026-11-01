@@ -113,12 +113,19 @@ func TestTaskFireLeftover_UnboundAndMismatchedWorktreesStayQuarantined(t *testin
 }
 
 // TestTaskFireLeftover_BoundWorktreeWithWorkStaysQuarantined: path equality
-// proves ownership, not disposability. A bound worktree carrying uncommitted
-// files or commits beyond the mainline holds the only copy of that work and
-// stays quarantined.
+// proves ownership, not disposability. "Clean" is defined by the three probes
+// the reconcile gate runs — WorktreeDirtyFiles, WorktreeCommitsBeyondRepo,
+// WorktreePrivateRefs — and every kind of residue they can name is exercised
+// here: modified or staged files, untracked files, ignored files (a gitignored
+// artifact exists nowhere else either), commits beyond the mainline, and the
+// worktree's own stash or refs/worktree/* entries. Each holds the only copy of
+// that work, so each bound leftover stays quarantined.
 func TestTaskFireLeftover_BoundWorktreeWithWorkStaysQuarantined(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		// prep runs inside the repository before the worktree is created —
+		// the stash and ignored cases need tracked content in the tree.
+		prep func(t *testing.T, repoPath string)
 		soil func(t *testing.T, wtPath string)
 	}{
 		{
@@ -127,6 +134,29 @@ func TestTaskFireLeftover_BoundWorktreeWithWorkStaysQuarantined(t *testing.T) {
 				t.Helper()
 				if err := os.WriteFile(filepath.Join(wtPath, "uncommitted.txt"), []byte("work"), 0o644); err != nil {
 					t.Fatalf("dirty the worktree: %v", err)
+				}
+			},
+		},
+		{
+			name: "ignored file",
+			prep: func(t *testing.T, repoPath string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(repoPath, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
+					t.Fatalf("write .gitignore: %v", err)
+				}
+				for _, args := range [][]string{
+					{"-C", repoPath, "add", ".gitignore"},
+					{"-C", repoPath, "commit", "-m", "ignore logs"},
+				} {
+					if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+						t.Fatalf("git %v: %v: %s", args, err, out)
+					}
+				}
+			},
+			soil: func(t *testing.T, wtPath string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(wtPath, "agent.log"), []byte("work"), 0o644); err != nil {
+					t.Fatalf("write ignored file: %v", err)
 				}
 			},
 		},
@@ -147,12 +177,51 @@ func TestTaskFireLeftover_BoundWorktreeWithWorkStaysQuarantined(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "stash of its own",
+			prep: func(t *testing.T, repoPath string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(repoPath, "tracked.txt"), []byte("base"), 0o644); err != nil {
+					t.Fatalf("write tracked file: %v", err)
+				}
+				for _, args := range [][]string{
+					{"-C", repoPath, "add", "tracked.txt"},
+					{"-C", repoPath, "commit", "-m", "track a file"},
+				} {
+					if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+						t.Fatalf("git %v: %v: %s", args, err, out)
+					}
+				}
+			},
+			soil: func(t *testing.T, wtPath string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(wtPath, "tracked.txt"), []byte("edited"), 0o644); err != nil {
+					t.Fatalf("edit tracked file: %v", err)
+				}
+				if out, err := exec.Command("git", "-C", wtPath, "stash").CombinedOutput(); err != nil {
+					t.Fatalf("git stash: %v: %s", err, out)
+				}
+			},
+		},
+		{
+			name: "a refs/worktree ref of its own",
+			soil: func(t *testing.T, wtPath string) {
+				t.Helper()
+				if out, err := exec.Command("git", "-C", wtPath, "update-ref",
+					"refs/worktree/agent-proof", "HEAD").CombinedOutput(); err != nil {
+					t.Fatalf("git update-ref: %v: %s", err, out)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			title := "bound-worktree-with-work"
 			repoPath, repo, sanitized, _ := fakeReapFixture(t, title)
 			branch := worktreeBranchFor(t, title)
 			wtPath := filepath.Join(resolvedTempDir(t), "worked-wt")
+			if tc.prep != nil {
+				tc.prep(t, repoPath)
+			}
 			seedLeftoverWorktree(t, repoPath, branch, wtPath)
 			installFakeReapTmux(t, sanitized, fakeReapTmux{absent: true})
 			tc.soil(t, wtPath)
@@ -235,5 +304,43 @@ func TestTaskFireLeftover_BoundWorktreeWithUnprovenSessionKeepsBoth(t *testing.T
 	}
 	if row == nil || !row.StartupStateUnknown || row.UserKilled {
 		t.Fatalf("an unproven-session leftover must quarantine, got %+v", row)
+	}
+}
+
+// TestTaskFireLeftover_ReFiredMarkerCannotTouchPriorIncarnation: a re-fire
+// mints a new marker for the same title — same deterministic worktree path,
+// different instance id. That marker must never authorize touching the prior
+// incarnation's runtime: the live session's environment carries the earlier
+// attempt's id, so nothing is proven and the whole leftover quarantines.
+func TestTaskFireLeftover_ReFiredMarkerCannotTouchPriorIncarnation(t *testing.T) {
+	title := "refired-leftover"
+	repoPath, repo, sanitized, home := fakeReapFixture(t, title)
+	branch := worktreeBranchFor(t, title)
+	wtPath := filepath.Join(resolvedTempDir(t), "refired-wt")
+	seedLeftoverWorktree(t, repoPath, branch, wtPath)
+	// The prior attempt's session is still live: its environment stamps the
+	// instance id attempt A was minted, not the re-fire's.
+	logPath := installFakeReapTmux(t, sanitized, fakeReapTmux{instance: "attempt-a", home: home})
+
+	// The re-fire's marker bound the same deterministic worktree path before
+	// its own create ran — then that create crashed too.
+	fire := &taskFireMarker{
+		TaskID: "ab0r7206", IntendedAt: time.Now().Add(-time.Minute), Title: title,
+		InstanceID: "attempt-b", WorktreePath: wtPath,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7206", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+		fire, repo, nil)
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if kills := killsIn(fakeTmuxLog(t, logPath)); len(kills) != 0 {
+		t.Fatalf("the re-fire's marker must not kill the prior incarnation's session; tmux was sent %q", kills)
+	}
+	if row == nil || !row.StartupStateUnknown || row.UserKilled {
+		t.Fatalf("a prior-incarnation leftover must quarantine, got %+v", row)
+	}
+	if _, statErr := os.Stat(wtPath); statErr != nil {
+		t.Fatalf("the prior incarnation's worktree must be left in place: %v", statErr)
 	}
 }
