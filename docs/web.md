@@ -95,7 +95,7 @@ non-default filter. If it hides everything, the empty state reports hidden rows.
 On a phone, selecting a terminal gives it the screen: one compact row holds
 **Toggle sessions**, the truncating session title, the
 **Terminal** and **VS Code** icon buttons, and **…**. The menu contains project
-choices, Sessions · Tasks · Config, session actions and tabs. Escape closes it and returns focus.
+choices, Sessions · Backlog · Tasks · Config, session actions and tabs. Escape closes it and returns focus.
 **Toggle sessions** opens the rail drawer; selecting a session or tapping its
 backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
@@ -294,6 +294,33 @@ Submit with **Add** or
 **Save**, or leave with **Cancel**. Invalid values show an inline error.
 See [Tasks and automation](tasks.md) for scheduling semantics.
 
+### Backlog view
+
+**Backlog** holds a project's ordered tree of work items, the same backlog `af backlog`
+edits. Each row shows its id (`B-12`), title and state: Draft, Queued, Waiting, Working,
+Needs you, In review, Done or Dropped. A parent's state is rolled up from its children.
+The tab shows how many items need you, and an item that has a session gets its `B-12`
+chip in the Sessions rail; click the chip to open the item.
+
+- **New item…** adds a draft at the bottom; **Add child…** in an item's panel adds one
+  under it. Drag a row, or press `Alt+↑` · `Alt+↓`, to reorder it. **Move…** in the
+  panel sends an item to the top or bottom, above another item, or into a parent.
+- The filter buttons narrow the list by state; **Show done** adds finished items.
+- An item's panel holds its actions (Queue, Back to draft, Mark done, Drop, Reopen, Delete),
+  its body, the items it waits on (a wait that would make a cycle is refused), its
+  children, its runs and its thread. Notes go on the thread.
+- **Start now** runs a queued or draft item immediately, ignoring the runner switch and
+  the budget: it continues the item's live session or creates a new one. When an item's
+  agent asks a question, the item reads **Needs you**; type the answer in the panel and
+  **Send answer**.
+- The bar at the top shows the runner (on or off, slots in use) and the budget. Its ⋯ menu
+  edits the budget share, the plan percent where the runner stops, the cap per run, the
+  dollar limit, and what happens to an item's session when the item is done.
+
+The view re-reads the backlog on every change the daemon announces, when the event
+stream reconnects, and each time you open it, so edits made with `af backlog` or in
+another browser appear without a reload.
+
 ### Config view
 
 Choose **Config** to edit global settings on the daemon's host. The header names
@@ -409,7 +436,7 @@ through to the agent unless a modal or menu handles them.
 | `1`–`9` | Select a tab in navigation mode |
 | `t` · `T` | Open a terminal tab · a VS Code tab, when the session supports that kind |
 | `w` | Ask to delete the active tab; confirm with Delete tab, or cancel; never the Agent tab |
-| `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
+| `[` · `]` | Cycle Sessions · Backlog · Tasks · Config in navigation mode |
 | `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |
 | `Alt+w` | Close the focused pane in Sessions |
 

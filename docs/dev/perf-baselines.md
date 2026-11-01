@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1126071.000 | 1126071.000–1126071.000 | 0.000 | 1182374.550 |
-| gzip_bytes | 255761.000 | 255761.000–255761.000 | 0.000 | 268549.050 |
+| raw_bytes | 1243724.000 | 1243724.000–1243724.000 | 0.000 | 1305910.200 |
+| gzip_bytes | 283682.000 | 283682.000–283682.000 | 0.000 | 297866.100 |
 | lazy_raw_bytes | 371003.000 | 371003.000–371003.000 | 0.000 | 389553.150 |
 | lazy_gzip_bytes | 120125.000 | 120125.000–120125.000 | 0.000 | 126131.250 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
@@ -134,6 +134,10 @@ only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
 were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
 `report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
 so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,149,376 raw and 260,459 gzip bytes over `web/dist` without `lazy/`. Both are inside the existing shell budgets (raw 1,182,374; gzip 268,549), so those baselines are not moved. Lazy bundle: 371,003 raw / 120,125 gzip.
+
+### Bundle refresh provenance (#6297)
+
+Master's committed bundle is 1,126,071 raw / 255,761 gzip over `web/dist/**.{js,css}` (gzip level 9) at the last merge of master. The Backlog view port (Refs #6284, fork `d7a0be4427`) takes the bundle to 1,243,724 raw / 283,682 gzip over master's 1,126,071 / 255,761 (#6289), +117,653 raw / +27,921 gzip (the shell metrics; the lazy Docs editor is unchanged by this PR: 371,003 / 120,125). The growth is feature code (the view, its model, loader and panel, about 3,000 lines of TypeScript and 900 lines of CSS) plus the web changes carried in by merging the daemon stack branch (#6295) and master, which carry the attention-dot rail work (#5581). Comments do not ship (esbuild strips them). Both entries are moved; each is the deterministic byte sum, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Computed from the committed tree rather than recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6289)
 

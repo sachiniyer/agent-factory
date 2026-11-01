@@ -285,7 +285,7 @@ export function viewNavigation(onSelect: (view: View) => void): {
   const el = h("div", { class: "af-viewnav", role: "tablist" });
   el.setAttribute("aria-label", "Views");
   const tabs = new Map<View, HTMLElement>();
-  const labels: Record<View, string> = { sessions: "Sessions", tasks: "Tasks", config: "Config" };
+  const labels: Record<View, string> = { sessions: "Sessions", backlog: "Backlog", tasks: "Tasks", config: "Config" };
   for (const view of VIEWS) {
     const tab = h("button", { type: "button", class: "af-viewtab", role: "tab" }, labels[view]);
     tab.dataset.view = view;
