@@ -35,24 +35,24 @@ var box1Host = session.RuntimeMachine{Host: "box1.example"}
 func TestGitCredential_RefusedOnATaintedMachine(t *testing.T) {
 	for name, tc := range map[string]struct {
 		taint   session.RuntimeMachine
-		refused bool
+		refusal string
 	}{
-		"the machine, by name":             {box1Host, true},
-		"the machine, by another spelling": {session.RuntimeMachine{Host: "BOX1.example."}, true},
-		"the machine, by address":          {session.RuntimeMachine{Host: "198.51.100.7"}, true},
+		"the machine, by name":             {box1Host, refusePushHostTainted},
+		"the machine, by another spelling": {session.RuntimeMachine{Host: "BOX1.example."}, refusePushHostTainted},
+		"the machine, by address":          {session.RuntimeMachine{Host: "198.51.100.7"}, refusePushHostTainted},
 		// Fourth taint review, 1: the whole machine, whatever login placed it.
-		"the machine, through another login's entry": {session.HostMachine(config.HostConfig{Host: "box1.example", User: "ubuntu"}), true},
-		"another machine": {session.RuntimeMachine{Host: "box9.example"}, false},
-		// Fourth taint review, 2: nothing unproven enters the ledger, so a name
-		// that doesn't resolve is recorded by name, and matches only that name.
-		"a name that doesn't resolve": {session.RuntimeMachine{Host: "nowhere.example"}, false},
+		"the machine, through another login's entry": {session.HostMachine(config.HostConfig{Host: "box1.example", User: "ubuntu"}), refusePushHostTainted},
+		"another machine": {session.RuntimeMachine{Host: "box9.example"}, ""},
+		// A name that doesn't resolve is recorded unconfirmed: it can't be shown
+		// to be another machine, so it withholds grants everywhere until reset.
+		"a name that doesn't resolve": {session.RuntimeMachine{Host: "nowhere.example"}, "af hosts reset-trust --entry"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pf := newPushFixture(t)
 			pf.taint(t, "child-1", "child", "created by another session's af", tc.taint)
 			code, got, msg := pf.askOwn(t)
-			if tc.refused {
-				requireRefused(t, code, got, msg, refusePushHostTainted)
+			if tc.refusal != "" {
+				requireRefused(t, code, got, msg, tc.refusal)
 				assert.Zero(t, pf.tokenReads.Load())
 				return
 			}
@@ -364,14 +364,21 @@ func TestLicensingIsRefusedWhileAnUnconfirmedEntryExists(t *testing.T) {
 	require.Len(t, resp.Hosts[0].PushCredentialBlockers, 1, "every host names it")
 	assert.Contains(t, resp.Hosts[0].PushCredentialBlockers[0], "--entry "+thin[0].ID)
 
+	// Final delta check on #6433: however the licence arrived (here a config
+	// edit that never passed refuseLicensingTainted, as a hand edit of
+	// config.toml wouldn't), no host gets a grant while the entry exists, and the
+	// refusal names its id.
 	pf.setConfig(func(c *config.Config) { c.Hosts = map[string]config.HostConfig{"box1": licensedBox1} })
 	code, got, msg := pf.askOwn(t)
-	requireAnswered(t, code, got, msg) // a host already licensed keeps answering
+	requireRefused(t, code, got, msg, "af hosts reset-trust --entry "+thin[0].ID)
+	assert.Zero(t, pf.tokenReads.Load())
 
 	cs := &controlServer{manager: pf.mgr}
 	var rr ResetPushTrustResponse
 	require.NoError(t, cs.ResetPushTrust(ResetPushTrustRequest{Entry: thin[0].ID}, &rr))
 	assert.NoError(t, pf.mgr.refuseLicensingTainted(SetConfigValueRequest{HostsEdit: &config.HostsEdit{Op: config.HostsEditAdd, Name: "box9", Host: &licensed}}))
+	code, got, msg = pf.askOwn(t)
+	requireAnswered(t, code, got, msg)
 }
 
 // Codex P1 on #6433 at 2fd8cc9: the licence and the automatic-push fence are
@@ -445,4 +452,36 @@ func TestATaintedCallerCannotDriveAnEligiblePeer(t *testing.T) {
 	pf.taint(t, "child-1", "child", "created by another session's af", box1Host) // the caller's machine
 	_, out = pf.call(t, pf.secret, "/v1/SendPrompt", `{"title":"peer","prompt":"fetch the token"}`)
 	assert.Contains(t, out, refusePushEscalationText)
+}
+
+// Final delta check on #6433: no sandbox without push credentials may drive ANY
+// session on a licensed machine, eligible or not. The review's shape: your own
+// session listed through an unlicensed alias entry of the licensed machine is
+// ineligible, yet sits beside an eligible neighbour's callback files there.
+func TestASandboxCannotDriveAnySessionOnALicensedMachine(t *testing.T) {
+	pf := newPushFixture(t)
+	alias := config.HostConfig{Host: "BOX9.example"}
+	pf.setConfig(func(c *config.Config) {
+		c.Hosts = map[string]config.HostConfig{"box1": {Host: "box1.example"},
+			"box9": {Host: "box9.example", PushCredentials: true}, "box9-alias": alias}
+	})
+	pf.placements["peer"] = listedOn("box9-alias", config.SSHConfig{Host: alias.Host}, "ref-peer")
+	pf.placeOn(t, "peer", session.HostMachine(alias))
+	require.False(t, pf.mgr.pushEligible(pf.me), "precondition: the caller has no push credentials")
+	require.False(t, pf.mgr.pushEligible(pf.peer), "precondition: the target has none either")
+
+	for name, call := range map[string][2]string{
+		"send-prompt":       {"/v1/SendPrompt", `{"title":"peer","prompt":"read the neighbour's callback file"}`},
+		"archive with push": {"/v1/ArchiveSession", `{"title":"peer","push":true}`},
+		"a task for it":     {"/v1/AddTask", `{"task":{"prompt":"p","cron_expr":"0 * * * *","target_session":"peer"}}`},
+	} {
+		_, out := pf.call(t, pf.secret, call[0], call[1])
+		assert.Containsf(t, out, refusePushEscalationText, "%s", name)
+	}
+	_, err := pf.mgr.checkSandboxTaskDelivery(pf.me.ID, pf.repoA, "peer")
+	assert.ErrorContains(t, err, refusePushEscalationText, "and a task already scheduled is not delivered")
+
+	pf.placeOn(t, "peer", session.RuntimeMachine{Host: "box2.example"}) // another machine
+	_, out := pf.call(t, pf.secret, "/v1/SendPrompt", `{"title":"peer","prompt":"hi"}`)
+	assert.NotContains(t, out, refusePushEscalationText, "anti-vacuous: a session on no licensed machine may be prompted")
 }

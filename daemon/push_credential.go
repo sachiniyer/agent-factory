@@ -196,9 +196,8 @@ func (m *Manager) authorizePushCredential(ask pushAsk) (pushcred.Origin, pushPas
 	if !m.pushTaintsRestored() {
 		return pushcred.Origin{}, none, sandboxRefusal(refusePushTaintsLoading)
 	}
-	if taints := m.pushCreds.taintsFor(machine); len(taints) > 0 {
-		m.info().Printf("push credential: withheld from session %s: %s", ask.owner, taints[0])
-		return pushcred.Origin{}, none, sandboxRefusal(refusePushHostTainted)
+	if err := m.grantRefusal(ask.owner, machine, ""); err != nil {
+		return pushcred.Origin{}, none, err
 	}
 	if m.pushCreds.autoPushFenced(inst.ID, placement.CallbackRef) {
 		return pushcred.Origin{}, none, sandboxRefusal(refusePushAutoPreserve)
@@ -251,9 +250,8 @@ func (m *Manager) pushCredentialRow(owner string, want *session.Instance) (*sess
 // credential the request presented is still that row's.
 func (m *Manager) pushStillLive(ask pushAsk, pass pushPass) error {
 	inst := pass.inst
-	if taints := m.pushCreds.taintsFor(pass.machine); len(taints) > 0 {
-		m.info().Printf("push credential: withheld from session %s at the final check: %s", ask.owner, taints[0])
-		return sandboxRefusal(refusePushHostTainted)
+	if err := m.grantRefusal(ask.owner, pass.machine, " at the final check"); err != nil {
+		return err
 	}
 	if !pass.placement.Licensed(m.Config(), pass.backend) {
 		return sandboxRefusal(refusePushNotLicensed)
