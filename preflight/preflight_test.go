@@ -306,6 +306,11 @@ func TestLocalSessionPrereqsAtResolvesRelativeOverrideInWorkdir(t *testing.T) {
 // entry are anchor-independent and must not be flagged — otherwise the doctor
 // would refuse to verify `default_program = "claude"` run outside a repo.
 func TestRelativeExecutable(t *testing.T) {
+	// Pin an absolute inherited PATH so the bare-name cases below are hermetic:
+	// a bare executable's lookup depends on the launch directory only through
+	// a relative PATH entry, and the doctor's inherited PATH is one source of
+	// such entries (covered by the relative-inherited-PATH case below).
+	t.Setenv("PATH", "/usr/bin"+string(os.PathListSeparator)+"/bin")
 	cases := []struct {
 		name    string
 		command string
@@ -332,9 +337,22 @@ func TestRelativeExecutable(t *testing.T) {
 		{name: "shell assignment relative PATH bare exe", command: "PATH=bin codex", want: true},
 		{name: "env PATH empty entry bare exe", command: "env PATH=:/usr/bin codex", want: true},
 		{name: "env PATH absolute entry bare exe", command: "env PATH=/usr/bin codex", want: false},
+		// A relative PATH entry does not anchor an absolute executable: PATH is
+		// never consulted when the executable already names a path, so the
+		// doctor outside a repo can still verify (and report missing) directly.
+		{name: "relative PATH with absolute exe is not anchoring", command: "PATH=bin /missing/codex", want: false},
+		// A relative shell wrapper that CheckCommand resolves separately from the
+		// detected agent executable (./bin/launcher codex) makes the command's
+		// launch depend on cwd even though the agent token is a bare name.
+		{name: "relative wrapper before agent token", command: "./bin/launcher codex", want: true},
+		{name: "bare wrapper before agent token is not anchoring", command: "launcher codex", want: false},
 		// A relative env -C chdir makes the launch working directory depend on
-		// the doctor's cwd; an absolute chdir does not.
+		// the doctor's cwd; an absolute chdir does not. A parent-relative chdir
+		// (env -C ../tools) must be detected too: the two probe anchors have
+		// distinct parents so ../tools resolves to distinct paths under each.
 		{name: "env chdir relative bare exe", command: "env -C subdir codex", want: true},
+		{name: "env chdir parent-relative bare exe", command: "env -C ../tools codex", want: true},
+		{name: "env chdir parent-relative absolute exe", command: "env -C ../tools /usr/bin/codex", want: true},
 		{name: "env chdir absolute bare exe", command: "env -C /abs codex", want: false},
 		{name: "opaque relative wrapper", command: "./my-wrapper --ready", want: true},
 		{name: "opaque bare wrapper", command: "my-wrapper --ready", want: false},
@@ -347,5 +365,26 @@ func TestRelativeExecutable(t *testing.T) {
 				t.Errorf("RelativeExecutable(%q) = %v, want %v", tc.command, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRelativeExecutable_InheritedRelativePath pins that a bare executable
+// whose lookup goes through the doctor's INHERITED PATH (no command-introduced
+// override) still depends on the launch directory when that inherited PATH has
+// a relative or empty entry: resolveExecutableAt joins such entries against the
+// launch directory, so the doctor outside a repo cannot verify the bare name
+// without anchoring.
+func TestRelativeExecutable_InheritedRelativePath(t *testing.T) {
+	t.Setenv("PATH", "bin"+string(os.PathListSeparator)+"/usr/bin")
+	if !RelativeExecutable("claude") {
+		t.Errorf("RelativeExecutable(%q) with a relative inherited PATH entry = false, want true", "claude")
+	}
+	t.Setenv("PATH", string(os.PathListSeparator)+"/usr/bin")
+	if !RelativeExecutable("claude") {
+		t.Errorf("RelativeExecutable(%q) with an empty inherited PATH entry = false, want true", "claude")
+	}
+	t.Setenv("PATH", "/usr/bin"+string(os.PathListSeparator)+"/bin")
+	if RelativeExecutable("claude") {
+		t.Errorf("RelativeExecutable(%q) with an absolute inherited PATH = true, want false", "claude")
 	}
 }

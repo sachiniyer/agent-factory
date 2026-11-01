@@ -265,13 +265,18 @@ func LocalSessionPrereqsAt(cfg *config.Config, agent, workingDir string) error {
 // repository, cannot verify it without anchoring to the directory the session
 // will launch in. The dependency arises from any of:
 //   - a relative executable (./venv/bin/claude, bin/claude, env -C d ./codex),
-//   - a command-introduced PATH entry that is relative or empty (PATH=bin codex,
-//     env PATH=bin codex): resolveExecutableAt joins such entries against the
-//     launch directory when looking up a bare name, so the lookup flips with the
-//     doctor's incidental cwd, or
-//   - a relative env -C chdir (env -C subdir codex): the launch working
-//     directory itself becomes cwd-relative, and the existence check (plus any
-//     relative PATH resolution) flips with it.
+//   - a relative shell wrapper that CheckCommand resolves separately from the
+//     detected agent executable (./bin/launcher codex): the wrapper is looked up
+//     against the launch directory even though the agent token is a bare name, or
+//   - a relative or empty PATH entry used by a bare executable, whether the entry
+//     is introduced by the command (PATH=bin codex, env PATH=bin codex) or
+//     inherited from the doctor's own environment: resolveExecutableAt joins such
+//     entries against the launch directory when looking up a bare name, so the
+//     lookup flips with the doctor's incidental cwd. Absolute and relative-path
+//     executables ignore PATH, so a relative PATH entry does not anchor them, or
+//   - a relative env -C chdir (env -C subdir codex, env -C ../tools codex): the
+//     launch working directory itself becomes cwd-relative, and the existence
+//     check (plus any relative PATH resolution) flips with it.
 //
 // Absolute executables, tilde paths, absolute PATH entries, and absolute chdirs
 // resolve the same way regardless of the launch directory, so the doctor
@@ -282,17 +287,29 @@ func LocalSessionPrereqsAt(cfg *config.Config, agent, workingDir string) error {
 // env options) returns false so CheckCommand surfaces the real error rather
 // than doctor emitting a different advisory for it.
 func RelativeExecutable(command string) bool {
-	launch, err := tmux.CommandEnvironmentFromCommand(command, "/")
+	launch, err := tmux.CommandEnvironmentFromCommand(command, relativeExecutableAnchorA)
 	if err != nil {
 		return false
 	}
 	if usesRelativeExecutable(launch.Executable) {
 		return true
 	}
-	// A command-introduced PATH override with a relative or empty entry makes a
-	// bare executable's lookup depend on the launch directory.
-	if pathOverride := launch.Override("PATH"); pathOverride.Present && pathOverride.Set {
-		if pathHasRelativeEntry(pathOverride.Value) {
+	// A relative shell wrapper (the first non-assignment token, the same token
+	// CheckCommand resolves via resolveShellExecutableAt) makes the command's
+	// launch depend on cwd even when the detected agent executable is a bare
+	// name. The detected executable and the shell wrapper are independent
+	// obligations; a relative wrapper resolves against the launch directory.
+	if wrapper := relativeShellWrapper(command); wrapper != "" && wrapper != launch.Executable && usesRelativeExecutable(wrapper) {
+		return true
+	}
+	// A bare executable is resolved through PATH, so a relative or empty PATH
+	// entry — whether introduced by the command or inherited from the doctor's
+	// environment — makes its lookup depend on the launch directory. Absolute
+	// and relative-path executables ignore PATH, so a relative PATH entry does
+	// not anchor them (PATH=bin /missing/codex resolves the absolute executable
+	// directly and never consults PATH).
+	if isBareExecutable(launch.Executable) {
+		if path, ok := effectivePathValue(launch); ok && pathHasRelativeEntry(path) {
 			return true
 		}
 	}
@@ -313,11 +330,48 @@ func RelativeExecutable(command string) bool {
 // relativeExecutableAnchorA and relativeExecutableAnchorB are two distinct
 // absolute working directories used to detect a relative env -C chdir by
 // comparison. They need not exist on disk; CommandEnvironmentFromCommand
-// never stats them.
+// never stats them. Their parents differ, so a parent-relative chdir such as
+// `env -C ../tools` resolves to distinct paths under each anchor instead of
+// collapsing to the same root-relative path.
 const (
-	relativeExecutableAnchorA = "/"
-	relativeExecutableAnchorB = "/__af-relative-executable-anchor__"
+	relativeExecutableAnchorA = "/__af-relative-executable-anchor-a__"
+	relativeExecutableAnchorB = "/__af-relative-executable-anchor-b__/probe"
 )
+
+// relativeShellWrapper returns the shell-wrapper token CheckCommand resolves
+// separately from the detected agent executable: the first non-assignment
+// token of the command, the same token CheckCommand feeds to
+// resolveShellExecutableAt. An empty string means the command could not be
+// tokenized; a value equal to the agent executable means there is no separate
+// wrapper (e.g. `PATH=bin codex`).
+func relativeShellWrapper(command string) string {
+	words, err := shellWords(command, 12)
+	if err != nil {
+		return ""
+	}
+	return shellExecutable(words)
+}
+
+// isBareExecutable reports whether exe is a bare name resolved through PATH
+// (no path separator, not a tilde, non-empty) — the one executable shape whose
+// lookup consults PATH and therefore flips with a relative PATH entry.
+func isBareExecutable(exe string) bool {
+	if exe == "" || strings.HasPrefix(exe, "~") {
+		return false
+	}
+	return !strings.ContainsRune(exe, filepath.Separator)
+}
+
+// effectivePathValue returns the PATH value that resolveExecutableAt would use
+// for launch, and whether PATH is set. A command-introduced override (set or
+// unset, including env -i) replaces the inherited value; otherwise the doctor's
+// inherited PATH is what the launch reads.
+func effectivePathValue(launch tmux.CommandEnvironment) (string, bool) {
+	if override := launch.Override("PATH"); override.Present {
+		return override.Value, override.Set
+	}
+	return os.LookupEnv("PATH")
+}
 
 // pathHasRelativeEntry reports whether pathValue contains a PATH entry that
 // resolveExecutableAt resolves against the launch directory: an empty entry
