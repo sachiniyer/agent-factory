@@ -15,6 +15,7 @@ import (
 // idle with its run over.
 func askedThen(t *testing.T, then string) (*Manager, string, *session.Instance) {
 	t.Helper()
+	stubExactResume(t, true, "")
 	m, repoID, inst := startedItem(t)
 	if _, err := m.backlogService().PostMessage(backlog.PostMessageRequest{RepoID: repoID, ID: 1,
 		Kind: backlog.KindQuestion, Text: "Which db?", SessionID: inst.ID, Then: then}); err != nil {
@@ -22,6 +23,15 @@ func askedThen(t *testing.T, then string) (*Manager, string, *session.Instance) 
 	}
 	idleItemSession(t, inst)
 	return m, repoID, inst
+}
+
+// stubExactResume answers whether af could resume the session's own
+// conversation, for sessions whose agent the tests stand in for.
+func stubExactResume(t *testing.T, ok bool, why string) {
+	t.Helper()
+	prev := backlogExactResume
+	backlogExactResume = func(*session.Instance) (bool, string) { return ok, why }
+	t.Cleanup(func() { backlogExactResume = prev })
 }
 
 // stubGuardedArchive stands in for the teardown the way the real one runs: it
@@ -278,5 +288,84 @@ func TestDeferredAskArchiveKeepsItsReason(t *testing.T) {
 	m.backgroundMutationWG.Wait()
 	if len(*results) != 1 || inst.GetLiveness() != session.LiveArchived {
 		t.Fatalf("after detach: archives %v, liveness %v", *results, inst.GetLiveness())
+	}
+}
+
+// af archives only a session it can restore into its own conversation. A
+// session of an agent it cannot resume by id (devin, say) stays live, as with
+// then wait, the item says why, and the answer is delivered straight to it.
+func TestAskArchiveKeepsLiveASessionAfCannotResume(t *testing.T) {
+	m, repoID, inst := askedThen(t, backlog.ThenArchive)
+	stubExactResume(t, false, "af cannot resume a devin conversation by its id")
+	results := stubGuardedArchive(t, inst, nil)
+	m.backlogRunEnded(repoID, inst.ID)
+	m.backgroundMutationWG.Wait()
+	if len(*results) != 0 || inst.GetLiveness() != session.LiveReady || inst.OwedArchive() != nil {
+		t.Fatalf("archives %v, liveness %v, owed %+v", *results, inst.GetLiveness(), inst.OwedArchive())
+	}
+	it := loadItem(t, repoID, 1)
+	const want = "Kept the session live: af cannot resume a devin conversation by its id, so archived it would come back as a fresh agent."
+	if got := lastNote(it).Text; got != want {
+		t.Fatalf("note %q, want %q", got, want)
+	}
+	if q := it.OpenQuestion(); q == nil || q.Then != backlog.ThenWait {
+		t.Fatalf("question %+v, want then wait", q)
+	}
+	sent := stubBacklogSend(t, m, repoID)
+	prevRestore := restoreBacklogSession
+	restoreBacklogSession = func(*Manager, RestoreSessionRequest) (session.InstanceData, error) {
+		t.Error("the answer restored a session that stayed live")
+		return session.InstanceData{}, errors.New("unexpected restore")
+	}
+	t.Cleanup(func() { restoreBacklogSession = prevRestore })
+	answer(t, m, repoID, "Postgres")
+	m.backgroundMutationWG.Wait()
+	if sent.count() != 1 {
+		t.Fatalf("delivered %d, want 1", sent.count())
+	}
+}
+
+// An archive that committed with a warning (an on_archive hook failed, or files
+// were skipped) is still an archive: the row is marked as waiting on the user
+// (Codex P2 on #6475).
+func TestACommittedArchiveWarningStillMarksTheRow(t *testing.T) {
+	m, repoID, inst := askedThen(t, backlog.ThenArchive)
+	prev := archiveSessionForLifecycle
+	archiveSessionForLifecycle = func(_ *Manager, _ ArchiveSessionRequest, guard sessionTeardownGuard) error {
+		if err := guard(inst); err != nil {
+			return err
+		}
+		if err := inst.Transition(session.BeginArchive()); err != nil {
+			return err
+		}
+		if err := inst.Transition(session.CommitArchive()); err != nil {
+			return err
+		}
+		return archiveCommittedWarning(inst, errors.New("on_archive hook exited 1"))
+	}
+	t.Cleanup(func() { archiveSessionForLifecycle = prev })
+	m.backlogRunEnded(repoID, inst.ID)
+	m.backgroundMutationWG.Wait()
+	if !inst.AwaitsAnswer() || inst.OwedArchive() != nil {
+		t.Fatalf("awaits %v, owed %+v; want the row marked and the filing settled", inst.AwaitsAnswer(), inst.OwedArchive())
+	}
+}
+
+// A daemon that stopped after the archive committed and before it marked the
+// row leaves the filing owed on an archived session: recovery marks the row
+// instead of dropping the filing.
+func TestRecoveryMarksAnAskArchiveThatCommittedBeforeARestart(t *testing.T) {
+	m, repoID, inst := askedThen(t, backlog.ThenArchive)
+	m.fileOwedArchive(repoID, inst, backlog.ArchiveAsk)
+	if err := inst.Transition(session.BeginArchive()); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.Transition(session.CommitArchive()); err != nil {
+		t.Fatal(err)
+	}
+	results := stubGuardedArchive(t, inst, nil)
+	m.redriveOwedArchives(repoID, m.itemSessions(repoID), nil)
+	if len(*results) != 0 || !inst.AwaitsAnswer() || inst.OwedArchive() != nil {
+		t.Fatalf("archives %v, awaits %v, owed %+v", *results, inst.AwaitsAnswer(), inst.OwedArchive())
 	}
 }

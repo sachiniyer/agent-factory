@@ -624,7 +624,7 @@ From an item session, ask the user a question
 
 Run from inside an item session: add a question to the item's thread and set the session's attention to it. The item shows Needs you until the user answers. Stop working after you ask.
 
---then says what happens to this session once you stop. archive, the default: af archives it, and the user's answer restores it, with this conversation, and arrives here. wait: the session stays live until the answer arrives. If someone works in the session after you stop, af keeps it live and notes why on the item.
+--then says what happens to this session once you stop. archive, the default: af archives it, and the user's answer restores it, with this conversation, and arrives here. wait: the session stays live until the answer arrives. af archives only a session it can restore into its own conversation (today a Claude, Codex or Amp session with a recorded conversation id); any other stays live, as with wait. If it keeps the session live, or someone works in the session after you stop, af notes why on the item.
 
 --handoff-file stores notes for a later run of the item (at most 8 KB) with the question, read from a file or from stdin with -. The user sees them in "af backlog inbox".
 

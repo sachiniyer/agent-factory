@@ -233,14 +233,7 @@ func prepareResumeConversation(i *Instance, program string) string {
 }
 
 func prepareExactResumeConversation(i *Instance, program string) (string, bool) {
-	conv := i.AgentConversation()
-	if !conv.HasID() {
-		// A launch pinned to a specific conversation before the agent tab exists
-		// (an adopted workspace's archived one): the same exact id, never a guess.
-		i.mu.RLock()
-		conv = i.carriedConversation
-		i.mu.RUnlock()
-	}
+	conv := i.resumableConversation()
 	if !conv.HasID() {
 		return program, false
 	}
@@ -248,4 +241,40 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool) 
 		return rewritten, true
 	}
 	return program, false
+}
+
+// resumableConversation is the conversation a restore would resume: the
+// recorded one, or a launch pinned to a specific conversation before the agent
+// tab exists (an adopted workspace's archived one): the same exact id, never a
+// guess.
+func (i *Instance) resumableConversation() AgentConversationData {
+	conv := i.AgentConversation()
+	if !conv.HasID() {
+		i.mu.RLock()
+		conv = i.carriedConversation
+		i.mu.RUnlock()
+	}
+	return conv
+}
+
+// ExactResume reports whether a restore of this session would resume its own
+// conversation, by the check every restore makes (prepareExactResumeConversation
+// on the program resolveLaunchProgramForInstance resolves), and when it would
+// not, why: archived, the session would come back as a fresh agent.
+func (i *Instance) ExactResume() (bool, string) {
+	program := resolveLaunchProgramForInstance(i).command
+	if _, ok := prepareExactResumeConversation(i, program); ok {
+		return true, ""
+	}
+	agent := tmux.DetectAgentFromCommand(program)
+	if agent == "" {
+		return false, "af does not know which agent this session runs"
+	}
+	if _, ok := tmux.ResumeProgramWithConversationID(agent, agent, "id"); !ok {
+		return false, "af cannot resume a " + agent + " conversation by its id"
+	}
+	if !i.resumableConversation().HasID() {
+		return false, "af recorded no conversation id for this " + agent + " session"
+	}
+	return false, "af cannot resume this " + agent + " session's recorded conversation with the command it would launch"
 }

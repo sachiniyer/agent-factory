@@ -2,10 +2,16 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/session"
 )
+
+// backlogExactResume is Instance.ExactResume, the check a restore makes for
+// resuming the session's own conversation. A package var so tests that stand in
+// for a session's agent can answer it.
+var backlogExactResume = func(inst *session.Instance) (bool, string) { return inst.ExactResume() }
 
 // errArchiveNoLongerOwed refuses an item-session archive whose reason went away
 // between the decision and the teardown: an answer came, or a new run started.
@@ -29,9 +35,30 @@ func (m *Manager) archiveItemSession(repoID, sessionID, reason string) {
 		return
 	}
 	inst := s.instance
-	if !b.ArchiveOwed(sessionID, reason) || s.view.Liveness == session.LiveArchived {
+	owed := b.ArchiveOwed(sessionID, reason)
+	if s.view.Liveness == session.LiveArchived {
+		// Archived already, by an earlier daemon that stopped before it finished
+		// here: an ask archive whose questions are still open marks the row.
+		if owed && reason == backlog.ArchiveAsk && inst.OwedArchive() != nil {
+			m.markArchivedForAnswer(repoID, inst)
+			return
+		}
 		m.settleOwedArchive(repoID, inst)
 		return
+	}
+	if !owed {
+		m.settleOwedArchive(repoID, inst)
+		return
+	}
+	// The answer to an archived session restores it, and af archives only a
+	// session it can restore into its own conversation; any other would come
+	// back as a fresh agent with none of its context. The check is the one
+	// every restore makes (Instance.ExactResume), so the two cannot drift.
+	if reason == backlog.ArchiveAsk {
+		if ok, why := backlogExactResume(inst); !ok {
+			m.keepItemSessionLive(repoID, inst, reason, fmt.Errorf("%s, so archived it would come back as a fresh agent", why))
+			return
+		}
 	}
 	m.fileOwedArchive(repoID, inst, reason)
 	if m.isPollPaused(repoID, inst.Title, sessionID) || inst.GetLiveness() != session.LiveReady {
@@ -82,16 +109,24 @@ func (m *Manager) archiveItemSession(repoID, sessionID, reason string) {
 			return
 		}
 		m.warn().Printf("backlog archive (%s) of session %q: %v", reason, inst.Title, err)
-		return
+		if !isMutationCommitted(err) {
+			return
+		}
+		// Archived, with a warning (an on_archive hook failed, or files were
+		// skipped): finish it as a clean archive.
 	}
 	if reason == backlog.ArchiveAsk && m.backlog.askedOf(sessionID) == decided {
-		// The session is archived and its question still open: mark the row, so
-		// the TUI shows it waits on the user.
-		inst.MarkArchivedForAnswer(reason, nowFunc())
-		m.persistAndPublishInstance(repoID, inst)
+		m.markArchivedForAnswer(repoID, inst)
 		return
 	}
 	m.settleOwedArchive(repoID, inst)
+}
+
+// markArchivedForAnswer marks the row of a session archived while its question
+// is open, so the TUI shows it waits on the user.
+func (m *Manager) markArchivedForAnswer(repoID string, inst *session.Instance) {
+	inst.MarkArchivedForAnswer(backlog.ArchiveAsk, nowFunc())
+	m.persistAndPublishInstance(repoID, inst)
 }
 
 // clearArchivedForAnswer drops the mark of a session af archived for its
