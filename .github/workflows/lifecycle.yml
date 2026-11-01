@@ -94,6 +94,7 @@ jobs:
       # Routed through scripts/ci-apt-install.sh so a third-party source in the
       # runner image cannot fail this step by failing the update (#3774).
       - name: Install harness dependencies
+        timeout-minutes: 25
         run: scripts/ci-apt-install.sh tmux jq curl
 
       - name: Enable the systemd user manager
