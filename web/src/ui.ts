@@ -86,7 +86,7 @@ import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES, currentMode, themeSurfaces } from "./theme.js";
 import { BacklogPane, type BacklogHost } from "./backlog_pane.js";
 import type { BacklogData } from "./backlog_data.js";
-import { type SessionItem, formatID, needsYouCount, needsYouLabel, sessionItems, sessionItemsSig } from "./backlog_model.js";
+import { type SessionItem, formatID, needsYouByRoot, needsYouLabel, sessionItems, sessionItemsSig } from "./backlog_model.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   type ConfigEntry,
@@ -1062,6 +1062,11 @@ export class AppShell {
   private sessionItemSig = "[]";
   private chipsChanged = false;
   private lastBacklog: BacklogData | undefined;
+  /** Needs-you counts by project root. The Backlog tab badge shows the selected
+   *  project's; the project switcher shows each other project's. */
+  private needsYou = new Map<string, number>();
+  private needsYouSig = "";
+  private needsYouChanged = false;
   private readonly configPane: ConfigPane;
   private lastView: View | null = null;
   private lastTasks: TaskData[] | null = null;
@@ -1612,11 +1617,15 @@ export class AppShell {
         this.sessionItemMap = items;
         this.chipsChanged = true;
       }
-      const n = needsYouCount(state.backlog.views.values());
-      this.backlogBadge.hidden = n === 0;
-      this.backlogBadge.textContent = String(n);
-      this.backlogBadge.setAttribute("aria-label", needsYouLabel(n));
+      const needs = needsYouByRoot(state.backlog.views);
+      const needsSig = JSON.stringify([...needs]);
+      if (needsSig !== this.needsYouSig) {
+        this.needsYouSig = needsSig;
+        this.needsYou = needs;
+        this.needsYouChanged = true;
+      }
     }
+    setNeedsYouBadge(this.backlogBadge, state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0);
     if (state.backlog) this.backlogPane.update(state.backlog, state.selectedProject, state.sessions);
 
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
@@ -1654,8 +1663,10 @@ export class AppShell {
       this.lastProjectSessions !== state.sessions ||
       this.lastProjectTasks !== state.tasks ||
       this.lastRegisteredProjects !== state.registeredProjects ||
+      this.needsYouChanged ||
       projectChanged
     ) {
+      this.needsYouChanged = false;
       this.lastProjectSessions = state.sessions;
       this.lastProjectTasks = state.tasks;
       this.lastRegisteredProjects = state.registeredProjects;
@@ -2191,7 +2202,7 @@ export class AppShell {
     }
     for (const p of summaries) {
       const record = state.registeredProjects.find((r) => r.root === p.root);
-      children.push(this.projectItem(p, p.root === current, record));
+      children.push(this.projectItem(p, p.root === current, record, p.root === current ? 0 : this.needsYou.get(p.root) ?? 0));
     }
 
     // Footer actions. Add-project is ALWAYS present (#2456): it is the empty
@@ -2283,7 +2294,7 @@ export class AppShell {
    *  registration behind the row, when there is one — a registration whose
    *  recorded root is gone (path_exists=false) is marked missing, the state the
    *  footer Rebind action repairs. */
-  private projectItem(p: ProjectSummary, current: boolean, record?: RegisteredProject): HTMLElement {
+  private projectItem(p: ProjectSummary, current: boolean, record: RegisteredProject | undefined, needsYou: number): HTMLElement {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...(current ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
@@ -2294,6 +2305,11 @@ export class AppShell {
       dot.style.setProperty("--af-swatch", dotColor);
       dot.setAttribute("aria-hidden", "true");
       name.prepend(dot, " ");
+    }
+    if (needsYou > 0) {
+      const badge = h("span", { class: "af-viewtab-badge af-project-item-badge" });
+      setNeedsYouBadge(badge, needsYou);
+      name.append(badge);
     }
     const label = h(
       "span",
@@ -3791,4 +3807,12 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
       );
     }
   }
+}
+
+/** Shows `n` needs-you items on a badge, or hides it at zero. */
+export function setNeedsYouBadge(el: HTMLElement, n: number): void {
+  el.hidden = n === 0;
+  if (el.textContent === String(n)) return;
+  el.textContent = String(n);
+  el.setAttribute("aria-label", needsYouLabel(n));
 }

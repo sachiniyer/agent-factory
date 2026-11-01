@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   type Backlog, type BacklogView, type Item, type ListOptions, type State,
-  applyMove, dropMove, itemActions, keyboardMove, listRows, needsYouCount, needsYouLabel, neededBy, parseBacklogView, safeHttpUrl,
+  applyMove, dropMove, itemActions, keyboardMove, listRows, needsYouByRoot, needsYouCount, needsYouLabel, neededBy, parseBacklogView, safeHttpUrl,
   sessionItems, sessionItemsSig, sources,
 } from "./backlog_model.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
@@ -87,6 +87,12 @@ test("needsYouCount counts open questions once across projects", () => {
   const b = backlog(item(1, { thread: [{ id: 1, kind: "question", author: "af", text: "q", closed: "done", at: "" }] }),
     item(2, { thread: [{ id: 1, kind: "question", author: "af", text: "q", at: "" }] }));
   assert.equal(needsYouCount([view(a), view(b)]), 2);
+});
+
+test("needsYouByRoot keys each project's count and drops projects with none", () => {
+  const q = (id: number) => item(id, { thread: [{ id: 1, kind: "question", author: "agent:x", text: "q", at: "" }] });
+  const views = new Map([["/detail", view(backlog(q(1)))], ["/sahara", view(backlog(q(1), q(2)))], ["/empty", view(backlog(item(1)))]]);
+  assert.deepEqual([...needsYouByRoot(views)], [["/detail", 1], ["/sahara", 2]]);
 });
 
 test("sessionItems maps run session ids to items", () => {
