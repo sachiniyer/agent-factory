@@ -37,7 +37,7 @@ func TestInstanceRendererAttentionGlyphAndReason(t *testing.T) {
 	r := NewInstanceRenderer()
 	r.SetWidth(120)
 	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, true, false, false), "")
-	assert.Contains(t, out, strings.TrimSpace(attentionIcon),
+	assert.Contains(t, out, strings.TrimSpace(AttentionIcon),
 		"a live attention row must carry the static bang glyph")
 	assert.NotContains(t, out, strings.TrimSpace(readyIcon),
 		"the bang replaces the ready dot until the request clears")
@@ -80,7 +80,7 @@ func TestInstanceRendererAttentionCollapsedRowKeepsGlyphOnly(t *testing.T) {
 	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	assert.Len(t, lines, 1, "a collapsed attention row stays one line")
-	assert.Contains(t, lines[0], strings.TrimSpace(attentionIcon),
+	assert.Contains(t, lines[0], strings.TrimSpace(AttentionIcon),
 		"the bang still marks the collapsed row")
 	assert.NotContains(t, out, "which file",
 		"the reason waits for the row's detail")
@@ -99,7 +99,7 @@ func TestInstanceRendererAttentionClearsOnTerminalRows(t *testing.T) {
 	r := NewInstanceRenderer()
 	r.SetWidth(120)
 	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, true, false, false), "")
-	assert.NotContains(t, out, strings.TrimSpace(attentionIcon))
+	assert.NotContains(t, out, strings.TrimSpace(AttentionIcon))
 	assert.NotContains(t, out, "needs attention")
 	assert.Contains(t, out, strings.TrimSpace(limitIcon),
 		"the limit glyph renders instead")
