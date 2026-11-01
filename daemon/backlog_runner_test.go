@@ -16,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/planusage"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -768,5 +769,231 @@ func TestPickStartsFreshRecomputesTheChoiceOnAFreshReading(t *testing.T) {
 	refreshed = 0
 	if p := pickStartsFresh(fresh, refresh, choose); len(p.Start) != 0 || refreshed != 0 {
 		t.Fatalf("nothing picked should not refresh: %+v (refreshed %d)", p, refreshed)
+	}
+}
+
+// A queued item with a live session that spends a registered account: the review
+// ended its run and the user queued it again, so the runner would continue it in
+// place.
+func queuedContinuationOn(t *testing.T, account string) (*Manager, string, *session.Instance) {
+	t.Helper()
+	m, repoID := runnerTestManager(t)
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account != "" {
+		if err := os.MkdirAll(filepath.Join(home, "accounts", "claude", account), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatal(err)
+	}
+	m.backgroundMutationWG.Wait()
+	inst := m.itemSessions(repoID)[loadItem(t, repoID, 1).Runs[0].SessionID].instance
+	inst.Account = account
+	if !inst.DisarmBacklogRun() {
+		t.Fatal("precondition: run active")
+	}
+	m.backlogRunEnded(repoID, inst.ID)
+	queueItem(t, m, repoID, 1)
+	return m, repoID, inst
+}
+
+// The runner is stopped only when no queued item can start. With the project's
+// default account over its limit and a queued continuation on an account with
+// room, selectStarts starts the continuation, so the runner view (the event and
+// what Get returns) must not say "stopped by the budget" (#6309, found on
+// 7d8eac6c14).
+func TestRunnerViewIsNotStoppedWhileAContinuationOnAnOpenAccountStarts(t *testing.T) {
+	m, repoID, _ := queuedContinuationOn(t, "alt")
+	var sent []SendPromptRequest
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(_ *Manager, req SendPromptRequest) error { sent = append(sent, req); return nil }
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	setRunner(t, m, repoID, true, 3)
+	writeFreshReading(t, 95) // the default account is past its limit
+	now := time.Now().UTC()
+	if err := planusage.WriteReading("alt", planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 10, ResetsAt: now.Add(2 * time.Hour).Unix()}, ReadAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.meterUsageWithin(0) // one real pass, so both accounts have a reading
+	events := runnerEvents(t, m)
+
+	// Queued, before the pass starts it: Get must not read "stopped" either.
+	v, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Runner.State == backlog.RunnerStopped || v.Runner.Gate != "" {
+		t.Fatalf("Get says stopped while a queued continuation can start: %+v", v.Runner)
+	}
+
+	pass(m, repoID, time.Now())
+
+	if len(sent) != 1 {
+		t.Fatalf("the continuation on the open account was not started: %d prompts", len(sent))
+	}
+	var last backlog.RunnerEvent
+	for _, ev := range events() {
+		if ev.RepoID == repoID {
+			last = ev
+		}
+	}
+	if last.State == backlog.RunnerStopped || last.Gate != "" {
+		t.Fatalf("the runner event says stopped while it starts work: %+v", last)
+	}
+}
+
+// With nothing queued on an open account the default account's closed gate still
+// stands: a new session would spend it.
+func TestRunnerViewStaysStoppedWhenNoQueuedItemsAccountIsOpen(t *testing.T) {
+	m, repoID, _ := queuedContinuationOn(t, "alt")
+	setRunner(t, m, repoID, true, 3)
+	writeFreshReading(t, 95)
+	now := time.Now().UTC()
+	if err := planusage.WriteReading("alt", planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 96, ResetsAt: now.Add(2 * time.Hour).Unix()}, ReadAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.meterUsageWithin(0)
+	v, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Runner.State != backlog.RunnerStopped || v.Runner.Gate != backlog.GateLimit {
+		t.Fatalf("every account is past its limit: %+v", v.Runner)
+	}
+}
+
+// A launch command that sets CLAUDE_CONFIG_DIR itself puts the session's usage
+// under that dir's account, which is where the meter files it; the continuation
+// gate must read the same account, not the ambient key (#6309).
+func TestContinuationAccountFollowsTheLaunchCommandsConfigDir(t *testing.T) {
+	m, repoID, inst := queuedContinuationOn(t, "work")
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Account = "" // no account field: only the launch command names the dir
+	// The fixture session has no worktree; the launch command is resolved against one.
+	repo := setupControlRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+	inst.Program = "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "accounts", "claude", "work") + " claude"
+	if _, _, err := inst.ClaudeRunTranscriptDirs(); err != nil {
+		t.Fatalf("precondition: the session resolves its transcript dirs: %v", err)
+	}
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.continuationAccount(repoID, b, 1); got != "work" {
+		t.Fatalf("an accountless session launched with CLAUDE_CONFIG_DIR=…/work continues on %q, want work", got)
+	}
+}
+
+// The runner view agrees with the starts: when the pacer holds an account back
+// (its reading is stale and a start already used the last reading), nothing is
+// started on it, so the view is not "running" for that account either (Codex P2 on
+// #6467 4448a7bf7c).
+func TestRunnerViewIsNotRunningForAnAccountThePacerHoldsBack(t *testing.T) {
+	m, repoID, _ := queuedContinuationOn(t, "alt")
+	var sent []SendPromptRequest
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(_ *Manager, req SendPromptRequest) error { sent = append(sent, req); return nil }
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	setRunner(t, m, repoID, true, 3)
+	writeFreshReading(t, 95)
+	readAt := time.Now().UTC()
+	if err := planusage.WriteReading("alt", planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 10, ResetsAt: readAt.Add(3 * time.Hour).Unix()}, ReadAt: readAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.meterUsageWithin(0)
+	events := runnerEvents(t, m)
+	// The reading is stale at the pass, and a start was made after it was taken.
+	at := readAt.Add(backlog.StaleReadingAfter + time.Minute)
+	m.backlog.runner.noteStarted(readAt.Add(time.Minute))
+
+	pass(m, repoID, at)
+
+	if len(sent) != 0 {
+		t.Fatalf("a start was made on an account the pacer holds back: %d prompts", len(sent))
+	}
+	var last backlog.RunnerEvent
+	for _, ev := range events() {
+		if ev.RepoID == repoID {
+			last = ev
+		}
+	}
+	if last.State == backlog.RunnerRunning {
+		t.Fatalf("the runner event says running while the pacer holds the account back: %+v", last)
+	}
+}
+
+// A usage-limit wall on a session with no account field belongs to the account its
+// launch command's config dir names, the account a continuation gates on, not the
+// ambient one (Codex P2 on #6467 4448a7bf7c).
+func TestUsageLimitWallOnAnAccountlessOverrideSessionIsThatAccountsWall(t *testing.T) {
+	m, _, inst := queuedContinuationOn(t, "work")
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Account = ""
+	repo := setupControlRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+	inst.Program = "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "accounts", "claude", "work") + " claude"
+	now := time.Now()
+	inst.SetLimitReached(now.Add(time.Hour))
+	if _, acct, ok := inst.LimitIdentity(); !ok || acct != "" {
+		t.Fatalf("precondition: a wall attributed to no account, got %q ok=%v", acct, ok)
+	}
+	if limited, _, err := m.claudeUsageLimit("work", now); err != nil || !limited {
+		t.Fatalf("work limited=%v err=%v: the wall on its override session was not counted", limited, err)
+	}
+	if limited, _, _ := m.claudeUsageLimit(planusage.DefaultAccount, now); limited {
+		t.Fatal("the ambient account was limited by work's wall")
+	}
+}
+
+// The same holds when the launch resolves to the ambient key while the daemon's own
+// environment names a registered account: the wall is the ambient account's, not
+// the daemon's (Codex P2 on #6467 c9b3a0135f).
+func TestUsageLimitWallOnAnOverrideToTheAmbientDirIsTheAmbientAccountsWall(t *testing.T) {
+	m, _, inst := queuedContinuationOn(t, "work")
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "accounts", "claude", "work"))
+	inst.Account = ""
+	repo := setupControlRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+	inst.Program = "CLAUDE_CONFIG_DIR=" + filepath.Join(t.TempDir(), ".claude") + " claude"
+	now := time.Now()
+	inst.SetLimitReached(now.Add(time.Hour))
+	if limited, _, err := m.claudeUsageLimit(planusage.DefaultAccount, now); err != nil || !limited {
+		t.Fatalf("ambient limited=%v err=%v: the wall on its override session was not counted", limited, err)
+	}
+	if limited, _, _ := m.claudeUsageLimit("work", now); limited {
+		t.Fatal("the daemon's account was limited by the ambient override's wall")
 	}
 }
