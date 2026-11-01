@@ -102,6 +102,9 @@ type PostMessageRequest struct {
 	Text       string `json:"text"`
 	SessionID  string `json:"session_id,omitempty"`
 	QuestionID int    `json:"question_id,omitempty"`
+	// Handoff goes with a question: the asking agent's notes for a later run
+	// of the item (at most MaxHandoffBytes).
+	Handoff string `json:"handoff,omitempty"`
 }
 
 type MessageResponse struct {

@@ -438,7 +438,7 @@ func TestSendToReviewClosesAFQuestion(t *testing.T) {
 		t.Fatal(got)
 	}
 
-	if _, err := b.Ask(2, "s2", "which db?", runnerNow); err != nil {
+	if _, err := b.Ask(2, "s2", Question{Text: "which db?"}, runnerNow); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.SetStatus(2, StatusReview, ActorUser, nil, runnerNow); err != nil {

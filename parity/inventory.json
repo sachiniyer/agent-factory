@@ -1897,7 +1897,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/backlog_self.go backlogAskCmd (ask --self) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go)"
+        "pointer": "api/backlog_self.go backlogAskCmd (ask --self --handoff-file) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go); api/backlog_inbox.go backlogInboxCmd reads /v1/GetBacklog"
       },
       "verdict": "real-gap",
       "issue": "TBD",
@@ -1940,6 +1940,7 @@
       "af backlog note": "backlog.items",
       "af backlog ask": "backlog.questions",
       "af backlog answer": "backlog.questions",
+      "af backlog inbox": "backlog.questions",
       "af backlog queue": "backlog.status",
       "af backlog draft": "backlog.status",
       "af backlog review": "backlog.status",
@@ -2256,6 +2257,8 @@
       "af backlog done --pr": "backlog.status",
       "af backlog note --self": "backlog.items",
       "af backlog ask --self": "backlog.questions",
+      "af backlog ask --handoff-file": "backlog.questions",
+      "af backlog inbox --help": "meta.discovery",
       "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
       "af backlog pause --help": "meta.discovery",
@@ -3173,6 +3176,9 @@
         },
         "question_id": {
           "ok": "Names the question an answer closes; the web answer box arrives in backlog PR 8."
+        },
+        "handoff": {
+          "ok": "Set only on an agent's question (af backlog ask --self --handoff-file); the web only answers."
         }
       },
       "SetBacklogItemStatus": {

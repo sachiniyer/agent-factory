@@ -254,7 +254,7 @@ func TestAnswerDelivered(t *testing.T) {
 	it, _ := b.Add(NewItem{Title: "A"}, time.Now())
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
-	if _, err := b.Ask(1, "s1", "q", time.Now()); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: "q"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	out, err := b.Answer(1, 0, "a", true, time.Now())
@@ -307,7 +307,7 @@ func TestQueuedAnswersAllFailingRestoreTheOriginalStatus(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
 	for _, q := range []string{"one?", "two?"} {
-		if _, err := b.Ask(1, "s1", q, now); err != nil {
+		if _, err := b.Ask(1, "s1", Question{Text: q}, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -345,7 +345,7 @@ func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
 	it, _ := b.Add(NewItem{Title: "A"}, now)
 	it.Status = StatusRunning
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
-	if _, err := b.Ask(1, "s1", "first?", now); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: "first?"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.AnsweredInSessionText("s1", 0, "second?", nil, now); got != 0 {
@@ -354,7 +354,7 @@ func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
 	if got := b.AnsweredInSessionText("s1", 0, "", nil, now); got != 0 {
 		t.Fatal("no seen question must close nothing")
 	}
-	if _, err := b.Ask(1, "s1", "second?", now); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: "second?"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.AnsweredInSessionText("s1", 0, "second?", nil, now); got != 0 {
@@ -377,7 +377,7 @@ func TestALaterAnswerFailingKeepsEarlierDeliveredWorkRunning(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
 	for _, q := range []string{"one?", "two?"} {
-		if _, err := b.Ask(1, "s1", q, now); err != nil {
+		if _, err := b.Ask(1, "s1", Question{Text: q}, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -407,7 +407,7 @@ func TestAnsweredInSessionTextMatchesACappedQuestion(t *testing.T) {
 	it.Status = StatusRunning
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
 	long := strings.Repeat("why? ", 200)
-	if _, err := b.Ask(1, "s1", long, now); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: long}, now); err != nil {
 		t.Fatal(err)
 	}
 	capped := func(s string) string {

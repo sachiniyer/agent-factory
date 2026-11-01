@@ -171,6 +171,8 @@ af backlog list --archived      # include archived groups
 af backlog note 12 "text"       # a note on the item's thread
 af backlog note --self "text"   # from inside an item session: a note on my own item
 af backlog ask --self "question?"   # from inside an item session: ask the user, then stop
+af backlog ask --self "question?" --handoff-file notes.md   # the same, with notes for a later run (at most 8 KB; - reads stdin)
+af backlog inbox                # every open question in the project, oldest first, with the agent's notes
 af backlog answer 12 "text"     # answer the item's oldest open question (--question n picks one)
 af backlog runner               # show or change this project's runner switch
 af backlog run --count 2        # one runner pass now: start up to 2 queued items, ignoring the switch and budget
