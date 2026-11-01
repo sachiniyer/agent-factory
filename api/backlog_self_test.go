@@ -328,13 +328,17 @@ func TestBacklogGuardRailsSurviveDroppedBacklogItem(t *testing.T) {
 	for _, args := range [][]string{
 		{"queue", "1"}, {"draft", "1"}, {"review", "1"}, {"reopen", "1"}, {"start", "1"}, {"done", "1"}, {"drop", "1"}, {"delete", "1"},
 		{"answer", "1", "yes"}, {"note", "1", "text"}, {"run"},
-		{"add", "another"}, {"add", "--file", "-"}, {"edit", "1", "--title", "x"}, {"move", "1", "--top"},
+		// Plan editing: an agent leaves a note instead (Codex P2 on #6294). It may
+		// add the work it found, as a draft with a title and --parent only
+		// (decision (3) on #6284).
+		{"add", "--file", "-"}, {"add", "x", "--waits-on", "1"}, {"add", "x", "--before", "1"}, {"add", "x", "--body", "b"},
+		{"add", "x", "--program", "claude"}, {"edit", "1", "--title", "x"}, {"move", "1", "--top"},
 	} {
 		if _, err := runBacklogCmd(t, args...); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
 			t.Errorf("%v: %v", args, err)
 		}
 	}
-	for _, args := range [][]string{{"runner", "on"}, {"runner", "--max-running", "2"}, {"budget", "--share", "40"}, {"budget", "--usd-limit", "5"}} {
+	for _, args := range [][]string{{"runner", "on"}, {"runner", "--max-running", "2"}, {"budget", "--limit", "40"}, {"budget", "--usd-limit", "5"}} {
 		if _, err := runBacklogCmd(t, args...); err == nil || err.Error() != `item sessions cannot change the runner or budget; ask the user with "af backlog ask --self"` {
 			t.Errorf("%v: %v", args, err)
 		}
