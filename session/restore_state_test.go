@@ -170,6 +170,52 @@ func TestAnOldServerLeavesTabsUnknownAndIsNeverRetried(t *testing.T) {
 	assert.Empty(t, inst.retireLostOffBoxTabs(rows, map[string]TabData{}))
 }
 
+// #6242: a restore outcome is applied only to the incarnation it was computed
+// for. If the tab is closed and recreated under the same stable id while the
+// answer is in flight, the sent roster's generation no longer names the tab
+// that would take the verdict — a late tabs_gone must not brand the live
+// replacement, which would persist across daemon restarts. reportRebound
+// already fences this way; the outcome path now does too.
+func TestRestoreOutcomeAppliesOnlyToTheSentIncarnation(t *testing.T) {
+	inst := &Instance{Title: "sb", started: true,
+		backend: offBoxNoTabsBackend{&failingStartBackend{FakeBackend: NewFakeBackend(), typ: "sandbox"}},
+		Tabs: []*Tab{newRemoteAgentTab(),
+			{ID: "t-dead", Name: "build", Kind: TabKindProcess, Command: "make", gen: "g2", sandboxTmux: "srv__build"},
+		}}
+
+	inst.restoreRosterForRestart(featureAbsent) // the restart leaves the off-box tab unknown
+	sent := inst.unknownRestoreRowsLocked()     // the roster the in-flight request was made with
+	require.Len(t, sent, 1)
+	require.Equal(t, "g2", sent[0].Gen)
+
+	// In flight: the tab is closed and recreated under the same stable id — a
+	// different incarnation, so a different generation.
+	inst.mu.Lock()
+	idx, ok := inst.tabIndexByIDLocked("t-dead")
+	require.True(t, ok)
+	inst.Tabs[idx] = &Tab{ID: "t-dead", Name: "build", Kind: TabKindProcess, Command: "make", gen: "g9", sandboxTmux: "srv__build"}
+	inst.mu.Unlock()
+
+	assert.False(t, inst.applyRestoreOutcome(sent, nil, []string{"t-dead"}),
+		"the answer named the old incarnation; nothing about the replacement may change")
+	assert.Equal(t, TabRestored, stateOf(inst, "t-dead"),
+		"a live replacement keeps its own state instead of taking the dead tab's gone")
+	assert.True(t, inst.TabAlive(1), "the replacement reads available, not 'not available'")
+
+	// A stale tabs_restored is fenced the same way: the next restart leaves the
+	// replacement unknown, and replaying the old generation's answer resolves
+	// nothing for the tab now under the id.
+	inst.restoreRosterForRestart(featureAbsent)
+	require.Equal(t, TabRestoreUnknown, stateOf(inst, "t-dead"))
+	assert.False(t, inst.applyRestoreOutcome(sent, []string{"t-dead"}, nil))
+	assert.Equal(t, TabRestoreUnknown, stateOf(inst, "t-dead"))
+
+	// The same verdict for the CURRENT incarnation still lands.
+	assert.True(t, inst.applyRestoreOutcome(
+		[]TabData{{ID: "t-dead", Gen: "g9", TmuxName: "srv__build"}}, nil, []string{"t-dead"}))
+	assert.Equal(t, TabRestoreGone, stateOf(inst, "t-dead"))
+}
+
 // #6237: a tab the server confirmed gone is retired by the sweep, even though an
 // earlier pass had left it unknown.
 func TestConfirmedGoneTabIsRetiredByTheSweep(t *testing.T) {
