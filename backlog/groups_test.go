@@ -1,6 +1,7 @@
 package backlog
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -208,5 +209,24 @@ func TestRunnerEligibleRefusesAnItemPausedAfterThePassChoseIt(t *testing.T) {
 	}
 	if b.RunnerEligible(leaf, b.DeriveAll(nil)) {
 		t.Fatalf("%s is eligible under a paused parent", FormatID(leaf))
+	}
+}
+
+// The pause can also land after the admission check and before the start is
+// recorded, so the transaction that records it refuses a runner start too
+// (Codex P2 on #6468). A start by hand still goes through.
+func TestBeginStartRefusesARunnerStartUnderAPausedParent(t *testing.T) {
+	b := group(t)
+	if _, err := b.Edit(2, Edit{Paused: ptr(true)}, t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.BeginStart(3, StartedByRunner, nil, t0); !errors.Is(err, ErrNotRunnable) {
+		t.Fatalf("runner start under a paused parent: %v", err)
+	}
+	if it := b.Item(3); it.Status != StatusQueued || len(it.Runs) != 0 {
+		t.Fatalf("the refused start changed the item: %+v", it)
+	}
+	if _, err := b.BeginStart(3, StartedByUser, nil, t0); err != nil {
+		t.Fatalf("a start by hand under a paused parent: %v", err)
 	}
 }

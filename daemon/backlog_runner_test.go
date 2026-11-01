@@ -543,6 +543,35 @@ func TestAutomaticStartRevalidatesTheItemAtAdmission(t *testing.T) {
 	}
 }
 
+// A group paused after the admission check, before the start is recorded,
+// stops an automatic start inside the start transaction (Codex P2 on #6468):
+// StartBacklogItem is called directly, past startBacklogItemCapped's check, as
+// the race would reach it. The refusal is errNotRunnable, so the runner does not
+// count it as a failed start.
+func TestAutomaticStartRefusesAnItemPausedBeforeItsStartIsRecorded(t *testing.T) {
+	m, repoID := runnerTestManager(t)
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		if _, err := b.Add(backlog.NewItem{Title: "group"}, time.Now()); err != nil {
+			return err
+		}
+		_, err := b.Add(backlog.NewItem{Title: "child", Parent: 1}, time.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	queueItem(t, m, repoID, 2)
+	setRunner(t, m, repoID, true, 1)
+	if _, err := m.backlogService().UpdateItem(backlog.UpdateItemRequest{RepoID: repoID, ID: 1, Paused: ptrTo(true)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 2}, backlog.StartedByRunner); !errors.Is(err, errNotRunnable) {
+		t.Fatalf("an automatic start under a paused group: %v", err)
+	}
+	if it := loadItem(t, repoID, 2); it.Status != backlog.StatusQueued || len(it.Runs) != 0 {
+		t.Fatalf("the paused group's item was started: %+v", it)
+	}
+}
+
 // A continuation spends its own session's account, not the project default's
 // (Codex P2 on #6300).
 func TestContinuationAccountIsTheLiveSessionsAccount(t *testing.T) {

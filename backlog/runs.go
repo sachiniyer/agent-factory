@@ -38,6 +38,15 @@ func (b *Backlog) BeginStart(id int, by string, facts Facts, now time.Time) (Sta
 	if !it.Status.Open() {
 		return StartPlan{}, fmt.Errorf("%s is %s; reopen it first with \"af backlog reopen %d\"", FormatID(id), it.Status, id)
 	}
+	// A group paused (or archived, which pauses it) after the runner's pass chose
+	// this item stops the start here, inside the transaction that records it: the
+	// admission check before the lock cannot see a pause that lands in between.
+	// A start by hand ignores pauses on purpose.
+	if by == StartedByRunner {
+		if p := b.PausedBy(id); p != 0 {
+			return StartPlan{}, fmt.Errorf("%w: %s is under paused %s", ErrNotRunnable, FormatID(id), FormatID(p))
+		}
+	}
 	if last := it.lastRun(); last != nil {
 		switch {
 		case last.State == RunStarting:

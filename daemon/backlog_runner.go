@@ -33,8 +33,10 @@ var errRunnerOff = errors.New("the runner is off")
 var errViewIncomplete = errors.New("the project's session view is incomplete")
 
 // errNotRunnable refuses an automatic start of an item that is no longer a
-// queued, unblocked leaf.
-var errNotRunnable = errors.New("the item is no longer runnable")
+// queued, unblocked leaf outside a paused group. It is backlog.ErrNotRunnable,
+// so the admission check here and the check inside the start transaction
+// (BeginStart) are one outcome to the runner.
+var errNotRunnable = backlog.ErrNotRunnable
 
 // runnerState paces runner passes, holds what the runner remembers between
 // passes, and remembers the state each project's runner last published.

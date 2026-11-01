@@ -1,6 +1,7 @@
 package backlog
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -230,6 +231,11 @@ func (b *Backlog) Runnable(states map[int]Derived, n int, skip func(int) bool) [
 	}
 	return out
 }
+
+// ErrNotRunnable refuses an automatic start of an item the runner may no longer
+// start because the user changed it since the pass chose it. It is not a failed
+// start: the runner neither backs off nor holds the item.
+var ErrNotRunnable = errors.New("the item is no longer runnable")
 
 // RunnerEligible reports whether the runner may start item id now: it is a
 // queued leaf (not held after a failed start, with no paused ancestor) in the
