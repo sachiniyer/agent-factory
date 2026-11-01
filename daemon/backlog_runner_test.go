@@ -802,7 +802,7 @@ func queuedContinuationOn(t *testing.T, account string) (*Manager, string, *sess
 }
 
 // The runner is stopped only when no queued item can start. With the project's
-// default account over its stop-at and a queued continuation on an account with
+// default account over its limit and a queued continuation on an account with
 // room, selectStarts starts the continuation, so the runner view (the event and
 // what Get returns) must not say "stopped by the budget" (#6309, found on
 // 7d8eac6c14).
@@ -813,7 +813,7 @@ func TestRunnerViewIsNotStoppedWhileAContinuationOnAnOpenAccountStarts(t *testin
 	sendBacklogPrompt = func(_ *Manager, req SendPromptRequest) error { sent = append(sent, req); return nil }
 	t.Cleanup(func() { sendBacklogPrompt = prev })
 	setRunner(t, m, repoID, true, 3)
-	writeFreshReading(t, 95) // the default account is past its stop-at
+	writeFreshReading(t, 95) // the default account is past its limit
 	now := time.Now().UTC()
 	if err := planusage.WriteReading("alt", planusage.Reading{
 		FiveHour: &planusage.Limit{UsedPercentage: 10, ResetsAt: now.Add(2 * time.Hour).Unix()}, ReadAt: now,
@@ -865,8 +865,8 @@ func TestRunnerViewStaysStoppedWhenNoQueuedItemsAccountIsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.Runner.State != backlog.RunnerStopped || v.Runner.Gate != backlog.GateStopAt {
-		t.Fatalf("every account is past its stop-at: %+v", v.Runner)
+	if v.Runner.State != backlog.RunnerStopped || v.Runner.Gate != backlog.GateLimit {
+		t.Fatalf("every account is past its limit: %+v", v.Runner)
 	}
 }
 
