@@ -16,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/planusage"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -761,6 +762,15 @@ func TestRunnerViewIsNotStoppedWhileAContinuationOnAnOpenAccountStarts(t *testin
 	m.meterUsageWithin(0) // one real pass, so both accounts have a reading
 	events := runnerEvents(t, m)
 
+	// Queued, before the pass starts it: Get must not read "stopped" either.
+	v, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Runner.State == backlog.RunnerStopped || v.Runner.Gate != "" {
+		t.Fatalf("Get says stopped while a queued continuation can start: %+v", v.Runner)
+	}
+
 	pass(m, repoID, time.Now())
 
 	if len(sent) != 1 {
@@ -774,13 +784,6 @@ func TestRunnerViewIsNotStoppedWhileAContinuationOnAnOpenAccountStarts(t *testin
 	}
 	if last.State == backlog.RunnerStopped || last.Gate != "" {
 		t.Fatalf("the runner event says stopped while it starts work: %+v", last)
-	}
-	v, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v.Runner.State == backlog.RunnerStopped || v.Runner.Gate != "" {
-		t.Fatalf("Get says stopped while a queued continuation can start: %+v", v.Runner)
 	}
 }
 
@@ -816,6 +819,13 @@ func TestContinuationAccountFollowsTheLaunchCommandsConfigDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst.Account = "" // no account field: only the launch command names the dir
+	// The fixture session has no worktree; the launch command is resolved against one.
+	repo := setupControlRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetGitWorktreeForTest(gw)
 	inst.Program = "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "accounts", "claude", "work") + " claude"
 	if _, _, err := inst.ClaudeRunTranscriptDirs(); err != nil {
 		t.Fatalf("precondition: the session resolves its transcript dirs: %v", err)
