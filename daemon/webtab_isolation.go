@@ -98,19 +98,19 @@ import (
 //     tab's own prefix: no tab's script can become a worker for the web UI at "/",
 //     which would outlive any fix.
 //
-//  6. An editor's parentOrigin host pages are served only to the editor's own page.
-//     VS Code has two that read parentOrigin and hand over a channel on a
-//     hostname-only match (webview/browser/pre/ and webWorkerExtensionHostIframe
-//     .html); each is part of the
-//     workbench, so rule 3 keeps it on a real origin — but code-server serves it
-//     from the editor's OWN origin and patches it to hand its message channel to a
-//     parent whose HOSTNAME matches, ignoring the port. Two editor origins on one
-//     front-door host (the editor-origin ports this PR relies on for off-box
-//     editors) differ only by port, so without this a page on one could be handed
-//     another's channel. So a webview-host request is refused unless the browser
-//     attests Sec-Fetch-Site: same-origin, or its parentOrigin query names the
-//     request's own origin (editorWebviewHostRefusal, the rule-4 comparison). This
-//     guards who may LOAD the page; rule 3 governs what origin it runs at.
+//  6. An editor's static DOCUMENTS are framed or navigated only by the editor's own
+//     origin (editorStaticDocumentRefusal). VS Code serves host pages that hand a
+//     caller a message channel on a hostname-only match (code-server's patch): the
+//     webview host under webview/browser/pre/, the web-worker extension host iframe
+//     webWorkerExtensionHostIframe.html, and whatever a future release adds. They
+//     are part of the workbench, so rule 3 keeps them on a real origin — but two
+//     editor origins on one front-door host (the editor-origin ports) differ only
+//     by port, so a page on one could be handed another's channel. Rather than name
+//     those pages, this closes the CLASS: a nested-browsing-context load (Sec-Fetch
+//     -Dest document/iframe/frame/object/embed) of anything under a static root is
+//     refused unless Sec-Fetch-Site is same-origin or none, with the parentOrigin
+//     query as the fallback when a browser sends no fetch metadata. It guards who
+//     may LOAD the page; rule 3 governs what origin it runs at.
 //
 // Rules 3 and 6 judge the path, so they stand on a precondition: an editor route
 // serves ONLY a canonical path (editorNonCanonicalRefusal, 400 otherwise). Without
@@ -290,7 +290,7 @@ func editorRouteRefusal(r *http.Request, route webTabRoute, allowedHosts []strin
 	if d := editorUpgradeRefusal(r, allowedHosts); d != nil {
 		return d
 	}
-	return editorWebviewHostRefusal(r, route, allowedHosts)
+	return editorStaticDocumentRefusal(r, route, allowedHosts)
 }
 
 // editorNonCanonicalRefusal refuses (400) an editor path that is not already in its
@@ -326,40 +326,69 @@ func editorNonCanonicalRefusal(route webTabRoute) *crossSiteDenial {
 	}
 }
 
-// editorWebviewHostRefusal is rule 6. A request for one of the editor's parentOrigin
-// host pages (editorPathIsParentOriginHost: the webview host, the web-worker
-// extension host iframe)
-// is admitted only when it is loaded by the editor's own page: either the browser
-// attests Sec-Fetch-Site: same-origin (a same-port, same-scheme loader — the
-// workbench itself, which frames the host same-origin under code-server, and which
-// a cross-port same-SITE loader cannot forge), or its parentOrigin query names the
-// request's own origin by the rule-4 comparison. Everything else is refused: a
-// cross-port loader must set a parentOrigin that is NOT this origin to receive the
-// channel, and a no-metadata, no-parentOrigin request cannot be a real host load.
+// editorStaticDocumentRefusal is rule 6, as a CLASS rather than a list of pages: an
+// editor's static documents are only ever framed or navigated by the editor's OWN
+// origin. It closes the hand-off whatever version of code-server a user runs — a
+// third parentOrigin host page in some release needs no new code here.
 //
-// The parentOrigin arm trusts the query only when the daemon and the browser must
-// read it the same way (webviewParentOrigin): Go's url.Query drops a pair with a
-// ";" or a malformed escape that a browser's URLSearchParams keeps, so without this
-// a crafted query could show the daemon one parentOrigin and the host page another.
-// The same-origin arm runs first, so a legitimate same-origin load whose URL has no
-// parentOrigin (the content frame pre/fake.html) is still admitted.
-func editorWebviewHostRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
-	if !editorPathIsParentOriginHost(route.escapedRest) {
+// Scoped to the editor's static roots (editorPathUnderStaticRoot: the static/ and
+// _static/ trees, where the real-origin documents live). Judged by fetch metadata,
+// which the browser sets and a page cannot forge:
+//
+//   - If Sec-Fetch-Dest names a nested browsing context (document, iframe, frame,
+//     object, embed), the load is admitted only when Sec-Fetch-Site is same-origin
+//     or none (the editor's own page, or a user-typed URL); a same-site (another
+//     port of this host) or cross-site framer is refused. This is what catches the
+//     webview host AND the web-worker extension host iframe AND any future one,
+//     without naming them.
+//   - A non-nested dest (a script, style, image, fetch) is a sub-resource, not a
+//     framing, and is admitted.
+//   - No Sec-Fetch-Dest at all (a browser too old to send it) falls back to the
+//     parentOrigin query: a request that carries one must carry exactly one that
+//     names this origin (webviewParentOrigin + the rule-4 comparison), else it is
+//     refused; a request with none is an ordinary sub-resource and is admitted.
+//
+// The static-root scope is deliberate: content the editor RELAYS (the port proxy,
+// vscode-remote-resource) is already opaque-origin under rule 3, so its own document
+// sub-requests arrive cross-site — applying this rule there would refuse a sandboxed
+// dev server loading its own frames. The editor's root shell is exempt too (it is
+// not under a static root), because the web UI legitimately frames an editor-origin
+// port's shell cross-origin to display it.
+func editorStaticDocumentRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
+	if !editorPathUnderStaticRoot(route.escapedRest) {
 		return nil
 	}
-	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin") {
+	refuse := func(why string) *crossSiteDenial {
+		return &crossSiteDenial{
+			status: http.StatusForbidden,
+			err: fmt.Errorf("refused a %s load of an editor static document: an editor's documents are "+
+				"framed only by the editor's own page", why),
+			logKey: "editor-static-doc",
+		}
+	}
+	dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
+	if dest != "" {
+		switch dest {
+		case "document", "iframe", "frame", "object", "embed":
+			site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
+			if site == "same-origin" || site == "none" {
+				return nil
+			}
+			return refuse(echoHost(dest))
+		default:
+			return nil // a sub-resource (script, style, image, fetch): not a framing
+		}
+	}
+	// No fetch metadata (an old browser). A parentOrigin query marks a host-page
+	// load; without one this is an ordinary sub-resource.
+	if !strings.Contains(r.URL.RawQuery, "parentOrigin") {
 		return nil
 	}
 	parent, ok := webviewParentOrigin(r.URL.RawQuery)
 	if ok && parent != "" && originNamesRequest(parent, r, allowedHosts) {
 		return nil
 	}
-	return &crossSiteDenial{
-		status: http.StatusForbidden,
-		err: fmt.Errorf("refused a webview-host request with parentOrigin %q: an editor's host pages are "+
-			"loaded only by the editor's own page", echoHost(parent)),
-		logKey: "editor-webview:" + echoHost(parent),
-	}
+	return refuse("parentOrigin")
 }
 
 // webviewParentOrigin returns the single parentOrigin of a webview-host query, and
@@ -393,41 +422,32 @@ func webviewParentOrigin(rawQuery string) (string, bool) {
 	return value, true
 }
 
-// editorPathIsParentOriginHost reports whether a path below an editor tab's prefix
-// is one of VS Code's host pages that READ parentOrigin and hand a caller a message
-// channel keyed on a hostname-only match (code-server's patch). There are two in
-// this VS Code line, and both must be guarded or the cross-port hand-off reopens
-// through the one left out:
-//
-//   - the webview host, any file under webview/browser/pre/ (notebook outputs,
-//     extension views);
-//   - the web-worker extension host iframe, webWorkerExtensionHostIframe.html under
-//     services/extensions/worker/ (found serving a real code-server 4.129.0).
-//
-// This list tracks upstream: a new parentOrigin host page in a future release is a
-// new entry, which the real-code-server proof is there to catch.
+// editorPathUnderStaticRoot reports whether a path below an editor tab's prefix is
+// inside one of VS Code's static file trees — static/ (under the optional vscode and
+// <quality>-<commit> prefixes) or code-server's _static/ at the root — where the
+// editor's real-origin documents (the webview host, the web-worker extension host
+// iframe, and any future host page) live. The port proxy's own "static" (proxy/
+// <port>/static/…) is NOT matched: its first segment is "proxy", so it stays the
+// relayed, opaque-origin content rule 3 governs.
 //
 // code-server's static server DECODES the path (percent escapes, %2F included) and
 // routes case-insensitively, so the match is on the decoded, lower-cased path — a
-// raw-segment match misses "%77ebview" and "webview%2Fbrowser%2Fpre". Decoded
-// repeatedly to a fixed point so a double-encoded spelling cannot slip under one
-// decode; a path that will not decode is treated as a host page (fail safe: the
-// guard only ever adds a refusal to a malformed request).
-func editorPathIsParentOriginHost(escapedRest string) bool {
+// raw-segment match misses "%73tatic" and encoded slashes. Decoded repeatedly to a
+// fixed point; a path that will not decode is treated as under a static root (fail
+// safe: the guard only ever adds a refusal to a malformed request).
+func editorPathUnderStaticRoot(escapedRest string) bool {
 	decoded, ok := decodeToFixedPoint(escapedRest)
 	if !ok {
 		return true
 	}
 	segs := strings.Split(strings.ToLower(decoded), "/")
-	for i, seg := range segs {
-		if seg == "webworkerextensionhostiframe.html" {
-			return true
-		}
-		if i+2 < len(segs) && seg == "webview" && segs[i+1] == "browser" && segs[i+2] == "pre" {
-			return true
-		}
+	if len(segs) > 0 && segs[0] == "vscode" {
+		segs = segs[1:]
 	}
-	return false
+	if len(segs) > 0 && editorProductSegment.MatchString(segs[0]) {
+		segs = segs[1:]
+	}
+	return len(segs) > 0 && (segs[0] == "static" || segs[0] == "_static")
 }
 
 // decodeToFixedPoint percent-decodes s until it stops changing (bounded), so an

@@ -833,11 +833,13 @@ tab survives a restart and simply starts a new editor when you next open it.
     with its token. Open notebooks only from repositories you trust there, or give
     local editors an origin of their own: `network.preview_listen_addr` when you
     view from this machine, `network.editor_origin_ports` from elsewhere (above).
-    af does bound who may load those host pages — both the webview host and the
-    web-worker extension host iframe, the two pages that trust a parent on a
-    hostname-only match: each is accepted only from the editor's own page, so one
-    session's editor origin cannot hand its channel to a page on another, which
-    matters because two editor-origin ports share a hostname and differ only by port.
+    af bounds who may load those pages as a class, not by name: an editor's static
+    documents are framed or navigated only by the editor's own origin. A page under
+    the editor's static tree loaded into a nested browsing context (an iframe,
+    frame, object or embed) from another origin — another editor-origin port shares
+    the hostname and differs only by port — is refused. So one session's editor
+    cannot hand its webview or extension-host channel to a page on another, and a
+    code-server version with a third such host page is covered without an update.
 
     Editor routes also serve only a **canonical** path. A request whose path has an
     empty segment (`//`), a `.`/`..` segment, or an encoded separator (`%2F`, `%5C`)

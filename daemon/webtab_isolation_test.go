@@ -210,55 +210,25 @@ func TestConfineOriginHeaders(t *testing.T) {
 	assert.Equal(t, "/", run(own, session.TabKindWeb, map[string]string{"Service-Worker-Allowed": "/"}).Get("Service-Worker-Allowed"))
 }
 
-func TestEditorPathIsParentOriginHost(t *testing.T) {
+func TestEditorPathUnderStaticRoot(t *testing.T) {
 	for _, rest := range []string{
+		"static/out/x.js",
 		"stable-abc/static/out/vs/workbench/contrib/webview/browser/pre/index.html",
-		"static/out/vs/workbench/contrib/webview/browser/pre/",
-		"a/b/webview/browser/pre/service-worker.js",
-		"webview/browser/pre/fake.html",
-		// The web-worker extension host iframe — the second parentOrigin host page,
-		// NOT under webview/browser/pre (found serving a real code-server 4.129.0).
+		"vscode/stable-abc/static/out/x.css",
+		"_static/out/browser/serviceWorker.js",
 		"stable-abc/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html",
-		"a/webWorkerExtensionHostIframe.html",
-		"static/out/vs/workbench/services/extensions/worker/WEBWORKEREXTENSIONHOSTIFRAME.HTML",
-		"static/out/vs/.../worker/webWorkerExtensionHostIframe%2ehtml", // encoded dot
-		// code-server decodes and routes case-insensitively, so these reach the real
-		// host and must match: an upper-case segment, a percent-encoded letter, and
-		// encoded slashes that collapse the three segments into one.
-		"WEBVIEW/browser/pre/index.html",
-		"static/out/%77ebview/browser/pre/index.html",
-		"static/out/webview%2Fbrowser%2Fpre/index.html",
-		"static/out/WebView/Browser/Pre/index.html",
-		"static/out/%2577ebview/browser/pre/index.html", // double-encoded
-		"static/out/webview/browser/%ZZ/pre/x",          // malformed escape: treated as host, fail safe
+		// code-server decodes + case-folds, so these are under static too.
+		"%73tatic/out/x.js", "STABLE-abc/STATIC/out/x.js", "stable-abc/static%2fout/x.js",
 	} {
-		assert.True(t, editorPathIsParentOriginHost(rest), rest)
+		assert.True(t, editorPathUnderStaticRoot(rest), rest)
 	}
 	for _, rest := range []string{
-		"", "static/out/x.js", "webview/browser/x.html", "webview/pre/index.html",
-		"browser/pre/index.html", "proxy/3000/", "static/out/webWorkerExtensionHost.js",
+		"", "/", "callback", "vscode", "stable-abc/", "stable-abc",
+		// the port proxy's own "static" is relayed content, not an editor static root
+		"proxy/3000/static/x.js", "absproxy/5173/static/app.js",
+		"vscode-remote-resource", "login", "web-extension-resource/x",
 	} {
-		assert.False(t, editorPathIsParentOriginHost(rest), rest)
-	}
-}
-
-func TestEditorNonCanonicalRefusal(t *testing.T) {
-	refused := func(escapedRest string) bool {
-		return editorNonCanonicalRefusal(webTabRoute{escapedRest: escapedRest, rest: escapedRest}) != nil
-	}
-	// Canonical paths pass, a single trailing slash included.
-	for _, esc := range []string{"", "/", "stable-abc/static/out/vs/x.js", "proxy/3000/", "static/out/workbench.web.main.js", "vscode-remote-resource", "callback"} {
-		assert.False(t, refused(esc), "canonical: %q", esc)
-	}
-	// Empty segments (the editor-port bypass), dot segments, encoded separators, a
-	// malformed escape, and double trailing slashes are refused.
-	for _, esc := range []string{
-		"webview//browser/pre/index.html", "static//out/x.js", "a/b//c",
-		"webview/./browser/pre/x", "foo/../bar", "a/.",
-		"webview%2Fbrowser/pre/index.html", "static%2fout/x.js", "a%5Cb",
-		"foo/%2e%2e/bar", "bad%zz", "proxy/3000//",
-	} {
-		assert.True(t, refused(esc), "non-canonical: %q", esc)
+		assert.False(t, editorPathUnderStaticRoot(rest), rest)
 	}
 }
 
@@ -289,50 +259,54 @@ func TestWebviewParentOrigin(t *testing.T) {
 // Rule 6: a webview-host request is admitted only when the editor's own page loads
 // it — the browser attests same-origin, or parentOrigin names the request's own
 // origin. A cross-port loader (same host, another editor port) is refused.
-func TestEditorWebviewHostRefusal(t *testing.T) {
+func TestEditorStaticDocumentRefusal(t *testing.T) {
 	const host = "127.0.0.1:9100"
-	hostPath := testCommit + "/static/out/vs/workbench/contrib/webview/browser/pre/index.html"
-	refused := func(path, query, fetchSite string) bool {
+	webviewHost := testCommit + "/static/out/vs/workbench/contrib/webview/browser/pre/index.html"
+	workerHost := testCommit + "/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html"
+	build := func(path, query, dest, site string) *http.Request {
 		target := "/v1/webtab/s/t/" + path
 		if query != "" {
 			target += "?" + query
 		}
 		r := httptest.NewRequest(http.MethodGet, target, nil)
 		r.Host = host
-		if fetchSite != "" {
-			r.Header.Set("Sec-Fetch-Site", fetchSite)
+		if dest != "" {
+			r.Header.Set("Sec-Fetch-Dest", dest)
 		}
-		return editorWebviewHostRefusal(r, webTabRoute{escapedRest: path}, nil) != nil
+		if site != "" {
+			r.Header.Set("Sec-Fetch-Site", site)
+		}
+		return r
 	}
-	// Admitted: the editor's own page.
-	assert.False(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9100", ""), "parentOrigin names this origin")
-	assert.False(t, refused(hostPath, "id=1&parentOrigin=http://127.0.0.1:9100", "same-site"))
-	assert.False(t, refused(hostPath, "", "same-origin"), "the browser attests the loader is same-origin")
-	// Refused: a cross-port or foreign loader, or a request that cannot be a real load.
-	assert.True(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9101", "same-site"), "another editor port")
-	assert.True(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9101", ""))
-	assert.True(t, refused(hostPath, "parentOrigin=null", ""))
-	assert.True(t, refused(hostPath, "parentOrigin=http://attacker.example", ""))
-	assert.True(t, refused(hostPath, "", ""), "a real host load always carries parentOrigin")
-	// The web-worker extension host iframe is the OTHER parentOrigin host page; the
-	// same guard covers it (a cross-port loader refused, its own page admitted).
-	workerPath := testCommit + "/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html"
-	assert.True(t, refused(workerPath, "parentOrigin=http://127.0.0.1:9101", ""), "worker host, another editor port")
-	assert.False(t, refused(workerPath, "", "same-origin"), "worker host, own page")
-	// Bypass 1 (path spelling): an encoded or mixed-case host path is still the host,
-	// so a foreign loader of it is still refused; its own page still gets in.
-	encHost := testCommit + "/static/out/%77ebview/browser/pre/index.html"
-	assert.True(t, refused(encHost, "parentOrigin=http://127.0.0.1:9101", ""), "encoded host path, foreign loader")
-	assert.False(t, refused(encHost, "", "same-origin"), "encoded host path, own page")
-	// Bypass 2 (query parsing): a query the daemon and a browser could read
-	// differently is refused even when it carries a parentOrigin that names this
-	// origin, because the browser might act on a different value.
-	assert.True(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9100;x=1&parentOrigin=http://evil", ""), "semicolon")
-	assert.True(t, refused(hostPath, "x=%ZZ&parentOrigin=http://127.0.0.1:9100", ""), "malformed escape")
-	assert.True(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9100&parentOrigin=http://evil", ""), "two parentOrigin")
-	// Not a webview-host path: not this rule's, even with a foreign parentOrigin.
-	assert.False(t, refused("static/out/x.js", "parentOrigin=http://evil", ""))
-	assert.False(t, refused("proxy/3000/", "parentOrigin=http://evil", ""))
+	refused := func(path, query, dest, site string) bool {
+		return editorStaticDocumentRefusal(build(path, query, dest, site), webTabRoute{escapedRest: path}, nil) != nil
+	}
+	// Both host pages, framed cross-port (same-site) as iframe/frame/object/embed —
+	// refused, WITHOUT either page being named in the rule.
+	for _, p := range []string{webviewHost, workerHost} {
+		for _, dest := range []string{"iframe", "frame", "object", "embed", "document"} {
+			assert.True(t, refused(p, "", dest, "same-site"), "%s cross-port as %s", p, dest)
+			assert.True(t, refused(p, "", dest, "cross-site"), "%s cross-site as %s", p, dest)
+			// The editor's own page (same-origin), and a user-typed URL (none), load it.
+			assert.False(t, refused(p, "", dest, "same-origin"), "%s same-origin as %s", p, dest)
+			assert.False(t, refused(p, "", dest, "none"), "%s none as %s", p, dest)
+		}
+	}
+	// A sub-resource under static (a script) is not a framing: admitted whatever the site.
+	assert.False(t, refused(testCommit+"/static/out/x.js", "", "script", "same-site"))
+	assert.False(t, refused(testCommit+"/static/out/x.css", "", "style", "cross-site"))
+	// Not under a static root: the port proxy and the shell are this rule's business
+	// never, even framed cross-site.
+	assert.False(t, refused("proxy/3000/", "", "iframe", "cross-site"), "the port proxy is not a static root")
+	assert.False(t, refused("", "", "iframe", "cross-site"), "the shell root is exempt (framed cross-origin to show an editor port)")
+	// Old browser (no Sec-Fetch-Dest): the parentOrigin fallback. A host-page load
+	// carries parentOrigin; a bare sub-resource does not.
+	assert.True(t, refused(webviewHost, "parentOrigin=http://127.0.0.1:9101", "", ""), "old browser, foreign parentOrigin")
+	assert.True(t, refused(workerHost, "parentOrigin=http://127.0.0.1:9101", "", ""), "old browser, foreign parentOrigin (worker)")
+	assert.False(t, refused(webviewHost, "parentOrigin=http://127.0.0.1:9100", "", ""), "old browser, own parentOrigin")
+	assert.False(t, refused(webviewHost, "id=1", "", ""), "old browser, no parentOrigin (sub-resource)")
+	assert.True(t, refused(webviewHost, "parentOrigin=http://a;x=1&parentOrigin=http://b", "", ""), "old browser, ambiguous query")
+
 }
 
 // Rule 6 through the real proxy: a foreign loader is refused before the editor
