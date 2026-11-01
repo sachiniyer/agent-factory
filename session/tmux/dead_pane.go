@@ -370,16 +370,16 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 
 // readPaneRow performs one panePID read within budget.
 func (t *TmuxSession) readPaneRow(budget time.Duration) (paneRow, error) {
-	// exactTarget forces an exact session match, mirroring ExistsOrUnknown.
+	// ExactTarget forces an exact session match, mirroring ExistsOrUnknown.
 	// (The bare `=name` form returns an empty pane_pid for display-message —
-	// the trailing `:` in exactTarget is what makes the pid resolve. See #1006.)
+	// the trailing `:` in ExactTarget is what makes the pid resolve. See #1006.)
 	//
 	// Bounded by tmuxCommandTimeout (#1917): this is the FIRST tmux command on
 	// the kill teardown, so an unbounded stall here wedges the kill before
 	// kill-session is even attempted.
 	ctx, cancel := tmuxTimeoutContextWithin(budget)
 	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), paneRowFormat)
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", ExactTarget(t.sanitizedName), paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
 			return paneRow{}, fmt.Errorf("%w: display-message pane_pid after %s", ErrTmuxTimeout, min(budget, tmuxCommandTimeout))
@@ -450,7 +450,7 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 	}
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "list-panes", "-s", "-t", exactTarget(t.sanitizedName), "-F", paneRowFormat)
+	output, err := t.outputTmuxBounded(ctx, "list-panes", "-s", "-t", ExactTarget(t.sanitizedName), "-F", paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
 			return false, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, t.sanitizedName, tmuxCommandTimeout)
@@ -673,7 +673,7 @@ type paneExit struct {
 func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncollected bool) {
 	ctx, cancel := tmuxTimeoutContextWithin(budget)
 	defer cancel()
-	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), paneExitFormat)
+	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", ExactTarget(t.sanitizedName), paneExitFormat)
 	if err != nil {
 		return paneExit{}, false
 	}
@@ -689,7 +689,7 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 		return paneExit{known: true}, false
 	}
 	// The reading comes from the session's ACTIVE pane — what `=name:`
-	// resolves to (see exactTarget) — and under remain-on-exit a user who
+	// resolves to (see ExactTarget) — and under remain-on-exit a user who
 	// attaches can split the window and end up focused on a pane af did not
 	// launch. That pane inherits remain-on-exit, exits, and is held dead as
 	// the active pane, so tmux reports its death — collected status or bare
@@ -894,7 +894,7 @@ func argvIsLaunchShim(argv []string) bool {
 func (t *TmuxSession) PaneDead() bool {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{pane_dead}")
+	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", ExactTarget(t.sanitizedName), "#{pane_dead}")
 	return err == nil && strings.TrimSpace(string(out)) == "1"
 }
 
@@ -917,7 +917,7 @@ func (t *TmuxSession) FinishedAndQuiet() bool {
 func (t *TmuxSession) FinishedPaneOutput(maxLines int) string {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-J", "-S", "-200", "-t", exactTarget(t.sanitizedName))
+	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-J", "-S", "-200", "-t", ExactTarget(t.sanitizedName))
 	if err != nil {
 		return ""
 	}

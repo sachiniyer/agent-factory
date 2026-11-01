@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // `af accounts login` (#3384) — af drives the agent's own login flow instead of
@@ -284,10 +285,10 @@ var accountLoginPaneAlive = func(sessionName, socketPath string) bool {
 	if socketPath != "" {
 		args = append(args, "-S", socketPath)
 	}
-	// The `=` prefix is tmux's exact-match syntax: without it a session name is a
-	// PREFIX pattern, so `af_af-login-codex-work` would match a hypothetical
+	// ExactSessionTarget is tmux's exact-match syntax: without it a session name
+	// is a PREFIX pattern, so `af_af-login-codex-work` would match a hypothetical
 	// `…-work-2` and report the wrong pane alive.
-	args = append(args, "has-session", "-t", "="+sessionName)
+	args = append(args, "has-session", "-t", tmux.ExactSessionTarget(sessionName))
 	return exec.Command("tmux", args...).Run() == nil
 }
 

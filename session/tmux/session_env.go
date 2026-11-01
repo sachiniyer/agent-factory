@@ -36,8 +36,8 @@ func (t *TmuxSession) SetRemainOnExit() {
 // the heal, never the tab.
 func (t *TmuxSession) ApplyRemainOnExit() {
 	ctx, cancel := tmuxTimeoutContext()
-	args := []string{"set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on"}
-	args = append(append(args, ";"), panePidStampArgs(exactTarget(t.sanitizedName))...)
+	args := []string{"set-option", "-w", "-t", ExactTarget(t.sanitizedName), "remain-on-exit", "on"}
+	args = append(append(args, ";"), panePidStampArgs(ExactTarget(t.sanitizedName))...)
 	_ = t.runTmuxBounded(ctx, args...)
 	cancel()
 }
@@ -403,9 +403,9 @@ func (t *TmuxSession) refreshRestoredAccountEnvironment() (err error) {
 		}
 	}
 	for _, name := range accountSessionBoundaryNames(accountAgent) {
-		args := []string{"set-environment", "-r", "-t", exactTarget(t.sanitizedName), name}
+		args := []string{"set-environment", "-r", "-t", ExactTarget(t.sanitizedName), name}
 		if value, ok := selected[name]; ok {
-			args = []string{"set-environment", "-t", exactTarget(t.sanitizedName), name, value}
+			args = []string{"set-environment", "-t", ExactTarget(t.sanitizedName), name, value}
 		}
 		if err := t.runRestoredAccountCommand(args...); err != nil {
 			return err
@@ -417,7 +417,7 @@ func (t *TmuxSession) refreshRestoredAccountEnvironment() (err error) {
 		return nil
 	}
 	return t.runRestoredAccountCommand(
-		"set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand,
+		"set-option", "-t", ExactTarget(t.sanitizedName), "default-command", defaultCommand,
 	)
 }
 

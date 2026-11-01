@@ -230,7 +230,7 @@ func (m *statusMonitor) hash(s string) []byte {
 func (t *TmuxSession) TapEnter() error {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	if err := t.runTmuxBounded(ctx, "send-keys", "-t", exactTarget(t.sanitizedName), "Enter"); err != nil {
+	if err := t.runTmuxBounded(ctx, "send-keys", "-t", ExactTarget(t.sanitizedName), "Enter"); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: send-keys Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
@@ -250,7 +250,7 @@ func (t *TmuxSession) TapEnter() error {
 func (t *TmuxSession) TapDAndEnter() error {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	if err := t.runTmuxBounded(ctx, "send-keys", "-t", exactTarget(t.sanitizedName), "D", "Enter"); err != nil {
+	if err := t.runTmuxBounded(ctx, "send-keys", "-t", ExactTarget(t.sanitizedName), "D", "Enter"); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: send-keys D Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
@@ -330,7 +330,7 @@ func (t *TmuxSession) HasUpdatedObserved(expectGone func() bool) (updated bool, 
 	alive := mon != nil && !mon.dead
 	var gen *tmuxGeneration
 	var probeDue bool
-	target := exactTarget(t.sanitizedName)
+	target := ExactTarget(t.sanitizedName)
 	if alive {
 		gen = mon.generation
 		if gen != nil && gen.sessionID != "" {
@@ -560,7 +560,7 @@ func (t *TmuxSession) CapturePaneContent() (string, error) {
 // ErrSessionGone — callers tear sessions down on "gone"). The parent is checked
 // first so a cancel racing the deadline is attributed to the caller.
 func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, error) {
-	return t.capturePaneContentTarget(ctx, exactTarget(t.sanitizedName), nil)
+	return t.capturePaneContentTarget(ctx, ExactTarget(t.sanitizedName), nil)
 }
 
 // capturePaneContentTarget is CapturePaneContentContext addressed to an
@@ -678,7 +678,7 @@ func (t *TmuxSession) confirmedGeneration() (*tmuxGeneration, bool) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := t.outputTmuxBounded(ctx, "display-message", "-p",
-		"-t", exactTarget(t.sanitizedName),
+		"-t", ExactTarget(t.sanitizedName),
 		"#{session_id} #{pid} #{session_created}")
 	if err != nil {
 		return nil, ctx.Err() == nil
@@ -762,7 +762,7 @@ func (t *TmuxSession) provedGenerationAbsent(gen *tmuxGeneration, runErr error) 
 func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-t", exactTarget(t.sanitizedName))
+	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-t", ExactTarget(t.sanitizedName))
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%w: capture-pane grid after %s", ErrTmuxTimeout, tmuxCommandTimeout)
@@ -788,7 +788,7 @@ func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
 func (t *TmuxSession) CapturePaneBuffer() (string, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-S", "-", "-t", exactTarget(t.sanitizedName))
+	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-S", "-", "-t", ExactTarget(t.sanitizedName))
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%w: capture-pane buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
@@ -816,7 +816,7 @@ const paneCursorStateFormat = "#{cursor_y} #{cursor_x} #{?cursor_flag,1,0}"
 func (t *TmuxSession) readPaneCursorState() (paneCursorState, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), paneCursorStateFormat)
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", ExactTarget(t.sanitizedName), paneCursorStateFormat)
 	if err != nil {
 		if ctx.Err() != nil {
 			return paneCursorState{}, fmt.Errorf("%w: display-message after %s", ErrTmuxTimeout, tmuxCommandTimeout)
@@ -846,7 +846,7 @@ func (t *TmuxSession) readPaneCursorState() (paneCursorState, error) {
 func (t *TmuxSession) CursorPosition() (row, col int, err error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{cursor_y} #{cursor_x}")
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", ExactTarget(t.sanitizedName), "#{cursor_y} #{cursor_x}")
 	if err != nil {
 		if ctx.Err() != nil {
 			return 0, 0, fmt.Errorf("%w: display-message after %s", ErrTmuxTimeout, tmuxCommandTimeout)
@@ -871,7 +871,7 @@ func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, 
 	// an exact session match, mirroring CapturePaneContent (#1006).
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", exactTarget(t.sanitizedName))
+	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", ExactTarget(t.sanitizedName))
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%w: capture-pane options after %s", ErrTmuxTimeout, tmuxCommandTimeout)
@@ -918,7 +918,7 @@ var ErrScrollbackCaptureUnparseable = errors.New("tmux answer carries no capture
 func (t *TmuxSession) CaptureVisibleWithScrollback() (string, int, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	target := exactTarget(t.sanitizedName)
+	target := ExactTarget(t.sanitizedName)
 	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", target, "#{history_size}",
 		";", "capture-pane", "-p", "-e", "-J", "-t", target)
 	if err != nil {
