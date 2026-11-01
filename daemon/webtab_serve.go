@@ -528,6 +528,9 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 			if policy := workspaceSandboxPolicy(route, tabKind); policy != "" {
 				resp.Header.Add("Content-Security-Policy", policy)
 			}
+			// No response acts on a whole origin it shares (rule 5): Clear-Site-Data
+			// stripped, Service-Worker-Allowed kept inside the tab's prefix.
+			confineOriginHeaders(resp.Header, route, tabKind, r.URL.Path)
 			// Cross-tab read isolation is the whole point of the per-tab origin, and it
 			// holds only while NO Access-Control-Allow-Origin comes back. Forcing the
 			// daemon's own allow-list empty (livePosture.previewOrigin) is not enough:

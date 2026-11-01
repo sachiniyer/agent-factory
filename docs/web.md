@@ -654,7 +654,14 @@ old owner's state.
 
 Unset (the default), nothing is bound and a remote viewer keeps the same-origin editor. If the
 pool is full the editor stays on the same-origin mirror and the daemon's error names
-`network.editor_origin_ports`. See [`network.editor_origin_ports`](configuration.md).
+`network.editor_origin_ports`. Both apply to a local session only: an off-box session's editor
+is never served on the web UI's address, so without a port of its own its pane says which
+setting to turn on. See [`network.editor_origin_ports`](configuration.md).
+
+Behind a front door that rewrites `Host`, forward the browser's for each of these ports too
+(`X-Forwarded-Host $http_host`), as for the main UI: an editor's WebSocket is accepted only
+from the editor's own page, judged the same way. See [behind a reverse
+proxy](remote-http-auth.md#behind-a-reverse-proxy).
 
 ##### VS Code tabs get one too — per session
 
@@ -809,13 +816,25 @@ tab survives a restart and simply starts a new editor when you next open it.
     Note that a VS Code pane is deliberately **not** origin-sandboxed the way a web
     tab is: VS Code cannot run under an opaque origin. For a **local** session that
     is acceptable because the daemon controls what is served there (a code-server it
-    started, on your worktree), and a local workspace already runs as you. What the
-    editor relays rather than serves itself is still sandboxed on every origin it is
-    reached through: code-server's port forwarding (`/proxy/<port>/`,
-    `/absproxy/<port>/`) and VS Code's route for worktree files
-    (`vscode-remote-resource`) answer as opaque-origin pages, so a dev server or a
-    repository's HTML never runs as the web UI, or as the editor, whose origin is
-    its terminal. The editor's WebSocket, which carries that terminal, is accepted
+    started, on your worktree), and a local workspace already runs as you. Only the
+    editor's own workbench keeps a real origin: its shell, VS Code's own static
+    files and its sign-in callback. Everything else the editor serves answers as an
+    opaque-origin page, on every origin the editor is reached through. That covers
+    code-server's port forwarding (`/proxy/<port>/`, `/absproxy/<port>/`, in any
+    spelling) and VS Code's route for worktree files (`vscode-remote-resource`). So
+    a dev server or a repository's HTML file opened there runs neither as the web UI
+    nor as the editor, whose origin is its terminal.
+
+    **Webviews are the exception.** VS Code renders notebook outputs and extension
+    views inside its webview host, which is part of the workbench and gives them a
+    real origin, and code-server serves that host on the editor's own origin. So
+    a notebook's HTML output, or an extension's view, runs with the editor's origin.
+    For a local editor opened on the web UI's address, that is the web UI's origin,
+    with its token. Open notebooks only from repositories you trust there, or give
+    local editors an origin of their own: `network.preview_listen_addr` when you
+    view from this machine, `network.editor_origin_ports` from elsewhere (above).
+
+    The editor's WebSocket, which carries that terminal, is accepted
     only from the editor's own page: af refuses a handshake whose `Origin` names any
     other origin, on every address the editor is served on. It works behind the
     same front doors the web UI's own streams do: a proxy that rewrites `Host` must

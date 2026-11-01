@@ -3,6 +3,9 @@ package daemon
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
+	"regexp"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -49,14 +52,26 @@ import (
 // the default local editor, which has no other origin unless the operator enabled
 // network.preview_listen_addr.
 //
-//  3. What an editor serves that it did not write is sandboxed on EVERY route that
-//     serves an editor — the mirror, the preview listener's editor origin and an
-//     editor-origin port alike — by path (editorServesWorkspaceContent):
-//     code-server's port proxy and VS Code's worktree-file route. On the mirror the
+//  3. Everything an editor serves, except its own workbench, is sandboxed on EVERY
+//     route that serves an editor — the mirror, the preview listener's editor
+//     origin and an editor-origin port alike. The rule is an ALLOW-list of the
+//     workbench's paths (editorPathKeepsItsOrigin), not a list of the routes that
+//     relay content: code-server's router matches case-insensitively, so a list
+//     of bad routes (/proxy/) misses their other spellings (/PROXY/), and every
+//     editor release can add one. What keeps a real origin is only what the
+//     workbench needs one for, matched exactly, in the request's own encoding.
+//     Everything else — code-server's port proxy, VS Code's worktree-file route,
+//     anything unknown — answers as an opaque-origin document. On the mirror the
 //     reason is the control origin; on an editor's own origin it is the editor
 //     itself: a page at the editor's origin is same-origin with its WebSocket,
-//     which is a terminal in that workspace, so a dev server reached through
-//     /proxy/<port>/ must not run there as a real origin either.
+//     which is a terminal in that workspace.
+//
+//     What this does NOT cover: VS Code renders webviews (notebook outputs,
+//     extension views) inside its webview host, a workbench page, in a frame it
+//     gives allow-same-origin, and code-server serves that host from its own
+//     static route. So a webview runs with the workbench's origin — the control
+//     origin, for a local editor on the mirror. Closing that needs the local
+//     editor on an origin of its own by default, which is a separate decision.
 //
 //  4. An editor's WebSocket is accepted only from the editor's own origin, on every
 //     route that serves an editor (editorUpgradeRefusal). The editor's channel IS a
@@ -74,6 +89,16 @@ import (
 //     Origin is not a browser's (the Fetch standard sends one on every WebSocket
 //     handshake) and is admitted, as the cross-site guard and code-server both do.
 
+//  5. No workspace response acts on a whole origin it shares (confineOriginHeaders).
+//     Clear-Site-Data wipes the storage of the origin the RESPONSE came from,
+//     whatever document asked for it, so a sandboxed page fetching a mirror URL
+//     could clear the web UI's token, and one on an editor origin the editor's
+//     state; it is stripped everywhere but a web tab's own preview origin, which
+//     belongs to that app. Service-Worker-Allowed widens how far a service worker
+//     registered from a script may reach, so on the mirror it is clamped to the
+//     tab's own prefix: no tab's script can become a worker for the web UI at "/",
+//     which would outlive any fix.
+
 // mirrorSandboxCSP is the opaque-origin sandbox for mirrored workspace documents.
 // Its flags must equal the web client's mirror iframe sandbox
 // (web/src/tabaddr.ts webSandbox(false, false)), so a page behaves the same framed
@@ -83,8 +108,8 @@ const mirrorSandboxCSP = "sandbox allow-scripts allow-forms allow-popups allow-m
 
 // workspaceSandboxPolicy is the CSP the proxy adds to a response, or "" for none:
 // rule 1 for a web tab on the mirror (a web tab's own preview origin is separate
-// from everything else by design and keeps a real origin), and rule 3 for an
-// editor's workspace-content routes on any route.
+// from everything else by design and keeps a real origin), and rule 3 for every
+// editor path outside the workbench, on any route.
 func workspaceSandboxPolicy(route webTabRoute, kind session.TabKind) string {
 	switch kind {
 	case session.TabKindWeb:
@@ -92,50 +117,110 @@ func workspaceSandboxPolicy(route webTabRoute, kind session.TabKind) string {
 			return mirrorSandboxCSP
 		}
 	case session.TabKindVSCode:
-		if editorServesWorkspaceContent(route.rest) {
+		if !editorPathKeepsItsOrigin(route.escapedRest) {
 			return mirrorSandboxCSP
 		}
 	}
 	return ""
 }
 
-// editorServesWorkspaceContent reports whether a path below an editor tab's prefix
-// is one where the editor relays content it did not write:
+// editorPathKeepsItsOrigin reports whether a path below an editor tab's prefix is
+// the editor's own workbench, the only part of an editor that needs a real origin
+// (rule 3). escapedRest is the path in the request's OWN encoding, and segments are
+// compared exactly, case included: the editor sees that same spelling, so a
+// spelling only a case-insensitive or decoding router would route — "/STATIC/",
+// "%73tatic" — is not the workbench here and is sandboxed. The workbench is:
 //
-//   - code-server's port proxy, proxy/<port>/… and absproxy/<port>/…, which serves
-//     any loopback server (an agent's dev server) under the editor's origin;
-//   - vscode-remote-resource, VS Code's route for worktree files (images, HTML,
-//     SVG), which a repository or an agent controls.
+//   - the shell, at the root (VS Code's "/"; code-server's too, and its "/vscode");
+//   - VS Code's own files under static/: scripts, styles, workers, and the
+//     webview host page;
+//   - VS Code's sign-in callback page, callback;
 //
-// Both are matched as path SEGMENTS (rest is decoded and has no leading slash), the
-// remote-resource one anywhere in the path because VS Code serves it under a
-// versioned prefix. The workbench itself (its shell, static assets, webview hosts)
-// matches neither and keeps the real origin it needs.
-func editorServesWorkspaceContent(rest string) bool {
-	segs := strings.Split(strings.TrimPrefix(rest, "/"), "/")
-	if len(segs) > 0 && (segs[0] == "proxy" || segs[0] == "absproxy") {
+// each optionally under VS Code's <quality>-<commit> product segment, which its
+// server strips; and code-server's own assets under _static/, at its root. Both
+// static trees are files from the editor's install, not from the workspace.
+func editorPathKeepsItsOrigin(escapedRest string) bool {
+	segs := strings.Split(strings.TrimPrefix(escapedRest, "/"), "/")
+	if len(segs) >= 2 && segs[0] == "_static" {
 		return true
 	}
-	for _, s := range segs {
-		if s == "vscode-remote-resource" {
-			return true
+	if segs[0] == "vscode" {
+		segs = segs[1:]
+	}
+	if len(segs) > 0 && editorProductSegment.MatchString(segs[0]) {
+		segs = segs[1:]
+		if len(segs) == 0 {
+			return false // "/stable-…" with no slash is no route of VS Code's
 		}
 	}
+	switch {
+	case len(segs) == 0, len(segs) == 1 && segs[0] == "":
+		return true
+	case len(segs) >= 2 && segs[0] == "static":
+		return true
+	case len(segs) == 1 && segs[0] == "callback":
+		return true
+	}
 	return false
+}
+
+// editorProductSegment is VS Code's server product path segment, <quality>-<commit>
+// (getServerProductSegment), such as stable-<40 hex>; "oss-dev" for an unbuilt one.
+var editorProductSegment = regexp.MustCompile(`^[a-z]+-(?:[0-9a-f]{7,64}|dev)$`)
+
+// confineOriginHeaders is rule 5 on one upstream response. browserPath is the
+// decoded path the browser requested, which a relative Service-Worker-Allowed is
+// resolved against.
+func confineOriginHeaders(h http.Header, route webTabRoute, kind session.TabKind, browserPath string) {
+	if !(route.previewOrigin && kind == session.TabKindWeb) {
+		h.Del("Clear-Site-Data")
+	}
+	if route.prefix != "" && len(h.Values("Service-Worker-Allowed")) > 0 {
+		h.Set("Service-Worker-Allowed", clampWorkerScope(h.Get("Service-Worker-Allowed"), route.prefix, browserPath))
+	}
+}
+
+// clampWorkerScope maps a Service-Worker-Allowed value onto the mirror and keeps it
+// inside the tab's prefix. An absolute path is the app's own path, which the mirror
+// serves under the prefix (like a redirect's Location); a relative one resolves
+// against the script's URL as the browser would. Whatever lands outside the
+// prefix, an absolute URL included, becomes the prefix itself.
+func clampWorkerScope(value, prefix, browserPath string) string {
+	floor := prefix + "/"
+	u, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" {
+		return floor
+	}
+	scope := u.Path
+	if strings.HasPrefix(scope, "/") {
+		scope = prefix + scope
+	} else {
+		scope = path.Join(path.Dir(browserPath), scope)
+	}
+	scope = path.Clean(scope)
+	if scope == prefix || !strings.HasPrefix(scope, floor) {
+		return floor
+	}
+	if strings.HasSuffix(u.Path, "/") || u.Path == "" {
+		scope += "/"
+	}
+	return scope
 }
 
 // trackedEditorTab reports whether (sessionID, tabID) is a VS Code tab, and whether
 // its editor is RELAYED from an off-box workspace, judged from the already-tracked
 // session WITHOUT resolving the tab's target: resolving an editor STARTS it (on the
 // workspace's host, for a relayed one), and rules 2 and 4 refuse before that, so an
-// editor is never started only to be turned away. The resolved target's Kind and
-// RelayedEditor stay the authoritative checks after resolution, for a session that
-// is not tracked yet.
+// editor is never started only to be turned away. The session is addressed the way
+// WebTabTarget addresses it — a stable id, else a title unique across projects —
+// so the claim holds for either spelling of the route. The resolved target's Kind
+// and RelayedEditor stay the authoritative checks after resolution, for a session
+// that is not tracked yet.
 func (m *Manager) trackedEditorTab(sessionID, tabID string) (editor, relayed bool) {
 	if m == nil {
 		return false, false
 	}
-	instance := m.trackedStreamSession(sessionID)
+	instance := m.trackedWebTabSession(sessionID)
 	if instance == nil {
 		return false, false
 	}
@@ -144,6 +229,32 @@ func (m *Manager) trackedEditorTab(sessionID, tabID string) (editor, relayed boo
 		return false, false
 	}
 	return true, instance.Capabilities().Workspace == session.WorkspaceRemote
+}
+
+// trackedWebTabSession is the tracked half of WebTabTarget's session resolution
+// (resolveStreamSession, unscoped): the stable id first, then a title that exactly
+// one project holds. It never refreshes from disk; an ambiguous or unknown name is
+// nil here and is left to the resolution, which reports it.
+func (m *Manager) trackedWebTabSession(idOrTitle string) *session.Instance {
+	if instance := m.trackedStreamSession(idOrTitle); instance != nil || idOrTitle == "" {
+		return instance
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var match *session.Instance
+	var repos []string
+	for key, instance := range m.instances {
+		if instance == nil || instance.Title != idOrTitle {
+			continue
+		}
+		rid, _ := splitDaemonInstanceKey(key)
+		repos = append(repos, rid)
+		match = instance
+	}
+	if len(session.DedupeSorted(repos)) != 1 {
+		return nil
+	}
+	return match
 }
 
 // editorUpgradeRefusal is rule 4 for one request on an editor tab's route: a

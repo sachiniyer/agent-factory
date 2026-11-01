@@ -80,22 +80,28 @@ func vscodeProxyRecorder(t *testing.T, mux *http.ServeMux, id, tabID, sub string
 	}
 }
 
-// Rules 2-3 for a LOCAL editor: its workbench keeps a real origin on the mirror,
-// while the routes where it relays content it did not write — code-server's port
-// proxy and VS Code's worktree-file route — are sandboxed.
-func TestWorkspaceIsolation_LocalEditorSandboxesOnlyWorkspaceContent(t *testing.T) {
+// testCommit is a realistic VS Code product segment: <quality>-<40 hex commit>.
+const testCommit = "stable-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
+
+// Rule 3 for a LOCAL editor, through the real proxy: only the workbench keeps a real
+// origin on the mirror; every other path the editor serves is sandboxed, in any
+// spelling a case-insensitive or decoding router would still route.
+func TestWorkspaceIsolation_LocalEditorSandboxesAllButTheWorkbench(t *testing.T) {
 	binary := writeFakeVSCodeBinary(t, "code-server", nil)
 	manager, id, tabID, _ := newVSCodeFixture(t, binary)
 	mux := newHTTPMux(&controlServer{manager: manager})
 
-	for _, sub := range []string{"", "static/out/vs/code/browser/workbench/workbench.html", "stable-abc/static/out/vs/workbench/contrib/webview/browser/pre/index.html"} {
+	for _, sub := range []string{"", "static/out/vs/code/browser/workbench/workbench.html",
+		testCommit + "/static/out/vs/workbench/contrib/webview/browser/pre/index.html", "_static/out/browser/serviceWorker.js"} {
 		rec := vscodeProxyRecorder(t, mux, id, tabID, sub)
 		assert.Contains(t, rec.Body.String(), fakeVSCodeMarker)
 		assert.False(t, hasSandboxCSP(rec.Header()), "%q: the workbench needs a real origin", sub)
 	}
-	for _, sub := range []string{"proxy/3000/", "absproxy/5173/index.html", "vscode-remote-resource?path=/repo/evil.html", "stable-abc/vscode-remote-resource?path=/repo/x.svg"} {
+	for _, sub := range []string{"proxy/3000/", "PROXY/3000/", "Proxy/3000/x", "%70roxy/3000/", "absproxy/5173/index.html", "AbsProxy/5173/",
+		"vscode-remote-resource?path=/repo/evil.html", testCommit + "/vscode-remote-resource?path=/repo/x.svg",
+		"STATIC/out/x.html", "%73tatic/out/x.html", "web-extension-resource/x/y.html", "login", "unknown/route.html"} {
 		rec := vscodeProxyRecorder(t, mux, id, tabID, sub)
-		assert.True(t, hasSandboxCSP(rec.Header()), "%q: content the editor relays must run sandboxed", sub)
+		assert.True(t, hasSandboxCSP(rec.Header()), "%q: anything but the workbench must run sandboxed", sub)
 	}
 }
 
@@ -118,13 +124,17 @@ func TestWorkspaceIsolation_MirrorRefusesARelayedEditor(t *testing.T) {
 	require.True(t, editor && relayed)
 
 	cs := &controlServer{manager: manager}
-	rec := httptest.NewRecorder()
-	newHTTPMux(cs).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, vscodeProxyPath(inst.ID, "tab-editor", ""), nil))
-	assert.Contains(t, rec.Body.String(), "only on an", "the mirror shows the notice: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "network.preview_listen_addr")
-	assert.Contains(t, rec.Body.String(), "network.editor_origin_ports")
-	assert.NotContains(t, rec.Body.String(), "runtime cannot run an editor",
-		"refused before the target resolved — resolving would have tried to start the editor")
+	// By stable id and by title alike: WebTabTarget resolves both, so the
+	// refuse-before-start check must too.
+	for _, addr := range []string{inst.ID, "offbox"} {
+		rec := httptest.NewRecorder()
+		newHTTPMux(cs).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, vscodeProxyPath(addr, "tab-editor", ""), nil))
+		assert.Contains(t, rec.Body.String(), "only on an", "%s: the mirror shows the notice: %s", addr, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "network.preview_listen_addr")
+		assert.Contains(t, rec.Body.String(), "network.editor_origin_ports")
+		assert.NotContains(t, rec.Body.String(), "runtime cannot run an editor",
+			"%s: refused before the target resolved — resolving would have tried to start the editor", addr)
+	}
 
 	// The same tab on an editor's own origin goes on to resolve (and here fails,
 	// because the fake backend has no editor relay) — it is not the mirror's refusal.
@@ -135,26 +145,95 @@ func TestWorkspaceIsolation_MirrorRefusesARelayedEditor(t *testing.T) {
 	assert.NotContains(t, own.Body.String(), "only on an")
 }
 
-func TestEditorServesWorkspaceContent(t *testing.T) {
-	for _, rest := range []string{"proxy/3000/", "proxy/3000/x", "absproxy/5173/", "vscode-remote-resource", "stable-1a2b/vscode-remote-resource", "a/b/vscode-remote-resource"} {
-		assert.True(t, editorServesWorkspaceContent(rest), rest)
+func TestEditorPathKeepsItsOrigin(t *testing.T) {
+	for _, rest := range []string{"", "/", "vscode", "vscode/", "static/out/x.js", "static/out/vs/workbench/contrib/webview/browser/pre/index.html",
+		testCommit + "/", testCommit + "/static/out/vs/workbench/workbench.web.main.js", "vscode/" + testCommit + "/static/x.css",
+		"callback", testCommit + "/callback", "oss-dev/static/x.js", "_static/out/browser/serviceWorker.js"} {
+		assert.True(t, editorPathKeepsItsOrigin(rest), "the workbench: %q", rest)
 	}
-	for _, rest := range []string{"", "static/out/x.js", "stable-1a2b/static/out/vs/workbench/workbench.web.main.js", "proxyfoo/1", "my-proxy/1", "vscode-remote-resource-x"} {
-		assert.False(t, editorServesWorkspaceContent(rest), rest)
+	for _, rest := range []string{
+		// code-server's port proxy, in the spellings its case-insensitive router accepts
+		"proxy/3000/", "PROXY/3000/", "Proxy/3000", "absproxy/5173/", "ABSPROXY/5173/", "%70roxy/3000/", "proxy%2F3000",
+		// worktree files, at the root and under the product segment
+		"vscode-remote-resource", testCommit + "/vscode-remote-resource", "a/b/vscode-remote-resource",
+		// the allow-listed names, in any other spelling, place or shape
+		"STATIC/x.js", "Static/x.js", "%73tatic/x.js", "static", "static%2Fx.js", "_STATIC/x", "_static", "vscode/_static/x",
+		"CALLBACK", "callback/x", "x/static/y.js", testCommit, strings.ToUpper(testCommit) + "/static/x.js", "stable-xyz/static/x.js",
+		// everything else the editors serve, and anything unknown
+		"web-extension-resource/x", "login", "healthz", "update/check", "mint-key", "manifest.json", "version", "anything/else.html"} {
+		assert.False(t, editorPathKeepsItsOrigin(rest), "not the workbench: %q", rest)
 	}
 }
 
 func TestWorkspaceSandboxPolicyMatrix(t *testing.T) {
-	mirror := webTabRoute{rest: "x"}
-	own := webTabRoute{rest: "x", previewOrigin: true}
+	mirror := webTabRoute{rest: "x", escapedRest: "x"}
+	own := webTabRoute{rest: "x", escapedRest: "x", previewOrigin: true}
 	assert.Equal(t, mirrorSandboxCSP, workspaceSandboxPolicy(mirror, session.TabKindWeb))
 	assert.Empty(t, workspaceSandboxPolicy(own, session.TabKindWeb), "a per-tab preview origin keeps its origin")
-	assert.Empty(t, workspaceSandboxPolicy(mirror, session.TabKindVSCode), "the workbench keeps its origin")
-	assert.Empty(t, workspaceSandboxPolicy(own, session.TabKindVSCode))
-	for _, route := range []webTabRoute{{rest: "proxy/3000/"}, {rest: "proxy/3000/", previewOrigin: true}} {
-		assert.Equal(t, mirrorSandboxCSP, workspaceSandboxPolicy(route, session.TabKindVSCode),
-			"an editor's relayed content is sandboxed on every route: %+v", route)
+	for _, route := range []webTabRoute{{}, {previewOrigin: true}, {rest: "static/x.js", escapedRest: "static/x.js"}} {
+		assert.Empty(t, workspaceSandboxPolicy(route, session.TabKindVSCode), "the workbench keeps its origin: %+v", route)
 	}
+	for _, route := range []webTabRoute{mirror, own, {rest: "proxy/3000/", escapedRest: "PROXY/3000/", previewOrigin: true}} {
+		assert.Equal(t, mirrorSandboxCSP, workspaceSandboxPolicy(route, session.TabKindVSCode),
+			"anything but the workbench is sandboxed on every route: %+v", route)
+	}
+}
+
+// Rule 5: a workspace response never acts on a whole origin it shares.
+func TestConfineOriginHeaders(t *testing.T) {
+	const prefix = "/v1/webtab/s1/t1"
+	mirror := webTabRoute{prefix: prefix}
+	own := webTabRoute{previewOrigin: true}
+	run := func(route webTabRoute, kind session.TabKind, set map[string]string) http.Header {
+		h := http.Header{}
+		for k, v := range set {
+			h.Set(k, v)
+		}
+		confineOriginHeaders(h, route, kind, prefix+"/assets/sw.js")
+		return h
+	}
+	wipe := map[string]string{"Clear-Site-Data": `"storage", "cookies"`}
+	assert.Empty(t, run(mirror, session.TabKindWeb, wipe).Get("Clear-Site-Data"), "the web UI's origin")
+	assert.Empty(t, run(mirror, session.TabKindVSCode, wipe).Get("Clear-Site-Data"), "the web UI's origin")
+	assert.Empty(t, run(own, session.TabKindVSCode, wipe).Get("Clear-Site-Data"), "an editor's origin belongs to the editor")
+	assert.NotEmpty(t, run(own, session.TabKindWeb, wipe).Get("Clear-Site-Data"), "a web tab's own preview origin is the app's")
+
+	for value, want := range map[string]string{
+		"/":                         prefix + "/",
+		"/app/":                     prefix + "/app/",
+		"/app":                      prefix + "/app",
+		"./":                        prefix + "/assets/",
+		"../":                       prefix + "/",
+		"../../../../":              prefix + "/",
+		"%2e%2e/%2e%2e/%2e%2e/":     prefix + "/",
+		"http://127.0.0.1:8443/":    prefix + "/",
+		"//127.0.0.1:8443/":         prefix + "/",
+		"/../../":                   prefix + "/",
+		"/v1/webtab/s1/t1-sibling/": prefix + "/v1/webtab/s1/t1-sibling/",
+	} {
+		got := run(mirror, session.TabKindWeb, map[string]string{"Service-Worker-Allowed": value}).Get("Service-Worker-Allowed")
+		assert.Equal(t, want, got, "Service-Worker-Allowed %q", value)
+		assert.True(t, strings.HasPrefix(got, prefix+"/"), "%q stays inside the tab", value)
+	}
+	assert.Empty(t, run(mirror, session.TabKindWeb, nil).Values("Service-Worker-Allowed"), "nothing is added")
+	assert.Equal(t, "/", run(own, session.TabKindWeb, map[string]string{"Service-Worker-Allowed": "/"}).Get("Service-Worker-Allowed"),
+		"a tab's own origin is the tab's to scope")
+}
+
+// Rule 5 through the real proxy, on the mirror.
+func TestWorkspaceIsolation_MirrorConfinesOriginWideHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Clear-Site-Data", `"*"`)
+		w.Header().Set("Service-Worker-Allowed", "/")
+		w.Header().Set("Content-Type", "text/javascript")
+		fmt.Fprint(w, "self.onfetch = () => {}")
+	}))
+	defer upstream.Close()
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+	rec := proxyGet(t, mux, id, tabID, "sw.js")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, rec.Header().Values("Clear-Site-Data"))
+	assert.Equal(t, webtabPathPrefix+id+"/"+tabID+"/", rec.Header().Get("Service-Worker-Allowed"))
 }
 
 // The header's flags are the web client's mirror-frame sandbox; web/src/tabaddr.test.ts
@@ -200,6 +279,15 @@ func TestWorkspaceIsolation_EditorWebSocketOnlyFromItsOwnOrigin(t *testing.T) {
 		require.NotNil(t, resp, "Origin %q: %v", origin, err)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode, "Origin %q", origin)
 	}
+	// The same tab addressed by its session's TITLE is refused before it starts too.
+	byTitle := "ws" + strings.TrimPrefix(srv.URL, "http") + vscodeProxyPath("vscodeproxy", tabID, "ws")
+	c, resp, err := websocket.Dial(ctx, byTitle, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {"null"}}})
+	if c != nil {
+		_ = c.CloseNow()
+	}
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "by title")
 	_, statErr := os.Stat(argsFile)
 	assert.True(t, os.IsNotExist(statErr), "a refused handshake must not start the editor (argv file: %v)", statErr)
 
@@ -216,7 +304,7 @@ func TestWorkspaceIsolation_EditorWebSocketOnlyFromItsOwnOrigin(t *testing.T) {
 		_ = c.CloseNow()
 	}
 	// A running editor is refused the same way.
-	c, resp, err := dial("http://127.0.0.1:3000")
+	c, resp, err = dial("http://127.0.0.1:3000")
 	if c != nil {
 		_ = c.CloseNow()
 	}
