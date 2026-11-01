@@ -304,12 +304,17 @@ func (m *Manager) RunBacklog(req backlog.RunRequest) (backlog.RunResponse, error
 		if req.RepoPath != "" {
 			start = backlog.StartRequest{RepoPath: req.RepoPath, ID: id}
 		}
-		_, err := m.startBacklogItemCapped(start, backlog.StartedByUser)
+		// A pass start, not a start by hand: its transaction honours a pause
+		// that lands after RunNow chose the batch.
+		_, err := m.startBacklogItemCapped(start, backlog.StartedByRunPass)
 		if errors.Is(err, errSlotsFull) {
 			if len(out.Started) == 0 {
 				out.Reason = backlog.SlotsFull(b.Settings.MaxRunning)
 			}
 			break
+		}
+		if errors.Is(err, errNotRunnable) {
+			continue // its group was paused since the pass chose it; not a failed start
 		}
 		if err != nil {
 			if len(out.Started) == 0 {

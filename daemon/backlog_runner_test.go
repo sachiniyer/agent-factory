@@ -572,6 +572,32 @@ func TestAutomaticStartRefusesAnItemPausedBeforeItsStartIsRecorded(t *testing.T)
 	}
 }
 
+// The same race for "af backlog run": RunNow chose the batch before the group
+// was paused, and each pick reaches the start as a pass start, which the
+// transaction refuses like the runner's (Codex P2 on #6468).
+func TestRunPassStartRefusesAnItemPausedAfterThePassChoseIt(t *testing.T) {
+	m, repoID := runnerTestManager(t)
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		if _, err := b.Add(backlog.NewItem{Title: "group"}, time.Now()); err != nil {
+			return err
+		}
+		_, err := b.Add(backlog.NewItem{Title: "child", Parent: 1}, time.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	queueItem(t, m, repoID, 2)
+	if _, err := m.backlogService().UpdateItem(backlog.UpdateItemRequest{RepoID: repoID, ID: 1, Paused: ptrTo(true)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: 2}, backlog.StartedByRunPass); !errors.Is(err, errNotRunnable) {
+		t.Fatalf("a pass start under a paused group: %v", err)
+	}
+	if it := loadItem(t, repoID, 2); it.Status != backlog.StatusQueued || len(it.Runs) != 0 {
+		t.Fatalf("the paused group's item was started: %+v", it)
+	}
+}
+
 // A continuation spends its own session's account, not the project default's
 // (Codex P2 on #6300).
 func TestContinuationAccountIsTheLiveSessionsAccount(t *testing.T) {

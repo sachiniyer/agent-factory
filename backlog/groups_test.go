@@ -213,15 +213,22 @@ func TestRunnerEligibleRefusesAnItemPausedAfterThePassChoseIt(t *testing.T) {
 }
 
 // The pause can also land after the admission check and before the start is
-// recorded, so the transaction that records it refuses a runner start too
-// (Codex P2 on #6468). A start by hand still goes through.
+// recorded, so the transaction that records it refuses a runner start, and a
+// start an "af backlog run" pass chose, too (Codex P2s on #6468). A start by
+// hand still goes through.
 func TestBeginStartRefusesARunnerStartUnderAPausedParent(t *testing.T) {
+	// Unpaused, a pass start is recorded as the user's, as before.
+	if p, err := group(t).BeginStart(3, StartedByRunPass, nil, t0); err != nil || p.Run.StartedBy != StartedByUser {
+		t.Fatalf("an unpaused pass start: %+v %v", p, err)
+	}
 	b := group(t)
 	if _, err := b.Edit(2, Edit{Paused: ptr(true)}, t0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.BeginStart(3, StartedByRunner, nil, t0); !errors.Is(err, ErrNotRunnable) {
-		t.Fatalf("runner start under a paused parent: %v", err)
+	for _, by := range []string{StartedByRunner, StartedByRunPass} {
+		if _, err := b.BeginStart(3, by, nil, t0); !errors.Is(err, ErrNotRunnable) {
+			t.Fatalf("%s start under a paused parent: %v", by, err)
+		}
 	}
 	if it := b.Item(3); it.Status != StatusQueued || len(it.Runs) != 0 {
 		t.Fatalf("the refused start changed the item: %+v", it)

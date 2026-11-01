@@ -38,6 +38,11 @@ const (
 
 	StartedByRunner = "runner"
 	StartedByUser   = "user"
+	// StartedByRunPass starts an item that "af backlog run" chose. It is
+	// recorded as StartedByUser (a pass ignores the runner switch and the
+	// budget, like a start by hand), but its start transaction honours pauses,
+	// as the pass's choice did.
+	StartedByRunPass = "run-pass"
 
 	KindQuestion = "question"
 	KindAnswer   = "answer"
