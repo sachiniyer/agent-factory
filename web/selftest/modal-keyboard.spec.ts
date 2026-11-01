@@ -48,11 +48,11 @@ for (const [width, height, kb] of [[390, 844, 336], [320, 568, 260]] as const) {
 
       await setKb(page, kb);
       await page.waitForTimeout(500);
-      await page.getByLabel("Title").focus();
+      await card.getByLabel("Session title", { exact: true }).focus();
       // Open the taller form and focus its last field, the hardest case for a
       // pinned footer: the field must scroll above it, not under it.
       await page.locator("summary", { hasText: "Defaults" }).click().catch(() => {});
-      await page.getByLabel("Prompt").focus();
+      await card.getByLabel("Initial prompt", { exact: true }).focus();
       await page.waitForTimeout(400);
 
       const c = await rect(page, ".af-modal-card");

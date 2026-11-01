@@ -105,6 +105,11 @@ func (m *Manager) planUsageOn() bool {
 	return cfg != nil && cfg.Backlog.PlanUsage
 }
 
+// disabledUsage is what every reader gets while plan usage is off.
+func disabledUsage() planusage.Usage {
+	return planusage.Usage{Disabled: true, Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+}
+
 // MeterBacklog starts a metering pass on its own goroutine when one is due.
 func (m *Manager) MeterBacklog() {
 	if !m.planUsageOn() {
@@ -141,7 +146,7 @@ func (m *Manager) startMeterPass() {
 // pass can read a week of them.
 func (m *Manager) backlogUsage() planusage.Usage {
 	if !m.planUsageOn() {
-		return planusage.Usage{Disabled: true, Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+		return disabledUsage()
 	}
 	st := &m.backlog.meter
 	usage, fresh := st.last(time.Now())
@@ -152,12 +157,52 @@ func (m *Manager) backlogUsage() planusage.Usage {
 }
 
 func (s *meterState) last(now time.Time) (planusage.Usage, bool) {
+	u, at := s.result()
+	if at.IsZero() {
+		return u, false
+	}
+	return u, now.Sub(at) < meterFreshFor
+}
+
+// result is the last pass's usage, however old, and when it finished; zero
+// before the first pass.
+func (s *meterState) result() (planusage.Usage, time.Time) {
 	s.usageMu.Lock()
 	defer s.usageMu.Unlock()
 	if s.finished.IsZero() {
-		return planusage.Usage{Metering: true, Runs: map[string]float64{}, RunWindow: map[string]float64{}}, false
+		return planusage.Usage{Metering: true, Runs: map[string]float64{}, RunWindow: map[string]float64{}}, time.Time{}
 	}
-	return s.usage, now.Sub(s.finished) < meterFreshFor
+	return s.usage, s.finished
+}
+
+// current is the last pass's usage, however old.
+func (s *meterState) current() planusage.Usage {
+	u, _ := s.result()
+	return u
+}
+
+// meterUsageWithin meters on the caller's goroutine unless the last pass
+// finished within age, then returns the usage. A pass already running is
+// waited for. Only background work calls it: a pass can read a week of
+// transcripts.
+func (m *Manager) meterUsageWithin(age time.Duration) planusage.Usage {
+	if !m.planUsageOn() {
+		return disabledUsage()
+	}
+	st := &m.backlog.meter
+	if u, at := st.result(); !at.IsZero() && time.Since(at) < age {
+		return u
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if u, at := st.result(); !at.IsZero() && time.Since(at) < age {
+		return u
+	}
+	if _, admitted := m.beginBackgroundMutation(); admitted {
+		m.meterPassLocked(time.Now())
+		m.backgroundMutationWG.Done()
+	}
+	return st.current()
 }
 
 // itemSessionTranscriptDirs are the transcript directories of every live item
@@ -229,6 +274,15 @@ func accountOfRun(home, configDir string) string {
 	return planusage.AccountForConfigDir(home, configDir)
 }
 
+// meterWhere names the project of repoID for an unmeterable reason: its
+// registered root when the registry has one, else the name a live session gives.
+func (m *Manager) meterWhere(repoID string) backlog.Where {
+	if root, err := registeredProjectRootForRepoID(repoID); err == nil && root != "" {
+		return backlog.Where{Name: filepath.Base(root), Root: root}
+	}
+	return backlog.Where{Name: backlogHost{m: m}.ProjectName(repoID)}
+}
+
 // itemRun is one started run of an item, with its session when it still exists.
 type itemRun struct {
 	repoID string
@@ -256,7 +310,7 @@ func (m *Manager) startedItemRuns(home string) ([]itemRun, bool) {
 		repoID := filepath.Base(filepath.Dir(p))
 		b, err := backlog.Load(repoID)
 		if err != nil {
-			m.warn().Printf("plan meter: backlog of project %s: %v", repoID, err)
+			m.warnBacklogUnreadable("plan meter: backlog", repoID, err)
 			complete = false
 			continue
 		}
@@ -289,6 +343,12 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	state, err := planusage.LoadMeter()
 	if err != nil {
 		m.warn().Printf("plan meter: %v", err)
+		// Publish the failure, not the previous good result: the runner would
+		// otherwise gate on unchanged costs while new spend goes unseen.
+		st.usageMu.Lock()
+		st.usage = planusage.Usage{Unavailable: err.Error(), Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+		st.finished = now
+		st.usageMu.Unlock()
 		return
 	}
 	appliedDirs := st.applyPending(state)
@@ -308,6 +368,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	runSnaps := map[string]planusage.RunSnapshot{}
 	runConfigs := map[string][]string{}
 	itemRuns, runsComplete := m.startedItemRuns(home)
+	wheres := map[string]backlog.Where{}
 	for _, r := range itemRuns {
 		usage.Runs[r.run.SessionID] = r.run.Cost()
 		// Only the item's CURRENT run can be an active-run metering failure: an
@@ -316,6 +377,25 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		// Historical runs are still metered for their cost.
 		running := r.item.Status == backlog.StatusRunning && len(r.item.Runs) > 0 &&
 			r.item.Runs[len(r.item.Runs)-1].SessionID == r.run.SessionID
+		// And only while that run is at work (Refs #6284, fork add59406df): the
+		// runner's gate is shared by every project, so a run that is over must not
+		// hold it. A killed or archived session is not at work, and neither is an
+		// item waiting on the user's answer: it stays running after its run ends,
+		// until the answer's delivery starts the next run. Pane churn after the end
+		// means someone is working in it again.
+		running = running && r.inst != nil &&
+			backlog.RunBlocksRunner(r.item.Status, r.inst.IsArchived(), r.inst.BacklogRunEndedAt(), r.inst.LastPaneChurnAt())
+		// The reason is shown in every project, so a run that can block it names
+		// its own. Only those runs pay for the registry read.
+		var where backlog.Where
+		if running {
+			if w, ok := wheres[r.repoID]; ok {
+				where = w
+			} else {
+				where = m.meterWhere(r.repoID)
+				wheres[r.repoID] = where
+			}
+		}
 		var configDir string
 		var dirs []string
 		if r.inst != nil {
@@ -327,7 +407,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 					if program == "" {
 						program = r.inst.Program
 					}
-					usage.Unmeterable[r.run.SessionID] = backlog.UnmeterableProgram(r.item.ID, program)
+					usage.Unmeterable[r.run.SessionID] = backlog.UnmeterableProgram(r.item.ID, where, program)
 				}
 				// The session ran Claude before a manual cross-agent handoff: its
 				// remembered Claude transcripts still hold usage that belongs to
@@ -356,7 +436,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		// them on the account window's schedule would let a resumed or forked
 		// transcript re-add old history to a run continued after more than a week
 		// (Codex P2 on #6299).
-		rm := backlog.MeterRun(r.item.ID, r.run, planusage.TranscriptFiles(dirs), seen, overrides, now)
+		rm := backlog.MeterRun(r.item.ID, where, r.run, planusage.TranscriptFiles(dirs), seen, overrides, now)
 		usage.Runs[r.run.SessionID] = rm.Cost()
 		// Each message belongs to the account whose config root holds its transcript,
 		// not to the session's account now: a session that switched accounts has
@@ -440,10 +520,14 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	// Save the dedupe keys and buckets BEFORE the offsets and costs that depend
 	// on them advance in backlog.json: the other order leaves a failed save with
 	// offsets ahead of keys, and the next pass skips messages that were never
-	// priced into the run window (Codex P2 on #6299). A failed save advances
-	// nothing.
+	// priced into the run window (Codex P2 on #6300). A failed save advances
+	// nothing, and closes the runner until metering works again.
 	if err := state.Save(); err != nil {
 		m.warn().Printf("plan meter: %v", err)
+		st.usageMu.Lock()
+		st.usage = planusage.Usage{Unavailable: err.Error(), Runs: map[string]float64{}, RunWindow: map[string]float64{}}
+		st.finished = now
+		st.usageMu.Unlock()
 		return
 	}
 	st.clearPending(appliedDirs)
@@ -498,6 +582,7 @@ func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlo
 			m.warn().Printf("plan meter: reading of account %s: %v", name, err)
 		}
 		au := planusage.AccountUsageOf(r, state.Accounts[name], overrides, now)
+		planusage.SetBacklogCosts(&au.Windows, state.Accounts[name], now)
 		usage.Accounts[name] = au
 		if au.ReadingAt != nil && (usage.ReadingAt == nil || au.ReadingAt.After(*usage.ReadingAt)) {
 			usage.Account, usage.Windows, usage.ReadingAt = name, au.Windows, au.ReadingAt

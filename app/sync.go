@@ -836,6 +836,20 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		_ = inst.Transition(session.ObserveLiveness(lv))
 		changed = true
 	}
+	// The agent's attention request is the same class of projection-only axis
+	// (#5461): it appears on `attention --self` and clears on the daemon's own
+	// rules while liveness stays Ready/Running, so an already-open rail must
+	// mirror it here or the row only learns of it at the next rebuild. It is
+	// applied AFTER the liveness transition on purpose: a Ready→Running churn
+	// transition the daemon deliberately marks attention-preserving
+	// (settleChurnedLiveness) would otherwise let noteAttentionLivenessLocked
+	// clear the just-mirrored request locally once its idle spell passes the
+	// ten-second answer window, dropping the marker until the next poll
+	// restores it. Daemon truth last — client-side clear rules may not
+	// override a snapshot that still carries the request.
+	if inst.ReconcileAttention(d.Attention) {
+		changed = true
+	}
 	// A kill tombstone is durable while an operation marker is process-local.
 	// Adopt it monotonically and clear any old marker under one session lock, so
 	// a same-session row cannot briefly project a killed handoff as Loading. An

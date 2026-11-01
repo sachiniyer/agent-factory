@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/backlog"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -47,6 +48,23 @@ func TestBacklogStart(t *testing.T) {
 	}
 	if strings.Join(*methods, ",") != "StartBacklogItem" {
 		t.Fatal(*methods)
+	}
+}
+
+func TestBacklogRun(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	out, err := runBacklogCmd(t, "run", "--count", "3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := decodeOut[daemon.RunBacklogResponse](t, out); len(r.Started) != 1 || r.Started[0] != 3 {
+		t.Fatalf("%+v", r)
+	}
+	if strings.Join(*methods, ",") != "RunBacklog" {
+		t.Fatal(*methods)
+	}
+	if _, err := runBacklogCmd(t, "run", "--count", "0"); err == nil || err.Error() != "--count must be 1 or more" {
+		t.Fatal(err)
 	}
 }
 
@@ -132,7 +150,7 @@ func TestBacklogGuardRails(t *testing.T) {
 	*methods = nil
 	for _, args := range [][]string{
 		{"queue", "1"}, {"draft", "1"}, {"review", "1"}, {"reopen", "1"}, {"start", "1"}, {"done", "1"}, {"drop", "1"}, {"delete", "1"},
-		{"answer", "1", "yes"}, {"note", "1", "text"},
+		{"answer", "1", "yes"}, {"note", "1", "text"}, {"run"},
 		// Plan editing: an agent leaves a note instead (Codex P2 on #6294).
 		{"add", "another"}, {"add", "--file", "-"}, {"edit", "1", "--title", "x"}, {"move", "1", "--top"},
 	} {

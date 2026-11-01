@@ -147,6 +147,11 @@ func TestMigrateSchemaBytesRefusesNewerVersion(t *testing.T) {
 	require.True(t, errors.As(err, &newer))
 	assert.Equal(t, 3, newer.FileVersion)
 	assert.Equal(t, 2, newer.SupportedVersion)
+	// The refusal says who wrote the file and what to do (#6469): an older af
+	// meeting a newer file must not read as corruption.
+	assert.Contains(t, err.Error(), "was written by a newer af")
+	assert.Contains(t, err.Error(), "schema_version 3")
+	assert.Contains(t, err.Error(), "supports up to 2")
 	assert.Contains(t, err.Error(), "upgrade af")
 }
 

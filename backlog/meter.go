@@ -3,8 +3,10 @@ package backlog
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/planusage"
 )
 
@@ -32,8 +34,9 @@ func (m RunMeter) Cost() float64 { return RunRef{Meter: m.Meter}.Cost() }
 // holds the keys of the run's messages counted so far, from any of its files,
 // and gains what this pass counts; a message Claude Code copied into a new
 // transcript (resume, fork) counts once. A run with no files is unmeterable
-// once it has run for UnmeterableAfter.
-func MeterRun(id int, r RunRef, files []string, seen map[string]int64, overrides map[string]planusage.Price, now time.Time) RunMeter {
+// once it has run for UnmeterableAfter. w names the item's project in the
+// reason, which the runner shows in every project.
+func MeterRun(id int, w Where, r RunRef, files []string, seen map[string]int64, overrides map[string]planusage.Price, now time.Time) RunMeter {
 	out := RunMeter{Meter: maps.Clone(r.Meter)}
 	if out.Meter == nil {
 		out.Meter = map[string]Meter{}
@@ -56,21 +59,68 @@ func MeterRun(id int, r RunRef, files []string, seen map[string]int64, overrides
 		case res.Unpriced != "":
 			out.Unmeterable = fmt.Sprintf("no price for model %s; add [backlog.prices.%q] to config.toml", res.Unpriced, res.Unpriced)
 		case res.Bad && out.Unmeterable == "":
-			out.Unmeterable = fmt.Sprintf("af cannot read a transcript of %s's session (%s); start %s by hand with \"af backlog start %d\"", FormatID(id), f, FormatID(id), id)
+			out.Unmeterable = fmt.Sprintf("af cannot read a transcript of the session of %s (%s) · %s", w.Item(id), f, w.Fix(id))
 		case err != nil && out.Unmeterable == "" && res.Mark.Offset == old.Offset:
-			out.Unmeterable = fmt.Sprintf("af cannot read a transcript of %s's session: %v", FormatID(id), err)
+			out.Unmeterable = fmt.Sprintf("af cannot read a transcript of the session of %s: %v", w.Item(id), err)
 		}
 	}
 	if len(files) == 0 && now.Sub(r.StartedAt) >= UnmeterableAfter {
-		out.Unmeterable = fmt.Sprintf("af cannot find the transcripts of %s's session; start %s by hand with \"af backlog start %d\"", FormatID(id), FormatID(id), id)
+		out.Unmeterable = fmt.Sprintf("af cannot find the transcripts of the session of %s · %s", w.Item(id), w.Fix(id))
 	}
 	return out
 }
 
+// Where names the project an item is in, for a reason shown outside it: the
+// runner's gate is shared, so one project's unmeterable run stops the runner of
+// every project, and "B-12" alone names an item in each of them.
+type Where struct {
+	// Name is the project's repo name; Root is its root directory.
+	Name, Root string
+}
+
+// Item names an item: "B-24 in project detail".
+func (w Where) Item(id int) string {
+	if w.Name == "" {
+		return FormatID(id)
+	}
+	return fmt.Sprintf("%s in project %s", FormatID(id), w.Name)
+}
+
+// Fix is what to do about an item af cannot meter: the plain action, then the
+// command that opens the item from any directory.
+func (w Where) Fix(id int) string {
+	out := fmt.Sprintf("mark %s done or drop it", FormatID(id))
+	if w.Root != "" {
+		return out + fmt.Sprintf(" · see \"af backlog show %d --repo %s\"", id, quoteArg(w.Root))
+	}
+	return out + fmt.Sprintf(" · see \"af backlog show %d\"", id)
+}
+
+// quoteArg quotes a path for a command the user pastes, only when the shell
+// would split or interpret it.
+func quoteArg(path string) string {
+	if strings.Trim(path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+:=@%,~") == "" {
+		return path
+	}
+	return config.ShellQuotePath(path)
+}
+
 // UnmeterableProgram is why a run of a program other than Claude cannot be
 // metered.
-func UnmeterableProgram(id int, program string) string {
-	return fmt.Sprintf("the runner can't meter %s; start %s by hand with \"af backlog start %d\"", program, FormatID(id), id)
+func UnmeterableProgram(id int, w Where, program string) string {
+	return fmt.Sprintf("the runner can't meter %s, the program of %s · %s", program, w.Item(id), w.Fix(id))
+}
+
+// RunBlocksRunner is whether trouble metering a run may stop the runner: only
+// a run still at work. An archived session, or a run that ended and was not
+// worked in since (pane churn after its end), is metered but never blocks. An
+// item waiting on the user's answer is such a run: its status stays running
+// after its run ends, and the answer's delivery starts a new run.
+func RunBlocksRunner(status Status, archived bool, endedAt, churnAt time.Time) bool {
+	if status != StatusRunning || archived {
+		return false
+	}
+	return endedAt.IsZero() || churnAt.After(endedAt)
 }
 
 // SetRunMeters stores per-file meters on the runs of the given sessions. It

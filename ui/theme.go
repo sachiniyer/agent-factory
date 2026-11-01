@@ -35,6 +35,7 @@ func ApplyTheme() {
 		Lost:                activeTheme.Lost,
 		Dead:                activeTheme.Dead,
 		ArchiveWarning:      activeTheme.Dead,
+		Attention:           activeTheme.Attention,
 	})
 	applyThemeStyles()
 }

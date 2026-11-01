@@ -137,7 +137,7 @@ async function runWith(runs, files = { 1: ['a.go'], 2: ['a.go'] }, mutate) {
 test('verified head (both success) merges', async () => {
   const { github } = await runWith({});
   assert.deepEqual(github.merged, [1, 2]);
-  assert.deepEqual(github_runs.dispatched.filter((w) => w !== 'build.yml' && w !== 'lint.yml'), ['docs.yml', 'pr.yml', 'sandbox-e2e.yml', 'tui-driver-selftest.yml', 'web-selftest.yml']);
+  assert.deepEqual(github_runs.dispatched.filter((w) => w !== 'build.yml' && w !== 'lint.yml'), ['docs.yml', 'pr.yml', 'sandbox-e2e.yml', 'mac-e2e.yml', 'tui-driver-selftest.yml', 'web-selftest.yml']);
 });
 
 test('a failed Build or Lint on the head halts merging', async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type Draft, type Event, type Model, initialModel, statusOf, step } from "./docs_sync_model.js";
+import { type Draft, type Event, type Model, findLanded, initialModel, statusOf, step } from "./docs_sync_model.js";
 
 type Loose = Event | { t: "save_ok" | "save_conflict" | "save_fail" | "save_fatal" | "reload_ok" | "reload_fail" | "reconcile_ok" | "reconcile_fail"; [k: string]: unknown };
 
@@ -265,4 +265,35 @@ test("a refused save keeps its error visible when a reconcile read completes (#6
   r = run(r.m, { t: "reconcile_ok", doc: { text: "v1", commit: "c1" } });
   assert.equal(r.m.fatal, true, "the refusal still blocks the autosave");
   assert.equal(statusOf(r.m).status, "error", "the pane still says the save was refused, not that it is about to save");
+});
+
+test("an undo stands when the save it undid landed beside an agent's edits to the lines next to it", () => {
+  const base = "a8\na11\na9\nu1\na3";
+  const doubted = "u17\na11\na9\nu1\na3";
+  // The save of `doubted` loses its connection, and the user undoes the line before the read comes back.
+  let r = open({ text: base, commit: "c1" });
+  r = run(r.m, { t: "edit", text: doubted }, { t: "timer" });
+  r = run(r.m, { t: "save_fail", error: "cannot reach the daemon", outstanding: true });
+  r = run(r.m, { t: "edit", text: base });
+  // The read finds the save landed, with the agent's edits to the two lines after it. The merge of the
+  // save onto this head is a conflict, because the edits touch, so it cannot tell the save landed.
+  r = run(r.m, { t: "reconcile_ok", doc: { text: "u17\na15\na14\nu1\na3", commit: "c2" } });
+  // The undo is not silently replaced by the landed text: it stands as the user's side of a conflict
+  // with the agent's edits (their text is theirs to keep or take), where before it was reloaded away.
+  assert.notEqual(r.m.buffer, "u17\na15\na14\nu1\na3", "the buffer is not reloaded over the undo");
+  assert.equal(r.m.phase, "conflict");
+  assert.equal(r.m.conflict?.ours, base, "the undo is the user's side");
+  assert.equal(r.m.conflict?.theirs, "u17\na15\na14\nu1\na3");
+});
+
+test("the latest save the head holds is the one that landed, whatever size an older one was against its own base", () => {
+  // An older two-line edit (against the text before a retry was acknowledged) and a newer one-line edit
+  // (against the text after it) both merge onto this head to give exactly the head: the changed-line
+  // counts are measured against different bases and say nothing about which landed last.
+  const base0 = "a\n1\n2\n3\n4\nb\n6\n7\n8\n9\nc";
+  const older = "A\n1\n2\n3\n4\nB\n6\n7\n8\n9\nc";
+  const newer = "A\n1\n2\n3\n4\nB\n6\n7\n8\n9\nC";
+  const head = "A\n1\nR\n3\n4\nB\n6\n7\n8\n9\nC";
+  const picked = findLanded([{ text: older, from: base0 }, { text: newer, from: older }], head);
+  assert.equal(picked?.text, newer);
 });

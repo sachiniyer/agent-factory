@@ -65,6 +65,7 @@ the docs build — on every push.
 | [Fail-first probe runs](probe-runs.md) | Proving a new `daemon/`, `app/` or `integration/` test fails without its fix, with one Linux `Test` job instead of a full CI run. |
 | [Demo assets](demo-assets.md) | Regenerating the web demo and theme-specific stills. |
 | [Lifecycle testing](lifecycle-testing.md) | Clean install and install → upgrade on a real machine: the bugs that need two versions to exist. |
+| [macOS smoke test](mac-smoke.md) | Run the real `af` through its core journey on a Mac (SIP on) and paste the report; the same script runs in CI. |
 | [Web client selftest](web-selftest.md) | The Playwright acceptance proof for the embedded web client. |
 | [Performance baselines](perf-baselines.md) | The 1,000-session fixture, web/TUI CI budgets, and reviewed demo goldens. |
 | [Manual TUI testing](tui-manual-testing.md) | `scripts/tui-driver.sh`, the self-synchronizing driver for play-testing the live TUI. |

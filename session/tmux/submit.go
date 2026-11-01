@@ -306,7 +306,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 	// exact session match so input never reaches a prefix-matched sibling
 	// session (#1006).
 	pasteCtx, pasteCancel := tmuxTimeoutContext()
-	pasteErr := t.runTmuxBounded(pasteCtx, "paste-buffer", "-d", "-p", "-b", buf, "-t", exactTarget(t.sanitizedName))
+	pasteErr := t.runTmuxBounded(pasteCtx, "paste-buffer", "-d", "-p", "-b", buf, "-t", ExactTarget(t.sanitizedName))
 	pasteTimedOut := pasteCtx.Err() != nil
 	pasteCancel()
 	if pasteErr != nil {
@@ -520,7 +520,7 @@ func (t *TmuxSession) clearComposerDraft() {
 	// send-keys discards output, so runTmuxBounded (which normalizes
 	// exec.ErrWaitDelay to success) is the right runner — the stdin-streaming
 	// caveat that makes load-buffer use its own helper does not apply here.
-	if err := t.runTmuxBounded(ctx, "send-keys", "-t", exactTarget(t.sanitizedName), "C-u"); err != nil {
+	if err := t.runTmuxBounded(ctx, "send-keys", "-t", ExactTarget(t.sanitizedName), "C-u"); err != nil {
 		if ctx.Err() != nil {
 			log.ErrorLog.Printf("submit: clearing composer for session %q timed out after %s (continuing to deliver)",
 				t.sanitizedName, tmuxCommandTimeout)
@@ -792,7 +792,7 @@ func (t *TmuxSession) capturePaneForDeliveryWithin(budget time.Duration) (string
 // capturePaneForDeliveryContext is the shared body: one bounded capture-pane,
 // with any failure (including a tripped deadline) reported as "could not look".
 func (t *TmuxSession) capturePaneForDeliveryContext(ctx context.Context) (string, bool) {
-	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-t", exactTarget(t.sanitizedName))
+	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-t", ExactTarget(t.sanitizedName))
 	if err != nil {
 		return "", false
 	}

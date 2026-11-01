@@ -1473,16 +1473,22 @@ test("reapConfigAssistant issues a DELETE to /v1/config-assistant with the beare
   let method = "";
   let url = "";
   let auth: string | undefined;
+  let contentType: string | undefined;
+  let body: unknown;
   (globalThis as { fetch: unknown }).fetch = async (u: string, init: RequestInit): Promise<Response> => {
     method = String(init.method);
     url = u;
     auth = (init.headers as Record<string, string>).Authorization;
+    contentType = (init.headers as Record<string, string>)["Content-Type"];
+    body = init.body;
     return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: {}, error: null }) } as unknown as Response;
   };
   await reapConfigAssistant("tok-2");
   assert.equal(method, "DELETE");
   assert.equal(url, "/v1/config-assistant");
   assert.equal(auth, "Bearer tok-2");
+  assert.equal(contentType, "application/json", "the daemon's TCP listener refuses an untyped DELETE");
+  assert.equal(body, "{}");
 });
 
 test("reapConfigAssistant throws ApiError on a non-2xx so a caller that cares can see it", async () => {
@@ -1708,11 +1714,13 @@ test("handoffSession sends an operator-selected account with optional agent", as
 // --- fetchEditorPortOrigin (W5.2) -------------------------------------------
 
 test("fetchEditorPortOrigin POSTs with the bearer and returns origin and bootstrap URL", async () => {
-  const cap: { url: string; method?: string; auth?: string } = { url: "" };
+  const cap: { url: string; method?: string; auth?: string; contentType?: string; body?: unknown } = { url: "" };
   (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
     cap.url = url;
     cap.method = init.method;
     cap.auth = (init.headers as Record<string, string> | undefined)?.Authorization;
+    cap.contentType = (init.headers as Record<string, string> | undefined)?.["Content-Type"];
+    cap.body = init.body;
     return {
       ok: true,
       status: 200,
@@ -1730,6 +1738,8 @@ test("fetchEditorPortOrigin POSTs with the bearer and returns origin and bootstr
   assert.equal(cap.url, "/v1/editor-origin?session=sess%201");
   assert.equal(cap.method, "POST", "minting allocates, so it must not be a GET");
   assert.equal(cap.auth, "Bearer tok");
+  assert.equal(cap.contentType, "application/json", "the daemon's TCP listener refuses an untyped POST");
+  assert.equal(cap.body, "{}");
 });
 
 test("fetchEditorPortOrigin is null when the feature is off or the call fails", async () => {

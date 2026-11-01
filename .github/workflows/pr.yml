@@ -333,6 +333,7 @@ jobs:
       # Routed through scripts/ci-apt-install.sh so a third-party source in the
       # runner image cannot fail this required check by failing the update (#3774).
       - name: Install zsh
+        timeout-minutes: 25
         run: scripts/ci-apt-install.sh zsh
 
       # There is deliberately no "warm alpine:3.20" step here any more (#2521).
@@ -481,6 +482,7 @@ jobs:
       # Same install as the Test job, for the same reason (internal/shellsuggest
       # runs its tests under zsh).
       - name: Install zsh
+        timeout-minutes: 25
         run: scripts/ci-apt-install.sh zsh
 
       - name: Run tests
@@ -550,6 +552,7 @@ jobs:
       # Routed through scripts/ci-apt-install.sh so a third-party source in the
       # runner image cannot fail this step by failing the update (#3774).
       - name: Install lifecycle dependencies
+        timeout-minutes: 25
         run: scripts/ci-apt-install.sh tmux
 
       - name: Enable the systemd user manager

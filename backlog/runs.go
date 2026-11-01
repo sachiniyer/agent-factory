@@ -38,6 +38,15 @@ func (b *Backlog) BeginStart(id int, by string, facts Facts, now time.Time) (Sta
 	if !it.Status.Open() {
 		return StartPlan{}, fmt.Errorf("%s is %s; reopen it first with \"af backlog reopen %d\"", FormatID(id), it.Status, id)
 	}
+	// A group paused (or archived, which pauses it) after a runner pass or an
+	// "af backlog run" pass chose this item stops the start here, inside the
+	// transaction that records it: a choice made before the lock cannot see a
+	// pause that lands in between. A start by hand ignores pauses on purpose.
+	if by == StartedByRunner || by == StartedByRunPass {
+		if p := b.PausedBy(id); p != 0 {
+			return StartPlan{}, fmt.Errorf("%w: %s is under paused %s", ErrNotRunnable, FormatID(id), FormatID(p))
+		}
+	}
 	if last := it.lastRun(); last != nil {
 		switch {
 		case last.State == RunStarting:
@@ -156,7 +165,7 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title stri
 		run.SessionID, run.Title, run.State = sessionID, title, RunStarted
 		return nil
 	}
-	run.State = RunFailed
+	run.State, run.EndedAt = RunFailed, now
 	if it.Status == StatusRunning && it.lastRun() == run {
 		if CheckStatusChange(StatusChange{ID: id, From: it.Status, To: run.PrevStatus, By: ActorAF,
 			StartFailed: true, PrevStatus: run.PrevStatus}) == nil {

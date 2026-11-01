@@ -213,6 +213,21 @@ func spawnWithEnv(t *testing.T, argv0 string, extraArgs []string, env map[string
 
 func alive(p proctree.Process) bool { return proctree.AliveSame(p) }
 
+// ambientTmuxEnv is the TMUX env var ("socket,serverPID,sessionIdx") a real
+// pane process inherits from tmux when its session lives on the same socket a
+// bare `tmux ls` resolves to in this test's isolated environment. A marked
+// orphan that carries it is corroborated against the ambient listing by
+// sessionDeathCorroborated (the record-absent kill arm): its TMUX socket agrees
+// with tmux.DefaultSocketPath, so the session's absence from the ambient
+// listing is proof of death rather than evidence the listing looked at the
+// wrong server. Use this to stage the production shape of a genuine orphan
+// (every pane process inherits TMUX from tmux) — without it the orphan has no
+// tmux server on record and the record-absent kill arm refuses it.
+func ambientTmuxEnv(t *testing.T) string {
+	t.Helper()
+	return fmt.Sprintf("%s,%d,0", tmux.DefaultSocketPath(), 1<<30)
+}
+
 func findByCheck(r *Report, check string) []Finding {
 	var out []Finding
 	for _, f := range r.Findings {
@@ -251,6 +266,11 @@ func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		"AF_SESSION": "af_doctor-dead-session",
 		"AF_HOME":    home,
+		// A genuine orphan inherited its session's TMUX env from tmux; the
+		// socket it names matches doctor's ambient listing, so the record-
+		// absent kill arm corroborates the session's death on the ambient
+		// server and arms the kill.
+		"TMUX": ambientTmuxEnv(t),
 	})
 
 	// Read-only pass: reported, not touched.
@@ -856,6 +876,10 @@ func TestOrphanSignalIdentityGuard(t *testing.T) {
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		"AF_SESSION": "af_doctor-recycle",
 		"AF_HOME":    home,
+		// The orphan lived on doctor's ambient server, so the record-absent
+		// kill arm corroborates its death and arms the fix closure this test
+		// exercises the identity guard of.
+		"TMUX": ambientTmuxEnv(t),
 	})
 
 	opts := testOptionsWithHome(t, home, false, orphan.PID)

@@ -38,6 +38,11 @@ const (
 
 	StartedByRunner = "runner"
 	StartedByUser   = "user"
+	// StartedByRunPass starts an item that "af backlog run" chose. It is
+	// recorded as StartedByUser (a pass ignores the runner switch and the
+	// budget, like a start by hand), but its start transaction honours pauses,
+	// as the pass's choice did.
+	StartedByRunPass = "run-pass"
 
 	KindQuestion = "question"
 	KindAnswer   = "answer"
@@ -92,6 +97,10 @@ type Item struct {
 	External  string    `json:"external,omitempty"`
 	Runs      []RunRef  `json:"runs,omitempty"`
 	Thread    []Message `json:"thread,omitempty"`
+	// Paused stops the runner from starting the items under a parent; Archived
+	// hides a top-level group and its items from the list, and pauses it.
+	Paused    bool      `json:"paused,omitempty"`
+	Archived  bool      `json:"archived,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -109,6 +118,13 @@ type RunRef struct {
 	StartedBy  string           `json:"started_by"`
 	StartedAt  time.Time        `json:"started_at"`
 	Meter      map[string]Meter `json:"meter,omitempty"`
+	// EndedAt is when a failed start failed.
+	EndedAt time.Time `json:"ended_at,omitzero"`
+	// CapReset names the 5-hour window the cap per run counts in, by its reset
+	// in epoch seconds; CapBase is the run's cost the cap counts from: at the
+	// window's start, or when af last stopped the run at the cap.
+	CapReset int64   `json:"cap_reset,omitempty"`
+	CapBase  float64 `json:"cap_base,omitempty"`
 }
 
 type Meter struct {
@@ -139,6 +155,11 @@ type Message struct {
 	// LiveEpoch is the item's LiveEpoch when the answer was accepted: a rollback
 	// applies only within the same epoch.
 	LiveEpoch int `json:"live_epoch,omitempty"`
+	// Then is what a question's session does after asking: "wait" or
+	// "archive". Handoff is the asking agent's notes for a later run. Both are
+	// schema v2 fields that later slices fill in (Refs #6284).
+	Then    string `json:"then,omitempty"`
+	Handoff string `json:"handoff,omitempty"`
 }
 
 type Settings struct {
@@ -252,6 +273,16 @@ func (it *Item) answerPending() bool {
 func (it *Item) closeOpenQuestions(reason string) {
 	for q := it.OpenQuestion(); q != nil; q = it.OpenQuestion() {
 		q.Closed = reason
+	}
+}
+
+// closeAFQuestions closes the open questions af asked, such as the cap per
+// run question; the agent's own questions stay open.
+func (it *Item) closeAFQuestions(reason string) {
+	for i := range it.Thread {
+		if m := &it.Thread[i]; m.Kind == KindQuestion && m.Author == AuthorAF && it.questionOpen(m.ID) {
+			m.Closed = reason
+		}
 	}
 }
 

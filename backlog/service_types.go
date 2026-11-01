@@ -27,8 +27,10 @@ const (
 type RunnerView struct {
 	State  string `json:"state"`
 	Reason string `json:"reason,omitempty"`
-	Used   int    `json:"used"`
-	Max    int    `json:"max"`
+	// Gate names the closed gate when State is stopped.
+	Gate string `json:"gate,omitempty"`
+	Used int    `json:"used"`
+	Max  int    `json:"max"`
 }
 
 type AddRequest struct {
@@ -55,6 +57,8 @@ type UpdateItemRequest struct {
 	WaitsOn    *[]int  `json:"waits_on,omitempty"`
 	Program    *string `json:"program,omitempty"`
 	Sequential *bool   `json:"sequential,omitempty"`
+	Paused     *bool   `json:"paused,omitempty"`
+	Archived   *bool   `json:"archived,omitempty"`
 }
 
 type ItemResponse struct {
@@ -98,6 +102,9 @@ type PostMessageRequest struct {
 	Text       string `json:"text"`
 	SessionID  string `json:"session_id,omitempty"`
 	QuestionID int    `json:"question_id,omitempty"`
+	// Handoff goes with a question: the asking agent's notes for a later run
+	// of the item (at most MaxHandoffBytes).
+	Handoff string `json:"handoff,omitempty"`
 }
 
 type MessageResponse struct {
@@ -148,4 +155,18 @@ type StartRequest struct {
 // starting.
 type StartResponse struct {
 	Run RunRef `json:"run"`
+}
+
+type RunRequest struct {
+	RepoID   string `json:"repo_id,omitempty"`
+	RepoPath string `json:"repo_path,omitempty"`
+	// Count is how many items to start; 0 means 1.
+	Count int `json:"count,omitempty"`
+}
+
+// RunResponse lists the items a run pass started; Reason says why it started
+// none.
+type RunResponse struct {
+	Started []int  `json:"started"`
+	Reason  string `json:"reason,omitempty"`
 }

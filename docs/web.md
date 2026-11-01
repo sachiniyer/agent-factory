@@ -95,7 +95,7 @@ non-default filter. If it hides everything, the empty state reports hidden rows.
 On a phone, selecting a terminal gives it the screen: one compact row holds
 **Toggle sessions**, the truncating session title, the
 **Terminal** and **VS Code** icon buttons, and **…**. The menu contains project
-choices, Sessions · Tasks · Config, session actions and tabs. Escape closes it and returns focus.
+choices, Sessions · Backlog · Tasks · Config, session actions and tabs. Escape closes it and returns focus.
 **Toggle sessions** opens the rail drawer; selecting a session or tapping its
 backdrop closes it. Opening the drawer leaves the terminal in place at the same
 size. Tasks and Config keep their phone layouts.
@@ -294,6 +294,34 @@ Submit with **Add** or
 **Save**, or leave with **Cancel**. Invalid values show an inline error.
 See [Tasks and automation](tasks.md) for scheduling semantics.
 
+### Backlog view
+
+**Backlog** holds a project's ordered tree of work items, the same backlog `af backlog`
+edits. Each row shows its id (`B-12`), title and state: Draft, Queued, Waiting, Working,
+Needs you, In review, Done or Dropped. A parent's state is rolled up from its children.
+The tab shows how many of the selected project's items need you; the project switcher
+shows each other project's count next to its name. An item that has a session gets its
+`B-12` chip in the Sessions rail; click the chip to open the item.
+
+- **New item…** adds a draft at the bottom; **Add child…** in an item's panel adds one
+  under it. Drag a row, or press `Alt+↑` · `Alt+↓`, to reorder it. **Move…** in the
+  panel sends an item to the top or bottom, above another item, or into a parent.
+- The filter buttons narrow the list by state; **Show done** adds finished items.
+- An item's panel holds its actions (Queue, Back to draft, Mark done, Drop, Reopen, Delete),
+  its body, the items it waits on (a wait that would make a cycle is refused), its
+  children, its runs and its thread. Notes go on the thread.
+- **Start now** runs a queued or draft item immediately, ignoring the runner switch and
+  the budget: it continues the item's live session or creates a new one. When an item's
+  agent asks a question, the item reads **Needs you**; type the answer in the panel and
+  **Send answer**.
+- The bar at the top shows the runner (on or off, slots in use) and the budget. Its ⋯ menu
+  edits the budget share, the plan percent where the runner stops, the cap per run, the
+  dollar limit, and what happens to an item's session when the item is done.
+
+The view re-reads the backlog on every change the daemon announces, when the event
+stream reconnects, and each time you open it, so edits made with `af backlog` or in
+another browser appear without a reload.
+
 ### Config view
 
 Choose **Config** to edit global settings on the daemon's host. The header names
@@ -409,7 +437,7 @@ through to the agent unless a modal or menu handles them.
 | `1`–`9` | Select a tab in navigation mode |
 | `t` · `T` | Open a terminal tab · a VS Code tab, when the session supports that kind |
 | `w` | Ask to delete the active tab; confirm with Delete tab, or cancel; never the Agent tab |
-| `[` · `]` | Cycle Sessions · Tasks · Config in navigation mode |
+| `[` · `]` | Cycle Sessions · Backlog · Tasks · Config in navigation mode |
 | `Alt+j` · `Alt+k` | Cycle pane focus in Sessions, including while attached |
 | `Alt+w` | Close the focused pane in Sessions |
 
@@ -449,8 +477,12 @@ terminal streams, or previews. Installing is optional.
 ### Web tabs
 
 The preview toolbar's **Reload** refreshes the frame; **Open** opens its target
-in a separate browser tab. A stopped dev server offers **Retry** in the fallback
-panel after you restart it.
+in a separate browser tab. A preview reached through the web UI's own address
+(the `/v1/webtab/` mirror) opens there under the same sandbox as its frame: an
+opaque origin, so it cannot read the web UI's storage or call its API as the web
+UI. A preview on its own [per-tab origin](#per-tab-preview-origins) opens on that
+origin. A stopped dev server offers **Retry** in the fallback panel after you
+restart it.
 
 Alongside terminal tabs, a session can hold **web tabs** — a tab that renders a
 **site in an iframe** instead of a terminal. The primary use is a **live
@@ -650,7 +682,18 @@ old owner's state.
 
 Unset (the default), nothing is bound and a remote viewer keeps the same-origin editor. If the
 pool is full the editor stays on the same-origin mirror and the daemon's error names
-`network.editor_origin_ports`. See [`network.editor_origin_ports`](configuration.md).
+`network.editor_origin_ports`. Both apply to a local session only: an off-box session's editor
+is never served on the web UI's address, so without a port of its own its pane says which
+setting to turn on. See [`network.editor_origin_ports`](configuration.md).
+
+An editor port answers only its own `Host` names, so a front-door name that
+`tailscale serve` or Caddy forwards must be listed in `network.allowed_hosts` — one
+entry covers the editor ports on any port. Behind a front door that rewrites `Host`,
+forward the browser's for each of these ports too (`X-Forwarded-Host $http_host`), as
+for the main UI: an editor's WebSocket is accepted only from the editor's own page,
+judged the same way. See [Host names the daemon answers
+to](remote-http-auth.md#host-names-the-daemon-answers-to) and [behind a reverse
+proxy](remote-http-auth.md#behind-a-reverse-proxy).
 
 ##### VS Code tabs get one too — per session
 
@@ -698,8 +741,11 @@ carry across every session's editor, which is why af shares it in the first plac
     origins do not apply remotely.
 
 A mirrored preview is sandboxed to an opaque origin, so it cannot reach the web UI
-or read its token. A preview on its **own** origin is sandboxed too, but with a real
-origin of its own (it needs one for `localStorage`, cookies and service workers) —
+or read its token — framed, and opened on its own alike: the daemon sends a
+`Content-Security-Policy: sandbox …` with every mirrored response, carrying the
+same flags as the frame, so a mirror address opened in a browser tab, bookmarked
+or pasted runs exactly as it does in the pane. A preview on its **own** origin is
+sandboxed too, but with a real origin of its own (it needs one for `localStorage`, cookies and service workers) —
 safe because the browser's own cross-origin rules already keep it away from the web
 UI. A small **reload** control sits above every web tab for dev-preview refreshes.
 
@@ -754,10 +800,20 @@ af sessions tab-create my-session --kind vscode --name editor
 every VS Code tab and pane in it — the first time a pane renders, listening on
 a **0600 unix socket** in a `0700` directory under the af home (no TCP listener
 at all). For an off-box session the agent-server on the session's host starts
-that code-server instead, and the daemon relays its socket. The browser reaches the editor through the daemon's `/v1/webtab/` proxy,
+that code-server instead, and the daemon relays its socket. A local editor is
+reached through the daemon's `/v1/webtab/` proxy when it has no origin of its own,
 which is what makes it work for a **remote viewer** (Tailscale/SSH) and what puts
 the daemon's auth policy in front of that route. On a cold start the pane briefly
 shows "VS Code is still starting…" and resolves itself.
+
+**An off-box session's editor opens only on an origin of its own.** Its bytes come
+from the session's workspace, and VS Code cannot run sandboxed, so af never serves
+it on the web UI's address: a compromised workspace would otherwise run script as
+the web UI itself. It opens on the [per-session editor
+origin](#per-tab-preview-origins) when `network.preview_listen_addr` is set to a
+fixed loopback port and you view from this machine, or on an [editor-origin
+port](#per-session-editor-origins-for-remote-viewers) when you view from
+elsewhere. With neither, the pane says which one to turn on.
 
 The editor is stopped when its last VS Code tab is closed, and when the session is
 archived or killed — and, **locally**, on daemon shutdown, so nothing is left
@@ -790,10 +846,49 @@ tab survives a restart and simply starts a new editor when you next open it.
     whatever your `launch_cmd` exposes it on — not a same-user socket.
 
     Note that a VS Code pane is deliberately **not** origin-sandboxed the way a web
-    tab is: VS Code cannot run under an opaque origin. That is acceptable because
-    the daemon controls what is served there (a code-server it started, on your
-    worktree) — and that editor already gives whoever reaches it a terminal on your
-    machine. Do not expose the daemon's listener to a network you do not trust.
+    tab is: VS Code cannot run under an opaque origin. For a **local** session that
+    is acceptable because the daemon controls what is served there (a code-server it
+    started, on your worktree), and a local workspace already runs as you. Only the
+    editor's own workbench keeps a real origin: its shell, VS Code's own static
+    files and its sign-in callback. Everything else the editor serves answers as an
+    opaque-origin page, on every origin the editor is reached through. That covers
+    code-server's port forwarding (`/proxy/<port>/`, `/absproxy/<port>/`, in any
+    spelling) and VS Code's route for worktree files (`vscode-remote-resource`). So
+    a dev server or a repository's HTML file opened there runs neither as the web UI
+    nor as the editor, whose origin is its terminal.
+
+    **Webviews are the exception.** VS Code renders notebook outputs and extension
+    views inside its webview host, which is part of the workbench and gives them a
+    real origin, and code-server serves that host on the editor's own origin. So
+    a notebook's HTML output, or an extension's view, runs with the editor's origin.
+    For a local editor opened on the web UI's address, that is the web UI's origin,
+    with its token. Open notebooks only from repositories you trust there, or give
+    local editors an origin of their own: `network.preview_listen_addr` when you
+    view from this machine, `network.editor_origin_ports` from elsewhere (above).
+    af bounds who may load those pages as a class, not by name: an editor's static
+    documents are framed or navigated only by the editor's own origin. A page under
+    the editor's static tree loaded into a nested browsing context (an iframe,
+    frame, object or embed) from another origin — another editor-origin port shares
+    the hostname and differs only by port — is refused. So one session's editor
+    cannot hand its webview or extension-host channel to a page on another, and a
+    code-server version with a third such host page is covered without an update.
+
+    Editor routes also serve only a **canonical** path. A request whose path has an
+    empty segment (`//`), a `.`/`..` segment, or an encoded separator (`%2F`, `%5C`)
+    is answered with `400` rather than left for the editor to collapse. One
+    user-visible effect: a **code-server port-forwarded app** (reached through
+    `/proxy/<port>/` or `/absproxy/<port>/`) that requests a URL containing `//` or
+    an encoded slash now gets a `400`; it must send the cleaned path. A dev server
+    reached as a web tab is unaffected.
+
+    The editor's WebSocket, which carries that terminal, is accepted
+    only from the editor's own page: af refuses a handshake whose `Origin` names any
+    other origin, on every address the editor is served on. It works behind the
+    same front doors the web UI's own streams do: a proxy that rewrites `Host` must
+    forward the browser's in `X-Forwarded-Host` (see [behind a reverse
+    proxy](remote-http-auth.md#behind-a-reverse-proxy)). An **off-box** session's
+    editor is never served on the web UI's address at all (above). Do not expose the
+    daemon's listener to a network you do not trust.
 
 In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
 editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.

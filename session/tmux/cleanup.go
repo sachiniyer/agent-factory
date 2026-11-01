@@ -262,7 +262,10 @@ func tmuxDiagnosticSuffix(err error) string {
 	return " (" + diagnostic + ")"
 }
 
-// exactTarget builds an exact-match `-t` target spec for the named session.
+// ExactTarget builds an exact-match `-t` target spec for the named session.
+// It is the canonical spelling every af-built tmux target derives from —
+// packages outside session/tmux must use it rather than open-coding the `=`
+// prefix, so the exact-match convention cannot silently drift (#1195).
 //
 // tmux resolves a bare `-t name` by exact match first and then PREFIX match, so
 // once an agent session dies a bare target silently resolves to a surviving
@@ -277,8 +280,18 @@ func tmuxDiagnosticSuffix(err error) string {
 // makes tmux parse `=name` as the session and resolve to its active pane. The
 // session-target commands (kill-session, attach-session) accept the same form,
 // so every action command shares one exact-match spelling.
-func exactTarget(name string) string {
+func ExactTarget(name string) string {
 	return fmt.Sprintf("=%s:", name)
+}
+
+// ExactSessionTarget builds the exact-match session-target spelling `=name`:
+// the same `=`-prefixed guarantee as ExactTarget without resolving to the
+// session's active pane. Session-target commands (has-session, kill-session,
+// attach-session) and the manual-remedy commands af suggests to the operator
+// use it. Pane-target commands must use ExactTarget instead — tmux parses a
+// bare `=name` there as a pane spec and reports "can't find pane: =name".
+func ExactSessionTarget(name string) string {
+	return "=" + name
 }
 
 // CleanupSessions kills every af_-prefixed tmux session owned by THIS
@@ -422,7 +435,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		switch {
 		case !ok:
 			log.InfoLog.Printf("leaving tmux session %s: no AF_HOME ownership marker (pre-marker build or tmux <3.2); kill manually with: %s", match,
-				shellsuggest.Command("tmux", "kill-session", "-t", "="+match))
+				shellsuggest.Command("tmux", "kill-session", "-t", ExactSessionTarget(match)))
 		case filepath.Clean(home) != filepath.Clean(ownHome):
 			log.InfoLog.Printf("leaving tmux session %s: owned by another agent-factory home (%s)", match, home)
 		default:
@@ -475,7 +488,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		// Bounded by tmuxCommandTimeout (#2099) so one undeletable session cannot
 		// wedge the whole sweep.
 		killCtx, killCancel := tmuxTimeoutContext()
-		killErrRaw := runTmuxBoundedWith(killCtx, cmdExec, "kill-session", "-t", exactTarget(match))
+		killErrRaw := runTmuxBoundedWith(killCtx, cmdExec, "kill-session", "-t", ExactTarget(match))
 		killTimedOut := killCtx.Err() != nil
 		killCancel()
 		if killErrRaw != nil {

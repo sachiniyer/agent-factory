@@ -248,7 +248,10 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   const stashedBuffers = (doc: string): string[] =>
     [...kvMap.entries()]
       .filter(([k]) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`))
-      .map(([, v]) => (JSON.parse(v) as { draft: Draft }).draft.buffer);
+      .flatMap(([, v]) => {
+        const e = JSON.parse(v) as { draft: Draft | null; more?: Draft[] };
+        return [...(e.draft ? [e.draft.buffer] : []), ...(e.more ?? []).map((d) => d.buffer)]; // drafts a pane took over with its own
+      });
   const initialText = (n: string): string => Array.from({ length: LINES }, (_, i) => `${n}${i}`).join("\n");
   // The values each line had before the user typed over it, for undo.
   const lineStack = new Map<string, Map<number, string[]>>(names.map((n) => [n, new Map()]));
@@ -582,7 +585,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
     const mine = names.flatMap((doc) => {
       const own = kvMap.get(`af.docs.draft\ns\nplan\n${doc}\n${storageA.owner}`);
-      return own ? [{ doc, buffer: (JSON.parse(own) as { draft: Draft }).draft.buffer }] : [];
+      const held = own ? (JSON.parse(own) as { draft: Draft | null }).draft : null;
+      return held ? [{ doc, buffer: held.buffer }] : []; // (an entry with only taken-over drafts is not what a sync holds)
     });
     if (!mine.length) return;
     if (stall) {
@@ -721,7 +725,14 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       // I13: work stored for a doc the daemon no longer has is reachable: the new pane
       // shows it as a deleted doc, to restore or discard. Stored and shown nowhere is lost.
       const d = daemons.get(doc)!;
-      const stored = stashedBuffers(doc).join("\n").split("\n");
+      // (A live second window's own entry is not the reopened pane's to take: that window holds the work.)
+      const ghostSuffix = ghostBox.cur ? `\n${ghostStorage.owner}` : null;
+      const stored = [...kvMap.entries()]
+        .filter(([k]) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`) && !(ghostSuffix && k.endsWith(ghostSuffix)))
+        .flatMap(([, v]) => {
+          const e = JSON.parse(v) as { draft: Draft | null; more?: Draft[] };
+          return [...(e.draft ? [e.draft] : []), ...(e.more ?? [])].flatMap((d) => d.buffer.split("\n"));
+        });
       const stranded = [...typed.get(doc)!.values()].filter((tok) => !excused.has(tok) && !d.everHad(tok) && stored.includes(tok));
       if (stranded.length && syncs.get(doc)?.currentStatus !== "gone") {
         fail("stored-draft-of-deleted-doc-unreachable", `${doc}: ${stranded.join(",")} is stored for a doc the daemon no longer has, and the reopened pane shows ${syncs.get(doc)?.currentStatus ?? "nothing"}`);
@@ -1227,7 +1238,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   async function lateLanding(): Promise<void> {
     const doc = attached;
     const s = syncs.get(doc);
-    if (!doc || !s || !isLoaded(s) || s.ended || o.collide || ghostBox.cur || daemons.get(doc)!.deleted) return;
+    if (!doc || !s || !isLoaded(s) || s.ended || ghostBox.cur || daemons.get(doc)!.deleted) return;
     const line = userEdit();
     if (line === null) return;
     nextSaveFault = "slow";
@@ -1237,6 +1248,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       nextSaveFault = null;
       return;
     }
+    const landedToken = typed.get(doc)!.get(line);
     userUndo(line);
     const want = typed.get(doc)!.get(line);
     await advance(31_000); // the client's timeout fires; its read of the head runs and finds nothing changed
@@ -1283,7 +1295,8 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     const after = syncs.get(doc);
     if (!reopened && after && !after.ended && ["saved", "pending", "merged", "recovered", "saving"].includes(after.currentStatus)) {
       const got = after.text.split("\n")[line];
-      if (got !== want) fail("late-landing-save-overwrote-undo", `${doc} line ${line}: expected ${want}, the tab shows ${got} (status ${after.currentStatus})`);
+      // (With an agent editing too, its edit of that line may win the merge; the landed save's own text must not.)
+      if (got !== want && (!o.collide || got === landedToken)) fail("late-landing-save-overwrote-undo", `${doc} line ${line}: expected ${want}, the tab shows ${got} (status ${after.currentStatus})`);
     }
   }
 
@@ -1428,7 +1441,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   for (let step = 0; step < o.steps && !violation; step++) {
     // The late-landing interleavings are rare by chance, so they are reached on purpose at fixed steps.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 30 || step === 70 || step === 110)) await lateLanding();
-    if (o.chaos && (o.faults ?? 0) > 0 && (step === 60 || step === 100) && !o.collide) await dropThenLand();
+    // The page closes and reopens on the same doc at fixed steps, as the random pageClose event does.
+    if (o.chaos && (o.faults ?? 0) > 0 && (step === 40 || step === 80 || step === 120)) await pageClose();
+    if (o.chaos && (o.faults ?? 0) > 0 && (step === 60 || step === 100)) await dropThenLand();
     // The page holds adopted drafts, then goes through the back-forward cache.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 40 || step === 80 || step === 120)) {
       bfcacheReturn(true);
@@ -1624,7 +1639,11 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
   for (let k = 0; k < 2; k++) {
     await advance(310_000);
     await drain();
+    // (A request that commits when its time comes, like a dropped save, tells the tabs as any commit does.)
+    while (events.length) deliverEvent();
+    await drain();
     for (const s of syncs.values()) s.reconnect?.();
+    ghostBox.cur?.sync.reconnect?.(); // the second window's events were lost with the outage too
     await drain();
     await advance(6000);
     await drain();

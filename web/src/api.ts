@@ -1261,12 +1261,16 @@ export interface EditorPortOrigin {
  */
 export async function fetchEditorPortOrigin(sessionId: string, token: string): Promise<EditorPortOrigin | null> {
   const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
-  const headers: Record<string, string> = {};
+  // JSON-typed with an empty object, like every other call: the daemon's TCP listener
+  // refuses a POST that declares no Content-Type, because that bare shape is the one a
+  // browser can send cross-site with no other signal (daemon/crosssite.go). The route
+  // ignores the body, so an older daemon is unaffected.
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token !== "") {
     headers.Authorization = `Bearer ${token}`;
   }
   try {
-    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    const resp = await fetch(url, { method: "POST", headers, body: "{}", cache: "no-store" });
     if (!resp.ok) {
       return null;
     }
@@ -1536,13 +1540,15 @@ export function spawnConfigAssistant(token: string): Promise<ConfigAssistantResp
  * do care.
  */
 export async function reapConfigAssistant(token: string): Promise<void> {
-  const headers: Record<string, string> = {};
+  // JSON-typed with an empty object for the same reason as fetchEditorPortOrigin: the
+  // daemon's TCP listener refuses an untyped DELETE. The route ignores the body.
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token !== "") {
     headers.Authorization = `Bearer ${token}`;
   }
   let resp: Response;
   try {
-    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers });
+    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers, body: "{}" });
   } catch (e) {
     throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
   }

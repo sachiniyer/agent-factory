@@ -189,6 +189,17 @@ printf '%s\n' "$READY_MARKER"
 # "❯". Without it a remote create spins the full 60s waitForReady and dies.
 # (Same shape every integration fixture uses: printf '❯ ' then exec cat.)
 printf '❯ '
+# A session that must stay SILENT (favicon-blink.spec.ts, #6465): \`cat\` echoes whatever
+# the browser terminal sends back, and any pane activity is a Running edge, which
+# clears an attention request once the agent has been idle (session/attention.go), so a
+# stray byte in the middle of the spec's blink sample loses the request before the spec
+# dismisses it. This agent turns tty echo off and then does nothing at all.
+case "\$PWD" in
+    *probe-quiet*)
+        stty -echo 2>/dev/null
+        exec sleep 86400
+        ;;
+esac
 exec cat
 EOF
 chmod +x "$HOME_DIR/fake-agent.sh"

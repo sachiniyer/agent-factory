@@ -56,7 +56,7 @@ func TestVanishedSessionSweepDoesNotReapSameNameReplacement(t *testing.T) {
 			"sleep 300").CombinedOutput()
 		require.NoError(t, createErr, "re-create same-named tmux session: %s", created)
 		t.Cleanup(func() {
-			_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+			_, _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 		})
 		requireMarkedPaneProcess(t, name, replacementGeneration)
 	})
@@ -333,7 +333,7 @@ func requireObservableDescendant(t *testing.T, parent, child proctree.Process) {
 func requireMarkedPaneProcess(t *testing.T, name, generation string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		out, err := exec.Command("tmux", "list-panes", "-s", "-t", exactTarget(name), "-F", "#{pane_pid}").Output()
+		out, err := exec.Command("tmux", "list-panes", "-s", "-t", ExactTarget(name), "-F", "#{pane_pid}").Output()
 		if err != nil {
 			return false
 		}
