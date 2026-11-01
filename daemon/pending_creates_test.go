@@ -173,6 +173,9 @@ func TestSweepUnrecordedCreate_LeavesUnprovenSessions(t *testing.T) {
 		journal bool
 		// commit gives the journaled id a committed instance row.
 		commit bool
+		// commitOwner commits a row that owns the session by its tmux name
+		// under a different id — the shape a fire-replay quarantine row takes.
+		commitOwner bool
 		// journalKept: the marker must survive the sweep (retry next start)
 		// rather than be consumed.
 		journalKept bool
@@ -182,6 +185,15 @@ func TestSweepUnrecordedCreate_LeavesUnprovenSessions(t *testing.T) {
 			session: func(home string) fakeReapTmux { return fakeReapTmux{instance: reapInstanceID, home: home} },
 			journal: true,
 			commit:  true,
+		},
+		{
+			name:    "a quarantine row owns the session by tmux name",
+			session: func(home string) fakeReapTmux { return fakeReapTmux{instance: reapInstanceID, home: home} },
+			journal: true,
+			// The row's fresh id does not equal the journaled id, but its
+			// TmuxName records durable ownership of the live session — the
+			// session is recorded, not unrecorded.
+			commitOwner: true,
 		},
 		{
 			name:    "the session carries a foreign id",
@@ -221,6 +233,14 @@ func TestSweepUnrecordedCreate_LeavesUnprovenSessions(t *testing.T) {
 			if tc.commit {
 				if err := appendInstanceData(repo.ID, session.InstanceData{
 					ID: reapInstanceID, Title: "worker", Path: repoPath, Program: "claude",
+				}); err != nil {
+					t.Fatalf("appendInstanceData: %v", err)
+				}
+			}
+			if tc.commitOwner {
+				if err := appendInstanceData(repo.ID, session.InstanceData{
+					ID: "quarantine-row-" + reapInstanceID, Path: repoPath,
+					Program: "claude", TmuxName: sanitized, StartupStateUnknown: true,
 				}); err != nil {
 					t.Fatalf("appendInstanceData: %v", err)
 				}

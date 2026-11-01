@@ -218,8 +218,16 @@ func sweepOneUnrecordedCreate(exec cmd.Executor, home string, names []string, ma
 			marker.SessionName, marker.RepoID, err)
 		return
 	}
-	if slices.ContainsFunc(rows, func(row session.InstanceData) bool { return row.ID == marker.InstanceID }) {
-		// The attempt committed after all; its row owns the session now.
+	if slices.ContainsFunc(rows, func(row session.InstanceData) bool {
+		return row.ID == marker.InstanceID ||
+			taskFireRowOwnsTmuxName(&row, marker.SessionName)
+	}) {
+		// The session is recorded, either because this attempt committed after
+		// all (a row owns the journaled id) or because a row claims the tmux
+		// name under another identity — e.g. a fire-replay quarantine row with
+		// a fresh id whose StartupStateUnknown preserves the session for
+		// inspection. Either way the session is not unrecorded: clear the
+		// marker and never reap.
 		clearPendingCreate(marker.InstanceID)
 		return
 	}
