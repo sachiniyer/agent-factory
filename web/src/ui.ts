@@ -1913,9 +1913,12 @@ export class AppShell {
     let hasStop = false;
     for (const railRow of railRows) {
       const isSelected = railRow.classList.contains("af-row-selected");
+      // Write only on a real change: this pass runs on EVERY snapshot, and a
+      // redundant setAttribute/tabIndex= still counts as a DOM write on an
+      // unchanged row (web-perf's rail audit asserts unchanged rows get none).
       if (isSelected) {
-        railRow.setAttribute("tabindex", "0");
-      } else {
+        if (railRow.getAttribute("tabindex") !== "0") railRow.setAttribute("tabindex", "0");
+      } else if (railRow.hasAttribute("tabindex")) {
         railRow.removeAttribute("tabindex");
       }
       hasStop ||= isSelected;
@@ -1926,12 +1929,13 @@ export class AppShell {
       // keeps its controls tabbable because they are its only keyboard route.
       const reachable = isSelected || railRow.getAttribute("aria-disabled") === "true";
       for (const ctrl of railRow.querySelectorAll<HTMLElement>(".af-row-actions .af-term-more, .af-backlog-session-chip")) {
-        ctrl.tabIndex = reachable ? 0 : -1;
+        const wanted = reachable ? 0 : -1;
+        if (ctrl.tabIndex !== wanted) ctrl.tabIndex = wanted;
       }
     }
     if (!hasStop) {
       const fallback = [...railRows].find((railRow) => !railRow.classList.contains("af-row-creating"));
-      if (fallback) {
+      if (fallback && fallback.getAttribute("tabindex") !== "0") {
         fallback.setAttribute("tabindex", "0");
       }
     }

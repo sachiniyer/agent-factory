@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "0aef28b0b09c";
+var CLIENT_VERSION = "0d1a0760d7df";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21381,19 +21381,20 @@ var AppShell = class {
     for (const railRow of railRows) {
       const isSelected = railRow.classList.contains("af-row-selected");
       if (isSelected) {
-        railRow.setAttribute("tabindex", "0");
-      } else {
+        if (railRow.getAttribute("tabindex") !== "0") railRow.setAttribute("tabindex", "0");
+      } else if (railRow.hasAttribute("tabindex")) {
         railRow.removeAttribute("tabindex");
       }
       hasStop ||= isSelected;
       const reachable = isSelected || railRow.getAttribute("aria-disabled") === "true";
       for (const ctrl of railRow.querySelectorAll(".af-row-actions .af-term-more, .af-backlog-session-chip")) {
-        ctrl.tabIndex = reachable ? 0 : -1;
+        const wanted = reachable ? 0 : -1;
+        if (ctrl.tabIndex !== wanted) ctrl.tabIndex = wanted;
       }
     }
     if (!hasStop) {
       const fallback = [...railRows].find((railRow) => !railRow.classList.contains("af-row-creating"));
-      if (fallback) {
+      if (fallback && fallback.getAttribute("tabindex") !== "0") {
         fallback.setAttribute("tabindex", "0");
       }
     }
