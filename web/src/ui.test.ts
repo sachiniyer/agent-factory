@@ -28,6 +28,7 @@ import {
   canCreateTabKind,
   canCloseTabs,
   canMutateTabRoster,
+  setNeedsYouBadge,
   offeredNewTabKinds,
 } from "./ui.js";
 import type { AppState } from "./ui.js";
@@ -793,4 +794,23 @@ test("each known reason gets a distinct label and hint, so the notice can tell f
   // the per-reason split exists to prevent (#4783, #4876).
   assert.equal(labels.size, reasons.length, "each reason has a unique label");
   assert.equal(hints.size, reasons.length, "each reason has a unique repair hint");
+});
+
+test("setNeedsYouBadge hides at zero and labels the count", () => {
+  // No DOM under node:test: the badge only needs hidden, textContent and attributes.
+  const attrs = new Map<string, string>();
+  const el = {
+    hidden: true,
+    textContent: "",
+    setAttribute: (k: string, v: string) => void attrs.set(k, v),
+    getAttribute: (k: string) => attrs.get(k) ?? null,
+  } as unknown as HTMLElement;
+  setNeedsYouBadge(el, 2);
+  assert.equal(el.hidden, false);
+  assert.equal(el.textContent, "2");
+  assert.equal(el.getAttribute("aria-label"), "2 need you");
+  setNeedsYouBadge(el, 1);
+  assert.equal(el.getAttribute("aria-label"), "1 needs you");
+  setNeedsYouBadge(el, 0);
+  assert.equal(el.hidden, true);
 });

@@ -18,6 +18,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af backlog`](#af-backlog) — Keep an ordered backlog of work items for a project
 - [`af backlog add`](#af-backlog-add) — Add a draft item, or add and update many items from JSON
 - [`af backlog answer`](#af-backlog-answer) — Answer an item's open question
+- [`af backlog archive`](#af-backlog-archive) — Hide a group and its items from the list
 - [`af backlog ask`](#af-backlog-ask) — From an item session, ask the user a question
 - [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
 - [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
@@ -28,6 +29,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af backlog list`](#af-backlog-list) — Print the backlog in order, as a tree, with each item's state
 - [`af backlog move`](#af-backlog-move) — Reorder an item; its children move with it
 - [`af backlog note`](#af-backlog-note) — Add a note to an item's thread
+- [`af backlog pause`](#af-backlog-pause) — Stop the runner from starting items in a parent
 - [`af backlog queue`](#af-backlog-queue) — Make an item eligible for the runner
 - [`af backlog reopen`](#af-backlog-reopen) — Reopen a done or dropped item as a draft
 - [`af backlog review`](#af-backlog-review) — Send a running item to review
@@ -35,6 +37,8 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af backlog runner`](#af-backlog-runner) — Show or change this project's runner
 - [`af backlog show`](#af-backlog-show) — Print one item: body, state and reason, links, runs, and thread
 - [`af backlog start`](#af-backlog-start) — Start an item now
+- [`af backlog unarchive`](#af-backlog-unarchive) — Show an archived group again, still paused
+- [`af backlog unpause`](#af-backlog-unpause) — Let the runner start items in a paused parent
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
 - [`af completion`](#af-completion) — Generate the autocompletion script for the specified shell
 - [`af completion bash`](#af-completion-bash) — Generate the autocompletion script for bash
@@ -501,6 +505,7 @@ af backlog
 
 - [`af backlog add`](#af-backlog-add) — Add a draft item, or add and update many items from JSON
 - [`af backlog answer`](#af-backlog-answer) — Answer an item's open question
+- [`af backlog archive`](#af-backlog-archive) — Hide a group and its items from the list
 - [`af backlog ask`](#af-backlog-ask) — From an item session, ask the user a question
 - [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
 - [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
@@ -511,6 +516,7 @@ af backlog
 - [`af backlog list`](#af-backlog-list) — Print the backlog in order, as a tree, with each item's state
 - [`af backlog move`](#af-backlog-move) — Reorder an item; its children move with it
 - [`af backlog note`](#af-backlog-note) — Add a note to an item's thread
+- [`af backlog pause`](#af-backlog-pause) — Stop the runner from starting items in a parent
 - [`af backlog queue`](#af-backlog-queue) — Make an item eligible for the runner
 - [`af backlog reopen`](#af-backlog-reopen) — Reopen a done or dropped item as a draft
 - [`af backlog review`](#af-backlog-review) — Send a running item to review
@@ -518,6 +524,8 @@ af backlog
 - [`af backlog runner`](#af-backlog-runner) — Show or change this project's runner
 - [`af backlog show`](#af-backlog-show) — Print one item: body, state and reason, links, runs, and thread
 - [`af backlog start`](#af-backlog-start) — Start an item now
+- [`af backlog unarchive`](#af-backlog-unarchive) — Show an archived group again, still paused
+- [`af backlog unpause`](#af-backlog-unpause) — Let the runner start items in a paused parent
 
 **Flags**
 
@@ -579,6 +587,25 @@ af backlog answer <id> [--question <n>] <text> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--question` | `int` | The `id` of the question to answer, from "af backlog show"; default the oldest open one (default `0`) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog archive
+
+Hide a group and its items from the list
+
+Archive a top-level parent: it and its items are hidden from "af backlog list" unless --archived, and it is paused. Refused while an item in it is running, has an open question, or has an answer on its way.
+
+```
+af backlog archive <id>
+```
 
 **Global flags**
 
@@ -760,7 +787,7 @@ af backlog edit <id> [flags]
 
 Print the backlog in order, as a tree, with each item's state
 
-Print the backlog in order, children under their parent, with each item's state and reason. Done and dropped items are hidden unless --all. With --json, print the items as JSON in the {data,error} envelope.
+Print the backlog in order, children under their parent, with each item's state and reason. Done and dropped items are hidden unless --all; archived groups and their items are hidden unless --archived. With --json, print the items as JSON in the {data,error} envelope.
 
 ```
 af backlog list [flags]
@@ -771,6 +798,7 @@ af backlog list [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--all` |  | Include done and dropped items |
+| `--archived` |  | Include archived groups and their items |
 | `--state` | `string` | Only items in this `state` (draft, queued, waiting, starting, working, stopped, in_review, needs_you, done, dropped) |
 
 **Global flags**
@@ -826,6 +854,25 @@ af backlog note <id> <text> | note --self <text> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--self` |  | Note on the item of the session this runs in |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog pause
+
+Stop the runner from starting items in a parent
+
+Pause a parent: the runner and "af backlog run" skip its queued items, and the items under it. Running items go on. "af backlog start" still starts an item by hand.
+
+```
+af backlog pause <id>
+```
 
 **Global flags**
 
@@ -969,6 +1016,44 @@ Start the item now, ignoring the runner switch and the budget. An item with a li
 
 ```
 af backlog start <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog unarchive
+
+Show an archived group again, still paused
+
+Unarchive a group. It comes back paused; unpause it to let the runner start its items.
+
+```
+af backlog unarchive <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog unpause
+
+Let the runner start items in a paused parent
+
+Unpause a parent, so the runner can start its queued items again. An archived group must be unarchived first.
+
+```
+af backlog unpause <id>
 ```
 
 **Global flags**

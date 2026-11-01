@@ -38,6 +38,11 @@ const (
 
 	StartedByRunner = "runner"
 	StartedByUser   = "user"
+	// StartedByRunPass starts an item that "af backlog run" chose. It is
+	// recorded as StartedByUser (a pass ignores the runner switch and the
+	// budget, like a start by hand), but its start transaction honours pauses,
+	// as the pass's choice did.
+	StartedByRunPass = "run-pass"
 
 	KindQuestion = "question"
 	KindAnswer   = "answer"
@@ -92,6 +97,10 @@ type Item struct {
 	External  string    `json:"external,omitempty"`
 	Runs      []RunRef  `json:"runs,omitempty"`
 	Thread    []Message `json:"thread,omitempty"`
+	// Paused stops the runner from starting the items under a parent; Archived
+	// hides a top-level group and its items from the list, and pauses it.
+	Paused    bool      `json:"paused,omitempty"`
+	Archived  bool      `json:"archived,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -146,6 +155,11 @@ type Message struct {
 	// LiveEpoch is the item's LiveEpoch when the answer was accepted: a rollback
 	// applies only within the same epoch.
 	LiveEpoch int `json:"live_epoch,omitempty"`
+	// Then is what a question's session does after asking: "wait" or
+	// "archive". Handoff is the asking agent's notes for a later run. Both are
+	// schema v2 fields that later slices fill in (Refs #6284).
+	Then    string `json:"then,omitempty"`
+	Handoff string `json:"handoff,omitempty"`
 }
 
 type Settings struct {

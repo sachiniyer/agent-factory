@@ -299,8 +299,9 @@ See [Tasks and automation](tasks.md) for scheduling semantics.
 **Backlog** holds a project's ordered tree of work items, the same backlog `af backlog`
 edits. Each row shows its id (`B-12`), title and state: Draft, Queued, Waiting, Working,
 Needs you, In review, Done or Dropped. A parent's state is rolled up from its children.
-The tab shows how many items need you, and an item that has a session gets its `B-12`
-chip in the Sessions rail; click the chip to open the item.
+The tab shows how many of the selected project's items need you; the project switcher
+shows each other project's count next to its name. An item that has a session gets its
+`B-12` chip in the Sessions rail; click the chip to open the item.
 
 - **New item…** adds a draft at the bottom; **Add child…** in an item's panel adds one
   under it. Drag a row, or press `Alt+↑` · `Alt+↓`, to reorder it. **Move…** in the

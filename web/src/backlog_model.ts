@@ -225,6 +225,16 @@ export function needsYouCount(views: Iterable<BacklogView>): number {
   return n;
 }
 
+/** Each project root with a non-zero needs-you count. */
+export function needsYouByRoot(views: ReadonlyMap<string, BacklogView>): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const [root, v] of views) {
+    const n = needsYouCount([v]);
+    if (n > 0) out.set(root, n);
+  }
+  return out;
+}
+
 export interface SessionItem {
   root: string;
   id: number;

@@ -275,8 +275,97 @@ func TestMeterPassCurrentNonClaudeRunStillUnmeterable(t *testing.T) {
 	st.mu.Unlock()
 
 	got := meterUsage(t, st)
-	require.Equal(t, backlog.UnmeterableProgram(1, "codex"), got.Unmeterable["sess"],
+	require.Equal(t, backlog.UnmeterableProgram(1, m.meterWhere("meter-repo"), "codex"), got.Unmeterable["sess"],
 		"the current run of a non-Claude session is still an active-run metering failure")
+}
+
+// meterPassWithCurrentRun runs one metering pass over a running item whose
+// current run is a non-Claude session in the state prepare leaves it in (nil:
+// no session, as after a kill), and returns the published usage.
+func meterPassWithCurrentRun(t *testing.T, prepare func(*session.Instance) *session.Instance) planusage.Usage {
+	t.Helper()
+	cs, _ := newBacklogTestServer(t)
+	m := cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	now := time.Now().UTC()
+	meterRepoWithItem(t, "meter-repo", backlog.Item{
+		ID: 1, Title: "Item one", Status: backlog.StatusRunning,
+		Runs: []backlog.RunRef{{SessionID: "sess", State: backlog.RunStarted, StartedAt: now.Add(-time.Hour)}},
+	})
+	inst := prepare(&session.Instance{ID: "sess", BacklogItem: 1, Program: "codex"})
+	if inst == nil {
+		// A killed session still has its remembered transcript directory, so the
+		// meter reaches the run (and finds nothing in it).
+		m.rememberRunDirs("sess", []string{filepath.Join(t.TempDir(), "projects", "-gone")})
+	}
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{}
+	if inst != nil {
+		m.instances["sess"] = inst
+	}
+	m.mu.Unlock()
+
+	st := &m.backlog.meter
+	st.mu.Lock()
+	m.meterPassLocked(now)
+	st.mu.Unlock()
+	return meterUsage(t, st)
+}
+
+// A run that is over must not close the runner, whose gate every project shares
+// (Refs #6284, fork add59406df): an archived session, a killed one, and an item
+// waiting on the user's answer (its status stays running after its run ends)
+// are metered for their cost but never unmeterable. Each case is the shape that
+// stopped every project's runner before: a running item whose current run af
+// cannot meter.
+func TestMeterPassRunThatIsOverDoesNotBlockTheRunner(t *testing.T) {
+	cases := map[string]func(*session.Instance) *session.Instance{
+		"archived": func(i *session.Instance) *session.Instance {
+			i.SetArchived()
+			return i
+		},
+		"ended, waiting on the user": func(i *session.Instance) *session.Instance {
+			require.True(t, i.ArmBacklogRun(time.Now().Add(-time.Hour)))
+			i.EndBacklogRunForTest()
+			require.False(t, i.BacklogRunEndedAt().IsZero())
+			return i
+		},
+		"killed": func(*session.Instance) *session.Instance { return nil },
+	}
+	for name, prepare := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := meterPassWithCurrentRun(t, prepare)
+			require.Empty(t, got.Unmeterable, "a run that is over must not stop the runner")
+			require.Contains(t, got.Runs, "sess", "the run is still metered for its cost")
+		})
+	}
+}
+
+// The positive controls: a run still at work keeps blocking, whether it never
+// ended or someone worked in its session after it did.
+func TestMeterPassRunAtWorkStillBlocksTheRunner(t *testing.T) {
+	cases := map[string]func(*session.Instance) *session.Instance{
+		"in flight": func(i *session.Instance) *session.Instance {
+			require.True(t, i.ArmBacklogRun(time.Now().Add(-time.Hour)))
+			return i
+		},
+		"ended, then worked in": func(i *session.Instance) *session.Instance {
+			require.True(t, i.ArmBacklogRun(time.Now().Add(-time.Hour)))
+			i.EndBacklogRunForTest()
+			_, epoch := i.InFlightOpAndEpoch()
+			require.True(t, i.RecordPaneChurnAtEpoch(time.Now().Add(time.Second), epoch))
+			return i
+		},
+	}
+	for name, prepare := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := meterPassWithCurrentRun(t, prepare)
+			require.Contains(t, got.Unmeterable["sess"], "the runner can't meter codex, the program of B-1",
+				"a run at work that af cannot meter stops the runner")
+			require.Contains(t, got.Unmeterable["sess"], "mark B-1 done or drop it")
+		})
+	}
 }
 
 // A metered run whose current config dir cannot be resolved — a session killed
