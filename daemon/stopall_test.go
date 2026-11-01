@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -244,5 +246,130 @@ func TestStopOrphanDaemons_StopsOnlyScopedDaemon(t *testing.T) {
 	}
 	if !pidLooksAlive(foreign) {
 		t.Fatalf("StopOrphanDaemons killed pid %d, a daemon for a DIFFERENT AF home", foreign)
+	}
+}
+
+// TestStopOrphanDaemons_RecycledPIDNotSignaled pins the fix for the
+// orphan-daemon SIGKILL-on-recycled-PID hazard: a PID verifyScopedDaemon proved
+// serves this home exits near the end of the SIGTERM grace and its number is
+// recycled onto an unrelated same-user process before the escalation fires. The
+// pre-fix path (signalAndWait) held a bare os.Process for the numeric PID and
+// polled it with pidLooksAlive (a PID-number liveness check with no instance
+// role), so the recycled PID's new owner kept the grace poll reporting "alive"
+// and the eventual SIGKILL landed on the unrelated process; reset then reported
+// that PID as successfully "stopped". The fix captures the daemon's
+// process-instance identity at the verification decision and signals through
+// signalClassifiedDaemon -> signalProcessChecked, whose proctree.Signal
+// revalidates the StartID immediately before SIGTERM and SIGKILL and refuses
+// (ErrIdentityChanged) rather than signal a PID the kernel recycled.
+//
+// A real PID recycle cannot be arranged on demand (#5007), so the test models
+// one the same way TestSignalClassifiedDaemon_UsesCapturedIdentity and
+// TestSignalProcessChecked_RecycledPIDNotSignaled do: capture the live daemon's
+// real identity and corrupt its StartID, so the captured snapshot no longer
+// matches the live process — exactly the instance-check failure a recycle
+// produces. StopOrphanDaemons must surface errSignalTargetChanged, leave the
+// PID out of the stopped return, and NOT signal the live process.
+func TestStopOrphanDaemons_RecycledPIDNotSignaled(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("proctree identity needs /proc")
+	}
+	ourHome := t.TempDir()
+	ours := spawnFakeDaemonWithHome(t, ourHome)
+
+	// Capture the live identity, then corrupt its StartID to model a PID the
+	// kernel recycled between verifyScopedDaemon and the signal: the PID is
+	// still alive (still this home's daemon) but the captured identity no
+	// longer matches the live process — exactly the instance-check failure a
+	// recycle produces.
+	real, err := proctree.Lookup(ours)
+	if err != nil {
+		t.Fatalf("proctree.Lookup(ours=%d): %v", ours, err)
+	}
+	stale := real
+	stale.StartID = real.StartID + 1
+
+	origCapture := captureDaemonIdentity
+	t.Cleanup(func() { captureDaemonIdentity = origCapture })
+	captureDaemonIdentity = func(int) proctree.Process { return stale }
+
+	origScan := scopedDaemonScanFn
+	t.Cleanup(func() { scopedDaemonScanFn = origScan })
+	scopedDaemonScanFn = func() ([]int, error) { return []int{ours}, nil }
+
+	stopped, unverified, err := StopOrphanDaemons(ourHome)
+	if err == nil {
+		t.Fatalf("StopOrphanDaemons returned nil error; want errSignalTargetChanged because the " +
+			"captured identity no longer matches the live process (recycled-PID simulation)")
+	}
+	if !errors.Is(err, errSignalTargetChanged) {
+		t.Fatalf("StopOrphanDaemons err=%v; want errSignalTargetChanged — a PID whose captured "+
+			"identity no longer matches the live process must not be signaled, and the refusal "+
+			"must surface so reset does not report the recycled PID as stopped", err)
+	}
+	if len(stopped) != 0 {
+		t.Errorf("stopped = %v; want none — a recycled PID must not be reported as successfully "+
+			"stopped (the pre-fix bug reported the SIGKILL'd replacement as stopped)", stopped)
+	}
+	if len(unverified) != 0 {
+		t.Errorf("unverified = %v; want none (the PID was proven ours at SIGTERM time; the "+
+			"refusal is an identity change, not an unverified home)", unverified)
+	}
+	if !pidLooksAlive(ours) {
+		t.Fatalf("daemon pid %d was killed despite a stale captured identity; the identity-checked "+
+			"escalation must refuse (ErrIdentityChanged) rather than SIGTERM/SIGKILL the live process "+
+			"the kernel recycled the PID onto", ours)
+	}
+}
+
+// TestStopOrphanDaemons_ZeroSnapshotFailsClosed pins the fail-closed half of
+// the fix: a PID verifyScopedDaemon proved ours whose identity captureDaemonIdentity
+// could not bind (the daemon exited between verification and the snapshot, or the
+// backend could not read its identity) returns a zero Process. signalClassifiedDaemon
+// must NOT fall back to a PID-only signal that could hit a recycled PID — the
+// captured identity is the whole of the signal's safety (#4793). When the PID is
+// still alive (recycled onto another process before the snapshot landed) it
+// surfaces errSignalTargetChanged and leaves the PID untouched, the same refusal
+// TestStopOrphanDaemons_RecycledPIDNotSignaled asserts for a stale snapshot.
+func TestStopOrphanDaemons_ZeroSnapshotFailsClosed(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("proctree identity needs /proc")
+	}
+	ourHome := t.TempDir()
+	ours := spawnFakeDaemonWithHome(t, ourHome)
+
+	// A zero snapshot models a daemon whose identity could not be bound at the
+	// classification decision (it exited before the snapshot, or the backend
+	// could not read it). The PID is still alive, so this is the recycled
+	// shape; signalClassifiedDaemon must fail closed rather than signal it.
+	origCapture := captureDaemonIdentity
+	t.Cleanup(func() { captureDaemonIdentity = origCapture })
+	captureDaemonIdentity = func(int) proctree.Process { return proctree.Process{} }
+
+	origScan := scopedDaemonScanFn
+	t.Cleanup(func() { scopedDaemonScanFn = origScan })
+	scopedDaemonScanFn = func() ([]int, error) { return []int{ours}, nil }
+
+	stopped, unverified, err := StopOrphanDaemons(ourHome)
+	if err == nil {
+		t.Fatalf("StopOrphanDaemons returned nil error; want errSignalTargetChanged because a " +
+			"live PID with a zero identity snapshot must fail closed rather than be signaled by PID")
+	}
+	if !errors.Is(err, errSignalTargetChanged) {
+		t.Fatalf("StopOrphanDaemons err=%v; want errSignalTargetChanged — a live PID whose "+
+			"identity could not be captured must fail closed (errSignalTargetChanged), not fall "+
+			"back to a PID-only signal that could hit a recycled PID", err)
+	}
+	if len(stopped) != 0 {
+		t.Errorf("stopped = %v; want none — a PID with no capturable identity must not be "+
+			"reported as stopped", stopped)
+	}
+	if len(unverified) != 0 {
+		t.Errorf("unverified = %v; want none (the PID was proven ours at SIGTERM time; the "+
+			"refusal is an unbindable identity, not an unverified home)", unverified)
+	}
+	if !pidLooksAlive(ours) {
+		t.Fatalf("daemon pid %d was killed despite a zero identity snapshot; the identity-checked "+
+			"escalation must fail closed rather than fall back to signalAndWait's PID-only signal", ours)
 	}
 }

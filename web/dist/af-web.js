@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "d03c83b61676";
+var CLIENT_VERSION = "5c57708208ca";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19836,6 +19836,13 @@ var BacklogPane = class {
   // Reorder writes go out one at a time: each target is computed from the previous
   // optimistic order, so they must commit in the order they were made.
   moves = Promise.resolve();
+  // A refusal breaks the optimistic chain — but only within the project it
+  // happened in. Each move captures its project's gen at queue time and skips
+  // itself when a refusal has bumped that project's gen by the time its segment
+  // runs, so a queued move whose target was computed against a refused order is
+  // dropped instead of being sent against the daemon's real order. A refusal in
+  // one project does not discard a reorder queued in another after switching.
+  movesGen = /* @__PURE__ */ new Map();
   panel = null;
   dragId = null;
   focusId = null;
@@ -20056,19 +20063,26 @@ ${id}`;
     }
     const token2 = this.host.token();
     if (token2 === null) return;
-    this.moves = this.moves.then(() => moveItem(root2, id, to, token2).then(() => {
-      if (pending) pending.gen = this.host.started();
-      return this.host.refresh();
-    }, (e) => {
-      if (pending && this.pending === pending) {
-        this.pending = null;
-        this.focusId = id;
-        this.render();
-      }
-      this.host.notify(errorText(e));
-      return this.host.refresh();
+    const gen = this.movesGen.get(root2) ?? 0;
+    this.moves = this.moves.then(() => {
+      if ((this.movesGen.get(root2) ?? 0) !== gen) return;
+      return moveItem(root2, id, to, token2).then(() => {
+        if (pending) pending.gen = this.host.started();
+        return this.host.refresh();
+      }, (e) => {
+        if (pending) {
+          if (!isMutationOutcomeUncertain(e)) this.movesGen.set(root2, (this.movesGen.get(root2) ?? 0) + 1);
+          if (this.pending?.root === root2) this.pending = null;
+          if (this.root === root2) {
+            this.focusId = id;
+            this.render();
+          }
+        }
+        this.host.notify(errorText(e));
+        return this.host.refresh();
+      });
     }).catch(() => {
-    }));
+    });
   }
   render() {
     this.pruneStarts();
