@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -43,7 +44,8 @@ type RuntimeMachine struct {
 // (a short name matches the first label of a longer one), or when their
 // addresses meet, as configured, pinned or resolved. A name that does not
 // resolve cannot be shown to differ from anything, so it shares every machine;
-// so does a sandbox.ssh command af cannot read a destination from. A runtime
+// so does a sandbox.ssh command whose effective destination af cannot prove
+// (sandboxSSHEffectiveHost). A runtime
 // with nothing recorded runs nowhere and shares nothing.
 //
 // Not detected: two literal addresses of one multi-homed machine that no name
@@ -91,7 +93,7 @@ func (m RuntimeMachine) identity() machineIdentity {
 	}
 	hosts := []string{m.Host, m.Addr}
 	if strings.TrimSpace(m.SandboxSSH) != "" {
-		dest, ok := sandboxSSHDestination(m.SandboxSSH)
+		dest, ok := sandboxSSHEffectiveHost(m.SandboxSSH)
 		if !ok {
 			id.unknown = true
 			return id
@@ -147,10 +149,83 @@ func shortNameOf(short, long string) bool {
 // sshFlagsWithArgument are the ssh options that take a value (OpenSSH 9).
 const sshFlagsWithArgument = "BbcDEeFIiJLlmOoPpQRSWw"
 
-// sandboxSSHDestination is the destination host a sandbox.ssh command names: the
-// first non-option argument of an ssh invocation, or a -o HostName= override,
-// without a user@, an ssh:// or a :port. ok is false for a command that is not
-// a plain ssh invocation (a wrapper script), whose destination af cannot read.
+// sandboxSSHEffectiveHost is the machine a sandbox.ssh command actually
+// connects to: the hostname ssh itself reports for it with -G, which evaluates
+// the command's -F file, ~/.ssh/config and every Host and Match block, and
+// connects to nothing. The command line alone proves nothing, because any of
+// those can remap its destination with HostName (Codex P1 on #6433). ok is false,
+// and the machine Unknown, whenever that is not proven:
+//   - the command is not a plain ssh invocation (a wrapper script);
+//   - it uses shell syntax (quotes, expansions, operators), which af's tunnel
+//     script would interpret and this check will not;
+//   - ssh -G fails or prints no hostname;
+//   - a ProxyCommand is in effect, which can reach any machine whatever the
+//     hostname says.
+func sandboxSSHEffectiveHost(command string) (string, bool) {
+	command = strings.TrimSpace(command)
+	if command == "" || strings.ContainsAny(command, "'\"`$;&|<>(){}*?[]#!\\\n") {
+		return "", false
+	}
+	words := strings.Fields(command)
+	if filepath.Base(words[0]) != "ssh" {
+		return "", false
+	}
+	sshEffectiveHosts.mu.Lock()
+	if e, ok := sshEffectiveHosts.m[command]; ok && time.Now().Before(e.until) {
+		sshEffectiveHosts.mu.Unlock()
+		return e.host, e.ok
+	}
+	sshEffectiveHosts.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), machineLookupTimeout)
+	defer cancel()
+	out, err := sshPrintConfig(ctx, words[0], words[1:])
+	host, ok := "", err == nil
+	for _, line := range strings.Split(out, "\n") {
+		k, v, _ := strings.Cut(strings.TrimSpace(line), " ")
+		switch strings.ToLower(k) {
+		case "hostname":
+			host = strings.TrimSpace(v)
+		case "proxycommand":
+			if v = strings.TrimSpace(v); v != "" && !strings.EqualFold(v, "none") {
+				ok = false
+			}
+		}
+	}
+	ok = ok && host != ""
+	ttl := machineLookupTTL
+	if !ok {
+		ttl = machineLookupFailTTL
+	}
+	sshEffectiveHosts.mu.Lock()
+	sshEffectiveHosts.m[command] = sshEffectiveHost{host: host, ok: ok, until: time.Now().Add(ttl)}
+	sshEffectiveHosts.mu.Unlock()
+	return host, ok
+}
+
+type sshEffectiveHost struct {
+	host  string
+	ok    bool
+	until time.Time
+}
+
+var sshEffectiveHosts = struct {
+	mu sync.Mutex
+	m  map[string]sshEffectiveHost
+}{m: map[string]sshEffectiveHost{}}
+
+// sshPrintConfig runs `<ssh> -G <args…>`: ssh's own reading of the command, with
+// no connection. A package var so tests never run a real ssh.
+var sshPrintConfig = func(ctx context.Context, ssh string, args []string) (string, error) {
+	cmd := exec.CommandContext(ctx, ssh, append([]string{"-G"}, args...)...)
+	cmd.Stdin = nil
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// sandboxSSHDestination is the destination host a sandbox.ssh command names on
+// its command line: the first non-option argument of an ssh invocation, or a -o
+// HostName= override, without a user@, an ssh:// or a :port. It is what ssh -G
+// reports for a command with no ssh_config, so tests stand it in for ssh.
 func sandboxSSHDestination(command string) (string, bool) {
 	words := strings.Fields(command)
 	if len(words) == 0 || filepath.Base(words[0]) != "ssh" {
@@ -258,9 +333,30 @@ func SetMachineLookupForTest(names map[string][]string) (restore func()) {
 		}
 		return out, nil
 	}
+	// And ssh -G as it answers with no ssh_config: the command-line destination.
+	prevPrint := sshPrintConfig
+	sshPrintConfig = func(_ context.Context, ssh string, args []string) (string, error) {
+		dest, ok := sandboxSSHDestination(strings.Join(append([]string{ssh}, args...), " "))
+		if !ok {
+			return "", &net.DNSError{Err: "no destination", Name: ssh}
+		}
+		return "hostname " + dest + "\nport 22\n", nil
+	}
 	flushMachineLookups()
 	return func() {
-		machineLookup = prev
+		machineLookup, sshPrintConfig = prev, prevPrint
+		flushMachineLookups()
+	}
+}
+
+// SetSSHPrintConfigForTest makes `ssh -G` answer with print, after
+// SetMachineLookupForTest, and returns a restore function.
+func SetSSHPrintConfigForTest(print func(ssh string, args []string) (string, error)) (restore func()) {
+	prev := sshPrintConfig
+	sshPrintConfig = func(_ context.Context, ssh string, args []string) (string, error) { return print(ssh, args) }
+	flushMachineLookups()
+	return func() {
+		sshPrintConfig = prev
 		flushMachineLookups()
 	}
 }
@@ -269,6 +365,9 @@ func flushMachineLookups() {
 	machineLookups.mu.Lock()
 	machineLookups.m = map[string]machineLookupEntry{}
 	machineLookups.mu.Unlock()
+	sshEffectiveHosts.mu.Lock()
+	sshEffectiveHosts.m = map[string]sshEffectiveHost{}
+	sshEffectiveHosts.mu.Unlock()
 }
 
 // RuntimeMachine reports the machine this session's off-box runtime runs on,

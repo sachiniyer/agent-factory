@@ -393,3 +393,36 @@ func TestCrossForwardRefusalLogIsRateLimited(t *testing.T) {
 	require.Len(t, lines, crossForwardLogBurst+1)
 	assert.Contains(t, lines[len(lines)-1], "further refusals not logged", "the suppressed count is carried into the next line")
 }
+
+// Codex P1 on #6433 at 3abfd87: a create that finishes in the middle of the
+// blocker scan must not vanish from both reads. A repo-target create starts while
+// the token is read; between the second pass's two reads it commits its row and
+// releases its hold. The second pass must still see it.
+func TestGitCredential_ACreateThatFinishesMidScanIsStillSeen(t *testing.T) {
+	pf := newPushFixture(t)
+	repoTarget := session.RuntimeMachine{Host: "box1.example", RepoChosen: true}
+	prevPlan := plannedRuntimeMachine
+	plannedRuntimeMachine = func(session.InstanceOptions, string) (session.RuntimeMachine, bool) { return repoTarget, true }
+	t.Cleanup(func() { plannedRuntimeMachine = prevPlan })
+
+	var release func()
+	pf.onTokenRead = func() {
+		release = pf.mgr.holdInflightCreate("repo-c1", "repo", session.InstanceOptions{}, pf.me.Path, false)
+	}
+	committed := false
+	prevHook := testHookBetweenBlockerReads
+	testHookBetweenBlockerReads = func() {
+		if release == nil || committed {
+			return
+		}
+		committed = true
+		pf.track(t, session.InstanceData{ID: "repo-c1", Title: "repo", CreatedByOperator: true})
+		pf.placeOn(t, "repo", repoTarget)
+		release() // the create's deferred release, after its row is committed
+	}
+	t.Cleanup(func() { testHookBetweenBlockerReads = prevHook })
+
+	code, got, msg := pf.askOwn(t)
+	require.True(t, committed, "the create finished in the middle of the second pass's scan")
+	requireRefused(t, code, got, msg, refusePushHostShared)
+}

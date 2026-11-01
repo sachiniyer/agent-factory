@@ -75,17 +75,31 @@ func (m *Manager) trackedInstances() []*session.Instance {
 // A session with no recorded runtime runs nowhere and blocks nothing, and neither
 // does an archive af confirmed stopped while keeping its workspace (Codex P2 on
 // #6433): its recorded runtime only lets a later kill reap the directory.
+//
+// The two reads are ordered so a create finishing mid-scan is never missed
+// (Codex P1 on #6433): the in-flight creates are read FIRST, and the tracked rows
+// after. A create commits its row and only then releases its hold, so a create
+// missing from the first read had committed before it, and is in the second.
+// Both reads come before any slow comparison (Shares may resolve names).
 func (m *Manager) pushHostBlockers(machines []session.RuntimeMachine) []pushBlocker {
+	inflight := m.pushCreds.inflightCreates()
+	testHookBetweenBlockerReads()
+	tracked := m.trackedInstances()
 	var out []pushBlocker
+	seen := map[string]bool{}
 	add := func(id, title, why string, machine session.RuntimeMachine) {
+		if seen[id] {
+			return
+		}
 		for _, lm := range machines {
 			if lm.Shares(machine) {
+				seen[id] = true
 				out = append(out, pushBlocker{ID: id, Title: title, Why: why})
 				return
 			}
 		}
 	}
-	for _, inst := range m.trackedInstances() {
+	for _, inst := range tracked {
 		machine, ok := instanceRuntimeMachine(inst)
 		if !ok || inst.StoppedPreservedArchive() || (inst.OperatorCreated() && !machine.RepoChosen) {
 			continue
@@ -99,12 +113,16 @@ func (m *Manager) pushHostBlockers(machines []session.RuntimeMachine) []pushBloc
 		}
 		add(inst.ID, inst.Title, why, machine)
 	}
-	for id, c := range m.pushCreds.inflightCreates() {
+	for id, c := range inflight {
 		add(id, c.title, "still being created there, by another session's af or onto a repository's own [ssh] target", c.machine)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
+
+// testHookBetweenBlockerReads runs between pushHostBlockers' two reads. Tests
+// only.
+var testHookBetweenBlockerReads = func() {}
 
 // inflightCreate is a create the operator did not place, from before NewInstance
 // until its row is tracked.

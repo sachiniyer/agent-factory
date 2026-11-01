@@ -1,7 +1,9 @@
 package session
 
 import (
+	"errors"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -356,4 +358,47 @@ func TestPlannedRuntimeMachineResolvesTheTargetTheRuntimeWill(t *testing.T) {
 
 	_, offBox = PlannedRuntimeMachine(InstanceOptions{Backend: BackendLocal}, t.TempDir())
 	assert.False(t, offBox, "a local session gets no callback")
+}
+
+// Codex P1 on #6433 at 3abfd87: a sandbox.ssh's destination can be remapped by
+// ssh_config (-F, ~/.ssh/config, HostName), so the machine is what ssh itself
+// reports with -G, and anything af can't prove is Unknown.
+func TestSandboxSSHMachineIsWhatSSHActuallyConnectsTo(t *testing.T) {
+	t.Cleanup(SetMachineLookupForTest(map[string][]string{
+		"box1.example": {"198.51.100.7"},
+		"box9":         {"198.51.100.9"},
+	}))
+	var asked [][]string
+	t.Cleanup(SetSSHPrintConfigForTest(func(ssh string, args []string) (string, error) {
+		asked = append(asked, append([]string{ssh}, args...))
+		switch strings.Join(args, " ") {
+		case "-F /etc/af/ssh.conf 192.0.2.10": // a config whose HostName remaps it
+			return "user dev\nhostname 198.51.100.7\nport 22\n", nil
+		case "-p 2222 -i ~/.ssh/k dev@box9":
+			return "hostname box9\nport 2222\n", nil
+		case "jump-alias":
+			return "hostname box9\nproxycommand /usr/local/bin/route-somewhere %h\n", nil
+		case "broken":
+			return "", errors.New("ssh: Could not resolve hostname")
+		}
+		return "", errors.New("unexpected ssh -G call")
+	}))
+	box1 := RuntimeMachine{Host: "box1.example", Addr: "198.51.100.7"}
+	free := func(cmd string) RuntimeMachine { return RuntimeMachine{SandboxSSH: cmd} }
+
+	assert.True(t, free("ssh -F /etc/af/ssh.conf 192.0.2.10").Shares(box1), "the command line names 192.0.2.10, but ssh connects to box1")
+	assert.Equal(t, []string{"ssh", "-G", "-F", "/etc/af/ssh.conf", "192.0.2.10"}, append([]string{asked[0][0], "-G"}, asked[0][1:]...),
+		"ssh is asked with the command's own arguments")
+	assert.False(t, free("ssh -p 2222 -i ~/.ssh/k dev@box9").Shares(box1), "anti-vacuous: a proven other machine differs")
+
+	for name, cmd := range map[string]string{
+		"a ProxyCommand in effect": "ssh jump-alias",
+		"ssh -G fails":             "ssh broken",
+		"quoted shell syntax":      `ssh -o "ProxyCommand=nc %h %p" box9`,
+		"a shell operator":         "ssh box9; true",
+		"a wrapper script":         "/usr/local/bin/to-box",
+	} {
+		assert.Truef(t, free(cmd).Shares(RuntimeMachine{Host: "box9"}), "%s: unproven, so it shares every machine", name)
+		assert.Truef(t, free(cmd).Shares(box1), "%s: even one it names nothing of", name)
+	}
 }
