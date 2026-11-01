@@ -293,6 +293,13 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
+	// A tainted machine can't be opted into push credentials (#5571 W7.8): refused
+	// before anything is written.
+	if s.manager != nil {
+		if err := s.manager.refuseLicensingTainted(req); err != nil {
+			return err
+		}
+	}
 	result, wroteDigest, err := writeGlobalConfig(req)
 	if err != nil {
 		return err

@@ -300,7 +300,7 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 		var guard func(*session.Instance, string) error
 		if req.SandboxOwner != "" {
 			send.ID = sandboxTargetID
-			guard = m.sandboxDeliveryGuard(sandboxTargetID, repo.ID)
+			guard = m.sandboxDeliveryGuard(req.SandboxOwner, sandboxTargetID, repo.ID)
 		}
 		deliveryStatus, err := m.sendPromptGuarded(send, guard)
 		if err != nil {

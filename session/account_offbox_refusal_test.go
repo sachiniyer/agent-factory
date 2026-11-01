@@ -339,9 +339,10 @@ func TestNewInstance_UnscopedRepoConfiguredBackendStillReachesFactory(t *testing
 	defer restore()
 
 	inst, err := NewInstance(InstanceOptions{
-		Title:   "plain",
-		Path:    repo,
-		Program: "codex",
+		Title:              "plain",
+		Path:               repo,
+		Program:            "codex",
+		SandboxCredentials: &recorder{}, // the daemon's: a repo target is recorded first
 	})
 	require.NoError(t, err)
 	require.NotNil(t, inst)

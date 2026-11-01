@@ -977,6 +977,186 @@ Not yet built: fanning a refresh out to every live session on the same account
 (providers that rotate refresh tokens log the others out), write-back on a timer or
 after a daemon restart.
 
+## Push credentials (listed hosts)
+
+On a host you opt in, a session can `git push` its origin and run `gh` (for
+example `gh pr create`) **as you**, with the daemon machine's own GitHub login. No
+secret is stored on the host: each time git or gh needs the credential, the session
+asks the daemon for it over the session's own af callback.
+
+Opt in from the global config. A repository can never set these, and checked-in
+values are a load error:
+
+```toml
+[hosts.box1]
+host = "box1.tailnet.ts.net"
+push_credentials = true
+
+# The free-form sandbox.ssh target has its own switch.
+[sandbox]
+ssh = "ssh box3"
+push_credentials = true
+```
+
+**Opting a host in trusts the machine.** Every session on a host runs as the one
+ssh user af connects as. So anything that has ever run as that user, or ever will,
+can read a session's callback file and ask for its push credential as that
+session. So can any login on the machine that can reach that user's files, such
+as one that can sudo, or root. That includes your own sessions, a repository's
+hooks and build scripts, and a process left behind by a session that has since
+ended, including one from before you opted in. Neither archiving a session nor
+killing it reaps a process its hooks detached. af taints a machine whenever it
+places code you didn't place there (below). It can't see what ran there before
+it kept those records, or outside af, so it can't prove that no such process
+exists.
+
+So opt in only a fresh, dedicated machine that runs nothing but your own af
+sessions, and opt it in from the moment you list it. A listed host that isn't
+opted in is one other sessions may start sessions on. One command does both:
+
+```bash
+af hosts add build af-push@build.tailnet.ts.net --push-credentials
+```
+
+Per-session Unix users would remove this
+([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)).
+
+Both are off by default, so listing a host never opts it in. The daemon reads them
+on every request: turn one off, or remove the host, and the next request is
+refused. Turning one on wires the sessions created or restored after it; a session
+already running keeps the wiring it was provisioned with until its next restore. This covers https GitHub origins, meaning `github.com` or the enterprise
+host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh keys.
+
+- **Only sessions you created.** A session started from inside another session,
+  for example by an agent running `af sessions create` through its af callback,
+  never gets push credentials. Neither does a session af has no record of who
+  created, such as one from before af kept that record: re-create it to make it
+  eligible. A session without push credentials also can't prompt, schedule a
+  task for, or `archive --push` one that has them, or any session on an
+  opted-in machine, even one that has none (such as one listed through another
+  host entry for the same machine).
+- **Only a machine no code you didn't place has run on.** When af places code
+  you didn't place on a machine, it records a *taint* on that machine first,
+  before any of the code can run, whichever login it runs as. That covers:
+  - a session started from inside another session;
+  - one on a repository's own `[ssh]` target;
+  - a create that failed after its hooks ran;
+  - a re-provision of any of these;
+  - a session from before af kept these records.
+
+  A tainted machine gives no push credentials, and can't be opted in, until you
+  recreate or wipe its users and run `af hosts reset-trust <name>`. Nothing
+  else clears a taint: not killing the session, not archiving it, not
+  restarting the daemon. `af hosts check` and `af doctor` show each taint, the
+  session that made it, and an entry id; `af hosts reset-trust --entry <id>`
+  clears that one entry. A sandbox can't start a session on an opted-in host at
+  all, or on any listed host af can't show is a different machine. While any
+  host is opted in, af also refuses to place code you didn't place on a machine
+  it can't identify, rather than guess. One placed while nothing was opted in is
+  kept as an *unconfirmed* taint. Since af can't show it ran on another machine,
+  no host gets push credentials, or can be opted in, until you clear it with
+  `af hosts reset-trust --entry <id>`. That holds however a host was opted in,
+  editing `config.toml` by hand included. A reset is durable: restarting the daemon
+  doesn't bring a cleared taint back.
+- **One machine, compared carefully.** af treats two hosts as one machine when
+  a name matches or an address does. Case, a trailing dot, and a short name for
+  a full one don't matter. Addresses count as configured, as af's ssh dialed
+  them, and as DNS resolves them. A `sandbox.ssh` command's destination is the
+  one `ssh -G` reports, so your ssh config's `HostName` counts. An opted-in host
+  whose name doesn't resolve, or a `sandbox.ssh` that ssh can't confirm (a
+  `ProxyCommand`, a wrapper script, shell syntax), gets no push credentials.
+  Each placement is its own taint. A reset by host clears only taints whose
+  every recorded address is that host's, so a name that moved between machines
+  never clears the other machine. af can't link two literal addresses of one
+  machine that no name connects.
+- **Only through the session's own connection.** Every af callback, not only
+  this one, is accepted only through the requesting session's own ssh forward.
+  A callback credential copied out of a session directory doesn't work through
+  any other session's connection, on the daemon's network listener, or from off
+  the host. A `sandbox.ssh` that shares one `ControlMaster` connection between
+  sessions can't carry af callbacks for the sessions multiplexed through it,
+  and the daemon log says so when it refuses one.
+- **Only the machine you opted in.** The opt-in follows the machine the host
+  entry named when the session was placed: its host, user and port. Re-point
+  `[hosts.<name>]` at another machine, or change `sandbox.ssh`, and sessions
+  still on the old one stop getting it. A different `identity_file` doesn't
+  count, because it changes how af connects, not where. The licence compares
+  the entry as configured, so a DNS or `/etc/hosts` change that points the same
+  name at another machine isn't detected.
+- **Where the token comes from.** It's the daemon machine's own login: its `GH_TOKEN` /
+  `GITHUB_TOKEN` (or `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` for an
+  enterprise host) when set, and otherwise `gh auth token --hostname <host>`. That
+  `gh` is found on absolute `PATH` entries only, so no working directory can choose
+  it. The token is read fresh on each request and kept in memory for at most a minute, so a re-login or a
+  rotation on the daemon machine reaches every session. With no login there, git
+  reports `af: no push credential: the daemon box has no GitHub login for this
+  origin's host`.
+- **How git and gh find it.** At provision, and again at restore, af writes into
+  the workspace's **repo-local** `.git/config` and never into `~/.gitconfig`:
+
+  ```
+  credential.https://github.com.helper =       # empty: resets the helper list
+  credential.https://github.com.helper = !'<session dir>/af' internal git-credential --session-dir '<session dir>'
+  credential.https://github.com.useHttpPath = true
+  ```
+
+  It also writes a gh shim at `<session dir>/gh`, first on the session's `PATH`, and
+  `push-origin.json`, a non-secret record of the origin. The empty reset is
+  load-bearing. Without it, git would also hand the token to the host user's own
+  global credential helpers, and `credential.helper=store` writes it in plain text
+  to `~/.git-credentials`.
+- **What git gets.** A credential for the session's **own origin repository**
+  only, checked against the daemon's checkout, never against anything the host
+  says. A submodule, a re-pointed `origin`, or a script pushing to another
+  repository gets nothing.
+- **When af can't supply it**, because the switch is off, the daemon machine
+  has no login, the daemon is unreachable, or one of af's own pushes is
+  running, the helper asks the host user's **own** git credential helpers
+  instead, and then the host user's own `GH_TOKEN` / `GITHUB_TOKEN` (or the
+  enterprise pair). It asks them from outside the workspace, with prompts off
+  and the session directory off `PATH`, in the order git used before af was
+  wired in. A host login therefore keeps working, and af's token still never
+  reaches those helpers: inside that fallback the gh shim fetches nothing, and
+  the token it gives a `gh` process is removed before any host helper runs and
+  is never mistaken for the host's own. If
+  they have nothing either, git stops rather than prompting, and says why.
+- **What gh gets.** The shim runs the host's real `gh`, found on absolute `PATH`
+  entries only. The token goes into that one process's environment: `GH_TOKEN`,
+  or `GH_HOST` plus `GH_ENTERPRISE_TOKEN`. So **gh carries the daemon machine's
+  full GitHub login**, exactly as `gh` does on a local worktree. af scopes git to
+  the session's repository but can't scope gh. To limit it on GitHub's side today,
+  log the daemon machine's `gh` in with a fine-grained personal access token
+  limited to the repositories and permissions you want.
+- **When it stops.** Archive, kill, reap and replacement all revoke the session's
+  af callback, so the helper stops working at once, even if the host is
+  unreachable. The wiring left in a preserved workspace is inert, and kill removes
+  it with the session directory. A restore applies or removes the wiring according
+  to the switch at that time. A daemon restart re-derives the same callback, so
+  pushes keep working after reattach.
+- **af's own pushes don't get it.** The automatic preserve-push that Lost recovery
+  and limit failover run is refused the credential while it runs. If that push
+  doesn't confirm success, the refusal stays for as long as that runtime's
+  callback credential lives, a daemon restart included. Those pushes keep using
+  whatever login the host has of its own, so this feature changes no push af
+  makes on its own. `af sessions archive --push` and the agent's own
+  pushes are answered.
+
+**What this protects against, and what it doesn't:**
+
+| Who | Gets the token? |
+|---|---|
+| Another session on the same host | **Not through af.** Its wiring names its own session directory, the daemon answers it only for its own origin and only through its own forward, and the token is never stored on the host. While the host is opted in, af has placed no code you didn't place on its machine since the last reset: it refuses to, and answers nobody on a machine where such code ever went. **But** sessions on one host share its ssh user. Any process running as that user can read a session's `0600` `af-callback.env`, connect to that session's own socket, and ask as that session, for that session's origin, until that session ends. That includes one of your sessions, or something a past session left running. That is the trust opting in grants (above). A Unix user per session would close it ([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)). |
+| A repository running on a host you didn't opt in | **No.** A session it creates through af is never eligible and can't be created on a host you opted in. A machine one ran on is tainted: no push credentials, and no opting it in, until you recreate or wipe its users and run `af hosts reset-trust`. It also can't prompt, schedule for or `archive --push` a session that is eligible, or any session on an opted-in machine. |
+| Programs the agent runs (a Makefile, a script, a repository's git hooks) | **Never handed it.** af puts the token in no environment, command line or file of theirs. They run with the agent's authority, so they can run `git push` or `gh` themselves, exactly as on a local worktree with your `gh` login, and git is answered only for the session's own origin. |
+| Commands af runs itself | **The same, stated plainly.** `post_worktree_commands` and process tabs run in the session after provisioning has wired the helper and the shim and the callback is up. While the switch is on, they can call the helper or `gh` like any program in the session, and none of them is handed the token. `on_archive_command` for a sandbox session runs on the daemon machine, after the archive has revoked the callback, so it never sees the credential. |
+| Other users on the host | **No.** The session directory is `0700`, the callback file and socket are `0600`, and the token is never on a command line. Root on the host is trusted, as for synced accounts. |
+| A copy of the workspace or session directory | **No.** Neither the workspace nor `.git/config` holds a secret. The callback credential in `af-callback.env` is accepted, on every af route, only through that session's own forward. So it is useless through any other session's connection, on the network listener, or off the host, and it stops working when the session ends. |
+| A compromised host you opted in | **Yes**, for its live sessions' origins, with gh carrying your full login. Turning `push_credentials` on means you trust that host with your GitHub authority. |
+
+Not covered yet: cloning a private repository through the helper (the af callback
+comes up after the clone, so the host still needs read access of its own), ssh
+origins, and a repository-scoped token source.
+
 ## Archive & restore
 
 For the disposable sandbox backends (`docker`, `ssh`, and `sandbox`), a **push**
@@ -1056,7 +1236,8 @@ What the sandbox host needs, and what af does to it:
   the configured value and substitutes the placeholder for the other. The
   host user's global git config is left untouched.
 - **Credentials.** The clone uses value-free GitHub credentials: no token value is
-  written into the clone's config. The per-session agent-server token goes
+  written into the clone's config. Pushing and `gh` authenticate as you only on a
+  host you opted in; see [Push credentials](#push-credentials-listed-hosts). The per-session agent-server token goes
   through stdin into a `0600` file in the session directory, never through argv
   or the environment of a process the agent starts.
 - **Callback credential.** For the agent inside the sandbox to call back into

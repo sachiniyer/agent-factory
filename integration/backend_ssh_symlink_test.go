@@ -96,6 +96,8 @@ func TestSSHBackendSymlinkedHomeRoundTrip(t *testing.T) {
 		Path:    repo,
 		Program: "cat",
 		Backend: session.BackendSSH,
+		// A repository [ssh] target is recorded before it provisions.
+		SandboxCredentials: placementRecorder{},
 	})
 	if err != nil {
 		t.Fatalf("NewInstance(backend=ssh, symlinked home): %v", err)

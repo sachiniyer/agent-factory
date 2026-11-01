@@ -101,21 +101,22 @@ var verbTargetClass = map[string]string{
 	"af proposal start":      classRouted,
 	"af proposal write":      classRouted,
 
-	"af quota":           classRouted,
-	"af daemon status":   classRouted, // the target's health route
-	"af config set":      classRouted, // global form; --project refuses in-verb
-	"af config unset":    classRouted,
-	"af config get":      classRefusedInVerb,
-	"af config list":     classRefusedInVerb,
-	"af config migrate":  classRefusedInVerb,
-	"af config validate": classRefusedInVerb,
-	"af accounts add":    classRefusedInVerb,
-	"af accounts list":   classRefusedInVerb,
-	"af accounts login":  classRefusedInVerb,
-	"af hosts add":       classRefusedInVerb,
-	"af hosts check":     classRefusedInVerb,
-	"af hosts list":      classRefusedInVerb,
-	"af hosts remove":    classRefusedInVerb,
+	"af quota":             classRouted,
+	"af daemon status":     classRouted, // the target's health route
+	"af config set":        classRouted, // global form; --project refuses in-verb
+	"af config unset":      classRouted,
+	"af config get":        classRefusedInVerb,
+	"af config list":       classRefusedInVerb,
+	"af config migrate":    classRefusedInVerb,
+	"af config validate":   classRefusedInVerb,
+	"af accounts add":      classRefusedInVerb,
+	"af accounts list":     classRefusedInVerb,
+	"af accounts login":    classRefusedInVerb,
+	"af hosts add":         classRefusedInVerb,
+	"af hosts check":       classRefusedInVerb,
+	"af hosts list":        classRefusedInVerb,
+	"af hosts remove":      classRefusedInVerb,
+	"af hosts reset-trust": classRefusedInVerb,
 
 	// No daemon API stands in for these; they refuse centrally (localOnlyVerbs).
 	"af token show":       classRefusedCentral,
@@ -143,6 +144,10 @@ var verbTargetClass = map[string]string{
 	"af gen-docs":          classLocal,
 	"af hook-guard-tmux":   classLocal,
 	"af internal plan-tap": classLocal, // Claude Code's status line command, run on THIS machine
+	// W7.8: run on the SANDBOX host by git and the gh shim; each dials its own
+	// session's callback socket, never a --daemon-url target.
+	"af internal git-credential": classLocal,
+	"af internal gh-shim":        classLocal,
 }
 
 func collectLeaves(c *cobra.Command, out *[]string) {

@@ -21,6 +21,8 @@ type sandboxHost struct {
 	privKey   string
 	known     string
 	repo      string
+	// bare is the host-side path of the bare repository mounted at /repo.git.
+	bare string
 }
 
 // stubAgentScript is the stand-in agent: it prints the ready prompt the create
@@ -40,6 +42,23 @@ func (h *sandboxHost) sshCommand() string {
 // inside the container and is set as the repo's origin.
 func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 	t.Helper()
+	return startSandboxHostWith(t, repo, sandboxImageExtra{})
+}
+
+// sandboxImageExtra is what a later W10 case adds to the mock host: files copied
+// into the image's build context (context name → source path on disk), Dockerfile
+// lines appended after the stub agent, and extra `docker run` arguments. A case
+// with extras builds its own tag, so it never replaces the shared image.
+type sandboxImageExtra struct {
+	tag        string
+	files      map[string]string
+	dockerfile string
+	runArgs    []string
+}
+
+// startSandboxHostWith is startSandboxHost with extras.
+func startSandboxHostWith(t *testing.T, repo string, extra sandboxImageExtra) *sandboxHost {
+	t.Helper()
 	requireDocker(t)
 	requireTool(t, "git")
 	requireTool(t, "ssh")
@@ -49,9 +68,20 @@ func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 	base := buildSSHDRoundTripImage(t)
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "claude"), stubAgentScript, 0755)
+	for name, src := range extra.files {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatalf("reading sandbox image extra %s: %v", src, err)
+		}
+		writeFile(t, filepath.Join(dir, name), string(data), 0755)
+	}
+	tag := "af-sandbox-e2e:test"
+	if extra.tag != "" {
+		tag = extra.tag
+	}
 	writeFile(t, filepath.Join(dir, "Dockerfile"),
-		"FROM "+base+"\nCOPY claude /usr/local/bin/claude\nRUN chmod +x /usr/local/bin/claude\n", 0644)
-	if out, err := exec.Command("docker", "build", "-t", "af-sandbox-e2e:test", dir).CombinedOutput(); err != nil {
+		"FROM "+base+"\nCOPY claude /usr/local/bin/claude\nRUN chmod +x /usr/local/bin/claude\n"+extra.dockerfile, 0644)
+	if out, err := exec.Command("docker", "build", "-t", tag, dir).CombinedOutput(); err != nil {
 		t.Fatalf("building the sandbox e2e image: %v\n%s", err, out)
 	}
 
@@ -61,7 +91,7 @@ func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 	bareDir := t.TempDir()
 	// The container pushes as root into this bind mount; hand the files back
 	// before TempDir's RemoveAll or cleanup fails with EPERM.
-	reownTempViaDocker(t, "af-sandbox-e2e:test", bareDir)
+	reownTempViaDocker(t, tag, bareDir)
 	bare := filepath.Join(bareDir, "repo.git")
 	runExternal(t, "", "git", "clone", "--bare", repo, bare)
 	runExternal(t, repo, "git", "remote", "add", "origin", "file:///repo.git")
@@ -74,17 +104,19 @@ func startSandboxHost(t *testing.T, repo string) *sandboxHost {
 		container: fmt.Sprintf("af-sandbox-e2e-%d", os.Getpid()),
 		privKey:   priv,
 		repo:      repo,
+		bare:      bare,
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", h.container).Run() })
 	// A FIXED host port, not an ephemeral one: restart() must come back on the
 	// address the operator's sandbox_ssh already names, and Docker may hand an
 	// ephemeral port out again differently after a restart.
 	fixedPort := freeLoopbackPort(t)
-	runExternal(t, "", "docker", "run", "-d", "--name", h.container,
-		"-p", "127.0.0.1:"+fixedPort+":22",
-		"-v", bare+":/repo.git",
-		"-v", priv+".pub:/authorized_keys:ro",
-		"af-sandbox-e2e:test")
+	args := []string{"run", "-d", "--name", h.container,
+		"-p", "127.0.0.1:" + fixedPort + ":22",
+		"-v", bare + ":/repo.git",
+		"-v", priv + ".pub:/authorized_keys:ro"}
+	args = append(args, extra.runArgs...)
+	runExternal(t, "", "docker", append(args, tag)...)
 	h.port = dockerPublishedHostPort(t, h.container, "22")
 	waitForSSH(t, h.port)
 	h.known = writeKnownHostsForContainer(t, h.port)

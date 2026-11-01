@@ -66,6 +66,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
 - [`af hosts list`](#af-hosts-list) — Show the saved hosts
 - [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
+- [`af hosts reset-trust`](#af-hosts-reset-trust) — Clear a host's push-credential taint after recreating or wiping its users
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
@@ -1580,7 +1581,8 @@ Settable keys:
                              name tailscale serve forwards, or "" for none — the whole list is replaced. localhost,
                              loopback IPs and the listener's own address always work; any other Host is refused.
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
-  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config} (global-only)
+  sandbox.push_credentials   true | false  (let sessions on the sandbox.ssh target push and run gh as you; global-only)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config,push_credentials} (global-only)
   default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
@@ -2089,6 +2091,7 @@ af hosts
 - [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
 - [`af hosts list`](#af-hosts-list) — Show the saved hosts
 - [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
+- [`af hosts reset-trust`](#af-hosts-reset-trust) — Clear a host's push-credential taint after recreating or wiping its users
 
 **Flags**
 
@@ -2114,6 +2117,12 @@ The name is what 'af sessions create --host <name>' takes. The host is probed
 for git, tmux (3.2 or newer) and gh, and every missing tool is reported with
 its fix. The entry is kept either way; use --no-check to skip the probe.
 
+--push-credentials opts the host into push credentials in the same write, so it
+is never listed without them: a listed host that is not opted in is one a
+sandbox may create sessions on. Opt in only a fresh, dedicated machine that
+runs nothing but your own af sessions (see "Push credentials" in
+docs/backends.md).
+
 ```
 af hosts add <name> <ssh-destination> [flags]
 ```
@@ -2126,6 +2135,7 @@ af hosts add <name> <ssh-destination> [flags]
 | `--host-key-verification` | `string` | strict \| accept-new \| insecure (default: the global ssh.host_key_verification) |
 | `--identity-file` | `string` | Absolute path of the ssh key for this host |
 | `--no-check` |  | Save the host without probing it |
+| `--push-credentials` |  | Opt the host into push credentials in the same write (a dedicated machine only) |
 | `--workspace-root` | `string` | Absolute directory on the host under which each session's dir is created (default ~/.af-sessions) |
 
 **Global flags**
@@ -2190,6 +2200,42 @@ af hosts remove <name> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--clear-default` |  | Also clear default_host when it names this host |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Print the result as a JSON envelope |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af hosts reset-trust
+
+Clear a host's push-credential taint after recreating or wiping its users
+
+Clear the push-credential taint on <name>'s machine.
+
+A machine that has run code you didn't place (a session started from inside
+another session, a repository's own [ssh] target, a create that failed after
+its hooks ran) gives no push credentials, because a process that code left
+behind can outlive every session, and any login on the machine able to sudo can
+reach every other login's files. Run this only after you recreated or wiped the
+machine's users. It clears the taints known to be only on that machine (every
+address they recorded is one of its own), and prints the identities it reset.
+<name> is a listed host, or sandbox.ssh for the free-form target. --entry <id>
+clears one taint by the id `af hosts check` shows; --all clears every taint. See
+"Push credentials" in docs/backends.md.
+
+```
+af hosts reset-trust <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--all` |  | Clear every taint (only once every machine they could have reached is reset) |
+| `--entry` | `string` | Clear one taint by the id `af hosts check` shows |
 
 **Global flags**
 

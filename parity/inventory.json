@@ -507,7 +507,7 @@
         "pointer": "commands/docs_gen.go:29 (hidden); commands/docs_gen.go:61 (--plugin-root); commands/agentservercmd.go:34; commands/legacy_tmuxguardcmd.go"
       },
       "verdict": "deliberate",
-      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio\u2194TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes \u2014 running it by hand does nothing useful. af internal plan-tap is hidden too: it is the Claude Code status line command af injects into the Claude sessions it launches, so Claude Code runs it, not a person; it records plan usage and runs the user's own status line. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
+      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio\u2194TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes \u2014 running it by hand does nothing useful. af internal plan-tap is hidden too: it is the Claude Code status line command af injects into the Claude sessions it launches, so Claude Code runs it, not a person; it records plan usage and runs the user's own status line. af internal git-credential and af internal gh-shim are hidden for the same reason (#5571 W7.8): git runs the first as the credential helper a sandbox workspace's repo-local config names, and the gh shim on the session's PATH runs the second; each asks the daemon for the session's own push credential over its own callback, so no person invokes them. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
       "id": "task.path-validate",
@@ -1980,6 +1980,8 @@
       "af help": "meta.discovery",
       "af hook-guard-tmux": "meta.internal",
       "af internal plan-tap": "meta.internal",
+      "af internal git-credential": "meta.internal",
+      "af internal gh-shim": "meta.internal",
       "af keys": "meta.discovery",
       "af projects add": "project.add",
       "af projects delete": "project.delete",
@@ -2038,6 +2040,7 @@
       "af hosts check": "host.manage",
       "af hosts list": "host.manage",
       "af hosts remove": "host.manage",
+      "af hosts reset-trust": "host.manage",
       "af target clear": "daemon.client-target",
       "af target set": "daemon.client-target",
       "af target show": "daemon.client-target",
@@ -2090,6 +2093,7 @@
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListAccounts": "session.accounts",
       "POST /v1/CheckHost": "host.check",
+      "POST /v1/ResetPushTrust": "host.manage",
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListDirectory": "project.browse",
       "POST /v1/ListProjects": "project.list",
@@ -2378,6 +2382,10 @@
       "af hook-guard-tmux --help": "meta.internal",
       "af internal --help": "meta.internal",
       "af internal plan-tap --help": "meta.internal",
+      "af internal git-credential --help": "meta.internal",
+      "af internal git-credential --session-dir": "meta.internal",
+      "af internal gh-shim --help": "meta.internal",
+      "af internal gh-shim --session-dir": "meta.internal",
       "af keys --help": "meta.discovery",
       "af keys --json": "cli.json-envelope",
       "af projects --help": "meta.discovery",
@@ -2556,12 +2564,16 @@
       "af hosts add --host-key-verification": "host.manage",
       "af hosts add --identity-file": "host.manage",
       "af hosts add --no-check": "host.manage",
+      "af hosts add --push-credentials": "host.manage",
       "af hosts add --workspace-root": "host.manage",
       "af hosts add --help": "meta.discovery",
       "af hosts check --help": "meta.discovery",
       "af hosts list --help": "meta.discovery",
       "af hosts remove --clear-default": "host.manage",
       "af hosts remove --help": "meta.discovery",
+      "af hosts reset-trust --all": "host.manage",
+      "af hosts reset-trust --entry": "host.manage",
+      "af hosts reset-trust --help": "meta.discovery",
       "af target show --help": "meta.discovery",
       "af token --help": "meta.discovery",
       "af token rotate --help": "meta.discovery",
@@ -2639,6 +2651,9 @@
             "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
           },
           "hosts_edit.host.use_ssh_config": {
+            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          },
+          "hosts_edit.host.push_credentials": {
             "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
           }
         }
@@ -3251,6 +3266,9 @@
           "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
         },
         "hosts_edit.host.use_ssh_config": {
+          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+        },
+        "hosts_edit.host.push_credentials": {
           "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
         }
       },

@@ -67,6 +67,8 @@ type Manager struct {
 	// daemon restart invalidates every outstanding one, which is the correct
 	// side to fail on.
 	sandboxTokens sandboxTokenRegistry
+	// pushCreds answers push-credential requests (#5571 W7.8); push_credential.go.
+	pushCreds pushCredentialState
 
 	// sandboxEndpointSocket is the live dedicated sandbox callback endpoint's
 	// socket path (#5571 W3.4); nil or empty while it is not listening. The mint
@@ -948,7 +950,13 @@ func (m *Manager) restoreInstances() error {
 }
 
 func (m *Manager) finishInstanceRestore() {
-	m.readyOnce.Do(func() { close(m.ready) })
+	m.readyOnce.Do(func() {
+		// Every restored row the operator didn't place taints its machine before
+		// the daemon is ready, and before any push credential is answered (#5571
+		// W7.8).
+		m.recordRestoredPlacements()
+		close(m.ready)
+	})
 	// Publish the lifecycle phase only after the Manager readiness barrier is
 	// open. A Ping that says upgrade_probation must never race a Snapshot that
 	// still says the restore is in progress. Transaction-tagged mutations remain
