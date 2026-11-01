@@ -1896,7 +1896,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/backlog_self.go backlogAskCmd (ask --self --handoff-file) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go); api/backlog_inbox.go backlogInboxCmd reads /v1/GetBacklog"
+        "pointer": "api/backlog_self.go backlogAskCmd (ask --self --then --handoff-file) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go); api/backlog_inbox.go backlogInboxCmd reads /v1/GetBacklog"
       },
       "verdict": "deliberate",
       "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; PR 8 adds the web answer box at the top of the item panel. Asking is agent-only (ask --self), so the web only answers. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
@@ -2259,6 +2259,7 @@
       "af backlog note --self": "backlog.items",
       "af backlog ask --self": "backlog.questions",
       "af backlog ask --handoff-file": "backlog.questions",
+      "af backlog ask --then": "backlog.questions",
       "af backlog inbox --help": "meta.discovery",
       "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
@@ -3177,6 +3178,9 @@
         },
         "handoff": {
           "ok": "Set only on an agent's question (af backlog ask --self --handoff-file); the web only answers."
+        },
+        "then": {
+          "ok": "Set only on an agent's question (af backlog ask --self --then); the web only answers."
         }
       },
       "SetBacklogItemStatus": {

@@ -55,8 +55,8 @@ func (it *Item) appendMessage(m Message, now time.Time) *Message {
 }
 
 // Ask appends a question from the agent of sessionID, which must be the item's
-// latest run. The item must be open. q.Handoff is kept on the question for a
-// later run of the item.
+// latest run. The item must be open. q.Then and q.Handoff are kept on the
+// question: what the session does once its run ends, and notes for a later run.
 func (b *Backlog) Ask(id int, sessionID string, q Question, now time.Time) (*Message, error) {
 	it, err := b.get(id)
 	if err != nil {
@@ -76,7 +76,7 @@ func (b *Backlog) Ask(id int, sessionID string, q Question, now time.Time) (*Mes
 		return nil, err
 	}
 	return it.appendMessage(Message{Kind: KindQuestion, Author: "agent:" + sessionID, Text: text,
-		Handoff: strings.TrimSpace(q.Handoff)}, now), nil
+		Then: q.Then, Handoff: strings.TrimSpace(q.Handoff)}, now), nil
 }
 
 // Answered is what Answer did.

@@ -31,9 +31,11 @@ type backlogState struct {
 	slots map[string]int
 	// continuing holds the items whose "continue" is being sent.
 	continuing map[string]bool
-	// deferredArchive holds the sessions whose on_done archive waits for an
-	// attached client to leave.
-	deferredArchive map[string]bool
+	// deferredArchive holds the sessions whose archive waits for an attached
+	// client to leave or the session to settle idle, with the reason af owes
+	// it (backlog.ArchiveDone or backlog.ArchiveAsk). The session's record
+	// carries the same owed archive durably (session.OwedArchiveData).
+	deferredArchive map[string]string
 	// pendingEnds holds, per session id, the run generation of an idle edge
 	// observed before the session's start record was committed: the completion
 	// has no item to land on yet, and is replayed by finishBacklogStart.
@@ -171,21 +173,30 @@ func (s *backlogState) endContinue(repoID string, id int) {
 	delete(s.continuing, continueKey(repoID, id))
 }
 
-func (s *backlogState) deferArchive(sessionID string) {
+// askedOf is the question the session showed, as remembered (asked), or the
+// empty seenQuestion.
+func (s *backlogState) askedOf(sessionID string) seenQuestion {
+	if q, ok := s.asked.Load(sessionID); ok {
+		return q.(seenQuestion)
+	}
+	return seenQuestion{}
+}
+
+func (s *backlogState) deferArchive(sessionID, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.deferredArchive == nil {
-		s.deferredArchive = map[string]bool{}
+		s.deferredArchive = map[string]string{}
 	}
-	s.deferredArchive[sessionID] = true
+	s.deferredArchive[sessionID] = reason
 }
 
-func (s *backlogState) takeDeferredArchive(sessionID string) bool {
+func (s *backlogState) takeDeferredArchive(sessionID string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	owed := s.deferredArchive[sessionID]
+	reason, owed := s.deferredArchive[sessionID]
 	delete(s.deferredArchive, sessionID)
-	return owed
+	return reason, owed
 }
 
 func (s *backlogState) beginRecovery() bool {

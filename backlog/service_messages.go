@@ -12,6 +12,9 @@ func (s *Service) PostMessage(req PostMessageRequest) (*MessageResponse, error) 
 	if req.Kind != KindQuestion && req.Handoff != "" {
 		return nil, errors.New("a handoff goes with a question")
 	}
+	if req.Kind != KindQuestion && req.Then != "" {
+		return nil, errors.New("then goes with a question")
+	}
 	switch req.Kind {
 	case KindNote, KindQuestion, KindAnswer:
 	default:
@@ -62,7 +65,7 @@ func (s *Service) ask(p *project, req PostMessageRequest) (*MessageResponse, err
 	}
 	var msg Message
 	_, err := s.update(p, func(b *Backlog) ([]int, error) {
-		m, err := b.Ask(req.ID, req.SessionID, Question{Text: req.Text, Handoff: req.Handoff}, s.now())
+		m, err := b.Ask(req.ID, req.SessionID, Question{Text: req.Text, Then: req.Then, Handoff: req.Handoff}, s.now())
 		if err != nil {
 			return nil, err
 		}
@@ -125,9 +128,14 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 		if out.SessionID != sessionID {
 			return nil, fmt.Errorf("%s changed while answering; retry", FormatID(req.ID))
 		}
+		// The next open question's id goes to the host for any target, so 0
+		// always means no question is left; only a live session mirrors its text.
 		next, nextID := "", 0
-		if out.Next != nil && target == TargetLive {
-			next, nextID = out.Next.Text, out.Next.ID
+		if out.Next != nil {
+			nextID = out.Next.ID
+			if target == TargetLive {
+				next = out.Next.Text
+			}
 		}
 		s.host.SetAttention(p.id, sessionID, nextID, next)
 		pending = PendingAnswer{ID: req.ID, AnswerID: out.Answer.ID, SessionID: sessionID,

@@ -61,16 +61,29 @@ const archivedIcon = "▧ "
 // (Refines the provisional ◒ slot Phase 1e stubbed for #1204.)
 const limitIcon = "◆ "
 
-// AttentionIcon marks a session whose agent asked for the user (#5461): a bang,
-// distinct in shape from every dot/diamond/box glyph and deliberately STATIC —
-// the TUI has no animation (#1766), where the web's attention dot blinks. It
-// echoes the automations rail's "[!]" needs-attention marker, and is drawn in
-// the generated attention role the web's dot uses rather than the dead/lost
-// ambers, so the request never reads as breakage. Exported per-concept so the
-// unanswered-question marker (#6475) can share one rendering helper and the
-// attention role while keeping its own `?` glyph — `!` is the attention
-// request, `?` is the open question.
-const AttentionIcon = "! "
+// The rail's two needs-you marks keep the web's two concepts apart, and share one
+// rendering (needsYouMark): the same attention colour role, in the status glyph's
+// slot. Both are static: the TUI has no animation (#1766), where the web's
+// attention dot blinks. Each is exported per concept.
+//
+//   - AttentionIcon: the session's agent asked for the user (#5461), the web's
+//     bell and Attention chip. A bang, distinct in shape from every
+//     dot/diamond/box glyph, echoing the automations rail's "[!]" marker.
+//   - AwaitingAnswerIcon: an item session af archived after its agent asked a
+//     question, waiting on the user's answer, which restores it: the web
+//     Backlog's "?" Needs you (#6475). It takes the place of ▧ on the archived
+//     row, and the Archived header's short count reuses its glyph.
+const (
+	AttentionIcon      = "! "
+	AwaitingAnswerIcon = "? "
+)
+
+// needsYouMark draws a needs-you icon in the generated attention role the web's
+// dot uses, rather than the dead/lost ambers, so a request never reads as
+// breakage.
+func needsYouMark(icon string) string {
+	return attentionStyle.Render(icon)
+}
 
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
 // shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
@@ -103,9 +116,9 @@ var archivedStyle = lipgloss.NewStyle()
 // archived gray so the blocked state is unmistakable at a glance.
 var limitStyle = lipgloss.NewStyle()
 
-// attentionStyle paints the status glyph of a session whose agent asked for the
-// user (#5461) in the generated attention role — the same token the web's
-// blinking dot draws — and attentionColor paints the request's detail line.
+// attentionStyle paints the needs-you marks (needsYouMark) in the generated
+// attention role — the same token the web's blinking dot draws — and
+// attentionColor paints an attention request's detail line.
 var attentionStyle = lipgloss.NewStyle()
 var attentionColor lipgloss.TerminalColor
 
@@ -396,7 +409,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// The ask outranks every status glyph the way the web's attention dot
 		// replaces the status dot — a Ready row's green returns when the request
 		// clears, and the reason rides the detail line below.
-		join = attentionStyle.Render(AttentionIcon)
+		join = needsYouMark(AttentionIcon)
 	case op != session.OpNone:
 		// The op axis is checked FIRST and DELIBERATELY masks the liveness glyph:
 		// an in-flight create/restore is a loading state (nothing, not a spinner —
@@ -420,6 +433,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 			join = lostStyle.Render(lostIcon)
 		case session.LiveArchived:
 			join = archivedStyle.Render(archivedIcon)
+			if i.AwaitsAnswer() {
+				join = needsYouMark(AwaitingAnswerIcon)
+			}
 		case session.LiveLimitReached:
 			join = limitStyle.Render(limitIcon)
 		case session.LivenessUnset:
@@ -475,7 +491,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// "[archived]..." (#1225). The state is already conveyed three other ways on
 	// the same row — the ▧ glyph, the dimming below, and the "▼ Archived (n)"
 	// section header — so the name stays full-width like a live row's.
-	if liveness == session.LiveArchived && !selected {
+	// A row waiting on your answer keeps full contrast: it is put away, but it
+	// is yours to act on.
+	if liveness == session.LiveArchived && !selected && !i.AwaitsAnswer() {
 		titleS = titleS.Foreground(InstanceTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
 	}

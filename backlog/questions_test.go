@@ -101,6 +101,29 @@ func TestServiceAnswerDelivers(t *testing.T) {
 	}
 }
 
+// An answer to a session af must restore mirrors no text on it, but still names
+// the question left open, so the host can tell it from a closed thread.
+func TestServiceAnswerToARestoreNamesTheQuestionLeft(t *testing.T) {
+	s, h := newTestService(t)
+	mustAdd(t, s, ItemInput{Key: "a", Title: "A"})
+	withRun(t, 1, StatusRunning)
+	ask(t, s, "Which db?")
+	second := ask(t, s, "Which port?")
+	h.target = TargetRestore
+	if _, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "Postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.attention["s1"] != "" || h.attentionID["s1"] != second.ID {
+		t.Fatalf("attention %q on question %d, want no text on question %d", h.attention["s1"], h.attentionID["s1"], second.ID)
+	}
+	if _, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "5432"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.attentionID["s1"] != 0 {
+		t.Fatalf("question %d after the last answer, want 0", h.attentionID["s1"])
+	}
+}
+
 func TestServiceAnswerResumesReviewAndRestores(t *testing.T) {
 	s, h := newTestService(t)
 	mustAdd(t, s, ItemInput{Key: "a", Title: "A"})

@@ -265,14 +265,17 @@ type RunEnd struct {
 	ID int
 	// Changed is whether the item was written.
 	Changed bool
-	// Archive asks the caller to archive the session: the user marked the item
-	// done and the project's on_done is archive.
+	// Archive asks the caller to archive the session for Reason: ArchiveDone
+	// when the user marked the item done and on_done is archive, ArchiveAsk
+	// when the run ended on open questions asked with then archive.
 	Archive bool
+	Reason  string
 }
 
 // RunEnded applies the end of a backlog run in sessionID, the item's latest
 // run. A running item with no open question goes to review with a note from
-// af. It returns a zero RunEnd when sessionID is not an item's latest run.
+// af; one whose open questions were all asked with then archive asks for an
+// archive. It returns a zero RunEnd when sessionID is not an item's latest run.
 func (b *Backlog) RunEnded(sessionID string, now time.Time) RunEnd {
 	it := b.ItemForSession(sessionID)
 	if it == nil || it.lastRun().SessionID != sessionID {
@@ -281,9 +284,10 @@ func (b *Backlog) RunEnded(sessionID string, now time.Time) RunEnd {
 	out := RunEnd{ID: it.ID}
 	switch it.Status {
 	case StatusDone:
-		out.Archive = b.Settings.OnDone == OnDoneArchive
+		out.Archive, out.Reason = b.Settings.OnDone == OnDoneArchive, ArchiveDone
 	case StatusRunning:
 		if it.OpenQuestion() != nil {
+			out.Archive, out.Reason = b.ArchiveOwed(sessionID, ArchiveAsk), ArchiveAsk
 			return out
 		}
 		if it.answerPending() {

@@ -89,6 +89,7 @@ var verbatimInstanceFields = map[string]string{
 	// owed — the same minted task id the TaskID row above already carries
 	// verbatim — and WHEN the obligation was filed; no user text reaches it.
 	"PendingOnComplete.TaskID": "minted task id (#1892), the same value TaskID above already carries verbatim",
+	"BacklogArchive.Reason":    "af enum (backlog.ArchiveDone or backlog.ArchiveAsk), never user text",
 
 	"BackendType":  "bounded backend discriminator (\"local\", \"remote\", \"\")",
 	"CurrentAgent": "agent enum name (tmux.SupportedPrograms), not user text",

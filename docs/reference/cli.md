@@ -622,12 +622,14 @@ af backlog archive <id>
 
 From an item session, ask the user a question
 
-Run from inside an item session: add a question to the item's thread and set the session's attention to it. The item shows Needs you until the user answers; the answer arrives in this session. Stop working after you ask.
+Run from inside an item session: add a question to the item's thread and set the session's attention to it. The item shows Needs you until the user answers. Stop working after you ask.
+
+--then says what happens to this session once you stop. archive, the default: af archives it, and the user's answer restores it, with this conversation, and arrives here. wait: the session stays live until the answer arrives. af archives only a session it can restore into its own conversation (today a Claude, Codex or Amp session with a recorded conversation id); any other stays live, as with wait. If it keeps the session live, or someone works in the session after you stop, af notes why on the item.
 
 --handoff-file stores notes for a later run of the item (at most 8 KB) with the question, read from a file or from stdin with -. The user sees them in "af backlog inbox".
 
 ```
-af backlog ask --self <text> [--handoff-file <path|->] [flags]
+af backlog ask --self <text> [--then wait|archive] [--handoff-file <path|->] [flags]
 ```
 
 **Flags**
@@ -636,6 +638,7 @@ af backlog ask --self <text> [--handoff-file <path|->] [flags]
 |------|------|-------------|
 | `--handoff-file` | `string` | A `path` to notes for a later run of the item, or - for stdin (at most 8 KB) |
 | `--self` |  | Ask on the item of the session this runs in |
+| `--then` | `string` | What happens to this session once you stop: archive (the answer restores it) or wait (it stays live) (default `archive`) |
 
 **Global flags**
 
