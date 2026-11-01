@@ -299,9 +299,11 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	// pre-reap returns (missing backend, bad kind, unresolvable account,
 	// runtime resolution failure, config/drift check) only this defer runs.
 	defer i.takeOnSandboxRetired()
-	// Until the replacement runtime is recorded, its machine is Unknown to the
-	// push-credential host rule (#5571 W7.8), which fails closed on it.
-	defer i.beginProvisioning()()
+	// Code the operator did not place taints the machine it is re-provisioned
+	// onto, durably and before any of it runs there (#5571 W7.8).
+	if err := i.recordReprovisionPlacement(); err != nil {
+		return err
+	}
 	i.mu.RLock()
 	backend := i.backend
 	accountName := i.Account
@@ -562,6 +564,7 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 		i.touchLocked()
 	}
 	i.mu.Unlock()
+	i.recordBoundPlacement()
 	return nil
 }
 
@@ -628,7 +631,6 @@ func (i *Instance) resetRemoteRuntime() {
 	// provisioner's (bound to runtimeTeardown, already nilled above), not this
 	// field, so clearing it does not affect a teardown still in flight.
 	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
-		i.rememberMachineLocked(provider)
 		provider.clearRuntimeCleanupData()
 	}
 	if i.runtimeCleanupStateUnknown {
@@ -689,7 +691,6 @@ func (i *Instance) clearDischargedRuntimeCleanup() {
 	i.mu.Lock()
 	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 		if provider.runtimeCleanupData() != nil {
-			i.rememberMachineLocked(provider)
 			provider.clearRuntimeCleanupData()
 			i.touchLocked()
 		}

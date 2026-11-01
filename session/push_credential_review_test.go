@@ -224,7 +224,6 @@ func TestRuntimeMachineSharesIsConservative(t *testing.T) {
 		"the name links both addresses":   {RuntimeMachine{Host: "2001:db8::7"}, box1, true},
 		"another machine":                 {box1, RuntimeMachine{Host: "box2.example", Addr: "198.51.100.8"}, false},
 		"an unresolvable name":            {box1, RuntimeMachine{Host: "nowhere.example"}, true},
-		"an in-flight provision":          {box1, RuntimeMachine{Unknown: true}, true},
 		"same free-form destination":      {RuntimeMachine{SandboxSSH: "ssh box3"}, RuntimeMachine{SandboxSSH: " ssh  box3 "}, true},
 		"other free-form destination":     {RuntimeMachine{SandboxSSH: "ssh box3"}, RuntimeMachine{SandboxSSH: "ssh box4"}, false},
 		"free-form naming the ssh host":   {RuntimeMachine{SandboxSSH: "ssh -p 2222 -i /k dev@box1.example"}, box1, true},
@@ -240,62 +239,6 @@ func TestRuntimeMachineSharesIsConservative(t *testing.T) {
 			assert.Equal(t, tc.want, tc.b.Shares(tc.a), "symmetric")
 		})
 	}
-}
-
-func TestRuntimeMachineReadsTheRecordedRuntime(t *testing.T) {
-	listed := &Instance{Title: "l", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1",
-		Config: config.SSHConfig{Host: "box1.example"}, DialAddress: "198.51.100.7"}}}
-	m, ok := listed.RuntimeMachine()
-	require.True(t, ok)
-	assert.Equal(t, RuntimeMachine{Host: "box1.example", Addr: "198.51.100.7"}, m)
-	p, ok := listed.PushCredentialPlacement()
-	require.True(t, ok)
-	assert.Equal(t, m, p.Machine, "the placement carries the same machine")
-
-	repoTarget := &Instance{Title: "r", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", Config: config.SSHConfig{Host: "box1.example"}}}}
-	m, ok = repoTarget.RuntimeMachine()
-	require.True(t, ok, "a repository's own [ssh] target still runs on a machine")
-	assert.Equal(t, RuntimeMachine{Host: "box1.example", RepoChosen: true}, m, "one the repository chose")
-
-	free := &Instance{Title: "f", backend: &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{SessionDir: "/s", SSHCommand: "ssh box3"}}}
-	m, ok = free.RuntimeMachine()
-	require.True(t, ok)
-	assert.Equal(t, RuntimeMachine{SandboxSSH: "ssh box3"}, m)
-
-	_, ok = (&Instance{Title: "y", backend: &LocalBackend{}}).RuntimeMachine()
-	assert.False(t, ok, "a local row runs nowhere off-box")
-}
-
-func TestPlannedRuntimeMachineResolvesTheTargetTheRuntimeWill(t *testing.T) {
-	t.Setenv("GH_HOST", "")
-	cfg := &config.ResolvedConfig{}
-	cfg.Hosts = map[string]config.HostConfig{"box1": {Host: "box1.example"}}
-	cfg.SandboxSSH = "ssh freebox"
-	prev := resolvedConfigFor
-	resolvedConfigFor = func(string) (*config.ResolvedConfig, error) { return cfg, nil }
-	t.Cleanup(func() { resolvedConfigFor = prev })
-
-	m, offBox := PlannedRuntimeMachine(InstanceOptions{Host: "box1"}, t.TempDir())
-	require.True(t, offBox)
-	assert.Equal(t, RuntimeMachine{Host: "box1.example"}, m, "a named listed host is the operator's placement")
-
-	cfg.DefaultHost = "box1"
-	m, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendSSH}, t.TempDir())
-	assert.Equal(t, RuntimeMachine{Host: "box1.example"}, m, "default_host too")
-
-	cfg.DefaultHost = ""
-	cfg.SSH = &config.SSHConfig{Host: "repo-box.example"}
-	m, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendSSH}, t.TempDir())
-	assert.Equal(t, RuntimeMachine{Host: "repo-box.example", RepoChosen: true}, m, "a repository's own [ssh] target")
-
-	m, _ = PlannedRuntimeMachine(InstanceOptions{Host: "not-listed"}, t.TempDir())
-	assert.True(t, m.Unknown, "a target that can't be resolved is Unknown")
-
-	m, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendSandbox}, t.TempDir())
-	assert.Equal(t, RuntimeMachine{SandboxSSH: "ssh freebox"}, m)
-
-	_, offBox = PlannedRuntimeMachine(InstanceOptions{Backend: BackendLocal}, t.TempDir())
-	assert.False(t, offBox, "a local session gets no callback")
 }
 
 // Codex P1 on #6433 at 3abfd87: a sandbox.ssh's destination can be remapped by
@@ -341,79 +284,6 @@ func TestSandboxSSHMachineIsWhatSSHActuallyConnectsTo(t *testing.T) {
 	}
 }
 
-// Third and fourth reviews of #6433: while a re-provision replaces the runtime,
-// the machine is Unknown (fail closed), and whether the repository chose the
-// placement comes from the recorded runtime, never from Instance.Host, which a
-// default_host session leaves empty.
-func TestRuntimeMachineIsUnknownWhileAReprovisionRuns(t *testing.T) {
-	handle := func(hostName string) *sshBackend {
-		return &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: hostName, Config: config.SSHConfig{Host: "box1.example"}}}
-	}
-	for name, tc := range map[string]struct {
-		inst     *Instance
-		wantRepo bool
-	}{
-		"a named listed host":             {&Instance{Title: "l", Host: "box1", backend: handle("box1")}, false},
-		"default_host (no Instance.Host)": {&Instance{Title: "d", backend: handle("box1")}, false},
-		"a repository's own [ssh] target": {&Instance{Title: "r", backend: handle("")}, true},
-		"a reaped runtime with no record": {&Instance{Title: "x", backend: &sshBackend{}}, true},
-		"the free-form target":            {&Instance{Title: "f", backend: &sandboxBackend{}}, false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			end := tc.inst.beginProvisioning()
-			m, ok := tc.inst.RuntimeMachine()
-			require.True(t, ok)
-			assert.True(t, m.Unknown)
-			assert.Equal(t, tc.wantRepo, m.RepoChosen)
-			reason, kind := m.Unproven()
-			assert.Equal(t, UnprovenInFlight, kind)
-			assert.Contains(t, reason, "re-provisioned")
-			end()
-			end() // idempotent
-			m, _ = tc.inst.RuntimeMachine()
-			_, kind = m.Unproven()
-			assert.NotEqual(t, UnprovenInFlight, kind)
-		})
-	}
-}
-
-// Fourth review of #6433, 1: a reap or a pushed archive clears the runtime
-// handle, but not a process a hook detached, so the row keeps standing for the
-// machine it ran on until it is killed, across a restart too.
-func TestRuntimeMachineOutlivesItsRuntimeHandle(t *testing.T) {
-	inst := &Instance{Title: "child", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1",
-		Config: config.SSHConfig{Host: "box1.example"}, DialAddress: "198.51.100.7"}}}
-	before, ok := inst.RuntimeMachine()
-	require.True(t, ok)
-	inst.clearDischargedRuntimeCleanup() // a confirmed reap
-	after, ok := inst.RuntimeMachine()
-	require.True(t, ok, "a reaped row still stands for its machine")
-	assert.Equal(t, before, after)
-
-	assert.Nil(t, inst.ToInstanceData().PlacedMachine, "never in a snapshot response: it names a host")
-	data := inst.ToInstanceData().ForStorage()
-	require.NotNil(t, data.PlacedMachine, "but it is persisted")
-	assert.Equal(t, before, *data.PlacedMachine)
-	data.Path, data.Status, data.BackendType = t.TempDir(), Archived, "ssh"
-	data.Worktree = GitWorktreeData{RepoPath: "/r", WorktreePath: "/r/wt"}
-	restored, err := FromInstanceData(data)
-	require.NoError(t, err)
-	got, ok := restored.RuntimeMachine()
-	require.True(t, ok)
-	assert.Equal(t, "box1.example", got.Host)
-	assert.Equal(t, "198.51.100.7", got.Addr, "restored after a daemon restart")
-
-	// A row from before af recorded machines, whose runtime was reaped: it ran
-	// off the daemon box, somewhere af can't name, so it is every machine.
-	old, ok := (&Instance{Title: "old", backend: &sshBackend{}}).RuntimeMachine()
-	require.True(t, ok)
-	reason, kind := old.Unproven()
-	assert.Equal(t, UnprovenOther, kind)
-	assert.Contains(t, reason, "before af recorded where")
-	_, ok = (&Instance{Title: "local", backend: &LocalBackend{}}).RuntimeMachine()
-	assert.False(t, ok, "a local row never ran off-box")
-}
-
 // Fourth review of #6433, 2: RuntimeMachine copies under the instance lock and
 // resolves nothing there, so a slow resolver can never stall a writer.
 func TestRuntimeMachineResolvesNothingUnderTheInstanceLock(t *testing.T) {
@@ -435,18 +305,152 @@ func TestRuntimeMachineResolvesNothingUnderTheInstanceLock(t *testing.T) {
 	assert.Zero(t, lookups, "RuntimeMachine resolved a name, which it would do under the instance lock")
 }
 
-// Fourth review of #6433, 3: the cause of an unproven machine is classified, so
-// a message can name the remedy that actually ends it.
-func TestUnprovenNamesItsCause(t *testing.T) {
+func TestRuntimeMachineReadsTheRecordedRuntime(t *testing.T) {
+	listed := &Instance{Title: "l", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1",
+		Config: config.SSHConfig{Host: "box1.example", User: "dev"}, DialAddress: "198.51.100.7"}}}
+	m, ok := listed.RuntimeMachine()
+	require.True(t, ok)
+	assert.Equal(t, RuntimeMachine{Host: "box1.example", Addr: "198.51.100.7", User: "dev"}, m)
+	p, ok := listed.PushCredentialPlacement()
+	require.True(t, ok)
+	assert.Equal(t, m, p.Machine, "the placement carries the same machine")
+
+	repoTarget := &Instance{Title: "r", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", Config: config.SSHConfig{Host: "box1.example", User: "dev"}}}}
+	m, ok = repoTarget.RuntimeMachine()
+	require.True(t, ok, "a repository's own [ssh] target still runs on a machine")
+	assert.Equal(t, RuntimeMachine{Host: "box1.example", User: "dev", RepoChosen: true}, m, "one the repository chose")
+
+	free := &Instance{Title: "f", backend: &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{SessionDir: "/s", SSHCommand: "ssh box3"}}}
+	m, ok = free.RuntimeMachine()
+	require.True(t, ok)
+	assert.Equal(t, RuntimeMachine{SandboxSSH: "ssh box3"}, m)
+
+	for name, inst := range map[string]*Instance{
+		"reaped": {Title: "x", backend: &sshBackend{}},
+		"local":  {Title: "y", backend: &LocalBackend{}},
+	} {
+		_, ok := inst.RuntimeMachine()
+		assert.False(t, ok, name)
+	}
+}
+
+func TestPlannedRuntimeMachineResolvesTheTargetTheRuntimeWill(t *testing.T) {
+	t.Setenv("GH_HOST", "")
+	cfg := &config.ResolvedConfig{}
+	cfg.Hosts = map[string]config.HostConfig{"box1": {Host: "box1.example", User: "dev"}}
+	cfg.SandboxSSH = "ssh freebox"
+	prev := resolvedConfigFor
+	resolvedConfigFor = func(string) (*config.ResolvedConfig, error) { return cfg, nil }
+	t.Cleanup(func() { resolvedConfigFor = prev })
+
+	m, offBox, err := PlannedRuntimeMachine(InstanceOptions{Host: "box1"}, t.TempDir())
+	require.NoError(t, err)
+	require.True(t, offBox)
+	assert.Equal(t, RuntimeMachine{Host: "box1.example", User: "dev"}, m, "a named listed host is the operator's placement")
+
+	cfg.DefaultHost = "box1"
+	m, _, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendSSH}, t.TempDir())
+	assert.Equal(t, RuntimeMachine{Host: "box1.example", User: "dev"}, m, "default_host too")
+
+	cfg.DefaultHost = ""
+	cfg.SSH = &config.SSHConfig{Host: "repo-box.example", User: "dev"}
+	m, _, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendSSH}, t.TempDir())
+	assert.Equal(t, RuntimeMachine{Host: "repo-box.example", User: "dev", RepoChosen: true}, m, "a repository's own [ssh] target")
+
+	_, _, err = PlannedRuntimeMachine(InstanceOptions{Host: "not-listed"}, t.TempDir())
+	assert.Error(t, err, "a target the runtime can't resolve provisions nothing")
+
+	m, _, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendSandbox}, t.TempDir())
+	assert.Equal(t, RuntimeMachine{SandboxSSH: "ssh freebox"}, m)
+
+	_, offBox, _ = PlannedRuntimeMachine(InstanceOptions{Backend: BackendLocal}, t.TempDir())
+	assert.False(t, offBox, "a local session gets no callback")
+}
+
+// A taint is per machine AND user: sessions as another Unix user can't read a
+// session's 0600 files, so they don't taint it. An unknown user is any user.
+func TestMachineIdentityKeepsUsersApart(t *testing.T) {
 	t.Cleanup(SetMachineLookupForTest(map[string][]string{"box1.example": {"198.51.100.7"}}))
-	reason, kind := RuntimeMachine{Host: "box1.example"}.Unproven()
-	assert.Equal(t, Proven, kind)
-	assert.Empty(t, reason)
-	reason, kind = RuntimeMachine{Host: "nowhere.example"}.Unproven()
-	assert.Equal(t, UnprovenName, kind)
-	assert.Contains(t, reason, "nowhere.example doesn't resolve")
-	_, kind = RuntimeMachine{SandboxSSH: "/usr/local/bin/to-box"}.Unproven()
-	assert.Equal(t, UnprovenOther, kind)
-	_, kind = RuntimeMachine{}.Unproven()
-	assert.Equal(t, Proven, kind, "a machine that names nothing is not unproven, it is nowhere")
+	dev := RuntimeMachine{Host: "box1.example", User: "dev"}.Identity()
+	assert.True(t, dev.Shares(RuntimeMachine{Host: "BOX1.example", User: "dev"}.Identity()))
+	assert.False(t, dev.Shares(RuntimeMachine{Host: "box1.example", User: "af-push"}.Identity()), "another user on the machine")
+	assert.True(t, dev.Shares(RuntimeMachine{Host: "198.51.100.7"}.Identity()), "a user af can't tell is any user")
+	merged := dev.Merge(RuntimeMachine{Addr: "203.0.113.9", User: "dev"}.Identity())
+	assert.Equal(t, []string{"198.51.100.7", "203.0.113.9"}, merged.Addrs, "every identity a placement named is kept")
+}
+
+// recorder is a fake PlacementRecorder, attached as the instance's minter.
+type recorder struct {
+	fakeCreds
+	placed []Placement
+	err    error
+}
+
+func (r *recorder) RecordPlacement(p Placement) error {
+	if r.err != nil {
+		return r.err
+	}
+	r.placed = append(r.placed, p)
+	return nil
+}
+
+// Design steer on #6433: a create the operator didn't place records its machine
+// BEFORE the backend runs anything there, and the record outlives a failed
+// create; an operator-placed create records nothing; a record that can't be
+// written provisions nothing.
+func TestProvisionRecordsThePlacementBeforeTheBackendRuns(t *testing.T) {
+	plan := RuntimeMachine{Host: "box1.example", User: "dev", RepoChosen: true}
+	t.Cleanup(SetPlannedRuntimeMachineForTest(func(InstanceOptions, string) (RuntimeMachine, bool, error) { return plan, true, nil }))
+	rec := &recorder{}
+	var seenBeforeBackend int
+	t.Cleanup(SetBackendFactoryForTest(func(InstanceOptions, string) (Backend, error) {
+		seenBeforeBackend = len(rec.placed)
+		return nil, errors.New("startup failed after the hooks ran")
+	}))
+	_, err := NewInstance(InstanceOptions{Title: "repo", Path: t.TempDir(), Program: "claude", SandboxCredentials: rec})
+	require.Error(t, err)
+	assert.Equal(t, 1, seenBeforeBackend, "recorded before the backend ran")
+	require.Len(t, rec.placed, 1, "and kept when the create fails")
+	assert.Equal(t, "repo", rec.placed[0].Title)
+	assert.Contains(t, rec.placed[0].Why, "repository's own [ssh] target")
+
+	plan = RuntimeMachine{Host: "box1.example", User: "dev"} // a listed host the operator named
+	rec.placed = nil
+	_, _ = NewInstance(InstanceOptions{Title: "op", Path: t.TempDir(), Program: "claude", SandboxCredentials: rec})
+	assert.Empty(t, rec.placed, "the operator's own placement taints nothing")
+
+	_, _ = NewInstance(InstanceOptions{Title: "child", Path: t.TempDir(), Program: "claude", SandboxCredentials: rec, CreatedBySandbox: "parent"})
+	require.Len(t, rec.placed, 1, "a sandbox-created create taints wherever it goes")
+
+	rec.err, seenBeforeBackend = errors.New("disk full"), -1
+	_, err = NewInstance(InstanceOptions{Title: "child2", Path: t.TempDir(), Program: "claude", SandboxCredentials: rec, CreatedBySandbox: "parent"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot record where this session's code will run")
+	assert.Equal(t, -1, seenBeforeBackend, "nothing was provisioned")
+}
+
+// And a re-provision of such a session records the machine it is going to
+// before it provisions; a record that can't be written refuses it (Codex P1 on
+// #6433: every machine a replaced runtime occupies stays tainted).
+func TestReprovisionRecordsThePlacementFirst(t *testing.T) {
+	t.Cleanup(SetPlannedRuntimeMachineForTest(func(InstanceOptions, string) (RuntimeMachine, bool, error) {
+		return RuntimeMachine{Host: "box2.example", User: "dev"}, true, nil
+	}))
+	rec := &recorder{err: errors.New("disk full")}
+	inst := &Instance{Title: "child", Path: t.TempDir(), Host: "box2", sandboxCreds: rec,
+		provenance: provenance{createdBySandbox: "parent"},
+		backend:    &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1", Config: config.SSHConfig{Host: "box1.example"}}}}
+	err := inst.reprovisionRemote()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot record where its re-provisioned code will run")
+
+	rec.err = nil
+	require.NoError(t, inst.recordReprovisionPlacement())
+	require.Len(t, rec.placed, 1)
+	assert.Equal(t, "box2.example", rec.placed[0].Machine.Host, "the machine it is going to")
+
+	rec.placed = nil
+	inst.provenance = provenance{createdByOperator: true}
+	require.NoError(t, inst.recordReprovisionPlacement())
+	assert.Empty(t, rec.placed, "an operator session on a host the operator named taints nothing")
 }

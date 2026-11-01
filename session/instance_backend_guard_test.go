@@ -49,8 +49,8 @@ import (
 //     is exactly the race the security review of #6433 found.
 //   - RuntimeMachine — the same handle, under the same lock, for the same reason:
 //     the host-sharing rule reads every live session's machine (#5571 W7.8).
-//   - placedMachineLocked — reached only from toInstanceDataLocked, whose
-//     callers hold i.mu; it persists the machine the runtime handle names.
+//   - recordReprovisionPlacement — reads the backend kind under one
+//     i.mu.RLock, then records the planned placement with no lock held.
 //
 // owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
 // backend pointer its caller already read under i.mu as an argument and never
@@ -82,7 +82,7 @@ var backendReadersUnderLock = map[string]bool{
 	"RemoteRuntimeUnbound":          true,
 	"PushCredentialPlacement":       true,
 	"RuntimeMachine":                true,
-	"placedMachineLocked":           true,
+	"recordReprovisionPlacement":    true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.

@@ -94,9 +94,6 @@ func archiveReportKillFence(report git.ArchiveReport) *GitWorktreeRelocationReco
 // daemon Snapshot payload, so it can carry transient in-flight operation state;
 // disk persistence must not.
 func (d InstanceData) ForStorage() InstanceData {
-	if d.placedMachine != nil {
-		d.PlacedMachine, d.placedMachine = d.placedMachine, nil
-	}
 	if d.snapshotTabsProjected {
 		d.Tabs = d.snapshotStorageTabs
 		d.snapshotTabsProjected = false

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 type hostsFake struct {
@@ -338,4 +339,36 @@ func TestHostsAdd_PushCredentialsOptsInInTheSameWrite(t *testing.T) {
 	assert.True(t, f.edits[0].Host.PushCredentials, "the add itself carries the opt-in")
 	assert.Equal(t, config.HostConfig{Host: "build.ts.net", User: "af-push", PushCredentials: true}, f.hosts["build"])
 	assert.Empty(t, f.sets, "no second write")
+}
+
+// Design steer on #6433: `af hosts reset-trust` is the operator's attestation,
+// for one host or --all, and prints what it reset.
+func TestHostsResetTrust(t *testing.T) {
+	f := &hostsFake{hosts: map[string]config.HostConfig{"build": {Host: "build.example"}}}
+	installHostsFake(t, f)
+	var asked []daemon.ResetPushTrustRequest
+	prev := hostsResetTrust
+	hostsResetTrust = func(req daemon.ResetPushTrustRequest) (daemon.ResetPushTrustResponse, error) {
+		asked = append(asked, req)
+		return daemon.ResetPushTrustResponse{
+			Identity: session.MachineIdentity{Names: []string{"build.example"}, Addrs: []string{"198.51.100.7"}, User: "af-push"},
+			Cleared:  []daemon.PushTaintReport{{SessionID: "child-1", Title: "child", Why: "created by another session's af"}},
+		}, nil
+	}
+	t.Cleanup(func() { hostsResetTrust, hostsResetTrustAll = prev, false })
+
+	out, err := runHosts(t, hostsResetTrustCmd, "build")
+	require.NoError(t, err)
+	assert.Equal(t, []daemon.ResetPushTrustRequest{{Host: "build"}}, asked)
+	assert.Contains(t, out, "names build.example; addresses 198.51.100.7; user af-push")
+	assert.Contains(t, out, `cleared: session "child" (child-1)`)
+
+	_, err = runHosts(t, hostsResetTrustCmd)
+	assert.Error(t, err, "neither a name nor --all")
+	hostsResetTrustAll = true
+	_, err = runHosts(t, hostsResetTrustCmd, "build")
+	assert.Error(t, err, "both a name and --all")
+	_, err = runHosts(t, hostsResetTrustCmd)
+	require.NoError(t, err)
+	assert.Equal(t, daemon.ResetPushTrustRequest{All: true}, asked[len(asked)-1])
 }

@@ -950,7 +950,13 @@ func (m *Manager) restoreInstances() error {
 }
 
 func (m *Manager) finishInstanceRestore() {
-	m.readyOnce.Do(func() { close(m.ready) })
+	m.readyOnce.Do(func() {
+		// Every restored row the operator didn't place taints its machine before
+		// the daemon is ready, and before any push credential is answered (#5571
+		// W7.8).
+		m.recordRestoredPlacements()
+		close(m.ready)
+	})
 	// Publish the lifecycle phase only after the Manager readiness barrier is
 	// open. A Ping that says upgrade_probation must never race a Snapshot that
 	// still says the restore is in progress. Transaction-tagged mutations remain

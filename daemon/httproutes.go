@@ -176,6 +176,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/ResetPushTrust",
+		Description: "Clear the push-credential taints on a listed host's machine and user (or every taint): the operator's attestation that the host user was recreated or wiped.",
+		requestType: reflect.TypeOf(ResetPushTrustRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResetPushTrust) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/ListPrograms",
 		Description: "List the agent programs a session can be created with, and the program an unspecified create defaults to.",
 		requestType: reflect.TypeOf(ListProgramsRequest{}),
