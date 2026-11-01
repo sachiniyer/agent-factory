@@ -96,7 +96,7 @@ Against the live SPA served over the daemon's plain-HTTP listener:
 | **Sidebar** | The rail lists the seeded sessions from the Snapshot/events plane, and the client reports an open event stream (`.af-app[data-live="open"]`). |
 | **Attach** | Click-to-attach opens the xterm terminal and shows the fake agent's live output (a real binary PTY frame decoded by the TS codec and painted in the browser). |
 | **Keyboard (#1694/#2517)** | In the sessions view's rail mode `j`/`k` navigate the rail; `Enter` attaches the selection; `ctrl+]` returns to the rail; `Escape` forwards to the agent as its interrupt (the ESC byte reaches the PTY and focus stays in the terminal). |
-| **View cycling (#1694/PR8)** | In rail mode `]` cycles the top-level view forward (sessions → tasks) and `[` cycles it back (tasks → sessions), the active view tab following each step. |
+| **View cycling (#1694/PR8)** | In rail mode `]` cycles the top-level view forward (sessions → backlog → tasks → config) and `[` cycles it back, the active view tab following each step. |
 | **Tabs (#1592 PR7)** | The header's **Terminal** and **VS Code** buttons, and `t` / Shift+`T` in rail mode, each create that tab directly when supported; the tab bar switches to it (click / `1`-`9`), and deletes it after confirmation (`×` / `w` → Delete tab) — the agent tab stays undeletable. |
 | **Create** | The **+ New** modal creates a session and its row appears in the rail. |
 | **Delete session** | The Delete session confirmation removes the session's row. |

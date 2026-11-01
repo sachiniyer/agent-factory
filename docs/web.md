@@ -28,7 +28,7 @@ after the tour. [Remote daemon access](remote-http-auth.md) is the full setup gu
 <figcaption>Choose a project, then select a session to see its tabs.</figcaption>
 </figure>
 
-The app bar's **Sessions**, **Tasks**, and **Config** buttons switch views.
+The app bar's **Sessions**, **Backlog**, **Tasks**, and **Config** buttons switch views.
 The **project switcher** scopes Sessions and Tasks to one repository and remembers
 that choice across reloads. Its menu shows session and working counts per project.
 Config's **This browser** section holds settings saved only in this browser.
