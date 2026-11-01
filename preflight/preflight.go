@@ -674,20 +674,18 @@ func relativeChdir(command string, launch tmux.CommandEnvironment) bool {
 }
 
 // relativeChdirOperand reports whether command's env prefix applies a relative
-// -C/--chdir that actually moves the working directory before any absolute
-// chdir resets it. Such a chain resolves launch.WorkingDir against the
-// doctor's cwd (join(cwd, chdir)) even when the two probe anchors collapse to
-// the same root-relative path, which the anchor comparison in
-// workingDirResolvesAgainstCwd and relativeChdir cannot distinguish from an
-// absolute chdir. A cwd-neutral chdir (env -C . codex) does not move the
-// directory, so it does not anchor the command and is skipped. An absolute
-// chdir fixes the working directory for operands after it, but a moving
-// relative chdir earlier in the chain already anchored the command: reaching
-// the absolute chdir requires first entering the relative directory from the
-// doctor's cwd (env -C rel env -C /tmp /bin/true must enter <launch-dir>/rel
-// before the inner -C /tmp takes effect), so the dependency is retained
-// rather than discarded. Relative chdirs after the first absolute chdir
-// resolve against it, not the doctor's cwd, so they do not anchor.
+// -C/--chdir that actually moves the working directory, with no absolute chdir
+// to fix it. Such a chain resolves launch.WorkingDir against the doctor's cwd
+// (join(cwd, chdir)) even when the two probe anchors collapse to the same
+// root-relative path, which the anchor comparison in workingDirResolvesAgainstCwd
+// and relativeChdir cannot distinguish from an absolute chdir. A cwd-neutral
+// chdir (env -C . codex) does not move the directory, so it does not anchor the
+// command and is skipped. A moving relative chdir before an absolute chdir
+// still anchors the command: reaching the absolute chdir requires first
+// entering the relative directory from the doctor's cwd (env -C rel
+// env -C /tmp /bin/true must enter <launch-dir>/rel before -C /tmp takes
+// effect). Relative chdirs after the first absolute chdir resolve against it,
+// not the doctor's cwd, so they do not anchor.
 func relativeChdirOperand(command string) bool {
 	chdirs := envChdirs(command)
 	if len(chdirs) == 0 {
