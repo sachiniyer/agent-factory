@@ -14,15 +14,19 @@ import (
 
 // captureDaemonIdentity snapshots the process-instance identity proctree uses to
 // revalidate a PID before signaling it, at the point classifyDaemonHome (or
-// pidBelongsToThisHome) just proved the PID serves this home. The snapshot is
-// bound to the instance whose home was checked so a PID the kernel recycled
-// between this classification and the signal is not terminated: proctree.Signal
-// revalidates the StartID and refuses (ErrIdentityChanged) when the PID no
-// longer names that instance. A PID that exited before the snapshot (or one the
-// backend could not read) returns the zero Process, so signalClassifiedDaemon
-// does not fall back to a PID-only signal that could hit the recycled PID
-// (#4793).
-func captureDaemonIdentity(pid int) proctree.Process {
+// verifyScopedDaemon, or pidBelongsToThisHome) just proved the PID serves this
+// home. The snapshot is bound to the instance whose home was checked so a PID
+// the kernel recycled between this classification and the signal is not
+// terminated: proctree.Signal revalidates the StartID and refuses
+// (ErrIdentityChanged) when the PID no longer names that instance. A PID that
+// exited before the snapshot (or one the backend could not read) returns the
+// zero Process, so signalClassifiedDaemon does not fall back to a PID-only
+// signal that could hit the recycled PID (#4793).
+//
+// A package var so a test can simulate a PID the kernel recycled between the
+// classification decision and the signal — a real recycle cannot be arranged on
+// demand (#5007) — the same way processStartTokenFn simulates PID reuse.
+var captureDaemonIdentity = func(pid int) proctree.Process {
 	proc, err := proctree.Lookup(pid)
 	if err != nil {
 		return proctree.Process{}

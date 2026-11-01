@@ -91,13 +91,24 @@ func StopOrphanDaemons(configDir string) (stopped []int, unverified []int, err e
 		if verifyScopedDaemon(pid, uid, wantHome) != daemonOurs {
 			continue
 		}
-		// signalAndWait is SIGTERM, poll, then SIGKILL only if the grace expires
-		// — the same escalation StopDaemon uses, so a daemon stopped here still
-		// gets to run its SaveInstances() handler (#571). It returns only once
-		// the process is GONE, which is the property the reset depends on: a
-		// daemon still running its shutdown flush would write instances.json
-		// back out after the wipe deleted it.
-		if err := signalAndWait(pid); err != nil {
+		// Capture the daemon's process-instance identity AT the verification
+		// decision, then signal through the identity-checked escalation
+		// (signalClassifiedDaemon -> signalProcessChecked). signalClassifiedDaemon
+		// sends SIGTERM, polls proctree.AliveSame, and escalates to SIGKILL — all
+		// via proctree.Signal, which revalidates the StartID immediately before
+		// each signal and refuses (ErrIdentityChanged) rather than signal a PID
+		// the kernel recycled onto an unrelated process after verifyScopedDaemon
+		// proved it ours (#4793, the same boundary StopDaemon and the PID-file
+		// SIGTERM fallback already enforce). It returns only once the captured
+		// instance is GONE, which is the property the reset depends on: a daemon
+		// still running its shutdown flush would write instances.json back out
+		// after the wipe deleted it (#571). A zero snapshot (the classified
+		// daemon exited before the capture, or the backend could not read its
+		// identity) fails closed: signalClassifiedDaemon never falls back to a
+		// PID-only signal that could hit the recycled PID — the captured
+		// identity is the whole of the signal's safety.
+		proc := captureDaemonIdentity(pid)
+		if err := signalClassifiedDaemon(pid, proc); err != nil {
 			errs = append(errs, fmt.Errorf("stop daemon pid %d: %w", pid, err))
 			continue
 		}
