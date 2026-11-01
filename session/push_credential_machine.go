@@ -531,7 +531,19 @@ func (i *Instance) recordReprovisionPlacement() error {
 	}
 	planned, offBox, err := planRuntimeMachine(InstanceOptions{Host: host, Backend: kind}, path)
 	if err != nil {
-		return fmt.Errorf("session %q: cannot resolve where it would be re-provisioned: %w", title, err)
+		if bySandbox != "" || !byOperator {
+			return fmt.Errorf("session %q: cannot resolve where it would be re-provisioned: %w", title, err)
+		}
+		// The operator's own row (restoring an archive onto a host since renamed
+		// or removed): record what can still be named, its runtime on a
+		// repository's own target, and let the re-provision report its own error.
+		if m, ok := i.RuntimeMachine(); ok && m.RepoChosen {
+			if rerr := recordPlacement(creds, Placement{SessionID: id, Title: title, Why: placementWhy(bySandbox, byOperator, m), Machine: m}); rerr != nil {
+				return fmt.Errorf("session %q: cannot record where its re-provisioned code will run, so it is not re-provisioned: %w", title, rerr)
+			}
+		}
+		log.WarningLog.Printf("session %q: can't resolve where it would be re-provisioned (%v); it is the operator's own, so the re-provision goes on", title, err)
+		return nil
 	}
 	if !offBox {
 		return nil

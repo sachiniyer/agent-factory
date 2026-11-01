@@ -480,3 +480,33 @@ func TestAPlacementThatCantBeRecordedIsNotProvisioned(t *testing.T) {
 	assert.Contains(t, err.Error(), "no daemon is attached to record where it will run")
 	assert.False(t, provisioned, "no recorder: nothing provisioned")
 }
+
+// Delta check of taint round two, b: a re-provision whose target af can't plan
+// (restoring your own archive onto a host since renamed or removed) refuses only
+// a row the operator didn't create; the operator's own proceeds with a warning,
+// recording what can still be named.
+func TestReprovisionPlanningErrorRefusesOnlyRowsTheOperatorDidNotCreate(t *testing.T) {
+	t.Cleanup(SetPlannedRuntimeMachineForTest(func(InstanceOptions, string) (RuntimeMachine, bool, error) {
+		return RuntimeMachine{}, true, errors.New(`backend=ssh: host "renamed" is not in the host list`)
+	}))
+	row := func(p provenance, hostName string) (*Instance, *recorder) {
+		rec := &recorder{}
+		return &Instance{Title: "s", Path: t.TempDir(), Host: "renamed", sandboxCreds: rec, provenance: p,
+			backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: hostName, Config: config.SSHConfig{Host: "old.example"}}}}, rec
+	}
+	child, _ := row(provenance{createdBySandbox: "p"}, "renamed")
+	err := child.recordReprovisionPlacement()
+	require.Error(t, err, "a sandbox-created row is refused")
+	assert.Contains(t, err.Error(), "not in the host list")
+	legacy, _ := row(provenance{}, "renamed")
+	assert.Error(t, legacy.recordReprovisionPlacement(), "so is one of unknown provenance")
+
+	mine, rec := row(provenance{createdByOperator: true}, "renamed")
+	require.NoError(t, mine.recordReprovisionPlacement(), "the operator's own row proceeds")
+	assert.Empty(t, rec.placed, "a listed placement of the operator's records nothing")
+
+	repo, rec := row(provenance{createdByOperator: true}, "") // the operator's, on a repository target
+	require.NoError(t, repo.recordReprovisionPlacement())
+	require.Len(t, rec.placed, 1, "what can still be named is recorded")
+	assert.Equal(t, "old.example", rec.placed[0].Machine.Host)
+}

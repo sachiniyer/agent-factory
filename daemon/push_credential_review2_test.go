@@ -81,7 +81,7 @@ func TestEverySandboxRouteAdmitsACredentialOnlyThroughItsOwnersForward(t *testin
 func TestGitCredential_RouteAlsoBindsTheForward(t *testing.T) {
 	pf := newPushFixture(t)
 	foreign := pf.giveForward("not-a-token", "ref-foreign")
-	_, _, _, err := pf.mgr.authorizePushCredential(pushAsk{owner: pf.me.ID, grant: pf.secret, carrier: foreign,
+	_, _, err := pf.mgr.authorizePushCredential(pushAsk{owner: pf.me.ID, grant: pf.secret, carrier: foreign,
 		req: GitCredentialRequest{Protocol: "https", Host: "github.com", Path: "owner/repo.git"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), refusePushWrongForward)

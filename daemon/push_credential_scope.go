@@ -208,7 +208,7 @@ func (m *Manager) pushEligible(inst *session.Instance) bool {
 	return ok && placement.Licensed(m.Config(), backend)
 }
 
-const refusePushEscalationText = "a session without push credentials cannot prompt, schedule a task for, or push-archive a session that has them"
+const refusePushEscalationText = "a session without push credentials (or on a machine af won't trust with them) cannot prompt, schedule a task for, or push-archive a session that has them"
 
 // refusePushEscalation is property 1's guard for a scoped verb that acts on
 // target on behalf of owner: refused when target is another session that is
@@ -221,8 +221,22 @@ func (m *Manager) refusePushEscalation(owner string, target *session.Instance) e
 	m.mu.Lock()
 	caller, _ := m.trackedSessionByIDLocked(owner)
 	m.mu.Unlock()
-	if m.pushEligible(caller) {
+	if m.pushEligible(caller) && m.pushMachineTrusted(caller) {
 		return nil
 	}
 	return sandboxRefusal(refusePushEscalationText)
+}
+
+// pushMachineTrusted reports whether inst's machine is identified and carries no
+// taint (Codex P1 on #6433): an eligible caller on a tainted machine is driven by
+// whatever the taint stands for, which must not reach a clean peer's credential
+// through the caller's own callback. It may resolve names (cached) and reads the
+// ledger, so it is asked last.
+func (m *Manager) pushMachineTrusted(inst *session.Instance) bool {
+	placement, ok := instancePushPlacement(inst)
+	if !ok {
+		return false
+	}
+	id := placement.Machine.Identity()
+	return id.Unproven == "" && len(m.pushCreds.taintsFor(id)) == 0
 }

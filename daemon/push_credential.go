@@ -131,7 +131,7 @@ type pushAsk struct {
 // meant to stop. A LAST liveness check follows, and only then is the answer
 // logged, so the audit line records what was actually sent.
 func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, error) {
-	origin, _, _, err := m.authorizePushCredential(ask)
+	origin, _, err := m.authorizePushCredential(ask)
 	if err != nil {
 		return "", err
 	}
@@ -142,7 +142,7 @@ func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, e
 	if err != nil {
 		return "", err
 	}
-	again, inst, machine, err := m.authorizePushCredential(ask)
+	again, pass, err := m.authorizePushCredential(ask)
 	if err != nil {
 		return "", err
 	}
@@ -152,7 +152,7 @@ func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, e
 		return "", sandboxRefusal(refusePushOtherRepo)
 	}
 	testHookPushBeforeFinalCheck()
-	if err := m.pushStillLive(ask, inst, machine); err != nil {
+	if err := m.pushStillLive(ask, pass); err != nil {
 		m.info().Printf("push credential: refused session %s for https://%s/%s at the final check: %v", ask.owner, origin.Host, origin.Path, err)
 		return "", err
 	}
@@ -165,57 +165,67 @@ func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, e
 // blocking step, reading the daemon checkout's origin (a git run), comes FIRST;
 // every rule that can change runs after it, and the liveness of the row and of
 // the very credential presented runs LAST, after every lock and read the others
-// take. It also returns the machine identity it resolved, which the final check
-// re-reads the taint ledger for.
-func (m *Manager) authorizePushCredential(ask pushAsk) (pushcred.Origin, *session.Instance, session.MachineIdentity, error) {
-	none := session.MachineIdentity{}
+// take. It also returns what the pass authorized (pushPass), which the final
+// check re-validates.
+func (m *Manager) authorizePushCredential(ask pushAsk) (pushcred.Origin, pushPass, error) {
+	none := pushPass{}
 	inst, err := m.pushCredentialRow(ask.owner, nil)
 	if err != nil {
-		return pushcred.Origin{}, nil, none, err
+		return pushcred.Origin{}, none, err
 	}
 	origin, originOK := instancePushOrigin(inst)
 	if _, err := m.pushCredentialRow(ask.owner, inst); err != nil {
-		return pushcred.Origin{}, nil, none, err
+		return pushcred.Origin{}, none, err
 	}
 	if !inst.OperatorCreated() {
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushSandboxCreated)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushSandboxCreated)
 	}
 	backend := instanceBackendType(inst)
 	if backend != "ssh" && backend != "sandbox" {
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushNotLicensed)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushNotLicensed)
 	}
 	placement, ok := instancePushPlacement(inst)
 	if !ok || !placement.Licensed(m.Config(), backend) {
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushNotLicensed)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushNotLicensed)
 	}
 	machine := placement.Machine.Identity()
 	if machine.Unproven != "" {
 		m.info().Printf("push credential: withheld from session %s: af can't establish which machine its host is, because %s", ask.owner, machine.Unproven)
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushHostUnproven)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushHostUnproven)
 	}
 	if !m.pushTaintsRestored() {
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushTaintsLoading)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushTaintsLoading)
 	}
 	if taints := m.pushCreds.taintsFor(machine); len(taints) > 0 {
 		m.info().Printf("push credential: withheld from session %s: %s", ask.owner, taints[0])
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushHostTainted)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushHostTainted)
 	}
 	if m.pushCreds.autoPushFenced(inst.ID, placement.CallbackRef) {
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushAutoPreserve)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushAutoPreserve)
 	}
 	if !carriedByOwnForward(ask.carrier, placement.CallbackRef) {
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushWrongForward)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushWrongForward)
 	}
 	if !originOK {
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushNoOrigin)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushNoOrigin)
 	}
 	if !origin.Matches(ask.req.Protocol, ask.req.Host, ask.req.Path) {
-		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushOtherRepo)
+		return pushcred.Origin{}, none, sandboxRefusal(refusePushOtherRepo)
 	}
-	if err := m.pushStillLive(ask, inst, machine); err != nil {
-		return pushcred.Origin{}, nil, none, err
+	pass := pushPass{inst: inst, machine: machine, placement: placement, backend: backend}
+	if err := m.pushStillLive(ask, pass); err != nil {
+		return pushcred.Origin{}, none, err
 	}
-	return origin, inst, machine, nil
+	return origin, pass, nil
+}
+
+// pushPass is what one authorization pass established: the row, the machine
+// identity it resolved, and the placement and backend it licensed.
+type pushPass struct {
+	inst      *session.Instance
+	machine   session.MachineIdentity
+	placement session.PushPlacement
+	backend   string
 }
 
 // pushCredentialRow finds the owner's tracked row. want, when set, is the row an
@@ -234,13 +244,22 @@ func (m *Manager) pushCredentialRow(owner string, want *session.Instance) (*sess
 // pushStillLive is the last check of every pass: the machine is still untainted
 // (the ledger read again, with the identity the pass resolved, so a taint a
 // placement recorded during any earlier step of this pass, the blocking carrier
-// lookup included, is seen; Codex P1 on #6433), then the row is still the one
-// authorized, still live, and the credential the request presented is still
-// that row's, all from memory, after the ledger read.
-func (m *Manager) pushStillLive(ask pushAsk, inst *session.Instance, machine session.MachineIdentity) error {
-	if taints := m.pushCreds.taintsFor(machine); len(taints) > 0 {
+// lookup included, is seen; Codex P1 on #6433). Then, all from memory and after
+// that blocking read, the licence still holds and no automatic push has fenced
+// the runtime (Codex P1 on #6433: a change made while the read waited for its
+// lock), and the row is still the one authorized, still live, and the
+// credential the request presented is still that row's.
+func (m *Manager) pushStillLive(ask pushAsk, pass pushPass) error {
+	inst := pass.inst
+	if taints := m.pushCreds.taintsFor(pass.machine); len(taints) > 0 {
 		m.info().Printf("push credential: withheld from session %s at the final check: %s", ask.owner, taints[0])
 		return sandboxRefusal(refusePushHostTainted)
+	}
+	if !pass.placement.Licensed(m.Config(), pass.backend) {
+		return sandboxRefusal(refusePushNotLicensed)
+	}
+	if m.pushCreds.autoPushFenced(inst.ID, pass.placement.CallbackRef) {
+		return sandboxRefusal(refusePushAutoPreserve)
 	}
 	if _, err := m.pushCredentialRow(ask.owner, inst); err != nil {
 		return err

@@ -338,3 +338,111 @@ func TestGitCredential_ATaintRecordedMidRequestIsSeenAtTheFinalCheck(t *testing.
 	code, got, msg := pf.askOwn(t)
 	requireRefused(t, code, got, msg, refusePushHostTainted)
 }
+
+// Delta check of taint round two, a: an entry af couldn't place on an identified
+// machine (a name that doesn't resolve, a sandbox.ssh ssh can't confirm) can't
+// be shown to be another machine, so no host is licensed while one exists, and
+// the refusal names its --entry id. It blocks no grant on a host already
+// licensed.
+func TestLicensingIsRefusedWhileAnUnconfirmedEntryExists(t *testing.T) {
+	pf := newPushFixture(t)
+	licensedBox1 := pf.mgr.Config().Hosts["box1"]
+	pf.setConfig(func(c *config.Config) { c.Hosts = map[string]config.HostConfig{"box1": {Host: "box1.example"}} })
+	creds := newSandboxCredentials(pf.mgr, "child-1")
+	require.NoError(t, creds.RecordPlacement(session.Placement{Title: "child", Why: "x", Machine: session.RuntimeMachine{SandboxSSH: "/usr/local/bin/to-box"}}))
+	thin, err := pf.mgr.pushCreds.taints.unconfirmed()
+	require.NoError(t, err)
+	require.Len(t, thin, 1, "an unconfirmed sandbox.ssh placement leaves a record, never nothing")
+
+	licensed := config.HostConfig{Host: "box9.example", PushCredentials: true}
+	err = pf.mgr.refuseLicensingTainted(SetConfigValueRequest{HostsEdit: &config.HostsEdit{Op: config.HostsEditAdd, Name: "box9", Host: &licensed}})
+	require.Error(t, err, "a machine nothing names is still refused while the entry exists")
+	assert.Contains(t, err.Error(), "af hosts reset-trust --entry "+thin[0].ID)
+
+	resp := &CheckHostResponse{Hosts: []HostCheckResult{{Name: "box1"}}}
+	pf.mgr.fillPushCredentialBlockers(pf.mgr.Config(), resp)
+	require.Len(t, resp.Hosts[0].PushCredentialBlockers, 1, "every host names it")
+	assert.Contains(t, resp.Hosts[0].PushCredentialBlockers[0], "--entry "+thin[0].ID)
+
+	pf.setConfig(func(c *config.Config) { c.Hosts = map[string]config.HostConfig{"box1": licensedBox1} })
+	code, got, msg := pf.askOwn(t)
+	requireAnswered(t, code, got, msg) // a host already licensed keeps answering
+
+	cs := &controlServer{manager: pf.mgr}
+	var rr ResetPushTrustResponse
+	require.NoError(t, cs.ResetPushTrust(ResetPushTrustRequest{Entry: thin[0].ID}, &rr))
+	assert.NoError(t, pf.mgr.refuseLicensingTainted(SetConfigValueRequest{HostsEdit: &config.HostsEdit{Op: config.HostsEditAdd, Name: "box9", Host: &licensed}}))
+}
+
+// Codex P1 on #6433 at 2fd8cc9: the licence and the automatic-push fence are
+// re-checked after the final ledger read, which can wait on its lock.
+func TestGitCredential_LicenceAndFenceAreRecheckedAfterTheFinalLedgerRead(t *testing.T) {
+	for name, tc := range map[string]struct {
+		change  func(pf *pushFixture)
+		refusal string
+	}{
+		"the licence is turned off": {func(pf *pushFixture) {
+			pf.setConfig(func(c *config.Config) {
+				c.Hosts = map[string]config.HostConfig{"box1": {Host: "box1.example"}}
+			})
+		}, refusePushNotLicensed},
+		"an automatic push fences the runtime": {func(pf *pushFixture) {
+			_, err := pf.mgr.pushCreds.beginAutoPush(pf.me.ID, "ref-me", nil)
+			require.NoError(t, err)
+		}, refusePushAutoPreserve},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pf := newPushFixture(t)
+			pf.mgr.pushCreds.fencePath = filepath.Join(t.TempDir(), pushFenceFileName)
+			prev := testHookPushBeforeFinalCheck
+			testHookPushBeforeFinalCheck = func() { tc.change(pf) }
+			t.Cleanup(func() { testHookPushBeforeFinalCheck = prev })
+			code, got, msg := pf.askOwn(t)
+			requireRefused(t, code, got, msg, tc.refusal)
+		})
+	}
+}
+
+// Codex P2 on #6433 at 2fd8cc9: a reset is durable. The restore pass on the next
+// start doesn't re-import a placement the operator cleared; a NEW placement of
+// that session taints again.
+func TestRestoreDoesNotReimportAClearedPlacement(t *testing.T) {
+	pf := newPushFixture(t)
+	pf.setConfig(func(c *config.Config) {
+		c.Hosts = map[string]config.HostConfig{"box1": c.Hosts["box1"], "box9": {Host: "box9.example"}}
+	})
+	pf.track(t, session.InstanceData{ID: "child-1", Title: "child", CreatedBySandbox: "x", Status: session.Archived})
+	box9 := session.RuntimeMachine{Host: "box9.example"}
+	pf.placeOn(t, "child", box9)
+	pf.mgr.pushCreds.taints.restored.Store(false)
+	pf.mgr.recordRestoredPlacements()
+	require.Len(t, pf.mgr.pushCreds.taintsFor(box9.Identity()), 1)
+
+	var rr ResetPushTrustResponse
+	require.NoError(t, (&controlServer{manager: pf.mgr}).ResetPushTrust(ResetPushTrustRequest{Host: "box9"}, &rr))
+	require.Len(t, rr.Cleared, 1)
+
+	pf.mgr.pushCreds.taints.restored.Store(false) // the next daemon start
+	pf.mgr.recordRestoredPlacements()
+	assert.Empty(t, pf.mgr.pushCreds.taintsFor(box9.Identity()), "the restore pass undid the reset")
+
+	creds := newSandboxCredentials(pf.mgr, "child-1")
+	require.NoError(t, creds.RecordPlacement(session.Placement{Title: "child", Why: "x", Machine: box9}))
+	assert.Len(t, pf.mgr.pushCreds.taintsFor(box9.Identity()), 1, "a new placement taints again")
+}
+
+// Codex P1 on #6433 at 2fd8cc9: an eligible caller on a tainted machine can't
+// drive an eligible peer: whatever the taint stands for could otherwise reach
+// the peer's credential through the caller's own callback.
+func TestATaintedCallerCannotDriveAnEligiblePeer(t *testing.T) {
+	pf := newPushFixture(t)
+	pf.eligiblePeer()
+	require.True(t, pf.mgr.pushEligible(pf.me), "precondition: the caller is eligible")
+	require.True(t, pf.mgr.pushEligible(pf.peer), "precondition: the peer is eligible")
+	_, out := pf.call(t, pf.secret, "/v1/SendPrompt", `{"title":"peer","prompt":"hi"}`)
+	assert.NotContains(t, out, refusePushEscalationText, "anti-vacuous: an untainted eligible caller may prompt it")
+
+	pf.taint(t, "child-1", "child", "created by another session's af", box1Host) // the caller's machine
+	_, out = pf.call(t, pf.secret, "/v1/SendPrompt", `{"title":"peer","prompt":"fetch the token"}`)
+	assert.Contains(t, out, refusePushEscalationText)
+}
