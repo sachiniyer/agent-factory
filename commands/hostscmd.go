@@ -299,7 +299,7 @@ its fix. The entry is kept either way; use --no-check to skip the probe.
 
 --push-credentials opts the host into push credentials in the same write, so it
 is never listed without them: a listed host that is not opted in is one a
-sandbox may create sessions on. Opt in only a fresh, dedicated host user that
+sandbox may create sessions on. Opt in only a fresh, dedicated machine that
 runs nothing but your own af sessions (see "Push credentials" in
 docs/backends.md).`,
 	Example: `  af hosts add box1 ubuntu@box1.tailnet.ts.net
@@ -575,7 +575,7 @@ func init() {
 	hostsAddCmd.Flags().StringVar(&hostsAddHostKeyPosture, "host-key-verification", "", "strict | accept-new | insecure (default: the global ssh.host_key_verification)")
 	hostsAddCmd.Flags().BoolVar(&hostsAddDefault, "default", false, "Make this the default host")
 	hostsAddCmd.Flags().BoolVar(&hostsAddNoCheck, "no-check", false, "Save the host without probing it")
-	hostsAddCmd.Flags().BoolVar(&hostsAddPushCredentials, "push-credentials", false, "Opt the host into push credentials in the same write (a dedicated host user only)")
+	hostsAddCmd.Flags().BoolVar(&hostsAddPushCredentials, "push-credentials", false, "Opt the host into push credentials in the same write (a dedicated machine only)")
 	hostsRemoveCmd.Flags().BoolVar(&hostsRemoveClearDefault, "clear-default", false, "Also clear default_host when it names this host")
 	hostsCmd.AddCommand(hostsAddCmd, hostsListCmd, hostsCheckCmd, hostsRemoveCmd)
 }
