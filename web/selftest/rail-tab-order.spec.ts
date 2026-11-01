@@ -1,0 +1,104 @@
+import { expect, test, type Page } from "@playwright/test";
+
+// #6409: every rail row's actions button used to be its own Tab stop, so a
+// keyboard user paid one Tab press per session to cross the rail — hundreds at
+// fleet scale. The rail is now a roving tabindex: the SELECTED row is the stop,
+// its actions button the second, and j/k moves both the selection and the DOM
+// focus. Bounded stops however many rows there are, and every row's menu is
+// still reachable: select the row, Tab to its actions, Enter.
+
+const SYNTH_ROWS = 8;
+const sessionA = process.env.AF_WEB_SESSION_A ?? "probe-a";
+
+async function seedExtraRows(page: Page): Promise<void> {
+  const response = await page.request.post("/v1/Snapshot", { data: { repo_id: "" } });
+  expect(response.ok()).toBe(true);
+  const original = await response.json();
+  const instances = original.data.instances as Array<Record<string, unknown> & { title: string }>;
+  const proto = { ...(instances.find((s) => s.title === sessionA) ?? {}) };
+  // Clone the real record (same worktree/repo_path, so the rows land in the
+  // scoped rail and keep its kill/lifecycle capabilities). created_at steps
+  // forward so the synthetic rows sort predictably after the seeded ones.
+  const base = Date.parse(String(proto.created_at ?? "2020-01-01T00:00:00Z"));
+  for (let i = 1; i <= SYNTH_ROWS; i++) {
+    instances.push({
+      ...proto,
+      id: `synth-tabstop-${i}`,
+      title: `tabstop-${i}`,
+      branch: `synth-tabstop-${i}`,
+      created_at: new Date(base + i * 60_000).toISOString(),
+    });
+  }
+  await page.route("**/v1/Snapshot", (route) =>
+    route.fulfill({ json: { ...original, data: { ...original.data, instances } } }),
+  );
+}
+
+test("#6409: the rail is a bounded number of Tab stops and every row menu stays reachable", async ({ page, request }) => {
+  await seedExtraRows(page);
+  // NOTE: `request` does not observe page.route, so this is the DAEMON's own
+  // snapshot — enough to find probe-a's id; the rail's rendered row count comes
+  // from the page.
+  const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const selected = snap.data.instances.find((s: { title: string }) => s.title === sessionA);
+  expect(selected?.id).toBeTruthy();
+  await page.goto(`/#/session/${encodeURIComponent(selected.id)}`);
+  await page.locator("#app[data-af-resync-settled]").waitFor();
+  const rows = page.locator(".af-rail-list .af-row");
+  const rowCount = await rows.count();
+  expect(rowCount, "the seeded + synthetic fleet rendered").toBeGreaterThan(SYNTH_ROWS);
+
+  // Exactly one row (the selected one) and exactly one actions button are
+  // tabbable; everything else in the rail is roving -1.
+  const tabbable = await page.locator(".af-rail-list").evaluate((list) => ({
+    rows: [...list.querySelectorAll<HTMLElement>(".af-row")].filter((r) => r.tabIndex === 0).length,
+    triggers: [...list.querySelectorAll<HTMLElement>(".af-row-actions .af-term-more")].filter((t) => t.tabIndex === 0).length,
+  }));
+  expect(tabbable.rows, "one rail row is the Tab stop").toBe(1);
+  expect(tabbable.triggers, "one row-actions button is a Tab stop").toBe(1);
+
+  // The issue's repro: detach to navigation, then walk Tab from the top of the
+  // page and count how many presses land inside the rail list.
+  await page.keyboard.press("Control+]");
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  const stops: string[] = [];
+  let railStops = 0;
+  let reachedPane = false;
+  for (let i = 0; i < 40 && !reachedPane; i++) {
+    await page.keyboard.press("Tab");
+    const stop = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      return {
+        rail: !!el?.closest(".af-rail-list"),
+        pane: !!el?.closest(".af-tabbar, .af-term-head, .af-main-term, .af-pane"),
+        desc: el
+          ? `${el.tagName.toLowerCase()} ${el.className} ${el.getAttribute("aria-label") ?? ""}`
+          : "none",
+      };
+    });
+    stops.push(stop.desc);
+    if (stop.rail) railStops += 1;
+    reachedPane = stop.pane;
+  }
+  expect(reachedPane, `Tab order never reached the pane chrome: ${stops.join(" | ")}`).toBe(true);
+  expect(railStops, `${rowCount} rows must not each cost a Tab stop: ${stops.join(" | ")}`).toBeLessThanOrEqual(2);
+
+  // Focus follows the j/k selection, so Tab then Enter reaches the actions of
+  // whatever row is selected — not just the first.
+  const selectedRow = page.locator(".af-rail-list .af-row.af-row-selected");
+  await selectedRow.focus();
+  const before = await selectedRow.locator(".af-row-title").textContent();
+  await page.keyboard.press("j");
+  const next = page.locator(".af-rail-list .af-row.af-row-selected");
+  await expect(next.locator(".af-row-title"), "j moves the rail selection").not.toHaveText(before ?? "", { timeout: 5_000 });
+  await expect(next, "DOM focus follows the selection").toBeFocused();
+  await page.keyboard.press("Tab");
+  const trigger = next.getByRole("button", { name: /^Actions for / });
+  await expect(trigger, "the selected row's actions button is the next stop").toBeFocused();
+  await page.keyboard.press("Enter");
+  const menu = next.locator(".af-term-menu");
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(trigger, "Escape returns focus to the actions button").toBeFocused();
+});
