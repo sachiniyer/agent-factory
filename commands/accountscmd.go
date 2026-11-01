@@ -120,9 +120,10 @@ to while every visible signal reported the selected account.
 
 Account-scoped sessions need tmux 3.2 or newer and run on the local backend, the docker backend, or an ssh
 session placed on a host in the global host list (--host <name>). On a listed host
-af syncs the session's account — only its credential files — into that session's
-own directory on the host, never the remote user's global agent config, writes
-refreshes back, and removes it when the session is killed or archived. A default
+af syncs the session's account — its credential files, plus any files the
+operator lists in ` + "`sandbox_agent_config`" + ` — into that session's own directory on
+the host, never the remote user's global agent config, writes refreshes back,
+and removes it when the session is killed or archived. A default
 account (default_accounts) is applied the same way; on a target that is not a listed
 host it is not applied, and the session runs on the host's own credentials. An
 explicit --account on such a target is refused, naming the remedy. af refuses rather

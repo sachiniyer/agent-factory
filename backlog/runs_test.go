@@ -91,14 +91,14 @@ func TestBeginStartLiveSession(t *testing.T) {
 func TestFinishStart(t *testing.T) {
 	b := runsBacklog(t)
 	plan, _ := b.BeginStart(2, StartedByUser, nil, t0)
-	if err := b.FinishStart(2, plan.Run.StartedAt, "s1", "B-2 Child a b", nil, t0); err != nil {
+	if err := b.FinishStart(2, plan.Run.StartedAt, "s1", "B-2 Child a b", "", nil, t0); err != nil {
 		t.Fatal(err)
 	}
 	r := b.Item(2).Runs[0]
 	if r.State != RunStarted || r.SessionID != "s1" || r.Title != "B-2 Child a b" {
 		t.Fatalf("run %+v", r)
 	}
-	if err := b.FinishStart(2, plan.Run.StartedAt, "s1", "", nil, t0); err == nil {
+	if err := b.FinishStart(2, plan.Run.StartedAt, "s1", "", "", nil, t0); err == nil {
 		t.Fatal("finished a run that is not starting")
 	}
 }
@@ -107,7 +107,7 @@ func TestFinishStartFailure(t *testing.T) {
 	b := runsBacklog(t)
 	b.Item(3).Status = StatusQueued
 	plan, _ := b.BeginStart(3, StartedByRunner, nil, t0)
-	if err := b.FinishStart(3, plan.Run.StartedAt, "", "", errors.New("boom"), t0); err != nil {
+	if err := b.FinishStart(3, plan.Run.StartedAt, "", "", "", errors.New("boom"), t0); err != nil {
 		t.Fatal(err)
 	}
 	it := b.Item(3)
@@ -307,22 +307,22 @@ func TestAdoptStartingLinksAnUnrecordedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := plan.Run.StartedAt
-	if b.AdoptStarting(it.ID, "s1", "B-1 A", started.Add(-time.Second), now) {
+	if b.AdoptStarting(it.ID, "s1", "B-1 A", "", started.Add(-time.Second), now) {
 		t.Fatal("a session created before the run began was adopted")
 	}
-	if b.AdoptStarting(it.ID+1, "s1", "x", started, now) {
+	if b.AdoptStarting(it.ID+1, "s1", "x", "", started, now) {
 		t.Fatal("an unknown item adopted a session")
 	}
-	if !b.AdoptStarting(it.ID, "s1", "B-1 A", started.Add(time.Second), now) {
+	if !b.AdoptStarting(it.ID, "s1", "B-1 A", "", started.Add(time.Second), now) {
 		t.Fatal("the starting run was not adopted")
 	}
 	if b.ItemForSession("s1") == nil || b.LatestRun(it.ID).State != RunStarted {
 		t.Fatalf("not linked: %+v", b.Item(it.ID).Runs)
 	}
-	if b.AdoptStarting(it.ID, "s2", "x", started.Add(time.Second), now) {
+	if b.AdoptStarting(it.ID, "s2", "x", "", started.Add(time.Second), now) {
 		t.Fatal("a second session adopted a run that is already linked")
 	}
-	if err := b.FinishStart(it.ID, started, "s1", "B-1 A", nil, now); err != nil {
+	if err := b.FinishStart(it.ID, started, "s1", "B-1 A", "", nil, now); err != nil {
 		t.Fatalf("the late start record must be a no-op for an adopted run: %v", err)
 	}
 }

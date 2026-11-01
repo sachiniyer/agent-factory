@@ -113,10 +113,11 @@ func TestValidateAccountEnvironmentCommand_RefusesUnmodeledWrapperAcrossAgents(t
 	}
 }
 
-// The wrapper guard must stay narrow. A process tab runs an arbitrary user
-// command, so the fix latches onto the literal NAME= signal specifically
-// rather than the wrapper's option spelling or a keyword scan. Each of these
-// carries no denied NAME= word, so it must keep working exactly as before.
+// The wrapper guard must stay narrow for plain commands and unlisted wrappers.
+// A process tab runs an arbitrary user command, so the visible-assignment fix
+// latches onto the literal NAME= signal specifically rather than the wrapper's
+// option spelling or a keyword scan. Each of these carries no visible denied
+// NAME= word, so it must keep working exactly as before.
 func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T) {
 	for _, command := range []string{
 		// Noun-uses of the mutators as operands carry no NAME= word.
@@ -126,37 +127,35 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		"ls env/bin",
 		"pip show env",
 		"python3 -c 'print(\"env\")'",
-		"strace -p 1234 env",
-		"strace -p 1234",
-		// An unmodeled wrapper around an ordinary command sets nothing.
-		"strace npm run dev",
-		"perf stat npm run dev",
-		"valgrind ls",
-		"gdb --args npm run dev",
+		// A plain command under a listed wrapper is no longer admitted (those
+		// refuse whatever their tail contains — see below), but an unlisted
+		// wrapper around an ordinary command sets nothing af can see.
+		"firejail npm run dev",
+		// Modeled wrappers (xargs is modeled, not a listed passthrough wrapper)
+		// keep unwrapping to an ordinary command.
 		"xargs ls",
 		"xargs -I{} ls",
-		"strace -o /dev/null npm run dev",
 		// A bare identity NAME without an `=` is an argument, not an
 		// assignment token, so it does not trigger the NAME= rule.
-		"strace echo CODEX_HOME",
-		"strace env CODEX_HOME codex",
+		"firejail echo CODEX_HOME",
+		"firejail env CODEX_HOME codex",
 		// An ordinary (non-identity) NAME= assignment is still allowed.
-		"strace env PORT=3000 npm start",
-		"strace env PORT=3000 codex",
+		"firejail env PORT=3000 npm start",
+		"firejail env PORT=3000 codex",
 		"xargs -I{} env PORT=3000 npm start",
 		// A NAME that merely shares a prefix with a denied name is not denied:
 		// the guard matches the whole assignment target.
-		"strace env CODEX_HOME_OTHER=warn codex",
-		"strace make CODEX_HOME_OTHER=warn",
+		"firejail env CODEX_HOME_OTHER=warn codex",
+		"firejail make CODEX_HOME_OTHER=warn",
 		// An invalid assignment target (empty or leading-digit name) is not a
 		// NAME=value token env would honor.
-		"strace env = codex",
-		"strace env 1INVALID=x codex",
+		"firejail env = codex",
+		"firejail env 1INVALID=x codex",
 		// Modeled wrappers keep unwrapping to an ordinary command.
-		"strace nice -n 5 npm run dev",
-		"strace ionice -c 3 npm run dev",
+		"firejail nice -n 5 npm run dev",
+		"firejail ionice -c 3 npm run dev",
 		// A no-op assignment with no command is not the exploit shape.
-		"strace",
+		"firejail",
 		// Non-wrapper commands whose arguments resemble a NAME=value token are
 		// not refused: the argument is never executed as an environment mutation.
 		"echo CODEX_HOME=/tmp",
@@ -166,7 +165,7 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		// A nested env with no command word is env's print mode: it mutates
 		// only its own process's environment and execs nothing, so the tail
 		// assignment overrides no running agent.
-		"strace env CODEX_HOME=/other",
+		"firejail env CODEX_HOME=/other",
 		// xargs with a literal command whose argv cannot reach env: items and
 		// substitutions land in the command's own arguments.
 		"xargs",
@@ -178,6 +177,38 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"command %q carries no denied NAME= word and must stay allowed", command)
+	}
+	// A listed argv-passthrough wrapper (strace/perf/valgrind/gdb/ltrace and the
+	// util-linux chrt/numactl/unshare/prlimit) is refused whatever its tail
+	// contains — even a benign tail with no denied NAME= word — because a static
+	// command-line check cannot prove what a shadowed wrapper does with the
+	// account environment. Each of these was admitted before the fail-closed
+	// redesign and must now be refused.
+	for _, command := range []string{
+		"strace -p 1234 env",
+		"strace -p 1234",
+		"strace npm run dev",
+		"perf stat npm run dev",
+		"valgrind ls",
+		"gdb --args npm run dev",
+		"strace -o /dev/null npm run dev",
+		"strace echo CODEX_HOME",
+		"strace env CODEX_HOME codex",
+		"strace env PORT=3000 npm start",
+		"strace env PORT=3000 codex",
+		"strace env CODEX_HOME_OTHER=warn codex",
+		"strace make CODEX_HOME_OTHER=warn",
+		"strace env = codex",
+		"strace env 1INVALID=x codex",
+		"strace nice -n 5 npm run dev",
+		"strace ionice -c 3 npm run dev",
+		"strace",
+		"strace env CODEX_HOME=/other",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q is a listed passthrough wrapper and must be refused", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q", command)
 	}
 }
 
@@ -214,12 +245,12 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		// A literal NAME with a dynamic value is still a hidden assignment.
 		{"strace env CODEX_HOME=$value codex", true},
 		// Non-exploiting shapes stay safe: no denied NAME= word in the tail.
-		{"strace npm run dev", false},
-		{"strace -p 1234 env", false},
+		{"strace npm run dev", true},
+		{"strace -p 1234 env", true},
 		{"man env", false},
-		{"strace env PORT=3000 npm start", false},
-		{"strace echo CODEX_HOME", false},
-		{"strace env CODEX_HOME codex", false},
+		{"strace env PORT=3000 npm start", true},
+		{"strace echo CODEX_HOME", true},
+		{"strace env CODEX_HOME codex", true},
 		// A shell word in an unmodeled wrapper's tail is judged by the same
 		// shellCommandIsUnproven rule the modeled path applies at command
 		// position, so a literal -c script is refused even inside the quotes —
@@ -230,10 +261,10 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"sh -c 'unset CODEX_HOME; codex'", true}, // control: bare shell form is caught
 		// A trailing shell name with no argv after it has nothing to prove
 		// against, so noun-uses stay allowed.
-		{"strace sh", false},
+		{"strace sh", true},
 		{"echo sh", false},
 		{"man sh", false},
-		{"strace -p 1234 sh", false},
+		{"strace -p 1234 sh", true},
 		// A tail that parses as a real unproven shell invocation refuses even
 		// under a non-wrapper head — the same trade `echo env X=y cmd` takes.
 		{"echo sh -c 'unset CODEX_HOME'", true},
@@ -247,8 +278,8 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace --env=CODEX_HOME=/other codex", true},
 		{"strace --env CODEX_HOME=/other codex", true},
 		{"grep -E 'CODEX_HOME=' /etc/environment", false},
-		{"strace -E FOO=1 codex", false},
-		{"strace --env=PORT=3000 codex", false},
+		{"strace -E FOO=1 codex", true},
+		{"strace --env=PORT=3000 codex", true},
 		// #5033: the attached forms stay refused when the VALUE (or the whole
 		// operand) carries an expansion the walk cannot prove — the literal
 		// NAME in the word's Lit prefix still decides, and an unprovable
@@ -267,18 +298,18 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace -qqECODEX_HOME=/other codex", true},
 		{"strace -fECODEX_HOME=$V codex", true},
 		{"strace -fE CODEX_HOME=/other codex", true},
-		{"strace -fE codex", false},
+		{"strace -fE codex", true},
 		// An operand-taking option consumes the REST of the cluster (Codex P1
 		// on #5701): -oECODEX_HOME=x is -o with a file name, not -E.
-		{"strace -oECODEX_HOME=x codex", false},
-		{"strace -fsECODEX_HOME=x codex", false},
-		{"strace -pECODEX_HOME=x codex", false},
+		{"strace -oECODEX_HOME=x codex", true},
+		{"strace -fsECODEX_HOME=x codex", true},
+		{"strace -pECODEX_HOME=x codex", true},
 		{"strace -fE CODEX_HOME=/other codex", true},
 		// A dynamic word in option position could expand to -E… (word
 		// splitting) and make the next word the traced command, so a trailing
 		// NAME= word is that command's argument, not print mode.
 		{"strace $W CODEX_HOME=/other", true},
-		{"strace -fEPORT=1 codex", false},
+		{"strace -fEPORT=1 codex", true},
 		// getopt_long accepts unambiguous prefixes (verified: strace
 		// --en=CODEX_HOME=/o sets it in the child).
 		{"strace --en=CODEX_HOME=/other codex", true},
@@ -286,7 +317,7 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace --en CODEX_HOME=/other codex", true},
 		{"strace --en=CODEX_HOME=$V codex", true},
 		{"strace --en$x codex", true},
-		{"strace --en=PORT=1 codex", false},
+		{"strace --en=PORT=1 codex", true},
 		// Inversion (#5033 review): strace's own option words are admitted only
 		// when positively recognized. Unknown long options and abbreviations
 		// refuse; known-safe options and their operands stay allowed.
@@ -297,14 +328,14 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace -fy$x codex", true},
 		{"strace -Q codex", true},
 		{"strace $opt codex", true},
-		{"strace --output=$F codex", false},
-		{"strace --output=trace.log --follow-forks codex", false},
-		{"strace --trace=openat codex", false},
-		{"strace -f -o trace.log codex --model x", false},
-		{"strace -ff -s 200 -e trace=network -o\"$LOG\" codex", false},
-		{"strace -p 1234 codex", false},
-		{"strace -- codex", false},
-		{"strace -E PORT codex", false},
+		{"strace --output=$F codex", true},
+		{"strace --output=trace.log --follow-forks codex", true},
+		{"strace --trace=openat codex", true},
+		{"strace -f -o trace.log codex --model x", true},
+		{"strace -ff -s 200 -e trace=network -o\"$LOG\" codex", true},
+		{"strace -p 1234 codex", true},
+		{"strace -- codex", true},
+		{"strace -E PORT codex", true},
 		// A strace in command position of another strace, env, or a modeled
 		// wrapper is option-walked too, however deep (#5033 follow-up).
 		{"strace -f strace --en=CODEX_HOME=/other codex", true},
@@ -319,14 +350,14 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace timeout 5 strace --bogus codex", true},
 		{"nohup strace -f strace --bogus codex", true},
 		{"strace strace strace --bogus codex", true},
-		{"strace -f strace -o x codex", false},
-		{"strace strace -f codex --model x", false},
-		{"env strace -o x codex", false},
-		{"strace env FOO=1 strace -f -o x codex", false},
+		{"strace -f strace -o x codex", true},
+		{"strace strace -f codex --model x", true},
+		{"env strace -o x codex", true},
+		{"strace env FOO=1 strace -f -o x codex", true},
 		// Control: the same expansions on a name af does not own, and the
 		// non-strace spelling, stay allowed.
-		{"strace -EPORT=$V codex", false},
-		{"strace --env=PORT=$V codex", false},
+		{"strace -EPORT=$V codex", true},
+		{"strace --env=PORT=$V codex", true},
 		{"grep -ECODEX_HOME=$V /etc/environment", false},
 		// An option word whose value is a denied NAME= assignment mutates the
 		// child's environment even when the option is not strace's.
@@ -428,10 +459,18 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 // command. Every position is judged once, so the number of judged words is
 // proportional to the command, whatever the machine or its load, and the verdict
 // does not change with length.
+//
+// strace as a head command is now refused whatever its tail contains (see
+// isUnmodeledArgvPassthroughWrapper), so the option-run scan is exercised
+// through a strace nested in an UNLISTED wrapper's tail, where the
+// visible-assignment scan (unrecognizedWrapperHidesAccountAssignment) still
+// judges it. `firejail strace -o strace … true` is a benign chain (strace's -o
+// takes a file operand, the traced command is `true`), so it stays admitted and
+// the strace option-run work is what this test measures.
 func TestStraceNestedOptionRunsAreLinear(t *testing.T) {
 	names := map[string]struct{}{"CODEX_HOME": {}}
 	run := func(n int) (unsafe bool, work int) {
-		command := "strace" + strings.Repeat(" -o strace", n) + " true"
+		command := "firejail strace" + strings.Repeat(" -o strace", n) + " true"
 		file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 		require.NoError(t, err)
 		call := file.Stmts[0].Cmd.(*syntax.CallExpr)

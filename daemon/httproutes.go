@@ -664,14 +664,14 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/GetBudget",
-		Description: "Read the global backlog budget: the share of each Claude plan window the backlog may use, the plan percent at which the runner stops, the cap per run, and the dollar limit for accounts with no plan readings, with each plan window's plan %, the backlog's part of it, the metered cost of everything in it (all_cost) and its reset time, per Claude account, and each item session's cost in total (runs) and within its account's current 5-hour window (run_window). Usage comes from the last metering pass; before the first one ends, metering is true.",
+		Description: "Read the global backlog budget: the limit, the total plan percent under which the runner starts items in both Claude plan windows, the cap per run, and the dollar limit for accounts with no plan readings, with each plan window's plan %, the backlog's part of it, the metered cost of everything in it (all_cost) and its reset time, per Claude account, and each item session's cost in total (runs) and within its account's current 5-hour window (run_window). Usage comes from the last metering pass; before the first one ends, metering is true.",
 		requestType: reflect.TypeOf(GetBudgetRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetBudget) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetBudget",
-		Description: "Change the global backlog budget: share, stop_at and max_per_run as percents from 0 to 100, and usd_limit in US dollars at API prices (0 turns it off). Returns the budget with the plan windows.",
+		Description: "Change the global backlog budget: limit and max_per_run as percents from 0 to 100, and usd_limit in US dollars at API prices (0 turns it off). Returns the budget with the plan windows.",
 		requestType: reflect.TypeOf(SetBudgetRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetBudget) },
 	},

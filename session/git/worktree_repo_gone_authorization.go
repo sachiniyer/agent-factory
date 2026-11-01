@@ -313,29 +313,82 @@ func boundedFinalizingCleanupIdentity(path string) (cleanupPathInspection, error
 	return boundedRelocationCleanupInspection(path, inspectFinalizingCleanupIdentity)
 }
 
+// cleanupInspectionFlight dedupes concurrent cleanup-identity inspections of
+// one path and latches after a deadline so retries cannot accumulate workers
+// against a stalled mount — the same per-path fence boundedRepoGoneOriginProbe
+// and boundedPointerCheck carry (#6267). The worker's raw syscalls are not
+// context-aware, so the latch — refuse new callers until the stuck worker
+// finally returns and unpublishes itself — is the containment.
+//
+// The two inspection kinds share one map keyed by path alone: their results
+// differ only in the `empty` field, which a caller joining the other kind's
+// healthy flight may read as "not verified empty" — the fail-closed answer
+// for a removal check — while every other field names the same path's
+// identity.
+type cleanupInspectionFlight struct {
+	done       chan struct{}
+	inspection cleanupPathInspection
+	err        error
+	// timedOut distinguishes a healthy shared in-flight probe from a worker
+	// which already exceeded an outer deadline and remains fenced until exit.
+	timedOut bool
+}
+
+var cleanupInspectionFlights = struct {
+	sync.Mutex
+	byPath map[string]*cleanupInspectionFlight
+}{byPath: make(map[string]*cleanupInspectionFlight)}
+
 func boundedRelocationCleanupInspection(
 	path string,
 	inspect func(string) (cleanupPathInspection, error),
 ) (cleanupPathInspection, error) {
-	type result struct {
-		inspection cleanupPathInspection
-		err        error
+	cleanupInspectionFlights.Lock()
+	if active := cleanupInspectionFlights.byPath[path]; active != nil {
+		if active.timedOut {
+			cleanupInspectionFlights.Unlock()
+			return cleanupPathInspection{}, fmt.Errorf(
+				"cleanup identity check at %s is still running after an earlier deadline: %w",
+				path, context.DeadlineExceeded,
+			)
+		}
+		cleanupInspectionFlights.Unlock()
+		return waitForCleanupInspectionFlight(path, active)
 	}
-	resultC := make(chan result, 1)
+	flight := &cleanupInspectionFlight{done: make(chan struct{})}
+	cleanupInspectionFlights.byPath[path] = flight
+	cleanupInspectionFlights.Unlock()
 	go func() {
-		inspection, err := inspect(path)
-		resultC <- result{inspection: inspection, err: err}
+		flight.inspection, flight.err = inspect(path)
+		cleanupInspectionFlights.Lock()
+		if cleanupInspectionFlights.byPath[path] == flight {
+			delete(cleanupInspectionFlights.byPath, path)
+		}
+		close(flight.done)
+		cleanupInspectionFlights.Unlock()
 	}()
+	return waitForCleanupInspectionFlight(path, flight)
+}
+
+func waitForCleanupInspectionFlight(path string, flight *cleanupInspectionFlight) (cleanupPathInspection, error) {
 	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
-	case observed := <-resultC:
-		return observed.inspection, observed.err
+	case <-flight.done:
+		return flight.inspection, flight.err
 	case <-timer.C:
-		return cleanupPathInspection{}, fmt.Errorf(
-			"timed out after %s while checking cleanup identity at %s: %w",
-			relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
-		)
+		cleanupInspectionFlights.Lock()
+		if cleanupInspectionFlights.byPath[path] == flight {
+			flight.timedOut = true
+			cleanupInspectionFlights.Unlock()
+			return cleanupPathInspection{}, fmt.Errorf(
+				"timed out after %s while checking cleanup identity at %s: %w",
+				relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
+			)
+		}
+		cleanupInspectionFlights.Unlock()
+		<-flight.done
+		return flight.inspection, flight.err
 	}
 }
 

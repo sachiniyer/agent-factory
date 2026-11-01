@@ -236,9 +236,10 @@ to while every visible signal reported the selected account.
 
 Account-scoped sessions need tmux 3.2 or newer and run on the local backend, the docker backend, or an ssh
 session placed on a host in the global host list (--host <name>). On a listed host
-af syncs the session's account — only its credential files — into that session's
-own directory on the host, never the remote user's global agent config, writes
-refreshes back, and removes it when the session is killed or archived. A default
+af syncs the session's account — its credential files, plus any files the
+operator lists in `sandbox_agent_config` — into that session's own directory on
+the host, never the remote user's global agent config, writes refreshes back,
+and removes it when the session is killed or archived. A default
 account (default_accounts) is applied the same way; on a target that is not a listed
 host it is not applied, and the session runs on the host's own credentials. An
 explicit --account on such a target is refused, naming the remedy. af refuses rather
@@ -547,7 +548,7 @@ af backlog
 
 Add a draft item, or add and update many items from JSON
 
-Add one draft item, at the bottom of its parent by default. With --file, add or update many items at once from JSON: {"proposal": "<slug>", "items": [{"key", "title", "body", "parent", "waits_on", "program", "sequential"}]}. key is local to the file; parent and waits_on take a key or an item id. With proposal set, an item with the same proposal and key as an existing one is updated, not added again. The batch is all or nothing and prints each key's id.
+Add one draft item, at the bottom of its parent by default. With --file, add or update many items at once from JSON: {"proposal": "<slug>", "items": [{"key", "title", "body", "parent", "waits_on", "program", "sequential"}]}. key is local to the file; parent and waits_on take a key or an item id. With proposal set, an item with the same proposal and key as an existing one is updated, not added again. The batch is all or nothing and prints each key's id. From an item session, add takes only a title and --parent: the agent files work it found as a draft, and af notes on the new item's thread which item's agent added it.
 
 ```
 af backlog add <title> | add --file <path or -> [flags]
@@ -578,7 +579,7 @@ af backlog add <title> | add --file <path or -> [flags]
 
 Answer an item's open question
 
-Answer the item's oldest open question, or the one --question names. af adds the answer to the thread and sends it to the item's session, restoring the session first if it is archived, and waiting while a client is attached to it. If the session is gone, the answer stays in the thread.
+Answer the item's oldest open question, or the one --question names. af adds the answer to the thread and sends it to the item's session, restoring the session first if it is archived, and waiting while a client is attached to it. If the session is gone, af starts a new session for the item whose first prompt carries the previous agent's notes, the question and the answer; the question closes when that session starts. A done or dropped item must be reopened first.
 
 ```
 af backlog answer <id> [--question <n>] <text> [flags]
@@ -653,19 +654,18 @@ af backlog ask --self <text> [--then wait|archive] [--handoff-file <path|->] [fl
 
 Show or change the global budget
 
-The budget is the share of your Claude plan the backlog may use, in each plan window (5-hour and weekly), for all projects. With no flags, print it with each window's plan %, the backlog's part of it, the reset time and the age of the newest reading. --share sets the backlog's % of each window (default 50). --stop-at sets the plan % at which the runner stops (default 90). --max-per-run sets the % of the 5-hour window one run may use (default 10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 turns it off.
+The budget keeps backlog work out of the way of your own: the runner starts items only while your total Claude plan use, from any source, is under the limit in both plan windows (5-hour and weekly), for all projects. With no flags, print it with each window's plan %, the backlog's part of it, the reset time and the age of the newest reading. --limit sets the plan % under which the runner starts items (default 50). Item sessions that are already running keep going when plan use passes the limit; only new starts wait. --max-per-run sets the % of the 5-hour window one run may use (default 10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 turns it off.
 
 ```
-af backlog budget [--share <pct>] [--stop-at <pct>] [--max-per-run <pct>] [--usd-limit <usd>] [flags]
+af backlog budget [--limit <pct>] [--max-per-run <pct>] [--usd-limit <usd>] [flags]
 ```
 
 **Flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--limit` | `string` | Plan percent, from any use, under which the runner starts items in both windows (0-100; default 50) |
 | `--max-per-run` | `string` | Percent of the 5-hour window one run may use (0-100; default 10) |
-| `--share` | `string` | Percent of each plan window the backlog may use (0-100; default 50) |
-| `--stop-at` | `string` | Plan percent, from any use, at which the runner stops (0-100; default 90) |
 | `--usd-limit` | `string` | Dollar limit at API prices for accounts with no plan readings; 0 turns it off |
 
 **Global flags**

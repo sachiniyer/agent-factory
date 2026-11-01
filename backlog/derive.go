@@ -138,7 +138,7 @@ func (d *deriver) leaf(it *Item) Derived {
 		return Derived{State: StateDone}
 	case it.Status == StatusDropped:
 		return Derived{State: StateDropped}
-	case it.OpenQuestion() != nil:
+	case it.OpenQuestion() != nil && !it.AnswerStarting():
 		return Derived{State: StateNeedsYou}
 	case it.Status == StatusReview:
 		return Derived{State: StateInReview}

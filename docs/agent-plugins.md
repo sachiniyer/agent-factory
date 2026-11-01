@@ -82,7 +82,11 @@ writes when `global_agent_skills` is on.
 ## Codex hooks
 
 The Codex plugin ships one optional hook: a `SessionStart` preflight that reports
-whether `af` is on your `PATH` and, if not, prints the install command.
+whether `af` is on your `PATH` and runs, and prints the install command if `af` is
+missing — or the reinstall command if `af` is on `PATH` but its `af version` probe
+fails (non-zero exit, no output, or a timeout), which covers a corrupt or
+wrong-architecture binary, a missing shebang interpreter, and a wrapper that
+emits a line and exits non-zero.
 
 The preflight deliberately does not fetch or install anything. A plugin hook runs as you,
 with your permissions. Af verifies release checksums, but those checksums are

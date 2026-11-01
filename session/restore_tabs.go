@@ -250,10 +250,23 @@ func (i *Instance) RestoreSurvivingTabs(rows []TabData) TabRestoreReport {
 	return rep
 }
 
+// sameTabIncarnation is the generation fence every application of an answer
+// about a tab makes: an empty generation on either side cannot disprove the
+// match, while two different ones mean the id was closed and re-created since
+// the question was asked — so the answer is not about the tab now under it.
+func sameTabIncarnation(rowGen, tabGen string) bool {
+	return rowGen == "" || tabGen == "" || rowGen == tabGen
+}
+
 // applyRestoreOutcome records the server's answer to a sent roster: a restored
 // id is bound (restored), a gone id is confirmed gone — the roster sweep then
 // retires its row (#6237) — and any other id stays unknown, to be retried. It
 // reports whether any tab changed state.
+//
+// The answer lands only on the incarnation the roster described: a tab closed
+// and recreated under the same id while the request was in flight is a
+// different one, and taking the dead generation's verdict would persist — a
+// late tabs_gone would brand the live replacement gone for good (#6242).
 func (i *Instance) applyRestoreOutcome(sent []TabData, restored, gone []string) (changed bool) {
 	set := func(ids []string, to TabRestoreState) {
 		for _, id := range ids {
@@ -261,7 +274,11 @@ func (i *Instance) applyRestoreOutcome(sent []TabData, restored, gone []string) 
 				if row.ID != id {
 					continue
 				}
-				if idx, ok := i.tabIndexByIDLocked(id); ok && i.Tabs[idx].restoreState != to {
+				idx, ok := i.tabIndexByIDLocked(id)
+				if !ok || !sameTabIncarnation(row.Gen, i.Tabs[idx].gen) {
+					continue
+				}
+				if i.Tabs[idx].restoreState != to {
 					i.Tabs[idx].restoreState = to
 					changed = true
 				}
@@ -291,7 +308,7 @@ func (i *Instance) reportRebound(rep *TabRestoreReport, row TabData) {
 	}
 	tab := i.Tabs[idx]
 	ts := tab.tmux
-	same := ts != nil && ts.SanitizedName() == row.TmuxName && (row.Gen == "" || tab.gen == "" || row.Gen == tab.gen)
+	same := ts != nil && ts.SanitizedName() == row.TmuxName && sameTabIncarnation(row.Gen, tab.gen)
 	i.mu.RUnlock()
 	if !same {
 		rep.Unresolved = append(rep.Unresolved, row.ID)

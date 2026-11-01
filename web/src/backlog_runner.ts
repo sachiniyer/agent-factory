@@ -1,5 +1,5 @@
 // The Backlog view's runner bar (backlog proposal, ui.md "Runner bar"): the
-// runner switch, max running, the backlog's use of the tighter plan window,
+// runner switch, max running, plan use of the window closest to the limit,
 // the paused reason with its main action, Run next, and the ⋯ settings. Its
 // controls live across renders so a backlog.spend event never takes focus or
 // a half-typed value.
@@ -56,15 +56,15 @@ function unmeterableItem(view: BacklogView, usage: Usage | null): number | null 
   return m ? Number(m[1]) : null;
 }
 
-/** The paused runner's main action, per ui.md: the share gate changes the
- *  share, an unmeterable run opens its item, no reading runs the next item. */
-export type MainAction = { kind: "share" } | { kind: "open"; id: number } | { kind: "run" } | null;
+/** The paused runner's main action: the limit gate changes the limit, an
+ *  unmeterable run opens its item, no reading runs the next item. */
+export type MainAction = { kind: "limit" } | { kind: "open"; id: number } | { kind: "run" } | null;
 
 export function mainAction(view: BacklogView, usage: Usage | null): MainAction {
   if (view.runner.state !== "stopped" && view.runner.state !== "waiting") return null;
   switch (view.runner.gate) {
-    case "share":
-      return { kind: "share" };
+    case "limit":
+      return { kind: "limit" };
     case "no_reading":
       return { kind: "run" };
     case "unmeterable": {
@@ -86,8 +86,7 @@ interface BudgetField {
 }
 
 const BUDGET_FIELDS: readonly BudgetField[] = [
-  { key: "share", label: "Backlog share", unit: "% of each plan window", max: 100, step: 1 },
-  { key: "stop_at", label: "Stop at plan %", unit: "% of either window, any use", max: 100, step: 1 },
+  { key: "limit", label: "Plan limit", unit: "% of either window, any use · new runs start only below it", max: 100, step: 1 },
   { key: "max_per_run", label: "Cap per run", unit: "% of the 5-hour window", max: 100, step: 1 },
   { key: "usd_limit", label: "Dollar limit", unit: "$ per window at API prices · 0 is off", max: 1_000_000, step: 0.01 },
 ];
@@ -126,7 +125,7 @@ export class RunnerBar {
     this.slots = h("select", { class: "af-backlog-slots" });
     this.slots.setAttribute("aria-label", "Max running");
     this.slots.addEventListener("change", () => actions.setMaxRunning(Number(this.slots.value)));
-    const hover = (): void => { if (this.usage) this.plan.title = usageHover(this.usage, this.now()); };
+    const hover = (): void => { if (this.usage && this.budget) this.plan.title = usageHover(this.usage, this.budget, this.now()); };
     this.plan.addEventListener("pointerenter", hover);
     this.plan.setAttribute("aria-expanded", "false");
     this.plan.addEventListener("click", () => {
@@ -205,7 +204,7 @@ export class RunnerBar {
     else if (a.kind === "open") this.actions.openItem(a.id);
     else {
       this.menu.open = true;
-      this.inputs.get("share")?.focus();
+      this.inputs.get("limit")?.focus();
     }
   }
 
@@ -225,7 +224,7 @@ export class RunnerBar {
     this.action = mainAction(view, usage);
     const a = this.action;
     this.main.hidden = a === null || a.kind === "run";
-    this.main.textContent = a?.kind === "open" ? `Open ${formatID(a.id)}` : "Change share";
+    this.main.textContent = a?.kind === "open" ? `Open ${formatID(a.id)}` : "Change limit";
     this.run.className = a?.kind === "run" ? "af-primary" : "af-ghost";
     this.run.disabled = busy;
     this.fill();
@@ -248,7 +247,8 @@ export class RunnerBar {
 
   private fillDetail(): void {
     if (this.planDetail.hidden || !this.usage) return;
-    this.planDetail.replaceChildren(...usageLines(this.usage, this.now()).map((l) => h("div", {}, l)));
+    if (!this.budget) return;
+    this.planDetail.replaceChildren(...usageLines(this.usage, this.budget, this.now()).map((l) => h("div", {}, l)));
   }
 
   private fillPlan(): void {
@@ -259,24 +259,23 @@ export class RunnerBar {
       this.planDetail.hidden = true;
       return;
     }
-    this.plan.title = usageHover(u, this.now());
+    this.plan.title = usageHover(u, b, this.now());
     this.fillDetail();
     if (u.metering) {
       this.plan.replaceChildren("Reading plan usage…");
       return;
     }
-    const k = tighterWindow(u, b, this.now());
+    const k = tighterWindow(u, this.now());
     if (k === null) {
-      this.plan.replaceChildren(b.usd_limit > 0 ? `Backlog limit ${usd(b.usd_limit)} per window` : `Backlog share ${pct(b.share)}`);
+      this.plan.replaceChildren(b.usd_limit > 0 ? `Backlog limit ${usd(b.usd_limit)} per window` : `Plan limit ${pct(b.limit)}`);
       return;
     }
     const w = u[k];
     const fill = h("span", { class: "af-backlog-meter-fill" });
-    fill.style.width = `${b.share > 0 ? Math.min(100, (w.backlog / b.share) * 100) : 100}%`;
+    fill.style.width = `${b.limit > 0 ? Math.min(100, (w.plan / b.limit) * 100) : 100}%`;
     const meter = h("span", { class: "af-backlog-meter", role: "img" }, fill);
-    meter.setAttribute("aria-label", `${pct(w.backlog)} of a ${pct(b.share)} share`);
-    this.plan.replaceChildren(`Backlog ${pct(w.backlog)} of ${WINDOW_LABELS[k].bar} `, meter,
-      ` ${pct(b.share)} · You ${pct(Math.max(0, w.plan - w.backlog))}`);
+    meter.setAttribute("aria-label", `${pct(w.plan)} of a ${pct(b.limit)} limit`);
+    this.plan.replaceChildren(`Plan ${pct(w.plan)} of ${WINDOW_LABELS[k].bar} `, meter, ` limit ${pct(b.limit)}`);
   }
 
   private fill(): void {

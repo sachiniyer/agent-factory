@@ -103,7 +103,7 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 		{"xargs -I{} echo {}", false},
 		{"xargs -I{} cp {} /tmp", false},
 		{"xargs -I{} nice -n 5 echo {}", false},
-		{"xargs -I{} strace -f echo {}", false},
+		{"xargs -I{} strace -f echo {}", true},
 		{"xargs -I{} env codex {}", false},
 		{"xargs -I{} env PORT={} codex", false},
 		{"xargs -I{} echo PORT={}", false},

@@ -4,7 +4,7 @@
 // backlog.changed; a reorder shows at once and snaps back on refusal, and a
 // started item shows Starting until its session exists.
 
-import { errorText } from "./api.js";
+import { errorText, isMutationOutcomeUncertain } from "./api.js";
 import {
   type BudgetReply, addItem, addNote, answerQuestion, deleteItem, backlogRoutes, moveItem, runNext, setBudget, setItemStatus, setSettings, startItem, updateItem,
 } from "./backlog_api.js";
@@ -74,6 +74,13 @@ export class BacklogPane {
   // Reorder writes go out one at a time: each target is computed from the previous
   // optimistic order, so they must commit in the order they were made.
   private moves: Promise<unknown> = Promise.resolve();
+  // A refusal breaks the optimistic chain — but only within the project it
+  // happened in. Each move captures its project's gen at queue time and skips
+  // itself when a refusal has bumped that project's gen by the time its segment
+  // runs, so a queued move whose target was computed against a refused order is
+  // dropped instead of being sent against the daemon's real order. A refusal in
+  // one project does not discard a reorder queued in another after switching.
+  private movesGen = new Map<string, number>();
   private panel: ItemPanel | null = null;
   private dragId: number | null = null;
   private focusId: number | null = null;
@@ -190,7 +197,7 @@ export class BacklogPane {
     const gate = closedGate(this.data?.budget ?? null, this.data?.usage ?? null, v.runner, Date.now());
     if (gate === null || this.confirmed.has(gate.key)) return true;
     const ok = await this.host.confirm("Budget gate closed",
-      `${gate.text} ${verb} ${formatID(id)} anyway? Its use still counts.`, `${verb} anyway`);
+      `${gate.text} ${verb} ${formatID(id)} anyway? This run will use more.`, `${verb} anyway`);
     if (ok) this.confirmed.add(gate.key);
     return ok;
   }
@@ -319,18 +326,37 @@ export class BacklogPane {
     }
     const token = this.host.token();
     if (token === null) return;
-    this.moves = this.moves.then(() => moveItem(root, id, to, token).then(() => {
-      if (pending) pending.gen = this.host.started();
-      return this.host.refresh();
-    }, (e: unknown) => {
-      if (pending && this.pending === pending) {
-        this.pending = null;
-        this.focusId = id;
-        this.render();
-      }
-      this.host.notify(errorText(e));
-      return this.host.refresh();
-    }).catch(() => {}));
+    const gen = this.movesGen.get(root) ?? 0;
+    this.moves = this.moves.then(() => {
+      if ((this.movesGen.get(root) ?? 0) !== gen) return;
+      return moveItem(root, id, to, token).then(() => {
+        if (pending) pending.gen = this.host.started();
+        return this.host.refresh();
+      }, (e: unknown) => {
+        if (pending) {
+          // A definitive refusal invalidates the optimistic chain in this
+          // project only: bump this project's gen so still-queued moves — whose
+          // targets were computed against this refused order — drop themselves
+          // rather than commit a phantom the user never saw. An uncertain
+          // outcome (the reply was lost; the move may have committed) does not
+          // bump the gen, so a successor computed against the now-real order
+          // still goes out — only a definitive daemon refusal drops the chain.
+          // Either way the overlay snaps back if it is the one shown here (a
+          // newer move in another project keeps its own). A refusal does not
+          // touch another project's chain, and focus is restored only while the
+          // failed project is still on screen, so a background rejection never
+          // steals the keyboard focus from an unrelated project.
+          if (!isMutationOutcomeUncertain(e)) this.movesGen.set(root, (this.movesGen.get(root) ?? 0) + 1);
+          if (this.pending?.root === root) this.pending = null;
+          if (this.root === root) {
+            this.focusId = id;
+            this.render();
+          }
+        }
+        this.host.notify(errorText(e));
+        return this.host.refresh();
+      });
+    }).catch(() => {});
   }
 
   private render(): void {

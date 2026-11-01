@@ -21,8 +21,7 @@ function parseBudgetReply(resp: { budget?: Budget } | null): BudgetReply {
   const b = resp?.budget;
   return {
     budget: {
-      share: Number(b?.share) || 0,
-      stop_at: Number(b?.stop_at) || 0,
+      limit: Number(b?.limit) || 0,
       max_per_run: Number(b?.max_per_run) || 0,
       usd_limit: Number(b?.usd_limit) || 0,
       usd_spent: Number(b?.usd_spent) || 0,
@@ -35,11 +34,11 @@ export async function getBudget(token: string): Promise<BudgetReply> {
   return parseBudgetReply(await af<{ budget?: Budget }>("GetBudget", {}, token));
 }
 
-export type BudgetUpdate = Partial<Pick<Budget, "share" | "stop_at" | "max_per_run" | "usd_limit">>;
+export type BudgetUpdate = Partial<Pick<Budget, "limit" | "max_per_run" | "usd_limit">>;
 
 export async function setBudget(update: BudgetUpdate, token: string): Promise<BudgetReply> {
   return parseBudgetReply(await af<{ budget?: Budget }>("SetBudget", {
-    share: update.share, stop_at: update.stop_at, max_per_run: update.max_per_run, usd_limit: update.usd_limit,
+    limit: update.limit, max_per_run: update.max_per_run, usd_limit: update.usd_limit,
   }, token));
 }
 

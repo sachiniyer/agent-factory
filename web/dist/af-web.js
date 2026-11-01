@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "ee1ee038e40f";
+var CLIENT_VERSION = "b14e649dd427";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18290,8 +18290,11 @@ function derivedOf(view, id) {
   return view.states[String(id)] ?? { state: "draft" };
 }
 function openQuestion(it) {
+  const last = it.runs?.[it.runs.length - 1];
+  if (last?.state === "starting" && last.answers?.length) return void 0;
   const thread = it.thread ?? [];
-  const answered = new Set(thread.filter((m) => m.kind === "answer" && m.answers).map((m) => m.answers));
+  const closes = (m) => m.kind === "answer" && !!m.answers && m.delivery !== "new_run" && m.delivery !== "superseded";
+  const answered = new Set(thread.filter(closes).map((m) => m.answers));
   return thread.find((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
 }
 function needsYouCount(views) {
@@ -18542,7 +18545,6 @@ function parseWindow(v) {
   const w = isRecord2(v) ? v : {};
   return {
     plan: Number(w.plan) || 0,
-    backlog: Number(w.backlog) || 0,
     resets_at: typeof w.resets_at === "string" ? w.resets_at : null,
     all_cost: Number(w.all_cost) || 0
   };
@@ -18594,18 +18596,10 @@ function pct(v) {
 function usd(v) {
   return `$${v.toFixed(2)}`;
 }
-function tighterWindow(u, b, now) {
-  const ratio = (v, limit) => limit > 0 ? v / limit : Infinity;
+function tighterWindow(u, now) {
   let best = null;
-  let score = -Infinity;
   for (const k of WINDOWS) {
-    const w = u[k];
-    if (!valid(w, now)) continue;
-    const s = Math.max(ratio(w.backlog, b.share), ratio(w.plan, b.stop_at));
-    if (s > score) {
-      best = k;
-      score = s;
-    }
+    if (valid(u[k], now) && (best === null || u[k].plan > u[best].plan)) best = k;
   }
   return best;
 }
@@ -18623,17 +18617,17 @@ function readingAge(at, now) {
   const hours = Math.floor(min / 60);
   return hours < 24 ? `read ${hours} h ago` : `read ${Math.floor(hours / 24)} d ago`;
 }
-function usageLines(u, now) {
+function usageLines(u, b, now) {
   const line = (k) => {
     const w = u[k];
     const label = WINDOW_LABELS[k].hover;
     if (!valid(w, now)) return `${label} \xB7 no reading`;
-    return `${label} \xB7 plan ${pct(w.plan)} \xB7 backlog ${pct(w.backlog)} \xB7 resets ${resetLabel(w.resets_at, now)}`;
+    return `${label} \xB7 plan ${pct(w.plan)} of ${pct(b.limit)} limit \xB7 resets ${resetLabel(w.resets_at, now)}`;
   };
   return [line("five_hour"), line("seven_day"), `${readingAge(u.reading_at, now)} \xB7 all projects`];
 }
-function usageHover(u, now) {
-  return usageLines(u, now).join("\n");
+function usageHover(u, b, now) {
+  return usageLines(u, b, now).join("\n");
 }
 function runUse(sessionId, u, now, account = "") {
   const name = account || "default";
@@ -18643,20 +18637,22 @@ function runUse(sessionId, u, now, account = "") {
   return Math.min(100, w.plan * cost / w.all_cost);
 }
 function closedGate(b, u, runner, now) {
-  if (b && b.share <= 0) return { key: "share:zero", text: "The backlog share is 0%." };
+  if (b && b.limit <= 0) return { key: "limit:zero", text: "The plan limit is 0%." };
   const daemonGate = runner !== null && runner.state !== "off";
   if (b && u && !daemonGate) {
+    let over = null;
     for (const k of WINDOWS) {
       const w = u[k];
-      if (valid(w, now) && w.backlog >= b.share) {
-        return { key: `share:${k}:${w.resets_at}`, text: `The backlog used its ${pct(b.share)} of ${WINDOW_LABELS[k].gate}.` };
+      if (valid(w, now) && w.plan >= b.limit && (over === null || Date.parse(w.resets_at) > Date.parse(u[over].resets_at))) {
+        over = k;
       }
     }
-    for (const k of WINDOWS) {
-      const w = u[k];
-      if (valid(w, now) && w.plan >= b.stop_at) {
-        return { key: `stop_at:${k}:${w.resets_at}`, text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[k].gate}.` };
-      }
+    if (over !== null) {
+      const w = u[over];
+      return {
+        key: `limit:${over}:${w.resets_at}`,
+        text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[over].gate}, over the ${pct(b.limit)} limit.`
+      };
     }
   }
   if (b && b.usd_limit > 0 && b.usd_spent >= b.usd_limit) {
@@ -18665,7 +18661,7 @@ function closedGate(b, u, runner, now) {
   if (runner?.state === "stopped" && runner.reason) {
     const text = `${webReason(runner.reason).replace(/\.$/, "")}.`;
     if (runner.gate === "usage_limit" || runner.gate === "usd_limit") return { key: runner.gate, text };
-    if (runner.gate === "share" || runner.gate === "stop_at") return { key: `${runner.gate}:${runner.reason}`, text };
+    if (runner.gate === "limit") return { key: `${runner.gate}:${runner.reason}`, text };
   }
   return null;
 }
@@ -18682,8 +18678,7 @@ function parseBudgetReply(resp) {
   const b = resp?.budget;
   return {
     budget: {
-      share: Number(b?.share) || 0,
-      stop_at: Number(b?.stop_at) || 0,
+      limit: Number(b?.limit) || 0,
       max_per_run: Number(b?.max_per_run) || 0,
       usd_limit: Number(b?.usd_limit) || 0,
       usd_spent: Number(b?.usd_spent) || 0
@@ -18696,8 +18691,7 @@ async function getBudget(token2) {
 }
 async function setBudget(update, token2) {
   return parseBudgetReply(await af("SetBudget", {
-    share: update.share,
-    stop_at: update.stop_at,
+    limit: update.limit,
     max_per_run: update.max_per_run,
     usd_limit: update.usd_limit
   }, token2));
@@ -19559,8 +19553,8 @@ function unmeterableItem(view, usage) {
 function mainAction(view, usage) {
   if (view.runner.state !== "stopped" && view.runner.state !== "waiting") return null;
   switch (view.runner.gate) {
-    case "share":
-      return { kind: "share" };
+    case "limit":
+      return { kind: "limit" };
     case "no_reading":
       return { kind: "run" };
     case "unmeterable": {
@@ -19571,8 +19565,7 @@ function mainAction(view, usage) {
   return null;
 }
 var BUDGET_FIELDS = [
-  { key: "share", label: "Backlog share", unit: "% of each plan window", max: 100, step: 1 },
-  { key: "stop_at", label: "Stop at plan %", unit: "% of either window, any use", max: 100, step: 1 },
+  { key: "limit", label: "Plan limit", unit: "% of either window, any use \xB7 new runs start only below it", max: 100, step: 1 },
   { key: "max_per_run", label: "Cap per run", unit: "% of the 5-hour window", max: 100, step: 1 },
   { key: "usd_limit", label: "Dollar limit", unit: "$ per window at API prices \xB7 0 is off", max: 1e6, step: 0.01 }
 ];
@@ -19595,7 +19588,7 @@ var RunnerBar = class {
     this.slots.setAttribute("aria-label", "Max running");
     this.slots.addEventListener("change", () => actions2.setMaxRunning(Number(this.slots.value)));
     const hover = () => {
-      if (this.usage) this.plan.title = usageHover(this.usage, this.now());
+      if (this.usage && this.budget) this.plan.title = usageHover(this.usage, this.budget, this.now());
     };
     this.plan.addEventListener("pointerenter", hover);
     this.plan.setAttribute("aria-expanded", "false");
@@ -19703,7 +19696,7 @@ var RunnerBar = class {
     else if (a.kind === "open") this.actions.openItem(a.id);
     else {
       this.menu.open = true;
-      this.inputs.get("share")?.focus();
+      this.inputs.get("limit")?.focus();
     }
   }
   update(view, budget, usage, busy) {
@@ -19722,7 +19715,7 @@ var RunnerBar = class {
     this.action = mainAction(view, usage);
     const a = this.action;
     this.main.hidden = a === null || a.kind === "run";
-    this.main.textContent = a?.kind === "open" ? `Open ${formatID(a.id)}` : "Change share";
+    this.main.textContent = a?.kind === "open" ? `Open ${formatID(a.id)}` : "Change limit";
     this.run.className = a?.kind === "run" ? "af-primary" : "af-ghost";
     this.run.disabled = busy;
     this.fill();
@@ -19743,7 +19736,8 @@ var RunnerBar = class {
   }
   fillDetail() {
     if (this.planDetail.hidden || !this.usage) return;
-    this.planDetail.replaceChildren(...usageLines(this.usage, this.now()).map((l) => h("div", {}, l)));
+    if (!this.budget) return;
+    this.planDetail.replaceChildren(...usageLines(this.usage, this.budget, this.now()).map((l) => h("div", {}, l)));
   }
   fillPlan() {
     const u = this.usage;
@@ -19753,27 +19747,23 @@ var RunnerBar = class {
       this.planDetail.hidden = true;
       return;
     }
-    this.plan.title = usageHover(u, this.now());
+    this.plan.title = usageHover(u, b, this.now());
     this.fillDetail();
     if (u.metering) {
       this.plan.replaceChildren("Reading plan usage\u2026");
       return;
     }
-    const k = tighterWindow(u, b, this.now());
+    const k = tighterWindow(u, this.now());
     if (k === null) {
-      this.plan.replaceChildren(b.usd_limit > 0 ? `Backlog limit ${usd(b.usd_limit)} per window` : `Backlog share ${pct(b.share)}`);
+      this.plan.replaceChildren(b.usd_limit > 0 ? `Backlog limit ${usd(b.usd_limit)} per window` : `Plan limit ${pct(b.limit)}`);
       return;
     }
     const w = u[k];
     const fill = h("span", { class: "af-backlog-meter-fill" });
-    fill.style.width = `${b.share > 0 ? Math.min(100, w.backlog / b.share * 100) : 100}%`;
+    fill.style.width = `${b.limit > 0 ? Math.min(100, w.plan / b.limit * 100) : 100}%`;
     const meter = h("span", { class: "af-backlog-meter", role: "img" }, fill);
-    meter.setAttribute("aria-label", `${pct(w.backlog)} of a ${pct(b.share)} share`);
-    this.plan.replaceChildren(
-      `Backlog ${pct(w.backlog)} of ${WINDOW_LABELS[k].bar} `,
-      meter,
-      ` ${pct(b.share)} \xB7 You ${pct(Math.max(0, w.plan - w.backlog))}`
-    );
+    meter.setAttribute("aria-label", `${pct(w.plan)} of a ${pct(b.limit)} limit`);
+    this.plan.replaceChildren(`Plan ${pct(w.plan)} of ${WINDOW_LABELS[k].bar} `, meter, ` limit ${pct(b.limit)}`);
   }
   fill() {
     for (const [key, input] of this.inputs) {
@@ -19833,6 +19823,13 @@ var BacklogPane = class {
   // Reorder writes go out one at a time: each target is computed from the previous
   // optimistic order, so they must commit in the order they were made.
   moves = Promise.resolve();
+  // A refusal breaks the optimistic chain — but only within the project it
+  // happened in. Each move captures its project's gen at queue time and skips
+  // itself when a refusal has bumped that project's gen by the time its segment
+  // runs, so a queued move whose target was computed against a refused order is
+  // dropped instead of being sent against the daemon's real order. A refusal in
+  // one project does not discard a reorder queued in another after switching.
+  movesGen = /* @__PURE__ */ new Map();
   panel = null;
   dragId = null;
   focusId = null;
@@ -19929,7 +19926,7 @@ var BacklogPane = class {
     if (gate === null || this.confirmed.has(gate.key)) return true;
     const ok = await this.host.confirm(
       "Budget gate closed",
-      `${gate.text} ${verb} ${formatID(id)} anyway? Its use still counts.`,
+      `${gate.text} ${verb} ${formatID(id)} anyway? This run will use more.`,
       `${verb} anyway`
     );
     if (ok) this.confirmed.add(gate.key);
@@ -20053,19 +20050,26 @@ ${id}`;
     }
     const token2 = this.host.token();
     if (token2 === null) return;
-    this.moves = this.moves.then(() => moveItem(root2, id, to, token2).then(() => {
-      if (pending) pending.gen = this.host.started();
-      return this.host.refresh();
-    }, (e) => {
-      if (pending && this.pending === pending) {
-        this.pending = null;
-        this.focusId = id;
-        this.render();
-      }
-      this.host.notify(errorText(e));
-      return this.host.refresh();
+    const gen = this.movesGen.get(root2) ?? 0;
+    this.moves = this.moves.then(() => {
+      if ((this.movesGen.get(root2) ?? 0) !== gen) return;
+      return moveItem(root2, id, to, token2).then(() => {
+        if (pending) pending.gen = this.host.started();
+        return this.host.refresh();
+      }, (e) => {
+        if (pending) {
+          if (!isMutationOutcomeUncertain(e)) this.movesGen.set(root2, (this.movesGen.get(root2) ?? 0) + 1);
+          if (this.pending?.root === root2) this.pending = null;
+          if (this.root === root2) {
+            this.focusId = id;
+            this.render();
+          }
+        }
+        this.host.notify(errorText(e));
+        return this.host.refresh();
+      });
     }).catch(() => {
-    }));
+    });
   }
   render() {
     this.pruneStarts();
