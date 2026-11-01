@@ -108,6 +108,38 @@ var backlogStartCmd = &cobra.Command{
 	},
 }
 
+var backlogRunCount int
+
+var backlogRunCmd = &cobra.Command{
+	Use:   "run [--count N]",
+	Short: "Run one runner pass now",
+	Long: "Start up to N queued items now (default 1), top first, in the project's free slots. " +
+		"It ignores the runner switch and the budget, so an af cron task can drive the runner " +
+		"with it. Prints the ids it started, and why when it started none.",
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runBacklog(func() (any, error) {
+			if err := refuseFromItemSession("run"); err != nil {
+				return nil, err
+			}
+			if backlogRunCount < 1 {
+				return nil, errors.New("--count must be 1 or more")
+			}
+			t, err := backlogProject()
+			if err != nil {
+				return nil, err
+			}
+			var resp daemon.RunBacklogResponse
+			if err := callBacklogRoute("RunBacklog", daemon.RunBacklogRequest{
+				RepoID: t.repoID, RepoPath: t.repoPath, Count: backlogRunCount,
+			}, &resp); err != nil {
+				return nil, err
+			}
+			return resp, nil
+		})
+	},
+}
+
 var (
 	backlogDoneSelf bool
 	backlogDonePR   string
@@ -273,5 +305,6 @@ func init() {
 	backlogDoneCmd.Flags().BoolVar(&backlogDoneSelf, "self", false, "From inside an item session: the work is finished; send the item to review")
 	backlogDoneCmd.Flags().StringVar(&backlogDonePR, "pr", "", "With --self, the `url` of the pull request for the work")
 	backlogNoteCmd.Flags().BoolVar(&backlogNoteSelf, "self", false, "Note on the item of the session this runs in")
-	BacklogCmd.AddCommand(backlogStartCmd, backlogDoneCmd, backlogNoteCmd, backlogAskCmd, backlogAnswerCmd)
+	backlogRunCmd.Flags().IntVar(&backlogRunCount, "count", 1, "How many items to start at most")
+	BacklogCmd.AddCommand(backlogStartCmd, backlogRunCmd, backlogDoneCmd, backlogNoteCmd, backlogAskCmd, backlogAnswerCmd)
 }

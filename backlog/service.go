@@ -35,6 +35,9 @@ type Host interface {
 	// background, restoring the session first when it is not running, and
 	// records the outcome on the answer.
 	DeliverAnswer(repoID string, a PendingAnswer)
+	// Gate reports the project's runner gate that is closed now, from a recent
+	// meter pass; the zero Gate when all are open.
+	Gate(repoID string) Gate
 }
 
 // AnswerTarget is where an answer can go.
@@ -131,38 +134,13 @@ func (s *Service) Get(req GetRequest) (*View, error) {
 	if err != nil {
 		return nil, err
 	}
-	budget, err := LoadBudget()
-	if err != nil {
-		return nil, err
-	}
 	states := b.DeriveAll(s.host.Facts(p.id))
-	runner := runnerView(b, states, budget)
-	runner.Used = s.host.SlotsUsed(p.id)
+	var gate Gate
+	if b.Settings.Runner {
+		gate = s.host.Gate(p.id)
+	}
+	runner := b.PlanRunner(RunnerInput{States: states, Used: s.host.SlotsUsed(p.id), Gate: gate, Limit: -1}).View
 	return &View{Backlog: b, States: states, Runner: runner}, nil
-}
-
-func runnerView(b *Backlog, states map[int]Derived, budget *Budget) RunnerView {
-	v := RunnerView{State: RunnerIdle, Max: b.Settings.MaxRunning}
-	queued := false
-	for _, it := range b.Items {
-		d := states[it.ID]
-		if d.State == StateQueued && !b.IsParent(it.ID) {
-			queued = true
-		}
-	}
-	switch {
-	case !b.Settings.Runner:
-		v.State, v.Reason = RunnerOff, "Items run only when you start them."
-	case budget.Share <= 0:
-		v.State, v.Reason = RunnerStopped, "Backlog share is 0%."
-	case budget.USDLimit <= 0:
-		v.State, v.Reason = RunnerWaiting, "No plan usage seen yet."
-	case budget.USDSpent >= budget.USDLimit:
-		v.State, v.Reason = RunnerStopped, fmt.Sprintf("Budget used (%s of %s).", USD(budget.USDSpent), USD(budget.USDLimit))
-	case !queued:
-		v.Reason = "Nothing queued."
-	}
-	return v
 }
 
 // USD formats dollars the way every surface shows them: $10.40.
@@ -289,8 +267,14 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		return r != nil && facts != nil && facts(r.SessionID).RunActive
 	}
 	var asked map[int]string
+	var askedRef map[int]openQuestion
 	b, err := s.update(p, func(b *Backlog) ([]int, error) {
 		asked = b.questionSessions()
+		askedRef = map[int]openQuestion{}
+		for id := range asked {
+			qid, text := b.OpenQuestionRef(id)
+			askedRef[id] = openQuestion{qid, text}
+		}
 		by := ActorUser
 		if req.SessionID != "" {
 			if err := checkAgentReview(b, req); err != nil {
@@ -311,6 +295,13 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		for id, sessionID := range asked {
 			if _, open := still[id]; !open {
 				s.host.SetAttention(p.id, sessionID, 0, "")
+				continue
+			}
+			// The oldest open question changed (send-to-review closed af's own
+			// question and left the agent's): the mirror and the remembered
+			// identity follow it, or a terminal answer fails the identity check.
+			if qid, text := b.OpenQuestionRef(id); (openQuestion{qid, text}) != askedRef[id] {
+				s.host.SetAttention(p.id, sessionID, qid, text)
 			}
 		}
 		return changed, nil
@@ -319,6 +310,12 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		return nil, err
 	}
 	return &ItemResponse{Item: *b.Item(req.ID)}, nil
+}
+
+// openQuestion is the identity of an item's oldest open question.
+type openQuestion struct {
+	id   int
+	text string
 }
 
 func checkAgentReview(b *Backlog, req SetItemStatusRequest) error {
