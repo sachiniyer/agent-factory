@@ -157,19 +157,19 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		{"xargs env codex", false},
 		{"xargs nohup rm", false},
 		{"xargs nice -n 5 echo", false},
-		{"xargs strace -f echo", false},
-		{"xargs strace -o log echo", false},
-		{"xargs strace -- echo", false},
+		{"xargs strace -f echo", true},
+		{"xargs strace -o log echo", true},
+		{"xargs strace -- echo", true},
 		{"xargs env A=1 nohup rm", false},
 		{"xargs xargs echo", false},
 		{"xargs -I{} echo {}", false},
 		{"xargs -I{} nohup", false},
-		{"xargs -I{} strace -f echo {}", false},
-		{"xargs -I{} strace -f echo -E{}", false},
+		{"xargs -I{} strace -f echo {}", true},
+		{"xargs -I{} strace -f echo -E{}", true},
 		// -E with no command after it runs no child, and a marker only in
 		// the value of a fixed variable name is data.
-		{"xargs -I{} strace -E{}", false},
-		{"xargs -I{} strace --env=A={} codex", false},
+		{"xargs -I{} strace -E{}", true},
+		{"xargs -I{} strace --env=A={} codex", true},
 
 		{"xargs -I{} env --chdir={} codex", false},
 		{"xargs -I{} env PORT={} codex", false},
@@ -186,16 +186,16 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		{"xargs -I{} {} codex", false},
 		// An attached value is part of one argv word; a shadowed strace
 		// cannot exec it on its own.
-		{"xargs -I{} strace -o{} codex", false},
-		{"xargs -I{} strace --output={} codex", false},
-		{"xargs -I{} strace --env=A={} codex", false},
+		{"xargs -I{} strace -o{} codex", true},
+		{"xargs -I{} strace --output={} codex", true},
+		{"xargs -I{} strace --env=A={} codex", true},
 		// With nothing after "--" there is still no program.
-		{"xargs -I{} strace -f -{} --", false},
+		{"xargs -I{} strace -f -{} --", true},
 		// -n1 keeps replace mode in GNU's count grammar.
 		{"xargs -I{} -n1 echo {}", false},
 		{"xargs -I{} -n ' 1' echo {}", false},
 		// Abbreviated and hidden options consume no marker here.
-		{"xargs -I{} strace --fol echo {}", false},
+		{"xargs -I{} strace --fol echo {}", true},
 		// An unparseable link no input reaches keeps the INPUT walk's verdict
 		// (admit), but the xargs child-tail scan (#5034 parity with nohup) also
 		// judges the buried `nice -E x` a shadowed xargs could `shift` to and
@@ -204,7 +204,7 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		{"xargs -I{} strace nice -E x", true},
 		// No child to run: strace with only options after the marker, and a
 		// nested xargs that names no command (it runs echo).
-		{"xargs -I{} strace -f -{} --", false},
+		{"xargs -I{} strace -f -{} --", true},
 		{"xargs -I{} xargs --process-slot-var={}", false},
 	} {
 		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, names),
@@ -230,17 +230,17 @@ func TestCommandMutatesAccountEnvironment_XargsEmptyReplaceMarker(t *testing.T) 
 		// Empty marker + a replace-canceller: GNU xargs 4.9 appends input
 		// (the marker is ignored) and runs the command, so it must not be
 		// refused. The default-marker control already passed.
-		{"xargs --replace= -L1 strace -f echo", false},
+		{"xargs --replace= -L1 strace -f echo", true},
 		{"xargs --replace= -L1 nohup echo", false},
-		{"xargs --replace= -l strace -f echo", false},
-		{"xargs --replace= -n2 strace -f echo", false},
-		{"xargs --replace= --max-args=2 strace -f echo", false},
-		{`xargs -I "" -L1 strace -f echo`, false},
+		{"xargs --replace= -l strace -f echo", true},
+		{"xargs --replace= -n2 strace -f echo", true},
+		{"xargs --replace= --max-args=2 strace -f echo", true},
+		{`xargs -I "" -L1 strace -f echo`, true},
 		{`xargs -I "" -n2 nohup echo`, false},
 		// No canceller: the empty marker defaults to {} too. GNU rejects the
 		// command with a usage error, but a usage error cannot mutate the
 		// environment, so the security answer is accepted.
-		{"xargs --replace= strace -f echo", false},
+		{"xargs --replace= strace -f echo", true},
 		{"xargs --replace= echo", false},
 		{`xargs -I "" echo`, false},
 		// When the defaulted {} actually reaches a dangerous spot the
@@ -255,7 +255,7 @@ func TestCommandMutatesAccountEnvironment_XargsEmptyReplaceMarker(t *testing.T) 
 		{"xargs --replace= -n2 env", true},
 		{`xargs -I "" -L1 env`, true},
 		// Default-marker controls are unchanged.
-		{"xargs --replace -L1 strace -f echo", false},
+		{"xargs --replace -L1 strace -f echo", true},
 		{"xargs --replace -L1 env", true},
 		{"xargs -I{} -n2 nohup", true},
 		{"xargs -I{} -L1 strace", true},
@@ -265,8 +265,8 @@ func TestCommandMutatesAccountEnvironment_XargsEmptyReplaceMarker(t *testing.T) 
 		// (#4980 review).
 		{"xargs -I@ --replace= -L1 env @ codex", false},
 		{`xargs -I@ -I "" -L1 env @ codex`, false},
-		{"xargs -I@ --replace= -L1 strace -f echo", false},
-		{`xargs -I@ -I "" -L1 strace -f echo`, false},
+		{"xargs -I@ --replace= -L1 strace -f echo", true},
+		{`xargs -I@ -I "" -L1 strace -f echo`, true},
 		// A dynamic -I "$M" fails closed at the marker arg itself (a
 		// shadowed xargs may exec the expansion), so the empty override
 		// never runs after it; the markerKnown reset above is inert on
@@ -314,7 +314,7 @@ func TestCommandMutatesAccountEnvironment_XargsBareReplaceOverride(t *testing.T)
 		// ReplaceMarker pins at false.
 		{"xargs -I@ --replace -L1 env @ codex", false},
 		{"xargs -I@ -i -L1 env @ codex", false},
-		{"xargs -I@ --replace -L1 strace -f echo", false},
+		{"xargs -I@ --replace -L1 strace -f echo", true},
 		// A prior marker that itself sets an env-looking operand stays
 		// literal under the bare override, so it is accepted where the stale
 		// marker used to refuse.

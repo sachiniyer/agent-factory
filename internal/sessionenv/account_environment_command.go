@@ -437,25 +437,21 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 			return nil, false, true
 		}
 	default:
-		if unrecognizedWrapperHidesAccountAssignment(words, names, memo) {
-			return nil, false, true
-		}
 		// An unmodeled argv-passthrough wrapper (strace/perf/valgrind/
 		// gdb --args/chrt/numactl/unshare/prlimit/...) runs a child
-		// command and forwards argv, so a
-		// PATH-shadowed copy (`shift N; exec "$@"`) can promote a buried
-		// literal suffix the modeled arms already refuse (#5711/#5714/#6329)
-		// to the executed command. cd685703 added the modeled arms' buried-
-		// literal-suffix scan to nohup/nice/timeout/setsid/stdbuf but left
-		// this arm the only one without it, so `perf echo unset CODEX_HOME`
-		// was accepted where `nice echo unset CODEX_HOME` was refused. Apply
-		// that scan here too, but only to the wrappers it can actually reach:
-		// an ordinary command (echo/rg/codex/...) does not exec a child, so
-		// scanning its tail would refuse the noun uses the wrapper guard
-		// keeps open (`rg foo .` keeps the `.` directory the scan would read
-		// as the `source` builtin, `grep -c zsh` keeps `zsh` as a pattern).
-		if isUnmodeledArgvPassthroughWrapper(words[0]) &&
-			unmodeledWrapperChildTailBuriesMutation(words, names, memo) {
+		// command and forwards argv, so a PATH-shadowed copy
+		// (`shift N; exec "$@"`) can replace the selected account
+		// environment exactly the way a shadowed nohup or ionice can. A
+		// static command-line check cannot enumerate every shape a
+		// shadowed wrapper can shift to (a buried suffix scan was bypassed
+		// twice by Codex), so for the wrappers in this class the check
+		// fails closed whatever their tail contains: the effect of an
+		// unmodeled wrapper on the account environment is unknown, so the
+		// command is unverifiable rather than clean.
+		if isUnmodeledArgvPassthroughWrapper(words[0]) {
+			return nil, false, true
+		}
+		if unrecognizedWrapperHidesAccountAssignment(words, names, memo) {
 			return nil, false, true
 		}
 		return words, false, false
@@ -644,18 +640,31 @@ func childTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, me
 // passthrough wrappers the modeled peel list does not name but the threat
 // model still treats as a child-executing wrapper: the binary runs a child
 // command and forwards argv, so a PATH-shadowed copy (`shift N; exec "$@"`)
-// promotes a buried literal suffix to the executed command exactly the way a
-// shadowed nohup or ionice does. Matched by basename, the way the modeled arms
-// match (isAccountCommandName uses filepath.Base), so a path form
-// (/usr/bin/perf) is the same wrapper. The class is open in principle; this
-// names the members the buried-suffix parity test enumerates — the tracing
-// tools (strace/ltrace/perf/valgrind/gdb) and the util-linux argv-passthrough
-// launchers that exec a child and forward argv the same way (chrt/numactl/
-// unshare/prlimit) — mirroring the closed list the strace special-case in
-// unrecognizedWrapperHidesAccountAssignment already keeps. Ordinary commands
-// that do not exec a child (echo/rg/codex/grep/...) are intentionally NOT
-// wrappers: their arguments never reach an exec boundary, so the buried-suffix
-// scan is not applied to them (see unmodeledWrapperChildTailBuriesMutation).
+// can replace the selected account environment exactly the way a shadowed
+// nohup or ionice can. Matched by basename, the way the modeled arms match
+// (isAccountCommandName uses filepath.Base), so a path form (/usr/bin/perf)
+// is the same wrapper. The class is open in principle; this names the members
+// the parity test enumerates — the tracing tools (strace/ltrace/perf/valgrind/
+// gdb) and the util-linux argv-passthrough launchers that exec a child and
+// forward argv the same way (chrt/numactl/unshare/prlimit) — mirroring the
+// closed list the strace special-case in unrecognizedWrapperHidesAccountAssignment
+// already keeps.
+//
+// peelAccountWrapper's default arm refuses a listed passthrough wrapper
+// whatever its tail contains, rather than pattern-matching a buried suffix.
+// Ordinary commands that do not exec a child (echo/rg/codex/grep/...) are
+// intentionally NOT wrappers: their arguments never reach an exec boundary,
+// so they fall through to unrecognizedWrapperHidesAccountAssignment (which
+// still judges a visible account-environment assignment under any such
+// command) and otherwise stay admitted.
+//
+// Scope: this check covers the visible command line and the modeled
+// wrappers it peels. A user's own wrapper script (a program_overrides
+// target af does not model) has internals the command line cannot see, so
+// what it does with the account environment is outside what af can verify;
+// refusing every unmodeled executable would break every custom-script
+// program_overrides, which is out of this fix's scope and is a product
+// decision for the owner.
 func isUnmodeledArgvPassthroughWrapper(word *syntax.Word) bool {
 	value, literal := literalShellWord(word)
 	if !literal {
@@ -667,111 +676,6 @@ func isUnmodeledArgvPassthroughWrapper(word *syntax.Word) bool {
 		return true
 	}
 	return false
-}
-
-// unmodeledWrapperChildTailBuriesMutation scans the tail an unmodeled
-// argv-passthrough wrapper (strace/perf/valgrind/gdb --args/chrt/numactl/
-// unshare/prlimit) forwards for a
-// LITERAL buried suffix a PATH-shadowed `shift N; exec "$@"` wrapper would
-// promote to the executed command, mirroring childTailBuriesMutation for the
-// modeled arms. cd685703 added that scan to nohup/nice/timeout/setsid/stdbuf
-// and never visited this arm, so a buried literal mutation suffix
-// (xargs --process-slot-var NAME codex, unset CODEX_HOME, set -k, hash -p,
-// trap, ...) under an unmodeled head was silently accepted where the same
-// payload under a modeled wrapper was refused — the parity gap the test
-// suite's invariant ("Every wrapper must give the verdict ionice gives for
-// the same buried payload") names.
-//
-// The scan judges only the verdict candidates the wrapper's own 5-signal tail
-// scan (unrecognizedWrapperHidesAccountAssignment) does NOT already cover.
-// That scan judges a buried env (with requireCommand, so print mode stays
-// admitted), a nested strace option run, a shell WITH argv, strace -E/--env
-// spellings, and a literal --opt=value, with the print-mode env admission and
-// shell-needs-argv leniency the wrapper-guard and unmodeled-wrapper tests
-// pin. The buried-suffix scan judges its candidates with the modeled reading
-// (env requireCommand=false, shellCommandIsUnproven with no argv gate), so
-// re-judging env/strace/shell here would refuse the noun uses those tests
-// keep open — `strace env CODEX_HOME=/other` (env print mode), `strace sh`
-// (bare trailing shell), and `grep -c zsh` under any wrapper. The excluded
-// class is therefore exactly the 5-signal scan's coverage; a buried LITERAL
-// wrapper or account-mutating builtin (xargs, unset, set, hash, trap, ...)
-// is not in that coverage, so it stays a candidate here and is judged exactly
-// as a modeled wrapper judges it.
-//
-// The verdict cache is separate from laterLiteralChildSuffixMutates's: a
-// suffix starting at a buried env judges TRUE under the modeled scan (print
-// mode refused, requireCommand=false) and FALSE under this one (excluded,
-// deferred to the 5-signal scan's requireCommand=true reading), so the two
-// scans' "from this word onward" answers disagree and cannot share a table.
-func unmodeledWrapperChildTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	return len(words) > 1 && laterUnmodeledWrapperChildSuffixMutates(words[1:], names, memo)
-}
-
-// laterUnmodeledWrapperChildSuffixMutates is the exclusion-filtered parallel
-// of laterLiteralChildSuffixMutates; see unmodeledWrapperChildTailBuriesMutation
-// for why the candidate set and the per-position cache are separate.
-func laterUnmodeledWrapperChildSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	answer := false
-	scanned := 0
-	for scanned < len(words) {
-		if cached, seen := memo.unmodeledLiteralChildTails[words[scanned]]; seen {
-			answer = cached
-			break
-		}
-		if _, literal := literalShellWord(words[scanned]); literal &&
-			accountUnmodeledWrapperChildVerdictStarts(words[scanned]) &&
-			judgeShadowedChildSuffix(words[scanned:], names, memo) {
-			answer = true
-			scanned++
-			break
-		}
-		scanned++
-	}
-	for _, word := range words[:scanned] {
-		memo.unmodeledLiteralChildTails[word] = answer
-	}
-	return answer
-}
-
-// accountUnmodeledWrapperChildVerdictStarts reports whether a literal tail
-// word of an unmodeled argv-passthrough wrapper can begin a buried-suffix
-// verdict the 5-signal scan (unrecognizedWrapperHidesAccountAssignment) does
-// not already judge. A non-literal word is not a candidate: the 5-signal
-// scan's unprovable-word branch already reads it as a possible env
-// expansion. The excluded literal class is the 5-signal scan's coverage
-// (env, strace, shells); wrappers (nohup/nice/timeout/setsid/stdbuf/ionice/
-// taskset/xargs) and the account-mutating and declaration builtins stay
-// candidates, matched the way the modeled arms match them (wrappers and
-// shells by basename, builtins by exact bare name — see
-// accountChildTailSuffixStartsVerdict for why that asymmetry is required).
-func accountUnmodeledWrapperChildVerdictStarts(word *syntax.Word) bool {
-	value, literal := literalShellWord(word)
-	if !literal {
-		return false
-	}
-	base := filepath.Base(value)
-	if _, excluded := accountUnmodeledWrapperScanExcludedVerdictNames[base]; excluded {
-		return false
-	}
-	if _, verdict := accountChildTailSuffixVerdictNames[base]; verdict {
-		return true
-	}
-	_, verdict := accountChildTailSuffixBuiltinVerdictNames[value]
-	return verdict
-}
-
-// accountUnmodeledWrapperScanExcludedVerdictNames lists the literal verdict
-// words the 5-signal scan (unrecognizedWrapperHidesAccountAssignment) already
-// judges from a wrapper's tail, so the unmodeled-wrapper buried-suffix scan
-// excludes them to avoid re-judging env print mode and bare shells with the
-// modeled (requireCommand=false, no-argv-gate) reading. Matched by basename:
-// env and strace are recognized by basename the way the 5-signal scan
-// recognizes them, and shells the way knownShellName does.
-var accountUnmodeledWrapperScanExcludedVerdictNames = map[string]struct{}{
-	"env":    {},
-	"strace": {},
-	"ash":    {}, "bash": {}, "csh": {}, "dash": {}, "fish": {},
-	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
 }
 
 // stracePrefixMutates judges a strace option word that carries an expansion by
