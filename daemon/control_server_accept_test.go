@@ -232,3 +232,38 @@ func TestControlServer_AcceptLoopExitsOnListenerClosed(t *testing.T) {
 	// on, joins the (now-done) serveWG, and returns without hanging.
 	require.NoError(t, closeServer(), "closeServer errored or hung after a clean net.ErrClosed exit")
 }
+
+// TestControlServer_AcceptLoopFatalErrorPropagatesToShutdownPath pins the
+// contract that a fatal accept error does not leave the daemon process
+// "running" while its control plane is dead. The loop closes the listener AND
+// triggers the daemon shutdown path (the same shutdownCh the Shutdown RPC
+// closes) so the supervisor (systemd/launchd) restarts the daemon instead of
+// keeping a wedged-but-running process. Without this propagation, runDaemon's
+// main select would stay blocked after the socket is gone, and the next
+// client's dial-failure reclaim would spawn a second daemon alongside the
+// wedged one — the #718/#767 orphan class this PR exists to close.
+func TestControlServer_AcceptLoopFatalErrorPropagatesToShutdownPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	shutdownCh := make(chan struct{})
+	fatalErr := errors.New("simulated permanent listener failure")
+	inj := installAcceptInjector(t, []error{fatalErr})
+
+	closeServer, err := startControlServer(nil, nil, nil, shutdownCh)
+	require.NoError(t, err, "startControlServer")
+	t.Cleanup(func() { _ = closeServer() })
+
+	select {
+	case <-inj.closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("accept loop did not close the listener on a fatal error")
+	}
+
+	select {
+	case <-shutdownCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fatal accept error did not propagate to the daemon shutdown path; runDaemon would stay blocked while the control plane is dead")
+	}
+
+	require.NoError(t, closeServer(), "closeServer errored or hung after the fatal-branch shutdown propagation")
+}

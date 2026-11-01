@@ -909,10 +909,10 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 					time.Sleep(tempDelay)
 					continue
 				}
-				// Non-recoverable: log and close the listener so net unlinks
-				// the socket — clients get "no such file", not a hang.
+				// Non-recoverable: log, close the listener (net unlinks the socket so clients get "no such
+				// file", not a hang), and propagate to the daemon shutdown path so the supervisor restarts it.
 				log.WarningLog.Printf("daemon control socket: fatal accept error, closing listener: %v", err)
-				_ = listener.Close()
+				fatalAcceptClose(listener, shutdownCh, shutdownOnce)
 				return
 			}
 			tempDelay = 0
