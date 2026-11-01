@@ -34,39 +34,88 @@ func (i *Instance) BacklogRunEndedAt() time.Time {
 	return i.backlogRunEndedAt
 }
 
-// OwedArchive is the item-session archive af owes, or nil. The value is a
-// copy.
-func (i *Instance) OwedArchive() *OwedArchiveData {
+// OwedArchive is the archive af owes this item session and has not done yet,
+// or nil. The value is a copy.
+func (i *Instance) OwedArchive() *BacklogArchiveData {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	if i.owedArchive == nil {
+	if i.backlogArchive == nil || !i.backlogArchive.ArchivedAt.IsZero() {
 		return nil
 	}
-	owed := *i.owedArchive
-	return &owed
+	rec := *i.backlogArchive
+	return &rec
 }
 
-// SetOwedArchive files (or, with nil, clears) the archive af owes this item
-// session, in memory; the caller persists the row.
-func (i *Instance) SetOwedArchive(owed *OwedArchiveData) {
+// SetOwedArchive files the archive af owes this item session, in memory; the
+// caller persists the row.
+func (i *Instance) SetOwedArchive(reason string, filedAt time.Time) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if owed != nil {
-		c := *owed
-		owed = &c
-	}
-	i.owedArchive = owed
+	i.backlogArchive = &BacklogArchiveData{Reason: reason, FiledAt: filedAt}
 	i.touchLocked()
 }
 
-// owedArchiveFromData is the owed archive of an item session's record; any
-// other session owes none.
-func owedArchiveFromData(data InstanceData) *OwedArchiveData {
-	if data.OwedArchive == nil || data.BacklogItem == 0 {
+// MarkArchivedForAnswer records, in memory, that af archived this session
+// after its agent asked: the row waits on the user's answer (AwaitsAnswer)
+// until ClearBacklogArchive or the session leaves the archive.
+func (i *Instance) MarkArchivedForAnswer(reason string, at time.Time) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	rec := BacklogArchiveData{Reason: reason, FiledAt: at, ArchivedAt: at}
+	if i.backlogArchive != nil {
+		rec.FiledAt = i.backlogArchive.FiledAt
+	}
+	i.backlogArchive = &rec
+	i.touchLocked()
+}
+
+// ClearBacklogArchive drops the record, owed or done, and reports whether
+// there was one; the caller persists the row.
+func (i *Instance) ClearBacklogArchive() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.backlogArchive == nil {
+		return false
+	}
+	i.backlogArchive = nil
+	i.touchLocked()
+	return true
+}
+
+// AwaitsAnswer reports whether af archived this item session after its agent
+// asked, and it is still archived with the questions open: it waits on the
+// user, whose answer restores it.
+func (i *Instance) AwaitsAnswer() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.backlogArchive != nil && !i.backlogArchive.ArchivedAt.IsZero() && i.liveness == LiveArchived
+}
+
+// ReconcileBacklogArchiveSnapshot adopts the daemon's record on a client's
+// read-only row and reports whether it changed.
+func (i *Instance) ReconcileBacklogArchiveSnapshot(rec *BacklogArchiveData) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if (rec == nil) == (i.backlogArchive == nil) && (rec == nil || *rec == *i.backlogArchive) {
+		return false
+	}
+	if rec != nil {
+		c := *rec
+		rec = &c
+	}
+	i.backlogArchive = rec
+	i.touchLocked()
+	return true
+}
+
+// backlogArchiveFromData is the archive record of an item session's record;
+// any other session has none.
+func backlogArchiveFromData(data InstanceData) *BacklogArchiveData {
+	if data.BacklogArchive == nil || data.BacklogItem == 0 {
 		return nil
 	}
-	owed := *data.OwedArchive
-	return &owed
+	rec := *data.BacklogArchive
+	return &rec
 }
 
 // BacklogRunActive reports whether the backlog run on this item session is in
@@ -88,7 +137,7 @@ func (i *Instance) BacklogRunGeneration() int {
 }
 
 // ArmBacklogRun opens a backlog run at the moment the backlog delivers a prompt.
-// A new run drops any archive owed to the run before.
+// A new run drops af's archive record of the run before.
 // It sets the run's prompt boundary and holds the turn gate, so the session's
 // next idle observation ends the run only after the agent has taken the turn.
 // It reports false for a session that is not an item session.
@@ -106,7 +155,7 @@ func (i *Instance) ArmBacklogRun(at time.Time) bool {
 	i.backlogRunActive = true
 	i.backlogRunGen++
 	i.backlogRunEndedAt = time.Time{}
-	i.owedArchive = nil
+	i.backlogArchive = nil
 	i.taskRunPromptAttemptAt = at
 	i.taskRunTurnObservedAt = time.Time{}
 	i.taskRunIdleEdgeHeld = false

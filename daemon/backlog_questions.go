@@ -35,6 +35,7 @@ var errBacklogAnswerHeld = errors.New("held")
 func (h backlogHost) SetAttention(repoID, sessionID string, questionID int, reason string) {
 	if reason == "" {
 		h.m.backlog.asked.Delete(sessionID)
+		h.m.clearArchivedForAnswer(repoID, sessionID)
 	} else {
 		h.m.backlog.asked.Store(sessionID, seenQuestion{ID: questionID, Text: session.NormalizeAttentionReason(reason)})
 	}
@@ -118,9 +119,9 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 		}
 		// The session is being archived (af's archive after the agent asked, or
 		// the user's) or deleted. Wait for that to settle, then restore the
-		// session, or find it gone, and send again: the archive's guard reads
-		// the backlog before it shuts the session, so an answer that loses that
-		// race meets the archive here instead of failing.
+		// session, or find it gone, and send again: the archive's guard checks
+		// the question just before it shuts the session, so an answer recorded
+		// after that check meets the archive here instead of failing.
 		if waits >= backlogAnswerTeardownWaits {
 			m.backlogAnswerFailed(repoID, a, "the session stayed busy being archived or deleted", stop)
 			return

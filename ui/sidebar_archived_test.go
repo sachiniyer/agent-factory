@@ -820,3 +820,62 @@ func TestSidebar_RowVerbTarget_ResizeRefits(t *testing.T) {
 	assert.Nil(t, s.RowVerbTarget(),
 		"a resize that scrolls the bound row off must drop it immediately")
 }
+
+// An item session af archived after its agent asked a question waits on the
+// user: the Archived header counts it while the folder is collapsed, and its
+// row shows "?" in place of ▧ (decision (2) on #6284).
+func TestSidebar_ArchivedSessionWaitingOnAnAnswerIsCounted(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	waiting, err := session.NewInstance(session.InstanceOptions{Title: "B-7 pick a db", Path: t.TempDir(), Program: "test", BacklogItem: 7})
+	require.NoError(t, err)
+	waiting.SetBackend(session.NewFakeBackend())
+	waiting.SetStatusForTest(session.Archived)
+	waiting.MarkArchivedForAnswer("ask", time.Now())
+	require.True(t, waiting.AwaitsAnswer())
+	addTestInstance(s, waiting)
+	addTestInstance(s, archTestInstance(t, "put-away", session.Archived))
+	s.SetSize(40, 40)
+
+	assert.Contains(t, s.View(), "Archived (2 · 1 needs you)", "the collapsed header counts the session waiting on you")
+
+	for i, it := range s.visibleItems {
+		if it.Kind == SectionArchived && it.IsHeader {
+			s.selectedIdx = i
+			break
+		}
+	}
+	s.ExpandSection()
+	view := s.View()
+	for _, line := range strings.Split(view, "\n") {
+		switch {
+		case strings.Contains(line, "B-7 pick a db"):
+			assert.Contains(t, line, "?", "the waiting row shows ?")
+			assert.NotContains(t, line, "▧")
+		case strings.Contains(line, "put-away"):
+			assert.Contains(t, line, "▧", "an ordinary archived row keeps ▧")
+			assert.NotContains(t, line, "?")
+		}
+	}
+
+	waiting.ClearBacklogArchive()
+	assert.Contains(t, s.View(), "Archived (2)")
+	assert.NotContains(t, s.View(), "needs you")
+}
+
+func TestArchivedHeaderLabelCounts(t *testing.T) {
+	mk := func(wait bool) *session.Instance {
+		inst, err := session.NewInstance(session.InstanceOptions{Title: "x", Path: t.TempDir(), Program: "test", BacklogItem: 1})
+		require.NoError(t, err)
+		inst.SetStatusForTest(session.Archived)
+		if wait {
+			inst.MarkArchivedForAnswer("ask", time.Now())
+		}
+		return inst
+	}
+	all := []*session.Instance{mk(true), mk(true), mk(false)}
+	assert.Equal(t, "Archived (3 · 2 need you)", archivedHeaderLabel(all, []int{0, 1, 2}, 40))
+	assert.Equal(t, "Archived (1 · 1 needs you)", archivedHeaderLabel(all, []int{0}, 0))
+	assert.Equal(t, "Archived (1)", archivedHeaderLabel(all, []int{2}, 10))
+	// A rail too narrow for the words keeps the count whole, with the rows' glyph.
+	assert.Equal(t, "Archived (3 · ? 2)", archivedHeaderLabel(all, []int{0, 1, 2}, 24))
+}

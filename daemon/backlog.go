@@ -173,6 +173,15 @@ func (s *backlogState) endContinue(repoID string, id int) {
 	delete(s.continuing, continueKey(repoID, id))
 }
 
+// askedOf is the question the session showed, as remembered (asked), or the
+// empty seenQuestion.
+func (s *backlogState) askedOf(sessionID string) seenQuestion {
+	if q, ok := s.asked.Load(sessionID); ok {
+		return q.(seenQuestion)
+	}
+	return seenQuestion{}
+}
+
 func (s *backlogState) deferArchive(sessionID, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

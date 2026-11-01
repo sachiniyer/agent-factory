@@ -46,6 +46,12 @@ func (m *Manager) archiveItemSession(repoID, sessionID, reason string) {
 		m.keepItemSessionLive(repoID, inst, reason, err)
 		return
 	}
+	// What the session asked, as the daemon remembers it (backlogState.asked):
+	// the guard compares it with the shut fence, from memory. Reading
+	// backlog.json there would take the backlog's file lock under the session's
+	// op lock, the reverse of an answer's transaction, which holds the file
+	// lock and then takes the op lock to clear the session's attention.
+	decided := m.backlog.askedOf(sessionID)
 	var fenced *session.Instance
 	defer func() {
 		if fenced != nil {
@@ -58,10 +64,11 @@ func (m *Manager) archiveItemSession(repoID, sessionID, reason string) {
 		if refused = check(cur); refused != nil {
 			return refused
 		}
-		// Read again with the fence shut: an answer recorded since the decision
-		// cancels the archive. One recorded after this read meets the archive
-		// on its way and restores the session (deliverBacklogAnswer).
-		if b, err := backlog.Load(repoID); err != nil || !b.ArchiveOwed(sessionID, reason) {
+		// An answer recorded since the decision closed or moved the question the
+		// session asked, which cancels the archive. One recorded after this
+		// check meets the archive on its way and restores the session
+		// (deliverBacklogAnswer).
+		if reason == backlog.ArchiveAsk && !decided.empty() && m.backlog.askedOf(sessionID) != decided {
 			refused = errArchiveNoLongerOwed
 			fenced.ReopenAdoptionFence()
 			fenced = nil
@@ -77,7 +84,25 @@ func (m *Manager) archiveItemSession(repoID, sessionID, reason string) {
 		m.warn().Printf("backlog archive (%s) of session %q: %v", reason, inst.Title, err)
 		return
 	}
+	if reason == backlog.ArchiveAsk && m.backlog.askedOf(sessionID) == decided {
+		// The session is archived and its question still open: mark the row, so
+		// the TUI shows it waits on the user.
+		inst.MarkArchivedForAnswer(reason, nowFunc())
+		m.persistAndPublishInstance(repoID, inst)
+		return
+	}
 	m.settleOwedArchive(repoID, inst)
+}
+
+// clearArchivedForAnswer drops the mark of a session af archived for its
+// question once the item has no open question left (answered, done or
+// dropped). Its restore clears it too.
+func (m *Manager) clearArchivedForAnswer(repoID, sessionID string) {
+	s, ok := m.itemSessions(repoID)[sessionID]
+	if !ok || s.instance.OwedArchive() != nil || !s.instance.ClearBacklogArchive() {
+		return
+	}
+	m.persistAndPublishInstance(repoID, s.instance)
 }
 
 // keepItemSessionLive settles a refused archive: the session stays. A refused
@@ -110,19 +135,19 @@ func (m *Manager) fileOwedArchive(repoID string, inst *session.Instance, reason 
 	if owed != nil && owed.Reason == reason {
 		return
 	}
-	inst.SetOwedArchive(&session.OwedArchiveData{Reason: reason, FiledAt: nowFunc()})
+	inst.SetOwedArchive(reason, nowFunc())
 	if err := m.persistAndPublishInstanceErr(repoID, inst); err != nil {
 		m.warn().Printf("the owed archive of session %q could not be written to disk (a restart before the archive would not finish it): %v",
 			inst.Title, err)
 	}
 }
 
-// settleOwedArchive clears an owed archive that is done or no longer owed.
+// settleOwedArchive clears an owed archive that is done or no longer owed. A
+// done archive's mark stays (clearArchivedForAnswer).
 func (m *Manager) settleOwedArchive(repoID string, inst *session.Instance) {
-	if inst.OwedArchive() == nil {
+	if inst.OwedArchive() == nil || !inst.ClearBacklogArchive() {
 		return
 	}
-	inst.SetOwedArchive(nil)
 	m.persistAndPublishInstance(repoID, inst)
 }
 

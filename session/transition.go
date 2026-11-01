@@ -838,6 +838,10 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	if from.liveness == LiveArchived && to.liveness != LiveArchived {
 		i.archivedAt = time.Time{}
 		i.prune.nonce = ""
+		// A session that left the archive no longer waits there for an answer.
+		if i.backlogArchive != nil && !i.backlogArchive.ArchivedAt.IsZero() {
+			i.backlogArchive = nil
+		}
 	}
 	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
 		close(i.archiveSettled)

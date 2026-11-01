@@ -169,13 +169,13 @@ func TestDisarmRestoresThePreviousRunEnd(t *testing.T) {
 func TestOwedArchiveSurvivesRoundTripAndANewRunDropsIt(t *testing.T) {
 	inst := backlogRunSession(t)
 	filed := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
-	inst.SetOwedArchive(&OwedArchiveData{Reason: "ask", FiledAt: filed})
+	inst.SetOwedArchive("ask", filed)
 
 	data := inst.ToInstanceData()
 	data.BackendType = "docker"
 	reloaded, err := FromInstanceData(data.ForStorage())
 	require.NoError(t, err)
-	require.Equal(t, &OwedArchiveData{Reason: "ask", FiledAt: filed}, reloaded.OwedArchive())
+	require.Equal(t, &BacklogArchiveData{Reason: "ask", FiledAt: filed}, reloaded.OwedArchive())
 
 	data.BacklogItem = 0
 	plain, err := FromInstanceData(data.ForStorage())
@@ -184,5 +184,46 @@ func TestOwedArchiveSurvivesRoundTripAndANewRunDropsIt(t *testing.T) {
 
 	require.True(t, reloaded.ArmBacklogRun(time.Now()))
 	require.Nil(t, reloaded.OwedArchive(), "a new run drops the archive owed to the one before")
-	require.Nil(t, reloaded.ToInstanceData().OwedArchive)
+	require.Nil(t, reloaded.ToInstanceData().BacklogArchive)
+}
+
+// Once af archived the session for its question the record is no longer owed:
+// it marks the archived row as waiting on the user, survives a round trip, and
+// goes when the session leaves the archive.
+func TestArchivedForAnswerMarksTheRowUntilItLeavesTheArchive(t *testing.T) {
+	inst := backlogRunSession(t)
+	filed := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	inst.SetOwedArchive("ask", filed)
+	require.NoError(t, inst.Transition(BeginArchive()))
+	require.NoError(t, inst.Transition(CommitArchive()))
+	require.False(t, inst.AwaitsAnswer(), "an archive still owed does not mark the row")
+	inst.MarkArchivedForAnswer("ask", filed.Add(time.Minute))
+	require.True(t, inst.AwaitsAnswer())
+	require.Nil(t, inst.OwedArchive(), "a done archive is not owed")
+	require.Equal(t, filed, inst.ToInstanceData().BacklogArchive.FiledAt)
+
+	data := inst.ToInstanceData()
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.True(t, reloaded.AwaitsAnswer())
+
+	require.NoError(t, inst.Transition(BeginRestore()))
+	require.False(t, inst.AwaitsAnswer())
+	require.Nil(t, inst.ToInstanceData().BacklogArchive, "a session that left the archive no longer waits there")
+
+	require.True(t, reloaded.ClearBacklogArchive())
+	require.False(t, reloaded.AwaitsAnswer())
+	require.False(t, reloaded.ClearBacklogArchive())
+}
+
+func TestReconcileBacklogArchiveSnapshot(t *testing.T) {
+	inst := backlogRunSession(t)
+	rec := &BacklogArchiveData{Reason: "ask", FiledAt: time.Unix(1, 0), ArchivedAt: time.Unix(2, 0)}
+	require.True(t, inst.ReconcileBacklogArchiveSnapshot(rec))
+	require.False(t, inst.ReconcileBacklogArchiveSnapshot(&BacklogArchiveData{Reason: "ask", FiledAt: time.Unix(1, 0), ArchivedAt: time.Unix(2, 0)}))
+	rec.Reason = "changed"
+	require.Equal(t, "ask", inst.ToInstanceData().BacklogArchive.Reason, "the row keeps its own copy")
+	require.True(t, inst.ReconcileBacklogArchiveSnapshot(nil))
+	require.False(t, inst.ReconcileBacklogArchiveSnapshot(nil))
 }

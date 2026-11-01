@@ -24,14 +24,17 @@ type PendingOnCompleteData struct {
 	FiledAt time.Time `json:"filed_at"`
 }
 
-// OwedArchiveData is an item-session archive af decided on and has not
-// finished: Reason is backlog.ArchiveDone or backlog.ArchiveAsk, FiledAt when
-// af decided. It is filed before the archive runs, so a daemon that stops in
-// between finishes it on restart, and the archive is refused if the session
-// changed after FiledAt.
-type OwedArchiveData struct {
-	Reason  string    `json:"reason"`
-	FiledAt time.Time `json:"filed_at"`
+// BacklogArchiveData is af's archive of an item session for its backlog item.
+// Reason is backlog.ArchiveDone or backlog.ArchiveAsk; FiledAt is when af
+// decided. It is filed before the archive runs (owed: ArchivedAt zero), so a
+// daemon that stops in between finishes it on restart. An archive after the
+// agent asked then stays on the record, with ArchivedAt set, while the item's
+// questions are open and the session is archived: it marks a session that
+// waits on the user's answer.
+type BacklogArchiveData struct {
+	Reason     string    `json:"reason"`
+	FiledAt    time.Time `json:"filed_at"`
+	ArchivedAt time.Time `json:"archived_at,omitzero"`
 }
 
 // InstanceData represents the serializable data of an Instance
@@ -247,9 +250,9 @@ type InstanceData struct {
 	// BacklogRunEndedAt is when the latest backlog run ended; the on_done
 	// archive treats pane churn after it as the user taking the session over.
 	BacklogRunEndedAt time.Time `json:"backlog_run_ended_at,omitzero"`
-	// OwedArchive is the item-session archive af owes (OwedArchiveData), cleared
-	// when it is done or no longer owed. omitempty + additive.
-	OwedArchive *OwedArchiveData `json:"owed_archive,omitempty"`
+	// BacklogArchive is af's archive of this item session (BacklogArchiveData):
+	// owed, or done and waiting on the user's answer. omitempty + additive.
+	BacklogArchive *BacklogArchiveData `json:"backlog_archive,omitempty"`
 	// LimitResetAt is the parsed usage-limit reset time (#1146), display-only:
 	// written (and carried in the daemon snapshot to the read-only TUI) only for a
 	// LiveLimitReached row so the sidebar [limit] badge can show "resets <t>" and

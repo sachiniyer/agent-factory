@@ -52,6 +52,11 @@ const lostIcon = "◌ "
 // row reads as "put away, restartable" rather than any live/vanished state.
 const archivedIcon = "▧ "
 
+// awaitingIcon marks an archived item session that af archived after its agent
+// asked a question: it waits on your answer, which restores it. The "?" the web
+// Backlog gives Needs you, in the attention colour, in place of ▧.
+const awaitingIcon = "? "
+
 // limitIcon marks a session blocked at a usage-limit wall (#1146): a filled
 // diamond, distinct in shape from every dot/box glyph so "blocked on limit"
 // never reads as a live Running/Ready session — the honest surface the whole
@@ -85,6 +90,9 @@ var lostStyle = lipgloss.NewStyle()
 // same muted gray as a deleting/dead recede, so a filed-away session never reads
 // as live. Reused for the title/desc foreground below.
 var archivedStyle = lipgloss.NewStyle()
+
+// awaitingStyle paints awaitingIcon in the attention colour.
+var awaitingStyle = lipgloss.NewStyle()
 
 // limitStyle paints the status glyph of a usage-limit-blocked session (#1146): a
 // warning red-orange, distinct from the ready-green, lost-amber, and dead/
@@ -185,6 +193,7 @@ func ApplyTheme(t Theme) {
 	deadStyle = lipgloss.NewStyle().Foreground(t.Dead)
 	lostStyle = lipgloss.NewStyle().Foreground(t.Lost)
 	archivedStyle = lipgloss.NewStyle().Foreground(theme.Colors()["archived"])
+	awaitingStyle = lipgloss.NewStyle().Foreground(theme.Colors()["attention"])
 	limitStyle = lipgloss.NewStyle().Foreground(theme.Colors()["limit-reached"])
 
 	InstanceTitleColor = t.Foreground
@@ -375,6 +384,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 			join = lostStyle.Render(lostIcon)
 		case session.LiveArchived:
 			join = archivedStyle.Render(archivedIcon)
+			if i.AwaitsAnswer() {
+				join = awaitingStyle.Render(awaitingIcon)
+			}
 		case session.LiveLimitReached:
 			join = limitStyle.Render(limitIcon)
 		case session.LivenessUnset:
@@ -430,7 +442,9 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// "[archived]..." (#1225). The state is already conveyed three other ways on
 	// the same row — the ▧ glyph, the dimming below, and the "▼ Archived (n)"
 	// section header — so the name stays full-width like a live row's.
-	if liveness == session.LiveArchived && !selected {
+	// A row waiting on your answer keeps full contrast: it is put away, but it
+	// is yours to act on.
+	if liveness == session.LiveArchived && !selected && !i.AwaitsAnswer() {
 		titleS = titleS.Foreground(InstanceTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
 	}

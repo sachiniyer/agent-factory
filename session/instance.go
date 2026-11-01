@@ -248,7 +248,7 @@ type Instance struct {
 	backlogRunActive bool
 	// backlogRunEndedAt is when the latest backlog run ended (persisted).
 	backlogRunEndedAt time.Time
-	owedArchive       *OwedArchiveData // the item-session archive af owes (persisted), or nil
+	backlogArchive    *BacklogArchiveData // af's archive of this item session (persisted), or nil
 	// backlogRunGen counts the runs armed on this session (in memory only): a
 	// completion queued for run N must not finish run N+1 (ArmBacklogRun).
 	backlogRunGen int

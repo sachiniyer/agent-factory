@@ -63,7 +63,7 @@ func keptLiveNotes(it backlog.Item) int {
 // the session, archives it, and settles the filing; the item still needs you.
 func TestAskThenArchiveArchivesTheSessionWhenItsRunEnds(t *testing.T) {
 	m, repoID, inst := askedThen(t, backlog.ThenArchive)
-	var filed *session.OwedArchiveData
+	var filed *session.BacklogArchiveData
 	results := stubGuardedArchive(t, inst, func() { filed = inst.OwedArchive() })
 	m.backlogRunEnded(repoID, inst.ID)
 	m.backgroundMutationWG.Wait()
@@ -76,12 +76,29 @@ func TestAskThenArchiveArchivesTheSessionWhenItsRunEnds(t *testing.T) {
 	if inst.GetLiveness() != session.LiveArchived || inst.OwedArchive() != nil {
 		t.Fatalf("liveness %v, owed %+v; want archived and settled", inst.GetLiveness(), inst.OwedArchive())
 	}
+	// The archived row is marked as waiting on the user, on its record too, so
+	// the TUI shows it.
+	if !inst.AwaitsAnswer() || inst.ToInstanceData().BacklogArchive == nil {
+		t.Fatal("the archived session is not marked as waiting on the answer")
+	}
 	v, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st := v.States[1].State; st != backlog.StateNeedsYou {
 		t.Fatalf("state %s, want needs you", st)
+	}
+	// The answer closes the question, which drops the mark before the restore.
+	stubBacklogSend(t, m, repoID)
+	prevRestore := restoreBacklogSession
+	restoreBacklogSession = func(*Manager, RestoreSessionRequest) (session.InstanceData, error) {
+		return inst.ToInstanceData(), errors.New("stand-in restore")
+	}
+	t.Cleanup(func() { restoreBacklogSession = prevRestore })
+	answer(t, m, repoID, "Postgres")
+	m.backgroundMutationWG.Wait()
+	if inst.AwaitsAnswer() || inst.ToInstanceData().BacklogArchive != nil {
+		t.Fatal("the mark outlived the question")
 	}
 }
 
@@ -219,7 +236,7 @@ func TestAFencedSendIsATeardownNotAnUncertainDelivery(t *testing.T) {
 func TestRecoveryFinishesAnOwedArchiveAndClearsOneNoLongerOwed(t *testing.T) {
 	m, repoID, inst := askedThen(t, backlog.ThenArchive)
 	m.fileOwedArchive(repoID, inst, backlog.ArchiveAsk)
-	if owed := inst.ToInstanceData().OwedArchive; owed == nil || owed.Reason != backlog.ArchiveAsk {
+	if owed := inst.ToInstanceData().BacklogArchive; owed == nil || owed.Reason != backlog.ArchiveAsk || !owed.ArchivedAt.IsZero() {
 		t.Fatalf("the filing is not on the record: %+v", owed)
 	}
 	results := stubGuardedArchive(t, inst, nil)
