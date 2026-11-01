@@ -294,6 +294,33 @@ new_window_is_scoped() {
 }
 step "new window in the account session runs under the account" new_window_is_scoped "fresh"
 
+# A burst of windows: each one claims through the shim, so a claim the broker
+# refuses for a reason that is not the window's (the macOS LOCAL_PEERPID ENOTCONN
+# race, #6455) shows up as a window that never answers.
+burst_windows_are_scoped() {
+	local n=15 i pane panes="" answer got
+	for i in $(seq 1 "$n"); do
+		pane="$(tm new-window -d -P -F '#{pane_id}' -t "$ACCT_TARGET" 2>>"$LOG")" || return 1
+		panes="$panes $pane"
+	done
+	sleep 2
+	i=0
+	for pane in $panes; do
+		i=$((i + 1))
+		answer="$ROOT/burst-$i"
+		tm send-keys -t "$pane" "printf %s \"\$CLAUDE_CONFIG_DIR\" > '$answer'" Enter || return 1
+	done
+	for i in $(seq 1 "$n"); do
+		wait_for 20 test -s "$ROOT/burst-$i" || {
+			echo "burst window $i never answered (claim refused?)" >>"$LOG"
+			return 1
+		}
+		got="$(cd -P "$(cat "$ROOT/burst-$i")" 2>/dev/null && pwd)"
+		[ "$got" = "$ACCT_DIR_REAL" ] || return 1
+	done
+}
+step "$(printf '15 windows opened at once all claim and run under the account')" burst_windows_are_scoped
+
 # 7. tabs ---------------------------------------------------------------------------
 count_tabs() { af sessions --repo "$REPO" get acct --json 2>/dev/null | grep -c '"kind"'; }
 TABS_BEFORE="$(count_tabs)"
