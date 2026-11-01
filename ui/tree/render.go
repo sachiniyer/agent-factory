@@ -61,13 +61,16 @@ const archivedIcon = "▧ "
 // (Refines the provisional ◒ slot Phase 1e stubbed for #1204.)
 const limitIcon = "◆ "
 
-// attentionIcon marks a session whose agent asked for the user (#5461): a bang,
+// AttentionIcon marks a session whose agent asked for the user (#5461): a bang,
 // distinct in shape from every dot/diamond/box glyph and deliberately STATIC —
 // the TUI has no animation (#1766), where the web's attention dot blinks. It
 // echoes the automations rail's "[!]" needs-attention marker, and is drawn in
 // the generated attention role the web's dot uses rather than the dead/lost
-// ambers, so the request never reads as breakage.
-const attentionIcon = "! "
+// ambers, so the request never reads as breakage. Exported per-concept so the
+// unanswered-question marker (#6475) can share one rendering helper and the
+// attention role while keeping its own `?` glyph — `!` is the attention
+// request, `?` is the open question.
+const AttentionIcon = "! "
 
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
 // shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
@@ -393,7 +396,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// The ask outranks every status glyph the way the web's attention dot
 		// replaces the status dot — a Ready row's green returns when the request
 		// clears, and the reason rides the detail line below.
-		join = attentionStyle.Render(attentionIcon)
+		join = attentionStyle.Render(AttentionIcon)
 	case op != session.OpNone:
 		// The op axis is checked FIRST and DELIBERATELY masks the liveness glyph:
 		// an in-flight create/restore is a loading state (nothing, not a spinner —
