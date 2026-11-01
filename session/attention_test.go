@@ -285,3 +285,28 @@ func TestAttentionAnsweredByWorkIgnoresAnObservationFromBeforeTheRequest(t *test
 	_, ok = i.AttentionAnsweredByWork(i.stateEpoch)
 	require.True(t, ok, "control: the same frame observed after it does answer")
 }
+
+// ReconcileAttention is the client-projection mirror (#5461): a snapshot poll
+// must move the request both ways — appear and clear — without a rebuild and
+// without touching the local epoch, which is unrelated to the daemon's.
+func TestReconcileAttentionMirrorsBothTransitions(t *testing.T) {
+	i := &Instance{Title: "w", liveness: LiveReady}
+	epoch := i.stateEpoch
+
+	request := &Attention{Reason: "pick A or B", SetAt: time.Unix(1_000, 0)}
+	require.True(t, i.ReconcileAttention(request))
+	require.Equal(t, "pick A or B", i.Attention().Reason)
+	require.Equal(t, epoch, i.stateEpoch, "a client's epoch is unrelated to the daemon's")
+
+	require.False(t, i.ReconcileAttention(request),
+		"the same request re-polled is a no-op, not a change")
+
+	// The bookkeeping fields mirror too, so a SeenIdle advance lands silently.
+	idle := &Attention{Reason: "pick A or B", SetAt: time.Unix(1_000, 0), SeenIdle: true}
+	require.True(t, i.ReconcileAttention(idle))
+	require.True(t, i.Attention().SeenIdle)
+
+	require.True(t, i.ReconcileAttention(nil), "the daemon's clear mirrors")
+	require.False(t, i.HasAttention())
+	require.False(t, i.ReconcileAttention(nil), "an absent request stays absent")
+}
