@@ -79,6 +79,74 @@ func TestPrepareRelocationClaimForCleanup_BoundsGenerationInstall(t *testing.T) 
 	}
 }
 
+// TestBoundedRelocationCleanupInspection_TimedOutProbeFencesRetry pins #6267:
+// the cleanup-identity probe is the one bounded probe on the repo-gone
+// teardown path that abandoned its worker on every timeout — each retry
+// spawned a fresh goroutine against the same stalled path while the previous
+// one stayed blocked, so the 5-minute tombstone retry loop accumulated
+// goroutines and the directory descriptors they hold. Like its sibling probes
+// in this file, a timed-out call must fence the path: a retry while the worker
+// is still in flight is refused, not stacked, and only the worker's exit
+// releases the fence.
+func TestBoundedRelocationCleanupInspection_TimedOutProbeFencesRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cleanup")
+	useRelocationIdentityTimeoutForTest(t, 25*time.Millisecond)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerFinished := make(chan struct{}, 2)
+	var starts atomic.Int32
+	var firstBlock atomic.Bool
+	firstBlock.Store(true)
+	inspect := func(string) (cleanupPathInspection, error) {
+		starts.Add(1)
+		defer func() { workerFinished <- struct{}{} }()
+		if firstBlock.CompareAndSwap(true, false) {
+			close(started)
+			<-release
+		}
+		return cleanupPathInspection{}, nil
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := boundedRelocationCleanupInspection(path, inspect)
+		result <- err
+	}()
+	<-started
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("inspection timeout must fail closed; err=%v", err)
+		}
+	case <-time.After(3 * relocationIdentityTimeout.Load()):
+		close(release)
+		<-result
+		t.Fatal("cleanup inspection exceeded its outer deadline")
+	}
+	// The deadline fired but the worker is still blocked on the stalled path:
+	// a retry must be refused by the in-flight fence, not spawn a second
+	// worker against it.
+	if _, retryErr := boundedRelocationCleanupInspection(path, inspect); !errors.Is(retryErr, context.DeadlineExceeded) {
+		close(release)
+		t.Fatalf("retry did not observe the timed-out inspection fence: %v", retryErr)
+	}
+	if got := starts.Load(); got != 1 {
+		close(release)
+		<-workerFinished
+		t.Fatalf("inspection deadline spawned %d workers, want one process fence (#6267)", got)
+	}
+	close(release)
+	<-workerFinished
+	// Once the abandoned worker exits, the fence releases: a retry probes the
+	// path again rather than latching a permanent refusal.
+	if _, err := boundedRelocationCleanupInspection(path, inspect); err != nil {
+		t.Fatalf("retry after the stuck worker exited must probe afresh: %v", err)
+	}
+	if got := starts.Load(); got != 2 {
+		t.Fatalf("post-exit retry reused or skipped the fence: %d workers, want 2", got)
+	}
+}
+
 func TestInstallCleanupGeneration_DoesNotOverwriteNewerGeneration(t *testing.T) {
 	worktree := t.TempDir()
 	identity, err := inspectRelocationPathIdentity(worktree)
