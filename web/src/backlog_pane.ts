@@ -14,6 +14,9 @@ import {
   applyMove, blocking, derivedOf, dropMove, formatID, itemByID, keyboardMove, latestRun, listRows, overlayMove, relatedIDs,
   safeHttpUrl, sources, topQueued,
 } from "./backlog_model.js";
+import { PAUSED_GLYPH } from "./backlog_group_panel.js";
+import { inbox } from "./backlog_groups.js";
+import { InboxList } from "./backlog_inbox.js";
 import { ItemPanel, type WriteOutcome, entryField, stateChip } from "./backlog_panel.js";
 import { PREVIEW_LINES, PreviewCache, PreviewPopover, previewSession } from "./backlog_preview.js";
 import { RunnerBar } from "./backlog_runner.js";
@@ -70,6 +73,9 @@ export class BacklogPane {
   private filter: Filter = "all";
   private source: string | null = null;
   private showDone = false;
+  private showArchived = false;
+  private inboxOn = false;
+  private readonly inboxList: InboxList;
   private readonly folded = new Set<number>();
   // A reorder shown before the daemon has it. It stays until data from a refresh
   // started after the move committed arrives; gen is Infinity until then.
@@ -122,6 +128,10 @@ export class BacklogPane {
       return token === null ? Promise.reject(new Error("not signed in")) : previewSession(id, PREVIEW_LINES, token);
     });
     this.popover = new PreviewPopover(this.previews);
+    this.inboxList = new InboxList({
+      answer: (id, qid, text) => this.answer(this.root ?? "", id, qid, text),
+      select: (id) => this.select(id),
+    });
     this.headSlot.append(this.runner.el);
     this.newItem = entryField("New item…", "New item title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
     const listWrap = h("div", { class: "af-backlog-listwrap" }, this.filterSlot, this.listSlot, this.emptySlot,
@@ -153,6 +163,7 @@ export class BacklogPane {
       this.pinned = null;
       this.hoverId = null;
       this.source = null;
+      this.inboxOn = false;
       this.cursor = null;
       this.folded.clear();
     }
@@ -171,7 +182,8 @@ export class BacklogPane {
     const chips = items.map((x) => {
       const sid = latestRun(x)?.session_id;
       const s = sid ? sessions.find((y) => y.id === sid) : undefined;
-      return s ? [s.id, isArchived(s)] : null;
+      const kind = s ? rowKind(s) : "";
+      return s ? [s.id, isArchived(s), kind === "lost" || kind === "dead"] : null;
     });
     return JSON.stringify([chips, (it?.runs ?? []).map((r) => {
       const s = sessions.find((x) => x.id === r.session_id);
@@ -189,6 +201,12 @@ export class BacklogPane {
     this.selected = id;
     this.cursor = id;
     this.focusPanel = true;
+    this.render();
+  }
+
+  /** Shows the Inbox filter: the nav badge links here. */
+  showInbox(): void {
+    this.inboxOn = true;
     this.render();
   }
 
@@ -412,7 +430,7 @@ export class BacklogPane {
     if (this.pinned !== null && !itemByID(v.backlog, this.pinned)) this.pinned = null;
     const focusedRow = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>(".af-backlog-row");
     if (focusedRow && this.focusId === null && this.listSlot.contains(focusedRow)) this.focusId = Number(focusedRow.dataset.itemId);
-    const rows = listRows(v, { filter: this.filter, showDone: this.showDone, folded: this.folded, source: this.source });
+    const rows = this.inboxOn ? [] : listRows(v, this.listOptions());
     const shown = (id: number | null): boolean => id !== null && rows.some((r) => r.item.id === id);
     this.cursor = [this.focusId, this.cursor, this.selected].find(shown) ?? rows[0]?.item.id ?? null;
     const list = h("ul", { class: "af-backlog-list", role: "tree" });
@@ -421,11 +439,17 @@ export class BacklogPane {
     for (const row of rows) list.append(this.row(v, row));
     this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
     this.filterSlot.replaceChildren(this.filters(v));
-    this.listSlot.replaceChildren(list);
-    this.popover.rebind(list);
     this.emptySlot.replaceChildren();
-    if (v.backlog.items.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, EMPTY_COPY));
-    else if (rows.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, "No items match this filter"));
+    if (this.inboxOn) {
+      this.popover.hide();
+      this.inboxList.render(v, this.sessions);
+      if (this.listSlot.firstChild !== this.inboxList.el) this.listSlot.replaceChildren(this.inboxList.el);
+    } else {
+      this.listSlot.replaceChildren(list);
+      this.popover.rebind(list);
+    }
+    if (!this.inboxOn && v.backlog.items.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, EMPTY_COPY));
+    else if (!this.inboxOn && rows.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, "No items match this filter"));
     if (this.selected !== null) {
       if (this.panel?.id !== this.selected) {
         this.closePanel();
@@ -483,11 +507,19 @@ export class BacklogPane {
       });
       return b;
     };
-    for (const f of FILTERS) row.append(chip(f.label, this.filter === f.filter, () => { this.filter = f.filter; }));
+    row.append(chip(`Inbox (${inbox(v).length})`, this.inboxOn, () => { this.inboxOn = !this.inboxOn; }));
+    const list = (click: () => void) => () => {
+      this.inboxOn = false;
+      click();
+    };
+    for (const f of FILTERS) row.append(chip(f.label, !this.inboxOn && this.filter === f.filter, list(() => { this.filter = f.filter; })));
     for (const s of sources(v.backlog)) {
-      row.append(chip(`From ${s}`, this.source === s, () => { this.source = this.source === s ? null : s; }));
+      row.append(chip(`From ${s}`, !this.inboxOn && this.source === s, list(() => { this.source = this.source === s ? null : s; })));
     }
-    row.append(chip("Show done", this.showDone, () => { this.showDone = !this.showDone; }));
+    row.append(chip("Show done", this.showDone, list(() => { this.showDone = !this.showDone; })));
+    if (this.showArchived || v.backlog.items.some((it) => it.archived)) {
+      row.append(chip("Show archived", this.showArchived, list(() => { this.showArchived = !this.showArchived; })));
+    }
     return row;
   }
 
@@ -510,7 +542,7 @@ export class BacklogPane {
       this.toggleFold(it.id, !this.folded.has(it.id));
     });
     li.append(handle, fold, h("span", { class: "af-backlog-id" }, formatID(it.id)),
-      h("span", { class: "af-backlog-row-title" }, it.title), this.rowChip(v, it, row.reason, li), ...this.rowTail(v, it));
+      h("span", { class: "af-backlog-row-title" }, it.title), this.rowChip(v, it, row.reason, li), ...this.groupTags(it), ...this.rowTail(v, it));
     const keys = [[".af-backlog-chip-link", "o"], [".af-backlog-blocks", "b"], [".af-backlog-row-pr", "p"]]
       .filter(([sel]) => li.querySelector(sel)).map(([, k]) => k);
     if (keys.length > 0) li.setAttribute("aria-keyshortcuts", keys.join(" "));
@@ -555,6 +587,15 @@ export class BacklogPane {
         else this.popover.attach(el, sid, heading, li);
       },
     });
+  }
+
+  private groupTags(it: Item): HTMLElement[] {
+    const out: HTMLElement[] = [];
+    if (it.paused) {
+      out.push(h("span", { class: "af-backlog-tag af-backlog-paused" }, h("span", { ariaHidden: "true" }, PAUSED_GLYPH), " Paused"));
+    }
+    if (it.archived) out.push(h("span", { class: "af-backlog-tag" }, "Archived"));
+    return out;
   }
 
   /** "Blocks n" and the PR link at the row's end. */
@@ -602,8 +643,7 @@ export class BacklogPane {
         this.folded.delete(p);
       }
     }
-    const shown = new Set(listRows(v, { filter: this.filter, showDone: this.showDone, folded: this.folded, source: this.source })
-      .map((r) => r.item.id));
+    const shown = new Set(listRows(v, this.listOptions()).map((r) => r.item.id));
     if (blocked.some((x) => !shown.has(x.id))) {
       this.filter = "all";
       this.source = null;
@@ -611,6 +651,10 @@ export class BacklogPane {
     this.pinned = id;
     this.focusId = blocked[0].id;
     this.render();
+  }
+
+  private listOptions() {
+    return { filter: this.filter, showDone: this.showDone, folded: this.folded, source: this.source, showArchived: this.showArchived };
   }
 
   private setCursor(id: number): void {
@@ -765,6 +809,7 @@ export class BacklogPane {
       archiveSession: (id: string) => this.host.archiveSession(id),
       restoreSession: (id: string) => this.host.restoreSession(id),
       loadSessions: (ids: string[]) => this.host.loadSessions(ids),
+      group: (id: number, c: { paused?: boolean; archived?: boolean }) => this.write(root, (t) => updateItem(root, id, c, t)),
     };
   }
 }
