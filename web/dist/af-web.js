@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "b65e277323fd";
+var CLIENT_VERSION = "f88162dd5812";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21385,6 +21385,14 @@ var AppShell = class {
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
     }
+    const railRows = this.railList.querySelectorAll(".af-row");
+    if (![...railRows].some((r) => r.tabIndex === 0) && railRows.length > 0) {
+      railRows[0].tabIndex = 0;
+    }
+    const focusedRow = document.activeElement;
+    if (focusedRow?.classList.contains("af-row") && !focusedRow.classList.contains("af-row-selected") && this.railList.contains(focusedRow)) {
+      this.railList.querySelector(".af-row-selected")?.focus();
+    }
     const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : void 0;
     this.lifecycleBtn = selectedMenu?.panel.querySelector(".af-rail-lifecycle") ?? null;
     this.lifecycleAction = selectedSession(state)?.lifecycle_action ?? null;
@@ -21411,6 +21419,7 @@ var AppShell = class {
     const menu = actionsDisclosure(`Actions for ${session.title}`);
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
+    menu.trigger.tabIndex = selected ? 0 : -1;
     menu.trigger.replaceChildren("\u2026");
     menu.trigger.addEventListener("click", () => {
       if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
@@ -22722,6 +22731,7 @@ function sessionRow(s, selected, openSession, buildActions, previous, itemChip) 
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
+  row.tabIndex = selected ? 0 : -1;
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);

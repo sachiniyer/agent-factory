@@ -1894,6 +1894,18 @@ export class AppShell {
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
     }
+    // With nothing selected nothing owns the roving stop, so the first row
+    // carries it — the listbox never vanishes from the Tab order (#6409).
+    const railRows = this.railList.querySelectorAll<HTMLElement>(".af-row");
+    if (![...railRows].some(r => r.tabIndex === 0) && railRows.length > 0) {
+      railRows[0].tabIndex = 0;
+    }
+    // DOM focus follows the j/k selection: without this the ring strands on the
+    // previously selected row while Enter attaches the new one.
+    const focusedRow = document.activeElement as HTMLElement | null;
+    if (focusedRow?.classList.contains("af-row") && !focusedRow.classList.contains("af-row-selected") && this.railList.contains(focusedRow)) {
+      this.railList.querySelector<HTMLElement>(".af-row-selected")?.focus();
+    }
     const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : undefined;
     this.lifecycleBtn = selectedMenu?.panel.querySelector<HTMLElement>(".af-rail-lifecycle") ?? null;
     this.lifecycleAction = selectedSession(state)?.lifecycle_action ?? null;
@@ -1922,6 +1934,9 @@ export class AppShell {
     const menu = actionsDisclosure(`Actions for ${session.title}`);
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
+    // Only the selected row's actions button sits in the Tab order (#6409); a
+    // keyboard user reaches another row's menu by moving the selection to it.
+    menu.trigger.tabIndex = selected ? 0 : -1;
     menu.trigger.replaceChildren("…");
     menu.trigger.addEventListener("click", () => {
       if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
@@ -3740,6 +3755,10 @@ export function sessionRow(
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
+  // The rail pays a bounded Tab cost however many rows it holds (#6409): the
+  // selected row is the one listbox stop, with its actions button next. Other
+  // rows stay programmatically focusable so DOM focus can follow j/k.
+  row.tabIndex = selected ? 0 : -1;
   const modelChange = s.model_change
     ? `; model changed from ${s.model_change.before} to ${s.model_change.after}`
     : "";

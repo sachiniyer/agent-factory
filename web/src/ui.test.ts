@@ -257,6 +257,16 @@ test("an actionable row still opens on click and carries no disabled marker", ()
   assert.equal(open.calls, 1, "the fix must not disable a row that CAN open");
 });
 
+test("the selected row is the rail's Tab stop; others rove to -1 (#6409)", () => {
+  const noActions = () => new RowElement() as unknown as HTMLElement;
+  const { el } = row({ lifecycle_action: "archive", can_kill: true });
+  assert.equal((el as RowElement & { tabIndex: number }).tabIndex, -1, "an unselected row leaves the Tab order");
+  const selected = sessionRow(sess({ lifecycle_action: "archive", can_kill: true }), true, () => {}, noActions) as unknown as RowElement & { tabIndex: number };
+  assert.equal(selected.tabIndex, 0, "the selected row carries the listbox's one stop");
+  const reused = sessionRow(sess({ lifecycle_action: "archive", can_kill: true }), false, () => {}, noActions, selected as unknown as HTMLElement) as unknown as RowElement & { tabIndex: number };
+  assert.equal(reused.tabIndex, -1, "a reused element roves the stop away on deselection");
+});
+
 test("each rail option names its state in visually hidden text", () => {
   const hidden = (el: RowElement): string[] => [
     ...(el.className === "af-visually-hidden" ? [el.textContent.trim()] : []),
