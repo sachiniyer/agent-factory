@@ -118,7 +118,7 @@ func sweepStartupOrphanSandboxTunnels() {
 // admission, not Snapshot/RefreshInstances and the other manager operations
 // that take m.mu alone — holding m.mu through external Docker work would stall
 // the whole daemon on an unavailable engine. The slug collection is inlined
-// because dockerReapProtectedSlugs acquires m.mu itself.
+// because a factored helper would acquire m.mu itself.
 func runDeferredOrphanSweepIfReady(manager *Manager) {
 	homeID, err := configDirForReap()
 	if err != nil {
@@ -132,9 +132,9 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 		return
 	}
 	manager.deferredOrphanSweepArmed = false
-	// Collect the protected slugs inline under the already-held m.mu (instead of
-	// calling dockerReapProtectedSlugs, which acquires m.mu itself) so the
-	// snapshot and the sweep stay in lockstep under createSweepMu.
+	// Collect the protected slugs inline under the already-held m.mu (a factored
+	// helper would acquire m.mu itself) so the snapshot and the sweep stay in
+	// lockstep under createSweepMu.
 	titles := make([]string, 0, len(manager.instances)+len(manager.pendingCreates))
 	for _, inst := range manager.instances {
 		titles = append(titles, inst.Title)
@@ -206,31 +206,4 @@ func launchDeferredOrphanSweepIfReady(manager *Manager, stopCh <-chan struct{}, 
 		}
 		runDeferredOrphanSweepIfReady(manager)
 	}()
-}
-
-// dockerReapProtectedSlugs returns the af.session label slugs of every session
-// the manager knows about — live instances AND still-provisioning pending creates
-// (the #2549 window where a container exists but no Instance does yet) — so the
-// orphan-container sweep (#2194) never reaps a container whose session is alive or
-// mid-create. Titles are collected under the lock; slugging happens after so the
-// lock stays short.
-func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
-	m.mu.Lock()
-	titles := make([]string, 0, len(m.instances)+len(m.pendingCreates))
-	for _, inst := range m.instances {
-		titles = append(titles, inst.Title)
-	}
-	for key, pending := range m.pendingCreates {
-		if _, settled := m.instances[key]; settled {
-			continue
-		}
-		titles = append(titles, pending.Title)
-	}
-	m.mu.Unlock()
-
-	slugs := make(map[string]bool, len(titles))
-	for _, t := range titles {
-		slugs[session.Slugify(t)] = true
-	}
-	return slugs
 }

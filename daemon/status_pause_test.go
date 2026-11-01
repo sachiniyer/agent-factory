@@ -35,7 +35,7 @@ func TestRefreshStatuses_PausedInstanceSkipsProbe(t *testing.T) {
 	registerStarted(t, manager, repoID, repoPath, "attached-x", deadTmuxBackend{session.NewFakeBackend()}, true, session.Running)
 	registerStarted(t, manager, repoID, repoPath, "sibling-y", deadTmuxBackend{session.NewFakeBackend()}, true, session.Running)
 
-	manager.PauseStatusPoll(repoID, "attached-x", "")
+	manager.PauseStatusPollFor(repoID, "attached-x", "", "")
 
 	manager.RefreshStatuses()
 
@@ -57,7 +57,7 @@ func TestRefreshStatuses_PausedDeadInstanceNotMarkedLost(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerStarted(t, manager, repoID, repoPath, "dead-but-paused", deadTmuxBackend{session.NewFakeBackend()}, true, session.Running)
 
-	manager.PauseStatusPoll(repoID, "dead-but-paused", "")
+	manager.PauseStatusPollFor(repoID, "dead-but-paused", "", "")
 
 	manager.RefreshStatuses()
 
@@ -78,7 +78,7 @@ func TestRefreshStatuses_PausedDeadInstanceNotMarkedLost(t *testing.T) {
 func TestRefreshStatuses_IDPauseDoesNotTransferToSameTitleReplacement(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	original := registerStarted(t, manager, repoID, repoPath, "reused", deadTmuxBackend{session.NewFakeBackend()}, true, session.Running)
-	manager.PauseStatusPoll(repoID, original.Title, original.ID)
+	manager.PauseStatusPollFor(repoID, original.Title, original.ID, "")
 
 	replacement := registerStarted(t, manager, repoID, repoPath, "reused", deadTmuxBackend{session.NewFakeBackend()}, true, session.Running)
 	if original.ID == replacement.ID {
@@ -93,7 +93,7 @@ func TestRefreshStatuses_IDPauseDoesNotTransferToSameTitleReplacement(t *testing
 		t.Fatalf("replacement status = %v, want Lost — the old ID's lease must not suppress its probe", got)
 	}
 
-	manager.ResumeStatusPoll(repoID, original.Title, original.ID)
+	manager.ResumeStatusPollFor(repoID, original.Title, original.ID, "")
 	if manager.isPollPaused(repoID, original.Title, original.ID) {
 		t.Fatal("the original ID-keyed lease must remain independently resumable")
 	}
@@ -105,10 +105,10 @@ func TestRefreshStatuses_IDPauseDoesNotTransferToSameTitleReplacement(t *testing
 // stable key rather than the reusable title.
 func TestResumeStatusPoll_StaleIDKeepsReplacementLease(t *testing.T) {
 	manager, repoID, _ := newStatusTestManager(t)
-	manager.PauseStatusPoll(repoID, "reused", "old-id")
-	manager.PauseStatusPoll(repoID, "reused", "new-id")
+	manager.PauseStatusPollFor(repoID, "reused", "old-id", "")
+	manager.PauseStatusPollFor(repoID, "reused", "new-id", "")
 
-	manager.ResumeStatusPoll(repoID, "reused", "old-id")
+	manager.ResumeStatusPollFor(repoID, "reused", "old-id", "")
 	if !manager.isPollPaused(repoID, "reused", "new-id") {
 		t.Fatal("stale resume cleared the replacement session's independent lease")
 	}
@@ -121,7 +121,7 @@ func TestResumeStatusPoll_StaleIDKeepsReplacementLease(t *testing.T) {
 func TestRefreshStatuses_ReclaimsExpiredIDLeaseAfterSessionGone(t *testing.T) {
 	advance := withFrozenClock(t)
 	manager, repoID, _ := newStatusTestManager(t)
-	manager.PauseStatusPoll(repoID, "gone", "gone-id")
+	manager.PauseStatusPollFor(repoID, "gone", "gone-id", "")
 	advance(statusPollLease + time.Second)
 
 	manager.RefreshStatuses()
@@ -143,7 +143,7 @@ func TestRefreshStatuses_LeaseExpiryDetectsRealDeath(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerStarted(t, manager, repoID, repoPath, "crashed-tui", deadTmuxBackend{session.NewFakeBackend()}, true, session.Running)
 
-	manager.PauseStatusPoll(repoID, "crashed-tui", "")
+	manager.PauseStatusPollFor(repoID, "crashed-tui", "", "")
 
 	// Still within the lease: the dead instance is protected.
 	if !manager.isPollPaused(repoID, "crashed-tui", "") {
@@ -175,12 +175,12 @@ func TestResumeStatusPoll_ClearsPauseImmediately(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerStarted(t, manager, repoID, repoPath, "detached", deadTmuxBackend{session.NewFakeBackend()}, true, session.Running)
 
-	manager.PauseStatusPoll(repoID, "detached", "")
+	manager.PauseStatusPollFor(repoID, "detached", "", "")
 	if !manager.isPollPaused(repoID, "detached", "") {
 		t.Fatal("instance should be paused after PauseStatusPoll")
 	}
 
-	manager.ResumeStatusPoll(repoID, "detached", "")
+	manager.ResumeStatusPollFor(repoID, "detached", "", "")
 	if manager.isPollPaused(repoID, "detached", "") {
 		t.Fatal("ResumeStatusPoll must clear the pause immediately, not wait out the lease")
 	}

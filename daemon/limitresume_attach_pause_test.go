@@ -16,7 +16,7 @@ func TestResumeLimitedSessions_DefersWhileAttached(t *testing.T) {
 	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", base.Add(time.Hour))
 	advance(time.Hour + limitResumeGrace + time.Second)
 
-	manager.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	manager.PauseStatusPollFor(repoID, inst.Title, inst.ID, "")
 	if !manager.isPollPaused(repoID, inst.Title, inst.ID) {
 		t.Fatal("precondition: the attach pause lease must be held")
 	}
@@ -30,7 +30,7 @@ func TestResumeLimitedSessions_DefersWhileAttached(t *testing.T) {
 	}
 
 	// Detach: the very next tick resumes (the deferral recorded no attempt/backoff).
-	manager.ResumeStatusPoll(repoID, inst.Title, inst.ID)
+	manager.ResumeStatusPollFor(repoID, inst.Title, inst.ID, "")
 	manager.ResumeLimitedSessions()
 	if _, _, prompts := backend.snapshot(); len(prompts) != 1 || prompts[0] != "finish the migration" {
 		t.Fatalf("after detach the resume must fire on the next tick, prompts=%v", prompts)
