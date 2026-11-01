@@ -298,3 +298,150 @@ test("docs tab: several Proposal shortcuts keep the app menu on screen at phone 
   await shortcuts.last().scrollIntoViewIfNeeded();
   await expect(shortcuts.last()).toBeVisible();
 });
+
+// iOS Safari fires no `contextmenu` on a touch long-press, so the doc-strip tab
+// opens its Delete menu from the pointerdown's own 500 ms timer; on lift WebKit
+// synthesizes a compatibility `mousedown` + `click` targeting the pressed tab
+// (implicit pointer capture), which — without the one-shot suppression in
+// `web/src/docs_pane.ts` — close the just-opened menu (the document-capture
+// mousedown closer) and open the doc (the tab's unconditional click handler),
+// so on a touch Apple device Delete is unreachable.
+//
+// This is the touch path the bug report traces on iOS Safari. Because
+// Playwright's Chromium long-press consumes the gesture with `contextmenu` +
+// `pointercancel` (the Android Chrome path), this test starts the production
+// timer with a JS-dispatched `pointerdown` (so it does not go through
+// Chromium's gesture recognizer and fires no `contextmenu`), then synthesizes
+// the lift's compat mouse events + `click` itself — exactly the recorded WebKit
+// sequence at the finger lift. It asserts the menu stays open and the
+// long-pressed doc does NOT switch, then taps Delete and checks the doc leaves.
+test("docs tab: a touch long-press keeps the Delete menu open through the lift's synthesized click", async ({ page, request }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const af = (...args: string[]): string =>
+    execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+  const title = "docs-touch-long-press-probe";
+  const slug = "docs-touch-long-press-plan";
+  af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
+  const started = JSON.parse(af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title,
+    "--docs", "goals,api")) as { path: string; tab_error?: string };
+  expect(started.tab_error ?? "", "start must create the Docs tab").toBe("");
+
+  const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
+  expect(session).toBeTruthy();
+  await page.goto(`/#/session/${session.id}`);
+  const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
+  await expect(pane.locator(".cm-content")).toBeVisible();
+  await expect(pane.locator(".af-docs-tab")).toHaveText(["goals", "api"]);
+  const goalsTab = pane.locator(".af-docs-tab", { hasText: "goals" });
+  const apiTab = pane.locator(".af-docs-tab", { hasText: "api" });
+  await expect(goalsTab).toHaveAttribute("aria-selected", "true");
+  const menu = pane.locator(".af-docs-docmenu");
+  await expect(menu).toBeHidden();
+
+  // (1) Touch `pointerdown` on the api tab — the doc NOT already open — starts
+  // the production 500 ms timer (TAB_PRESS_LIMITS.holdMs in web/src/tabtouch.ts).
+  // JS-dispatched so Chromium's long-press gesture recognizer never sees it,
+  // mirroring iOS Safari, which fires no `contextmenu` to mask the bug.
+  const point = await apiTab.evaluate((el: HTMLElement) => {
+    const r = el.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  });
+  await apiTab.evaluate((el: HTMLElement, p) => {
+    el.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true, cancelable: true,
+      pointerId: 7, pointerType: "touch", isPrimary: true,
+      clientX: p.x, clientY: p.y,
+    }));
+  }, point);
+
+  // (2) The production timer fires and opens the doc menu WITHOUT switching
+  // the doc (`openDocMenu` does not call `openDoc`).
+  await expect(menu, "the long-press timer must open the doc menu").toBeVisible({ timeout: 2_000 });
+  await expect(menu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
+  await expect(apiTab, "long-pressing must not open the doc").not.toHaveAttribute("aria-selected", "true");
+  await expect(goalsTab).toHaveAttribute("aria-selected", "true");
+
+  // (3) The lift. iOS Safari synthesizes compat `mousedown`/`mouseup`/`click`
+  // targeting the pressed tab; without the one-shot suppression the
+  // document-capture mousedown closer (`onDocMouseDown`) closes the menu and
+  // the tab's `click` handler runs `openDoc(api)`.
+  await apiTab.evaluate((el: HTMLElement, p) => {
+    const base = { bubbles: true, cancelable: true, clientX: p.x, clientY: p.y, button: 0 };
+    el.dispatchEvent(new PointerEvent("pointerup", {
+      ...base, pointerId: 7, pointerType: "touch", isPrimary: true,
+    }));
+    el.dispatchEvent(new MouseEvent("mousedown", base));
+    el.dispatchEvent(new MouseEvent("mouseup", base));
+    el.dispatchEvent(new MouseEvent("click", base));
+  }, point);
+
+  // (4) THE bug assertion: the menu stays open through both synthesized events
+  // and the long-pressed doc does not switch/open.
+  await expect(menu, "the synthesized mousedown must not close the doc menu").toBeVisible();
+  await expect(goalsTab, "the synthesized click must not open the long-pressed doc").toHaveAttribute("aria-selected", "true");
+  await expect(apiTab).not.toHaveAttribute("aria-selected", "true");
+
+  // (5) With the menu still open, Delete is reachable: a real click on the
+  // menuitem removes the doc and the file leaves the proposal.
+  await menu.getByRole("menuitem", { name: "Delete" }).click();
+  await expect(menu).toBeHidden();
+  await expect(pane.locator(".af-docs-tab")).toHaveText(["goals"]);
+  await expect(pane.locator('.af-docs-tab[aria-selected="true"]')).toHaveText("goals");
+  await expect.poll(() => existsSync(join(started.path, "api.md"))).toBe(false);
+  expect(existsSync(join(started.path, "goals.md"))).toBe(true);
+});
+
+// Regression guard: after the touch long-press fix, a real click on a tab (no
+// long-press in the picture) still opens the doc — the one-shot flag must not
+// linger and swallow the next ordinary click.
+test("docs tab: an ordinary click still opens a doc after the long-press fix", async ({ page, request }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const af = (...args: string[]): string =>
+    execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+  const title = "docs-touch-after-long-press-probe";
+  const slug = "docs-touch-after-long-press-plan";
+  af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
+  af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title, "--docs", "goals,api");
+
+  const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
+  expect(session).toBeTruthy();
+  await page.goto(`/#/session/${session.id}`);
+  const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
+  await expect(pane.locator(".cm-content")).toBeVisible();
+  await expect(pane.locator(".af-docs-tab")).toHaveText(["goals", "api"]);
+  const goalsTab = pane.locator(".af-docs-tab", { hasText: "goals" });
+  const apiTab = pane.locator(".af-docs-tab", { hasText: "api" });
+  await expect(goalsTab).toHaveAttribute("aria-selected", "true");
+  const menu = pane.locator(".af-docs-docmenu");
+
+  // Open the menu via the touch long-press timer, then Escape to close it: the
+  // one-shot flag would be armed and consumed by the next click only if it
+  // lingered past the menu's dismissal.
+  const point = await apiTab.evaluate((el: HTMLElement) => {
+    const r = el.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  });
+  await apiTab.evaluate((el: HTMLElement, p) => {
+    el.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true, cancelable: true,
+      pointerId: 7, pointerType: "touch", isPrimary: true,
+      clientX: p.x, clientY: p.y,
+    }));
+  }, point);
+  await expect(menu).toBeVisible({ timeout: 2_000 });
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  // The one-shot must be cleared (closeDocMenu clears it), so a real click now
+  // opens the doc — no suppressed-by-stale-flag regression.
+  await apiTab.click();
+  await expect(apiTab, "an ordinary click after a long-press menu dismissal must open the doc").toHaveAttribute("aria-selected", "true");
+  await expect(goalsTab).not.toHaveAttribute("aria-selected", "true");
+});

@@ -115,6 +115,17 @@ export class DocsPane {
   private readonly docMenu: HTMLElement;
   private docMenuTab: HTMLElement | null = null;
   private longPress: { timer: number; x: number; y: number; pointerId: number } | null = null;
+  // Set when the touch long-press timer opens the doc menu: iOS Safari fires no
+  // `contextmenu`, so on lift WebKit synthesizes a compatibility `mousedown` /
+  // `click` that target the pressed tab (implicit pointer capture). Without
+  // suppression the `mousedown` closes the just-opened menu (the document-capture
+  // closer) and the `click` opens the doc (the tab's unconditional `click`
+  // handler) — the only path to Delete on a touch Apple device. The tab's
+  // `click` handler consumes the flag one-shot, and the closer skips a
+  // `mousedown` whose target is the menu's tab while it is set. `closeDocMenu`
+  // and a fresh `pointerdown` also clear it, so a menu dismissed some other way
+  // leaves a real following click intact.
+  private longPressFired = false;
   private readonly status: HTMLElement;
   private readonly statusText: HTMLElement;
   private readonly questions: HTMLButtonElement;
@@ -162,6 +173,13 @@ export class DocsPane {
     for (const s of this.syncs.values()) s.saveBeforeLeaving();
   };
   private readonly onDocMouseDown = (e: MouseEvent): void => {
+    // The lift that follows a touch long-press that opened the doc menu synthesizes
+    // a `mousedown` targeting the pressed tab; let the tab's `click` handler
+    // swallow the matching `click` and keep the menu open for Delete.
+    if (this.longPressFired && this.docMenuTab !== null && (
+      e.target === this.docMenuTab || this.docMenuTab.contains(e.target as Node))) {
+      return;
+    }
     if (!this.menu.hidden && !this.menu.contains(e.target as Node) && e.target !== this.addButton &&
       !this.addButton.contains(e.target as Node)) {
       this.closeMenu();
@@ -445,7 +463,17 @@ export class DocsPane {
       tab.setAttribute("aria-selected", selected ? "true" : "false");
       tab.tabIndex = selected ? 0 : -1;
       tab.title = doc.file;
-      tab.addEventListener("click", () => void this.openDoc(doc));
+      tab.addEventListener("click", () => {
+        // The touch long-press that opened the doc menu is followed by a
+        // synthesized `click` on lift (iOS Safari fires no `contextmenu`); the
+        // one-shot flag eats it so the doc the user long-pressed does not open
+        // the moment they go to tap Delete.
+        if (this.longPressFired) {
+          this.longPressFired = false;
+          return;
+        }
+        void this.openDoc(doc);
+      });
       tab.addEventListener("keydown", (e) => this.onStripKey(e, doc));
       tab.addEventListener("contextmenu", (e) => {
         e.preventDefault();
@@ -484,9 +512,16 @@ export class DocsPane {
   private startLongPress(e: PointerEvent, doc: ProposalDocRef, tab: HTMLElement): void {
     if (e.pointerType !== "touch") return;
     this.cancelLongPress();
+    // A fresh press drops any stale one-shot left by a long-press whose lift
+    // never synthesized a click (the menu was dismissed some other way); a real
+    // following tap then opens the doc as it does without a touch.
+    this.longPressFired = false;
     const { clientX: x, clientY: y } = e;
     const timer = window.setTimeout(() => {
       this.longPress = null;
+      // Arm the one-shot that swallows the lift's synthesized mouse events so
+      // the menu this timer just opened stays open for Delete.
+      this.longPressFired = true;
       this.openDocMenu(doc, tab, { x, y });
     }, TAB_PRESS_LIMITS.holdMs);
     this.longPress = { timer, x, y, pointerId: e.pointerId };
@@ -519,6 +554,10 @@ export class DocsPane {
     this.docMenu.replaceChildren();
     if (restoreFocus) this.docMenuTab?.focus();
     this.docMenuTab = null;
+    // The menu has been dismissed; the lift no longer owes a synthesized click,
+    // so a real click that follows (a different tab, the tab itself after the
+    // menu was Escape-closed) reaches openDoc as it does without a touch.
+    this.longPressFired = false;
   }
 
   private deleteDoc(doc: ProposalDocRef, button: HTMLButtonElement): void {
