@@ -15,6 +15,9 @@ type PlanWindow struct {
 	All float64 `json:"all_cost"`
 	// ResetsAt is nil when there is no valid reading for the window.
 	ResetsAt *time.Time `json:"resets_at"`
+	// BacklogCost is the item runs' metered cost in the window, in US
+	// dollars. A window with no reading counts the span ending now.
+	BacklogCost float64 `json:"-"`
 }
 
 // Valid reports whether the window has a reading that has not reset yet.
@@ -62,6 +65,10 @@ type Usage struct {
 	// default): af injects no status line tap, reads no transcripts, and has no
 	// plan windows, so nothing can be gated on the plan budget.
 	Disabled bool `json:"disabled,omitempty"`
+	// Unavailable is set (with the reason) when the meter could not be read or
+	// written on its last pass: the windows are empty, not stale, so nothing is
+	// gated on a result that no longer reflects the spend.
+	Unavailable string `json:"unavailable,omitempty"`
 	// Metering is set until the first metering pass has finished; the windows
 	// are empty until then.
 	Metering bool `json:"metering,omitempty"`
@@ -134,4 +141,18 @@ func attribute(l *Limit, span time.Duration, a *AccountMeter, now time.Time) Pla
 		w.Backlog = math.Min(w.Plan, w.Plan*backlog/all)
 	}
 	return w
+}
+
+// SetBacklogCosts fills each window's BacklogCost from the account's meter: the
+// reading's window when it has one, else the span that ends now.
+func SetBacklogCosts(w *Windows, a *AccountMeter, now time.Time) {
+	set := func(pw *PlanWindow, span time.Duration) {
+		from, to := now.Add(-span), now.Add(BucketSpan)
+		if pw.Valid() {
+			from, to = pw.ResetsAt.Add(-span), *pw.ResetsAt
+		}
+		_, pw.BacklogCost = a.costIn(from, to)
+	}
+	set(&w.FiveHour, FiveHourSpan)
+	set(&w.SevenDay, SevenDaySpan)
 }

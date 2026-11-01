@@ -133,11 +133,11 @@ func TestCheckAndHandleTrustPrompt_CodexSafetyWaitsForRealTmuxRender(t *testing.
 
 	serverPID := tmuxServerPID(t, socketPath, name)
 	t.Cleanup(func() {
-		if killOut, killErr := tmuxAt(socketPath, "kill-session", "-t", exactTarget(name)).CombinedOutput(); killErr != nil {
+		if killOut, killErr := tmuxAt(socketPath, "kill-session", "-t", ExactTarget(name)).CombinedOutput(); killErr != nil {
 			// A session that is already gone is cleanup's goal reached early,
 			// not a failure — kill-session and has-session both exit nonzero
 			// once the server is down, so ask before reporting.
-			if probeErr := tmuxAt(socketPath, "has-session", "-t", exactTarget(name)).Run(); probeErr == nil {
+			if probeErr := tmuxAt(socketPath, "has-session", "-t", ExactTarget(name)).Run(); probeErr == nil {
 				t.Errorf("kill isolated tmux session: %v: %s", killErr, killOut)
 			}
 		}
@@ -156,7 +156,7 @@ func TestCheckAndHandleTrustPrompt_CodexSafetyWaitsForRealTmuxRender(t *testing.
 	waitForRealPane(t, session, codexSafetyRealNormalPane)
 	require.False(t, session.CheckAndHandleTrustPrompt(), "normal pane establishes the pre-dialog model")
 
-	out, err = tmuxAt(socketPath, "send-keys", "-t", exactTarget(name), "x").CombinedOutput()
+	out, err = tmuxAt(socketPath, "send-keys", "-t", ExactTarget(name), "x").CombinedOutput()
 	require.NoError(t, err, "raise the fixture's safety picker: %s", out)
 	waitForRealPane(t, session, "Dismiss and keep waiting")
 	require.True(t, session.CheckAndHandleTrustPrompt(), "the live safety picker blocks prompt delivery")
@@ -173,7 +173,7 @@ func TestCheckAndHandleTrustPrompt_CodexSafetyWaitsForRealTmuxRender(t *testing.
 
 func tmuxServerPID(t *testing.T, socket, name string) int {
 	t.Helper()
-	output, err := tmuxAt(socket, "display-message", "-p", "-t", exactTarget(name), "#{pid}").Output()
+	output, err := tmuxAt(socket, "display-message", "-p", "-t", ExactTarget(name), "#{pid}").Output()
 	require.NoError(t, err)
 	pid, err := strconv.Atoi(strings.TrimSpace(string(output)))
 	require.NoError(t, err)

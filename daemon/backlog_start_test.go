@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +34,14 @@ func backlogTestManager(t *testing.T) (*Manager, string, string) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	// No test using this manager returns, or runs the cleanups registered above
+	// (the backend factory restore, the env restore), with a background mutation
+	// it launched still in flight: StartBacklogItem's create reads the global
+	// backend factory, and a test that ended first raced its restore (#4217).
+	// Cleanups run last-in-first-out, so this one runs before them. Joining here,
+	// in the shared harness, covers every test built on it, including ones that
+	// never wait for their own mutations.
+	t.Cleanup(m.stopAndWaitBackgroundMutationsForShutdown)
 	if _, err := m.backlogService().Add(backlog.AddRequest{RepoID: repo.ID,
 		Items: []backlog.ItemInput{{Key: "a", Title: "web/view", Body: "Build it."}}}); err != nil {
 		t.Fatal(err)
@@ -457,5 +466,25 @@ func TestFailedContinueRollbackRetriesABusyBacklog(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the failure note was lost to a busy backlog: %+v", it.Thread)
+	}
+}
+
+// A test built on backlogTestManager never returns with a background mutation it
+// launched still running (#4217). The mutation here only ends when the harness
+// closes its stop channel, so it is still running after the subtest unless the
+// harness's cleanup joins it.
+func TestBacklogTestManagerJoinsItsBackgroundMutations(t *testing.T) {
+	var done atomic.Bool
+	t.Run("harness", func(t *testing.T) {
+		m, _, _ := backlogTestManager(t)
+		if !m.launchBackgroundMutation(func(stop <-chan struct{}) {
+			<-stop
+			done.Store(true)
+		}) {
+			t.Fatal("the mutation was not admitted")
+		}
+	})
+	if !done.Load() {
+		t.Fatal("the subtest returned with its background mutation still in flight")
 	}
 }

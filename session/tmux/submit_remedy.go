@@ -180,7 +180,7 @@ func chipDeclaredCount(chip string, parts ...string) (int, bool) {
 func (t *TmuxSession) capturePaneAndCursorState() (string, paneCursorState, bool) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	target := exactTarget(t.sanitizedName)
+	target := ExactTarget(t.sanitizedName)
 	out, err := t.outputTmuxBounded(ctx,
 		"display-message", "-p", "-t", target, paneCursorStateFormat, ";",
 		"capture-pane", "-p", "-t", target,

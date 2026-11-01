@@ -20,19 +20,23 @@ type testHost struct {
 	facts   Facts
 	// attention is each session's mirrored attention reason.
 	attention map[string]string
-	target    AnswerTarget
-	delivered []PendingAnswer
-	usage     planusage.Usage
+	// attentionID is the question id each session's attention mirrors.
+	attentionID map[string]int
+	target      AnswerTarget
+	delivered   []PendingAnswer
+	usage       planusage.Usage
 	// onTarget runs inside AnswerTarget, between the service reading the item and
 	// its transaction.
 	onTarget func()
 }
 
-func (h *testHost) SetAttention(_, sessionID string, _ int, reason string) {
+func (h *testHost) SetAttention(_, sessionID string, questionID int, reason string) {
 	if h.attention == nil {
 		h.attention = map[string]string{}
+		h.attentionID = map[string]int{}
 	}
 	h.attention[sessionID] = reason
+	h.attentionID[sessionID] = questionID
 }
 func (h *testHost) AnswerTarget(string, string) AnswerTarget {
 	if h.onTarget != nil {
@@ -52,6 +56,14 @@ func (h *testHost) Changed(_ string, ids []int) { h.changed = append(h.changed, 
 func (h *testHost) last() []int                 { return h.changed[len(h.changed)-1] }
 func ptr[T any](v T) *T                         { return &v }
 func (h *testHost) reset()                      { h.changed = nil }
+func (h *testHost) Gate(string) Gate {
+	b, err := LoadBudget()
+	if err != nil {
+		return Gate{Name: "budget", Reason: err.Error()}
+	}
+	return CheckGates(GateInput{Budget: *b, Usage: h.usage, Now: time.Now(), Loc: time.UTC})
+}
+
 func newTestService(t *testing.T) (*Service, *testHost) {
 	t.Helper()
 	home(t)
@@ -306,7 +318,7 @@ func TestServiceSettings(t *testing.T) {
 		}
 	}
 	v, _ := s.Get(GetRequest{RepoID: repoID})
-	if v.Runner.State != RunnerWaiting || v.Runner.Reason != "No plan usage seen yet." || v.Runner.Max != 3 {
+	if v.Runner.State != RunnerWaiting || v.Runner.Gate != GateNoReading || v.Runner.Max != 3 {
 		t.Fatalf("%+v", v.Runner)
 	}
 }
@@ -415,27 +427,39 @@ func TestServiceBudget(t *testing.T) {
 }
 
 func TestServiceRunnerView(t *testing.T) {
-	s, _ := newTestService(t)
+	s, h := newTestService(t)
 	if _, err := s.SetSettings(SetSettingsRequest{RepoID: repoID, Runner: ptr(true)}); err != nil {
 		t.Fatal(err)
 	}
+	reset := time.Now().Add(2 * time.Hour)
+	reading := planusage.Usage{Windows: planusage.Windows{FiveHour: planusage.PlanWindow{Plan: 20, Backlog: 5, ResetsAt: &reset}}}
 	steps := []struct {
-		edit func(*Budget)
-		want RunnerView
+		edit  func(*Budget)
+		usage planusage.Usage
+		state string
+		gate  string
 	}{
-		{func(*Budget) {}, RunnerView{State: RunnerWaiting, Reason: "No plan usage seen yet.", Max: 1}},
-		{func(b *Budget) { b.Share = 0 }, RunnerView{State: RunnerStopped, Reason: "Backlog share is 0%.", Max: 1}},
-		{func(b *Budget) { b.Share, b.USDLimit = 50, 10 }, RunnerView{State: RunnerIdle, Reason: "Nothing queued.", Max: 1}},
-		{func(b *Budget) { b.USDSpent = 10.4 }, RunnerView{State: RunnerStopped, Reason: "Budget used ($10.40 of $10.00).", Max: 1}},
+		{func(*Budget) {}, planusage.Usage{}, RunnerWaiting, GateNoReading},
+		{func(*Budget) {}, planusage.Usage{Metering: true}, RunnerWaiting, GateMetering},
+		{func(b *Budget) { b.Share = 0 }, reading, RunnerStopped, GateShare},
+		{func(b *Budget) { b.Share = 50 }, reading, RunnerIdle, ""},
+		{func(b *Budget) { b.USDLimit = 10 }, planusage.Usage{}, RunnerIdle, ""},
 	}
 	for i, st := range steps {
 		if _, err := UpdateBudget(func(b *Budget) error { st.edit(b); return nil }); err != nil {
 			t.Fatal(err)
 		}
+		h.usage = st.usage
 		v, err := s.Get(GetRequest{RepoID: repoID})
-		if err != nil || v.Runner != st.want {
+		if err != nil || v.Runner.State != st.state || v.Runner.Gate != st.gate {
 			t.Fatalf("step %d: %+v %v", i, v.Runner, err)
 		}
+	}
+	if _, err := s.SetSettings(SetSettingsRequest{RepoID: repoID, Runner: ptr(false)}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.Get(GetRequest{RepoID: repoID}); v.Runner.State != RunnerOff {
+		t.Fatalf("%+v", v.Runner)
 	}
 }
 

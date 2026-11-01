@@ -384,7 +384,7 @@ func (m *Manager) recoverBacklogStarts(stop <-chan struct{}) {
 func (m *Manager) recoverBacklog(repoID string, stop <-chan struct{}) bool {
 	b, err := backlog.Load(repoID)
 	if err != nil {
-		m.warn().Printf("backlog recovery for project %s: %v", repoID, err)
+		m.warnBacklogUnreadable("backlog recovery", repoID, err)
 		return false
 	}
 	sessions := m.itemSessions(repoID)

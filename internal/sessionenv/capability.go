@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -259,12 +260,13 @@ func (b *CapabilityBroker) Serve(ln net.Listener) {
 func (b *CapabilityBroker) serveConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(claimIOTimeout))
-	if enableAttestation(conn) != nil {
+	st, aerr := enableAttestation(conn)
+	if aerr != nil {
 		return
 	}
 	enc := json.NewEncoder(conn)
 	for round := 0; round < 2; round++ {
-		line, pid, err := readAttestedLine(conn)
+		line, pid, err := readAttestedLine(conn, st)
 		if err != nil {
 			return
 		}
@@ -286,6 +288,11 @@ func (b *CapabilityBroker) serveConn(conn net.Conn) {
 			resp.Error = cerr.Error()
 		}
 		_ = enc.Encode(resp)
+		// Hold the connection until the client has read the reply and closed.
+		// Closing first leaves a macOS client's LOCAL_PEERPID read with ENOTCONN
+		// and refuses a live claim (#6455). The deadline bounds a client that
+		// never closes.
+		_, _ = io.Copy(io.Discard, io.LimitReader(conn, 1<<10))
 		return
 	}
 }
@@ -304,10 +311,12 @@ func (b *CapabilityBroker) serveConn(conn net.Conn) {
 // that of the process that wrote THIS message, and it is checked on the hello
 // before the token is sent and again on the answer.
 //
-// Where it cannot (macOS has LOCAL_PEERPID, which is per connection, and no
-// per-message sender attestation) the check is per connection and the
-// fork-then-exec bypass above remains. That is a stated residual, not a
-// guarantee: see perMessageAttestation.
+// Where it cannot (macOS has LOCAL_PEERPID, the peer socket's last_pid, and no
+// per-message sender attestation) the pid is read after each message arrives, so
+// it names the last process to use the socket. That closes the fork-then-exec
+// case where the responder writes, but a process that touches the socket after
+// the responder wrote still wins; that is a stated residual, not a guarantee:
+// see perMessageAttestation.
 //
 // Every failure refuses.
 func ClaimCapability(socket, token string) (Capability, error) {
@@ -317,7 +326,8 @@ func ClaimCapability(socket, token string) (Capability, error) {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(claimIOTimeout))
-	if err := enableAttestation(conn); err != nil {
+	st, err := enableAttestation(conn)
+	if err != nil {
 		return Capability{}, fmt.Errorf("launch capability refused: cannot attest the claim endpoint: %w", err)
 	}
 	enc := json.NewEncoder(conn)
@@ -326,7 +336,7 @@ func ClaimCapability(socket, token string) (Capability, error) {
 		if err := enc.Encode(req); err != nil {
 			return claimResponse{}, err
 		}
-		line, sender, err := readAttestedLine(conn)
+		line, sender, err := readAttestedLine(conn, st)
 		if err != nil {
 			return claimResponse{}, fmt.Errorf("launch capability refused: %w", err)
 		}

@@ -197,6 +197,16 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 			// unknown leaf to a misleading warning about the whole table.
 			continue
 		}
+		if len(key) == 2 && configAliasSection(key[0]) && configAliasLeaf(key[0], key[1]) {
+			// A root-dotted spelling of an approved alias leaf (e.g.
+			// `network.allowed_hosts = [...]`) reaches strict mode as a
+			// two-component key, unlike the [section] header form, which
+			// collapses to one. applyGroupedConfigAliases loads it either way,
+			// so warning here would falsely claim a functioning setting is
+			// ignored. Unknown dotted leaves still fall through and warn below
+			// (and again in the leaf loop), so no typo goes silent.
+			continue
+		}
 		log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, strings.Join(key, "."))
 	}
 

@@ -146,6 +146,7 @@ const MASTER_PUSH_WORKFLOWS = [
   "build.yml",
   "docs.yml",
   "lint.yml",
+  "mac-e2e.yml",
   "pr.yml",
   "sandbox-e2e.yml",
   "tui-driver-selftest.yml",

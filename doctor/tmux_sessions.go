@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -70,10 +71,19 @@ type recordedSocketKind int
 
 const (
 	// recordedSocketAbsent: no tmux-server-state.json record exists AND no
-	// daemon is currently serving this home — the only reading under which
-	// "no record" actually means "this home never ran the Linux daemon that
-	// writes one". The ambient listing is the only evidence available, so
-	// preserve the historical behavior of arming kills from it.
+	// daemon is currently serving this home — the reading under which "no
+	// record" historically meant "this home never ran the Linux daemon that
+	// writes one," so the ambient listing was the only evidence available.
+	// Absence is not proof of that, though: recordServerState silently
+	// ignores write failures, macOS never writes a record at all, and a
+	// dead daemon leaves sessions live on a socket the record never named.
+	// The kill arm therefore corroborates an ambient listing's absence
+	// PER PROCESS against the socket that process's own TMUX env names
+	// (see sessionDeathCorroborated), arming only when the two sockets
+	// agree — i.e. only when the ambient server is positively the one that
+	// hosted the dead session. A process whose TMUX env names a different
+	// socket (a live session on a non-ambient server reads dead here, the
+	// #6271 wrong-server kill) or no socket at all is reported, not killed.
 	recordedSocketAbsent recordedSocketKind = iota
 	// recordedSocketPinned: a record named a socket, and the listing is run
 	// against it with `tmux -S <socket> ls`. A name absent from THAT listing is
@@ -112,15 +122,25 @@ func (c *scanContext) recordedSocket() (string, recordedSocketKind) {
 	case !ok:
 		// No record exists. The historical reading is "this home never ran
 		// the Linux daemon that writes one," and the ambient listing is the
-		// only evidence — preserve the arming-from-ambient behavior for that
-		// case. But absence is not proof the daemon never ran: recordServerState
-		// silently ignores write failures, and the file may have been deleted
-		// while a daemon remains live. When a daemon IS serving this home it
-		// should have written a record, so its absence means doctor cannot prove
-		// the ambient server is the one the daemon hosts sessions on — a live
+		// only evidence. But absence is not proof the daemon never ran:
+		// recordServerState silently ignores write failures, macOS never
+		// writes a record, and the file may have been deleted while a daemon
+		// remains live. When a daemon IS serving this home it should have
+		// written a record, so its absence means doctor cannot prove the
+		// ambient server is the one the daemon hosts sessions on — a live
 		// session on the daemon's (unrecorded) socket would read dead here
-		// exactly as it does for an unreadable record. Treat that as
-		// unconfirmed rather than arming kills from the ambient listing.
+		// exactly as it does for an unreadable record. Treat a live daemon
+		// as unconfirmed rather than arming kills from the ambient listing.
+		//
+		// The dead-daemon window (the daemon hosted sessions and then died,
+		// so activeHomeDaemons is empty) falls through to recordedSocketAbsent
+		// rather than unconfirmed: this home may genuinely never have run a
+		// record-writing daemon (the case the ambient listing was kept for),
+		// and the per-process TMUX-env corroboration sessionDeathCorroborated
+		// applies there arms the kill only when the ambient listing is
+		// positively the server the session lived on — closing the wrong-
+		// server kill for this window without forgoing --fix cleanup for the
+		// never-ran-a-daemon homes that do corroborate.
 		if len(activeHomeDaemons(c)) > 0 {
 			return "", recordedSocketUnconfirmed
 		}
@@ -138,24 +158,84 @@ func (c *scanContext) recordedSocket() (string, recordedSocketKind) {
 }
 
 // sessionDeathCorroborated reports whether the run's tmux session listing is
-// evidence a marked process's session is genuinely dead — the standard the
+// evidence that the session hosting p is genuinely dead — the standard the
 // orphaned-process kill arm must meet before it arms a kill.
 //
 // It is true when the listing was pinned to the daemon's recorded socket (the
-// server that actually hosts this home's sessions) — a name absent from THAT
-// listing is absent from the server — and also when no daemon record exists at
-// all AND no daemon is currently serving this home, in which case the ambient
-// listing is the only evidence and the check preserves its historical behavior.
-// It is false when a daemon record exists but doctor cannot pin the listing to
-// the socket it names, OR when no record exists yet a daemon IS serving this
-// home (a write failure or a deleted file): in both cases a successful listing
-// of whatever server doctor's own $TMUX/$TMUX_TMPDIR reaches is not proof of
-// death — a live session on the daemon's (unreadable or unrecorded) socket
-// would be absent from that listing and read as a verified orphan. The kill
-// stays report-only in that state.
-func (c *scanContext) sessionDeathCorroborated() bool {
+// server that actually hosts this home's sessions): a name absent from THAT
+// listing is absent from the server, so p's session is dead. It is false when a
+// daemon record exists but doctor cannot pin the listing to the socket it names
+// (unreadable, or names no socket): the ambient listing may then be looking at a
+// different server, so a live session on the daemon's (unreadable) socket would
+// be absent from it and read as a verified orphan. The kill stays report-only.
+//
+// The record-absent state (no tmux-server-state.json AND no daemon currently
+// serving this home) is the historical "this home never ran the record-writing
+// daemon" reading under which the ambient listing is the only evidence. But
+// absence is not proof the daemon never ran: the daemon may have hosted
+// sessions and then died (leaving sessions live on a socket the record never
+// named), macOS never writes a record at all, and recordServerState silently
+// ignores write failures. In that state the ambient listing corroborates p's
+// session death ONLY when p's own TMUX env (set by tmux on every pane process)
+// names the SAME socket the ambient listing resolves to — proving the ambient
+// server IS the one that hosted p's session. A p whose TMUX env names a
+// different socket (a live session on a non-ambient server reads dead here,
+// the #6271 wrong-server kill) or no socket at all cannot be proven dead from
+// the ambient listing, so it is reported, not killed — the same rule the
+// unreadable-record guard enforces, narrowed to the processes the ambient
+// listing actually covers.
+func (c *scanContext) sessionDeathCorroborated(p proctree.Process) bool {
 	_, kind := c.recordedSocket()
-	return kind != recordedSocketUnconfirmed
+	switch kind {
+	case recordedSocketPinned:
+		return true
+	case recordedSocketAbsent:
+		return ambientListingCoversProcess(p)
+	default:
+		return false
+	}
+}
+
+// ambientListingCoversProcess reports whether the ambient tmux listing (the
+// unpinned `tmux ls` doctor runs when no daemon record exists) names the same
+// server that hosted p's session. Every pane process carries a TMUX env of the
+// form "socketPath,serverPID,sessionIdx" set by tmux itself, so the socket p
+// records is the server that actually hosted its session. Only when that
+// socket agrees with the socket a bare `tmux` resolves to in doctor's own
+// environment (tmux.DefaultSocketPath) is the session's absence from the
+// ambient listing evidence the session is dead, rather than evidence the
+// listing looked at the wrong server. A p with no readable TMUX env (the
+// marker was inherited, but tmux's was cleared or never set) is not provably
+// dead from the ambient listing, so it is reported rather than killed.
+func ambientListingCoversProcess(p proctree.Process) bool {
+	tmuxEnv, status := proctree.LookupEnv(p.PID, "TMUX")
+	if status != proctree.EnvFound || tmuxEnv == "" {
+		return false
+	}
+	procSocket, _, _ := strings.Cut(tmuxEnv, ",")
+	procSocket = strings.TrimSpace(procSocket)
+	if procSocket == "" {
+		return false
+	}
+	return sameSocket(procSocket, tmux.DefaultSocketPath())
+}
+
+// sameSocket reports whether two tmux socket paths identify the same socket.
+// Compares by filesystem identity (os.SameFile) when both stat, so a symlinked
+// TMUX_TMPDIR — or macOS /var vs /private/var — does not split one socket into
+// two; falls back to a cleaned lexical comparison when either path cannot be
+// statted (a dead server leaves no socket file to stat, and the comparison
+// must still answer for it).
+func sameSocket(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	if aerr == nil && berr == nil {
+		return os.SameFile(ai, bi)
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // captureSessionProcessTrees is the doctor wrapper around
@@ -374,12 +454,12 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 		case present && home != "":
 			origin = "created by another agent-factory home: " + home
 		}
-		killCmd := shellsuggest.Command("tmux", "kill-session", "-t", "="+name+":")
+		killCmd := shellsuggest.Command("tmux", "kill-session", "-t", tmux.ExactTarget(name))
 		if kind == recordedSocketPinned {
-			// "=name:" is tmux's exact-match target syntax — one argument, so
-			// it is one piece the seam quotes as a whole. `-S <socket>` pins
+			// tmux.ExactTarget spells "=name:", one argument, so it is one
+			// piece the seam quotes as a whole. `-S <socket>` pins
 			// the remedy to the server the listing found the session on.
-			killCmd = shellsuggest.Command("tmux", "-S", socket, "kill-session", "-t", "="+name+":")
+			killCmd = shellsuggest.Command("tmux", "-S", socket, "kill-session", "-t", tmux.ExactTarget(name))
 		}
 		finding := Finding{
 			Check: "leaked-tmux-session",

@@ -70,6 +70,7 @@ jobs:
     # runner image cannot fail this step by failing the update (#3774) — a
     # release must not be blocked by a repository it never installs from.
     - name: Install zsh
+      timeout-minutes: 25
       run: scripts/ci-apt-install.sh zsh
 
     # Test (macOS) is the only darwin test run and lives on master's pr.yml, which

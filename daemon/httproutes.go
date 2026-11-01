@@ -615,7 +615,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/UpdateBacklogItem",
-		Description: "Change an item's title, body, waits-on, program or sequential flag.",
+		Description: "Change an item's title, body, waits-on, program or sequential flag, or pause, unpause, archive or unarchive a group.",
 		requestType: reflect.TypeOf(UpdateBacklogItemRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UpdateBacklogItem) },
 	},
@@ -653,6 +653,13 @@ var httpRoutes = []HTTPRoute{
 		Description: "Start an item now, ignoring the runner switch and budget: send \"continue\" to its live session, or create a session for it; returns the run, which is starting until the session exists.",
 		requestType: reflect.TypeOf(StartBacklogItemRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.StartBacklogItem) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/RunBacklog",
+		Description: "Run one runner pass now, ignoring the runner switch and budget: start up to count queued items (default 1) in the free slots; returns the ids started.",
+		requestType: reflect.TypeOf(RunBacklogRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RunBacklog) },
 	},
 	{
 		Method:      http.MethodPost,

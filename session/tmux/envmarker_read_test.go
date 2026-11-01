@@ -69,9 +69,9 @@ func testSessionMarkerRead(t *testing.T, marker string, read func(cmd.Executor, 
 				wantValue = "value"
 			}
 			require.Equal(t, wantValue, value)
-			wantCalls := [][]string{{"show-environment", "-t", exactTarget("af_marker_test"), marker}}
+			wantCalls := [][]string{{"show-environment", "-t", ExactTarget("af_marker_test"), marker}}
 			if tc.wantFallback {
-				wantCalls = append(wantCalls, []string{"show-environment", "-t", exactTarget("af_marker_test")})
+				wantCalls = append(wantCalls, []string{"show-environment", "-t", ExactTarget("af_marker_test")})
 			}
 			require.Equal(t, wantCalls, calls)
 		})

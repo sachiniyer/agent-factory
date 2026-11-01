@@ -65,9 +65,22 @@ func (d ServerDeath) Describe() string {
 		d.At.Format(time.RFC3339), how, (time.Duration(d.UptimeSeconds) * time.Second).String())
 }
 
-// defaultSocketPath is the socket a bare `tmux` run by this process resolves to.
+// DefaultSocketPath is the socket a bare `tmux` run by this process resolves
+// to — the very socket the ambient `tmux ls` (no -S/-L) lists, derived the way
+// tmux itself resolves it: $TMUX's socket when this process is inside a tmux
+// session, else ${TMUX_TMPDIR:-/tmp}/tmux-<uid>/default.
+//
 // It is also the identity the dedicated server's unit name is derived from.
-func defaultSocketPath() string {
+//
+// Exported for `af doctor`, whose orphaned-process kill arm must compare this
+// ambient socket against the socket a marked process's own TMUX env names:
+// only when they agree can an ambient listing's absence of a session be read
+// as proof that session is dead (see doctor/tmux_sessions.go). Doctor is a
+// separate process from the daemon and can resolve a DIFFERENT socket, so a
+// bare `tmux ls` and a marked process's $TMUX can name different servers —
+// the wrong-server divergence this comparison closes for the record-absent
+// state.
+func DefaultSocketPath() string {
 	identity := os.Getenv("TMUX")
 	if socket, _, ok := strings.Cut(identity, ","); ok {
 		identity = socket

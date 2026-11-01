@@ -76,7 +76,12 @@ anything. Do not proxy this socket to a network interface.
     (`localhost`, loopback IPs, its own address, or a `network.allowed_hosts` entry) and
     refuses any other with `421 Misdirected Request` before routing — see
     [Host names the daemon answers to](remote-http-auth.md#host-names-the-daemon-answers-to).
-    The Unix socket has no such check: a browser cannot reach it.
+    It also refuses any cross-site browser request, and any POST, PUT, PATCH or
+    DELETE that does not send `Content-Type: application/json` (even with no
+    body) — see [Cross-site browser
+    requests](remote-http-auth.md#cross-site-browser-requests-are-refused).
+    The Unix socket has neither check: a browser cannot reach it, and the
+    `curl --unix-socket … -d` examples below keep working.
 
 ## Response envelope
 
@@ -419,9 +424,9 @@ clients are unaffected.
 
 ### Backlog
 
-Eleven POST routes serve a project's backlog (the `af backlog` CLI calls them): `GetBacklog`, `AddBacklogItems`, `UpdateBacklogItem`, `MoveBacklogItem`, `SetBacklogItemStatus`, `DeleteBacklogItem`, `PostBacklogMessage` (a note, a question from the item's session, or an answer that is delivered to it), `StartBacklogItem`, `SetBacklogSettings`, `GetBudget` and `SetBudget`. `StartBacklogItem` returns at once with a run that is still starting; the session is created on a daemon-tracked goroutine, and an item left starting by a restart is settled on the daemon's first poll. The per-route fields are in [the generated reference](reference/api.md). A project request names its project with exactly one of `repo_id` or `repo_path` (a path on the daemon host). None of these routes accepts the scoped sandbox credential.
+Twelve POST routes serve a project's backlog (the `af backlog` CLI calls them): `GetBacklog`, `AddBacklogItems`, `UpdateBacklogItem`, `MoveBacklogItem`, `SetBacklogItemStatus`, `DeleteBacklogItem`, `PostBacklogMessage` (a note, a question from the item's session, or an answer that is delivered to it), `StartBacklogItem`, `RunBacklog` (one runner pass now, ignoring the switch and the budget), `SetBacklogSettings`, `GetBudget` and `SetBudget`. `StartBacklogItem` returns at once with a run that is still starting; the session is created on a daemon-tracked goroutine, and an item left starting by a restart is settled on the daemon's first poll. The per-route fields are in [the generated reference](reference/api.md). A project request names its project with exactly one of `repo_id` or `repo_path` (a path on the daemon host). None of these routes accepts the scoped sandbox credential.
 
-Every write publishes a `backlog.changed` event on `GET /v1/events` with `{repo_id, ids}`: the ids the write touched, including items whose waits-on link was removed by a delete and both parents of a move. The frame names the project and the ids the write touched, not the new rows or their derived state, and a write that changes a parent's roll-up (queueing or finishing a child) does not name the parent; re-read `GetBacklog` on any frame. An empty `ids` means a project-level change (the runner settings): refresh the project. The global budget publishes no event. Refusals are ordinary `500` envelopes with the reason in `error.message`; an invalid budget amount (non-finite, negative or out of range) is refused before anything is written.
+Every write publishes a `backlog.changed` event on `GET /v1/events` with `{repo_id, ids}`: the ids the write touched, including items whose waits-on link was removed by a delete and both parents of a move. The frame names the project and the ids the write touched, not the new rows or their derived state, and a write that changes a parent's roll-up (queueing or finishing a child) does not name the parent; re-read `GetBacklog` on any frame. An empty `ids` means a project-level change (the runner settings): refresh the project. The global budget publishes no event. `backlog.runner` is published when a project's runner state, gate or reason changes; `backlog.spend` when plan usage is on and the metered spend changes. Refusals are ordinary `500` envelopes with the reason in `error.message`; an invalid budget amount (non-finite, negative or out of range) is refused before anything is written.
 
 ### Session state names
 

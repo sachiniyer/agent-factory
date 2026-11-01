@@ -29,6 +29,9 @@ const MASTER_WORKFLOWS = [
   // still exercise the sandbox path after every batch: a GITHUB_TOKEN merge
   // fires no push, so without this entry it never ran again.
   "sandbox-e2e.yml",
+  // Report-only like sandbox-e2e: the real binary on macOS, which no other master
+  // job runs (#6384). A GITHUB_TOKEN merge fires no push, so it needs this entry.
+  "mac-e2e.yml",
   "tui-driver-selftest.yml",
   "web-selftest.yml",
 ];

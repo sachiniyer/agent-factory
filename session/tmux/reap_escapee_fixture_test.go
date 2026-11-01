@@ -56,7 +56,7 @@ func runMarkedEscapee(pidFile string) error {
 // Do not require PPID 1: a runner may use a child subreaper.
 func vanishSessionWithObservableEscapee(t *testing.T, name string, helper proctree.Process) {
 	t.Helper()
-	out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+	out, err := exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 	require.NoError(t, err, "vanish original tmux session: %s", out)
 	require.Eventually(t, func() bool {
 		exists, known, probeErr := probeSessionStrict(cmd.MakeExecutor(), name)

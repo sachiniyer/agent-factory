@@ -11,7 +11,7 @@ API economy is a hard requirement (the Actions `GITHUB_TOKEN` quota starved the 
 
 ## After a merge
 
-`GITHUB_TOKEN` merges do not fire push workflows, so after a run that merged anything the workflow dispatches `build.yml`, `docs.yml` (with `verify_sha`), `lint.yml`, `pr.yml` (the master-only heavy jobs since #5615), `sandbox-e2e.yml` (advisory, not a merge gate), `tui-driver-selftest.yml` and `web-selftest.yml` once on `master`. It then runs the **composition check** on the new head — `go build ./...`, `go vet ./...`, `scripts/lint-file-length.sh`. On failure it opens (or comments on) one issue titled `master broken by merge batch <sha>` and refuses further merges. Each later run re-checks master and closes the issue once it passes. Fix forward on master.
+`GITHUB_TOKEN` merges do not fire push workflows, so after a run that merged anything the workflow dispatches `build.yml`, `docs.yml` (with `verify_sha`), `lint.yml`, `mac-e2e.yml` (advisory: the real binary on macOS, #6384), `pr.yml` (the master-only heavy jobs since #5615), `sandbox-e2e.yml` (advisory, not a merge gate), `tui-driver-selftest.yml` and `web-selftest.yml` once on `master`. It then runs the **composition check** on the new head — `go build ./...`, `go vet ./...`, `scripts/lint-file-length.sh`. On failure it opens (or comments on) one issue titled `master broken by merge batch <sha>` and refuses further merges. Each later run re-checks master and closes the issue once it passes. Fix forward on master.
 
 ## Batch, then verify
 

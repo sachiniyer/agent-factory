@@ -547,6 +547,9 @@ export type EventType =
   | "task.created"
   | "task.updated"
   | "task.removed"
+  | "backlog.changed"
+  | "backlog.spend"
+  | "backlog.runner"
   | "proposal.changed"
   | "proposal.push";
 

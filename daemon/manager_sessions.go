@@ -558,8 +558,10 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	// is the reliable command path automated deliveries need. This crosses the
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
-	status, err := instance.SendPromptWithEvidence(req.Prompt, nowFunc)
+	confirmation := beginSendConfirmation(instance)
+	status, err := instance.SendPromptWithEvidence(req.Prompt, sendAttemptClock(confirmation))
 	releaseObservationFence()
+	status = m.promoteUnverifiedSend(instance, status, err, confirmation)
 	// Delivery evidence changes the row even when liveness does not. Publish it
 	// immediately so list clients can distinguish a confirmed miss from #3162's
 	// honest could-not-confirm instead of waiting for the status poll.

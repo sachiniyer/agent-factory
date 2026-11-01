@@ -81,7 +81,7 @@ func TestUpdateRoundTrip(t *testing.T) {
 	path, _ := BacklogPath(repoID)
 	raw, _ := os.ReadFile(path)
 	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil || m["schema_version"] != float64(1) {
+	if err := json.Unmarshal(raw, &m); err != nil || m["schema_version"] != float64(BacklogSchemaVersion) {
 		t.Fatalf("%s", raw)
 	}
 }
@@ -111,7 +111,7 @@ func writeRaw(t *testing.T, path, s string) {
 func TestRefusesNewerSchema(t *testing.T) {
 	home(t)
 	path, _ := BacklogPath(repoID)
-	newer := `{"schema_version": 2, "next_id": 5, "items": [], "future": true}`
+	newer := `{"schema_version": 3, "next_id": 5, "items": [], "future": true}`
 	writeRaw(t, path, newer)
 
 	var unsupported *config.UnsupportedSchemaVersionError
@@ -154,8 +154,54 @@ func TestMigratesFileWithoutVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.SchemaVersion != 1 || b.NextID != 4 || b.Item(3).Title != "hand" || b.Settings.MaxRunning != 1 {
+	if b.SchemaVersion != BacklogSchemaVersion || b.NextID != 4 || b.Item(3).Title != "hand" || b.Settings.MaxRunning != 1 {
 		t.Fatalf("%+v", b)
+	}
+}
+
+func TestMigratesV1AndKeepsV2Fields(t *testing.T) {
+	home(t)
+	path, _ := BacklogPath(repoID)
+	writeRaw(t, path, `{"schema_version": 1, "next_id": 3, "items": [
+		{"id": 1, "title": "group", "status": "queued", "paused": true, "archived": true},
+		{"id": 2, "title": "child", "status": "queued", "parent": 1, "thread": [
+			{"id": 1, "kind": "question", "author": "agent:s", "text": "q?", "then": "archive", "handoff": "notes"}]}]}`)
+	if _, err := Update(repoID, func(b *Backlog) error {
+		b.Item(2).Title = "child2"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Load(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, c := b.Item(1), b.Item(2)
+	if b.SchemaVersion != BacklogSchemaVersion || !g.Paused || !g.Archived || c.Title != "child2" {
+		t.Fatalf("%+v", b)
+	}
+	if m := c.Thread[0]; m.Then != "archive" || m.Handoff != "notes" {
+		t.Fatalf("%+v", m)
+	}
+	raw, _ := os.ReadFile(path)
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["schema_version"] != float64(BacklogSchemaVersion) {
+		t.Fatalf("not stamped: %s", raw)
+	}
+}
+
+func TestV2FieldsOmittedWhenUnset(t *testing.T) {
+	raw, err := json.Marshal(Item{Thread: []Message{{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"paused", "archived", "then", "handoff"} {
+		if strings.Contains(string(raw), `"`+k+`"`) {
+			t.Errorf("%s written when unset: %s", k, raw)
+		}
 	}
 }
 

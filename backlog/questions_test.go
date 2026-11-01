@@ -254,7 +254,7 @@ func TestAnswerDelivered(t *testing.T) {
 	it, _ := b.Add(NewItem{Title: "A"}, time.Now())
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
-	if _, err := b.Ask(1, "s1", "q", time.Now()); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: "q"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	out, err := b.Answer(1, 0, "a", true, time.Now())
@@ -307,7 +307,7 @@ func TestQueuedAnswersAllFailingRestoreTheOriginalStatus(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
 	for _, q := range []string{"one?", "two?"} {
-		if _, err := b.Ask(1, "s1", q, now); err != nil {
+		if _, err := b.Ask(1, "s1", Question{Text: q}, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -345,7 +345,7 @@ func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
 	it, _ := b.Add(NewItem{Title: "A"}, now)
 	it.Status = StatusRunning
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
-	if _, err := b.Ask(1, "s1", "first?", now); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: "first?"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.AnsweredInSessionText("s1", 0, "second?", nil, now); got != 0 {
@@ -354,7 +354,7 @@ func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
 	if got := b.AnsweredInSessionText("s1", 0, "", nil, now); got != 0 {
 		t.Fatal("no seen question must close nothing")
 	}
-	if _, err := b.Ask(1, "s1", "second?", now); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: "second?"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.AnsweredInSessionText("s1", 0, "second?", nil, now); got != 0 {
@@ -377,7 +377,7 @@ func TestALaterAnswerFailingKeepsEarlierDeliveredWorkRunning(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
 	for _, q := range []string{"one?", "two?"} {
-		if _, err := b.Ask(1, "s1", q, now); err != nil {
+		if _, err := b.Ask(1, "s1", Question{Text: q}, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -407,7 +407,7 @@ func TestAnsweredInSessionTextMatchesACappedQuestion(t *testing.T) {
 	it.Status = StatusRunning
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
 	long := strings.Repeat("why? ", 200)
-	if _, err := b.Ask(1, "s1", long, now); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: long}, now); err != nil {
 		t.Fatal(err)
 	}
 	capped := func(s string) string {
@@ -615,8 +615,8 @@ func TestAnswerFailedAfterAStatusResetLeavesALaterAnswersWorkRunning(t *testing.
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
 	it.Thread = []Message{
-		{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"},
-		{ID: 2, Kind: KindQuestion, Author: AuthorAF, Text: "Which cache?"},
+		{ID: 1, Kind: KindQuestion, Author: "agent:s1", Text: "Which db?"},
+		{ID: 2, Kind: KindQuestion, Author: "agent:s1", Text: "Which cache?"},
 	}
 	first, err := b.Answer(1, 1, "Postgres", true, now)
 	if err != nil {
@@ -643,5 +643,32 @@ func TestAnswerFailedAfterAStatusResetLeavesALaterAnswersWorkRunning(t *testing.
 	}
 	if err := b.AnswerDelivered(1, second.Answer.ID, now.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Sending an item to review closes af's own question and keeps the agent's: the
+// session's attention and remembered question identity move to the one that
+// remains, or a terminal answer fails the identity check (Codex P2 on #6300).
+func TestSendToReviewMovesAttentionToTheRemainingAgentQuestion(t *testing.T) {
+	s, host := newTestService(t)
+	mustAdd(t, s, ItemInput{Key: "a", Title: "A"})
+	if _, err := Update(repoID, func(b *Backlog) error {
+		it := b.Item(1)
+		it.Status = StatusRunning
+		it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
+		it.Thread = []Message{
+			{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Over the cap. Continue?"},
+			{ID: 2, Kind: KindQuestion, Author: "agent:s1", Text: "Which db?"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	host.SetAttention(repoID, "s1", 1, "Over the cap. Continue?")
+	if _, err := s.SetItemStatus(SetItemStatusRequest{RepoID: repoID, ID: 1, Status: StatusReview}); err != nil {
+		t.Fatal(err)
+	}
+	if host.attentionID["s1"] != 2 || host.attention["s1"] != "Which db?" {
+		t.Fatalf("attention = %d %q, want the remaining agent question 2 %q", host.attentionID["s1"], host.attention["s1"], "Which db?")
 	}
 }

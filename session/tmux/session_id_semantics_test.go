@@ -47,10 +47,10 @@ func TestTmuxSessionIDSemanticsTheIncarnationBindingRelies(t *testing.T) {
 	}
 	sessionID := func(name string) string {
 		t.Helper()
-		return must("display-message", "-p", "-t", exactTarget(name), "#{session_id}")
+		return must("display-message", "-p", "-t", ExactTarget(name), "#{session_id}")
 	}
 	alive := func(name string) bool {
-		_, _, err := tm("has-session", "-t", exactTarget(name))
+		_, _, err := tm("has-session", "-t", ExactTarget(name))
 		return err == nil
 	}
 
@@ -172,8 +172,8 @@ func TestTmuxSessionIDSemanticsTheIncarnationBindingRelies(t *testing.T) {
 	probe := NewTmuxSessionFromSanitizedName(name, "sleep 600")
 	// A plausible-looking verified identity for the dead id: the pid and stamp of the
 	// live server. Only the session id can tell the answers apart.
-	livePID := must("display-message", "-p", "-t", exactTarget(name), "#{pid}")
-	liveCreated := must("display-message", "-p", "-t", exactTarget(name), "#{session_created}")
+	livePID := must("display-message", "-p", "-t", ExactTarget(name), "#{pid}")
+	liveCreated := must("display-message", "-p", "-t", ExactTarget(name), "#{session_created}")
 	same, known, perr := probe.confirmIncarnation(&tmuxGeneration{sessionID: idA, serverPID: livePID, created: liveCreated})
 	if same || known || perr == nil {
 		t.Errorf("confirmIncarnation on a vanished id = (same=%v, known=%v, err=%v), want unknown", same, known, perr)
