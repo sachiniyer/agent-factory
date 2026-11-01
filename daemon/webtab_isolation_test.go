@@ -213,17 +213,18 @@ func TestConfineOriginHeaders(t *testing.T) {
 func TestEditorPathUnderStaticRoot(t *testing.T) {
 	for _, rest := range []string{
 		"static/out/x.js",
-		"stable-abc/static/out/vs/workbench/contrib/webview/browser/pre/index.html",
-		"vscode/stable-abc/static/out/x.css",
+		testCommit + "/static/out/vs/workbench/contrib/webview/browser/pre/index.html",
+		"vscode/" + testCommit + "/static/out/x.css",
 		"_static/out/browser/serviceWorker.js",
-		"stable-abc/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html",
+		testCommit + "/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html",
+		"oss-dev/static/out/x.js",
 		// code-server decodes + case-folds, so these are under static too.
-		"%73tatic/out/x.js", "STABLE-abc/STATIC/out/x.js", "stable-abc/static%2fout/x.js",
+		"%73tatic/out/x.js", strings.ToUpper(testCommit) + "/STATIC/out/x.js", testCommit + "/static%2fout/x.js",
 	} {
 		assert.True(t, editorPathUnderStaticRoot(rest), rest)
 	}
 	for _, rest := range []string{
-		"", "/", "callback", "vscode", "stable-abc/", "stable-abc",
+		"", "/", "callback", "vscode", testCommit + "/", testCommit,
 		// the port proxy's own "static" is relayed content, not an editor static root
 		"proxy/3000/static/x.js", "absproxy/5173/static/app.js",
 		"vscode-remote-resource", "login", "web-extension-resource/x",
