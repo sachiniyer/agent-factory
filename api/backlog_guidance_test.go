@@ -18,6 +18,7 @@ func TestItemSessionGuidanceNamesEveryRefusal(t *testing.T) {
 	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 1})
 
 	refusal := regexp.MustCompile(`item sessions cannot run "af backlog ([^"]+)"`)
+	const controls = `item sessions cannot change the runner or budget; ask the user with "af backlog ask --self"`
 	got := map[string]bool{}
 	for _, c := range BacklogCmd.Commands() {
 		name := c.Name()
@@ -30,6 +31,10 @@ func TestItemSessionGuidanceNamesEveryRefusal(t *testing.T) {
 			if _, err := runBacklogCmd(t, args...); err != nil {
 				if m := refusal.FindStringSubmatch(err.Error()); m != nil {
 					got[m[1]] = true
+				} else if strings.HasPrefix(err.Error(), "item sessions cannot") && err.Error() != controls {
+					// A refusal in its own words would escape the list below: say it
+					// the way refuseFromItemSession does, or teach this test the shape.
+					t.Errorf("af backlog %v refuses an item session in a shape this test cannot read: %v", args, err)
 				}
 			}
 		}
@@ -53,7 +58,6 @@ func TestItemSessionGuidanceNamesEveryRefusal(t *testing.T) {
 	}
 
 	// The sentence's last clause: the runner and the budget refuse changes.
-	const controls = `item sessions cannot change the runner or budget; ask the user with "af backlog ask --self"`
 	for _, args := range [][]string{{"runner", "on"}, {"budget", "--max-per-run", "5"}} {
 		if _, err := runBacklogCmd(t, args...); err == nil || err.Error() != controls {
 			t.Errorf("%v from an item session: %v", args, err)

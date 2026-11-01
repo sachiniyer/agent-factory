@@ -57,6 +57,8 @@ type UpdateItemRequest struct {
 	WaitsOn    *[]int  `json:"waits_on,omitempty"`
 	Program    *string `json:"program,omitempty"`
 	Sequential *bool   `json:"sequential,omitempty"`
+	Paused     *bool   `json:"paused,omitempty"`
+	Archived   *bool   `json:"archived,omitempty"`
 }
 
 type ItemResponse struct {

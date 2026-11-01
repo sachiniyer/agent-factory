@@ -1848,6 +1848,24 @@
       "notes": "The web item panel offers Queue, Back to draft, Mark done, Drop, Reopen and Delete; Send to review arrives in backlog PR 8. The agent's done --self (session_id, pr) is CLI-only by design: it runs inside an item session. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
+      "id": "backlog.groups",
+      "title": "Pause, unpause, archive and unarchive backlog groups",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_groups.go backlogPauseCmd/backlogUnpauseCmd/backlogArchiveCmd/backlogUnarchiveCmd, api/backlog.go backlogListCmd --archived → POST /v1/UpdateBacklogItem paused/archived (daemon/backlog.go)"
+      },
+      "verdict": "deliberate",
+      "notes": "Backlog v2 PR 2 adds the CLI and the UpdateBacklogItem fields; the web group panel gains Pause, Unpause and Archive in backlog v2 PR 7. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
       "id": "backlog.sessions",
       "title": "Start backlog items as sessions",
       "tui": {
@@ -1929,6 +1947,10 @@
       "af backlog done": "backlog.status",
       "af backlog start": "backlog.sessions",
       "af backlog drop": "backlog.status",
+      "af backlog pause": "backlog.groups",
+      "af backlog unpause": "backlog.groups",
+      "af backlog archive": "backlog.groups",
+      "af backlog unarchive": "backlog.groups",
       "af backlog runner": "backlog.runner",
       "af backlog run": "backlog.runner",
       "af backlog budget": "backlog.runner",
@@ -2236,6 +2258,10 @@
       "af backlog ask --self": "backlog.questions",
       "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
+      "af backlog pause --help": "meta.discovery",
+      "af backlog unpause --help": "meta.discovery",
+      "af backlog archive --help": "meta.discovery",
+      "af backlog unarchive --help": "meta.discovery",
       "af backlog runner --help": "meta.discovery",
       "af backlog run --help": "meta.discovery",
       "af backlog budget --help": "meta.discovery",
@@ -2252,6 +2278,7 @@
       "af backlog edit --title": "backlog.items",
       "af backlog edit --waits-on": "backlog.items",
       "af backlog list --all": "backlog.items",
+      "af backlog list --archived": "backlog.groups",
       "af backlog list --state": "backlog.items",
       "af backlog move --after": "backlog.items",
       "af backlog move --before": "backlog.items",
@@ -3119,6 +3146,12 @@
         },
         "program": {
           "ok": "Program choice matters only when an item starts a session; the web gains it with Start now in backlog PR 8."
+        },
+        "paused": {
+          "ok": "The web group panel gains Pause and Unpause in backlog v2 PR 7; the CLI has af backlog pause and unpause."
+        },
+        "archived": {
+          "ok": "The web group panel gains Archive in backlog v2 PR 7; the CLI has af backlog archive and unarchive."
         }
       },
       "MoveBacklogItem": {

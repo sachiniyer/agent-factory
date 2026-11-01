@@ -221,7 +221,7 @@ func (s *Service) UpdateItem(req UpdateItemRequest) (*ItemResponse, error) {
 	}
 	b, err := s.update(p, func(b *Backlog) ([]int, error) {
 		_, err := b.Edit(req.ID, Edit{Title: req.Title, Body: req.Body, Program: req.Program,
-			WaitsOn: req.WaitsOn, Sequential: req.Sequential}, s.now())
+			WaitsOn: req.WaitsOn, Sequential: req.Sequential, Paused: req.Paused, Archived: req.Archived}, s.now())
 		return []int{req.ID}, err
 	})
 	if err != nil {

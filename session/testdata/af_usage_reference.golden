@@ -68,7 +68,7 @@ Backlog items: when af started your session for a backlog item (your first promp
   af backlog done --self [--pr <url>]                  The work is finished; the item goes to the user for review. Pass --pr when you opened a pull request
   af backlog ask --self <text>                         Ask the user a question on the item, then stop and wait; the answer arrives in this session as a prompt
   af backlog note --self <text>                        Add a note to the item's thread; nobody is notified
-From an item session af refuses these, which are the user's: add, edit, move, queue, draft, review, reopen, start, done <id>, drop, delete, note <id>, answer, run, and changing the runner or budget. If you need one of them, ask with "af backlog ask --self". Do not create other af sessions from an item session.
+From an item session af refuses these, which are the user's: add, edit, move, queue, draft, review, reopen, start, done <id>, drop, delete, note <id>, answer, run, pause, unpause, archive, unarchive, and changing the runner or budget. If you need one of them, ask with "af backlog ask --self". Do not create other af sessions from an item session.
 
 Asking for the user: the user watches many sessions at once and cannot tell that you are blocked on them. Run "af sessions attention --self --reason '<what you need, in one line>'" only when you are blocked on a decision or question that only the user can answer, as the last step before you stop, after you write the question in your reply. Do not run it when a task has simply finished or at the end of an ordinary turn. It clears on its own when the user replies; "af sessions attention --self --clear" removes it if you no longer need them.
 
