@@ -91,17 +91,17 @@ func startHeldPaneWithHook(t *testing.T, name, command string, hookOverride []st
 	// undead forever.
 	program := "exec sh " + shellquote.Quote(script)
 	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, afPaneLaunch(program),
-		";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
-	require.NoError(t, exec.Command("tmux", panePidStampArgs(exactTarget(name))...).Run())
+		";", "set-option", "-w", "-t", ExactTarget(name), "remain-on-exit", "on").Run())
+	require.NoError(t, exec.Command("tmux", panePidStampArgs(ExactTarget(name))...).Run())
 	if hookOverride != nil {
 		require.NoError(t, exec.Command("tmux", append([]string{
-			"set-hook", "-p", "-t", exactTarget(name), sessionenv.PaneDeathsHookName},
+			"set-hook", "-p", "-t", ExactTarget(name), sessionenv.PaneDeathsHookName},
 			hookOverride...)...).Run())
 	}
 	require.NoError(t, os.WriteFile(release, nil, 0o600))
-	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run() })
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).Run() })
 	require.Eventually(t, func() bool {
-		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead}").Output()
+		out, err := exec.Command("tmux", "display-message", "-p", "-t", ExactTarget(name), "#{pane_dead}").Output()
 		return err == nil && strings.TrimSpace(string(out)) == "1"
 	}, 5*time.Second, 20*time.Millisecond, "the pane never died")
 	return program
@@ -118,7 +118,7 @@ func probeHeldExit(t *testing.T, s *TmuxSession, name string) (status int, at ti
 	require.True(t, known)
 	require.True(t, dead)
 	if !statusKnown {
-		out, _ := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
+		out, _ := exec.Command("tmux", "display-message", "-p", "-t", ExactTarget(name),
 			"#{pane_dead_status}|#{pane_pid}").Output()
 		fields := strings.Split(strings.TrimSpace(string(out)), "|")
 		state := "unreadable"
@@ -140,7 +140,7 @@ func probeHeldExit(t *testing.T, s *TmuxSession, name string) (status int, at ti
 
 func requireSessionGone(t *testing.T, name string) {
 	t.Helper()
-	require.Error(t, exec.Command("tmux", "has-session", "-t", exactTarget(name)).Run(),
+	require.Error(t, exec.Command("tmux", "has-session", "-t", ExactTarget(name)).Run(),
 		"the held dead pane's session must be gone after teardown")
 }
 
@@ -179,7 +179,7 @@ func TestProbePaneExitRecoversTheStatusOfEveryHeldExit(t *testing.T) {
 	const anchor = "af_test_held_exit_anchor"
 	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", anchor, "sleep 3600").Run())
 	serverPID := func() string {
-		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(anchor), "#{pid}").Output()
+		out, err := exec.Command("tmux", "display-message", "-p", "-t", ExactTarget(anchor), "#{pid}").Output()
 		require.NoError(t, err)
 		return strings.TrimSpace(string(out))
 	}
@@ -190,7 +190,7 @@ func TestProbePaneExitRecoversTheStatusOfEveryHeldExit(t *testing.T) {
 		program := startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
 		status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, program), name)
 		require.Equal(t, 7, status, "pane %d", i)
-		require.NoError(t, exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run())
+		require.NoError(t, exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).Run())
 	}
 	require.Equal(t, server, serverPID(), "every pane must be probed on the same tmux server")
 }
@@ -247,7 +247,7 @@ func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing
 	// hang the pane up.
 	program := startHeldPane(t, name, `sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; exec sleep 300'`)
 
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", ExactTarget(name),
 		"#{pane_pid}|#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}").Output()
 	require.NoError(t, err)
 	fields := strings.Split(strings.TrimSpace(string(out)), "|")
@@ -286,7 +286,7 @@ func TestProbePaneExit_ARootThatIsExitingIsNotReportedAlive(t *testing.T) {
 	name := fmt.Sprintf("af_test_dead_pane_exiting_%d", time.Now().UnixNano())
 	program := startHeldPane(t, name, `sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; sleep 0.3; exit 7'`)
 
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", ExactTarget(name),
 		"#{pane_dead}|#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}").Output()
 	require.NoError(t, err)
 	require.Equal(t, "1|", strings.TrimSpace(string(out)),
@@ -325,7 +325,7 @@ func TestProbePaneExit_AStatusRecordedBetweenTheReadAndTheLivenessCheckIsNotLost
 		if raced.CompareAndSwap(false, true) {
 			require.NoError(t, os.WriteFile(gate, nil, 0o600))
 			require.Eventually(t, func() bool {
-				out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead_status}").Output()
+				out, err := exec.Command("tmux", "display-message", "-p", "-t", ExactTarget(name), "#{pane_dead_status}").Output()
 				return err == nil && strings.TrimSpace(string(out)) == "7"
 			}, 5*time.Second, 5*time.Millisecond, "tmux never recorded the root's status")
 			return true
@@ -810,7 +810,7 @@ func TestStartHeldPaneStampsItsRootPid(t *testing.T) {
 	// assert.Eventually reports its message eagerly, so the diagnosis is
 	// asserted separately below with the values the callback last saw.
 	gotFresh := assert.Eventually(t, func() bool {
-		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), paneRowFormat).Output()
+		out, err := exec.Command("tmux", "display-message", "-p", "-t", ExactTarget(name), paneRowFormat).Output()
 		if err != nil {
 			lastErr = err
 			return false

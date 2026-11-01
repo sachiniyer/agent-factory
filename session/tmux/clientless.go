@@ -33,7 +33,7 @@ import "fmt"
 func (t *TmuxSession) EnablePipePane(shellCommand string) error {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	if err := t.runTmuxBounded(ctx, "pipe-pane", "-O", "-t", exactTarget(t.sanitizedName), shellCommand); err != nil {
+	if err := t.runTmuxBounded(ctx, "pipe-pane", "-O", "-t", ExactTarget(t.sanitizedName), shellCommand); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: pipe-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
@@ -63,7 +63,7 @@ func (t *TmuxSession) EnablePipePane(shellCommand string) error {
 func (t *TmuxSession) DisablePipePane() error {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	if err := t.runTmuxBounded(ctx, "pipe-pane", "-t", exactTarget(t.sanitizedName)); err != nil {
+	if err := t.runTmuxBounded(ctx, "pipe-pane", "-t", ExactTarget(t.sanitizedName)); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: pipe-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
@@ -115,7 +115,7 @@ const sendRawKeysArgvBudget = 512
 // rather than assumed small — a long project path must not silently push the
 // command over the budget.
 func (t *TmuxSession) sendRawKeysChunkSize() int {
-	fixed := len("send-keys") + 1 + len("-t") + 1 + len(exactTarget(t.sanitizedName)) + 1 + len("-H") + 1
+	fixed := len("send-keys") + 1 + len("-t") + 1 + len(ExactTarget(t.sanitizedName)) + 1 + len("-H") + 1
 	// 3 bytes per input byte: two hex digits and the argument's NUL.
 	return max(1, (sendRawKeysArgvBudget-fixed)/3)
 }
@@ -167,7 +167,7 @@ func (t *TmuxSession) SendRawKeys(b []byte) error {
 // deadline, and the error classification for a single command.
 func (t *TmuxSession) sendRawKeysChunk(b []byte) error {
 	args := make([]string, 0, len(b)+4)
-	args = append(args, "send-keys", "-t", exactTarget(t.sanitizedName), "-H")
+	args = append(args, "send-keys", "-t", ExactTarget(t.sanitizedName), "-H")
 	for _, c := range b {
 		args = append(args, fmt.Sprintf("%02x", c))
 	}
@@ -196,7 +196,7 @@ func (t *TmuxSession) sendRawKeysChunk(b []byte) error {
 func (t *TmuxSession) ResizeWindow(cols, rows int) error {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	if err := t.runTmuxBounded(ctx, "resize-window", "-t", exactTarget(t.sanitizedName),
+	if err := t.runTmuxBounded(ctx, "resize-window", "-t", ExactTarget(t.sanitizedName),
 		"-x", fmt.Sprintf("%d", cols), "-y", fmt.Sprintf("%d", rows)); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: resize-window after %s", ErrTmuxTimeout, tmuxCommandTimeout)

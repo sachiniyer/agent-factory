@@ -6,21 +6,23 @@
 // also names its project by repo id, which the web cannot map to every root it
 // knows, so every project is re-read; there are few. The stream's reconnect resync
 // and every focus of the view re-read too, and a refresh reads the budget, which
-// publishes no event of its own. backlog.spend (not yet emitted) re-reads only it.
+// publishes no event of its own. backlog.spend carries the plan use itself, so it applies without a refetch.
 
 import { errorText } from "./api.js";
-import { getBacklog, getBudget } from "./backlog_api.js";
+import { type BudgetReply, getBacklog, getBudget } from "./backlog_api.js";
 import type { BacklogView, Budget } from "./backlog_model.js";
+import { type Usage, applySpend, spendHasUnmeterable } from "./backlog_usage.js";
 
 export interface BacklogData {
   views: ReadonlyMap<string, BacklogView>;
   errors: ReadonlyMap<string, string>;
   budget: Budget | null;
+  usage: Usage | null;
   /** The loader refresh these views came from; a later refresh started later. */
   generation: number;
 }
 
-export const EMPTY_BACKLOG_DATA: BacklogData = { views: new Map(), errors: new Map(), budget: null, generation: 0 };
+export const EMPTY_BACKLOG_DATA: BacklogData = { views: new Map(), errors: new Map(), budget: null, usage: null, generation: 0 };
 
 const DEBOUNCE_MS = 150;
 
@@ -41,13 +43,13 @@ const SESSION_EVENTS: ReadonlySet<string> = new Set(["session.updated", "session
 /** What a wire event asks of the loader. The frame's ids are a hint and are never
  *  read: a parent's derived state moves without being named, and an empty list is a
  *  project-level change, so every backlog.changed and backlog.runner frame is a full
- *  re-read. backlog.spend moves only the budget. A session event for a session an
+ *  re-read. backlog.spend carries the plan use and is applied in place. A session event for a session an
  *  item run points at is a refresh too: killing, archiving or limiting it changes the
  *  item's state and the slot count with no backlog frame. Other sessions' events are
  *  not the backlog's business. */
-export function backlogEventAction(type: string, sessionId?: string, runSessions?: ReadonlySet<string>): "refresh" | "budget" | null {
+export function backlogEventAction(type: string, sessionId?: string, runSessions?: ReadonlySet<string>): "refresh" | "spend" | null {
   if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
-  if (type === "backlog.spend") return "budget";
+  if (type === "backlog.spend") return "spend";
   if (SESSION_EVENTS.has(type) && sessionId && runSessions?.has(sessionId)) return "refresh";
   return null;
 }
@@ -62,8 +64,12 @@ export interface BacklogLoaderOptions {
 export class BacklogLoader {
   private generation = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private budgetTimer: ReturnType<typeof setTimeout> | null = null;
   private budgetGeneration = 0;
+  private spendGeneration = 0;
+  private accountsTimer: ReturnType<typeof setTimeout> | null = null;
+  // Whether a backlog.spend since the last GetBudget reply named the
+  // unmeterable runs; an older daemon's payload does not.
+  private spendUnmeterable = false;
 
   constructor(private readonly opts: BacklogLoaderOptions) {}
 
@@ -92,6 +98,7 @@ export class BacklogLoader {
     if (token === null) return new Map();
     const gen = ++this.generation;
     const budgetGen = ++this.budgetGeneration;
+    const spendGen = this.spendGeneration;
     const roots = [...new Set(this.opts.roots().filter(Boolean))];
     const [results, budget] = await Promise.all([
       Promise.all(roots.map((root) => getBacklog(root, token)
@@ -115,18 +122,65 @@ export class BacklogLoader {
         if (old) views.set(r.root, old);
       }
     }
-    this.opts.commit({ views, errors, budget: budgetGen === this.budgetGeneration ? budget ?? cur.budget : cur.budget, generation: gen });
+    const fresh = budgetGen === this.budgetGeneration ? budget : null;
+    let usage = cur.usage;
+    if (fresh && spendGen === this.spendGeneration) {
+      usage = fresh.usage;
+      this.spendUnmeterable = false;
+    } else if (fresh && cur.usage && !this.spendUnmeterable) {
+      usage = { ...cur.usage, unmeterable: fresh.usage.unmeterable };
+    }
+    this.opts.commit({ views, errors, budget: fresh?.budget ?? cur.budget, usage, generation: gen });
     return ok;
   }
 
-  /** Refetches only the budget, for backlog.spend. */
-  async refreshBudget(): Promise<void> {
+  /** Takes the budget and plan use a SetBudget reply carries. A GetBudget still in flight was read
+   *  before the save, so its reply is dropped. */
+  applyBudget(reply: BudgetReply): void {
+    this.budgetGeneration++;
+    this.opts.commit({ ...this.opts.current(), budget: reply.budget, usage: reply.usage });
+  }
+
+  /** Applies a backlog.spend payload. A GetBudget still in flight was read
+   *  before it, so that reply's plan use is dropped. */
+  applySpend(ev: unknown): void {
+    const cur = this.opts.current();
+    const usage = applySpend(cur.usage, ev);
+    if (usage === cur.usage) return;
+    this.spendGeneration++;
+    if (spendHasUnmeterable(ev)) this.spendUnmeterable = true;
+    this.opts.commit({ ...cur, usage });
+    this.requestAccounts();
+  }
+
+  /** A spend event carries the top-level windows but not which account they are for, nor the
+   *  other accounts' windows, and the account the daemon meters can change between events. So
+   *  each burst of events is followed by one budget-only read, whose account identity and
+   *  per-account windows replace the ones kept. */
+  private requestAccounts(): void {
+    if (this.accountsTimer !== null) return;
+    this.accountsTimer = setTimeout(() => {
+      this.accountsTimer = null;
+      void this.refreshAccounts();
+    }, DEBOUNCE_MS);
+  }
+
+  private async refreshAccounts(): Promise<void> {
     const token = this.opts.token();
     if (token === null) return;
-    const gen = ++this.budgetGeneration;
-    const budget = await getBudget(token).catch(() => null);
-    if (gen !== this.budgetGeneration || this.opts.token() !== token || !budget) return;
-    this.opts.commit({ ...this.opts.current(), budget });
+    const budgetGen = this.budgetGeneration;
+    const spendGen = this.spendGeneration;
+    const fresh = await getBudget(token).catch(() => null);
+    // A full refresh that started meanwhile commits its own budget read.
+    if (!fresh || this.opts.token() !== token || budgetGen !== this.budgetGeneration) return;
+    const cur = this.opts.current();
+    let usage = fresh.usage;
+    if (spendGen !== this.spendGeneration && cur.usage) {
+      usage = { ...cur.usage, account: fresh.usage.account, accounts: fresh.usage.accounts };
+    } else {
+      this.spendUnmeterable = false;
+    }
+    this.opts.commit({ ...cur, budget: fresh.budget, usage });
   }
 
   /** Coalesces a burst of events into one refetch. */
@@ -138,20 +192,13 @@ export class BacklogLoader {
     }, DEBOUNCE_MS);
   }
 
-  requestBudget(): void {
-    if (this.budgetTimer !== null) return;
-    this.budgetTimer = setTimeout(() => {
-      this.budgetTimer = null;
-      void this.refreshBudget();
-    }, DEBOUNCE_MS);
-  }
-
   reset(): void {
     this.generation++;
     this.budgetGeneration++;
+    this.spendGeneration++;
     if (this.timer !== null) clearTimeout(this.timer);
-    if (this.budgetTimer !== null) clearTimeout(this.budgetTimer);
     this.timer = null;
-    this.budgetTimer = null;
+    if (this.accountsTimer !== null) clearTimeout(this.accountsTimer);
+    this.accountsTimer = null;
   }
 }

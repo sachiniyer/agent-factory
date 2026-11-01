@@ -500,7 +500,7 @@ func TestCleanupSessionsPreservesPartialCaptureAfterGenericFailure(t *testing.T)
 	escapee := spawnSessionWithEscapee(t, name)
 	home, err := afHomeDir()
 	require.NoError(t, err)
-	out, err := exec.Command("tmux", "set-environment", "-t", exactTarget(name), EnvMarkerHome, home).CombinedOutput()
+	out, err := exec.Command("tmux", "set-environment", "-t", ExactTarget(name), EnvMarkerHome, home).CombinedOutput()
 	require.NoError(t, err, "set ownership marker: %s", out)
 
 	var warnings logtest.Buffer
@@ -692,7 +692,7 @@ func vanishOnMarkerExecutorWith(t *testing.T, name string, beforeKill func()) cm
 				if beforeKill != nil {
 					beforeKill()
 				}
-				out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+				out, err := exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 				require.NoError(t, err, "kill session before marker lookup: %s", out)
 			}
 			return realExec.Output(command)
@@ -710,7 +710,7 @@ func vanishOnSecondPaneCaptureExecutor(t *testing.T, name string) cmd.Executor {
 			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
 				paneCaptures++
 				if paneCaptures == 2 {
-					out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+					out, err := exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 					require.NoError(t, err, "kill session before second pane capture: %s", out)
 				}
 			}
@@ -774,7 +774,7 @@ func mixedCaptureFailureExecutor(t *testing.T, vanishedName, failedName string) 
 			}
 			switch {
 			case paneCaptures[vanishedName] == 2 && strings.Contains(joined, vanishedName):
-				out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(vanishedName)).CombinedOutput()
+				out, err := exec.Command("tmux", "kill-session", "-t", ExactTarget(vanishedName)).CombinedOutput()
 				require.NoError(t, err, "kill vanished fixture session: %s", out)
 				return realExec.Output(command)
 			case paneCaptures[failedName] == 2 && strings.Contains(joined, failedName):
@@ -796,7 +796,7 @@ func vanishAfterPaneListExecutor(t *testing.T, name string) cmd.Executor {
 			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
 				paneCaptures++
 				if paneCaptures == 2 {
-					out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+					out, err := exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 					require.NoError(t, err, "kill session after pane list: %s", out)
 					// A PID that cannot exist makes the post-list snapshot report the
 					// concrete generic "pane process disappeared" capture error.
@@ -825,7 +825,7 @@ func vanishCompleteBeforeLaterFailureExecutor(t *testing.T, completeName, failed
 				}
 			}
 			if paneCaptures[failedName] == 2 && strings.Contains(joined, failedName) {
-				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(completeName)).CombinedOutput()
+				_, _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(completeName)).CombinedOutput()
 				return nil, fmt.Errorf("injected later capture failure")
 			}
 			return realExec.Output(command)
@@ -855,7 +855,7 @@ func partialCaptureThenAbsentExecutor(t *testing.T, name, trigger, pidFile strin
 				}
 			}
 			if len(command.Args) > 1 && command.Args[1] == "has-session" {
-				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+				_, _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 			}
 			return realExec.Output(command)
 		},
@@ -872,14 +872,14 @@ func replaceWithForeignPartialThenAbsentExecutor(t *testing.T, name, foreignHome
 			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
 				paneCaptures++
 				if paneCaptures == 2 {
-					_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+					_, _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 					*foreign = spawnMarkedSessionWithEscapee(t, name, foreignHome)
 					out, err := realExec.Output(command)
 					return append(out, []byte("not-a-pane-pid\n")...), err
 				}
 			}
 			if len(command.Args) > 1 && command.Args[1] == "has-session" {
-				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+				_, _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 			}
 			return realExec.Output(command)
 		},
@@ -907,7 +907,7 @@ func partialCaptureThenAbsentAfterTriggerExecutor(t *testing.T, name, trigger, p
 				}
 			}
 			if len(command.Args) > 1 && command.Args[1] == "has-session" {
-				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+				_, _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 			}
 			return realExec.Output(command)
 		},
@@ -931,7 +931,7 @@ func vanishDuringCaptureExecutor(t *testing.T, names ...string) cmd.Executor {
 				}
 				paneCaptures[name]++
 				if paneCaptures[name] == 2 {
-					_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+					_, _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 				}
 			}
 			return realExec.Output(command)

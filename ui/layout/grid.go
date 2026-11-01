@@ -214,6 +214,18 @@ func (l Layout) AutomationsCanDrawRows() bool {
 	return l.AutomationsVisible && !l.AutomationsCompact && l.Automations.H > 1
 }
 
+// ProjectsCanDrawRows reports whether the solved Projects region has room to
+// draw at least one item row — the same condition the pane renders rows under
+// (ProjectsPane.String falls back to the 1-line summary when compact or a row
+// short). A visible-but-summary rail has no row for a cursor to mark, so
+// keyboard focus must never rest on it (#6317, mirrored for the Projects
+// section): the focus ring hides the region exactly while this is false, the
+// same test the minimal-mode cutoff applies implicitly when it drops the
+// whole section.
+func (l Layout) ProjectsCanDrawRows() bool {
+	return l.ProjectsVisible && !l.ProjectsCompact && l.Projects.H > 1
+}
+
 // Solve lays out a width×height terminal.
 func (g Grid) Solve(width, height int) Layout {
 	l := Layout{Width: width, Height: height}

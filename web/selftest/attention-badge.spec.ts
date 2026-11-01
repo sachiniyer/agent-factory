@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
+import { quietSession } from "./quiet-session";
 
 // #6405: on a phone with the rail drawer CLOSED, another session's attention
 // request must be visible — a count on the drawer toggle and the state in words —
@@ -6,7 +7,11 @@ import { test, expect, type APIRequestContext } from "@playwright/test";
 // --self` calls.
 
 const SELECTED = process.env.AF_WEB_SESSION_B ?? "probe-b";
-const OTHER = process.env.AF_WEB_SESSION_A ?? "probe-a";
+// The session that raises the request is a quiet one: on the shared `cat` session a
+// stray Running edge could clear it between the raise and the badge assertions
+// (#4217, #6465). The viewed session (SELECTED) is never the one with the request.
+const quiet = quietSession("probe-quiet-badge");
+const OTHER = quiet.name;
 
 async function id(request: APIRequestContext, title: string) {
   const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();

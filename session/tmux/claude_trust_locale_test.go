@@ -78,7 +78,7 @@ func TestClaudeTrustCursorSurvivesRealCaptureUnderNonUTF8Locale(t *testing.T) {
 			require.NoError(t, err, "tmux new-session: %s", out)
 			testguard.KeepTmuxServerOnEmpty(t)
 			t.Cleanup(func() {
-				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+				_, _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 			})
 
 			session := NewTmuxSessionFromSanitizedNameWithDeps(name, "claude", MakePtyFactory(), cmdpkg.MakeExecutor())

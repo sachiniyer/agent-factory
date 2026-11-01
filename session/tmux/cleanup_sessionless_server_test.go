@@ -47,7 +47,7 @@ func sessionlessTmuxServer(t *testing.T) string {
 	// probes below would race the shutdown instead of observing the state.
 	out, err = exec.Command("tmux", "set", "-s", "exit-empty", "off").CombinedOutput()
 	require.NoError(t, err, "tmux set -s exit-empty off: %s", out)
-	out, err = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+	out, err = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).CombinedOutput()
 	require.NoError(t, err, "tmux kill-session: %s", out)
 
 	// The precondition, asserted rather than assumed: the server is still up

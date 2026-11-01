@@ -92,7 +92,18 @@ func (w *sandboxWorkspace) syncAgentConfigInto(timeout time.Duration, scopeDir s
 	agent := w.spec.Account.Agent
 	home := operatorAgentHome(agent)
 	if home == "" {
-		return nil, nil
+		// An unresolvable operator home refuses EVERY declared file: each is
+		// read from there, so none can land. Treat it like the per-file
+		// refusals below and name each skip on every surface — not a silent
+		// no-op, which would leave the session appearing fully provisioned
+		// while running a bare agent (#6337).
+		skipped := make([]string, 0, len(files))
+		for _, file := range files {
+			entry := fmt.Sprintf("%s:%s: cannot resolve the operator's %s home on this machine", agent, file, agent)
+			log.WarningLog.Printf("sandbox_agent_config: skipping %s", entry)
+			skipped = append(skipped, entry)
+		}
+		return skipped, nil
 	}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)

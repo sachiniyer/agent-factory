@@ -63,6 +63,37 @@ func (i *Instance) Attention() *Attention {
 	return cloneAttention(i.attention)
 }
 
+// ReconcileAttention mirrors the daemon's attention request onto an existing
+// client projection. It is its own axis like the archive warning (#5461): the
+// request can appear or clear while liveness stays Ready/Running, so a
+// snapshot poll must mirror both transitions explicitly rather than waiting
+// for a rebuild. It is deliberately not epoch-bound — a client's local
+// lifecycle epoch is unrelated to the daemon epoch the request was raised at,
+// the same split ReconcileAgentModelChange draws. Returns whether the stored
+// request changed.
+func (i *Instance) ReconcileAttention(a *Attention) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if sameAttention(i.attention, a) {
+		return false
+	}
+	i.attention = cloneAttention(a)
+	return true
+}
+
+// sameAttention compares two requests on the projected fields — the
+// bookkeeping SeenIdle/IdleSince included, so a daemon-side advance of the
+// idle record mirrors without a redraw when nothing visible moved.
+func sameAttention(a, b *Attention) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Reason == b.Reason &&
+		a.SetAt.Equal(b.SetAt) &&
+		a.SeenIdle == b.SeenIdle &&
+		a.IdleSince.Equal(b.IdleSince)
+}
+
 // HasAttention reports whether the agent asked for the user.
 func (i *Instance) HasAttention() bool {
 	i.mu.RLock()

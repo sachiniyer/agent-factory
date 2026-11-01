@@ -1,16 +1,21 @@
-// The Backlog view (backlog proposal, ui.md): the read-only runner bar, the
-// ordered item tree with filters, reorder by drag or Alt+arrows, a "New item"
-// row, and the item panel. Every change goes to the daemon and comes back
-// through backlog.changed; a reorder shows at once and snaps back on refusal.
+// The Backlog view (backlog proposal, ui.md): the runner bar, the ordered item
+// tree with filters, reorder by drag or Alt+arrows, a "New item" row, and the
+// item panel. Every change goes to the daemon and comes back through
+// backlog.changed; a reorder shows at once and snaps back on refusal, and a
+// started item shows Starting until its session exists.
 
 import { errorText } from "./api.js";
-import { addItem, addNote, deleteItem, moveItem, setItemStatus, updateItem } from "./backlog_api.js";
+import {
+  type BudgetReply, addItem, addNote, answerQuestion, deleteItem, backlogRoutes, moveItem, runNext, setBudget, setItemStatus, setSettings, startItem, updateItem,
+} from "./backlog_api.js";
 import type { BacklogData } from "./backlog_data.js";
 import {
-  type Backlog, type BacklogView, type Budget, type DropZone, FILTERS, type Filter, type ListRow, type MoveTarget,
-  applyMove, dropMove, formatID, itemByID, keyboardMove, listRows, overlayMove, sources,
+  type Backlog, type BacklogView, type DropZone, FILTERS, type Filter, type Item, type ListRow, type MoveTarget,
+  applyMove, dropMove, formatID, itemByID, keyboardMove, listRows, overlayMove, sources, topQueued,
 } from "./backlog_model.js";
 import { ItemPanel, type WriteOutcome, entryField, stateChip } from "./backlog_panel.js";
+import { RunnerBar } from "./backlog_runner.js";
+import { closedGate, webReason } from "./backlog_usage.js";
 import { h } from "./dom.js";
 import { icon } from "./icon.js";
 import { recoveryScreen } from "./recovery.js";
@@ -23,38 +28,34 @@ export interface BacklogHost {
   refresh(root?: string): Promise<boolean>;
   /** The newest backlog refresh started so far. */
   started(): number;
+  /** Takes the budget a SetBudget reply carries, so a save is shown even when the read after it fails. */
+  applyBudget?(reply: BudgetReply): void;
   notify(message: string): void;
   openSession(id: string): void;
   archiveSession(id: string): void;
   restoreSession(id: string): void;
   loadSessions(ids: string[]): Promise<void>;
   addProject?(): void;
+  /** Asks the user to confirm; resolves true to go ahead. */
+  confirm(title: string, body: string, confirmLabel: string): Promise<boolean>;
 }
 
 const DRAG_TYPE = "application/x-af-backlog-item";
 
 export const EMPTY_COPY = "No items yet · Add one below, or ask an agent to make items from a proposal.";
 
-function usd(v: number): string {
-  return `$${v.toFixed(2)}`;
-}
-
-const RUNNER_STATES: Record<string, string> = {
-  off: "Runner off",
-  idle: "Runner on",
-  waiting: "Runner waiting",
-  stopped: "Runner paused",
-};
-
-/** The runner bar's words: its state, reason, the slots in use, and the budget. */
-export function runnerText(view: BacklogView, budget: Budget | null): { state: string; warn: boolean; parts: string[] } {
-  const r = view.runner;
-  const parts = [(r.reason ?? "").replace(/\.$/, ""), `${r.used} of ${r.max} working`];
-  if (budget) {
-    parts.push(`Backlog share ${budget.share}% · stop at plan ${budget.stop_at}%`);
-    if (budget.usd_limit > 0) parts.push(`${usd(budget.usd_spent)} of ${usd(budget.usd_limit)}`);
-  }
-  return { state: RUNNER_STATES[r.state] ?? "Runner on", warn: r.state === "stopped", parts: parts.filter(Boolean) };
+/** Whether a started item still shows Starting: its request is out, or its
+ *  run is starting, or its session has not reached the session list yet and
+ *  the daemon still has the item starting or working. */
+function stillStarting(it: Item | undefined, derived: string | undefined, inFlight: boolean, sessions: SessionData[]): boolean {
+  if (inFlight) return true;
+  // The daemon's own state, read after the start's reply, outranks the session list: a session killed
+  // before it ever showed up there leaves the run recorded as started with no session to wait for.
+  if (derived !== undefined && derived !== "starting" && derived !== "working") return false;
+  const run = it?.runs?.at(-1);
+  if (!run || run.state === "failed") return false;
+  if (run.state === "starting") return true;
+  return run.session_id !== "" && !sessions.some((s) => s.id === run.session_id);
 }
 
 export class BacklogPane {
@@ -82,7 +83,16 @@ export class BacklogPane {
   private readonly requested = new Set<string>();
   private rowEls = new Map<number, HTMLElement>();
   private readonly newItem: HTMLInputElement;
-  private readonly headSlot = h("div", { class: "af-backlog-head" });
+  // Items started from this tab, by project and id: gen is the refresh that
+  // follows the start's reply, Infinity until it comes.
+  private readonly starts = new Map<string, { root: string; id: number; gen: number }>();
+  private running = false;
+  // Starts asked for and not yet answered by the daemon, so a second click
+  // while the confirm or the request is out does nothing.
+  private readonly asking = new Set<string>();
+  private readonly confirmed = new Set<string>();
+  private readonly runner: RunnerBar;
+  private readonly headSlot = h("div", {});
   private readonly filterSlot = h("div", {});
   private readonly listSlot = h("div", {});
   private readonly emptySlot = h("div", {});
@@ -91,6 +101,8 @@ export class BacklogPane {
   constructor(private readonly host: BacklogHost) {
     this.el = h("section", { class: "af-backlog" });
     this.el.setAttribute("aria-label", "Backlog");
+    this.runner = new RunnerBar(this.runnerActions());
+    this.headSlot.append(this.runner.el);
     this.newItem = entryField("New item…", "New item title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
     const listWrap = h("div", { class: "af-backlog-listwrap" }, this.filterSlot, this.listSlot, this.emptySlot,
       h("div", { class: "af-backlog-new" }, icon("plus"), this.newItem));
@@ -105,7 +117,7 @@ export class BacklogPane {
       if (sessions === this.sessions) return;
       const before = this.runSig(this.sessions);
       this.sessions = sessions;
-      if (this.runSig(sessions) === before) return;
+      if (this.runSig(sessions) === before && this.starts.size === 0) return;
       this.render();
       return;
     }
@@ -150,8 +162,130 @@ export class BacklogPane {
 
   private view(): BacklogView | undefined {
     const v = this.root ? this.data?.views.get(this.root) : undefined;
-    if (v && this.pending && this.pending.root === this.root) return { ...v, backlog: overlayMove(v.backlog, this.pending.backlog, this.pending.base) };
-    return v;
+    if (!v) return v;
+    let out = v;
+    if (this.pending && this.pending.root === this.root) out = { ...out, backlog: overlayMove(out.backlog, this.pending.backlog, this.pending.base) };
+    const starting = [...this.starts.values()].filter((s) => s.root === this.root);
+    if (starting.length > 0) {
+      const states = { ...out.states };
+      for (const s of starting) states[String(s.id)] = { state: "starting" };
+      out = { ...out, states };
+    }
+    return out;
+  }
+
+  /** Drops the starts that the daemon's data and the session list now show. */
+  private pruneStarts(): void {
+    const gen = this.data?.generation ?? 0;
+    for (const [k, s] of this.starts) {
+      const it = this.data?.views.get(s.root)?.backlog.items.find((x) => x.id === s.id);
+      const derived = this.data?.views.get(s.root)?.states[String(s.id)]?.state;
+      if (!stillStarting(it, derived, gen <= s.gen, this.sessions)) this.starts.delete(k);
+    }
+  }
+
+  /** Asks once per closed budget gate, by gate and window, before a start
+   *  by hand. */
+  private async gateOK(v: BacklogView, verb: string, id: number): Promise<boolean> {
+    const gate = closedGate(this.data?.budget ?? null, this.data?.usage ?? null, v.runner, Date.now());
+    if (gate === null || this.confirmed.has(gate.key)) return true;
+    const ok = await this.host.confirm("Budget gate closed",
+      `${gate.text} ${verb} ${formatID(id)} anyway? Its use still counts.`, `${verb} anyway`);
+    if (ok) this.confirmed.add(gate.key);
+    return ok;
+  }
+
+  private markStarting(root: string, id: number): { gen: number } {
+    const entry = { root, id, gen: Infinity };
+    this.starts.set(`${root}\n${id}`, entry);
+    return entry;
+  }
+
+  private settle(root: string, entries: { gen: number }[]): Promise<unknown> {
+    for (const e of entries) e.gen = this.host.started();
+    return this.host.refresh();
+  }
+
+  private start(root: string, id: number): void {
+    const v = this.root === root ? this.view() : undefined;
+    const key = `${root}\n${id}`;
+    if (!v || this.asking.has(key)) return;
+    this.asking.add(key);
+    void this.gateOK(v, "Start", id).then((ok) => {
+      const token = this.host.token();
+      if (!ok || token === null) {
+        this.asking.delete(key);
+        return;
+      }
+      const entry = this.markStarting(root, id);
+      this.render();
+      startItem(root, id, token).then(() => {
+        this.asking.delete(key);
+        return this.settle(root, [entry]);
+      }, (e: unknown) => {
+        this.asking.delete(key);
+        this.starts.delete(key);
+        this.host.notify(errorText(e));
+        this.render();
+        void this.host.refresh();
+      });
+    });
+  }
+
+  private runNext(): void {
+    const v = this.view();
+    const root = this.root;
+    if (!v || !root || this.running) return;
+    this.running = true;
+    this.render();
+    const top = topQueued(v);
+    void (top ? this.gateOK(v, "Start", top.id) : Promise.resolve(true)).then((ok) => {
+      const token = this.host.token();
+      if (!ok || token === null) {
+        this.running = false;
+        this.render();
+        return;
+      }
+      runNext(root, token).then((r) => {
+        this.running = false;
+        if (r.started.length === 0 && r.reason) {
+          const why = webReason(r.reason);
+          this.host.notify(why.charAt(0).toUpperCase() + why.slice(1));
+        }
+        return this.settle(root, r.started.map((id) => this.markStarting(root, id)));
+      }, (e: unknown) => {
+        this.running = false;
+        this.host.notify(errorText(e));
+        void this.host.refresh();
+      }).finally(() => this.render());
+    });
+  }
+
+  private async answer(root: string, id: number, questionId: number, text: string): Promise<boolean> {
+    const v = this.root === root ? this.view() : this.data?.views.get(root);
+    if (v && !await this.gateOK(v, "Answer", id)) return false;
+    const token = this.host.token();
+    if (token === null) return false;
+    try {
+      await answerQuestion(root, id, questionId, text, token);
+      void this.host.refresh();
+      return true;
+    } catch (e) {
+      this.host.notify(errorText(e));
+      void this.host.refresh();
+      return false;
+    }
+  }
+
+  private runnerActions() {
+    return {
+      setRunner: (on: boolean) => this.mutate((t) => setSettings(this.root ?? "", { runner: on }, t)),
+      setMaxRunning: (n: number) => this.mutate((t) => setSettings(this.root ?? "", { max_running: n }, t)),
+      setOnDone: (onDone: string) => this.mutate((t) => setSettings(this.root ?? "", { on_done: onDone }, t)),
+      setBudget: (u: Parameters<typeof setBudget>[0]) => this.write(this.root ?? "", (t) => setBudget(u, t).then((r) => this.host.applyBudget?.(r))),
+      runNext: backlogRoutes.runBacklog ? () => this.runNext() : undefined,
+      openItem: (id: number) => this.select(id),
+    };
   }
 
   private mutate(run: (token: string) => Promise<unknown>): void {
@@ -200,6 +334,7 @@ export class BacklogPane {
   }
 
   private render(): void {
+    this.pruneStarts();
     const v = this.view();
     const error = this.root ? this.data?.errors.get(this.root) : undefined;
     if (this.root === null || !v) {
@@ -231,7 +366,7 @@ export class BacklogPane {
     list.setAttribute("aria-label", "Items");
     this.rowEls = new Map();
     for (const row of rows) list.append(this.row(v, row));
-    this.headSlot.replaceChildren(...this.runnerBar(v).childNodes);
+    this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
     this.filterSlot.replaceChildren(this.filters(v));
     this.listSlot.replaceChildren(list);
     this.emptySlot.replaceChildren();
@@ -243,7 +378,7 @@ export class BacklogPane {
         this.panel = new ItemPanel(this.root, this.selected, this.panelActions(this.root));
         this.main.append(this.panel.el);
       }
-      this.panel.render(v, this.sessions);
+      this.panel.render(v, this.sessions, this.data?.usage ?? null);
     } else {
       this.closePanel();
     }
@@ -260,22 +395,6 @@ export class BacklogPane {
     this.panel?.dispose();
     this.panel?.el.remove();
     this.panel = null;
-  }
-
-  private runnerBar(v: BacklogView): HTMLElement {
-    const r = runnerText(v, this.data?.budget ?? null);
-    const bar = h("div", { class: "af-backlog-runner" },
-      h("span", { class: `af-backlog-runner-state${r.warn ? " af-backlog-warn" : ""}` }, r.state), ...r.parts.flatMap((p) => [" · ", p]));
-    const budget = this.data?.budget;
-    if (budget && budget.usd_limit > 0) {
-      const fill = h("span", { class: "af-backlog-meter-fill" });
-      fill.style.width = `${Math.min(100, (budget.usd_spent / budget.usd_limit) * 100)}%`;
-      const meter = h("span", { class: "af-backlog-meter", role: "img" }, fill);
-      meter.setAttribute("aria-label", `${usd(budget.usd_spent)} of ${usd(budget.usd_limit)} spent`);
-      bar.append(" ", meter);
-    }
-    if (budget) bar.title = `All projects · cap per run ${budget.max_per_run}% of the plan window`;
-    return h("div", {}, h("span", { class: "af-backlog-heading" }, "Backlog"), bar);
   }
 
   private filters(v: BacklogView): HTMLElement {
@@ -445,6 +564,8 @@ export class BacklogPane {
       },
       // A note is appended once the daemon accepts it, whether or not the read after it landed.
       note: (id: number, text: string) => this.write(root, (t) => addNote(root, id, text, t)).then((o) => o !== "refused"),
+      start: (id: number) => this.start(root, id),
+      answer: (id: number, questionId: number, text: string) => this.answer(root, id, questionId, text),
       addChild: (parent: number, title: string) => this.write(root, (t) => addItem(root, { title, parent }, t)),
       select: (id: number) => this.select(id, root),
       close: () => {

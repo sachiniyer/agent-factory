@@ -291,21 +291,27 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// the daemon's recorded socket in listTmuxSessions; an UNCONFIRMED
 			// record (present but unreadable, or naming no socket) means the
 			// listing could not be pinned and stays ambient, so this arm
-			// refuses the kill and reports instead — the same "a successful
-			// listing of the wrong server is not evidence of death" rule the
+			// refuses the kill and reports instead. The record-ABSENT state
+			// (no record AND no live daemon) is corroborated PER PROCESS: the
+			// marked process's own TMUX env names the socket its session lived
+			// on, so the ambient listing corroborates death only when that
+			// socket matches the ambient one — the same "a successful listing
+			// of the wrong server is not evidence of death" rule the
 			// failed-listing guard above enforces for one that did not answer.
 			home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
 			hasHome := homeStatus == proctree.EnvFound
 			switch {
 			case hasHome && filepath.IsAbs(home) && sameHome(home, ctx.opts.ConfigDir):
-				if !ctx.sessionDeathCorroborated() {
+				if !ctx.sessionDeathCorroborated(p) {
 					report.addAdvisoryFinding(Finding{
 						Check: "orphaned-process",
 						Detail: fmt.Sprintf("%s marks session %s (home %s) but the daemon's tmux "+
-							"server record could not be read, so doctor cannot pin the listing "+
-							"to the socket that hosts its sessions — a live session on a "+
-							"different tmux server would look the same here, so it is reported, "+
-							"not killed", describeProc(p), name, home),
+							"server record is absent or could not be pinned to a socket, and the "+
+							"ambient listing cannot be tied to the socket the process's session "+
+							"lived on — so doctor cannot corroborate the session's death on the "+
+							"server that hosts it, and a live session on a different tmux server "+
+							"would look the same here; it is reported, not killed",
+							describeProc(p), name, home),
 					})
 					continue
 				}

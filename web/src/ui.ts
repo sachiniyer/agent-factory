@@ -1409,6 +1409,7 @@ export class AppShell {
       refresh: async () => true,
       started: () => 0,
       notify: () => {},
+      confirm: async () => false,
       openSession: () => {},
       archiveSession: () => {},
       restoreSession: () => {},

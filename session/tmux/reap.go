@@ -119,7 +119,7 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket stri
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
-		socketTmuxArgs(socket, "list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", paneRowFormat)...)
+		socketTmuxArgs(socket, "list-panes", "-s", "-t", ExactTarget(sanitizedName), "-F", paneRowFormat)...)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
@@ -396,7 +396,7 @@ type markedGeneration struct {
 // two verdicts that follow from it are unambiguous. So the message names the
 // pids and their generations, gives that read, and states both outcomes.
 //
-// The suggested target is exactTarget's `=name:` form rather than a bare name on
+// The suggested target is ExactTarget's `=name:` form rather than a bare name on
 // purpose: tmux resolves a bare -t as a prefix match, so a pasted suggestion
 // could report a DIFFERENT session's generation — in the one message whose
 // answer decides what an operator kills.
@@ -418,7 +418,7 @@ func blindGenerationRefusal(sanitizedName string, marked []markedGeneration) err
 		" A generation no live session claims is a leftover of the vanished session — that pid is safe to kill,"+
 		" and the next sweep then proceeds.",
 		sanitizedName, strings.Join(named, ", "),
-		shellsuggest.Command("tmux", "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerGeneration),
+		shellsuggest.Command("tmux", "show-environment", "-t", ExactTarget(sanitizedName), EnvMarkerGeneration),
 		shellsuggest.Command("af", "sessions", "list", "--json"))
 }
 

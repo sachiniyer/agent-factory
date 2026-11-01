@@ -576,7 +576,7 @@ func normalizeCodexPane(content string) string {
 func (t *TmuxSession) tapPromptKeys(keys ...string) error {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	args := []string{"send-keys", "-t", exactTarget(t.sanitizedName)}
+	args := []string{"send-keys", "-t", ExactTarget(t.sanitizedName)}
 	args = append(args, keys...)
 	if err := t.runTmuxBounded(ctx, args...); err != nil {
 		joined := strings.Join(keys, " ")

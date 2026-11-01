@@ -4092,8 +4092,136 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 }
 
 .af-backlog-runner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--af-space-1) var(--af-space-2);
+  flex: 1 1 calc(var(--af-space-4) * 20);
+  min-width: 0;
   font-size: var(--af-type-caption);
 }
+
+.af-backlog-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-space-1);
+  padding: var(--af-space-1) var(--af-space-2);
+  background: transparent;
+  color: var(--af-ink);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  border-radius: var(--af-radius-control);
+  font: inherit;
+  cursor: pointer;
+}
+
+.af-backlog-toggle-knob {
+  display: inline-block;
+  width: var(--af-space-2);
+  height: var(--af-space-2);
+  border-radius: 50%;
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-ink-muted);
+}
+
+.af-backlog-toggle-on .af-backlog-toggle-knob {
+  background: var(--af-accent);
+  border-color: var(--af-accent);
+}
+
+.af-backlog-slots {
+  padding: var(--af-space-1);
+  background: var(--af-surface-raised);
+  color: var(--af-ink);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  border-radius: var(--af-radius-control);
+  font: inherit;
+}
+
+.af-backlog-plan {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--af-space-1);
+  max-width: 100%;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--af-ink);
+  border: none;
+  font: inherit;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.af-backlog-plan-detail {
+  flex-basis: 100%;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.af-backlog-plan-detail[hidden] { display: none; }
+
+.af-backlog-plan[hidden] { display: none; }
+
+.af-backlog-runner-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+  margin-left: auto;
+  font-size: var(--af-type-caption);
+}
+
+.af-backlog-settings { position: relative; }
+.af-backlog-settings > summary { list-style: none; cursor: pointer; }
+.af-backlog-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.af-backlog-settings > summary::-webkit-details-marker { display: none; }
+
+.af-backlog-settings-panel {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: var(--af-z-popover);
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+  width: calc(var(--af-space-4) * 17);
+  max-width: calc(100vw - var(--af-space-4) * 2);
+  margin-top: var(--af-space-1);
+  padding: var(--af-space-3);
+  background: var(--af-surface-raised);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  border-radius: var(--af-radius-control);
+}
+
+.af-backlog-settings-panel p { margin: 0; }
+
+.af-backlog-setting {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0 var(--af-space-2);
+}
+
+.af-backlog-setting > .af-backlog-reason { grid-column: 1 / -1; }
+
+.af-backlog-number {
+  width: calc(var(--af-space-4) * 5);
+  padding: var(--af-space-1);
+  background: var(--af-surface);
+  color: var(--af-ink);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  border-radius: var(--af-radius-control);
+  font: inherit;
+  text-align: right;
+}
+
+.af-backlog-run-use { font-variant-numeric: tabular-nums; }
 
 .af-backlog-runner-state { font-weight: 600; }
 .af-backlog-warn { color: var(--af-lost); }
@@ -4289,13 +4417,16 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 
 .af-backlog-question {
   display: flex;
-  gap: var(--af-space-2);
+  flex-direction: column;
+  margin-bottom: var(--af-space-2);
   padding: var(--af-space-2);
   border: calc(var(--af-space-1) * 0.25) solid var(--af-attention);
   border-radius: var(--af-radius-control);
   color: var(--af-ink);
 }
 
+.af-backlog-question[hidden] { display: none; }
+.af-backlog-question-text { display: flex; gap: var(--af-space-2); }
 .af-backlog-question svg { color: var(--af-attention); flex: 0 0 auto; }
 
 .af-backlog-actions {

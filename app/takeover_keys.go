@@ -89,7 +89,7 @@ func (r takeoverRoute) attachArgs() []string {
 	// private session is created detached. It is NOT given destroy-unattached: that
 	// reaper intermittently took the whole tmux server down (#6193).
 	return []string{
-		"has-session", "-t", "=" + r.session, ";",
+		"has-session", "-t", tmux.ExactSessionTarget(r.session), ";",
 		"new-session", "-d", "-t", r.session, "-s", r.group, ";",
 		"run-shell", r.mirrorSessionOptionsScript(), ";",
 		"run-shell", r.mirrorRootScript(), ";",
@@ -128,12 +128,11 @@ func (r takeoverRoute) mirrorRootScript() string {
 // (prefix, prefix2, key-table, status-right), so the takeover's own values win
 // over a copied one. A failed copy must not abort the takeover.
 //
-// The source is addressed as `=<session>:` (#6270). show-options declares -t a PANE
-// target, and tmux strips the exact-match `=` only from the session part of a split
-// `session:window.pane` target; a bare `=<session>` has no `:` to split on, so the
-// whole string is taken as a pane spec and fails with "no such session". The
-// trailing colon is the same form session/tmux/cleanup.go uses for pane-target
-// commands.
+// The source is addressed as `=<session>:` (#6270) — the form tmux.ExactTarget
+// builds. show-options declares -t a PANE target, and tmux strips the
+// exact-match `=` only from the session part of a split `session:window.pane`
+// target; a bare `=<session>` has no `:` to split on, so the whole string is
+// taken as a pane spec and fails with "no such session".
 //
 // A failure is never silent: the script cannot reach af's log from inside the
 // server, so it records the reason on the private session as the user option
@@ -144,7 +143,7 @@ func (r takeoverRoute) mirrorSessionOptionsScript() string {
 	}
 	// An empty listing (a source with no local options) is a successful empty copy,
 	// not an error: sed would turn its one blank line into a bare `set-option`.
-	return "opts=$(tmux show-options -t " + shellQuote("="+r.session+":") + ") || { " + fail("show-options on the source session failed") + "; exit 0; }; " +
+	return "opts=$(tmux show-options -t " + shellQuote(tmux.ExactTarget(r.session)) + ") || { " + fail("show-options on the source session failed") + "; exit 0; }; " +
 		"if [ -n \"$opts\" ]; then printf '%s\\n' \"$opts\" | sed -E 's/^/set-option -t " + r.group + " /' | tmux source-file - || " + fail("source-file rejected the copied options") + "; fi; true"
 }
 
@@ -158,7 +157,7 @@ var readTakeoverMirrorError = func(socket string, r takeoverRoute) string {
 	if socket != "" {
 		args = append(args, "-S", socket)
 	}
-	args = append(args, "show-options", "-qv", "-t", "="+r.group+":", mirrorErrorOption)
+	args = append(args, "show-options", "-qv", "-t", tmux.ExactTarget(r.group), mirrorErrorOption)
 	c := exec.Command("tmux", args...)
 	c.Env = configAgentAttachEnv()
 	out, err := c.Output()
