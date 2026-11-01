@@ -304,3 +304,79 @@ func TestBacklogAddFromItemSession(t *testing.T) {
 		t.Fatalf("%+v", it)
 	}
 }
+
+// TestBacklogGuardRailsSurviveDroppedBacklogItem reproduces the version-skew bug
+// from #6337: an older daemon binary whose InstanceData lacks the BacklogItem
+// field rewrites the session record and silently drops the omitempty
+// `backlog_item` key (the daemon is the sole writer of instances.json). Once
+// dropped the field is never re-derived. The refusal rails must still fire,
+// resolving from the authoritative backlog link — the run records in
+// backlog.json (ItemForSession) — instead of the droppable persisted field,
+// mirroring selfItem. Without this, an agent inside an item session reaches the
+// daemon with no SessionID and SetItemStatus attributes its action to the human
+// user (open questions close, the runner can be enabled, plan mutates).
+func TestBacklogGuardRailsSurviveDroppedBacklogItem(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// Item 1 runs in session s1; the run record in backlog.json is the
+	// authoritative link. The session record has lost its BacklogItem field
+	// (an older daemon dropped the omitempty key on its next write).
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0})
+	*methods = nil
+	for _, args := range [][]string{
+		{"queue", "1"}, {"draft", "1"}, {"review", "1"}, {"reopen", "1"}, {"start", "1"}, {"done", "1"}, {"drop", "1"}, {"delete", "1"},
+		{"answer", "1", "yes"}, {"note", "1", "text"}, {"run"},
+		{"add", "another"}, {"add", "--file", "-"}, {"edit", "1", "--title", "x"}, {"move", "1", "--top"},
+	} {
+		if _, err := runBacklogCmd(t, args...); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"runner", "on"}, {"runner", "--max-running", "2"}, {"budget", "--share", "40"}, {"budget", "--usd-limit", "5"}} {
+		if _, err := runBacklogCmd(t, args...); err == nil || err.Error() != `item sessions cannot change the runner or budget; ask the user with "af backlog ask --self"` {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	for _, m := range *methods {
+		if m != "GetBacklog" {
+			t.Fatalf("a refused command reached the daemon: %v", *methods)
+		}
+	}
+	for _, args := range [][]string{{"runner"}, {"budget"}, {"list"}, {"show", "1"}} {
+		if _, err := runBacklogCmd(t, args...); err != nil {
+			t.Errorf("%v refused: %v", args, err)
+		}
+	}
+}
+
+// TestBacklogGuardRailsCoverStillStartingRun verifies the fallback to the
+// record's BacklogItem during the run-still-starting window: the run record has
+// no SessionID until the daemon links it, so ItemForSession returns nil, and the
+// session chip is the only signal. The guard must still fire in this window.
+// Regression test for the #6337 fix, which made the rails consult ItemForSession
+// first: the field-only fallback path must remain for the starting window.
+func TestBacklogGuardRailsCoverStillStartingRun(t *testing.T) {
+	stubBacklogDaemon(t)
+	if _, err := runBacklogCmd(t, "add", "work"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := backlogProject()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backlog.Update(p.repoID, func(b *backlog.Backlog) error {
+		it := b.Item(1)
+		it.Status = backlog.StatusRunning
+		// A still-starting run with no SessionID: ItemForSession cannot find it.
+		it.Runs = []backlog.RunRef{{State: backlog.RunStarting, StartedAt: time.Now()}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The session chip carries the item id while the run is still starting.
+	backlogSelfSession = func() (*session.InstanceData, error) {
+		return &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 1}, nil
+	}
+	if _, err := runBacklogCmd(t, "done", "1"); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatalf("guard did not fire during the starting window: %v", err)
+	}
+}

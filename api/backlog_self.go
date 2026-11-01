@@ -49,9 +49,34 @@ func (t *backlogTarget) selfItem() (string, *backlog.Item, error) {
 
 // inItemSession reports the item session this command runs in, or nil. A
 // caller outside any af session is not an item session.
+//
+// The authoritative link between a session and its backlog item is the run
+// record in backlog.json (ItemForSession); the session record's own BacklogItem
+// is a client-side chip set at creation. It is omitempty, so an older daemon
+// binary whose InstanceData lacks the field rewrites the record and silently
+// drops the key — and once dropped it is never re-derived. Resolving the
+// refusal rails solely from that field lets a confused agent run plan
+// mutations (done <id>, start, run, queue/drop, runner on, note <id>, ...) past
+// the guard after the drop: the CLI sends them with no SessionID and the daemon
+// attributes them to the human user.
+//
+// Resolve primarily from the authoritative link, mirroring selfItem below; keep
+// the record's BacklogItem only as a fallback for the run-still-starting window
+// (before the daemon links the run) and for a backlog that cannot be loaded.
+// Failing closed on the fallback — firing the guard when the record says item
+// session even though the link is unresolved — is the safe direction: a
+// confused agent is refused rather than allowed to run past.
 func inItemSession() *session.InstanceData {
 	s, err := backlogSelfSession()
-	if err != nil || s == nil || s.BacklogItem == 0 {
+	if err != nil || s == nil {
+		return nil
+	}
+	if t, err := backlogProject(); err == nil {
+		if v, err := t.get(); err == nil && v.Backlog.ItemForSession(s.ID) != nil {
+			return s
+		}
+	}
+	if s.BacklogItem == 0 {
 		return nil
 	}
 	return s
