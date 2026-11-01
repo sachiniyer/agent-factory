@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
+import { quietSession } from "./quiet-session";
 
 // The agent-set attention request, end to end against the REAL daemon the harness
 // boots on a throwaway home (#6284 theme A): the agent raises it over the same
@@ -7,7 +8,14 @@ import { test, expect, type APIRequestContext, type Page } from "@playwright/tes
 // clears it. This runs against the embedded app only inside the sanctioned web
 // testbox.
 
+// The two specs that WANT pane activity to answer the request (a submitted line, a
+// send-prompt) run on the shared `cat` session, where the stimulus is the thing under
+// test. Every other spec raises a request and then interacts with it, so it runs on a
+// quiet session where nothing but that interaction can clear it (#4217, #6465): on
+// `cat`, the echo of the browser's terminal replies cleared the request under load
+// before the Dismiss click.
 const SESSION = process.env.AF_WEB_SESSION_A ?? "probe-a";
+const quiet = quietSession("probe-quiet-attention", { perTest: true });
 
 async function target(request: APIRequestContext) {
   const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
@@ -39,6 +47,7 @@ test.describe.configure({ mode: "serial" });
 
 test.afterEach(async ({ request }) => {
   // Leave no request behind for the specs that run after this one.
+  // The quiet session is killed after each test, which takes its request with it.
   const id = await target(request);
   await request.post("/v1/SetAttention", { data: { id, clear: true } });
 });
@@ -46,8 +55,8 @@ test.afterEach(async ({ request }) => {
 for (const width of [1280, 390]) {
   test(`an agent's request shows the dot and the header chip, and only the × dismisses it, at ${width}px`, async ({ page, request }) => {
     await page.setViewportSize({ width, height: 844 });
-    const id = await target(request);
-    await openSettled(page, id);
+    const id = await quiet.id(request);
+    await quiet.open(page, id);
     const chip = page.locator(".af-term-attention");
     await expect(chip, "no request, no chip").toBeHidden();
 
@@ -55,7 +64,7 @@ for (const width of [1280, 390]) {
     await expect(chip).toBeVisible();
     await expect(chip).toHaveAttribute("title", "Needs attention: Pick option A or B");
     // The rail's own dot is the glyph-only state; the row keeps no state text.
-    const row = page.locator(".af-rail-list .af-row").filter({ hasText: SESSION });
+    const row = page.locator(".af-rail-list .af-row").filter({ hasText: quiet.name });
     await expect(row.locator(".af-dot-attention")).toHaveCount(1);
 
     // Looking at the session does not clear it. (Input into the pane is covered by
@@ -110,8 +119,8 @@ test("a user's send-prompt answers the request, with the chip and dot following"
 
 test("a dismissal names the request the chip showed, so a newer request survives it", async ({ page, request }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
-  const id = await target(request);
-  await openSettled(page, id);
+  const id = await quiet.id(request);
+  await quiet.open(page, id);
   await raise(request, id, "First question");
   const first = await attentionOf(request, id);
   expect(first).not.toBeNull();
@@ -127,8 +136,8 @@ test("a dismissal names the request the chip showed, so a newer request survives
 
 test("reduced motion stills the blink and keeps the dot a ring", async ({ page, request }) => {
   await page.setViewportSize({ width: 1280, height: 844 });
-  const id = await target(request);
-  await openSettled(page, id);
+  const id = await quiet.id(request);
+  await quiet.open(page, id);
   await raise(request, id, "Look at this");
   const dot = page.locator(".af-rail-list .af-row .af-dot-attention").first();
   const bell = page.locator(".af-term-attention-bell");
