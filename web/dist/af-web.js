@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1d8629d270d1";
+var CLIENT_VERSION = "0f5e1fa02d8b";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19631,6 +19631,9 @@ var RunnerBar = class {
   onDone;
   view = null;
   budget = null;
+  // Budget values asked for and not yet acknowledged, by field, and the chain that sends them.
+  pendingBudget = /* @__PURE__ */ new Map();
+  budgetQueue = Promise.resolve();
   usage = null;
   action = null;
   menuSummary() {
@@ -19648,8 +19651,10 @@ var RunnerBar = class {
           this.fill();
           return;
         }
-        if (this.budget && this.budget[f.key] === v) return;
-        this.actions.setBudget({ [f.key]: v });
+        const current = this.pendingBudget.has(f.key) ? this.pendingBudget.get(f.key) : this.budget?.[f.key];
+        if (current === v) return;
+        this.pendingBudget.set(f.key, v);
+        this.writeBudget(f.key, v);
       });
       this.inputs.set(f.key, input);
       return h(
@@ -19668,6 +19673,15 @@ var RunnerBar = class {
       h("p", { class: "af-backlog-reason" }, "Runner \xB7 this project"),
       h("label", { class: "af-backlog-setting" }, h("span", { class: "af-backlog-label" }, "When an item is done"), this.onDone)
     );
+  }
+  /** Writes go out one at a time, in the order they were made, so the last edit of a field is the
+   *  one the daemon ends up with. */
+  writeBudget(key, v) {
+    const done2 = () => {
+      if (this.pendingBudget.get(key) === v) this.pendingBudget.delete(key);
+      this.fill();
+    };
+    this.budgetQueue = this.budgetQueue.then(() => this.actions.setBudget({ [key]: v })).then(done2, done2);
   }
   runMain() {
     const a = this.action;
@@ -19750,7 +19764,8 @@ var RunnerBar = class {
   }
   fill() {
     for (const [key, input] of this.inputs) {
-      if (document.activeElement !== input && this.budget) input.value = String(this.budget[key]);
+      const shown = this.pendingBudget.get(key) ?? this.budget?.[key];
+      if (document.activeElement !== input && shown !== void 0) input.value = String(shown);
     }
     if (this.view && document.activeElement !== this.onDone) this.onDone.value = this.view.backlog.settings.on_done || "keep";
   }
@@ -19759,8 +19774,9 @@ var RunnerBar = class {
 // src/backlog_pane.ts
 var DRAG_TYPE = "application/x-af-backlog-item";
 var EMPTY_COPY = "No items yet \xB7 Add one below, or ask an agent to make items from a proposal.";
-function stillStarting(it, inFlight, sessions) {
+function stillStarting(it, derived, inFlight, sessions) {
   if (inFlight) return true;
+  if (derived !== void 0 && derived !== "starting" && derived !== "working") return false;
   const run = it?.runs?.at(-1);
   if (!run || run.state === "failed") return false;
   if (run.state === "starting") return true;
@@ -19889,7 +19905,8 @@ var BacklogPane = class {
     const gen = this.data?.generation ?? 0;
     for (const [k, s] of this.starts) {
       const it = this.data?.views.get(s.root)?.backlog.items.find((x) => x.id === s.id);
-      if (!stillStarting(it, gen <= s.gen, this.sessions)) this.starts.delete(k);
+      const derived = this.data?.views.get(s.root)?.states[String(s.id)]?.state;
+      if (!stillStarting(it, derived, gen <= s.gen, this.sessions)) this.starts.delete(k);
     }
   }
   /** Asks once per closed budget gate, by gate and window, before a start
@@ -22830,6 +22847,7 @@ var BacklogLoader = class {
   timer = null;
   budgetGeneration = 0;
   spendGeneration = 0;
+  accountsTimer = null;
   // Whether a backlog.spend since the last GetBudget reply named the
   // unmeterable runs; an older daemon's payload does not.
   spendUnmeterable = false;
@@ -22896,6 +22914,34 @@ var BacklogLoader = class {
     this.spendGeneration++;
     if (spendHasUnmeterable(ev)) this.spendUnmeterable = true;
     this.opts.commit({ ...cur, usage });
+    this.requestAccounts();
+  }
+  /** A spend event carries the top-level windows but not which account they are for, nor the
+   *  other accounts' windows, and the account the daemon meters can change between events. So
+   *  each burst of events is followed by one budget-only read, whose account identity and
+   *  per-account windows replace the ones kept. */
+  requestAccounts() {
+    if (this.accountsTimer !== null) return;
+    this.accountsTimer = setTimeout(() => {
+      this.accountsTimer = null;
+      void this.refreshAccounts();
+    }, DEBOUNCE_MS);
+  }
+  async refreshAccounts() {
+    const token2 = this.opts.token();
+    if (token2 === null) return;
+    const budgetGen = this.budgetGeneration;
+    const spendGen = this.spendGeneration;
+    const fresh = await getBudget(token2).catch(() => null);
+    if (!fresh || this.opts.token() !== token2 || budgetGen !== this.budgetGeneration) return;
+    const cur = this.opts.current();
+    let usage = fresh.usage;
+    if (spendGen !== this.spendGeneration && cur.usage) {
+      usage = { ...cur.usage, account: fresh.usage.account, accounts: fresh.usage.accounts };
+    } else {
+      this.spendUnmeterable = false;
+    }
+    this.opts.commit({ ...cur, budget: fresh.budget, usage });
   }
   /** Coalesces a burst of events into one refetch. */
   request() {
@@ -22911,6 +22957,8 @@ var BacklogLoader = class {
     this.spendGeneration++;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+    if (this.accountsTimer !== null) clearTimeout(this.accountsTimer);
+    this.accountsTimer = null;
   }
 };
 

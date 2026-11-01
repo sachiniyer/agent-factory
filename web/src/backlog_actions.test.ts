@@ -307,7 +307,7 @@ test("the switch, max running and when-done change this project's runner", () =>
   ]);
 });
 
-test("budget fields send one change each and refuse values out of range", () => {
+test("budget fields send one change each and refuse values out of range", async () => {
   const pane = mount(host());
   pane.update(data(view([item(1)])), "/a", []);
   const input = (label: string): FakeElement => el(pane).querySelector(`input[aria-label="${label}"]`)!;
@@ -321,7 +321,41 @@ test("budget fields send one change each and refuse values out of range", () => 
   input("Cap per run").dispatchEvent(new FakeEvent("change"));
   input("Dollar limit").value = "12.5";
   input("Dollar limit").dispatchEvent(new FakeEvent("change"));
+  await settle();
   assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ share: 30 }, { usd_limit: 12.5 }]);
+});
+
+test("a budget field changed and changed back before the first write is read sends both, in order", async () => {
+  const pane = mount(host());
+  pane.update(data(view([item(1)])), "/a", []);
+  const input = (label: string): FakeElement => el(pane).querySelector(`input[aria-label="${label}"]`)!;
+  const edit = (label: string, v: string): void => {
+    input(label).value = v;
+    input(label).dispatchEvent(new FakeEvent("change"));
+  };
+  edit("Backlog share", "30");
+  edit("Backlog share", "50"); // the budget shown is still the daemon's 50: this must not read as no change
+  edit("Backlog share", "50");
+  await settle();
+  assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ share: 30 }, { share: 50 }], "the last edit is the one saved");
+  assert.equal(input("Backlog share").value, "50");
+});
+
+test("an optimistic Starting is dropped when the daemon, read after the reply, says the item stopped", async () => {
+  const h = host();
+  const pane = mount(h);
+  pane.update(data(view([item(1)], { 1: "draft" })), "/a", []);
+  pane.select(1);
+  reply = async (m) => (m === "StartBacklogItem" ? { run: { session_id: "", state: "starting" } } : {});
+  buttonNamed(el(pane), "Start now")!.click();
+  await settle();
+  assert.match(chip(pane, 1), /Starting/);
+  // The session was killed before it reached the session list: the run stays "started", the item derives Stopped.
+  const run = { session_id: "s1", title: "B-1 item 1", state: "started", prev_status: "draft" as const, started_by: "user", started_at: "" };
+  const killed = view([item(1, { status: "running", runs: [run] })], { 1: "stopped" });
+  pane.update(data(killed, 3), "/a", []);
+  assert.doesNotMatch(chip(pane, 1), /Starting/);
+  assert.notEqual(buttonNamed(el(pane), "Start now"), undefined, "Start now is offered again without a reload");
 });
 
 test("a paused runner says why and offers the main action ui.md names", () => {

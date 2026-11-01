@@ -243,3 +243,16 @@ test("a refresh a newer one superseded is acknowledged only by what the newer on
   assert.equal(await newest, true);
   assert.equal(await again, true, "the newer snapshot that carries the edit committed");
 });
+
+test("a spend event is followed by a budget read that renews which account the windows are for", async () => {
+  const l = loader();
+  state = { ...EMPTY_BACKLOG_DATA, usage: { metering: true, account: "default", accounts: { default: {} as never }, five_hour: {} as never, seven_day: {} as never, reading_at: null, runs: {}, run_window: {}, unmeterable: {} } as never };
+  l.applySpend({ five_hour: {}, seven_day: {}, reading_at: null, runs: {}, run_window: {}, unmeterable: {} });
+  assert.equal(pending.length, 0, "debounced");
+  mock.timers.tick(150);
+  await settle();
+  assert.deepEqual(pending.map((p) => p.method), ["GetBudget"]);
+  answer("GetBudget", { budget: { share: 30, stop_at: 80, max_per_run: 10, usd_limit: 0, usd_spent: 0 }, account: "work", accounts: { work: { windows: { five_hour: { plan: 20 } } } }, windows: {} });
+  await settle();
+  assert.equal(state.usage?.account, "work", "the account the daemon now meters replaces the one kept");
+});

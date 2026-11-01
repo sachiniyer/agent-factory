@@ -66,6 +66,7 @@ export class BacklogLoader {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private budgetGeneration = 0;
   private spendGeneration = 0;
+  private accountsTimer: ReturnType<typeof setTimeout> | null = null;
   // Whether a backlog.spend since the last GetBudget reply named the
   // unmeterable runs; an older daemon's payload does not.
   private spendUnmeterable = false;
@@ -142,6 +143,37 @@ export class BacklogLoader {
     this.spendGeneration++;
     if (spendHasUnmeterable(ev)) this.spendUnmeterable = true;
     this.opts.commit({ ...cur, usage });
+    this.requestAccounts();
+  }
+
+  /** A spend event carries the top-level windows but not which account they are for, nor the
+   *  other accounts' windows, and the account the daemon meters can change between events. So
+   *  each burst of events is followed by one budget-only read, whose account identity and
+   *  per-account windows replace the ones kept. */
+  private requestAccounts(): void {
+    if (this.accountsTimer !== null) return;
+    this.accountsTimer = setTimeout(() => {
+      this.accountsTimer = null;
+      void this.refreshAccounts();
+    }, DEBOUNCE_MS);
+  }
+
+  private async refreshAccounts(): Promise<void> {
+    const token = this.opts.token();
+    if (token === null) return;
+    const budgetGen = this.budgetGeneration;
+    const spendGen = this.spendGeneration;
+    const fresh = await getBudget(token).catch(() => null);
+    // A full refresh that started meanwhile commits its own budget read.
+    if (!fresh || this.opts.token() !== token || budgetGen !== this.budgetGeneration) return;
+    const cur = this.opts.current();
+    let usage = fresh.usage;
+    if (spendGen !== this.spendGeneration && cur.usage) {
+      usage = { ...cur.usage, account: fresh.usage.account, accounts: fresh.usage.accounts };
+    } else {
+      this.spendUnmeterable = false;
+    }
+    this.opts.commit({ ...cur, budget: fresh.budget, usage });
   }
 
   /** Coalesces a burst of events into one refetch. */
@@ -159,5 +191,7 @@ export class BacklogLoader {
     this.spendGeneration++;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+    if (this.accountsTimer !== null) clearTimeout(this.accountsTimer);
+    this.accountsTimer = null;
   }
 }

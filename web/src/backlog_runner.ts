@@ -13,7 +13,8 @@ export interface RunnerActions {
   setRunner(on: boolean): void;
   setMaxRunning(n: number): void;
   setOnDone(onDone: string): void;
-  setBudget(update: BudgetUpdate): void;
+  /** Settles when the write and the read after it have landed. */
+  setBudget(update: BudgetUpdate): Promise<unknown> | void;
   /** One runner pass now. Absent while the daemon has no RunBacklog route: the button is then not drawn. */
   runNext?(): void;
   openItem(id: number): void;
@@ -74,8 +75,10 @@ export function mainAction(view: BacklogView, usage: Usage | null): MainAction {
   return null;
 }
 
+type BudgetKey = keyof BudgetUpdate;
+
 interface BudgetField {
-  key: keyof BudgetUpdate;
+  key: BudgetKey;
   label: string;
   unit: string;
   max: number;
@@ -105,6 +108,9 @@ export class RunnerBar {
   private readonly onDone: HTMLSelectElement;
   private view: BacklogView | null = null;
   private budget: Budget | null = null;
+  // Budget values asked for and not yet acknowledged, by field, and the chain that sends them.
+  private readonly pendingBudget = new Map<BudgetKey, number>();
+  private budgetQueue: Promise<unknown> = Promise.resolve();
   private usage: Usage | null = null;
   private action: MainAction = null;
 
@@ -159,8 +165,12 @@ export class RunnerBar {
           this.fill();
           return;
         }
-        if (this.budget && this.budget[f.key] === v) return;
-        this.actions.setBudget({ [f.key]: v });
+        // Against the value last asked for: the budget shown is the daemon's, which still holds
+        // the old one while a write is out, so a change back would otherwise be taken for no change.
+        const current = this.pendingBudget.has(f.key) ? this.pendingBudget.get(f.key) : this.budget?.[f.key];
+        if (current === v) return;
+        this.pendingBudget.set(f.key, v);
+        this.writeBudget(f.key, v);
       });
       this.inputs.set(f.key, input);
       return h("label", { class: "af-backlog-setting" },
@@ -170,6 +180,18 @@ export class RunnerBar {
       h("p", { class: "af-backlog-reason" }, "Budget · all projects"), ...fields,
       h("p", { class: "af-backlog-reason" }, "Runner · this project"),
       h("label", { class: "af-backlog-setting" }, h("span", { class: "af-backlog-label" }, "When an item is done"), this.onDone));
+  }
+
+  /** Writes go out one at a time, in the order they were made, so the last edit of a field is the
+   *  one the daemon ends up with. */
+  private writeBudget(key: BudgetKey, v: number): void {
+    const done = (): void => {
+      if (this.pendingBudget.get(key) === v) this.pendingBudget.delete(key);
+      this.fill();
+    };
+    this.budgetQueue = this.budgetQueue
+      .then(() => this.actions.setBudget({ [key]: v }))
+      .then(done, done);
   }
 
   private runMain(): void {
@@ -255,7 +277,8 @@ export class RunnerBar {
 
   private fill(): void {
     for (const [key, input] of this.inputs) {
-      if (document.activeElement !== input && this.budget) input.value = String(this.budget[key]);
+      const shown = this.pendingBudget.get(key) ?? this.budget?.[key];
+      if (document.activeElement !== input && shown !== undefined) input.value = String(shown);
     }
     if (this.view && document.activeElement !== this.onDone) this.onDone.value = this.view.backlog.settings.on_done || "keep";
   }

@@ -43,9 +43,13 @@ const DRAG_TYPE = "application/x-af-backlog-item";
 export const EMPTY_COPY = "No items yet · Add one below, or ask an agent to make items from a proposal.";
 
 /** Whether a started item still shows Starting: its request is out, or its
- *  run is starting, or its session has not reached the session list yet. */
-function stillStarting(it: Item | undefined, inFlight: boolean, sessions: SessionData[]): boolean {
+ *  run is starting, or its session has not reached the session list yet and
+ *  the daemon still has the item starting or working. */
+function stillStarting(it: Item | undefined, derived: string | undefined, inFlight: boolean, sessions: SessionData[]): boolean {
   if (inFlight) return true;
+  // The daemon's own state, read after the start's reply, outranks the session list: a session killed
+  // before it ever showed up there leaves the run recorded as started with no session to wait for.
+  if (derived !== undefined && derived !== "starting" && derived !== "working") return false;
   const run = it?.runs?.at(-1);
   if (!run || run.state === "failed") return false;
   if (run.state === "starting") return true;
@@ -173,7 +177,8 @@ export class BacklogPane {
     const gen = this.data?.generation ?? 0;
     for (const [k, s] of this.starts) {
       const it = this.data?.views.get(s.root)?.backlog.items.find((x) => x.id === s.id);
-      if (!stillStarting(it, gen <= s.gen, this.sessions)) this.starts.delete(k);
+      const derived = this.data?.views.get(s.root)?.states[String(s.id)]?.state;
+      if (!stillStarting(it, derived, gen <= s.gen, this.sessions)) this.starts.delete(k);
     }
   }
 
