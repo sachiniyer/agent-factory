@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "f85260aaf663";
+var CLIENT_VERSION = "ee1ee038e40f";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18644,7 +18644,8 @@ function runUse(sessionId, u, now, account = "") {
 }
 function closedGate(b, u, runner, now) {
   if (b && b.share <= 0) return { key: "share:zero", text: "The backlog share is 0%." };
-  if (b && u) {
+  const daemonGate = runner !== null && runner.state !== "off";
+  if (b && u && !daemonGate) {
     for (const k of WINDOWS) {
       const w = u[k];
       if (valid(w, now) && w.backlog >= b.share) {
@@ -18661,8 +18662,10 @@ function closedGate(b, u, runner, now) {
   if (b && b.usd_limit > 0 && b.usd_spent >= b.usd_limit) {
     return { key: "usd_limit", text: `The backlog spent its ${usd(b.usd_limit)} dollar limit.` };
   }
-  if (runner?.state === "stopped" && (runner.gate === "usage_limit" || runner.gate === "usd_limit") && runner.reason) {
-    return { key: runner.gate, text: `${webReason(runner.reason).replace(/\.$/, "")}.` };
+  if (runner?.state === "stopped" && runner.reason) {
+    const text = `${webReason(runner.reason).replace(/\.$/, "")}.`;
+    if (runner.gate === "usage_limit" || runner.gate === "usd_limit") return { key: runner.gate, text };
+    if (runner.gate === "share" || runner.gate === "stop_at") return { key: `${runner.gate}:${runner.reason}`, text };
   }
   return null;
 }

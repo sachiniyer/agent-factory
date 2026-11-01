@@ -143,6 +143,16 @@ test("closedGate names the first closed budget gate, keyed by gate and window", 
   const limited: RunnerView = { state: "stopped", gate: "usage_limit", reason: "Usage limit until 14:00", used: 0, max: 1 };
   assert.deepEqual(g(budget(), usage(), limited), { key: "usage_limit", text: "Usage limit until 14:00." });
   assert.equal(g(null, null, { ...limited, gate: "no_reading" }), null);
+  // With the runner on, the daemon's gate is for the project's account; the top-level
+  // windows are the newest-reading account's and say nothing about it.
+  const on: RunnerView = { state: "running", used: 0, max: 1 };
+  assert.equal(g(budget({ share: 15 }), usage(), on), null, "another account's windows do not close this project's gate");
+  const shareStopped: RunnerView = { state: "stopped", gate: "share", reason: "Backlog used its 15% of 5-hour window · resumes 14:00", used: 0, max: 1 };
+  assert.deepEqual(g(budget(), usage({ five_hour: { plan: 1, backlog: 0, resets_at: SOON } }), shareStopped),
+    { key: `share:${shareStopped.reason}`, text: "Backlog used its 15% of 5-hour window · resumes 14:00." },
+    "the project account's exhausted share asks even when the newest reading is below budget");
+  const stopAt: RunnerView = { ...shareStopped, gate: "stop_at", reason: "Plan at 90% of 5-hour window (stop at 80%) · resumes 14:00" };
+  assert.equal(g(budget(), usage(), stopAt)?.key, `stop_at:${stopAt.reason}`);
   // The daemon's runner view has no gate field: an exhausted dollar limit is read from the budget.
   const stoppedNoGate: RunnerView = { state: "stopped", reason: "Dollar limit reached", used: 0, max: 1 };
   assert.deepEqual(g(budget({ usd_limit: 5, usd_spent: 5 }), null, stoppedNoGate), { key: "usd_limit", text: "The backlog spent its $5.00 dollar limit." });

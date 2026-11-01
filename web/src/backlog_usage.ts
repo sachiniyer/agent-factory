@@ -200,7 +200,10 @@ export interface Gate {
  *  passes the gates, so the web asks once per gate before it does. */
 export function closedGate(b: Budget | null, u: Usage | null, runner: RunnerView | null, now: number): Gate | null {
   if (b && b.share <= 0) return { key: "share:zero", text: "The backlog share is 0%." };
-  if (b && u) {
+  // With the runner on, the daemon's gate is for the account this project's sessions
+  // use; the top-level windows are the newest-reading account's, which may be another.
+  const daemonGate = runner !== null && runner.state !== "off";
+  if (b && u && !daemonGate) {
     for (const k of WINDOWS) {
       const w = u[k];
       if (valid(w, now) && w.backlog >= b.share) {
@@ -219,8 +222,11 @@ export function closedGate(b: Budget | null, u: Usage | null, runner: RunnerView
   if (b && b.usd_limit > 0 && b.usd_spent >= b.usd_limit) {
     return { key: "usd_limit", text: `The backlog spent its ${usd(b.usd_limit)} dollar limit.` };
   }
-  if (runner?.state === "stopped" && (runner.gate === "usage_limit" || runner.gate === "usd_limit") && runner.reason) {
-    return { key: runner.gate, text: `${webReason(runner.reason).replace(/\.$/, "")}.` };
+  if (runner?.state === "stopped" && runner.reason) {
+    const text = `${webReason(runner.reason).replace(/\.$/, "")}.`;
+    if (runner.gate === "usage_limit" || runner.gate === "usd_limit") return { key: runner.gate, text };
+    // The reason names the window and when it resumes, so a new window asks again.
+    if (runner.gate === "share" || runner.gate === "stop_at") return { key: `${runner.gate}:${runner.reason}`, text };
   }
   return null;
 }
