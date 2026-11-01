@@ -129,9 +129,31 @@ func signalProcessChecked(proc proctree.Process) error {
 	log.WarningLog.Printf("sigterm fallback: pid %d did not exit within %s; escalating to SIGKILL", proc.PID, sigtermFallbackGrace)
 	if err := proctree.Signal(proc, syscall.SIGKILL); err != nil {
 		if errors.Is(err, proctree.ErrIdentityChanged) {
-			// Exited between the grace poll and SIGKILL — the daemon is gone,
-			// which is the desired outcome; a recycled PID is not signaled.
-			return nil
+			// Distinguish a confirmed exit from a transient identity-read
+			// failure, as the grace poll above does: proctree.Signal
+			// revalidates via AliveSame, which collapses any read error to
+			// "not alive", so a transiently unreadable identity surfaces here
+			// as ErrIdentityChanged with no SIGKILL sent. Treating that as a
+			// successful stop would report a still-running daemon as stopped
+			// and let reset's liveness barrier abort on it later instead of
+			// completing the teardown (#4793). Re-check via SameIdentity so
+			// only a confirmed exit/identity change returns nil.
+			same, rerr := proctree.SameIdentity(proc)
+			if rerr == nil && !same {
+				// Confirmed exit or identity change — the daemon is gone,
+				// which is the desired outcome; a recycled PID is not signaled.
+				return nil
+			}
+			// Unreadable identity, or still our live instance (the AliveSame
+			// false was a transient read race): in both cases no SIGKILL was
+			// sent and the daemon may still be running. Surface the failure
+			// so the caller does not append this PID to stopped and the
+			// liveness barrier sees the daemon honestly rather than trusting
+			// a false stop.
+			if rerr != nil {
+				return fmt.Errorf("SIGKILL: cannot revalidate pid %d identity: %w", proc.PID, rerr)
+			}
+			return errSignalTargetChanged
 		}
 		return fmt.Errorf("SIGKILL: %w", err)
 	}
