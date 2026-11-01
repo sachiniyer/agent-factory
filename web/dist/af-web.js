@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "79d10f3c0af8";
+var CLIENT_VERSION = "e35a716dbf89";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7371,12 +7371,12 @@ async function fetchPreviewOrigin(sessionId, tabId, token2) {
 }
 async function fetchEditorPortOrigin(sessionId, token2) {
   const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
-  const headers = {};
+  const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }
   try {
-    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    const resp = await fetch(url, { method: "POST", headers, body: "{}", cache: "no-store" });
     if (!resp.ok) {
       return null;
     }
@@ -7465,13 +7465,13 @@ function spawnConfigAssistant(token2) {
   return af("config-assistant", {}, token2);
 }
 async function reapConfigAssistant(token2) {
-  const headers = {};
+  const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }
   let resp;
   try {
-    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers });
+    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers, body: "{}" });
   } catch (e) {
     throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
   }
