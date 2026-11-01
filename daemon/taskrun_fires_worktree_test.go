@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -67,8 +66,10 @@ func TestTaskFireLeftover_BoundCleanWorktreeTombstones(t *testing.T) {
 	}
 	// The row's own id is fresh, so its Worktree must carry the durable
 	// hook-scope handle the fire's original identity minted — the teardown's
-	// survivor pass names scopes from it.
-	if want := systemdunit.HookScopeUnitPrefix(reapInstanceID); row.Worktree.HookScopeUnitPrefix != want {
+	// survivor pass names scopes from it. The handle is synthesized only
+	// where scopes can exist (a systemd user manager): in this test process
+	// taskFireHookScopeHandle is empty either way, so assert through it.
+	if want := taskFireHookScopeHandle(reapInstanceID); row.Worktree.HookScopeUnitPrefix != want {
 		t.Fatalf("the tombstone must carry the fire's hook-scope handle %q, got %q", want, row.Worktree.HookScopeUnitPrefix)
 	}
 	if _, statErr := os.Stat(wtPath); statErr != nil {
@@ -523,3 +524,58 @@ func TestTaskFireLeftover_HookScopesJoinedBeforeCleanProbe(t *testing.T) {
 		t.Fatalf("with the hook join answering, the bound clean worktree must tombstone, got %+v", row)
 	}
 }
+
+// TestTaskFireLeftover_UnreapedWorktreeWriterQuarantines: a process still
+// cwd'd inside the leftover — the shape a git post-checkout hook orphaned
+// mid-Setup takes — can keep writing between the probes and the removal.
+// The gate reaps writers and then requires the table to prove none remain;
+// a survivor, or an unreadable table, quarantines.
+func TestTaskFireLeftover_UnreapedWorktreeWriterQuarantines(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		remaining int
+		err       error
+	}{
+		{name: "a writer survives the reap", remaining: 1},
+		{name: "the process table cannot be read", err: errSentinel},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			title := "unreaped-writer-leftover"
+			repoPath, repo, sanitized, _ := fakeReapFixture(t, title)
+			branch := worktreeBranchFor(t, title)
+			wtPath := filepath.Join(resolvedTempDir(t), "writer-wt")
+			seedLeftoverWorktree(t, repoPath, branch, wtPath)
+			installFakeReapTmux(t, sanitized, fakeReapTmux{absent: true})
+
+			var gotPath string
+			prev := reapAndVerifyWorktreeWriters
+			reapAndVerifyWorktreeWriters = func(path string) (int, error) {
+				gotPath = path
+				return tc.remaining, tc.err
+			}
+			t.Cleanup(func() { reapAndVerifyWorktreeWriters = prev })
+
+			fire := &taskFireMarker{
+				TaskID: "ab0r7211", IntendedAt: time.Now().Add(-time.Minute), Title: title,
+				InstanceID: reapInstanceID, WorktreePath: wtPath,
+			}
+			row, err := taskFireLeftoverRecord(
+				&task.Task{ID: "ab0r7211", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+				fire, repo, nil)
+			if err != nil {
+				t.Fatalf("taskFireLeftoverRecord: %v", err)
+			}
+			if gotPath != wtPath {
+				t.Fatalf("the writer reap must run against the bound worktree, got %q", gotPath)
+			}
+			if row == nil || !row.StartupStateUnknown || row.UserKilled {
+				t.Fatalf("a worktree a live process can still write must quarantine, got %+v", row)
+			}
+			if _, statErr := os.Stat(wtPath); statErr != nil {
+				t.Fatalf("the unproven-clean worktree must be left in place: %v", statErr)
+			}
+		})
+	}
+}
+
+var errSentinel = os.ErrExist

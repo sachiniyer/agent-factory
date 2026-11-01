@@ -309,6 +309,13 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 // Tests stub it to observe the call without a systemd manager.
 var stopOrphanedHookScopes = git.StopOrphanedHookScopes
 
+// reapAndVerifyWorktreeWriters is the seam the clean gate calls through to
+// reap and count the processes cwd'd inside a leftover worktree — a git
+// post-checkout hook orphaned with its daemon writes there in no tmux pane
+// and no hook scope. Tests stub it to model a survivor the process table
+// cannot clear.
+var reapAndVerifyWorktreeWriters = git.ReapAndVerifyWorktreeWriters
+
 func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) {
 	repo, err := repoFromPathForCreate(t.ProjectPath)
 	if err != nil {
@@ -561,6 +568,19 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		}
 	}
 	if clean && wtPath != "" {
+		// The tmux proof covers pane trees and the scope stop covers AF hook
+		// scopes; neither sees a git post-checkout hook orphaned mid-Setup —
+		// it writes inside the worktree with no session and no scope. Reap
+		// every process cwd'd inside, then require the re-scan to find none.
+		// An unreadable table or a survivor is unknown-is-not-clean.
+		remaining, werr := reapAndVerifyWorktreeWriters(wtPath)
+		if werr != nil || remaining > 0 {
+			log.WarningLog.Printf("task %s: cannot prove no writers remain in interrupted-fire worktree %q (reap: %v, remaining: %d) — quarantining it",
+				t.ID, wtPath, werr, remaining)
+			clean = false
+		}
+	}
+	if clean && wtPath != "" {
 		// The unrecoverable-content probe is the dirty check PLUS what `git
 		// status` cannot see: index flags hiding modified content, a locked
 		// registration, object storage inside the tree, a submodule — every
@@ -630,10 +650,23 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 			// handle the fire's ORIGINAL instance identity would have minted
 			// (the scope session id IS the instance id): the teardown's own
 			// survivor pass can then name every scope this leftover's hooks
-			// could still be living in (#6546 Codex).
-			HookScopeUnitPrefix: systemdunit.HookScopeUnitPrefix(fire.InstanceID),
+			// could still be living in (#6546 Codex). Only the systemd daemon
+			// can mint a scope — elsewhere the handle stays empty rather than
+			// naming scopes that never existed.
+			HookScopeUnitPrefix: taskFireHookScopeHandle(fire.InstanceID),
 		},
 	}, nil
+}
+
+// taskFireHookScopeHandle derives the durable scope-unit prefix the fire's
+// instance id would mint — but only where such scopes can exist: on a daemon
+// without the user manager nothing ever entered a scope, and persisting a
+// synthesized handle would name scopes that never ran (Codex on #6546).
+func taskFireHookScopeHandle(instanceID string) string {
+	if !systemdunit.RunningDaemonProcess() {
+		return ""
+	}
+	return systemdunit.HookScopeUnitPrefix(instanceID)
 }
 
 // taskFireForeignRowReason names the identity through which a persisted row
