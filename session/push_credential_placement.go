@@ -101,22 +101,11 @@ func sameSSHDestination(a, b config.SSHConfig) bool {
 		a.User == b.User && port(a.Port) == port(b.Port)
 }
 
-// provenance is who created a session (InstanceData.CreatedBySandbox and
-// CreatedByOperator, immutable after construction, so read without a lock) and
-// whether a re-provision is replacing its runtime right now (under i.mu).
+// provenance is who created a session: InstanceData.CreatedBySandbox and
+// CreatedByOperator. Immutable after construction, so read without a lock.
 type provenance struct {
 	createdBySandbox  string
 	createdByOperator bool
-	// provisioning counts re-provisions in flight (reprovisionRemoteOpts). While
-	// one runs, the runtime handle may be cleared or replaced, so the machine the
-	// session runs on cannot be named, and RuntimeMachine reports Unknown.
-	provisioning int
-	// lastMachine is the machine the row's runtime last ran on, kept when its
-	// handle is cleared (a reap, a pushed archive) and persisted
-	// (InstanceData.PlacedMachine): a reap kills the agent and deletes the
-	// session directory, but not a process a hook detached, so the row keeps
-	// blocking that machine until it is killed. Under i.mu.
-	lastMachine RuntimeMachine
 }
 
 // CreatedBySandbox is the id of the session whose sandbox callback credential

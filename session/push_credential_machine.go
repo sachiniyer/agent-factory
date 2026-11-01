@@ -2,181 +2,184 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
-// Which machine a runtime runs on (#5571 W7.8, security reviews of #6433). The
-// push-credential host rule asks one question of it, Shares, and asks it
-// CONSERVATIVELY: where two runtimes cannot be shown to run on different machines,
-// they are treated as one, because sessions on one machine share its ssh user.
+// Which machine, and which user on it, a runtime runs as (#5571 W7.8, security
+// reviews of #6433). Code the operator did not place TAINTS the machine and user
+// it is placed on, durably, before any of it runs (RecordPlacement); a tainted
+// machine gets no push credential until the operator resets its trust. The
+// identity is compared CONSERVATIVELY: where two cannot be shown to differ, they
+// are one.
 
-// RuntimeMachine names the machine an off-box runtime runs on, from the handle
-// its provision recorded: the ssh destination and the address af actually
-// dialed (the ssh runtime pins it, ssh_machine_pin.go), or the free-form
-// sandbox.ssh command.
+// RuntimeMachine names the machine and login user an off-box runtime runs as,
+// from the handle its provision recorded (or the target a provision will
+// resolve): the ssh destination and the address af actually dialed (the ssh
+// runtime pins it, ssh_machine_pin.go), or the free-form sandbox.ssh command.
 type RuntimeMachine struct {
 	// Host is the ssh destination's host, as configured.
-	Host string `json:"host,omitempty"`
+	Host string
 	// Addr is the address the ssh runtime dialed and pinned; empty when none was
 	// recorded.
-	Addr string `json:"addr,omitempty"`
+	Addr string
+	// User is the ssh login user; empty when af cannot tell (any user).
+	User string
 	// SandboxSSH is the free-form target's sandbox.ssh command.
-	SandboxSSH string `json:"sandbox_ssh,omitempty"`
+	SandboxSSH string
 	// RepoChosen marks an ssh runtime on a repository's own [ssh] target: a
 	// placement the repository chose, not the operator.
-	RepoChosen bool `json:"repo_chosen,omitempty"`
-	// Unknown marks a runtime whose machine af cannot name right now (a
-	// re-provision or create in flight, or a runtime from before af recorded
-	// machines). It shares every machine.
-	Unknown bool `json:"unknown,omitempty"`
-	// why says why it is Unknown, for a message that names the cause; inFlight
-	// marks the Unknown of a re-provision still running.
-	why      string
-	inFlight bool
+	RepoChosen bool
 }
 
-// UnprovenKind classifies why a machine can't be established, so a message can
-// name the remedy that actually ends it.
-type UnprovenKind int
-
-const (
-	// Proven: the machine is known (or names nothing).
-	Proven UnprovenKind = iota
-	// UnprovenInFlight: a re-provision is replacing the runtime; it ends.
-	UnprovenInFlight
-	// UnprovenName: a host name doesn't resolve.
-	UnprovenName
-	// UnprovenOther: anything else (an unconfirmable sandbox.ssh, no record).
-	UnprovenOther
-)
-
-// recorded reports whether m names anything, without resolving it.
-func (m RuntimeMachine) recorded() bool {
-	return m.Unknown || strings.TrimSpace(m.Host) != "" || strings.TrimSpace(m.Addr) != "" || strings.TrimSpace(m.SandboxSSH) != ""
+// MachineIdentity is a machine's canonical identities: lowercased names without
+// a trailing dot, and unmapped, zone-less addresses (as configured, pinned, or
+// resolved), plus the login user. Unproven, when set, says why af cannot
+// establish the machine, which then counts as every machine. It is what a taint
+// persists.
+type MachineIdentity struct {
+	Names    []string `json:"names,omitempty"`
+	Addrs    []string `json:"addrs,omitempty"`
+	User     string   `json:"user,omitempty"`
+	Unproven string   `json:"unproven,omitempty"`
 }
 
-// Unproven says why af cannot establish which machine m is, and so treats it as
-// every machine (a runtime in flight, a name that does not resolve, a
-// sandbox.ssh whose destination ssh cannot confirm), and what kind of reason
-// that is. Empty and Proven when the machine is known, or m names nothing. It
-// may resolve names: never call it under a lock.
-func (m RuntimeMachine) Unproven() (string, UnprovenKind) {
-	id := m.identity()
-	switch {
-	case id.unknown == "":
-		return "", Proven
-	case m.Unknown && m.inFlight:
-		return id.unknown, UnprovenInFlight
-	case id.unresolved:
-		return id.unknown, UnprovenName
-	}
-	return id.unknown, UnprovenOther
+// Empty reports whether the identity names nothing (and so matches nothing).
+func (id MachineIdentity) Empty() bool {
+	return id.Unproven == "" && len(id.Names) == 0 && len(id.Addrs) == 0
 }
 
-// Shares reports whether two runtimes may run on the same machine. They do when
-// either is Unknown, when any canonical name of one matches one of the other's
-// (a short name matches the first label of a longer one), or when their
-// addresses meet, as configured, pinned or resolved. A name that does not
-// resolve cannot be shown to differ from anything, so it shares every machine;
-// so does a sandbox.ssh command whose effective destination af cannot prove
-// (sandboxSSHEffectiveHost). A runtime
-// with nothing recorded runs nowhere and shares nothing.
-//
-// Not detected: two literal addresses of one multi-homed machine that no name
-// links, and an /etc/hosts or DNS answer that differs from what the session's
-// ssh dialed when it was placed (its pinned address is compared too).
-func (m RuntimeMachine) Shares(o RuntimeMachine) bool {
-	a, b := m.identity(), o.identity()
-	if a.empty() || b.empty() {
+// Shares reports whether two identities may be one machine and one user: either
+// is Unproven, a canonical name matches (a short name matching a longer one's
+// first label), or an address does; and the users match, or either is unknown.
+// It resolves nothing.
+func (id MachineIdentity) Shares(o MachineIdentity) bool {
+	if id.Empty() || o.Empty() {
 		return false
 	}
-	if a.unknown != "" || b.unknown != "" {
+	if id.User != "" && o.User != "" && id.User != o.User {
+		return false
+	}
+	if id.Unproven != "" || o.Unproven != "" {
 		return true
 	}
-	for x := range a.names {
-		for y := range b.names {
+	for _, x := range id.Names {
+		for _, y := range o.Names {
 			if x == y || shortNameOf(x, y) || shortNameOf(y, x) {
 				return true
 			}
 		}
 	}
-	for addr := range a.addrs {
-		if b.addrs[addr] {
-			return true
+	for _, a := range id.Addrs {
+		for _, b := range o.Addrs {
+			if a == b {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// machineIdentity is a RuntimeMachine's canonical names and addresses. unknown,
-// when set, is why its machine cannot be established.
-type machineIdentity struct {
-	names      map[string]bool
-	addrs      map[netip.Addr]bool
-	unknown    string
-	unresolved bool
-}
-
-func (id machineIdentity) empty() bool {
-	return id.unknown == "" && len(id.names) == 0 && len(id.addrs) == 0
-}
-
-func (m RuntimeMachine) identity() machineIdentity {
-	id := machineIdentity{names: map[string]bool{}, addrs: map[netip.Addr]bool{}}
-	if m.Unknown {
-		id.unknown = m.why
-		if id.unknown == "" {
-			id.unknown = "af can't name its machine right now"
-		}
-		return id
+// Merge is the union of two identities of one placement.
+func (id MachineIdentity) Merge(o MachineIdentity) MachineIdentity {
+	out := MachineIdentity{Names: union(id.Names, o.Names), Addrs: union(id.Addrs, o.Addrs), User: id.User, Unproven: id.Unproven}
+	if out.User == "" {
+		out.User = o.User
 	}
+	if out.Unproven == "" {
+		out.Unproven = o.Unproven
+	}
+	return out
+}
+
+func union(a, b []string) []string {
+	set := map[string]bool{}
+	for _, s := range append(append([]string(nil), a...), b...) {
+		set[s] = true
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// Shares reports whether two runtimes may run on the same machine as the same
+// user (MachineIdentity.Shares). It may resolve names: never call it under a lock.
+func (m RuntimeMachine) Shares(o RuntimeMachine) bool {
+	return m.Identity().Shares(o.Identity())
+}
+
+// Unproven says why af cannot establish which machine m is ("" when it can, or m
+// names nothing). It may resolve names: never call it under a lock.
+func (m RuntimeMachine) Unproven() string {
+	return m.Identity().Unproven
+}
+
+// recorded reports whether m names anything, without resolving it.
+func (m RuntimeMachine) recorded() bool {
+	return strings.TrimSpace(m.Host) != "" || strings.TrimSpace(m.Addr) != "" || strings.TrimSpace(m.SandboxSSH) != ""
+}
+
+// Identity is m's canonical identities, resolving its names (cached, bounded) and
+// asking ssh where a sandbox.ssh command goes. A name that does not resolve, or a
+// sandbox.ssh whose destination ssh cannot confirm, makes it Unproven.
+//
+// Not detected: two literal addresses of one multi-homed machine that no name
+// links, and a DNS or /etc/hosts answer that differs from what the session's ssh
+// dialed (its pinned address is compared too).
+func (m RuntimeMachine) Identity() MachineIdentity {
+	var names, addrs []string
+	unproven := ""
+	user := strings.TrimSpace(m.User)
 	hosts := []string{m.Host, m.Addr}
 	if strings.TrimSpace(m.SandboxSSH) != "" {
-		dest, ok := sandboxSSHEffectiveHost(m.SandboxSSH)
+		dest, sshUser, ok := sandboxSSHEffective(m.SandboxSSH)
 		if !ok {
-			id.unknown = "ssh can't confirm which machine its sandbox.ssh command reaches"
-			return id
+			return MachineIdentity{Unproven: "ssh can't confirm which machine its sandbox.ssh command reaches"}
 		}
 		hosts = append(hosts, dest)
+		if user == "" {
+			user = sshUser
+		}
 	}
 	for _, h := range hosts {
-		id.add(h)
-	}
-	return id
-}
-
-// add records h: an address in canonical form (IPv4-mapped IPv6 unmapped, zone
-// dropped), or a canonical name with every address it resolves to. A name that
-// does not resolve makes the identity unknown.
-func (id *machineIdentity) add(h string) {
-	h = canonicalMachineName(h)
-	if h == "" {
-		return
-	}
-	if addr, err := netip.ParseAddr(h); err == nil {
-		id.addrs[addr.Unmap().WithZone("")] = true
-		return
-	}
-	id.names[h] = true
-	addrs, err := resolveMachine(h)
-	if err != nil || len(addrs) == 0 {
-		if id.unknown == "" {
-			id.unknown, id.unresolved = "its host name "+h+" doesn't resolve", true
+		h = canonicalMachineName(h)
+		if h == "" {
+			continue
 		}
-		return
+		if addr, err := netip.ParseAddr(h); err == nil {
+			addrs = append(addrs, addr.Unmap().WithZone("").String())
+			continue
+		}
+		names = append(names, h)
+		resolved, err := resolveMachine(h)
+		if err != nil || len(resolved) == 0 {
+			if unproven == "" {
+				unproven = "its host name " + h + " doesn't resolve"
+			}
+			continue
+		}
+		for _, a := range resolved {
+			addrs = append(addrs, a.String())
+		}
 	}
-	for _, a := range addrs {
-		id.addrs[a] = true
-	}
+	return MachineIdentity{Names: union(names, nil), Addrs: union(addrs, nil), User: user, Unproven: unproven}
 }
 
 // canonicalMachineName lowercases a host, and drops IPv6 brackets and a
@@ -211,6 +214,17 @@ const sshFlagsWithArgument = "BbcDEeFIiJLlmOoPpQRSWw"
 //   - ssh -G fails or prints no hostname;
 //   - a ProxyCommand is in effect, which can reach any machine whatever the
 //     hostname says.
+func sandboxSSHEffective(command string) (host, user string, ok bool) {
+	host, ok = sandboxSSHEffectiveHost(command)
+	if !ok {
+		return "", "", false
+	}
+	sshEffectiveHosts.mu.Lock()
+	user = sshEffectiveHosts.m[strings.TrimSpace(command)].user
+	sshEffectiveHosts.mu.Unlock()
+	return host, user, true
+}
+
 func sandboxSSHEffectiveHost(command string) (string, bool) {
 	command = strings.TrimSpace(command)
 	if command == "" || strings.ContainsAny(command, "'\"`$;&|<>(){}*?[]#!\\\n") {
@@ -229,12 +243,14 @@ func sandboxSSHEffectiveHost(command string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), machineLookupTimeout)
 	defer cancel()
 	out, err := sshPrintConfig(ctx, words[0], words[1:])
-	host, ok := "", err == nil
+	host, user, ok := "", "", err == nil
 	for _, line := range strings.Split(out, "\n") {
 		k, v, _ := strings.Cut(strings.TrimSpace(line), " ")
 		switch strings.ToLower(k) {
 		case "hostname":
 			host = strings.TrimSpace(v)
+		case "user":
+			user = strings.TrimSpace(v)
 		case "proxycommand":
 			if v = strings.TrimSpace(v); v != "" && !strings.EqualFold(v, "none") {
 				ok = false
@@ -247,15 +263,15 @@ func sandboxSSHEffectiveHost(command string) (string, bool) {
 		ttl = machineLookupFailTTL
 	}
 	sshEffectiveHosts.mu.Lock()
-	sshEffectiveHosts.m[command] = sshEffectiveHost{host: host, ok: ok, until: time.Now().Add(ttl)}
+	sshEffectiveHosts.m[command] = sshEffectiveHost{host: host, user: user, ok: ok, until: time.Now().Add(ttl)}
 	sshEffectiveHosts.mu.Unlock()
 	return host, ok
 }
 
 type sshEffectiveHost struct {
-	host  string
-	ok    bool
-	until time.Time
+	host, user string
+	ok         bool
+	until      time.Time
 }
 
 var sshEffectiveHosts = struct {
@@ -420,100 +436,20 @@ func flushMachineLookups() {
 	sshEffectiveHosts.mu.Unlock()
 }
 
-// RuntimeMachine reports the machine this session's off-box runtime runs on,
-// for any ssh runtime (a listed host or a repository's [ssh] target) and the
-// free-form sandbox target. It copies the row's fields under the instance lock
-// and resolves nothing there (a slow resolver must never stall a writer).
-//
-//   - While a re-provision is replacing the runtime, the machine is Unknown;
-//     whether the repository chose the placement comes from the recorded
-//     runtime, never from Instance.Host (default_host leaves that empty).
-//   - With no runtime handle, it is the machine the row last ran on: a reap
-//     does not reach a process a hook detached, so the row keeps standing for
-//     that machine until it is killed. An off-box row with no record (from
-//     before af kept one) is Unknown.
-//
-// ok is false for a row that never ran off-box: local, docker or hook.
+// RuntimeMachine reports the machine and user this session's off-box runtime
+// runs as, from its runtime handle: any ssh runtime (a listed host or a
+// repository's [ssh] target) or the free-form sandbox target. It copies the
+// handle under the instance lock and resolves nothing there, so a slow resolver
+// can never stall a writer. ok is false with no runtime handle.
 func (i *Instance) RuntimeMachine() (RuntimeMachine, bool) {
 	i.mu.RLock()
-	var current RuntimeMachine
+	var data *RuntimeCleanupData
 	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
-		current = machineOf(provider.runtimeCleanupData())
+		data = provider.runtimeCleanupData()
 	}
-	last, provisioning := i.lastMachine, i.provisioning > 0
-	_, sandbox := i.backend.(*sandboxBackend)
-	_, ssh := i.backend.(*sshBackend)
+	m := machineOf(data)
 	i.mu.RUnlock()
-
-	recorded := current
-	if !recorded.recorded() {
-		recorded = last
-	}
-	switch {
-	case provisioning:
-		repo := !sandbox
-		if recorded.recorded() {
-			repo = recorded.RepoChosen
-		}
-		return RuntimeMachine{Unknown: true, RepoChosen: repo, why: "it is being re-provisioned onto a machine af can't name yet", inFlight: true}, true
-	case recorded.recorded():
-		return recorded, true
-	case ssh || sandbox:
-		return RuntimeMachine{Unknown: true, RepoChosen: !sandbox, why: "it ran off the daemon box before af recorded where"}, true
-	}
-	return RuntimeMachine{}, false
-}
-
-// placedMachineLocked is the machine to persist: the live runtime's, else the
-// last one recorded. Caller holds i.mu.
-func (i *Instance) placedMachineLocked() *RuntimeMachine {
-	m := i.lastMachine
-	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
-		if cur := machineOf(provider.runtimeCleanupData()); cur.recorded() {
-			m = cur
-		}
-	}
-	if !m.recorded() || m.Unknown {
-		return nil
-	}
-	return &m
-}
-
-// rememberMachineLocked keeps the machine of a runtime handle about to be
-// cleared. Caller holds i.mu.
-func (i *Instance) rememberMachineLocked(provider runtimeCleanupProvider) {
-	if m := machineOf(provider.runtimeCleanupData()); m.recorded() {
-		i.lastMachine = m
-	}
-}
-
-// provenanceFromData restores who created a row and where it last ran.
-func provenanceFromData(data InstanceData) provenance {
-	p := provenance{createdBySandbox: data.CreatedBySandbox, createdByOperator: data.CreatedByOperator}
-	placed := data.PlacedMachine
-	if placed == nil {
-		placed = data.placedMachine // a live snapshot, not yet stored
-	}
-	if placed != nil {
-		p.lastMachine = *placed
-		p.lastMachine.Unknown = false
-	}
-	return p
-}
-
-// beginProvisioning marks a re-provision in flight; the returned func ends it.
-func (i *Instance) beginProvisioning() (end func()) {
-	i.mu.Lock()
-	i.provisioning++
-	i.mu.Unlock()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			i.mu.Lock()
-			i.provisioning--
-			i.mu.Unlock()
-		})
-	}
+	return m, m.recorded()
 }
 
 func machineOf(data *RuntimeCleanupData) RuntimeMachine {
@@ -522,45 +458,152 @@ func machineOf(data *RuntimeCleanupData) RuntimeMachine {
 		return RuntimeMachine{}
 	case data.SSH != nil:
 		addr, _ := sshPinnedCleanupTarget(data.SSH)
-		return RuntimeMachine{Host: data.SSH.Config.Host, Addr: addr, RepoChosen: data.SSH.HostName == ""}
+		return RuntimeMachine{Host: data.SSH.Config.Host, Addr: addr, User: sshLoginUser(data.SSH.Config), RepoChosen: data.SSH.HostName == ""}
 	case data.Sandbox != nil:
 		return RuntimeMachine{SandboxSSH: data.Sandbox.SSHCommand}
 	}
 	return RuntimeMachine{}
 }
 
+// Placement is one placement of code the operator did not place, as a recorder
+// persists it: the session, why it isn't the operator's, and where it runs.
+type Placement struct {
+	SessionID, Title, Why string
+	Machine               RuntimeMachine
+}
+
+// PlacementRecorder is the optional half of SandboxCredentials that records a
+// Placement DURABLY. It is called before any of the placement's code can run on
+// the machine; an error refuses the provision (#5571 W7.8, design steer on #6433).
+type PlacementRecorder interface {
+	RecordPlacement(p Placement) error
+}
+
+// placementWhy is why a session's placement is not the operator's, or "" when it
+// is: the operator created it AND chose where it runs.
+func placementWhy(createdBySandbox string, createdByOperator bool, m RuntimeMachine) string {
+	switch {
+	case createdBySandbox != "":
+		return "created by another session's af"
+	case !createdByOperator:
+		return "of unknown provenance (created before af recorded who creates a session)"
+	case m.RepoChosen:
+		return "on a repository's own [ssh] target, which the repository chose"
+	}
+	return ""
+}
+
+func recordPlacement(creds SandboxCredentials, p Placement) error {
+	recorder, ok := creds.(PlacementRecorder)
+	if !ok || p.Why == "" || !p.Machine.recorded() {
+		return nil
+	}
+	return recorder.RecordPlacement(p)
+}
+
+// provisionRecordingPlacement is NewInstance's provision: a create the operator
+// did not place has its planned machine recorded BEFORE the backend factory
+// runs anything there, and the machine it actually provisioned (with the
+// address it dialed) recorded after, whether or not the create later fails.
+func provisionRecordingPlacement(opts InstanceOptions, absPath string, kind BackendKind) (ProvisionResult, error) {
+	createdByOperator := opts.CreatedBySandbox == ""
+	if planned, offBox, err := planRuntimeMachine(opts, absPath); err == nil && offBox {
+		why := placementWhy(opts.CreatedBySandbox, createdByOperator, planned)
+		if err := recordPlacement(opts.SandboxCredentials, Placement{SessionID: opts.ID, Title: opts.Title, Why: why, Machine: planned}); err != nil {
+			return ProvisionResult{}, fmt.Errorf("cannot record where this session's code will run, so it is not provisioned: %w", err)
+		}
+	}
+	res, err := backendFactory(opts, absPath, kind)
+	if provider, ok := res.Backend.(runtimeCleanupProvider); ok {
+		m := machineOf(provider.runtimeCleanupData())
+		if rerr := recordPlacement(opts.SandboxCredentials, Placement{SessionID: opts.ID, Title: opts.Title,
+			Why: placementWhy(opts.CreatedBySandbox, createdByOperator, m), Machine: m}); rerr != nil {
+			log.WarningLog.Printf("session %q: could not record the address its runtime dialed: %v", opts.Title, rerr)
+		}
+	}
+	return res, err
+}
+
+// recordReprovisionPlacement records, before a re-provision runs anything, the
+// machine it will provision onto, when the session is not the operator's to
+// place. A target the runtime cannot resolve provisions nothing.
+func (i *Instance) recordReprovisionPlacement() error {
+	i.mu.RLock()
+	creds, host, path := i.sandboxCreds, i.Host, i.Path
+	var kind BackendKind
+	switch i.backend.(type) {
+	case *sshBackend:
+		kind = BackendSSH
+	case *sandboxBackend:
+		kind = BackendSandbox
+	}
+	bySandbox, byOperator, id, title := i.createdBySandbox, i.createdByOperator, i.ID, i.Title
+	i.mu.RUnlock()
+	if kind == "" {
+		return nil
+	}
+	planned, offBox, err := planRuntimeMachine(InstanceOptions{Host: host, Backend: kind}, path)
+	if err != nil || !offBox {
+		return nil
+	}
+	if err := recordPlacement(creds, Placement{SessionID: id, Title: title, Why: placementWhy(bySandbox, byOperator, planned), Machine: planned}); err != nil {
+		return fmt.Errorf("session %q: cannot record where its re-provisioned code will run, so it is not re-provisioned: %w", title, err)
+	}
+	return nil
+}
+
+// recordBoundPlacement records the machine a freshly bound runtime handle names
+// (the address it dialed), for a session not the operator's to place.
+func (i *Instance) recordBoundPlacement() {
+	m, ok := i.RuntimeMachine()
+	if !ok {
+		return
+	}
+	i.mu.RLock()
+	creds, why, id, title := i.sandboxCreds, placementWhy(i.createdBySandbox, i.createdByOperator, m), i.ID, i.Title
+	i.mu.RUnlock()
+	if err := recordPlacement(creds, Placement{SessionID: id, Title: title, Why: why, Machine: m}); err != nil {
+		log.WarningLog.Printf("session %q: could not record the address its runtime dialed: %v", title, err)
+	}
+}
+
+// PlacementWhy is why this row's placement is not the operator's ("" when it is),
+// for the daemon's taint of rows it restores.
+func (i *Instance) PlacementWhy(m RuntimeMachine) string {
+	return placementWhy(i.createdBySandbox, i.createdByOperator, m)
+}
+
 // PlannedRuntimeMachine is the machine a create with opts would provision onto,
 // resolved before it provisions, the way the runtime itself will resolve it:
 // the listed host chooseListedHost picks (named, or default_host), the
 // repository's own [ssh] target, or the free-form sandbox.ssh target. offBox is
-// false for a runtime that gets no af callback (local, docker, hook). A target
-// that cannot be resolved here is Unknown.
-func PlannedRuntimeMachine(opts InstanceOptions, repoRoot string) (m RuntimeMachine, offBox bool) {
-	unknown := RuntimeMachine{Unknown: true, RepoChosen: true, why: "af can't resolve where its create will run"}
+// false for a runtime that gets no af callback (local, docker, hook). An error is
+// one the runtime's own resolution hits too, so nothing is provisioned.
+func PlannedRuntimeMachine(opts InstanceOptions, repoRoot string) (m RuntimeMachine, offBox bool, err error) {
 	kind, err := BackendKindFor(opts, repoRoot)
 	if err != nil {
-		return unknown, true
+		return RuntimeMachine{}, false, err
 	}
 	if !kind.InjectsSandboxCallback() {
-		return RuntimeMachine{}, false
+		return RuntimeMachine{}, false, nil
 	}
 	cfg, err := resolvedConfigFor(repoRoot)
 	if err != nil || cfg == nil {
-		return unknown, true
+		return RuntimeMachine{}, true, fmt.Errorf("cannot resolve the config: %w", err)
 	}
 	if kind == BackendSandbox {
-		return RuntimeMachine{SandboxSSH: cfg.SandboxSSH}, true
+		return RuntimeMachine{SandboxSSH: cfg.SandboxSSH}, true, nil
 	}
 	name, listed, err := chooseListedHost(opts.Host, cfg)
 	switch {
 	case err != nil:
-		return unknown, true
+		return RuntimeMachine{}, true, err
 	case name != "" && listed != nil:
-		return RuntimeMachine{Host: listed.Host}, true
+		return RuntimeMachine{Host: listed.Host, User: sshLoginUser(sshConfigForHost(*listed))}, true, nil
 	case cfg.SSH != nil && strings.TrimSpace(cfg.SSH.Host) != "":
-		return RuntimeMachine{Host: cfg.SSH.Host, RepoChosen: true}, true
+		return RuntimeMachine{Host: cfg.SSH.Host, User: sshLoginUser(*cfg.SSH), RepoChosen: true}, true, nil
 	}
-	return unknown, true
+	return RuntimeMachine{}, true, fmt.Errorf("no ssh target is configured")
 }
 
 // resolvedConfigFor is the config a runtime resolves for repoRoot; a var so a
@@ -575,8 +618,20 @@ var resolvedConfigFor = func(repoRoot string) (*config.ResolvedConfig, error) {
 	return config.ResolveConfig(repoRoot)
 }
 
-// InFlightRuntimeMachineForTest is the machine RuntimeMachine reports while a
-// re-provision runs, for tests outside this package that place a row mid-flight.
-func InFlightRuntimeMachineForTest(repoChosen bool) RuntimeMachine {
-	return RuntimeMachine{Unknown: true, RepoChosen: repoChosen, why: "it is being re-provisioned onto a machine af can't name yet", inFlight: true}
+// HostMachine is the machine and login user a listed host entry names, as its
+// ssh runtime will dial it.
+func HostMachine(entry config.HostConfig) RuntimeMachine {
+	return RuntimeMachine{Host: entry.Host, User: sshLoginUser(sshConfigForHost(entry))}
+}
+
+// planRuntimeMachine is PlannedRuntimeMachine, as provisioning calls it; a var so
+// a test can place a create without a repository.
+var planRuntimeMachine = PlannedRuntimeMachine
+
+// SetPlannedRuntimeMachineForTest makes provisioning plan with f, and returns a
+// restore function. For tests outside this package.
+func SetPlannedRuntimeMachineForTest(f func(opts InstanceOptions, repoRoot string) (RuntimeMachine, bool, error)) (restore func()) {
+	prev := planRuntimeMachine
+	planRuntimeMachine = f
+	return func() { planRuntimeMachine = prev }
 }

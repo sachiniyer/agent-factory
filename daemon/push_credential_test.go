@@ -110,6 +110,9 @@ func newPushFixture(t *testing.T) *pushFixture {
 	pf.setConfig(func(c *config.Config) {
 		c.Hosts = map[string]config.HostConfig{"box1": {Host: "box1.example", PushCredentials: true}}
 	})
+	// Taints are recorded in the test's own file, and the restore pass is done.
+	f.mgr.pushCreds.taints.path = filepath.Join(t.TempDir(), pushTaintFileName)
+	f.mgr.pushCreds.taints.restored.Store(true)
 	// Machine names resolve here, never in DNS (session.RuntimeMachine.Shares).
 	t.Cleanup(session.SetMachineLookupForTest(map[string][]string{
 		"box1.example":  {"198.51.100.7"},

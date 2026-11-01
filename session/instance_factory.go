@@ -598,7 +598,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, resolveBackendErr
 	}
 
-	res, err := backendFactory(opts, absPath, kind)
+	res, err := provisionRecordingPlacement(opts, absPath, kind)
 	if err != nil {
 		return nil, err
 	}
