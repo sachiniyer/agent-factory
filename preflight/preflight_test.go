@@ -356,6 +356,13 @@ func TestRelativeExecutable(t *testing.T) {
 		// advisory, not a false PASS against the doctor's cwd.
 		{name: "env command operand relative wrapper", command: "env ./bin/launcher codex", want: true},
 		{name: "env command operand bare wrapper is not anchoring", command: "env launcher codex", want: false},
+		// A bare env operand is looked up through env's PATH, so a relative or
+		// empty entry anchors it even though the detected agent token is an
+		// absolute path: CheckCommand resolves env and the absolute codex but
+		// never the intervening bare operand, whose lookup flips with the
+		// launch directory through the relative PATH entry.
+		{name: "env bare operand relative PATH", command: "env PATH=bin launcher /usr/bin/codex", want: true},
+		{name: "env bare operand absolute PATH not anchoring", command: "env PATH=/usr/bin launcher /usr/bin/codex", want: false},
 		// A bare shell wrapper (env) is looked up through the shell-prefix
 		// PATH, so a relative PATH entry anchors it even when the detected
 		// agent token is an absolute path a chdir would otherwise fix.
@@ -384,6 +391,13 @@ func TestRelativeExecutable(t *testing.T) {
 		{name: "opaque relative wrapper", command: "./my-wrapper --ready", want: true},
 		{name: "opaque bare wrapper", command: "my-wrapper --ready", want: false},
 		{name: "unterminated quote defers to CheckCommand", command: "claude --bad'", want: false},
+		// An unterminated quote on a relative override must defer to
+		// CheckCommand too: CommandEnvironmentFromCommand tolerates unclosed
+		// quotes, so without the stricter shellWords check the relative
+		// executable would make RelativeExecutable return true and the doctor
+		// would emit a non-problem "unverified" advisory instead of letting
+		// CheckCommand report the malformed command.
+		{name: "relative exe unterminated quote defers to CheckCommand", command: "./bin/claude '", want: false},
 		{name: "empty command", command: "", want: false},
 	}
 	for _, tc := range cases {
@@ -413,5 +427,23 @@ func TestRelativeExecutable_InheritedRelativePath(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin"+string(os.PathListSeparator)+"/bin")
 	if RelativeExecutable("claude") {
 		t.Errorf("RelativeExecutable(%q) with an absolute inherited PATH = true, want false", "claude")
+	}
+}
+
+// TestRelativeExecutable_AbsolutePathEntryResolvesFirst pins that a bare
+// executable already present at an absolute PATH entry before a relative one
+// is anchor-independent: PATH resolution stops at the first match, so the
+// later relative entry is never consulted and the doctor outside a repo can
+// verify the command directly instead of downgrading a conclusive PASS to an
+// unverified advisory.
+func TestRelativeExecutable_AbsolutePathEntryResolvesFirst(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "codex")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+"bin")
+	if RelativeExecutable("codex") {
+		t.Errorf("RelativeExecutable(%q) with an absolute PATH entry resolving before a relative one = true, want false", "codex")
 	}
 }
