@@ -1032,7 +1032,9 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
   never gets push credentials. Neither does a session af has no record of who
   created, such as one from before af kept that record: re-create it to make it
   eligible. A session without push credentials also can't prompt, schedule a
-  task for, or `archive --push` one that has them.
+  task for, or `archive --push` one that has them, or any session on an
+  opted-in machine, even one that has none (such as one listed through another
+  host entry for the same machine).
 - **Only a machine no code you didn't place has run on.** When af places code
   you didn't place on a machine, it records a *taint* on that machine first,
   before any of the code can run, whichever login it runs as. That covers:
@@ -1052,8 +1054,9 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
   host is opted in, af also refuses to place code you didn't place on a machine
   it can't identify, rather than guess. One placed while nothing was opted in is
   kept as an *unconfirmed* taint. Since af can't show it ran on another machine,
-  no host can be opted in until you clear it with
-  `af hosts reset-trust --entry <id>`. A reset is durable: restarting the daemon
+  no host gets push credentials, or can be opted in, until you clear it with
+  `af hosts reset-trust --entry <id>`. That holds however a host was opted in,
+  editing `config.toml` by hand included. A reset is durable: restarting the daemon
   doesn't bring a cleared taint back.
 - **One machine, compared carefully.** af treats two hosts as one machine when
   a name matches or an address does. Case, a trailing dot, and a short name for
@@ -1143,7 +1146,7 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
 | Who | Gets the token? |
 |---|---|
 | Another session on the same host | **Not through af.** Its wiring names its own session directory, the daemon answers it only for its own origin and only through its own forward, and the token is never stored on the host. While the host is opted in, af has placed no code you didn't place on its machine since the last reset: it refuses to, and answers nobody on a machine where such code ever went. **But** sessions on one host share its ssh user. Any process running as that user can read a session's `0600` `af-callback.env`, connect to that session's own socket, and ask as that session, for that session's origin, until that session ends. That includes one of your sessions, or something a past session left running. That is the trust opting in grants (above). A Unix user per session would close it ([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)). |
-| A repository running on a host you didn't opt in | **No.** A session it creates through af is never eligible and can't be created on a host you opted in. A machine one ran on is tainted: no push credentials, and no opting it in, until you recreate or wipe its users and run `af hosts reset-trust`. It also can't prompt, schedule for or `archive --push` a session that is eligible. |
+| A repository running on a host you didn't opt in | **No.** A session it creates through af is never eligible and can't be created on a host you opted in. A machine one ran on is tainted: no push credentials, and no opting it in, until you recreate or wipe its users and run `af hosts reset-trust`. It also can't prompt, schedule for or `archive --push` a session that is eligible, or any session on an opted-in machine. |
 | Programs the agent runs (a Makefile, a script, a repository's git hooks) | **Never handed it.** af puts the token in no environment, command line or file of theirs. They run with the agent's authority, so they can run `git push` or `gh` themselves, exactly as on a local worktree with your `gh` login, and git is answered only for the session's own origin. |
 | Commands af runs itself | **The same, stated plainly.** `post_worktree_commands` and process tabs run in the session after provisioning has wired the helper and the shim and the callback is up. While the switch is on, they can call the helper or `gh` like any program in the session, and none of them is handed the token. `on_archive_command` for a sandbox session runs on the daemon machine, after the archive has revoked the callback, so it never sees the credential. |
 | Other users on the host | **No.** The session directory is `0700`, the callback file and socket are `0600`, and the token is never on a command line. Root on the host is trusted, as for synced accounts. |
