@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, mock, test } from "node:test";
 import assert from "node:assert/strict";
 
+import { backlogRoutes } from "./backlog_api.js";
 import { type BacklogData, BacklogLoader, EMPTY_BACKLOG_DATA } from "./backlog_data.js";
 
 interface Pending {
@@ -109,7 +110,7 @@ test("a failed refetch keeps the last view and records the error", async () => {
   assert.equal(state.budget?.usd_spent, 1);
 });
 
-test("a spend event refetches only the budget", async () => {
+test("a spend event applies in place and wins over a budget read before it", async () => {
   const l = loader();
   void l.refresh();
   await settle();
@@ -117,16 +118,50 @@ test("a spend event refetches only the budget", async () => {
   answer("GetBudget", budgetOf(1));
   await settle();
   const views = state.views;
-  l.requestBudget();
-  l.requestBudget();
-  mock.timers.tick(150);
+  void l.refresh();
   await settle();
-  assert.deepEqual(pending.map((p) => p.method), ["GetBudget"]);
-  answer("GetBudget", budgetOf(2.5));
-  await settle();
-  assert.equal(state.budget?.usd_spent, 2.5);
+  l.applySpend({
+    five_hour: { plan: 40, backlog: 12, resets_at: "2000-01-01T05:00:00Z", all_cost: 20 },
+    seven_day: { plan: 30, backlog: 18, resets_at: null },
+    reading_at: "2000-01-01T00:00:00Z",
+    runs: { s1: 1.25 },
+  });
+  assert.deepEqual(pending.map((p) => p.method).sort(), ["GetBacklog", "GetBudget"]);
+  assert.equal(state.usage?.five_hour.backlog, 12);
+  assert.equal(state.usage?.runs.s1, 1.25);
   assert.equal(state.views, views);
-  assert.equal(state.generation, 1);
+  answer("GetBacklog", backlogOf("b"));
+  answer("GetBudget", { ...(budgetOf(2) as object), windows: { five_hour: { plan: 1, backlog: 1, resets_at: null } }, runs: {},
+    unmeterable: { s7: "the runner can't meter aider" } });
+  await settle();
+  assert.equal(state.budget?.usd_spent, 2);
+  assert.equal(state.usage?.five_hour.backlog, 12);
+  assert.equal(state.usage?.runs.s1, 1.25);
+  assert.deepEqual(state.usage?.unmeterable, { s7: "the runner can't meter aider" }, "an older spend payload names no unmeterable runs");
+});
+
+test("unmeterable runs follow the newest source that names them", async () => {
+  const l = loader();
+  void l.refresh();
+  await settle();
+  answer("GetBacklog", backlogOf("a"));
+  answer("GetBudget", { ...(budgetOf(1) as object), unmeterable: { s7: "old" } });
+  await settle();
+  void l.refresh();
+  await settle();
+  l.applySpend({ five_hour: {}, seven_day: {}, reading_at: null, runs: {}, run_window: { s1: 0.5 }, unmeterable: {} });
+  assert.deepEqual(state.usage?.unmeterable, {});
+  assert.deepEqual(state.usage?.run_window, { s1: 0.5 });
+  answer("GetBacklog", backlogOf("a"));
+  answer("GetBudget", { ...(budgetOf(1) as object), unmeterable: { s7: "old" } });
+  await settle();
+  assert.deepEqual(state.usage?.unmeterable, {}, "a reply read before the spend event does not bring back a cleared run");
+  void l.refresh();
+  await settle();
+  answer("GetBacklog", backlogOf("a"));
+  answer("GetBudget", { ...(budgetOf(1) as object), unmeterable: { s8: "new" } });
+  await settle();
+  assert.deepEqual(state.usage?.unmeterable, { s8: "new" });
 });
 
 import { backlogEventAction, runSessionIds } from "./backlog_data.js";
@@ -136,7 +171,7 @@ test("every backlog.changed frame is a full re-read, whatever its ids say", () =
   // empty list means "refresh the project". The decision is on the type alone.
   assert.equal(backlogEventAction("backlog.changed"), "refresh");
   assert.equal(backlogEventAction("backlog.runner"), "refresh");
-  assert.equal(backlogEventAction("backlog.spend"), "budget");
+  assert.equal(backlogEventAction("backlog.spend"), "spend");
   assert.equal(backlogEventAction("session.updated"), null);
 });
 
@@ -156,7 +191,7 @@ test("runSessionIds collects every run's session across projects", () => {
   const mk = (...items: unknown[]) => ({ backlog: { items } }) as never;
   const ids = runSessionIds({
     views: new Map([["/a", mk({ runs: [run("s1"), run("")] }, { runs: undefined })], ["/b", mk({ runs: [run("s2")] })]]),
-    errors: new Map(), budget: null, generation: 1,
+    errors: new Map(), budget: null, usage: null, generation: 1,
   });
   assert.deepEqual([...ids].sort(), ["s1", "s2"]);
 });
@@ -208,4 +243,33 @@ test("a refresh a newer one superseded is acknowledged only by what the newer on
   answer("GetBudget", budgetOf(1));
   assert.equal(await newest, true);
   assert.equal(await again, true, "the newer snapshot that carries the edit committed");
+});
+
+test("a spend event is followed by a budget read that renews which account the windows are for", async () => {
+  const l = loader();
+  state = { ...EMPTY_BACKLOG_DATA, usage: { metering: true, account: "default", accounts: { default: {} as never }, five_hour: {} as never, seven_day: {} as never, reading_at: null, runs: {}, run_window: {}, unmeterable: {} } as never };
+  l.applySpend({ five_hour: {}, seven_day: {}, reading_at: null, runs: {}, run_window: {}, unmeterable: {} });
+  assert.equal(pending.length, 0, "debounced");
+  mock.timers.tick(150);
+  await settle();
+  assert.deepEqual(pending.map((p) => p.method), ["GetBudget"]);
+  answer("GetBudget", { budget: { share: 30, stop_at: 80, max_per_run: 10, usd_limit: 0, usd_spent: 0 }, account: "work", accounts: { work: { windows: { five_hour: { plan: 20 } } } }, windows: {} });
+  await settle();
+  assert.equal(state.usage?.account, "work", "the account the daemon now meters replaces the one kept");
+});
+
+test("a saved budget's reply is committed and a GetBudget read before it is dropped", async () => {
+  const l = loader();
+  void l.refresh();
+  await settle();
+  l.applyBudget({ budget: { share: 10, stop_at: 80, max_per_run: 5, usd_limit: 0, usd_spent: 0 }, usage: null as never });
+  assert.equal(state.budget?.share, 10);
+  answer("GetBacklog", backlogOf("a"));
+  answer("GetBudget", budgetOf(1)); // read before the save: must not put the old budget back
+  await settle();
+  assert.equal(state.budget?.share, 10);
+});
+
+test("Run next is on: the daemon serves RunBacklog", () => {
+  assert.equal(backlogRoutes.runBacklog, true);
 });
