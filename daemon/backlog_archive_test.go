@@ -462,7 +462,7 @@ func TestRecoveryMarksAnArchiveWithAQuestionLeftAndAnAnswerPending(t *testing.T)
 		t.Fatal(err)
 	}
 	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
-		_, err := b.Answer(1, 0, "Postgres", true, time.Now())
+		_, err := b.Answer(1, 0, "Postgres", time.Now())
 		return err
 	}); err != nil {
 		t.Fatal(err)

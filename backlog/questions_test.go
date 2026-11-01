@@ -1,6 +1,7 @@
 package backlog
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -152,27 +153,34 @@ func TestServiceAnswerResumesReviewAndRestores(t *testing.T) {
 	}
 }
 
-func TestServiceAnswerGoneKeepsAnswer(t *testing.T) {
+// An answer whose session is gone goes to the host, which starts a new run with
+// it: the service names the gone session so the host can refuse a replaced one,
+// and writes nothing itself.
+func TestServiceAnswerGoneStartsANewRun(t *testing.T) {
 	s, h := newTestService(t)
 	mustAdd(t, s, ItemInput{Key: "a", Title: "A"})
 	withRun(t, 1, StatusRunning)
 	ask(t, s, "q")
 	h.target = TargetGone
-	_, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "a"})
-	want := `the session for B-1 is gone; start it again with "af backlog start 1" — your answer is kept in the thread`
-	if err == nil || err.Error() != want {
+	out, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "a"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(h.delivered) != 0 {
-		t.Fatalf("%+v", h.delivered)
+	want := AnswerRunRequest{SessionID: "s1", ID: 1, Text: "a"}
+	if len(h.answerRuns) != 1 || h.answerRuns[0] != want {
+		t.Fatalf("answer runs %+v, want [%+v]", h.answerRuns, want)
+	}
+	if out.Message.Delivery != DeliveryNewRun || len(h.delivered) != 0 {
+		t.Fatalf("%+v %+v", out.Message, h.delivered)
 	}
 	b, _ := Load(repoID)
-	it := b.Item(1)
-	if len(it.Thread) != 2 || it.Thread[1].Kind != KindAnswer || it.OpenQuestion() != nil {
+	if it := b.Item(1); len(it.Thread) != 1 || it.OpenQuestion() == nil {
 		t.Fatalf("%+v", it.Thread)
 	}
-	if it.Status != StatusRunning {
-		t.Fatal(it.Status)
+	// The host's refusal reaches the caller with the project named.
+	h.answerRunErr = errors.New("B-1 is done; reopen it")
+	if _, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "a"}); err == nil || !strings.Contains(err.Error(), "B-1 is done") {
+		t.Fatal(err)
 	}
 }
 
@@ -280,7 +288,7 @@ func TestAnswerDelivered(t *testing.T) {
 	if _, err := b.Ask(1, "s1", Question{Text: "q"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	out, err := b.Answer(1, 0, "a", true, time.Now())
+	out, err := b.Answer(1, 0, "a", time.Now())
 	if err != nil || b.Item(1).Status != StatusRunning || out.Answer.PrevStatus != StatusReview {
 		t.Fatal(out, err)
 	}
@@ -334,11 +342,11 @@ func TestQueuedAnswersAllFailingRestoreTheOriginalStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	first, err := b.Answer(1, 0, "a", true, now)
+	first, err := b.Answer(1, 0, "a", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := b.Answer(1, 0, "b", true, now)
+	second, err := b.Answer(1, 0, "b", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,8 +412,8 @@ func TestALaterAnswerFailingKeepsEarlierDeliveredWorkRunning(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	first, _ := b.Answer(1, 0, "a", true, now)
-	second, _ := b.Answer(1, 0, "b", true, now)
+	first, _ := b.Answer(1, 0, "a", now)
+	second, _ := b.Answer(1, 0, "b", now)
 	if err := b.AnswerDelivered(1, first.Answer.ID, now); err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +465,7 @@ func TestAnswerFailedAfterAReplacementRunLeavesTheItemRunning(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
 	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
-	ans, err := b.Answer(1, 0, "Postgres", true, now)
+	ans, err := b.Answer(1, 0, "Postgres", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +474,7 @@ func TestAnswerFailedAfterAReplacementRunLeavesTheItemRunning(t *testing.T) {
 	if _, err := b.BeginStart(1, StartedByUser, nil, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.FinishStart(1, now.Add(time.Second), "s2", "A-2", nil, now.Add(2*time.Second)); err != nil {
+	if err := b.FinishStart(1, now.Add(time.Second), "s2", "A-2", "", nil, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.AnswerFailed(1, ans.Answer.ID, "the session is gone", now.Add(3*time.Second)); err != nil {
@@ -486,7 +494,7 @@ func TestAnswerFailedAfterAContinueLeavesTheItemRunning(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
 	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
-	ans, err := b.Answer(1, 0, "Postgres", true, now)
+	ans, err := b.Answer(1, 0, "Postgres", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +518,7 @@ func TestPendingAnswerStaysWithTheRunThatAcceptedIt(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "old", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
 	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
-	if _, err := b.Answer(1, 0, "Postgres", true, now); err != nil {
+	if _, err := b.Answer(1, 0, "Postgres", now); err != nil {
 		t.Fatal(err)
 	}
 	if p := b.PendingAnswers(); len(p) != 1 || p[0].SessionID != "old" || p[0].Superseded {
@@ -533,19 +541,19 @@ func TestAnswerDoesNotInheritAnEarlierRunsRollbackStatus(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
 	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
-	if _, err := b.Answer(1, 0, "Postgres", true, now); err != nil {
+	if _, err := b.Answer(1, 0, "Postgres", now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.BeginStart(1, StartedByUser, nil, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.FinishStart(1, now.Add(time.Second), "s2", "A-2", nil, now.Add(2*time.Second)); err != nil {
+	if err := b.FinishStart(1, now.Add(time.Second), "s2", "A-2", "", nil, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	q, _ := b.AddNote(1, AuthorAF, "ignored", now)
 	_ = q
 	it.Thread = append(it.Thread, Message{ID: 90, Kind: KindQuestion, Author: AuthorAF, Text: "Which cache?"})
-	ans, err := b.Answer(1, 90, "Redis", true, now.Add(3*time.Second))
+	ans, err := b.Answer(1, 90, "Redis", now.Add(3*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,30 +590,26 @@ func TestAnsweredInSessionBindsToTheQuestionIDNotItsText(t *testing.T) {
 	}
 }
 
-// A session replaced between the service reading the item and its transaction
-// refuses the answer and leaves the question open for the retry (Codex P2 on
-// #6295), rather than closing it against a stale gone-session target.
-func TestServiceAnswerRefusesWhenTheSessionChangedUnderIt(t *testing.T) {
-	s, h := newTestService(t)
-	mustAdd(t, s, ItemInput{Key: "a", Title: "A"})
-	withRun(t, 1, StatusRunning)
-	ask(t, s, "Which db?")
-	h.target = TargetGone // the killed session
-	h.onTarget = func() { // ...replaced before the transaction
-		if _, err := Update(repoID, func(b *Backlog) error {
-			b.Item(1).Runs = append(b.Item(1).Runs, RunRef{SessionID: "s2", Title: "B-1 A", State: RunStarted})
-			return nil
-		}); err != nil {
-			t.Error(err)
-		}
-	}
-	_, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "Postgres"})
-	if err == nil || !strings.Contains(err.Error(), "changed while answering") {
+// A session replaced between the service reading the item and the answer run's
+// transaction refuses the answer and leaves the question open for the retry
+// (Codex P2 on #6295), rather than starting a second session for an item that
+// already has one.
+func TestBeginAnswerRunRefusesWhenTheSessionChangedUnderIt(t *testing.T) {
+	now := time.Now()
+	b := New()
+	it, _ := b.Add(NewItem{Title: "A"}, now)
+	it.Status = StatusRunning
+	it.Runs = []RunRef{{SessionID: "s1", Title: "B-1 A", State: RunStarted, StartedAt: now}}
+	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: "agent:s1", Text: "Which db?"}}
+	// s1 was found gone; s2 replaced it before the transaction.
+	b.Item(it.ID).Runs = append(b.Item(it.ID).Runs, RunRef{SessionID: "s2", Title: "B-1 A", State: RunStarted, StartedAt: now})
+	before := len(b.Item(it.ID).Thread)
+	if _, err := b.BeginAnswerRun(it.ID, 0, "s1", "Postgres", now); err == nil || !strings.Contains(err.Error(), "changed while answering") {
 		t.Fatalf("err = %v, want the retry error", err)
 	}
-	b, _ := Load(repoID)
-	if b.Item(1).OpenQuestion() == nil {
-		t.Fatal("the question was closed without an answer being delivered")
+	got := b.Item(it.ID)
+	if len(got.Thread) != before || len(got.Runs) != 2 || got.OpenQuestion() == nil {
+		t.Fatalf("a refused answer run changed the item: %+v", got)
 	}
 }
 
@@ -618,7 +622,7 @@ func TestRunEndedIgnoresAnAnswerPendingForAnEarlierRun(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted, StartedAt: now.Add(-time.Hour)}}
 	it.Thread = []Message{{ID: 1, Kind: KindQuestion, Author: AuthorAF, Text: "Which db?"}}
-	if _, err := b.Answer(1, 0, "Postgres", true, now); err != nil {
+	if _, err := b.Answer(1, 0, "Postgres", now); err != nil {
 		t.Fatal(err)
 	}
 	it.Runs = append(it.Runs, RunRef{SessionID: "s2", State: RunStarted, StartedAt: now.Add(time.Minute)})
@@ -641,14 +645,14 @@ func TestAnswerFailedAfterAStatusResetLeavesALaterAnswersWorkRunning(t *testing.
 		{ID: 1, Kind: KindQuestion, Author: "agent:s1", Text: "Which db?"},
 		{ID: 2, Kind: KindQuestion, Author: "agent:s1", Text: "Which cache?"},
 	}
-	first, err := b.Answer(1, 1, "Postgres", true, now)
+	first, err := b.Answer(1, 1, "Postgres", now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.SetStatus(1, StatusReview, ActorUser, func(*Item) bool { return false }, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	second, err := b.Answer(1, 2, "Redis", true, now.Add(2*time.Second))
+	second, err := b.Answer(1, 2, "Redis", now.Add(2*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}

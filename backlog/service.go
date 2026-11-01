@@ -38,9 +38,26 @@ type Host interface {
 	// background, restoring the session first when it is not running, and
 	// records the outcome on the answer.
 	DeliverAnswer(repoID string, a PendingAnswer)
+	// StartAnswerRun answers an open question whose session is gone: it keeps
+	// the answer and starts a new run of the item whose first prompt carries
+	// it, as a start by the user. It returns the answer.
+	StartAnswerRun(repoID string, req AnswerRunRequest) (Message, error)
 	// Gate reports the project's runner gate that is closed now, from a recent
 	// meter pass; the zero Gate when all are open.
 	Gate(repoID string) Gate
+}
+
+// AnswerRunRequest is an answer that starts a new run.
+type AnswerRunRequest struct {
+	// RepoPath is the project root the request named, or "" when it named the
+	// project by id.
+	RepoPath string
+	// SessionID is the session of the item's latest run that the service found
+	// gone, or "" when that run never had one: the host refuses if it changed.
+	SessionID  string
+	ID         int
+	QuestionID int
+	Text       string
 }
 
 // AnswerTarget is where an answer can go.
@@ -158,6 +175,14 @@ func (s *Service) Add(req AddRequest) (*AddResponse, error) {
 	var order []int
 	b, err := s.update(p, func(b *Backlog) ([]int, error) {
 		now := s.now()
+		if req.SessionID != "" {
+			it, err := addFromItemSession(b, req, now)
+			if err != nil {
+				return nil, err
+			}
+			ids, order = map[string]int{req.Items[0].Key: it.ID}, []int{it.ID}
+			return order, nil
+		}
 		if req.Before != 0 || req.After != 0 {
 			it, err := addOne(b, req, now)
 			if err != nil {
@@ -194,6 +219,32 @@ func (s *Service) Add(req AddRequest) (*AddResponse, error) {
 		out.Items = append(out.Items, *b.Item(id))
 	}
 	return out, nil
+}
+
+// addFromItemSession adds the work an item session's agent found: one draft
+// with a title and an optional parent, at the bottom of that parent (decision
+// (3) on #6284). af notes on the new item's thread which item's agent added it,
+// so the user can tell it from their own.
+func addFromItemSession(b *Backlog, req AddRequest, now time.Time) (*Item, error) {
+	from := b.ItemForSession(req.SessionID)
+	if from == nil {
+		return nil, fmt.Errorf("session %s is not an item session", req.SessionID)
+	}
+	if len(req.Items) != 1 || req.Proposal != "" || req.Before != 0 || req.After != 0 {
+		return nil, errors.New("an item session adds one draft with a title and an optional parent")
+	}
+	in := req.Items[0]
+	if in.Body != "" || len(in.WaitsOn) != 0 || in.Program != "" || in.Sequential || in.Parent.Key != "" {
+		return nil, errors.New("an item session adds one draft with a title and an optional parent")
+	}
+	it, err := b.Add(NewItem{Title: in.Title, Parent: in.Parent.ID}, now)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := b.AddNote(it.ID, AuthorAF, fmt.Sprintf("Added by the agent working on %s.", FormatID(from.ID)), now); err != nil {
+		return nil, err
+	}
+	return it, nil
 }
 
 // addOne adds a single item next to a sibling. Refs must be item ids, since

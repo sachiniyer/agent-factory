@@ -1,12 +1,9 @@
 package session
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -907,25 +904,8 @@ func lsRemoteArgs(originURL, branch string) []string {
 }
 
 func branchOnOriginViaGit(originURL, branch string) (bool, error) {
-	if strings.TrimSpace(originURL) == "" {
-		return false, errors.New("the repository has no origin remote")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", lsRemoteArgs(originURL, branch)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	cmd.WaitDelay = dockerWaitDelay
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return true, nil
-	}
-	var exit *exec.ExitError
-	// --exit-code makes 2 mean "reached origin, no matching ref"; any other
-	// failure says nothing about the ref.
-	if errors.As(err, &exit) && exit.ExitCode() == 2 && ctx.Err() == nil {
-		return false, nil
-	}
-	return false, fmt.Errorf("git ls-remote: %w: %s", err, strings.TrimSpace(string(out)))
+	_, found, err := lsRemoteBranch(originURL, branch, 30*time.Second)
+	return found, err
 }
 
 // settleRestoreCheckpoint decides the branch a replacement sandbox may fetch

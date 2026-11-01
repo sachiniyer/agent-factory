@@ -420,7 +420,7 @@ func (m *Manager) adoptStartingRun(repoID, repoPath, sessionID string) {
 		if b.ItemForSession(sessionID) != nil {
 			return nil, errBacklogNoChange
 		}
-		if !b.AdoptStarting(s.instance.BacklogItem, sessionID, s.instance.Title, s.instance.CreatedAt, svc.Now()) {
+		if !b.AdoptStarting(s.instance.BacklogItem, sessionID, s.instance.Title, s.instance.GetBranch(), s.instance.CreatedAt, svc.Now()) {
 			return nil, errBacklogNoChange
 		}
 		return []int{s.instance.BacklogItem}, nil
