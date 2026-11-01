@@ -2,6 +2,9 @@ package api
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -378,5 +381,42 @@ func TestBacklogGuardRailsCoverStillStartingRun(t *testing.T) {
 	}
 	if _, err := runBacklogCmd(t, "done", "1"); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
 		t.Fatalf("guard did not fire during the starting window: %v", err)
+	}
+}
+
+// TestBacklogGuardRailsSurviveRepoOverride reproduces the cross-project gap
+// raised on #6498: a confused agent inside an item session of project A that
+// points the command at another project B (--repo B) must still be refused.
+// The guard resolves item-session membership from the session's own project
+// (its worktree path), not the command target, so consulting B's backlog (which
+// has no run for this session) cannot disarm it once the session's BacklogItem
+// chip has been dropped.
+func TestBacklogGuardRailsSurviveRepoOverride(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// Project A is the session's own project; setupRepoForCmd set --repo to A.
+	aRoot := repoFlag
+	// A second project B is the command target.
+	bRoot := filepath.Join(t.TempDir(), "repo-b")
+	if err := os.MkdirAll(bRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", bRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init B: %v (%s)", err, out)
+	}
+	// Item 1 runs in session s1 in A; the session record has lost its BacklogItem
+	// chip (dropped by an older daemon) and carries its worktree path so the
+	// guard can resolve the session's own project.
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0, Path: aRoot})
+	prevRepo := repoFlag
+	repoFlag = bRoot
+	t.Cleanup(func() { repoFlag = prevRepo })
+	*methods = nil
+	if _, err := runBacklogCmd(t, "done", "1"); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatalf("done --repo B from an item session of A: %v", err)
+	}
+	for _, m := range *methods {
+		if m != "GetBacklog" {
+			t.Fatalf("a refused command reached the daemon: %v", *methods)
+		}
 	}
 }

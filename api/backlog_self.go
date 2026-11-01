@@ -3,11 +3,14 @@ package api
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/backlog"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -50,36 +53,79 @@ func (t *backlogTarget) selfItem() (string, *backlog.Item, error) {
 // inItemSession reports the item session this command runs in, or nil. A
 // caller outside any af session is not an item session.
 //
-// The authoritative link between a session and its backlog item is the run
-// record in backlog.json (ItemForSession); the session record's own BacklogItem
-// is a client-side chip set at creation. It is omitempty, so an older daemon
-// binary whose InstanceData lacks the field rewrites the record and silently
-// drops the key — and once dropped it is never re-derived. Resolving the
-// refusal rails solely from that field lets a confused agent run plan
-// mutations (done <id>, start, run, queue/drop, runner on, note <id>, ...) past
-// the guard after the drop: the CLI sends them with no SessionID and the daemon
-// attributes them to the human user.
+// The session record's own BacklogItem is a client-side chip set at creation;
+// when it is set, the session was started for a backlog item, so the guard fires
+// without a backlog read. It is omitempty, so an older daemon binary whose
+// InstanceData lacks the field rewrites the record and silently drops the key —
+// and once dropped it is never re-derived. Resolving the refusal rails solely
+// from that field lets a confused agent run plan mutations (done <id>, start,
+// run, queue/drop, runner on, note <id>, ...) past the guard after the drop: the
+// CLI sends them with no SessionID and the daemon attributes them to the human
+// user.
 //
-// Resolve primarily from the authoritative link, mirroring selfItem below; keep
-// the record's BacklogItem only as a fallback for the run-still-starting window
-// (before the daemon links the run) and for a backlog that cannot be loaded.
-// Failing closed on the fallback — firing the guard when the record says item
-// session even though the link is unresolved — is the safe direction: a
-// confused agent is refused rather than allowed to run past.
+// So when the chip is absent the guard falls back to the authoritative link, a
+// run record in backlog.json (ItemForSession), mirroring selfItem below. That
+// fallback is resolved from the session's own project, not the command target
+// (itemSessionFromAuthoritativeLink), so a confused agent that points --repo at
+// another project cannot escape the guard. Failing closed on the chip — firing
+// when the record says item session even though the link is unresolved — is the
+// safe direction: a confused agent is refused rather than allowed to run past.
 func inItemSession() *session.InstanceData {
 	s, err := backlogSelfSession()
 	if err != nil || s == nil {
 		return nil
 	}
+	if s.BacklogItem != 0 {
+		return s
+	}
+	if itemSessionFromAuthoritativeLink(s) {
+		return s
+	}
+	return nil
+}
+
+// itemSessionFromAuthoritativeLink reports whether the authoritative backlog
+// link — a run record in backlog.json (ItemForSession) — confirms s is an item
+// session. The link is resolved from the session's own project, the project its
+// worktree path belongs to, independently of the command target: a confused
+// agent that points --repo (or its cwd) at another project must not escape the
+// guard, so membership is checked against the session's own backlog, not the
+// command's. When the session's own project cannot be resolved — no recorded
+// path, or a --daemon-url target whose path is on the daemon host — it falls
+// back to the command target's project (the prior behavior), so a record that
+// predates the path or a remote session is still guarded when the command
+// targets its own project.
+func itemSessionFromAuthoritativeLink(s *session.InstanceData) bool {
+	if t := sessionOwnBacklogTarget(s); t != nil {
+		v, err := t.get()
+		if err == nil {
+			return v.Backlog.ItemForSession(s.ID) != nil
+		}
+		return false
+	}
 	if t, err := backlogProject(); err == nil {
 		if v, err := t.get(); err == nil && v.Backlog.ItemForSession(s.ID) != nil {
-			return s
+			return true
 		}
 	}
-	if s.BacklogItem == 0 {
+	return false
+}
+
+// sessionOwnBacklogTarget resolves the session's own project — the project its
+// worktree path belongs to — as a backlog target, independent of the command
+// target. It returns nil when the session has no recorded path or the path
+// cannot be resolved to a git repository (including a --daemon-url target, whose
+// session path is on the daemon host and so unreadable on this client); callers
+// then fall back to the command target's project.
+func sessionOwnBacklogTarget(s *session.InstanceData) *backlogTarget {
+	if apiclient.IsRemoteTarget() || s.Path == "" {
 		return nil
 	}
-	return s
+	repo, err := config.RepoFromPath(s.Path)
+	if err != nil {
+		return nil
+	}
+	return &backlogTarget{repoID: repo.ID, name: filepath.Base(repo.Root)}
 }
 
 const backlogSelfAskHint = "ask the user with \"af backlog ask --self\""
