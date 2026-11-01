@@ -124,8 +124,19 @@ func (m *Manager) pushTrustReport(name string, target session.RuntimeMachine, li
 	if licensed && id.Unproven != "" {
 		out = append(out, "af can't establish which machine this is, because "+id.Unproven+": fix that, and push credentials resume")
 	}
+	shown := map[string]bool{}
 	for _, t := range m.pushCreds.taintsFor(id) {
-		out = append(out, fmt.Sprintf("%s. Recreate or wipe this host user, then run `af hosts reset-trust %s`", t, name))
+		shown[t.ID] = true
+		out = append(out, fmt.Sprintf("%s. Recreate or wipe this machine's users, then run `af hosts reset-trust %s`", t, name))
+	}
+	// An entry af couldn't place on an identified machine blocks licensing every
+	// host, so every host names it.
+	if thin, err := m.pushCreds.taints.unconfirmed(); err == nil {
+		for _, t := range thin {
+			if !shown[t.ID] {
+				out = append(out, fmt.Sprintf("%s. No host can be opted into push credentials until it is reset: `af hosts reset-trust --entry %s`", t, t.ID))
+			}
+		}
 	}
 	return out
 }
