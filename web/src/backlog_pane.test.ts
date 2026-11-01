@@ -13,6 +13,16 @@ interface Call {
   body: Record<string, unknown>;
 }
 
+/** A thrown `TransportError` makes the fetch stub re-throw, simulating a lost
+ *  reply (a transport failure) rather than a daemon refusal: `af()` then
+ *  raises an `ApiError(0, …)`, which `isMutationOutcomeUncertain` classifies
+ *  as uncertain — the move may have committed even though its response was
+ *  lost. A plain `Error` thrown by `reply` is rendered as a daemon-rejected
+ *  envelope, i.e. a definitive refusal. */
+class TransportError extends Error {
+  constructor(msg = "transport") { super(msg); this.name = "TransportError"; }
+}
+
 let dom: ReturnType<typeof installFakeDom>;
 let doc: FakeDocument;
 let calls: Call[];
@@ -41,7 +51,8 @@ beforeEach(() => {
     try {
       data = await reply(method);
     } catch (e) {
-      return new Response(JSON.stringify({ data: null, error: { message: (e as Error).message } }), { status: 400 });
+      if (e instanceof TransportError) throw e;
+      return new Response(JSON.stringify({ data: null, error: { message: (e as Error).message, daemon_rejected: true } }), { status: 400 });
     }
     return new Response(JSON.stringify({ data, error: null }), { status: 200 });
   };
@@ -329,6 +340,125 @@ test("a refused reorder snaps back and says why", async () => {
   await settle();
   assert.deepEqual(rowIds(pane), [1, 2]);
   assert.match(h.notices[0], /cannot move there/);
+});
+
+test("a refused earlier reorder snaps back and drops a queued move computed against the phantom", async () => {
+  // The first MoveBacklogItem call rejects; later calls would succeed.
+  let first = true;
+  reply = async (method) => {
+    if (method === "MoveBacklogItem" && first) { first = false; throw new Error("B-3 cannot move there"); }
+    return {};
+  };
+  const h = host();
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1), item(2), item(3)) }), "/a", []);
+  // Move 1: nest B-3 under B-2 (Alt+Right on B-3). The daemon will refuse it.
+  key(row(pane, 3), "ArrowRight", { altKey: true });
+  // Move 2: B-1 after B-2 (Alt+Down on B-1), issued before move 1 settles. Its target
+  // is computed against move 1's optimistic (phantom) order, where "after 2" means
+  // after B-2's subtree — i.e. after the nested B-3 — a placement that does not exist
+  // in the daemon's real order.
+  key(row(pane, 1), "ArrowDown", { altKey: true });
+  await settle();
+  // The refused move snaps back to the daemon's real order, and the queued move is
+  // dropped rather than committed against a phantom order the user was shown but the
+  // daemon never had.
+  assert.deepEqual(rowIds(pane), [1, 2, 3], "the refused order snaps back");
+  const moves = (): Call[] => calls.filter((c) => c.method === "MoveBacklogItem");
+  assert.equal(moves().length, 1, "the queued move is dropped, not sent against the phantom");
+  assert.deepEqual(moves()[0].body, { repo_path: "/a", id: 3, into: 2 });
+  assert.deepEqual(h.notices, ["B-3 cannot move there"]);
+});
+
+test("a refusal drops every move queued behind it, not just the next one", async () => {
+  let first = true;
+  reply = async (method) => {
+    if (method === "MoveBacklogItem" && first) { first = false; throw new Error("B-4 cannot move there"); }
+    return {};
+  };
+  const h = host();
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1), item(2), item(3), item(4)) }), "/a", []);
+  // Three reorders issued before the first settles; the first is refused, so the
+  // whole optimistic chain is invalidated.
+  key(row(pane, 4), "ArrowUp", { altKey: true });   // B-4 before B-3 — refused
+  key(row(pane, 4), "ArrowUp", { altKey: true });   // queued against the phantom
+  key(row(pane, 4), "ArrowUp", { altKey: true });   // queued against the phantom
+  await settle();
+  assert.deepEqual(rowIds(pane), [1, 2, 3, 4], "every queued move is dropped and the screen snaps back");
+  const moves = (): Call[] => calls.filter((c) => c.method === "MoveBacklogItem");
+  assert.equal(moves().length, 1, "only the refused move was sent; the rest are dropped");
+  assert.deepEqual(moves()[0].body, { repo_path: "/a", id: 4, before: 3 });
+  assert.deepEqual(h.notices, ["B-4 cannot move there"]);
+});
+
+test("a move queued after an earlier refusal still goes out against the refreshed order", async () => {
+  let first = true;
+  reply = async (method) => {
+    if (method === "MoveBacklogItem" && first) { first = false; throw new Error("B-3 cannot move there"); }
+    return {};
+  };
+  const h = host();
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1), item(2), item(3)) }), "/a", []);
+  key(row(pane, 3), "ArrowRight", { altKey: true });   // refused
+  key(row(pane, 1), "ArrowDown", { altKey: true });    // queued against the phantom, dropped
+  await settle();
+  assert.deepEqual(rowIds(pane), [1, 2, 3]);
+  // A reorder issued after the snap-back recomputes its target against the daemon's
+  // real order and is sent — the dropped phantom move does not poison the chain.
+  key(row(pane, 2), "ArrowDown", { altKey: true });    // B-2 after B-3
+  await settle();
+  const moves = (): Call[] => calls.filter((c) => c.method === "MoveBacklogItem");
+  assert.deepEqual(moves().map((m) => m.body), [
+    { repo_path: "/a", id: 3, into: 2 },    // the refused attempt, sent over the wire and rejected
+    { repo_path: "/a", id: 2, after: 3 },    // the post-snap-back move, computed against the real order
+  ]);
+  assert.deepEqual(h.notices, ["B-3 cannot move there"]);
+});
+
+test("a refusal in one project does not drop a reorder queued in another after switching", async () => {
+  let first = true;
+  reply = async (method) => {
+    if (method === "MoveBacklogItem" && first) { first = false; throw new Error("B-1 cannot move there"); }
+    return {};
+  };
+  const h = host();
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1), item(2)), "/b": view(item(1), item(2)) }), "/a", []);
+  key(row(pane, 1), "ArrowDown", { altKey: true });   // /a move queued, will be refused
+  // Switch to /b and queue a reorder there before /a settles. Its target comes
+  // from /b's own backlog and stays valid — a refusal in /a must not drop it.
+  pane.update(data({ "/a": view(item(1), item(2)), "/b": view(item(1), item(2)) }, 2), "/b", []);
+  key(row(pane, 1), "ArrowDown", { altKey: true });
+  await settle();
+  const moves = (): Call[] => calls.filter((c) => c.method === "MoveBacklogItem");
+  assert.deepEqual(moves().map((m) => m.body), [
+    { repo_path: "/a", id: 1, after: 2 },   // the refused attempt, sent over the wire and rejected
+    { repo_path: "/b", id: 1, after: 2 },    // the post-switch move, not dropped by /a's refusal
+  ]);
+  assert.deepEqual(h.notices, ["B-1 cannot move there"]);
+});
+
+test("an uncertain refusal (the reply lost) does not drop a queued move", async () => {
+  // The first MoveBacklogItem's reply is lost — a transport (uncertain) error.
+  // The move may have committed, so the queued successor — whose target was
+  // computed against the optimistic order the first move made, which is the
+  // daemon's real order if it landed — is still sent, not dropped the way a
+  // definitive refusal drops it.
+  let first = true;
+  reply = async (method) => {
+    if (method === "MoveBacklogItem" && first) { first = false; throw new TransportError(); }
+    return {};
+  };
+  const h = host();
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1), item(2), item(3)) }), "/a", []);
+  key(row(pane, 3), "ArrowRight", { altKey: true });   // first move; its reply is lost
+  key(row(pane, 1), "ArrowDown", { altKey: true });    // queued against the optimistic order
+  await settle();
+  const moves = (): Call[] => calls.filter((c) => c.method === "MoveBacklogItem");
+  assert.equal(moves().length, 2, "the queued move is not dropped on an uncertain outcome");
 });
 
 test("a selected project with no backlog yet asks for one refresh", () => {
