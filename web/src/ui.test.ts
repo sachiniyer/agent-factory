@@ -257,14 +257,14 @@ test("an actionable row still opens on click and carries no disabled marker", ()
   assert.equal(open.calls, 1, "the fix must not disable a row that CAN open");
 });
 
-test("the selected row is the rail's Tab stop; others rove to -1 (#6409)", () => {
+test("the selected row is the rail's Tab stop; others carry no tabindex (#6409)", () => {
   const noActions = () => new RowElement() as unknown as HTMLElement;
   const { el } = row({ lifecycle_action: "archive", can_kill: true });
-  assert.equal((el as RowElement & { tabIndex: number }).tabIndex, -1, "an unselected row leaves the Tab order");
-  const selected = sessionRow(sess({ lifecycle_action: "archive", can_kill: true }), true, () => {}, noActions) as unknown as RowElement & { tabIndex: number };
-  assert.equal(selected.tabIndex, 0, "the selected row carries the listbox's one stop");
-  const reused = sessionRow(sess({ lifecycle_action: "archive", can_kill: true }), false, () => {}, noActions, selected as unknown as HTMLElement) as unknown as RowElement & { tabIndex: number };
-  assert.equal(reused.tabIndex, -1, "a reused element roves the stop away on deselection");
+  assert.equal(el.getAttribute("tabindex"), null, "an unselected row is as unfocusable as a plain li");
+  const selected = sessionRow(sess({ lifecycle_action: "archive", can_kill: true }), true, () => {}, noActions);
+  assert.equal(selected.getAttribute("tabindex"), "0", "the selected row carries the listbox's one stop");
+  const reused = sessionRow(sess({ lifecycle_action: "archive", can_kill: true }), false, () => {}, noActions, selected);
+  assert.equal(reused.getAttribute("tabindex"), null, "a reused element loses the stop on deselection");
 });
 
 test("each rail option names its state in visually hidden text", () => {

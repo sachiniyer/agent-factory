@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "e46b6b6548ac";
+var CLIENT_VERSION = "2f94550726c6";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21389,11 +21389,22 @@ var AppShell = class {
     let hasStop = false;
     for (const railRow of railRows) {
       const isSelected = railRow.classList.contains("af-row-selected");
-      railRow.tabIndex = isSelected ? 0 : -1;
+      if (isSelected) {
+        railRow.setAttribute("tabindex", "0");
+      } else {
+        railRow.removeAttribute("tabindex");
+      }
       hasStop ||= isSelected;
+      const reachable = isSelected || railRow.getAttribute("aria-disabled") === "true";
+      for (const ctrl of railRow.querySelectorAll(".af-row-actions .af-term-more, .af-backlog-session-chip")) {
+        ctrl.tabIndex = reachable ? 0 : -1;
+      }
     }
-    if (!hasStop && railRows.length > 0) {
-      railRows[0].tabIndex = 0;
+    if (!hasStop) {
+      const fallback = [...railRows].find((railRow) => !railRow.classList.contains("af-row-creating"));
+      if (fallback) {
+        fallback.setAttribute("tabindex", "0");
+      }
     }
     const focusedRow = document.activeElement;
     if (focusedRow?.classList.contains("af-row") && !focusedRow.classList.contains("af-row-selected") && this.railList.contains(focusedRow)) {
@@ -22737,7 +22748,11 @@ function sessionRow(s, selected, openSession, buildActions, previous, itemChip) 
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
-  row.tabIndex = selected ? 0 : -1;
+  if (selected) {
+    row.setAttribute("tabindex", "0");
+  } else {
+    row.removeAttribute("tabindex");
+  }
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);

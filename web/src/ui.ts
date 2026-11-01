@@ -1894,20 +1894,39 @@ export class AppShell {
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
     }
-    // With nothing selected nothing owns the roving stop, so the first row
-    // carries it — the listbox never vanishes from the Tab order (#6409). Every
-    // row is normalized here, not only at build time: a reused element keeps
-    // whatever tabindex it last had, so a stale fallback would otherwise sit in
-    // the order beside the newly selected row's own stop.
+    // With nothing selected nothing owns the roving stop, so the first real
+    // row carries it — the listbox never vanishes from the Tab order (#6409).
+    // Every row is normalized here, not only at build time: a reused element
+    // keeps whatever tabindex it last had, so a stale fallback would otherwise
+    // sit in the order beside the newly selected row's own stop. Unselected
+    // rows carry NO tabindex, not -1 — a plain click on an unfocusable li moves
+    // no DOM focus, which is what keeps a forced click on a creating
+    // placeholder from landing there either.
     const railRows = this.railList.querySelectorAll<HTMLElement>(".af-row");
     let hasStop = false;
     for (const railRow of railRows) {
       const isSelected = railRow.classList.contains("af-row-selected");
-      railRow.tabIndex = isSelected ? 0 : -1;
+      if (isSelected) {
+        railRow.setAttribute("tabindex", "0");
+      } else {
+        railRow.removeAttribute("tabindex");
+      }
       hasStop ||= isSelected;
+      // In-row controls rove with the row (#6409): the selected row's actions
+      // trigger and backlog chip are stops; other rows' leave the order. The
+      // carve-out mirrors rowActions — a row that can never be selected (the
+      // aria-disabled it carries: kill-only rows, the creating placeholder)
+      // keeps its controls tabbable because they are its only keyboard route.
+      const reachable = isSelected || railRow.getAttribute("aria-disabled") === "true";
+      for (const ctrl of railRow.querySelectorAll<HTMLElement>(".af-row-actions .af-term-more, .af-backlog-session-chip")) {
+        ctrl.tabIndex = reachable ? 0 : -1;
+      }
     }
-    if (!hasStop && railRows.length > 0) {
-      railRows[0].tabIndex = 0;
+    if (!hasStop) {
+      const fallback = [...railRows].find((railRow) => !railRow.classList.contains("af-row-creating"));
+      if (fallback) {
+        fallback.setAttribute("tabindex", "0");
+      }
     }
     // DOM focus follows the j/k selection: without this the ring strands on the
     // previously selected row while Enter attaches the new one.
@@ -3768,9 +3787,15 @@ export function sessionRow(
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   // The rail pays a bounded Tab cost however many rows it holds (#6409): the
-  // selected row is the one listbox stop, with its actions button next. Other
-  // rows stay programmatically focusable so DOM focus can follow j/k.
-  row.tabIndex = selected ? 0 : -1;
+  // selected row is the one listbox stop, with its in-row controls next. An
+  // unselected row carries NO tabindex, not -1 — it must stay as unfocusable
+  // as a plain li was, or a click would move DOM focus onto it (and a forced
+  // click on a creating placeholder would focus a row that cannot open).
+  if (selected) {
+    row.setAttribute("tabindex", "0");
+  } else {
+    row.removeAttribute("tabindex");
+  }
   const modelChange = s.model_change
     ? `; model changed from ${s.model_change.before} to ${s.model_change.after}`
     : "";
