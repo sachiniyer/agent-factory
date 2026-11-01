@@ -28,7 +28,7 @@ import (
 func TestSandboxScopeTableIsPinned(t *testing.T) {
 	want := []string{
 		"/v1/AddTask", "/v1/ArchiveSession", "/v1/CloseTab", "/v1/CreateSession", "/v1/CreateTab",
-		"/v1/ListTasks", "/v1/RemoveTask", "/v1/RenameTab", "/v1/ReorderTab", "/v1/SendPrompt", "/v1/SetAttention", "/v1/Snapshot",
+		"/v1/GitCredential", "/v1/ListTasks", "/v1/RemoveTask", "/v1/RenameTab", "/v1/ReorderTab", "/v1/SendPrompt", "/v1/SetAttention", "/v1/Snapshot",
 	}
 	var got []string
 	for path := range sandboxAllowedPaths {
@@ -70,6 +70,9 @@ type scopeFixture struct {
 	other  *session.Instance // another project, off-box
 	secret string
 	gated  http.Handler
+	// forwards stands in for each session's own supervised tunnel: call sends a
+	// request through its token owner's own forward.
+	forwards *ownForwards
 	// backends is the persisted backend type per session title (the seam).
 	backends map[string]string
 	rows     func(insts ...*session.Instance) []byte
@@ -118,6 +121,12 @@ func newScopeFixture(t *testing.T) *scopeFixture {
 	secret, err := mgr.sandboxTokens.mint(f.me.ID)
 	require.NoError(t, err)
 	f.secret = secret
+	f.forwards = installOwnForwards(t, &mgr.sandboxTokens)
+	// A sandbox creates only on a listed host (refuseSandboxCreateOnLicensedHost):
+	// list the ones these tests create on.
+	cfg := *mgr.Config()
+	cfg.Hosts = map[string]config.HostConfig{"h1": {Host: "h1.example"}, "box1": {Host: "box1.example"}}
+	mgr.storeLivePosture(&cfg)
 	mux := newHTTPMux(&controlServer{manager: mgr})
 	f.gated = withAuth(mux, &authGate{
 		expectedToken: func() (string, error) { return "operator-token", nil },
@@ -132,7 +141,7 @@ func (f *scopeFixture) call(t *testing.T, token, path, body string) (int, string
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	f.gated.ServeHTTP(rec, req)
+	f.gated.ServeHTTP(rec, f.forwards.carry(req))
 	return rec.Code, rec.Body.String()
 }
 
@@ -610,7 +619,7 @@ func TestSandboxTaskDeliveryIsPinnedToTheAuthorizedSessionID(t *testing.T) {
 	idA, err := f.mgr.checkSandboxTaskDelivery(f.me.ID, f.repoA, "peer")
 	require.NoError(t, err)
 	require.Equal(t, f.peer.ID, idA, "authorization names the session by ID")
-	guard := f.mgr.sandboxDeliveryGuard(idA, f.repoA)
+	guard := f.mgr.sandboxDeliveryGuard(f.me.ID, idA, f.repoA)
 	require.NoError(t, guard(f.peer, f.repoA), "anti-vacuous: the authorized session passes its own guard")
 
 	// B takes the title "peer" in the same project; A is gone from the map.

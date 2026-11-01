@@ -101,21 +101,22 @@ var verbTargetClass = map[string]string{
 	"af proposal start":      classRouted,
 	"af proposal write":      classRouted,
 
-	"af quota":           classRouted,
-	"af daemon status":   classRouted, // the target's health route
-	"af config set":      classRouted, // global form; --project refuses in-verb
-	"af config unset":    classRouted,
-	"af config get":      classRefusedInVerb,
-	"af config list":     classRefusedInVerb,
-	"af config migrate":  classRefusedInVerb,
-	"af config validate": classRefusedInVerb,
-	"af accounts add":    classRefusedInVerb,
-	"af accounts list":   classRefusedInVerb,
-	"af accounts login":  classRefusedInVerb,
-	"af hosts add":       classRefusedInVerb,
-	"af hosts check":     classRefusedInVerb,
-	"af hosts list":      classRefusedInVerb,
-	"af hosts remove":    classRefusedInVerb,
+	"af quota":             classRouted,
+	"af daemon status":     classRouted, // the target's health route
+	"af config set":        classRouted, // global form; --project refuses in-verb
+	"af config unset":      classRouted,
+	"af config get":        classRefusedInVerb,
+	"af config list":       classRefusedInVerb,
+	"af config migrate":    classRefusedInVerb,
+	"af config validate":   classRefusedInVerb,
+	"af accounts add":      classRefusedInVerb,
+	"af accounts list":     classRefusedInVerb,
+	"af accounts login":    classRefusedInVerb,
+	"af hosts add":         classRefusedInVerb,
+	"af hosts check":       classRefusedInVerb,
+	"af hosts list":        classRefusedInVerb,
+	"af hosts remove":      classRefusedInVerb,
+	"af hosts reset-trust": classRefusedInVerb,
 
 	// No daemon API stands in for these; they refuse centrally (localOnlyVerbs).
 	"af token show":       classRefusedCentral,

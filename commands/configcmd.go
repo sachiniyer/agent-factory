@@ -155,6 +155,7 @@ var globalConfigReadOrder = []string{
 	"ssh.host_key_verification",
 	"sandbox.ssh",
 	"sandbox.binary",
+	"sandbox.push_credentials",
 	"hosts",
 	"default_host",
 	"limit_retry_interval",
@@ -562,7 +563,8 @@ Settable keys:
                              name tailscale serve forwards, or "" for none — the whole list is replaced. localhost,
                              loopback IPs and the listener's own address always work; any other Host is refused.
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
-  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config} (global-only)
+  sandbox.push_credentials   true | false  (let sessions on the sandbox.ssh target push and run gh as you; global-only)
+  hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config,push_credentials} (global-only)
   default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,

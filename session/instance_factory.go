@@ -36,6 +36,9 @@ type InstanceOptions struct {
 	// BacklogItem marks the session as started for a backlog item, and opens its
 	// first backlog run.
 	BacklogItem int
+	// CreatedBySandbox is the session whose sandbox credential asked for this
+	// create (#5571 W7.8): set by the daemon from that credential, never a field.
+	CreatedBySandbox string
 	// SandboxCredentials mints and revokes the per-session credential a provisioned
 	// sandbox uses to call back into the daemon (#2999, #3068). An INTERFACE rather
 	// than a pair of values so it runs only for off-box kinds — session cannot
@@ -594,7 +597,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, resolveBackendErr
 	}
 
-	res, err := backendFactory(opts, absPath, kind)
+	res, err := provisionRecordingPlacement(opts, absPath, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -673,6 +676,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		// is never counted against a cap.
 		taskRunActive:         opts.TaskID != "",
 		BacklogItem:           opts.BacklogItem,
+		provenance:            provenance{createdBySandbox: opts.CreatedBySandbox, createdByOperator: opts.CreatedBySandbox == ""},
 		backlogRunActive:      opts.BacklogItem != 0,
 		liveness:              LiveReady,
 		Path:                  absPath,
