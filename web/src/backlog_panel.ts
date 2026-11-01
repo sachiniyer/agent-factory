@@ -135,7 +135,7 @@ export class ItemPanel {
       this.repaint();
     }, queueFor(`${root}\u0000${id}\u0000waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
-    this.title.setAttribute("aria-label", "Title");
+    this.title.setAttribute("aria-label", "Backlog item title");
     const commitTitle = (): void => {
       const it = this.item();
       const t = this.title.value.trim();
