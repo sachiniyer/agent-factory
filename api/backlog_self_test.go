@@ -161,7 +161,7 @@ func TestBacklogGuardRails(t *testing.T) {
 			t.Errorf("%v: %v", args, err)
 		}
 	}
-	for _, args := range [][]string{{"runner", "on"}, {"runner", "--max-running", "2"}, {"budget", "--share", "40"}, {"budget", "--usd-limit", "5"}} {
+	for _, args := range [][]string{{"runner", "on"}, {"runner", "--max-running", "2"}, {"budget", "--limit", "40"}, {"budget", "--usd-limit", "5"}} {
 		if _, err := runBacklogCmd(t, args...); err == nil || err.Error() != `item sessions cannot change the runner or budget; ask the user with "af backlog ask --self"` {
 			t.Errorf("%v: %v", args, err)
 		}

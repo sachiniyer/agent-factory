@@ -217,11 +217,22 @@ var backlogRunnerCmd = &cobra.Command{
 }
 
 var (
-	backlogBudgetShare     string
-	backlogBudgetStopAt    string
+	backlogBudgetLimit     string
 	backlogBudgetMaxPerRun string
 	backlogBudgetUSDLimit  string
+	// backlogBudgetRemoved names the two-gate budget's flags, which v1.0.341
+	// shipped. They stay as hidden flags so that giving one is refused with what
+	// replaced it, not with "unknown flag".
+	backlogBudgetRemoved = []string{"share", "stop-at"}
 )
+
+// errBudgetFlagRemoved answers --share and --stop-at. Neither maps onto
+// --limit: --stop-at 90 with the default share held the backlog to half the
+// plan, and --limit 90 would let it run to 90%.
+func errBudgetFlagRemoved(name string) error {
+	return fmt.Errorf("--%s was removed: the runner now starts items only while your total plan use, "+
+		"from any source, is under one limit (default 50%%) · set it with \"af backlog budget --limit <pct>\"", name)
+}
 
 // backlogNow is the clock for reading ages. A var so tests can pin it.
 var backlogNow = time.Now
@@ -234,23 +245,25 @@ type backlogBudgetView struct {
 }
 
 var backlogBudgetCmd = &cobra.Command{
-	Use:   "budget [--share <pct>] [--stop-at <pct>] [--max-per-run <pct>] [--usd-limit <usd>]",
+	Use:   "budget [--limit <pct>] [--max-per-run <pct>] [--usd-limit <usd>]",
 	Short: "Show or change the global budget",
-	Long: "The budget is the share of your Claude plan the backlog may use, in each plan window " +
+	Long: "The budget keeps backlog work out of the way of your own: the runner starts items only " +
+		"while your total Claude plan use, from any source, is under the limit in both plan windows " +
 		"(5-hour and weekly), for all projects. With no flags, print it with each window's plan %, " +
-		"the backlog's part of it, the reset time and the age of the newest reading. --share sets " +
-		"the backlog's % of each window (default 50). --stop-at sets the plan % at which the runner " +
-		"stops (default 90). --max-per-run sets the % of the 5-hour window one run may use (default " +
-		"10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 " +
-		"turns it off.",
+		"the backlog's part of it, the reset time and the age of the newest reading. --limit sets " +
+		"the plan % under which the runner starts items (default 50). Item sessions that are " +
+		"already running keep going when plan use passes the limit; only new starts wait. " +
+		"--max-per-run sets the % of the 5-hour window one run may use (default 10). --usd-limit " +
+		"sets a dollar limit at API prices for accounts with no plan readings; 0 turns it off.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
-			share, err := budgetFlag(cmd, "share", backlogBudgetShare, false)
-			if err != nil {
-				return nil, err
+			for _, name := range backlogBudgetRemoved {
+				if cmd.Flags().Changed(name) {
+					return nil, errBudgetFlagRemoved(name)
+				}
 			}
-			stopAt, err := budgetFlag(cmd, "stop-at", backlogBudgetStopAt, false)
+			limit, err := budgetFlag(cmd, "limit", backlogBudgetLimit, false)
 			if err != nil {
 				return nil, err
 			}
@@ -263,11 +276,10 @@ var backlogBudgetCmd = &cobra.Command{
 				return nil, err
 			}
 			var req daemon.SetBudgetRequest
-			req.Share = share
-			req.StopAt = stopAt
+			req.Limit = limit
 			req.MaxPerRun = maxPerRun
 			req.USDLimit = usdLimit
-			change := share != nil || stopAt != nil || maxPerRun != nil || usdLimit != nil
+			change := limit != nil || maxPerRun != nil || usdLimit != nil
 			var resp daemon.GetBudgetResponse
 			if change {
 				if err := refuseControlsFromItemSession(); err != nil {
@@ -324,8 +336,13 @@ func init() {
 	backlogRunnerCmd.Flags().IntVar(&backlogRunnerMaxRunning, "max-running", backlog.DefaultMaxRunning, "How many items may run at once (1-8)")
 	backlogRunnerCmd.Flags().StringVar(&backlogRunnerOnDone, "on-done", backlog.OnDoneKeep, "What happens to an item's session when it is done: keep or archive")
 	f := backlogBudgetCmd.Flags()
-	f.StringVar(&backlogBudgetShare, "share", "", "Percent of each plan window the backlog may use (0-100; default 50)")
-	f.StringVar(&backlogBudgetStopAt, "stop-at", "", "Plan percent, from any use, at which the runner stops (0-100; default 90)")
+	f.StringVar(&backlogBudgetLimit, "limit", "", "Plan percent, from any use, under which the runner starts items in both windows (0-100; default 50)")
+	for _, name := range backlogBudgetRemoved {
+		f.String(name, "", "Removed; use --limit")
+		if err := f.MarkHidden(name); err != nil {
+			panic(err)
+		}
+	}
 	f.StringVar(&backlogBudgetMaxPerRun, "max-per-run", "", "Percent of the 5-hour window one run may use (0-100; default 10)")
 	f.StringVar(&backlogBudgetUSDLimit, "usd-limit", "", "Dollar limit at API prices for accounts with no plan readings; 0 turns it off")
 

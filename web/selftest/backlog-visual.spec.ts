@@ -39,14 +39,14 @@ const VIEW = {
     5: { state: "draft" },
     6: { state: "done" },
   },
-  runner: { state: "stopped", gate: "share", reason: "Backlog used its 30% of the week · resumes Sat 09:00", used: 1, max: 2 },
+  runner: { state: "stopped", gate: "limit", reason: "Plan at 52% of the week (limit 50%) · resumes Sat 09:00", used: 1, max: 2 },
 };
 
 const BUDGET = {
-  budget: { schema_version: 1, share: 30, stop_at: 80, max_per_run: 10, usd_limit: 0, usd_spent: 0 },
+  budget: { schema_version: 2, limit: 50, max_per_run: 10, usd_limit: 0, usd_spent: 0 },
   windows: {
-    five_hour: { plan: 41, backlog: 12, resets_at: "2000-01-01T04:00:00Z", all_cost: 20 },
-    seven_day: { plan: 52, backlog: 31, resets_at: "2000-01-08T09:00:00Z", all_cost: 120 },
+    five_hour: { plan: 41, resets_at: "2000-01-01T04:00:00Z", all_cost: 20 },
+    seven_day: { plan: 52, resets_at: "2000-01-08T09:00:00Z", all_cost: 120 },
   },
   account: "default",
   reading_at: "2000-01-01T00:03:00Z",
@@ -86,7 +86,7 @@ test.describe("backlog view stills", () => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await serve(page);
     await openBacklog(page);
-    await expect(page.locator(".af-backlog-plan")).toHaveText("Backlog 31% of week 30% · You 21%");
+    await expect(page.locator(".af-backlog-plan")).toHaveText("Plan 52% of week limit 50%");
     await page.locator('.af-backlog-row[data-item-id="2"]').click();
     const panel = page.getByRole("complementary", { name: "Item B-2" });
     await expect(panel).toBeVisible();
@@ -106,9 +106,9 @@ test.describe("backlog view stills", () => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await serve(page);
     await openBacklog(page);
-    await page.getByRole("button", { name: "Change share" }).click();
-    await expect(page.getByRole("spinbutton", { name: "Backlog share" })).toBeFocused();
-    await expect(page.getByRole("spinbutton", { name: "Backlog share" })).toHaveValue("30");
+    await page.getByRole("button", { name: "Change limit" }).click();
+    await expect(page.getByRole("spinbutton", { name: "Plan limit" })).toBeFocused();
+    await expect(page.getByRole("spinbutton", { name: "Plan limit" })).toHaveValue("50");
     await still(page, info, "backlog-settings.png");
   });
 

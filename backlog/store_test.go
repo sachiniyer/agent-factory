@@ -3,6 +3,7 @@ package backlog
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,7 +48,7 @@ func TestLoadMissing(t *testing.T) {
 		t.Fatalf("%+v", b)
 	}
 	bud, err := LoadBudget()
-	if err != nil || *bud != *NewBudget() || bud.Share != 50 || bud.StopAt != 90 || bud.MaxPerRun != 10 {
+	if err != nil || *bud != *NewBudget() || bud.Limit != 50 || bud.MaxPerRun != 10 {
 		t.Fatalf("%+v %v", bud, err)
 	}
 }
@@ -127,7 +128,7 @@ func TestRefusesNewerSchema(t *testing.T) {
 
 	bp, _ := BudgetPath()
 	writeRaw(t, bp, `{"schema_version": 9}`)
-	if _, err := UpdateBudget(func(b *Budget) error { b.Share = 1; return nil }); !errors.As(err, &unsupported) {
+	if _, err := UpdateBudget(func(b *Budget) error { b.Limit = 1; return nil }); !errors.As(err, &unsupported) {
 		t.Fatalf("budget err = %v", err)
 	}
 }
@@ -229,7 +230,7 @@ func TestLockTimeoutIsBusy(t *testing.T) {
 func TestBudgetRoundTrip(t *testing.T) {
 	home(t)
 	_, err := UpdateBudget(func(b *Budget) error {
-		b.Share, b.MaxPerRun, b.USDLimit, b.USDSpent = 30, 0, 10, 2.5
+		b.Limit, b.MaxPerRun, b.USDLimit, b.USDSpent = 30, 0, 10, 2.5
 		return nil
 	})
 	if err != nil {
@@ -239,8 +240,81 @@ func TestBudgetRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Budget{SchemaVersion: 1, Share: 30, StopAt: DefaultStopAt, MaxPerRun: 0, USDLimit: 10, USDSpent: 2.5}
+	want := Budget{SchemaVersion: BudgetSchemaVersion, Limit: 30, MaxPerRun: 0, USDLimit: 10, USDSpent: 2.5}
 	if *got != want {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestMigratesBudgetToLimit(t *testing.T) {
+	cases := []struct {
+		name, raw string
+		limit     float64
+	}{
+		{"the default budget takes the default limit", `{"schema_version": 1, "share": 50, "stop_at": 90, "max_per_run": 5}`, DefaultLimit},
+		{"a lowered share becomes the limit", `{"schema_version": 1, "share": 30, "stop_at": 90, "max_per_run": 5}`, 30},
+		{"a lowered stop_at becomes the limit", `{"schema_version": 1, "share": 100, "stop_at": 50, "max_per_run": 5}`, 50},
+		{"a raised stop_at keeps the share's cap", `{"schema_version": 1, "share": 50, "stop_at": 95, "max_per_run": 5}`, 50},
+		{"a raised share under the default stop_at", `{"schema_version": 1, "share": 80, "stop_at": 90, "max_per_run": 5}`, 80},
+		{"share 0 keeps the runner held", `{"schema_version": 1, "share": 0, "stop_at": 90, "max_per_run": 5}`, 0},
+		{"no stop_at takes the old default", `{"schema_version": 1, "share": 95, "max_per_run": 5}`, 90},
+		{"no share takes the old default", `{"schema_version": 1, "stop_at": 70, "max_per_run": 5}`, 50},
+		{"no version, old shape", `{"share": 40, "stop_at": 70, "max_per_run": 5}`, 40},
+		{"no version, new shape keeps its limit", `{"limit": 35, "max_per_run": 5}`, 35},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			home(t)
+			bp, _ := BudgetPath()
+			writeRaw(t, bp, c.raw)
+			got, err := LoadBudget()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := Budget{SchemaVersion: BudgetSchemaVersion, Limit: c.limit, MaxPerRun: 5}
+			if *got != want {
+				t.Fatalf("%+v", got)
+			}
+			raw, err := os.ReadFile(bp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var obj map[string]any
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				t.Fatal(err)
+			}
+			if obj["schema_version"] != float64(BudgetSchemaVersion) || obj["limit"] != c.limit || obj["share"] != nil || obj["stop_at"] != nil {
+				t.Fatalf("file not rewritten in the new shape: %s", raw)
+			}
+		})
+	}
+}
+
+// TestBudgetMigrationNeverLoosens pins the migration's promise: wherever the
+// version 1 budget held the runner (the backlog at its share of a window, or
+// total plan use at stop_at), the migrated limit holds it too.
+func TestBudgetMigrationNeverLoosens(t *testing.T) {
+	grid := []float64{0, 10, 30, 50, 70, 90, 95, 100}
+	for _, share := range grid {
+		for _, stopAt := range grid {
+			raw, err := budgetToLimit([]byte(fmt.Sprintf(`{"schema_version": 1, "share": %v, "stop_at": %v}`, share, stopAt)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct{ Limit float64 }
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			for _, plan := range grid {
+				for _, backlog := range grid {
+					if backlog > plan {
+						continue
+					}
+					if heldBefore := backlog >= share || plan >= stopAt; heldBefore && plan < got.Limit {
+						t.Errorf("share %v, stop_at %v: plan %v with backlog %v was held, but limit %v starts items", share, stopAt, plan, backlog, got.Limit)
+					}
+				}
+			}
+		}
 	}
 }

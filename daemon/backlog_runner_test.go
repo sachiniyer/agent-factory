@@ -187,7 +187,7 @@ func TestGetBacklogShowsTheReadingAfterTheFirstPass(t *testing.T) {
 	if v, err = m.backlogService().Get(backlog.GetRequest{RepoID: repoID}); err != nil {
 		t.Fatal(err)
 	}
-	if v.Runner.Gate != backlog.GateStopAt {
+	if v.Runner.Gate != backlog.GateLimit {
 		t.Fatalf("the read started a pass; the next read shows the reading: %+v", v.Runner)
 	}
 }
@@ -387,7 +387,7 @@ func TestRunnerFailsClosedOnAnUnreadableLedger(t *testing.T) {
 
 func TestRunnerStateChangedOnReason(t *testing.T) {
 	var s runnerState
-	ev := backlog.RunnerEvent{RepoID: "r", State: backlog.RunnerStopped, Gate: backlog.GateStopAt, Reason: "Plan at 91%"}
+	ev := backlog.RunnerEvent{RepoID: "r", State: backlog.RunnerStopped, Gate: backlog.GateLimit, Reason: "Plan at 91%"}
 	if !s.changed(ev) {
 		t.Fatal("first stop")
 	}
