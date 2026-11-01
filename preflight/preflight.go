@@ -260,18 +260,22 @@ func LocalSessionPrereqsAt(cfg *config.Config, agent, workingDir string) error {
 	return nil
 }
 
-// RelativeExecutable reports whether command's resolved executable is a
-// relative path that resolves against the launch working directory — for
-// example ./venv/bin/claude, bin/claude, or an env-wrapped relative executable
-// such as env -C subdir ./codex. The doctor uses this to emit an advisory when
-// it runs outside any git repository: a relative program_overrides command has
-// no anchor there, and resolving it against the doctor's own cwd gives both
-// false failures (the cwd lacks it) and false passes (a decoy cwd contains it)
-// for a config shape af explicitly sanctions (#5779, doctor).
+// RelativeExecutable reports whether command's resolution depends on the
+// launch working directory — so the doctor, which may run outside any git
+// repository, cannot verify it without anchoring to the directory the session
+// will launch in. The dependency arises from any of:
+//   - a relative executable (./venv/bin/claude, bin/claude, env -C d ./codex),
+//   - a command-introduced PATH entry that is relative or empty (PATH=bin codex,
+//     env PATH=bin codex): resolveExecutableAt joins such entries against the
+//     launch directory when looking up a bare name, so the lookup flips with the
+//     doctor's incidental cwd, or
+//   - a relative env -C chdir (env -C subdir codex): the launch working
+//     directory itself becomes cwd-relative, and the existence check (plus any
+//     relative PATH resolution) flips with it.
 //
-// Absolute paths, tilde paths, and bare names do not share the dependency:
-// they resolve the same way regardless of the launch directory, so a doctor
-// outside any repo may still verify them directly. The detected executable is
+// Absolute executables, tilde paths, absolute PATH entries, and absolute chdirs
+// resolve the same way regardless of the launch directory, so the doctor
+// outside any repo may still verify them directly. The detected context is
 // resolved through tmux.CommandEnvironmentFromCommand, so the same env-wrapper
 // and opaque-wrapper handling as the launch path applies. The classification is
 // conservative: a command that cannot be parsed (unterminated quotes, unknown
@@ -282,15 +286,58 @@ func RelativeExecutable(command string) bool {
 	if err != nil {
 		return false
 	}
-	return usesRelativeExecutable(launch.Executable)
+	if usesRelativeExecutable(launch.Executable) {
+		return true
+	}
+	// A command-introduced PATH override with a relative or empty entry makes a
+	// bare executable's lookup depend on the launch directory.
+	if pathOverride := launch.Override("PATH"); pathOverride.Present && pathOverride.Set {
+		if pathHasRelativeEntry(pathOverride.Value) {
+			return true
+		}
+	}
+	// A relative env -C chdir makes the launch working directory depend on the
+	// doctor's cwd. CommandEnvironmentFromCommand sets WorkingDir to the input
+	// anchor when no chdir is applied, to the (absolute) chdir when it is
+	// absolute, and to join(anchor, chdir) when it is relative. So a chdir
+	// happened iff WorkingDir differs from the anchor, and it is relative iff
+	// re-resolving under a second, distinct anchor yields a different WorkingDir.
+	if launch.WorkingDir != relativeExecutableAnchorA {
+		if other, err := tmux.CommandEnvironmentFromCommand(command, relativeExecutableAnchorB); err == nil && other.WorkingDir != launch.WorkingDir {
+			return true
+		}
+	}
+	return false
+}
+
+// relativeExecutableAnchorA and relativeExecutableAnchorB are two distinct
+// absolute working directories used to detect a relative env -C chdir by
+// comparison. They need not exist on disk; CommandEnvironmentFromCommand
+// never stats them.
+const (
+	relativeExecutableAnchorA = "/"
+	relativeExecutableAnchorB = "/__af-relative-executable-anchor__"
+)
+
+// pathHasRelativeEntry reports whether pathValue contains a PATH entry that
+// resolveExecutableAt resolves against the launch directory: an empty entry
+// (which becomes the launch directory) or a non-absolute entry (which is joined
+// with it).
+func pathHasRelativeEntry(pathValue string) bool {
+	for _, dir := range filepath.SplitList(pathValue) {
+		if dir == "" || !filepath.IsAbs(dir) {
+			return true
+		}
+	}
+	return false
 }
 
 // usesRelativeExecutable mirrors the relative-path branch of
 // resolveExecutableAt: a token with a path separator that is not absolute and
-// not a tilde is the one shape whose resolution depends on the launch
-// directory. Bare names depend on PATH entries' relativity, which CheckCommand
-// handles; tilde expands to an absolute home; absolute paths ignore the
-// working directory entirely.
+// not a tilde is the one executable shape whose resolution depends on the
+// launch directory. Bare names depend on PATH entries' relativity (handled by
+// RelativeExecutable via the PATH override), tilde expands to an absolute
+// home, and absolute paths ignore the working directory entirely.
 func usesRelativeExecutable(exe string) bool {
 	if exe == "" {
 		return false

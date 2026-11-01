@@ -297,11 +297,14 @@ func TestLocalSessionPrereqsAtResolvesRelativeOverrideInWorkdir(t *testing.T) {
 // TestRelativeExecutable locks the doctor-side classification that drives the
 // "doctor outside any repo must not resolve a relative override against its
 // incidental cwd" branch (preflight.RelativeExecutable, doctor bug). The
-// detector must report exactly the command shapes whose resolution depends on
-// the launch working directory: a path-separator-containing executable that is
-// not absolute and not a tilde. Bare names, absolute paths, and tilde paths
-// are anchor-independent and must not be flagged — otherwise the doctor would
-// refuse to verify `default_program = "claude"` run outside a repo.
+// detector must report every command shape whose resolution depends on the
+// launch working directory: a relative executable, a command-introduced PATH
+// entry that is relative or empty (resolved against the launch directory when
+// looking up a bare name), and a relative env -C chdir (which makes the launch
+// working directory itself cwd-relative). Absolute executables, absolute PATH
+// entries, absolute chdirs, tilde paths, and bare names with no relative PATH
+// entry are anchor-independent and must not be flagged — otherwise the doctor
+// would refuse to verify `default_program = "claude"` run outside a repo.
 func TestRelativeExecutable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -322,8 +325,17 @@ func TestRelativeExecutable(t *testing.T) {
 		// false-positive/false-negative trade.
 		{name: "env chdir absolute with relative exe is conservative", command: "env -C /abs ./codex", want: true},
 		{name: "env bare exe", command: "env codex", want: false},
-		{name: "env PATH override bare exe", command: "env PATH=bin codex", want: false},
-		{name: "shell assignment then bare exe", command: "PATH=bin codex", want: false},
+		// A relative PATH entry (introduced by env or a shell assignment) makes
+		// a bare executable's lookup depend on the launch directory, so the
+		// doctor outside any repo cannot verify it without anchoring.
+		{name: "env PATH override relative entry bare exe", command: "env PATH=bin codex", want: true},
+		{name: "shell assignment relative PATH bare exe", command: "PATH=bin codex", want: true},
+		{name: "env PATH empty entry bare exe", command: "env PATH=:/usr/bin codex", want: true},
+		{name: "env PATH absolute entry bare exe", command: "env PATH=/usr/bin codex", want: false},
+		// A relative env -C chdir makes the launch working directory depend on
+		// the doctor's cwd; an absolute chdir does not.
+		{name: "env chdir relative bare exe", command: "env -C subdir codex", want: true},
+		{name: "env chdir absolute bare exe", command: "env -C /abs codex", want: false},
 		{name: "opaque relative wrapper", command: "./my-wrapper --ready", want: true},
 		{name: "opaque bare wrapper", command: "my-wrapper --ready", want: false},
 		{name: "unterminated quote defers to CheckCommand", command: "claude --bad'", want: false},

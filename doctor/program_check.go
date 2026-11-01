@@ -52,7 +52,7 @@ func checkProgramCommand(repoWorkspace, command string) programCheckOutcome {
 func relativeOverrideNoAnchorDetail(command string) string {
 	return fmt.Sprintf("%q is a relative command but `af doctor` is not inside a git "+
 		"repository, so the launch directory it would resolve against cannot be "+
-		"determined — run `af doctor` from inside the session's repo (or pass "+
-		"--repo) to verify it against the directory the session will launch in",
+		"determined — run `af doctor` from inside the session's repo to verify "+
+		"it against the directory the session will launch in",
 		command)
 }
