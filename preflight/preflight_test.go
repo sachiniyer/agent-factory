@@ -323,12 +323,14 @@ func TestRelativeExecutable(t *testing.T) {
 		{name: "absolute path", command: "/usr/bin/claude", want: false},
 		{name: "tilde path", command: "~/bin/claude", want: false},
 		{name: "env chdir relative exe", command: "env -C subdir ./codex", want: true},
-		// env -C with an ABSOLUTE chdir still surfaces a relative detected
-		// executable, so the helper conservatively reports it: doctor's caller
-		// treats "true" as advisory, and "cannot verify" for a command whose
-		// chdir happens to be absolute is the safe side of the
-		// false-positive/false-negative trade.
-		{name: "env chdir absolute with relative exe is conservative", command: "env -C /abs ./codex", want: true},
+		// An absolute env -C chdir fixes the launch working directory
+		// independent of the doctor's cwd, so a relative executable resolved
+		// against it (env -C /opt ./codex → /opt/codex) is anchor-independent
+		// and CheckCommand can verify it directly — the doctor must NOT
+		// downgrade a verifiable command to an unverified advisory, or a
+		// genuinely broken `env -C /opt ./codex` would exit 0 instead of
+		// reporting the missing file.
+		{name: "env chdir absolute with relative exe is verifiable", command: "env -C /abs ./codex", want: false},
 		{name: "env bare exe", command: "env codex", want: false},
 		// A relative PATH entry (introduced by env or a shell assignment) makes
 		// a bare executable's lookup depend on the launch directory, so the
@@ -346,6 +348,15 @@ func TestRelativeExecutable(t *testing.T) {
 		// launch depend on cwd even though the agent token is a bare name.
 		{name: "relative wrapper before agent token", command: "./bin/launcher codex", want: true},
 		{name: "bare wrapper before agent token is not anchoring", command: "launcher codex", want: false},
+		// GNU env's command operand is a separate executable the session
+		// launches from the working directory but CheckCommand does not
+		// resolve when a supported agent token is nested behind it. A relative
+		// operand anchors the command regardless of chdir (CheckCommand never
+		// verifies it), so `env ./bin/launcher codex` outside any repo must be
+		// advisory, not a false PASS against the doctor's cwd.
+		{name: "env command operand relative wrapper", command: "env ./bin/launcher codex", want: true},
+		{name: "env command operand bare wrapper is not anchoring", command: "env launcher codex", want: false},
+		{name: "env absolute chdir relative command operand still unverified", command: "env -C /abs ./bin/launcher codex", want: true},
 		// A relative env -C chdir makes the launch working directory depend on
 		// the doctor's cwd; an absolute chdir does not. A parent-relative chdir
 		// (env -C ../tools) must be detected too: the two probe anchors have

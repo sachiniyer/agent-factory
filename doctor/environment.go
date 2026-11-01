@@ -210,8 +210,11 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 	// invoked — a false failure outside the repo and a false pass against a
 	// decoy cwd. Outside any repo a relative override has no anchor and is
 	// reported advisory; absolute paths, tilde paths, and bare names are still
-	// checked directly.
-	workspace, _ := currentRepoRoot()
+	// checked directly. If the repo probe itself failed (not "not inside a git
+	// repository"), the doctor cannot tell whether it is inside the session's
+	// repo, so a relative override is reported incomplete (carrying the probe
+	// error) rather than downgraded to the outside-repo advisory.
+	workspace, repoErr := currentRepoRoot()
 	header := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
 		command := agent
@@ -220,13 +223,18 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 			command = config.ResolveProgram(cfg, agent)
 			configured = cfg.DefaultProgram == agent || strings.TrimSpace(cfg.ProgramOverrides[agent]) != ""
 		}
-		outcome := checkProgramCommand(workspace, command)
+		outcome := checkProgramCommand(workspace, repoErr, command)
 		switch {
 		case outcome.advisory:
 			header = append(header, agent+"=unverified")
 			report.Warn(sectionEnvironment, agent,
 				relativeOverrideNoAnchorDetail(command),
 				"run `af doctor` from inside the session's repo to verify a relative program_overrides path", false)
+		case outcome.incomplete:
+			header = append(header, agent+"=unverified")
+			report.Warn(sectionEnvironment, agent,
+				relativeOverrideProbeFailedDetail(command, outcome.probeErr),
+				"fix the repo probe (for example, run `af doctor` from inside the session's repo) and rerun", false)
 		case outcome.err == nil:
 			header = append(header, agent+"=present")
 			report.Pass(sectionEnvironment, agent, fmt.Sprintf("%q resolves to %s", command, outcome.check.Path))

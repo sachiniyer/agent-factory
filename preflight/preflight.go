@@ -280,51 +280,63 @@ func LocalSessionPrereqsAt(cfg *config.Config, agent, workingDir string) error {
 //
 // Absolute executables, tilde paths, absolute PATH entries, and absolute chdirs
 // resolve the same way regardless of the launch directory, so the doctor
-// outside any repo may still verify them directly. The detected context is
-// resolved through tmux.CommandEnvironmentFromCommand, so the same env-wrapper
-// and opaque-wrapper handling as the launch path applies. The classification is
-// conservative: a command that cannot be parsed (unterminated quotes, unknown
-// env options) returns false so CheckCommand surfaces the real error rather
-// than doctor emitting a different advisory for it.
+// outside any repo may still verify them directly. In particular, an absolute
+// env -C chdir fixes the launch working directory independent of the doctor's
+// cwd, so a relative executable that resolves against it (env -C /opt ./codex
+// → /opt/codex) is anchor-independent and CheckCommand can verify it. The
+// detected context is resolved through tmux.CommandEnvironmentFromCommand, so
+// the same env-wrapper and opaque-wrapper handling as the launch path applies.
+// The classification is conservative: a command that cannot be parsed
+// (unterminated quotes, unknown env options) returns false so CheckCommand
+// surfaces the real error rather than doctor emitting a different advisory for
+// it.
 func RelativeExecutable(command string) bool {
 	launch, err := tmux.CommandEnvironmentFromCommand(command, relativeExecutableAnchorA)
 	if err != nil {
 		return false
 	}
-	if usesRelativeExecutable(launch.Executable) {
-		return true
-	}
-	// A relative shell wrapper (the first non-assignment token, the same token
-	// CheckCommand resolves via resolveShellExecutableAt) makes the command's
-	// launch depend on cwd even when the detected agent executable is a bare
-	// name. The detected executable and the shell wrapper are independent
-	// obligations; a relative wrapper resolves against the launch directory.
+	// The shell wrapper (the first non-assignment token, the same token
+	// CheckCommand resolves via resolveShellExecutableAt) is looked up against
+	// the doctor's own cwd (launchDir), not against launch.WorkingDir, so an
+	// env -C chdir does not anchor it. A relative wrapper therefore anchors
+	// the command regardless of chdir even when the detected agent executable
+	// is a bare name.
 	if wrapper := relativeShellWrapper(command); wrapper != "" && wrapper != launch.Executable && usesRelativeExecutable(wrapper) {
 		return true
 	}
-	// A bare executable is resolved through PATH, so a relative or empty PATH
-	// entry — whether introduced by the command or inherited from the doctor's
-	// environment — makes its lookup depend on the launch directory. Absolute
-	// and relative-path executables ignore PATH, so a relative PATH entry does
-	// not anchor them (PATH=bin /missing/codex resolves the absolute executable
-	// directly and never consults PATH).
-	if isBareExecutable(launch.Executable) {
-		if path, ok := effectivePathValue(launch); ok && pathHasRelativeEntry(path) {
+	// GNU env's command operand (the token env execs) is a separate executable
+	// the session launches from the working directory, but CheckCommand does
+	// not resolve it when a supported agent token is nested behind it
+	// (`env ./bin/launcher codex` resolves env and codex, not the intervening
+	// ./bin/launcher). A relative operand therefore anchors the command
+	// regardless of chdir, since CheckCommand never verifies it.
+	if op := envCommandOperand(command); op != "" && op != launch.Executable && usesRelativeExecutable(op) {
+		return true
+	}
+	// The remaining resolutions — launch.Executable, a bare executable's PATH
+	// lookup, and the existence check on launch.WorkingDir — all go through
+	// launch.WorkingDir. An absolute env -C chdir fixes WorkingDir independent
+	// of the doctor's cwd, so those resolutions are anchor-independent and
+	// CheckCommand can verify them directly. Only when WorkingDir itself
+	// resolves against the doctor's cwd (no chdir, or a relative chdir) can
+	// they flip with the doctor's invocation directory.
+	if workingDirResolvesAgainstCwd(command, launch) {
+		if usesRelativeExecutable(launch.Executable) {
 			return true
 		}
-	}
-	// A relative env -C chdir makes the launch working directory depend on the
-	// doctor's cwd. CommandEnvironmentFromCommand sets WorkingDir to the input
-	// anchor when no chdir is applied, to the (absolute) chdir when it is
-	// absolute, and to join(anchor, chdir) when it is relative. So a chdir
-	// happened iff WorkingDir differs from the anchor, and it is relative iff
-	// re-resolving under a second, distinct anchor yields a different WorkingDir.
-	if launch.WorkingDir != relativeExecutableAnchorA {
-		if other, err := tmux.CommandEnvironmentFromCommand(command, relativeExecutableAnchorB); err == nil && other.WorkingDir != launch.WorkingDir {
-			return true
+		if isBareExecutable(launch.Executable) {
+			if path, ok := effectivePathValue(launch); ok && pathHasRelativeEntry(path) {
+				return true
+			}
 		}
 	}
-	return false
+	// A relative env -C chdir makes launch.WorkingDir itself depend on the
+	// doctor's cwd: CheckCommand stats it before resolving the executable, and
+	// that stat flips with the doctor's invocation directory even for an
+	// absolute executable with an absolute PATH. No chdir means WorkingDir is
+	// the doctor's own cwd, which always exists, so it does not add a
+	// dependency; an absolute chdir fixes it independent of the cwd.
+	return relativeChdir(command, launch)
 }
 
 // relativeExecutableAnchorA and relativeExecutableAnchorB are two distinct
@@ -350,6 +362,73 @@ func relativeShellWrapper(command string) string {
 		return ""
 	}
 	return shellExecutable(words)
+}
+
+// envCommandOperand returns the executable token GNU env execs (env's command
+// operand) when the command begins with one or more env wrappers, or "" if the
+// command has no env wrapper or the wrapper's command cannot be found. af
+// models env as exec'ing its command operand; when a supported agent token is
+// nested behind that operand (`env ./bin/launcher codex`), CheckCommand
+// resolves env (the shell wrapper) and codex (the detected agent) but not the
+// intervening operand, so a relative operand is a launch-directory-dependent
+// executable the doctor cannot verify from outside a repo. Leading shell
+// assignments are skipped, and nested env wrappers are unwrapped, mirroring
+// firstCommandTokenStrict in the tmux package.
+func envCommandOperand(command string) string {
+	words, err := shellWords(command, 12)
+	if err != nil {
+		return ""
+	}
+	idx := 0
+	for idx < len(words) && isAssignment(words[idx]) {
+		idx++
+	}
+	for idx < len(words) && isEnvExecutable(words[idx]) {
+		invocation, perr := envcommand.Parse(words[idx+1:], envcommand.Policy{AllowAssignments: true})
+		if perr != nil || invocation.CommandIndex < 0 {
+			return ""
+		}
+		idx += 1 + invocation.CommandIndex
+	}
+	if idx < len(words) {
+		return words[idx]
+	}
+	return ""
+}
+
+// workingDirResolvesAgainstCwd reports whether launch.WorkingDir is resolved
+// against the doctor's cwd, and so a relative executable or a bare executable
+// with a relative PATH entry resolved through it flips with where af doctor
+// runs. It is true when no env -C chdir was applied (WorkingDir is the doctor's
+// own cwd) or when a relative chdir was applied (WorkingDir is join(cwd,
+// chdir)); an absolute chdir fixes WorkingDir independent of the cwd and
+// returns false.
+func workingDirResolvesAgainstCwd(command string, launch tmux.CommandEnvironment) bool {
+	if launch.WorkingDir == relativeExecutableAnchorA {
+		return true
+	}
+	other, err := tmux.CommandEnvironmentFromCommand(command, relativeExecutableAnchorB)
+	if err != nil {
+		return false
+	}
+	return other.WorkingDir != launch.WorkingDir
+}
+
+// relativeChdir reports whether an env -C chdir made launch.WorkingDir itself
+// depend on the doctor's cwd: CheckCommand stats WorkingDir before resolving
+// the executable, and that stat flips with the doctor's invocation directory
+// even for an otherwise anchor-independent executable. No chdir (WorkingDir is
+// the doctor's own cwd, which always exists) and an absolute chdir both return
+// false; only a relative chdir returns true.
+func relativeChdir(command string, launch tmux.CommandEnvironment) bool {
+	if launch.WorkingDir == relativeExecutableAnchorA {
+		return false
+	}
+	other, err := tmux.CommandEnvironmentFromCommand(command, relativeExecutableAnchorB)
+	if err != nil {
+		return false
+	}
+	return other.WorkingDir != launch.WorkingDir
 }
 
 // isBareExecutable reports whether exe is a bare name resolved through PATH

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -334,4 +335,28 @@ func TestDoctorSetup_RelativeOverrideInRepo_AnchoredToRepoRootPasses(t *testing.
 	require.True(t, okContains(report, "default_program"),
 		"the relative override must resolve anchored to the repo root")
 	require.True(t, okContains(report, "program_overrides.claude"))
+}
+
+// TestCheckProgramCommand_ProbeFailed_RelativeIsIncomplete pins finding #3:
+// when the doctor is inside a repository but the git repo probe itself fails
+// (git could not start, metadata unreadable, …) for a reason other than "not
+// inside a git repository", the doctor cannot tell whether it is inside the
+// session's repo. A relative override can be neither anchored (CheckCommandAt
+// needs a workspace) nor confirmed unanchored (the outside-repo advisory
+// presumes the doctor verified it is outside any repo), so it is reported
+// incomplete carrying the probe error, never downgraded to the outside-repo
+// advisory that claims "not inside a git repository". A non-relative command
+// does not depend on the anchor and is still checked directly.
+func TestCheckProgramCommand_ProbeFailed_RelativeIsIncomplete(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin"+string(os.PathListSeparator)+"/bin")
+	probeErr := errors.New("failed to get git repo root: git could not start")
+
+	relative := checkProgramCommand("", probeErr, "bin/claude")
+	require.True(t, relative.incomplete, "a relative command with a failed repo probe is incomplete")
+	require.False(t, relative.advisory, "a failed repo probe must not take the outside-repository branch")
+	require.Equal(t, probeErr, relative.probeErr)
+
+	absolute := checkProgramCommand("", probeErr, "/missing/codex")
+	require.False(t, absolute.incomplete, "an absolute command does not depend on the repo anchor")
+	require.False(t, absolute.advisory)
 }

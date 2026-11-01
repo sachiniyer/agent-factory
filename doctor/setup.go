@@ -206,23 +206,30 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 	// daemon's create-validation path does the same with repo.WorkspacePath()
 	// (#5779); the doctor was left behind, so the same relative override
 	// flipped between PASS and FAIL purely on where `af doctor` was typed.
-	workspace, _ := currentRepoRoot()
-	checkOneProgram(workspace, "default_program", cfg.DefaultProgram, config.ResolveProgram(cfg, cfg.DefaultProgram), report)
+	workspace, repoErr := currentRepoRoot()
+	checkOneProgram(workspace, repoErr, "default_program", cfg.DefaultProgram, config.ResolveProgram(cfg, cfg.DefaultProgram), report)
 	for _, agent := range sortedKeys(cfg.ProgramOverrides) {
 		command := strings.TrimSpace(cfg.ProgramOverrides[agent])
 		if command == "" {
 			continue
 		}
-		checkOneProgram(workspace, "program_overrides."+agent, agent, command, report)
+		checkOneProgram(workspace, repoErr, "program_overrides."+agent, agent, command, report)
 	}
 }
 
-func checkOneProgram(workspace, field, agent, command string, report *Report) {
-	outcome := checkProgramCommand(workspace, command)
+func checkOneProgram(workspace string, repoErr error, field, agent, command string, report *Report) {
+	outcome := checkProgramCommand(workspace, repoErr, command)
 	if outcome.advisory {
 		report.addAdvisoryFinding(Finding{
 			Check:  "agent-program",
 			Detail: fmt.Sprintf("%s resolves to %s", field, relativeOverrideNoAnchorDetail(command)),
+		})
+		return
+	}
+	if outcome.incomplete {
+		report.addAdvisoryFinding(Finding{
+			Check:  "agent-program",
+			Detail: fmt.Sprintf("%s resolves to %s", field, relativeOverrideProbeFailedDetail(command, outcome.probeErr)),
 		})
 		return
 	}
