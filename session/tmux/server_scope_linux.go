@@ -277,7 +277,7 @@ func dedicatedServerScopeCommand(logPath, unit string) *exec.Cmd {
 // dedicatedServerScopeName is the stable per-socket prefix of every dedicated
 // server unit; newDedicatedServerUnit appends a per-launch suffix.
 func dedicatedServerScopeName() string {
-	sum := sha256.Sum256([]byte(defaultSocketPath()))
+	sum := sha256.Sum256([]byte(DefaultSocketPath()))
 	return fmt.Sprintf("agent-factory-tmux-server-%x", sum[:6])
 }
 
@@ -289,7 +289,7 @@ func newDedicatedServerUnit() string {
 
 // dedicatedServerReady records that sessions are hosted by the dedicated server.
 func dedicatedServerReady(home, unit string) {
-	socket := defaultSocketPath()
+	socket := DefaultSocketPath()
 	log.InfoLog.Printf("dedicated tmux server is running in systemd unit %s.scope on socket %s", unit, socket)
 	recordServerState(home, ServerState{Mode: ServerModeDedicated, Socket: socket, Unit: unit, At: time.Now()})
 }
@@ -369,7 +369,7 @@ func recordServerDeath(home, unit string, started time.Time, runErr error) {
 	death := ServerDeath{
 		At:            time.Now(),
 		Unit:          unit,
-		Socket:        defaultSocketPath(),
+		Socket:        DefaultSocketPath(),
 		UptimeSeconds: time.Since(started).Seconds(),
 	}
 	if runErr != nil {
@@ -405,7 +405,7 @@ func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd
 				log.WarningLog.Printf("tmux client lacks a verified -N no-autostart flag; using a per-session systemd scope compatibility fallback")
 			})
 		} else {
-			socket := defaultSocketPath()
+			socket := DefaultSocketPath()
 			log.WarningLog.Printf("dedicated tmux server launch failed; falling back to a per-session systemd scope on socket %s: %v", socket, serverErr)
 			recordServerState(home, ServerState{Mode: ServerModeFallback, Socket: socket, Reason: serverErr.Error(), At: time.Now()})
 		}

@@ -827,6 +827,13 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileUnreachable(d.Unreachable) {
 		changed = true
 	}
+	// The agent's attention request is the same class of projection-only axis
+	// (#5461): it appears on `attention --self` and clears on the daemon's own
+	// rules while liveness stays Ready/Running, so an already-open rail must
+	// mirror it here or the row only learns of it at the next rebuild.
+	if inst.ReconcileAttention(d.Attention) {
+		changed = true
+	}
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
 	// the daemon poll computes Running/Ready/Lost/Archived/LimitReached (the #935
 	// liveness) and the TUI renders it. Applied UNCONDITIONALLY — daemon liveness

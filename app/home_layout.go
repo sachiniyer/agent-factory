@@ -91,14 +91,14 @@ func (m *home) relayout() {
 	ids = append(ids, layout.RegionAutomations, layout.RegionProjects)
 	m.ring.SetIDs(ids...)
 	// A rail region joins the ring only while it can draw an item row (#6317):
-	// the visible-but-compact automations section renders just its 1-line
-	// summary — no row for a cursor to mark — so Enter there would act on an
-	// item the user cannot see. The compact band used to keep the region
+	// the visible-but-compact automations or projects section renders just its
+	// 1-line summary — no row for a cursor to mark — so Enter there would act
+	// on an item the user cannot see. The compact band used to keep the region
 	// focusable on visibility alone; the test is now the pane's own "at least
 	// one item row" rule, the same outcome minimal mode gets by dropping the
 	// section outright.
 	m.ring.SetHidden(layout.RegionAutomations, !lay.AutomationsCanDrawRows())
-	m.ring.SetHidden(layout.RegionProjects, !lay.ProjectsVisible)
+	m.ring.SetHidden(layout.RegionProjects, !lay.ProjectsCanDrawRows())
 	m.applyPendingTUIViewFocus()
 	m.syncFocus()
 

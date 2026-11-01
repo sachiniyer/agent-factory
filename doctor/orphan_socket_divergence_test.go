@@ -479,3 +479,238 @@ func TestStaleTempHomeClaimedByAmbientOnlySessionSurvives(t *testing.T) {
 	require.Empty(t, findByCheck(report, "stale-temp-home"),
 		"a claimed home is not a stale finding to remove")
 }
+
+// The dead-daemon half of the missing-record corroboration guard. #6271
+// refused the kill when a record was unreadable, named no socket, or was
+// absent WITH a live daemon — but left the record-absent, dead-daemon window
+// arming from the ambient listing, on the premise that an absent record means
+// the home never ran the record-writing daemon. That premise is unsound: a
+// daemon that hosted sessions and then died leaves no record (recordServerState
+// silently ignores write failures; macOS never writes one), so the ambient
+// listing is the only evidence and may be looking at a different server than
+// the one hosting a live session — the wrong-server kill #6271's pinning
+// closed for the recorded case, reopened here.
+//
+// The fix corroborates the ambient listing PER PROCESS against the socket the
+// marked process's own TMUX env names ("socketPath,serverPID,sessionIdx", set by
+// tmux on every pane process), arming the kill only when that socket agrees
+// with the ambient one — proving the ambient server IS the one that hosted the
+// dead session. A mismatch, a no-TMUX-env, or an empty (no-server) ambient
+// listing all refuse, the same rule the unreadable-record guard enforces. The
+// tests below stage the divergence the existing suite never exercised: a LIVE
+// af session on a non-ambient socket the absent record cannot pin to, while
+// doctor's ambient server is a different one (or none at all).
+
+// TestMissingServerRecord_DeadDaemon_LiveOnOtherSocket_NotKilled is the precise
+// fix. No record exists, no daemon is serving this home (recordedSocketAbsent,
+// the dead-daemon window), and a live af session sits on a non-ambient socket
+// (server A) the ambient listing (server B, kept alive with a decoy for a real
+// successful read) cannot reach. The victim carries the live session's markers
+// AND the TMUX env it inherited from tmux, naming server A. The ambient listing
+// reads the session as dead, but the per-process guard sees the victim's socket
+// does not match the ambient one and refuses the kill.
+func TestMissingServerRecord_DeadDaemon_LiveOnOtherSocket_NotKilled(t *testing.T) {
+	testguard.IsolateTmux(t) // doctor's ambient server (server B); TMUX cleared, TMUX_TMPDIR set
+	home := testguard.SocketTempDir(t)
+
+	// Server A: an explicit-socket tmux server holding a LIVE af session that
+	// carries this home's ancestry markers — the production shape of a session
+	// the daemon hosted on its own (now-unrecorded) socket before it died.
+	sockA := testguard.SocketPath(t, "a")
+	const liveName = "af_doctor-live-behind-absent-record"
+	out, err := exec.Command("tmux", "-S", sockA, "new-session", "-d", "-s", liveName,
+		"-e", tmux.EnvMarkerSession+"="+liveName, "-e", tmux.EnvMarkerHome+"="+home,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session on server A: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockA, "kill-server").Run() })
+
+	// Server B (the ambient IsolateTmux server) kept alive with a decoy so the
+	// ambient listing succeeds and is non-empty — the "successful listing of
+	// the wrong server" shape, not a failed read the blindness guard covers.
+	const decoyName = "af_doctor-ambient-decoy-absent-record"
+	out, err = exec.Command("tmux", "new-session", "-d", "-s", decoyName, "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session decoy: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+decoyName+":").Run() })
+
+	// No writeTmuxServerState and no staged daemon: recordedSocket falls to
+	// recordedSocketAbsent and the listing is the unpinned ambient one.
+
+	// A process carrying the LIVE session's markers, this home, and the TMUX
+	// env a real pane process inherits from tmux — naming server A, which the
+	// ambient listing does not reach.
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: liveName,
+		tmux.EnvMarkerHome:    home,
+		"TMUX":                fmt.Sprintf("%s,%d,0", sockA, 1<<30),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process whose session is live on a non-ambient socket the "+
+			"daemon never recorded — the record-absent dead-daemon window the per-process "+
+			"TMUX-env corroboration guard closes")
+
+	orphanFindings := findByCheck(report, "orphaned-process")
+	require.NotEmpty(t, orphanFindings,
+		"the uncorroborated orphan must stay VISIBLE so the run does not report clean over a kill it refused")
+	for _, f := range orphanFindings {
+		require.Empty(t, f.FixAction,
+			"a session death the ambient listing cannot corroborate (no record, no daemon, process "+
+				"TMUX socket != ambient) must not arm a kill: %s", f.Detail)
+		require.False(t, f.Fixed, "an uncorroborated orphan must not be fixed: %s", f.Detail)
+	}
+	// The tmux-inspection row attests a healthy read of the (wrong) ambient
+	// server — the insidious shape: nothing in the row names the divergence.
+	rows := findCheckRows(report, "tmux-inspection")
+	require.Len(t, rows, 1)
+	require.Equal(t, StatusPass, rows[0].Status,
+		"the ambient listing succeeded, so its row is a PASS — the kill must be refused by the "+
+			"per-process guard, not by blindness: %s", rows[0].Detail)
+}
+
+// TestMissingServerRecord_DeadDaemon_NoAmbientServer_NotKilled is the
+// no-ambient-server shape of the same window. Nothing runs on doctor's ambient
+// socket, so the ambient listing is tmux's definitive "no server running on
+// <socket>", which session/tmux's listSessionField converts to an error-free
+// empty list. That empty list passes the failed-listing guard, the live session
+// on server A reads dead, and before the guard the kill armed from a listing
+// that never named the server the session lived on. The per-process TMUX-env
+// corroboration refuses it the same way the non-empty-wrong-server shape does.
+func TestMissingServerRecord_DeadDaemon_NoAmbientServer_NotKilled(t *testing.T) {
+	testguard.IsolateTmux(t) // doctor's ambient socket dir is empty: no server, no sessions
+	home := testguard.SocketTempDir(t)
+
+	sockA := testguard.SocketPath(t, "a")
+	const liveName = "af_doctor-live-behind-absent-record-no-ambient"
+	out, err := exec.Command("tmux", "-S", sockA, "new-session", "-d", "-s", liveName,
+		"-e", tmux.EnvMarkerSession+"="+liveName, "-e", tmux.EnvMarkerHome+"="+home,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session on server A: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockA, "kill-server").Run() })
+
+	// No decoy: the ambient socket holds no server, so `tmux ls` answers the
+	// definitive no-server diagnostic and listSessionField returns an empty,
+	// error-free list — the shape that armed the kill before the fix.
+
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: liveName,
+		tmux.EnvMarkerHome:    home,
+		"TMUX":                fmt.Sprintf("%s,%d,0", sockA, 1<<30),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process whose session is live on a non-ambient socket while the "+
+			"ambient server was not running at all — the empty listing was read as proof of death")
+
+	orphanFindings := findByCheck(report, "orphaned-process")
+	require.NotEmpty(t, orphanFindings)
+	for _, f := range orphanFindings {
+		require.Empty(t, f.FixAction,
+			"an empty ambient listing is not corroboration against a process on another socket: %s", f.Detail)
+		require.False(t, f.Fixed, "an uncorroborated orphan must not be fixed: %s", f.Detail)
+	}
+}
+
+// TestMissingServerRecord_DeadDaemon_ProcessWithoutTmuxEnv_NotKilled locks the
+// conservative direction of the guard. A marked process that carries no TMUX
+// env cannot be tied to the ambient server at all, so the ambient listing cannot
+// corroborate its session's death — the exact shape the report's repro stages
+// (a process spawned with the session's markers but no inherited TMUX). Before
+// the fix the ambient listing armed the kill from that uncorroborated absence;
+// after, the arm refuses and the process is reported, not killed.
+func TestMissingServerRecord_DeadDaemon_ProcessWithoutTmuxEnv_NotKilled(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	// A live af session on a non-ambient socket (server A) carrying this
+	// home's markers — the session the ambient listing cannot see.
+	sockA := testguard.SocketPath(t, "a")
+	const liveName = "af_doctor-live-no-tmux-env"
+	out, err := exec.Command("tmux", "-S", sockA, "new-session", "-d", "-s", liveName,
+		"-e", tmux.EnvMarkerSession+"="+liveName, "-e", tmux.EnvMarkerHome+"="+home,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session on server A: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockA, "kill-server").Run() })
+
+	// Server B (ambient) kept alive with a decoy so the listing succeeds.
+	const decoyName = "af_doctor-ambient-decoy-no-tmux-env"
+	out, err = exec.Command("tmux", "new-session", "-d", "-s", decoyName, "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session decoy: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+decoyName+":").Run() })
+
+	// No record, no daemon: recordedSocketAbsent. The victim carries the live
+	// session's markers but no TMUX env, so ambientListingCoversProcess cannot
+	// tie it to the ambient server and the kill refuses.
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: liveName,
+		tmux.EnvMarkerHome:    home,
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a marked process that carries no TMUX env, so the ambient listing "+
+			"could not corroborate which server hosted its session — the uncorroborated-ambient kill")
+
+	orphanFindings := findByCheck(report, "orphaned-process")
+	require.NotEmpty(t, orphanFindings)
+	for _, f := range orphanFindings {
+		require.Empty(t, f.FixAction,
+			"a process with no TMUX env to corroborate against the ambient server must not arm a kill: %s", f.Detail)
+		require.False(t, f.Fixed)
+	}
+}
+
+// TestMissingServerRecord_DeadDaemon_GenuineOrphanOnAmbientSocket_Killed is the
+// no-regression direction for the per-process guard. With no record and no
+// daemon, the ambient listing STILL corroborates a session's death when the
+// marked process's TMUX env names the AMBIENT socket — proving the ambient
+// server IS the one that hosted the (now-dead) session. The kill arms and
+// fires, so --fix cleanup is preserved for the never-ran-a-record-writing-
+// daemon homes that do corroborate (the macOS common case), at the cost only of
+// the wrong-server and no-TMUX-env shapes the guards above now refuse.
+func TestMissingServerRecord_DeadDaemon_GenuineOrphanOnAmbientSocket_Killed(t *testing.T) {
+	testguard.IsolateTmux(t) // doctor's ambient server is the one that hosted the dead session
+	home := testguard.SocketTempDir(t)
+
+	// Server B (the ambient IsolateTmux server) kept alive with a decoy so the
+	// ambient listing succeeds and is non-empty — a real read, not blindness.
+	const decoyName = "af_doctor-ambient-decoy-genuine-absent"
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", decoyName, "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session decoy: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+decoyName+":").Run() })
+
+	// A genuinely dead session name (never created on any server) carrying this
+	// home's markers and a TMUX env naming the ambient socket — the production
+	// shape of a process the daemon hosted on the ambient server before it
+	// died. The ambient listing does not name the dead session, and the
+	// process's TMUX socket matches the ambient one, so the absence is
+	// corroborated death and the kill arms.
+	const deadName = "af_doctor-genuine-orphan-absent-record"
+	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: deadName,
+		tmux.EnvMarkerHome:    home,
+		"TMUX":                ambientTmuxEnv(t),
+	})
+
+	opts := testOptionsWithHome(t, home, true, orphan.PID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	findings := findByCheck(report, "orphaned-process")
+	require.Len(t, findings, 1)
+	require.NotEmpty(t, findings[0].FixAction,
+		"a genuine orphan whose TMUX socket matches the ambient server is corroborated and must arm the kill")
+	require.True(t, findings[0].Fixed, "fix outcome: %v", findings[0].FixErr)
+	require.Eventually(t, func() bool { return !alive(orphan) }, 5*time.Second, 25*time.Millisecond,
+		"a genuine orphan corroborated against the ambient server must still be killed by --fix")
+}

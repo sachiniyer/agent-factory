@@ -383,9 +383,9 @@ func TestProbePaneExitRefusesAnUnstampedForeignPaneOnRealTmux(t *testing.T) {
 	// pane-died hook installed against the living pane (mirroring
 	// startHeldPane, but the command stays alive).
 	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, afPaneLaunch("sleep 600"),
-		";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
-	require.NoError(t, exec.Command("tmux", panePidStampArgs(exactTarget(name))...).Run())
-	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run() })
+		";", "set-option", "-w", "-t", ExactTarget(name), "remain-on-exit", "on").Run())
+	require.NoError(t, exec.Command("tmux", panePidStampArgs(ExactTarget(name))...).Run())
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", ExactTarget(name)).Run() })
 	require.Equal(t, "0", tmuxDisplay(t, name, "#{pane_dead}"),
 		"the recorded command's pane is alive, not dead")
 	require.NotEqual(t, "", tmuxDisplay(t, name, "#{"+PanePidMarker+"}"),
@@ -394,7 +394,7 @@ func TestProbePaneExitRefusesAnUnstampedForeignPaneOnRealTmux(t *testing.T) {
 	// What a user attaching to the session does: split the window and exit the
 	// new pane with status 7. The split pane inherits remain-on-exit (a window
 	// option), dies, and is held dead.
-	require.NoError(t, exec.Command("tmux", "split-window", "-h", "-t", exactTarget(name),
+	require.NoError(t, exec.Command("tmux", "split-window", "-h", "-t", ExactTarget(name),
 		"sh -c 'exit 7'").Run())
 	require.Eventually(t, func() bool {
 		return tmuxDisplay(t, name, "#{pane_dead}") == "1"
@@ -532,7 +532,7 @@ func TestProbePaneExitRefusesAnAccountScopedDefaultCommandSplit(t *testing.T) {
 // tmuxDisplay returns tmux's expansion of format for the session's active pane.
 func tmuxDisplay(t *testing.T, name, format string) string {
 	t.Helper()
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), format).Output()
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", ExactTarget(name), format).Output()
 	require.NoError(t, err, "tmux display-message -t %s %q", name, format)
 	return strings.TrimSpace(string(out))
 }

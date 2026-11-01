@@ -46,7 +46,7 @@ func TestBlindVanishedSessionRefusalTellsOperatorHowToTell(t *testing.T) {
 	require.Contains(t, message, name,
 		"the refusal must name the vanished session")
 	require.Contains(t, message,
-		shellsuggest.Command("tmux", "show-environment", "-t", exactTarget(name), EnvMarkerGeneration),
+		shellsuggest.Command("tmux", "show-environment", "-t", ExactTarget(name), EnvMarkerGeneration),
 		"the refusal must give the read that answers which generation the live session of that name carries")
 	require.Contains(t, message, "safe to kill",
 		"the refusal must say what to do with a generation no live session claims")
@@ -79,7 +79,7 @@ func TestBlindGenerationRefusalNamesEveryPidAndItsGeneration(t *testing.T) {
 	}
 	require.Contains(t, message, name, "the refusal must name the vanished session")
 	require.Contains(t, message,
-		shellsuggest.Command("tmux", "show-environment", "-t", exactTarget(name), EnvMarkerGeneration),
+		shellsuggest.Command("tmux", "show-environment", "-t", ExactTarget(name), EnvMarkerGeneration),
 		"the refusal must give the read that answers what the live session of that name carries")
 	require.Contains(t, message, shellsuggest.Command("af", "sessions", "list", "--json"),
 		"the refusal must say how to find the af session behind that tmux name")

@@ -645,8 +645,8 @@
       "id": "session.attention",
       "title": "Ask the user for attention",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/tree/render.go attentionIcon/showAttention/attentionText — a static ! in the theme attention role replaces the status glyph on live rows, and 'needs attention: <reason>' leads the row detail; the row reads the same Instance.Attention projection the web rail reads"
       },
       "web": {
         "status": "yes",
@@ -656,9 +656,9 @@
         "status": "yes",
         "pointer": "api/sessions_attention.go newSessionsAttentionCmd (af sessions attention) → daemon SetAttention RPC"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5461",
-      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. Only the web rail shows it so far: the TUI rail does not render InstanceData.Attention yet, so a TUI user gets no sign of the request (#5461). The generated theme.Attention colour is the token that work will use. session.Instance owns the clear rules: a submitted line on the agent pane (daemon/attention.go attentionClearingBinding), the dismiss control in the web session header (web/src/components.ts terminalChrome), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
+      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. Closed by the TUI half of #5461: the rail row paints a static bang in theme.Roles().Attention (the TUI has no animation, #1766) where the web blinks its dot, guards on the same live-only predicate the web's hasAttention applies, and leads the detail with the reason — outranking the ordinary idle detail, yielding to unreachable/restore reports, collapsed to glyph-only on unselected rows like the web's tooltip model. Clear rules stay daemon-owned and surface-agnostic: a submitted line on the agent pane (daemon/attention.go attentionClearingBinding wraps every client's PTY write path), the dismiss control in the web session header (web/src/components.ts terminalChrome), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
     },
     {
       "id": "project.color",

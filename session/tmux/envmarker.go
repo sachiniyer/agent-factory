@@ -220,7 +220,7 @@ func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 // the named variable was absent. If neither query answers, ownership remains
 // unknown and cleanup decides whether the exact session has since vanished.
 func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker, socket string) (string, bool, error) {
-	return sessionEnvMarkerAt(cmdExec, exactTarget(sanitizedName), sanitizedName, marker, socket)
+	return sessionEnvMarkerAt(cmdExec, ExactTarget(sanitizedName), sanitizedName, marker, socket)
 }
 
 // sessionEnvMarkerAt is sessionEnvMarker against an explicit tmux target: the

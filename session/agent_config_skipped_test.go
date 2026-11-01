@@ -230,3 +230,102 @@ func TestSwapOffBoxAccountClearsSkippedConfigWhenEverythingPlaces(t *testing.T) 
 	assert.Empty(t, res.AgentConfigSkipped)
 	assert.Empty(t, f.inst.AgentConfigSkipped(), "a clean staged scope clears the row's skip list")
 }
+
+// When the operator's agent home cannot be resolved on the daemon box —
+// os.UserHomeDir() errors (HOME unset or empty) and no relocation variable
+// (CLAUDE_CONFIG_DIR/CODEX_HOME) is set — the placement cannot read ANY
+// declared file. This is a refusal of every declared file, not a silent no-op:
+// each declared file must be named on every surface like the per-file refusals
+// above, or the session appears fully provisioned while running a bare agent
+// (#6337). The provision still succeeds — a bare agent beats none.
+func TestAgentConfigSkippedNamesEveryFileWhenOperatorHomeUnresolvable(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+
+	w := configWorkspace(t, "claude", "box1", "claude:CLAUDE.md", "claude:settings.json")
+	skipped, err := w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err, "an unresolvable home still does not fail the create")
+
+	require.Len(t, skipped, 2, "one entry per declared file, named as the operator declared it")
+	assert.Contains(t, skipped[0], "claude:CLAUDE.md")
+	assert.Contains(t, skipped[0], "cannot resolve", "the reason names the unresolvable home")
+	assert.Contains(t, skipped[1], "claude:settings.json")
+	assert.Contains(t, skipped[1], "cannot resolve")
+
+	assert.NoDirExists(t, w.AccountDir(), "nothing is placed when the home cannot be resolved")
+}
+
+// The codex agent resolves its home the same way (CODEX_HOME or $HOME/.codex),
+// so an unresolvable home refuses every declared codex file too.
+func TestAgentConfigSkippedNamesEveryCodexFileWhenOperatorHomeUnresolvable(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+
+	w := configWorkspace(t, "codex", "box1", "codex:config.toml", "codex:AGENTS.md")
+	skipped, err := w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
+	require.Len(t, skipped, 2)
+	assert.Contains(t, skipped[0], "codex:config.toml")
+	assert.Contains(t, skipped[0], "cannot resolve")
+	assert.Contains(t, skipped[1], "codex:AGENTS.md")
+	assert.Contains(t, skipped[1], "cannot resolve")
+	assert.NoDirExists(t, w.AccountDir())
+}
+
+// The skip is also warned in the daemon log, like every other refusal: the
+// user-visible row is the contract, but the log line is the diagnostic the
+// sibling refusals emit — the unresolvable-home branch must not be the one
+// refusal that is totally silent.
+func TestAgentConfigSkippedWarnsWhenOperatorHomeUnresolvable(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+
+	buf := captureWarningLog(t)
+	w := configWorkspace(t, "claude", "box1", "claude:CLAUDE.md", "claude:settings.json")
+	_, err := w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "sandbox_agent_config: skipping claude:CLAUDE.md")
+	assert.Contains(t, logged, "sandbox_agent_config: skipping claude:settings.json")
+	assert.Contains(t, logged, "cannot resolve", "the log line carries the reason too")
+}
+
+// The count of skips tracks the count of declared files: one declared file
+// under an unresolvable home produces exactly one entry — the count is the
+// actionable fact bugreport redaction preserves.
+func TestAgentConfigSkippedCountsOneEntryPerDeclaredFileWhenHomeUnresolvable(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+
+	w := configWorkspace(t, "claude", "box1", "claude:.claude.json")
+	skipped, err := w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
+	require.Len(t, skipped, 1)
+	assert.Contains(t, skipped[0], "claude:.claude.json")
+}
+
+// The unresolvable-home refusal does NOT fire when the host is unlisted or the
+// session has no account scope: nothing applied, so there is nothing to warn
+// about — the entries stay constrained to the same shape as the per-file
+// refusals, so a session the config never carried is not warned as 'skipped'.
+func TestAgentConfigSkippedIsEmptyWhenHomeUnresolvableButNothingApplies(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+
+	unlisted := configWorkspace(t, "claude", "", "claude:settings.json")
+	skipped, err := unlisted.syncAgentConfigIn(time.Second)
+	require.NoError(t, err)
+	assert.Empty(t, skipped, "an unlisted target receives no skip list")
+
+	noAccount := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s",
+		spec: ProvisionSpec{AccountSyncHost: "box1", AgentConfigFiles: []string{"claude:settings.json"}}}
+	skipped, err = noAccount.syncAgentConfigIn(time.Second)
+	require.NoError(t, err)
+	assert.Empty(t, skipped, "without an account scope the home is never consulted")
+}
