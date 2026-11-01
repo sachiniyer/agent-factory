@@ -204,6 +204,20 @@ their command; a terminal profile inside the editor is yours, and it lives in
 the editor's own settings, which the editor can rewrite. If you pin sessions to
 accounts, keep agent credential variables out of your shell startup files.
 
+For a process or shell sibling tab's command, `af` checks the **visible command
+line** for an override of the account's identity or shell-startup variables — a
+direct assignment, one nested behind a wrapper `af` models (`env`, `exec`,
+`nohup`, `nice`, `timeout`, `setsid`, `stdbuf`, `ionice`, `taskset`, `xargs`,
+`command`, `builtin`), or one nested behind a listed argv-passthrough wrapper
+(`strace`, `ltrace`, `perf`, `valgrind`, `gdb`, `chrt`, `numactl`, `unshare`,
+`prlimit`) that runs a child and forwards argv. A listed passthrough wrapper is
+refused whatever its tail contains, since a PATH-shadowed copy can replace the
+account environment in ways a static command-line scan cannot enumerate. The
+check covers the visible command line and the modeled wrappers; a user's own
+wrapper script (a `program_overrides` target `af` does not model) has internals
+the command line cannot see, so what it does with the account environment is
+outside what `af` can verify.
+
 ### Docker and backend boundaries
 
 Account selection supports local and Docker sessions, and ssh sessions on a host in

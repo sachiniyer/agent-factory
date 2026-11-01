@@ -55,7 +55,7 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 	}{
 		{"echo env … env x", func(n int) string { return "echo " + strings.Repeat("env ", n) + "x" }, false},
 		{"env … env x", func(n int) string { return strings.Repeat("env ", n) + "x" }, false},
-		{"strace env … env x", func(n int) string { return "strace " + strings.Repeat("env ", n) + "x" }, false},
+		{"strace env … env x", func(n int) string { return "strace " + strings.Repeat("env ", n) + "x" }, true},
 		{"env … env unset CODEX_HOME", func(n int) string { return strings.Repeat("env ", n) + "unset CODEX_HOME" }, true},
 		{"echo a … a", func(n int) string { return "echo" + strings.Repeat(" a", n) }, false},
 		{"echo a … a /bin/sh -i", func(n int) string { return "echo" + strings.Repeat(" a", n) + " /bin/sh -i" }, false},
@@ -63,7 +63,7 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"env -u env env -u env … x", func(n int) string { return strings.Repeat("env -u env ", n) + "x" }, false},
 		{"echo A=$x … x", func(n int) string { return "echo" + strings.Repeat(" A=$x", n) + " x" }, false},
 		{"echo env -v env -v … x", func(n int) string { return "echo" + strings.Repeat(" env -v", n) + " x" }, false},
-		{"strace -E x … x", func(n int) string { return "strace" + strings.Repeat(" -E x", n) + " x" }, false},
+		{"strace -E x … x", func(n int) string { return "strace" + strings.Repeat(" -E x", n) + " x" }, true},
 		// nohup's child tail is scanned like ionice's (#5034), so this nesting
 		// fails closed past shadowedChildJudgementLimit instead of staying
 		// admitted — the same budget the taskset family below pins.
@@ -113,7 +113,7 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"xargs -I{} echo xargs -a … /tmp/f codex", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" xargs -a", n) + " /tmp/f codex" }, false},
 		{"xargs strace -f xargs strace -f … echo x", func(n int) string { return strings.Repeat("xargs strace -f ", n) + "echo x" }, true},
 		{"xargs env A=1 strace xargs … echo x", func(n int) string { return strings.Repeat("xargs env A=1 strace ", n) + "echo x" }, true},
-		{"xargs strace --fol … echo x", func(n int) string { return "xargs strace" + strings.Repeat(" --fol", n) + " echo x" }, false},
+		{"xargs strace --fol … echo x", func(n int) string { return "xargs strace" + strings.Repeat(" --fol", n) + " echo x" }, true},
 		{"xargs -I{} strace -o {} … echo x", func(n int) string { return "xargs -I{} strace" + strings.Repeat(" -o {}", n) + " echo x" }, true},
 		{"xargs -I{} strace -f -f … {}", func(n int) string { return "xargs -I{} strace" + strings.Repeat(" -f", n) + " -{} echo" }, true},
 		// Distinct markers past xargsMarkerLimit fail closed (Codex on

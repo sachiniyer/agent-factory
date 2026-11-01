@@ -437,6 +437,20 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 			return nil, false, true
 		}
 	default:
+		// An unmodeled argv-passthrough wrapper (strace/perf/valgrind/
+		// gdb --args/chrt/numactl/unshare/prlimit/...) runs a child
+		// command and forwards argv, so a PATH-shadowed copy
+		// (`shift N; exec "$@"`) can replace the selected account
+		// environment exactly the way a shadowed nohup or ionice can. A
+		// static command-line check cannot enumerate every shape a
+		// shadowed wrapper can shift to (a buried suffix scan was bypassed
+		// twice by Codex), so for the wrappers in this class the check
+		// fails closed whatever their tail contains: the effect of an
+		// unmodeled wrapper on the account environment is unknown, so the
+		// command is unverifiable rather than clean.
+		if isUnmodeledArgvPassthroughWrapper(words[0]) {
+			return nil, false, true
+		}
 		if unrecognizedWrapperHidesAccountAssignment(words, names, memo) {
 			return nil, false, true
 		}
@@ -620,6 +634,48 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 // (see #5034) and the literal payloads the report names are closed here.
 func childTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	return len(words) > 1 && laterLiteralChildSuffixMutates(words[1:], names, memo)
+}
+
+// isUnmodeledArgvPassthroughWrapper reports whether word is one of the argv-
+// passthrough wrappers the modeled peel list does not name but the threat
+// model still treats as a child-executing wrapper: the binary runs a child
+// command and forwards argv, so a PATH-shadowed copy (`shift N; exec "$@"`)
+// can replace the selected account environment exactly the way a shadowed
+// nohup or ionice can. Matched by basename, the way the modeled arms match
+// (isAccountCommandName uses filepath.Base), so a path form (/usr/bin/perf)
+// is the same wrapper. The class is open in principle; this names the members
+// the parity test enumerates — the tracing tools (strace/ltrace/perf/valgrind/
+// gdb) and the util-linux argv-passthrough launchers that exec a child and
+// forward argv the same way (chrt/numactl/unshare/prlimit) — mirroring the
+// closed list the strace special-case in unrecognizedWrapperHidesAccountAssignment
+// already keeps.
+//
+// peelAccountWrapper's default arm refuses a listed passthrough wrapper
+// whatever its tail contains, rather than pattern-matching a buried suffix.
+// Ordinary commands that do not exec a child (echo/rg/codex/grep/...) are
+// intentionally NOT wrappers: their arguments never reach an exec boundary,
+// so they fall through to unrecognizedWrapperHidesAccountAssignment (which
+// still judges a visible account-environment assignment under any such
+// command) and otherwise stay admitted.
+//
+// Scope: this check covers the visible command line and the modeled
+// wrappers it peels. A user's own wrapper script (a program_overrides
+// target af does not model) has internals the command line cannot see, so
+// what it does with the account environment is outside what af can verify;
+// refusing every unmodeled executable would break every custom-script
+// program_overrides, which is out of this fix's scope and is a product
+// decision for the owner.
+func isUnmodeledArgvPassthroughWrapper(word *syntax.Word) bool {
+	value, literal := literalShellWord(word)
+	if !literal {
+		return false
+	}
+	switch filepath.Base(value) {
+	case "strace", "ltrace", "perf", "valgrind", "gdb",
+		"chrt", "numactl", "unshare", "prlimit":
+		return true
+	}
+	return false
 }
 
 // stracePrefixMutates judges a strace option word that carries an expansion by
