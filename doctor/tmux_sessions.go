@@ -454,12 +454,12 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 		case present && home != "":
 			origin = "created by another agent-factory home: " + home
 		}
-		killCmd := shellsuggest.Command("tmux", "kill-session", "-t", "="+name+":")
+		killCmd := shellsuggest.Command("tmux", "kill-session", "-t", tmux.ExactTarget(name))
 		if kind == recordedSocketPinned {
-			// "=name:" is tmux's exact-match target syntax — one argument, so
-			// it is one piece the seam quotes as a whole. `-S <socket>` pins
+			// tmux.ExactTarget spells "=name:", one argument, so it is one
+			// piece the seam quotes as a whole. `-S <socket>` pins
 			// the remedy to the server the listing found the session on.
-			killCmd = shellsuggest.Command("tmux", "-S", socket, "kill-session", "-t", "="+name+":")
+			killCmd = shellsuggest.Command("tmux", "-S", socket, "kill-session", "-t", tmux.ExactTarget(name))
 		}
 		finding := Finding{
 			Check: "leaked-tmux-session",

@@ -260,7 +260,7 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 	t.Cleanup(func() { _, _ = agent.CloseAndWaitForPaneExit() })
 	assertAccountScopedNewWindow(t, agent, accountDir, dir)
 	if output, err := exec.Command(
-		"tmux", "set-option", "-t", exactTarget(agent.SanitizedName()), "default-command", "",
+		"tmux", "set-option", "-t", ExactTarget(agent.SanitizedName()), "default-command", "",
 	).CombinedOutput(); err != nil {
 		t.Fatalf("clear pre-fix agent default command: %v: %s", err, output)
 	}
@@ -269,7 +269,7 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 		"OPENAI_API_KEY": "ambient-must-not-reach-tab",
 	} {
 		if output, err := exec.Command(
-			"tmux", "set-environment", "-t", exactTarget(agent.SanitizedName()), name, value,
+			"tmux", "set-environment", "-t", ExactTarget(agent.SanitizedName()), name, value,
 		).CombinedOutput(); err != nil {
 			t.Fatalf("install pre-fix agent environment %s: %v: %s", name, err, output)
 		}
@@ -342,7 +342,7 @@ func assertAccountScopedNewWindow(t *testing.T, session *TmuxSession, accountDir
 	// An unqualified tmux new-window uses the session's default command. It must
 	// not fall back to a login shell that can restore ambient credentials from a
 	// profile after af established the account boundary.
-	if output, err := exec.Command("tmux", "set-option", "-t", exactTarget(session.SanitizedName()), "default-shell", "/bin/bash").CombinedOutput(); err != nil {
+	if output, err := exec.Command("tmux", "set-option", "-t", ExactTarget(session.SanitizedName()), "default-shell", "/bin/bash").CombinedOutput(); err != nil {
 		t.Fatalf("select profile-reading default shell: %v: %s", err, output)
 	}
 	newPane, err := exec.Command(

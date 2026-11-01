@@ -192,7 +192,7 @@ func (t *TmuxSession) start(workDir string) error {
 	}
 	args = append(args, wrappedProgram)
 	if defaultCommand != "" {
-		args = append(args, ";", "set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand)
+		args = append(args, ";", "set-option", "-t", ExactTarget(t.sanitizedName), "default-command", defaultCommand)
 	}
 	t.programMu.RLock()
 	remainOnExit := t.remainOnExit
@@ -205,7 +205,7 @@ func (t *TmuxSession) start(workDir string) error {
 		// own @af_pane_pid stamp is written by the launch shim inside the pane
 		// (sessionenv stamps its own pid — the shim IS the pane root), so no
 		// spawn-side command is needed and nothing here races death (#5319).
-		args = append(args, ";", "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
+		args = append(args, ";", "set-option", "-w", "-t", ExactTarget(t.sanitizedName), "remain-on-exit", "on")
 	}
 	// Mask the UNSELECTED account boundary names so a shell tab or
 	// default-command process in this account's session can never inherit
@@ -230,7 +230,7 @@ func (t *TmuxSession) start(workDir string) error {
 			if _, ok := selected[name]; ok {
 				continue
 			}
-			args = append(args, ";", "set-environment", "-r", "-t", exactTarget(t.sanitizedName), name)
+			args = append(args, ";", "set-environment", "-r", "-t", ExactTarget(t.sanitizedName), name)
 		}
 	}
 	// Bootstrap before deciding whether new-session needs a temporary
@@ -291,7 +291,7 @@ func (t *TmuxSession) start(workDir string) error {
 			// commands (#1917) — a tripped deadline degrades to a best-effort cleanup
 			// failure, the same as any other kill-session error below.
 			ctx, cancel := tmuxTimeoutContext()
-			cleanupErr := t.runTmuxBounded(ctx, "kill-session", "-t", exactTarget(t.sanitizedName))
+			cleanupErr := t.runTmuxBounded(ctx, "kill-session", "-t", ExactTarget(t.sanitizedName))
 			cancel()
 			if cleanupErr != nil {
 				err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
@@ -431,7 +431,7 @@ func (t *TmuxSession) start(workDir string) error {
 	// #2028): these run on the daemon's create path, so a wedged server must not
 	// hang them; both are best-effort and only log on failure.
 	ctx, cancel := tmuxTimeoutContext()
-	if err := t.runTmuxBounded(ctx, "set-option", "-t", exactTarget(t.sanitizedName), "history-limit", "10000"); err != nil {
+	if err := t.runTmuxBounded(ctx, "set-option", "-t", ExactTarget(t.sanitizedName), "history-limit", "10000"); err != nil {
 		// Logged at INFO with no "Warning:" text (#2166): the level is the
 		// severity signal, and an embedded "Warning:" makes an INFO line trip a
 		// log scraper that greps for the word.
@@ -441,7 +441,7 @@ func (t *TmuxSession) start(workDir string) error {
 
 	// Enable mouse scrolling for the session
 	ctx, cancel = tmuxTimeoutContext()
-	if err := t.runTmuxBounded(ctx, "set-option", "-t", exactTarget(t.sanitizedName), "mouse", "on"); err != nil {
+	if err := t.runTmuxBounded(ctx, "set-option", "-t", ExactTarget(t.sanitizedName), "mouse", "on"); err != nil {
 		log.InfoLog.Printf("failed to enable mouse scrolling for session %s: %v", t.sanitizedName, err)
 	}
 	cancel()

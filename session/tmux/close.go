@@ -196,7 +196,7 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 			if r.unknown {
 				break
 			}
-			_ = r.tmux("kill-session", "-t", exactTarget(mate))
+			_ = r.tmux("kill-session", "-t", ExactTarget(mate))
 			// A mate's windows are gone or going with the group; whatever
 			// default-command capability it held ends with it.
 			revokeLaunchCapabilities(mate)
@@ -206,7 +206,7 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// absent). Only then does its per-pane launch capability end — a close that
 	// could not tell, or that left the session live, keeps it (#4731).
 	gone := true
-	if err := r.tmux("kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
+	if err := r.tmux("kill-session", "-t", ExactTarget(t.sanitizedName)); err != nil {
 		switch {
 		case r.unknown:
 			gone = false

@@ -56,7 +56,7 @@ func strandDraft(t *testing.T, ts *TmuxSession, text string) {
 	load := exec.Command("tmux", "load-buffer", "-b", buf, "-")
 	load.Stdin = strings.NewReader(text)
 	require.NoError(t, ts.cmdExec.Run(load))
-	paste := exec.Command("tmux", "paste-buffer", "-d", "-p", "-b", buf, "-t", exactTarget(ts.sanitizedName))
+	paste := exec.Command("tmux", "paste-buffer", "-d", "-p", "-b", buf, "-t", ExactTarget(ts.sanitizedName))
 	require.NoError(t, ts.cmdExec.Run(paste))
 }
 
