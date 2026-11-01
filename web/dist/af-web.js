@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "b14e649dd427";
+var CLIENT_VERSION = "0d1a0760d7df";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21295,6 +21295,7 @@ var AppShell = class {
       this.renderFilterMenu(state, scoped);
     }
     const activeBefore = document.activeElement;
+    const activeRowBefore = activeBefore && this.railList.contains(activeBefore) ? activeBefore.closest(".af-row") : null;
     let restoreChangedFocus;
     const reopened = [];
     const rows = this.railRows.reconcile(
@@ -21375,6 +21376,36 @@ var AppShell = class {
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
     }
+    const railRows = this.railList.querySelectorAll(".af-row");
+    let hasStop = false;
+    for (const railRow of railRows) {
+      const isSelected = railRow.classList.contains("af-row-selected");
+      if (isSelected) {
+        if (railRow.getAttribute("tabindex") !== "0") railRow.setAttribute("tabindex", "0");
+      } else if (railRow.hasAttribute("tabindex")) {
+        railRow.removeAttribute("tabindex");
+      }
+      hasStop ||= isSelected;
+      const reachable = isSelected || railRow.getAttribute("aria-disabled") === "true";
+      for (const ctrl of railRow.querySelectorAll(".af-row-actions .af-term-more, .af-backlog-session-chip")) {
+        const wanted = reachable ? 0 : -1;
+        if (ctrl.tabIndex !== wanted) ctrl.tabIndex = wanted;
+      }
+    }
+    if (!hasStop) {
+      const fallback = [...railRows].find((railRow) => !railRow.classList.contains("af-row-creating"));
+      if (fallback && fallback.getAttribute("tabindex") !== "0") {
+        fallback.setAttribute("tabindex", "0");
+      }
+    }
+    if (activeRowBefore && !activeRowBefore.classList.contains("af-row-selected")) {
+      const after = document.activeElement;
+      const afterRow = after && this.railList.contains(after) ? after.closest(".af-row") : null;
+      const deadSpot = !afterRow || after === afterRow && !afterRow.classList.contains("af-row-selected");
+      if (deadSpot) {
+        this.railList.querySelector(".af-row-selected")?.focus();
+      }
+    }
     const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : void 0;
     this.lifecycleBtn = selectedMenu?.panel.querySelector(".af-rail-lifecycle") ?? null;
     this.lifecycleAction = selectedSession(state)?.lifecycle_action ?? null;
@@ -21401,6 +21432,7 @@ var AppShell = class {
     const menu = actionsDisclosure(`Actions for ${session.title}`);
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
+    menu.trigger.tabIndex = selected || !isOpenableSession(session) ? 0 : -1;
     menu.trigger.replaceChildren("\u2026");
     menu.trigger.addEventListener("click", () => {
       if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
@@ -22712,6 +22744,11 @@ function sessionRow(s, selected, openSession, buildActions, previous, itemChip) 
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
+  if (selected) {
+    row.setAttribute("tabindex", "0");
+  } else {
+    row.removeAttribute("tabindex");
+  }
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
