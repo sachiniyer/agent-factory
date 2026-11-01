@@ -1873,16 +1873,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/backlog_panel.ts ItemPanel actionsRow (Start now) → web/src/backlog_pane.ts BacklogPane.start → web/src/backlog_api.ts startItem"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_self.go backlogStartCmd → POST /v1/StartBacklogItem (daemon/backlog_start.go)"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Backlog PR 4 starts items as sessions from the CLI; the web Start now button arrives in PR 8. Item sessions are ordinary sessions, so open, archive and restore use the session routes. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "verdict": "deliberate",
+      "notes": "Backlog PR 4 starts items as sessions from the CLI; PR 8 adds Start now to the web item panel, which shows Starting until the session exists. Item sessions are ordinary sessions, so open, archive and restore use the session routes. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.questions",
@@ -1892,16 +1891,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/backlog_panel.ts ItemPanel question box (Send answer) → web/src/backlog_api.ts answerQuestion"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_self.go backlogAskCmd (ask --self --then --handoff-file) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go); api/backlog_inbox.go backlogInboxCmd reads /v1/GetBacklog"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; the web answer box arrives in PR 8. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "verdict": "deliberate",
+      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; PR 8 adds the web answer box at the top of the item panel. Asking is agent-only (ask --self), so the web only answers. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.runner",
@@ -1911,16 +1909,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/backlog_pane.ts runnerBar (read only) → web/src/backlog_api.ts getBacklog/getBudget"
+        "status": "yes",
+        "pointer": "web/src/backlog_runner.ts RunnerBar (switch, max running, Run next, ⋯ budget and when-done settings) → web/src/backlog_api.ts getBudget/setBudget/setSettings/runNext"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_status.go backlogRunnerCmd/backlogBudgetCmd, api/backlog_self.go backlogRunCmd → POST /v1/SetBacklogSettings, GetBudget, SetBudget, GetBacklog, RunBacklog (daemon/backlog.go, daemon/backlog_runner.go)"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (share of the Claude plan, stop-at, cap per run, dollar limit); plan readings arrive in PR 6; PR 7 adds the runner loop in the daemon poll loop, af backlog run, and the backlog.runner event. PR 3 shows a read-only runner bar on the web and PR 7 makes it editable. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "verdict": "deliberate",
+      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (share of the Claude plan, stop-at, cap per run, dollar limit); plan readings arrive in PR 6 and the runner loop, af backlog run and the backlog.runner event in PR 7. PR 3 shows a read-only runner bar on the web and PR 8 makes it editable: the switch, max running, plan use, and the ⋯ budget settings. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     }
   ],
   "ledger": {
@@ -2188,6 +2185,10 @@
       "PostBacklogMessage": "backlog.items",
       "SetBacklogItemStatus": "backlog.status",
       "GetBudget": "backlog.runner",
+      "SetBudget": "backlog.runner",
+      "SetBacklogSettings": "backlog.runner",
+      "RunBacklog": "backlog.runner",
+      "StartBacklogItem": "backlog.sessions",
       "SetAttention": "session.attention",
       "AccountLogin": "session.account-login",
       "ListAccounts": "session.accounts",
@@ -3175,9 +3176,6 @@
         "session_id": {
           "ok": "Set only for an agent's question (af backlog ask --self), which arrives with backlog PR 5."
         },
-        "question_id": {
-          "ok": "Names the question an answer closes; the web answer box arrives in backlog PR 8."
-        },
         "handoff": {
           "ok": "Set only on an agent's question (af backlog ask --self --handoff-file); the web only answers."
         },
@@ -3194,6 +3192,21 @@
         },
         "pr": {
           "ok": "Set only by the agent's af backlog done --self --pr, which arrives with item sessions in backlog PR 4."
+        }
+      },
+      "StartBacklogItem": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        }
+      },
+      "SetBacklogSettings": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        }
+      },
+      "RunBacklog": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
         }
       },
       "SetAttention": {
