@@ -2,6 +2,7 @@ package backlog
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestBeginAnswerRunKeepsTheAnswerAndStartsARun(t *testing.T) {
 		t.Fatalf("%+v", out)
 	}
 	run := it.lastRun()
-	if run.State != RunStarting || run.Answer != out.Answer.ID || run.StartedBy != StartedByUser || it.Status != StatusRunning {
+	if run.State != RunStarting || !slices.Equal(run.Answers, []int{out.Answer.ID}) || run.StartedBy != StartedByUser || it.Status != StatusRunning {
 		t.Fatalf("run %+v status %s", run, it.Status)
 	}
 	// The question stays open until the run starts, but the item does not need
@@ -92,7 +93,7 @@ func TestFinishStartSendsTheKeptAnswer(t *testing.T) {
 	if r := it.lastRun(); r.Branch != "af/b-2-a-2" || r.SessionID != "s2" {
 		t.Fatalf("%+v", r)
 	}
-	if it.KeptAnswer() != nil {
+	if len(it.KeptAnswers()) != 0 {
 		t.Fatal("a delivered answer is still kept")
 	}
 }
@@ -114,11 +115,11 @@ func TestAFailedAnswerRunKeepsTheAnswerForTheNextStart(t *testing.T) {
 	if !strings.Contains(note.Text, "tmux is not installed") || !strings.Contains(note.Text, `Your answer is kept: "af backlog start 2" sends it`) {
 		t.Fatalf("%q", note.Text)
 	}
-	if it.OpenQuestion() == nil || it.KeptAnswer().ID != first.Answer.ID || b.Derive(2, nil).State != StateNeedsYou {
-		t.Fatalf("kept %+v state %s", it.KeptAnswer(), b.Derive(2, nil).State)
+	if it.OpenQuestion() == nil || len(it.KeptAnswers()) != 1 || it.KeptAnswers()[0].ID != first.Answer.ID || b.Derive(2, nil).State != StateNeedsYou {
+		t.Fatalf("kept %+v state %s", it.KeptAnswers(), b.Derive(2, nil).State)
 	}
 	plan, err := b.BeginStart(2, StartedByUser, nil, now.Add(time.Second))
-	if err != nil || plan.Run.Answer != first.Answer.ID {
+	if err != nil || !slices.Equal(plan.Run.Answers, []int{first.Answer.ID}) {
 		t.Fatalf("a start after the failure does not carry the kept answer: %+v %v", plan.Run, err)
 	}
 	if err := b.FinishStart(2, plan.Run.StartedAt, "", "", "", errors.New("again"), now); err != nil {
@@ -133,7 +134,7 @@ func TestAFailedAnswerRunKeepsTheAnswerForTheNextStart(t *testing.T) {
 	if a := b.Item(2).message(first.Answer.ID); a.Delivery != DeliverySuperseded {
 		t.Fatalf("the first kept answer was not superseded: %+v", a)
 	}
-	if b.Item(2).KeptAnswer().ID != second.Answer.ID || b.Item(2).lastRun().Answer != second.Answer.ID {
+	if kept := b.Item(2).KeptAnswers(); len(kept) != 1 || kept[0].ID != second.Answer.ID || !slices.Equal(b.Item(2).lastRun().Answers, []int{second.Answer.ID}) {
 		t.Fatal("the latest answer is not the kept one")
 	}
 }
@@ -244,5 +245,65 @@ func TestPendingAnswersCarryTheHandoff(t *testing.T) {
 	}
 	if p := b.PendingAnswers(); len(p) != 1 || p[0].Handoff != "Schema drafted in db/schema.sql." {
 		t.Fatalf("%+v", p)
+	}
+}
+
+// Two questions of a gone session: the first answer's run fails, then the
+// second question is answered. The new run carries both kept answers, its
+// prompt lists both, and both questions close when it starts (Codex P2 on
+// #6535).
+func TestAnAnswerRunCarriesEveryKeptAnswer(t *testing.T) {
+	now := time.Now()
+	b := goneAsker(t, now)
+	region, err := b.Ask(2, "s1", Question{Text: "Which region?", Handoff: "Latency matters for EU users."}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.FinishStart(2, first.Plan.Run.StartedAt, "", "", "", errors.New("no worktree"), now); err != nil {
+		t.Fatal(err)
+	}
+	if note := b.Item(2).Thread[len(b.Item(2).Thread)-1].Text; !strings.Contains(note, "Your answer is kept") {
+		t.Fatalf("note %q", note)
+	}
+	// The second answer names its question, as the web's answer box does: the
+	// oldest open question is still the first, whose kept answer a bare answer
+	// would replace.
+	second, err := b.BeginAnswerRun(2, region.ID, "", "eu-west-1", now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Question.Text != "Which region?" {
+		t.Fatalf("the second answer went to %q, want the question still open", second.Question.Text)
+	}
+	it := b.Item(2)
+	if got, want := it.lastRun().Answers, []int{first.Answer.ID, second.Answer.ID}; !slices.Equal(got, want) {
+		t.Fatalf("the run carries %v, want %v", got, want)
+	}
+	got := b.StartPrompt(it, "", PrevRun{})
+	for _, want := range []string{
+		"asked the user questions, and is gone now.",
+		"```markdown\nSchema drafted in db/schema.sql.\n```\n\n```markdown\nLatency matters for EU users.\n```\n",
+		"Question 1:\n\n```markdown\nPostgres or SQLite?\n```\n\nAnswer 1:\n\n```markdown\nPostgres\n```\n",
+		"Question 2:\n\n```markdown\nWhich region?\n```\n\nAnswer 2:\n\n```markdown\neu-west-1\n```\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in\n%s", want, got)
+		}
+	}
+	if err := b.FinishStart(2, second.Plan.Run.StartedAt, "s2", "B-2 A", "af/b-2-a-2", nil, now); err != nil {
+		t.Fatal(err)
+	}
+	it = b.Item(2)
+	if it.OpenQuestion() != nil || len(it.KeptAnswers()) != 0 {
+		t.Fatalf("an answer was stranded: %+v", it.Thread)
+	}
+	for _, id := range []int{first.Answer.ID, second.Answer.ID} {
+		if a := it.message(id); a.Delivery != DeliveryDelivered {
+			t.Fatalf("answer %d is %s", id, a.Delivery)
+		}
 	}
 }

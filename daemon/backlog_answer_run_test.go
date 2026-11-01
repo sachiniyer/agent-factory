@@ -92,7 +92,7 @@ func TestAnAnswerToAGoneSessionStartsANewRun(t *testing.T) {
 	}
 	it := loadItem(t, repoID, 1)
 	last := it.Runs[len(it.Runs)-1]
-	if len(it.Runs) != 2 || last.State != backlog.RunStarted || last.StartedBy != backlog.StartedByUser || last.Answer != msg.ID {
+	if len(it.Runs) != 2 || last.State != backlog.RunStarted || last.StartedBy != backlog.StartedByUser || len(last.Answers) != 1 || last.Answers[0] != msg.ID {
 		t.Fatalf("runs %+v", it.Runs)
 	}
 	if it.OpenQuestion() != nil || it.Status != backlog.StatusRunning {
@@ -111,7 +111,7 @@ func TestAFailedAnswerRunKeepsTheAnswerForTheNextStart(t *testing.T) {
 	answerAt(t, m, repoPath, "Postgres")
 	m.backgroundMutationWG.Wait()
 	it := loadItem(t, repoID, 1)
-	if it.OpenQuestion() == nil || it.KeptAnswer() == nil {
+	if it.OpenQuestion() == nil || len(it.KeptAnswers()) != 1 {
 		t.Fatalf("the failed start did not keep the answer: %+v", it.Thread)
 	}
 	if note := lastNote(it).Text; !strings.Contains(note, "no worktree") || !strings.Contains(note, `"af backlog start 1" sends it`) {
@@ -181,5 +181,32 @@ func TestARestoreWithoutTheConversationSendsTheHandoff(t *testing.T) {
 				t.Fatalf("exact resume %v, handoff in the answer %v:\n%s", exact, has, got)
 			}
 		})
+	}
+}
+
+// An agent can file found work before the daemon recorded its start (the start
+// record is written after the first prompt was delivered): its add adopts the
+// starting run, as its questions and notes do, instead of being refused as no
+// item session's (Codex P2 on #6535).
+func TestAnAgentsAddBeforeItsStartIsRecordedAdoptsTheRun(t *testing.T) {
+	m, repoID, inst := startedItem(t)
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		r := &b.Item(1).Runs[0]
+		r.State, r.SessionID, r.Title = backlog.RunStarting, "", ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cs := &controlServer{manager: m}
+	var resp AddBacklogItemsResponse
+	if err := cs.AddBacklogItems(AddBacklogItemsRequest{RepoID: repoID, SessionID: inst.ID,
+		Items: []backlog.ItemInput{{Key: "item", Title: "Index the reports table"}}}, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Items) != 1 || len(resp.Items[0].Thread) != 1 || resp.Items[0].Thread[0].Text != "Added by the agent working on B-1." {
+		t.Fatalf("%+v", resp.Items)
+	}
+	if r := loadItem(t, repoID, 1).Runs[0]; r.State != backlog.RunStarted || r.SessionID != inst.ID {
+		t.Fatalf("the starting run was not adopted: %+v", r)
 	}
 }

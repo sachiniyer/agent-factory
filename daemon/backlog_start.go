@@ -111,7 +111,7 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 		return backlog.RunRef{}, err
 	}
 	var prev backlog.PrevRun
-	if plan.Run.Answer != 0 {
+	if len(plan.Run.Answers) > 0 {
 		prev = m.prevBacklogRun(ref.ID, root, b.Item(req.ID))
 	}
 

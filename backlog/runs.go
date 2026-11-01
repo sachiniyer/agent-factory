@@ -66,10 +66,11 @@ func (b *Backlog) BeginStart(id int, by string, facts Facts, now time.Time) (Sta
 		by = StartedByUser
 	}
 	run := RunRef{State: RunStarting, PrevStatus: it.Status, StartedBy: by, StartedAt: now}
-	// Any start carries an answer kept for a new run: the one the answer made,
-	// and a later "af backlog start" after that one failed.
-	if a := it.KeptAnswer(); a != nil {
-		run.Answer = a.ID
+	// Any start carries every answer kept for a new run: the one an answer
+	// started, and a later "af backlog start" after that one failed, with the
+	// answers kept from earlier failed starts too.
+	for _, a := range it.KeptAnswers() {
+		run.Answers = append(run.Answers, a.ID)
 	}
 	it.Status = StatusRunning
 	it.resetLiveAnswers() // answers accepted under an earlier run belong to it, not this one
@@ -169,7 +170,7 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title, bra
 	it.UpdatedAt = now
 	if startErr == nil {
 		run.SessionID, run.Title, run.Branch, run.State = sessionID, title, branch, RunStarted
-		it.answerSent(run.Answer)
+		it.answersSent(run.Answers)
 		return nil
 	}
 	run.State, run.EndedAt = RunFailed, now
@@ -180,23 +181,27 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title, bra
 		}
 	}
 	note := "The session could not start: " + startErr.Error()
-	if a := it.message(run.Answer); a != nil && a.Delivery == DeliveryNewRun {
+	if kept := len(it.KeptAnswers()); kept == 1 {
 		note += fmt.Sprintf(". Your answer is kept: \"af backlog start %d\" sends it to a new session with the previous agent's notes", id)
+	} else if kept > 1 {
+		note += fmt.Sprintf(". Your answers are kept: \"af backlog start %d\" sends them to a new session with the previous agent's notes", id)
 	}
 	_, err = b.AddNote(id, AuthorAF, note, now)
 	return err
 }
 
-// answerSent closes the question of kept answer answerID: a session started
-// with it in its first prompt.
-func (it *Item) answerSent(answerID int) {
-	a := it.message(answerID)
-	if a == nil || a.Kind != KindAnswer || a.Delivery != DeliveryNewRun {
-		return
-	}
-	a.Delivery = DeliveryDelivered
-	if q := it.message(a.Answers); q != nil && q.Kind == KindQuestion && q.Closed == "" {
-		q.Closed = ClosedAnswered
+// answersSent closes the questions of the kept answers answerIDs: a session
+// started with them in its first prompt.
+func (it *Item) answersSent(answerIDs []int) {
+	for _, id := range answerIDs {
+		a := it.message(id)
+		if a == nil || a.Kind != KindAnswer || a.Delivery != DeliveryNewRun {
+			continue
+		}
+		a.Delivery = DeliveryDelivered
+		if q := it.message(a.Answers); q != nil && q.Kind == KindQuestion && q.Closed == "" {
+			q.Closed = ClosedAnswered
+		}
 	}
 }
 
@@ -215,7 +220,7 @@ func (b *Backlog) AdoptStarting(id int, sessionID, title, branch string, created
 		return false
 	}
 	r.SessionID, r.Title, r.Branch, r.State = sessionID, title, branch, RunStarted
-	it.answerSent(r.Answer)
+	it.answersSent(r.Answers)
 	it.UpdatedAt = now
 	return true
 }

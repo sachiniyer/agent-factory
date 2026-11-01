@@ -17,8 +17,8 @@ export interface RunRef {
   started_at: string;
   /** The run's session branch, recorded when it starts. */
   branch?: string;
-  /** The kept answer (delivery "new_run") this run's first prompt carries. */
-  answer?: number;
+  /** The kept answers (delivery "new_run") this run's first prompt carries. */
+  answers?: number[];
 }
 
 export interface Message {
@@ -221,7 +221,7 @@ export function openQuestion(it: Item): Message | undefined {
   // An answer to a gone session starts a new run that carries it: while that
   // run starts, the item does not need the user (backlog.Item.AnswerStarting).
   const last = it.runs?.[it.runs.length - 1];
-  if (last?.state === "starting" && last.answer) return undefined;
+  if (last?.state === "starting" && last.answers?.length) return undefined;
   const thread = it.thread ?? [];
   // An answer kept for a new run, or one a later answer replaced, leaves its
   // question open until a run starts with it (backlog.Message.closesQuestion).

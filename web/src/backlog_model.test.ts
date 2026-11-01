@@ -83,7 +83,7 @@ test("listRows adds the needs-you count to a parent's reason", () => {
 test("openQuestion stays open with an answer kept for a new run, but not while that run starts", () => {
   const q = { id: 1, kind: "question", author: "agent:x", text: "q", at: "" };
   const kept = { id: 2, kind: "answer", author: "user", text: "a", answers: 1, delivery: "new_run", at: "" };
-  const run = { session_id: "", title: "", state: "failed", prev_status: "review" as const, started_by: "user", started_at: "", answer: 2 };
+  const run = { session_id: "", title: "", state: "failed", prev_status: "review" as const, started_by: "user", started_at: "", answers: [2] };
   assert.equal(openQuestion(item(1, { thread: [q, kept], runs: [run] }))?.id, 1);
   assert.equal(openQuestion(item(1, { thread: [q, { ...kept, delivery: "superseded" }] }))?.id, 1);
   assert.equal(openQuestion(item(1, { thread: [q, kept], runs: [{ ...run, state: "starting" }] })), undefined);

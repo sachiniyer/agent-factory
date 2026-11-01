@@ -123,8 +123,9 @@ type RunRef struct {
 	// Branch is the run's session branch, recorded when the run starts so af can
 	// name it to a later run after the session is gone.
 	Branch string `json:"branch,omitempty"`
-	// Answer is the kept answer (DeliveryNewRun) this run's first prompt carries.
-	Answer     int              `json:"answer,omitempty"`
+	// Answers are the kept answers (DeliveryNewRun) this run's first prompt
+	// carries, oldest first: one per open question its gone session left.
+	Answers    []int            `json:"answers,omitempty"`
 	PrevStatus Status           `json:"prev_status"`
 	StartedBy  string           `json:"started_by"`
 	StartedAt  time.Time        `json:"started_at"`
@@ -303,22 +304,24 @@ func (m Message) closesQuestion() bool {
 	return m.Kind == KindAnswer && m.Answers != 0 && m.Delivery != DeliveryNewRun && m.Delivery != DeliverySuperseded
 }
 
-// KeptAnswer is the latest answer kept for a new run whose question is still
-// open, or nil.
-func (it *Item) KeptAnswer() *Message {
-	for i := len(it.Thread) - 1; i >= 0; i-- {
+// KeptAnswers are the answers kept for a new run whose questions are still
+// open, oldest first: at most one per question, since a later answer to the
+// same question supersedes the kept one (BeginAnswerRun).
+func (it *Item) KeptAnswers() []*Message {
+	var out []*Message
+	for i := range it.Thread {
 		if m := &it.Thread[i]; m.Kind == KindAnswer && m.Delivery == DeliveryNewRun && it.questionOpen(m.Answers) {
-			return m
+			out = append(out, m)
 		}
 	}
-	return nil
+	return out
 }
 
 // AnswerStarting is whether the item's latest run is starting with a kept
 // answer: the question it answers is still open, but the user has answered it.
 func (it *Item) AnswerStarting() bool {
 	r := it.lastRun()
-	return r != nil && r.State == RunStarting && r.Answer != 0
+	return r != nil && r.State == RunStarting && len(r.Answers) > 0
 }
 
 func (it *Item) lastRun() *RunRef {

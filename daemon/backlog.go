@@ -294,6 +294,9 @@ func (s *controlServer) AddBacklogItems(req AddBacklogItemsRequest, resp *AddBac
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// An agent that files found work before its start was recorded adopts the
+	// run first, as its questions and notes do (Codex P2 on #6535).
+	s.manager.adoptStartingRun(req.RepoID, req.RepoPath, req.SessionID)
 	out, err := s.manager.backlogService().Add(req)
 	if err != nil {
 		return err
@@ -396,7 +399,7 @@ func (s *controlServer) SetBudget(req SetBudgetRequest, resp *SetBudgetResponse)
 }
 
 // adoptStartingRun links a session's still-starting run to it when the session
-// reports on its item (done, note, ask) before the start record is committed.
+// reports on its item (done, note, ask, add) before the start record is committed.
 // The start record is written after the session's initial prompt was delivered,
 // so a fast agent, or a busy backlog, can make the report arrive first; without
 // this the report fails and its pull request link or question is lost. The

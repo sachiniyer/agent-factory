@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "12d72f76fbda";
+var CLIENT_VERSION = "d03c83b61676";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18291,7 +18291,7 @@ function derivedOf(view, id) {
 }
 function openQuestion(it) {
   const last = it.runs?.[it.runs.length - 1];
-  if (last?.state === "starting" && last.answer) return void 0;
+  if (last?.state === "starting" && last.answers?.length) return void 0;
   const thread = it.thread ?? [];
   const closes = (m) => m.kind === "answer" && !!m.answers && m.delivery !== "new_run" && m.delivery !== "superseded";
   const answered = new Set(thread.filter(closes).map((m) => m.answers));
