@@ -235,7 +235,7 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 	// editor (on the workspace's host, for a relayed one) only to turn it away.
 	allowedHosts := cs.webTabAllowedHosts(r)
 	if editor, relayed := cs.manager.trackedEditorTab(route.sessionID, route.tabID); editor {
-		if d := editorUpgradeRefusal(r, allowedHosts); d != nil {
+		if d := editorRouteRefusal(r, route, allowedHosts); d != nil {
 			refuseCrossSite(w, r, d)
 			return
 		}
@@ -306,7 +306,7 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 	// After the target resolved, so the install and starting notices above still
 	// reach the pane.
 	if target.Kind == session.TabKindVSCode {
-		if d := editorUpgradeRefusal(r, allowedHosts); d != nil {
+		if d := editorRouteRefusal(r, route, allowedHosts); d != nil {
 			refuseCrossSite(w, r, d)
 			return
 		}
@@ -530,7 +530,7 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 			}
 			// No response acts on a whole origin it shares (rule 5): Clear-Site-Data
 			// stripped, Service-Worker-Allowed kept inside the tab's prefix.
-			confineOriginHeaders(resp.Header, route, tabKind, r.URL.Path)
+			confineOriginHeaders(resp.Header, route, tabKind)
 			// Cross-tab read isolation is the whole point of the per-tab origin, and it
 			// holds only while NO Access-Control-Allow-Origin comes back. Forcing the
 			// daemon's own allow-list empty (livePosture.previewOrigin) is not enough:

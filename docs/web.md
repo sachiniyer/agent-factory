@@ -833,6 +833,10 @@ tab survives a restart and simply starts a new editor when you next open it.
     with its token. Open notebooks only from repositories you trust there, or give
     local editors an origin of their own: `network.preview_listen_addr` when you
     view from this machine, `network.editor_origin_ports` from elsewhere (above).
+    af does bound who may load that host page: a webview-host request is accepted
+    only from the editor's own page, so one session's editor origin cannot hand its
+    webview channel to a page on another — which matters because two editor-origin
+    ports share a hostname and differ only by port.
 
     The editor's WebSocket, which carries that terminal, is accepted
     only from the editor's own page: af refuses a handshake whose `Origin` names any

@@ -92,7 +92,7 @@ func TestWorkspaceIsolation_LocalEditorSandboxesAllButTheWorkbench(t *testing.T)
 	mux := newHTTPMux(&controlServer{manager: manager})
 
 	for _, sub := range []string{"", "static/out/vs/code/browser/workbench/workbench.html",
-		testCommit + "/static/out/vs/workbench/contrib/webview/browser/pre/index.html", "_static/out/browser/serviceWorker.js"} {
+		testCommit + "/static/out/vs/workbench/workbench.web.main.js", "_static/out/browser/serviceWorker.js"} {
 		rec := vscodeProxyRecorder(t, mux, id, tabID, sub)
 		assert.Contains(t, rec.Body.String(), fakeVSCodeMarker)
 		assert.False(t, hasSandboxCSP(rec.Header()), "%q: the workbench needs a real origin", sub)
@@ -189,7 +189,7 @@ func TestConfineOriginHeaders(t *testing.T) {
 		for k, v := range set {
 			h.Set(k, v)
 		}
-		confineOriginHeaders(h, route, kind, prefix+"/assets/sw.js")
+		confineOriginHeaders(h, route, kind)
 		return h
 	}
 	wipe := map[string]string{"Clear-Site-Data": `"storage", "cookies"`}
@@ -198,26 +198,93 @@ func TestConfineOriginHeaders(t *testing.T) {
 	assert.Empty(t, run(own, session.TabKindVSCode, wipe).Get("Clear-Site-Data"), "an editor's origin belongs to the editor")
 	assert.NotEmpty(t, run(own, session.TabKindWeb, wipe).Get("Clear-Site-Data"), "a web tab's own preview origin is the app's")
 
-	for value, want := range map[string]string{
-		"/":                         prefix + "/",
-		"/app/":                     prefix + "/app/",
-		"/app":                      prefix + "/app",
-		"./":                        prefix + "/assets/",
-		"../":                       prefix + "/",
-		"../../../../":              prefix + "/",
-		"%2e%2e/%2e%2e/%2e%2e/":     prefix + "/",
-		"http://127.0.0.1:8443/":    prefix + "/",
-		"//127.0.0.1:8443/":         prefix + "/",
-		"/../../":                   prefix + "/",
-		"/v1/webtab/s1/t1-sibling/": prefix + "/v1/webtab/s1/t1-sibling/",
-	} {
+	// The scope is set to EXACTLY the tab's prefix, whatever the app asked for — a
+	// computed value cannot be clamped safely (a browser reads "\" as "/" where
+	// Go's path does not), so nothing the app sends is echoed.
+	for _, value := range []string{"/", "/app/", `\..\..\`, "..\\..\\", `\\evil\`, "../../../", "%2e%2e/", "http://127.0.0.1:8443/"} {
 		got := run(mirror, session.TabKindWeb, map[string]string{"Service-Worker-Allowed": value}).Get("Service-Worker-Allowed")
-		assert.Equal(t, want, got, "Service-Worker-Allowed %q", value)
-		assert.True(t, strings.HasPrefix(got, prefix+"/"), "%q stays inside the tab", value)
+		assert.Equal(t, prefix+"/", got, "Service-Worker-Allowed %q is forced to the tab prefix", value)
 	}
 	assert.Empty(t, run(mirror, session.TabKindWeb, nil).Values("Service-Worker-Allowed"), "nothing is added")
-	assert.Equal(t, "/", run(own, session.TabKindWeb, map[string]string{"Service-Worker-Allowed": "/"}).Get("Service-Worker-Allowed"),
-		"a tab's own origin is the tab's to scope")
+	// A web tab's own preview origin is the app's to scope; it is left alone there.
+	assert.Equal(t, "/", run(own, session.TabKindWeb, map[string]string{"Service-Worker-Allowed": "/"}).Get("Service-Worker-Allowed"))
+}
+
+func TestEditorPathIsWebviewHost(t *testing.T) {
+	for _, rest := range []string{
+		"stable-abc/static/out/vs/workbench/contrib/webview/browser/pre/index.html",
+		"static/out/vs/workbench/contrib/webview/browser/pre/",
+		"a/b/webview/browser/pre/service-worker.js",
+		"webview/browser/pre/fake.html",
+	} {
+		assert.True(t, editorPathIsWebviewHost(rest), rest)
+	}
+	for _, rest := range []string{
+		"", "static/out/x.js", "webview/browser/x.html", "webview/pre/index.html",
+		"browser/pre/index.html", "proxy/3000/", "WEBVIEW/browser/pre/index.html",
+	} {
+		assert.False(t, editorPathIsWebviewHost(rest), rest)
+	}
+}
+
+// Rule 6: a webview-host request is admitted only when the editor's own page loads
+// it — the browser attests same-origin, or parentOrigin names the request's own
+// origin. A cross-port loader (same host, another editor port) is refused.
+func TestEditorWebviewHostRefusal(t *testing.T) {
+	const host = "127.0.0.1:9100"
+	hostPath := testCommit + "/static/out/vs/workbench/contrib/webview/browser/pre/index.html"
+	refused := func(path, query, fetchSite string) bool {
+		target := "/v1/webtab/s/t/" + path
+		if query != "" {
+			target += "?" + query
+		}
+		r := httptest.NewRequest(http.MethodGet, target, nil)
+		r.Host = host
+		if fetchSite != "" {
+			r.Header.Set("Sec-Fetch-Site", fetchSite)
+		}
+		return editorWebviewHostRefusal(r, webTabRoute{escapedRest: path}, nil) != nil
+	}
+	// Admitted: the editor's own page.
+	assert.False(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9100", ""), "parentOrigin names this origin")
+	assert.False(t, refused(hostPath, "id=1&parentOrigin=http://127.0.0.1:9100", "same-site"))
+	assert.False(t, refused(hostPath, "", "same-origin"), "the browser attests the loader is same-origin")
+	// Refused: a cross-port or foreign loader, or a request that cannot be a real load.
+	assert.True(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9101", "same-site"), "another editor port")
+	assert.True(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9101", ""))
+	assert.True(t, refused(hostPath, "parentOrigin=null", ""))
+	assert.True(t, refused(hostPath, "parentOrigin=http://attacker.example", ""))
+	assert.True(t, refused(hostPath, "", ""), "a real host load always carries parentOrigin")
+	// Not a webview-host path: not this rule's, even with a foreign parentOrigin.
+	assert.False(t, refused("static/out/x.js", "parentOrigin=http://evil", ""))
+	assert.False(t, refused("proxy/3000/", "parentOrigin=http://evil", ""))
+}
+
+// Rule 6 through the real proxy: a foreign loader is refused before the editor
+// serves the host page, and the editor's own page gets it at a real origin (rule 3).
+func TestWorkspaceIsolation_WebviewHostRefusesAForeignLoader(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	manager, id, tabID, _ := newVSCodeFixture(t, binary)
+	mux := newHTTPMux(&controlServer{manager: manager})
+	hostPath := testCommit + "/static/out/vs/workbench/contrib/webview/browser/pre/index.html"
+
+	// Warm the editor with a plain workbench GET so the host request below is not
+	// answered by the "still starting" notice.
+	vscodeProxyRecorder(t, mux, id, tabID, "")
+
+	foreign := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, tabID, hostPath)+"?parentOrigin=http://127.0.0.1:9101", nil)
+	req.Host = "127.0.0.1:9100"
+	mux.ServeHTTP(foreign, req)
+	assert.Equal(t, http.StatusForbidden, foreign.Code, "a cross-port loader is refused: %s", foreign.Body.String())
+
+	own := httptest.NewRecorder()
+	ownReq := httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, tabID, hostPath), nil)
+	ownReq.Header.Set("Sec-Fetch-Site", "same-origin")
+	mux.ServeHTTP(own, ownReq)
+	require.Equal(t, http.StatusOK, own.Code, own.Body.String())
+	assert.Contains(t, own.Body.String(), fakeVSCodeMarker)
+	assert.False(t, hasSandboxCSP(own.Header()), "the webview host is the workbench; it keeps a real origin")
 }
 
 // Rule 5 through the real proxy, on the mirror.

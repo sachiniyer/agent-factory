@@ -3,8 +3,6 @@ package daemon
 import (
 	"fmt"
 	"net/http"
-	"net/url"
-	"path"
 	"regexp"
 	"strings"
 
@@ -98,6 +96,18 @@ import (
 //     registered from a script may reach, so on the mirror it is clamped to the
 //     tab's own prefix: no tab's script can become a worker for the web UI at "/",
 //     which would outlive any fix.
+//
+//  6. An editor's webview host page is served only to the editor's own page. VS
+//     Code's webview host (the pages under webview/browser/pre/) is part of the
+//     workbench, so rule 3 keeps it on a real origin — but code-server serves it
+//     from the editor's OWN origin and patches it to hand its message channel to a
+//     parent whose HOSTNAME matches, ignoring the port. Two editor origins on one
+//     front-door host (the editor-origin ports this PR relies on for off-box
+//     editors) differ only by port, so without this a page on one could be handed
+//     another's channel. So a webview-host request is refused unless the browser
+//     attests Sec-Fetch-Site: same-origin, or its parentOrigin query names the
+//     request's own origin (editorWebviewHostRefusal, the rule-4 comparison). This
+//     guards who may LOAD the page; rule 3 governs what origin it runs at.
 
 // mirrorSandboxCSP is the opaque-origin sandbox for mirrored workspace documents.
 // Its flags must equal the web client's mirror iframe sandbox
@@ -168,43 +178,20 @@ func editorPathKeepsItsOrigin(escapedRest string) bool {
 // (getServerProductSegment), such as stable-<40 hex>; "oss-dev" for an unbuilt one.
 var editorProductSegment = regexp.MustCompile(`^[a-z]+-(?:[0-9a-f]{7,64}|dev)$`)
 
-// confineOriginHeaders is rule 5 on one upstream response. browserPath is the
-// decoded path the browser requested, which a relative Service-Worker-Allowed is
-// resolved against.
-func confineOriginHeaders(h http.Header, route webTabRoute, kind session.TabKind, browserPath string) {
+// confineOriginHeaders is rule 5 on one upstream response.
+func confineOriginHeaders(h http.Header, route webTabRoute, kind session.TabKind) {
 	if !(route.previewOrigin && kind == session.TabKindWeb) {
 		h.Del("Clear-Site-Data")
 	}
 	if route.prefix != "" && len(h.Values("Service-Worker-Allowed")) > 0 {
-		h.Set("Service-Worker-Allowed", clampWorkerScope(h.Get("Service-Worker-Allowed"), route.prefix, browserPath))
+		// Set the scope to exactly the tab's prefix — never a value computed from the
+		// app's, which cannot be clamped safely: Go's url/path read "\" as an ordinary
+		// character while a browser reads it as "/", so a "\..\..\" an app sends
+		// survives a path-based clamp and a worker escapes to "/". The whole tab
+		// subtree is the widest legitimate scope here anyway, so this costs the app
+		// nothing a narrower scope would not.
+		h.Set("Service-Worker-Allowed", route.prefix+"/")
 	}
-}
-
-// clampWorkerScope maps a Service-Worker-Allowed value onto the mirror and keeps it
-// inside the tab's prefix. An absolute path is the app's own path, which the mirror
-// serves under the prefix (like a redirect's Location); a relative one resolves
-// against the script's URL as the browser would. Whatever lands outside the
-// prefix, an absolute URL included, becomes the prefix itself.
-func clampWorkerScope(value, prefix, browserPath string) string {
-	floor := prefix + "/"
-	u, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" {
-		return floor
-	}
-	scope := u.Path
-	if strings.HasPrefix(scope, "/") {
-		scope = prefix + scope
-	} else {
-		scope = path.Join(path.Dir(browserPath), scope)
-	}
-	scope = path.Clean(scope)
-	if scope == prefix || !strings.HasPrefix(scope, floor) {
-		return floor
-	}
-	if strings.HasSuffix(u.Path, "/") || u.Path == "" {
-		scope += "/"
-	}
-	return scope
 }
 
 // trackedEditorTab reports whether (sessionID, tabID) is a VS Code tab, and whether
@@ -279,6 +266,61 @@ func editorUpgradeRefusal(r *http.Request, allowedHosts []string) *crossSiteDeni
 			"X-Forwarded-Host (and X-Forwarded-Proto) or keep Host", echoHost(origin)),
 		logKey: "editor-origin:" + echoHost(origin),
 	}
+}
+
+// editorRouteRefusal is every request-time refusal an editor route carries: the
+// WebSocket/upgrade Origin rule (4) and the webview-host loader rule (6). Both call
+// sites — before the target resolves and after — run it, so the earlier one refuses
+// without starting the editor and the later one covers a session resolved only just
+// now.
+func editorRouteRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
+	if d := editorUpgradeRefusal(r, allowedHosts); d != nil {
+		return d
+	}
+	return editorWebviewHostRefusal(r, route, allowedHosts)
+}
+
+// editorWebviewHostRefusal is rule 6. A request for the editor's webview host page
+// is admitted only when it is loaded by the editor's own page: either the browser
+// attests Sec-Fetch-Site: same-origin (a same-port, same-scheme loader — the
+// workbench itself, which frames the host same-origin under code-server), or the
+// page's parentOrigin query names the request's own origin by the rule-4
+// comparison. A cross-port loader is same-SITE, not same-origin, and must set a
+// parentOrigin that is NOT this origin to receive the channel, so both arms refuse
+// it. A no-metadata, no-parentOrigin request cannot be a real host load and is
+// refused. Non-host paths are not this rule's.
+func editorWebviewHostRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
+	if !editorPathIsWebviewHost(route.escapedRest) {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin") {
+		return nil
+	}
+	parent := r.URL.Query().Get("parentOrigin")
+	if parent != "" && originNamesRequest(parent, r, allowedHosts) {
+		return nil
+	}
+	return &crossSiteDenial{
+		status: http.StatusForbidden,
+		err: fmt.Errorf("refused a webview-host request with parentOrigin %q: an editor's webview host is "+
+			"loaded only by the editor's own page", echoHost(parent)),
+		logKey: "editor-webview:" + echoHost(parent),
+	}
+}
+
+// editorPathIsWebviewHost reports whether escapedRest is one of VS Code's webview
+// host pages, served from webview/browser/pre/. Matched as consecutive path
+// SEGMENTS in the request's own encoding (the files are served from disk, so the
+// spelling is exact), the sequence anywhere because it sits under static/ and the
+// product segment. These are the only pages that read parentOrigin.
+func editorPathIsWebviewHost(escapedRest string) bool {
+	segs := strings.Split(strings.TrimPrefix(escapedRest, "/"), "/")
+	for i := 0; i+2 < len(segs); i++ {
+		if segs[i] == "webview" && segs[i+1] == "browser" && segs[i+2] == "pre" {
+			return true
+		}
+	}
+	return false
 }
 
 // requestsUpgrade reports whether r asks for a protocol switch: an Upgrade header,
