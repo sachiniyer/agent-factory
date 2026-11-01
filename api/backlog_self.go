@@ -70,18 +70,31 @@ func (t *backlogTarget) selfItem() (string, *backlog.Item, error) {
 // another project cannot escape the guard. Failing closed on the chip — firing
 // when the record says item session even though the link is unresolved — is the
 // safe direction: a confused agent is refused rather than allowed to run past.
-func inItemSession() *session.InstanceData {
+//
+// When the chip is absent and the authoritative read itself fails, the second
+// return is that error: a guarded mutation cannot proceed when af cannot
+// determine whether the session runs a backlog item, so the caller refuses with
+// the real cause rather than treating it as a non-item session and letting it
+// through. (A confused agent cannot cause the read to fail; the failure is
+// transient, e.g. a backlog lock timeout, and naming it costs the caller one
+// retry in exactly the window where the mutation would itself contend for the
+// same backlog.)
+func inItemSession() (*session.InstanceData, error) {
 	s, err := backlogSelfSession()
 	if err != nil || s == nil {
-		return nil
+		return nil, nil
 	}
 	if s.BacklogItem != 0 {
-		return s
+		return s, nil
 	}
-	if itemSessionFromAuthoritativeLink(s) {
-		return s
+	in, readErr := itemSessionFromAuthoritativeLink(s)
+	if readErr != nil {
+		return nil, readErr
 	}
-	return nil
+	if in {
+		return s, nil
+	}
+	return nil, nil
 }
 
 // itemSessionFromAuthoritativeLink reports whether the authoritative backlog
@@ -95,20 +108,30 @@ func inItemSession() *session.InstanceData {
 // back to the command target's project (the prior behavior), so a record that
 // predates the path or a remote session is still guarded when the command
 // targets its own project.
-func itemSessionFromAuthoritativeLink(s *session.InstanceData) bool {
+//
+// When the backlog read itself fails (a transient lock timeout, etc.) the second
+// return is that error, so inItemSession can fail closed on it instead of
+// silently treating an unreadable link as a non-item session. A failure to
+// resolve a target (no recorded path and backlogProject errors) is not a read
+// failure: there is no backlog to read, so it returns false with no error and
+// the guard falls through to its chip-first stance.
+func itemSessionFromAuthoritativeLink(s *session.InstanceData) (bool, error) {
 	if t := sessionOwnBacklogTarget(s); t != nil {
 		v, err := t.get()
-		if err == nil {
-			return v.Backlog.ItemForSession(s.ID) != nil
+		if err != nil {
+			return false, err
 		}
-		return false
+		return v.Backlog.ItemForSession(s.ID) != nil, nil
 	}
-	if t, err := backlogProject(); err == nil {
-		if v, err := t.get(); err == nil && v.Backlog.ItemForSession(s.ID) != nil {
-			return true
-		}
+	t, err := backlogProject()
+	if err != nil {
+		return false, nil
 	}
-	return false
+	v, err := t.get()
+	if err != nil {
+		return false, err
+	}
+	return v.Backlog.ItemForSession(s.ID) != nil, nil
 }
 
 // sessionOwnBacklogTarget resolves the session's own project — the project its
@@ -130,18 +153,38 @@ func sessionOwnBacklogTarget(s *session.InstanceData) *backlogTarget {
 
 const backlogSelfAskHint = "ask the user with \"af backlog ask --self\""
 
+// backlogUnreadableItemSessionErr is the fail-closed refusal a guarded mutation
+// gets when af cannot read this project's backlog to determine whether the
+// session runs a backlog item. It names the real cause (the wrapped read error)
+// rather than claiming the session is an item session, so a plain session that
+// hits a transient read failure retries rather than sees a misleading
+// "item sessions cannot run" error.
+func backlogUnreadableItemSessionErr(readErr error) error {
+	return fmt.Errorf("cannot read this project's backlog to check for an item session: %w; retry", readErr)
+}
+
 // refuseFromItemSession stops an agent in an item session from running a
 // command that changes the backlog's plan. It stops a confused agent, not a
-// hostile one.
+// hostile one. When the item-session membership cannot be determined because
+// the authoritative backlog read failed, it refuses with the real cause rather
+// than letting the mutation through.
 func refuseFromItemSession(command string) error {
-	if inItemSession() == nil {
+	s, err := inItemSession()
+	if err != nil {
+		return backlogUnreadableItemSessionErr(err)
+	}
+	if s == nil {
 		return nil
 	}
 	return fmt.Errorf("item sessions cannot run \"af backlog %s\"; %s", command, backlogSelfAskHint)
 }
 
 func refuseControlsFromItemSession() error {
-	if inItemSession() == nil {
+	s, err := inItemSession()
+	if err != nil {
+		return backlogUnreadableItemSessionErr(err)
+	}
+	if s == nil {
 		return nil
 	}
 	return errors.New("item sessions cannot change the runner or budget; " + backlogSelfAskHint)

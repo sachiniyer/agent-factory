@@ -424,3 +424,50 @@ func TestBacklogGuardRailsSurviveRepoOverride(t *testing.T) {
 		}
 	}
 }
+
+// TestBacklogGuardRailsFailClosedOnUnreadableBacklog pins the fail-closed
+// behavior raised on #6498: when the session's BacklogItem chip has been dropped
+// (the version-skew case this PR exists for) and the authoritative backlog read
+// itself fails (e.g. a transient backlog lock timeout), af cannot determine
+// whether the session runs a backlog item. A guarded mutation must not proceed
+// in that window — it must be refused with the real cause, not allowed through
+// as a non-item session. The refusal names the read failure (it does not claim
+// the session is an item session), so a plain session that hits the same
+// transient failure retries rather than sees a misleading "item sessions cannot
+// run" error. The chip-set path and the successful-read path are covered by the
+// tests above; this one isolates the read-failure path.
+func TestBacklogGuardRailsFailClosedOnUnreadableBacklog(t *testing.T) {
+	stubBacklogDaemon(t)
+	// Item 1 runs in session s1; the run record in backlog.json is the
+	// authoritative link. The session record has lost its BacklogItem field
+	// (an older daemon dropped the omitempty key on its next write), so the
+	// guard must consult the authoritative link.
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0})
+	// Make the authoritative backlog read fail (e.g. a backlog lock timeout):
+	// every GetBacklog call returns the read error, but other routes still work
+	// so the test isolates the guard's read failure from the mutation route.
+	const readErr = "backlog lock timeout"
+	prev := callBacklogRoute
+	callBacklogRoute = func(method string, req, resp any) error {
+		if method == "GetBacklog" {
+			return errors.New(readErr)
+		}
+		return prev(method, req, resp)
+	}
+	t.Cleanup(func() { callBacklogRoute = prev })
+	// A guarded mutation is refused with the real cause, not allowed through.
+	_, err := runBacklogCmd(t, "done", "1")
+	if err == nil || !strings.Contains(err.Error(), readErr) {
+		t.Fatalf("guard did not fail closed with the real cause: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cannot read this project's backlog to check for an item session") {
+		t.Fatalf("refusal does not name the real cause: %v", err)
+	}
+	if strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatalf("refusal misclaims an item session: %v", err)
+	}
+	// A runner/budget control is refused with the same real cause.
+	if _, err := runBacklogCmd(t, "runner", "on"); err == nil || !strings.Contains(err.Error(), readErr) {
+		t.Fatalf("runner on did not fail closed with the real cause: %v", err)
+	}
+}
