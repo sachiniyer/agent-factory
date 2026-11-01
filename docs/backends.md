@@ -1003,10 +1003,18 @@ ssh user af connects as. So anything that has ever run as that user, or ever wil
 can read a session's callback file and ask for its push credential as that
 session. That includes your own sessions, a repository's hooks and build scripts,
 and a process left behind by a session that has since ended, including one from
-before you opted in. af keeps the sessions it can see in line (below), but it
+before you opted in. Neither archiving a session nor killing it reaps a process
+its hooks detached. af keeps the sessions it can see in line (below), but it
 can't prove that no such process exists. So opt in only a fresh, dedicated host
-user that runs nothing but your own af sessions. Per-session Unix users would
-remove this
+user that runs nothing but your own af sessions, and opt it in from the moment
+you list it: a listed host that isn't opted in is one other sessions may start
+sessions on. One command does both:
+
+```bash
+af hosts add build af-push@build.tailnet.ts.net --push-credentials
+```
+
+Per-session Unix users would remove this
 ([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)).
 
 Both are off by default, so listing a host never opts it in. The daemon reads them
@@ -1031,15 +1039,21 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
   - on a repository's own `[ssh]` target, which the repository chose;
   - still being created or re-provisioned there.
 
-  `af hosts check` and `af doctor` name it; remove it and push credentials
-  resume. This doesn't change the host's readiness or the command's exit code.
-  An archive af confirmed stopped doesn't count.
+  `af hosts check` and `af doctor` name it and say what ends it: kill a
+  session (archiving it isn't enough), wait for a create or re-provision to
+  finish, or fix a name that doesn't resolve. If af can't establish which
+  machine an opted-in host is, they say that instead. Neither changes the host's
+  readiness or the command's exit code.
 - **One machine, compared carefully.** af treats two hosts as one machine when
   a name matches or an address does. Case, a trailing dot, and a short name for
   a full one don't matter. Addresses count as configured, as af's ssh dialed
-  them, and as DNS resolves them. A name that doesn't resolve, or a `sandbox.ssh`
-  command af can't read a destination from, counts as every machine. af can't
-  link two literal addresses of one machine that no name connects.
+  them, and as DNS resolves them. A `sandbox.ssh` command's destination is the
+  one `ssh -G` reports, so your ssh config's `HostName` counts. A name that
+  doesn't resolve, or a `sandbox.ssh` that ssh can't confirm (a `ProxyCommand`,
+  a wrapper script, shell syntax), counts as every machine. af can't link two
+  literal addresses of one machine that no name connects. Nor can it link a
+  repository's `[ssh]` target whose name differs from the opted-in one when its
+  ssh pinned no address (`accept-new` and `insecure` host-key postures don't).
 - **Only through the session's own connection.** Every af callback, not only
   this one, is accepted only through the requesting session's own ssh forward.
   A callback credential copied out of a session directory doesn't work through
