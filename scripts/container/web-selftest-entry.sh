@@ -189,22 +189,15 @@ printf '%s\n' "$READY_MARKER"
 # "❯". Without it a remote create spins the full 60s waitForReady and dies.
 # (Same shape every integration fixture uses: printf '❯ ' then exec cat.)
 printf '❯ '
-# A session that must stay SILENT (favicon-blink.spec.ts, #6465): \`cat\` echoes every
-# byte the browser terminal sends back (its query replies, focus events), and that
-# echo is output that clears an attention request the spec is still sampling. This
-# one turns tty echo off and prints nothing until the spec asks for noise by creating
-# the trigger file, so the stray-output hazard is something the spec injects on
-# demand instead of something it hopes not to meet.
+# A session that must stay SILENT (favicon-blink.spec.ts, #6465): \`cat\` echoes whatever
+# the browser terminal sends back, and any pane activity is a Running edge, which
+# clears an attention request once the agent has been idle (session/attention.go), so a
+# stray byte in the middle of the spec's blink sample loses the request before the spec
+# dismisses it. This agent turns tty echo off and then does nothing at all.
 case "\$PWD" in
     *probe-quiet*)
         stty -echo 2>/dev/null
-        while :; do
-            if [ -e /tmp/af-probe-quiet-emit ]; then
-                rm -f /tmp/af-probe-quiet-emit
-                printf 'stray output\n'
-            fi
-            sleep 0.2
-        done
+        exec sleep 86400
         ;;
 esac
 exec cat
