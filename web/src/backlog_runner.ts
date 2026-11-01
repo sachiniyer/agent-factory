@@ -109,7 +109,8 @@ export class RunnerBar {
   private view: BacklogView | null = null;
   private budget: Budget | null = null;
   // Budget values asked for and not yet acknowledged, by field, and the chain that sends them.
-  private readonly pendingBudget = new Map<BudgetKey, number>();
+  private readonly pendingBudget = new Map<BudgetKey, { v: number; rev: number }>();
+  private budgetRev = 0;
   private budgetQueue: Promise<unknown> = Promise.resolve();
   private usage: Usage | null = null;
   private action: MainAction = null;
@@ -167,10 +168,11 @@ export class RunnerBar {
         }
         // Against the value last asked for: the budget shown is the daemon's, which still holds
         // the old one while a write is out, so a change back would otherwise be taken for no change.
-        const current = this.pendingBudget.has(f.key) ? this.pendingBudget.get(f.key) : this.budget?.[f.key];
+        const current = this.pendingBudget.get(f.key)?.v ?? this.budget?.[f.key];
         if (current === v) return;
-        this.pendingBudget.set(f.key, v);
-        this.writeBudget(f.key, v);
+        const rev = ++this.budgetRev;
+        this.pendingBudget.set(f.key, { v, rev });
+        this.writeBudget(f.key, v, rev);
       });
       this.inputs.set(f.key, input);
       return h("label", { class: "af-backlog-setting" },
@@ -184,9 +186,11 @@ export class RunnerBar {
 
   /** Writes go out one at a time, in the order they were made, so the last edit of a field is the
    *  one the daemon ends up with. */
-  private writeBudget(key: BudgetKey, v: number): void {
+  private writeBudget(key: BudgetKey, v: number, rev: number): void {
+    // An acknowledgement retires its own edit only: an older write of the same value must not
+    // retire the draft of a later one.
     const done = (): void => {
-      if (this.pendingBudget.get(key) === v) this.pendingBudget.delete(key);
+      if (this.pendingBudget.get(key)?.rev === rev) this.pendingBudget.delete(key);
       this.fill();
     };
     this.budgetQueue = this.budgetQueue
@@ -277,7 +281,7 @@ export class RunnerBar {
 
   private fill(): void {
     for (const [key, input] of this.inputs) {
-      const shown = this.pendingBudget.get(key) ?? this.budget?.[key];
+      const shown = this.pendingBudget.get(key)?.v ?? this.budget?.[key];
       if (document.activeElement !== input && shown !== undefined) input.value = String(shown);
     }
     if (this.view && document.activeElement !== this.onDone) this.onDone.value = this.view.backlog.settings.on_done || "keep";

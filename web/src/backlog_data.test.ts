@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, mock, test } from "node:test";
 import assert from "node:assert/strict";
 
+import { backlogRoutes } from "./backlog_api.js";
 import { type BacklogData, BacklogLoader, EMPTY_BACKLOG_DATA } from "./backlog_data.js";
 
 interface Pending {
@@ -255,4 +256,20 @@ test("a spend event is followed by a budget read that renews which account the w
   answer("GetBudget", { budget: { share: 30, stop_at: 80, max_per_run: 10, usd_limit: 0, usd_spent: 0 }, account: "work", accounts: { work: { windows: { five_hour: { plan: 20 } } } }, windows: {} });
   await settle();
   assert.equal(state.usage?.account, "work", "the account the daemon now meters replaces the one kept");
+});
+
+test("a saved budget's reply is committed and a GetBudget read before it is dropped", async () => {
+  const l = loader();
+  void l.refresh();
+  await settle();
+  l.applyBudget({ budget: { share: 10, stop_at: 80, max_per_run: 5, usd_limit: 0, usd_spent: 0 }, usage: null as never });
+  assert.equal(state.budget?.share, 10);
+  answer("GetBacklog", backlogOf("a"));
+  answer("GetBudget", budgetOf(1)); // read before the save: must not put the old budget back
+  await settle();
+  assert.equal(state.budget?.share, 10);
+});
+
+test("Run next is on: the daemon serves RunBacklog", () => {
+  assert.equal(backlogRoutes.runBacklog, true);
 });

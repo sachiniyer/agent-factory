@@ -6,7 +6,7 @@
 
 import { errorText } from "./api.js";
 import {
-  addItem, addNote, answerQuestion, deleteItem, backlogRoutes, moveItem, runNext, setBudget, setItemStatus, setSettings, startItem, updateItem,
+  type BudgetReply, addItem, addNote, answerQuestion, deleteItem, backlogRoutes, moveItem, runNext, setBudget, setItemStatus, setSettings, startItem, updateItem,
 } from "./backlog_api.js";
 import type { BacklogData } from "./backlog_data.js";
 import {
@@ -28,6 +28,8 @@ export interface BacklogHost {
   refresh(root?: string): Promise<boolean>;
   /** The newest backlog refresh started so far. */
   started(): number;
+  /** Takes the budget a SetBudget reply carries, so a save is shown even when the read after it fails. */
+  applyBudget?(reply: BudgetReply): void;
   notify(message: string): void;
   openSession(id: string): void;
   archiveSession(id: string): void;
@@ -280,7 +282,7 @@ export class BacklogPane {
       setRunner: (on: boolean) => this.mutate((t) => setSettings(this.root ?? "", { runner: on }, t)),
       setMaxRunning: (n: number) => this.mutate((t) => setSettings(this.root ?? "", { max_running: n }, t)),
       setOnDone: (onDone: string) => this.mutate((t) => setSettings(this.root ?? "", { on_done: onDone }, t)),
-      setBudget: (u: Parameters<typeof setBudget>[0]) => this.write(this.root ?? "", (t) => setBudget(u, t)),
+      setBudget: (u: Parameters<typeof setBudget>[0]) => this.write(this.root ?? "", (t) => setBudget(u, t).then((r) => this.host.applyBudget?.(r))),
       runNext: backlogRoutes.runBacklog ? () => this.runNext() : undefined,
       openItem: (id: number) => this.select(id),
     };

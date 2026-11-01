@@ -9,7 +9,7 @@
 // publishes no event of its own. backlog.spend carries the plan use itself, so it applies without a refetch.
 
 import { errorText } from "./api.js";
-import { getBacklog, getBudget } from "./backlog_api.js";
+import { type BudgetReply, getBacklog, getBudget } from "./backlog_api.js";
 import type { BacklogView, Budget } from "./backlog_model.js";
 import { type Usage, applySpend, spendHasUnmeterable } from "./backlog_usage.js";
 
@@ -132,6 +132,13 @@ export class BacklogLoader {
     }
     this.opts.commit({ views, errors, budget: fresh?.budget ?? cur.budget, usage, generation: gen });
     return ok;
+  }
+
+  /** Takes the budget and plan use a SetBudget reply carries. A GetBudget still in flight was read
+   *  before the save, so its reply is dropped. */
+  applyBudget(reply: BudgetReply): void {
+    this.budgetGeneration++;
+    this.opts.commit({ ...this.opts.current(), budget: reply.budget, usage: reply.usage });
   }
 
   /** Applies a backlog.spend payload. A GetBudget still in flight was read

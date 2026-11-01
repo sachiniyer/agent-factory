@@ -25,7 +25,7 @@ const NOW = Date.parse("2000-01-03T10:00:00");
 const iso = (s: string): string => new Date(s).toISOString();
 
 beforeEach(() => {
-  backlogRoutes.runBacklog = true; // the Run next tests drive the route; the off case has its own test
+  backlogRoutes.runBacklog = true; // the off case has its own test
   dom = installFakeDom();
   doc = dom.doc;
   calls = [];
@@ -50,7 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  backlogRoutes.runBacklog = false;
+  backlogRoutes.runBacklog = true;
   mock.timers.reset();
   dom.restore();
   (globalThis as { fetch: unknown }).fetch = realFetch;
@@ -339,6 +339,43 @@ test("a budget field changed and changed back before the first write is read sen
   await settle();
   assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ share: 30 }, { share: 50 }], "the last edit is the one saved");
   assert.equal(input("Backlog share").value, "50");
+});
+
+test("an earlier write of a value does not retire the draft of a later write of the same value", async () => {
+  const pane = mount(host());
+  pane.update(data(view([item(1)])), "/a", []);
+  const input = (label: string): FakeElement => el(pane).querySelector(`input[aria-label="${label}"]`)!;
+  const waiting: (() => void)[] = [];
+  reply = (m) => (m === "SetBudget" ? new Promise((r) => waiting.push(() => r({}))) : Promise.resolve({}));
+  for (const v of ["30", "40", "30"]) {
+    input("Backlog share").value = v;
+    input("Backlog share").dispatchEvent(new FakeEvent("change"));
+  }
+  await settle();
+  assert.equal(waiting.length, 1, "writes go out one at a time");
+  waiting.shift()!();
+  await settle();
+  assert.equal(input("Backlog share").value, "30", "the first reply retires the first edit only; the last 30 is still pending");
+  while (waiting.length > 0) {
+    waiting.shift()!();
+    await settle();
+  }
+  assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ share: 30 }, { share: 40 }, { share: 30 }]);
+});
+
+test("a saved budget is applied from the SetBudget reply, not only from the read after it", async () => {
+  const h = host();
+  const applied: unknown[] = [];
+  h.applyBudget = (r) => { applied.push(r); };
+  const pane = mount(h);
+  pane.update(data(view([item(1)])), "/a", []);
+  const f = el(pane).querySelector('input[aria-label="Dollar limit"]')!;
+  reply = async (m) => (m === "SetBudget" ? { budget: { ...BUDGET, usd_limit: 5 } } : {});
+  f.value = "5";
+  f.dispatchEvent(new FakeEvent("change"));
+  await settle();
+  assert.equal(applied.length, 1);
+  assert.equal((applied[0] as { budget: Budget }).budget.usd_limit, 5);
 });
 
 test("an optimistic Starting is dropped when the daemon, read after the reply, says the item stopped", async () => {

@@ -3247,6 +3247,7 @@ const actions = {
     token: () => token,
     refresh: (root?: string) => backlogLoader.refresh(root),
     started: () => backlogLoader.started(),
+    applyBudget: (reply: Parameters<typeof backlogLoader.applyBudget>[0]) => backlogLoader.applyBudget(reply),
     notify: (message: string) => showTransientNotice(message),
     openSession: openBacklogSession,
     archiveSession: (id: string) => {

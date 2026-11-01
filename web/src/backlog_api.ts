@@ -64,10 +64,9 @@ export interface RunReply {
   reason: string;
 }
 
-/** Whether the daemon serves RunBacklog. The runner loop is a later slice of the
- *  backlog stack; until it lands there is nothing for "Run next" to call, so the
- *  runner bar leaves the button out. Flip it when the route exists; tests set it. */
-export const backlogRoutes = { runBacklog: false };
+/** Whether the daemon serves RunBacklog (it does since the runner loop landed, #6300). Kept so a
+ *  test can drive the bar without the button. */
+export const backlogRoutes = { runBacklog: true };
 
 /** One runner pass now for one item, past the runner switch and the budget. */
 export async function runNext(root: string, token: string): Promise<RunReply> {

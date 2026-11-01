@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "0f5e1fa02d8b";
+var CLIENT_VERSION = "f85260aaf663";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18299,6 +18299,14 @@ function needsYouCount(views) {
   for (const v of views) n += v.backlog.items.filter((it) => openQuestion(it)).length;
   return n;
 }
+function needsYouByRoot(views) {
+  const out = /* @__PURE__ */ new Map();
+  for (const [root2, v] of views) {
+    const n = needsYouCount([v]);
+    if (n > 0) out.set(root2, n);
+  }
+  return out;
+}
 function sources(b) {
   return [...new Set(b.items.map((it) => it.source?.proposal ?? "").filter(Boolean))];
 }
@@ -18704,7 +18712,7 @@ async function startItem(root2, id, token2) {
   const resp = await af("StartBacklogItem", { repo_path: root2, id }, token2);
   return resp.run;
 }
-var backlogRoutes = { runBacklog: false };
+var backlogRoutes = { runBacklog: true };
 async function runNext(root2, token2) {
   const resp = await af("RunBacklog", { repo_path: root2, count: 1 }, token2);
   return { started: Array.isArray(resp?.started) ? resp.started : [], reason: resp?.reason ?? "" };
@@ -19096,7 +19104,7 @@ var ItemPanel = class {
       this.repaint();
     }, queueFor(`${root2}\0${id}\0waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
-    this.title.setAttribute("aria-label", "Title");
+    this.title.setAttribute("aria-label", "Backlog item title");
     const commitTitle = () => {
       const it = this.item();
       const t = this.title.value.trim();
@@ -19633,6 +19641,7 @@ var RunnerBar = class {
   budget = null;
   // Budget values asked for and not yet acknowledged, by field, and the chain that sends them.
   pendingBudget = /* @__PURE__ */ new Map();
+  budgetRev = 0;
   budgetQueue = Promise.resolve();
   usage = null;
   action = null;
@@ -19651,10 +19660,11 @@ var RunnerBar = class {
           this.fill();
           return;
         }
-        const current = this.pendingBudget.has(f.key) ? this.pendingBudget.get(f.key) : this.budget?.[f.key];
+        const current = this.pendingBudget.get(f.key)?.v ?? this.budget?.[f.key];
         if (current === v) return;
-        this.pendingBudget.set(f.key, v);
-        this.writeBudget(f.key, v);
+        const rev = ++this.budgetRev;
+        this.pendingBudget.set(f.key, { v, rev });
+        this.writeBudget(f.key, v, rev);
       });
       this.inputs.set(f.key, input);
       return h(
@@ -19676,9 +19686,9 @@ var RunnerBar = class {
   }
   /** Writes go out one at a time, in the order they were made, so the last edit of a field is the
    *  one the daemon ends up with. */
-  writeBudget(key, v) {
+  writeBudget(key, v, rev) {
     const done2 = () => {
-      if (this.pendingBudget.get(key) === v) this.pendingBudget.delete(key);
+      if (this.pendingBudget.get(key)?.rev === rev) this.pendingBudget.delete(key);
       this.fill();
     };
     this.budgetQueue = this.budgetQueue.then(() => this.actions.setBudget({ [key]: v })).then(done2, done2);
@@ -19764,7 +19774,7 @@ var RunnerBar = class {
   }
   fill() {
     for (const [key, input] of this.inputs) {
-      const shown = this.pendingBudget.get(key) ?? this.budget?.[key];
+      const shown = this.pendingBudget.get(key)?.v ?? this.budget?.[key];
       if (document.activeElement !== input && shown !== void 0) input.value = String(shown);
     }
     if (this.view && document.activeElement !== this.onDone) this.onDone.value = this.view.backlog.settings.on_done || "keep";
@@ -20006,7 +20016,7 @@ ${id}`;
       setRunner: (on) => this.mutate((t) => setSettings(this.root ?? "", { runner: on }, t)),
       setMaxRunning: (n) => this.mutate((t) => setSettings(this.root ?? "", { max_running: n }, t)),
       setOnDone: (onDone) => this.mutate((t) => setSettings(this.root ?? "", { on_done: onDone }, t)),
-      setBudget: (u) => this.write(this.root ?? "", (t) => setBudget(u, t)),
+      setBudget: (u) => this.write(this.root ?? "", (t) => setBudget(u, t).then((r) => this.host.applyBudget?.(r))),
       runNext: backlogRoutes.runBacklog ? () => this.runNext() : void 0,
       openItem: (id) => this.select(id)
     };
@@ -20885,6 +20895,11 @@ var AppShell = class {
   sessionItemSig = "[]";
   chipsChanged = false;
   lastBacklog;
+  /** Needs-you counts by project root. The Backlog tab badge shows the selected
+   *  project's; the project switcher shows each other project's. */
+  needsYou = /* @__PURE__ */ new Map();
+  needsYouSig = "";
+  needsYouChanged = false;
   configPane;
   lastView = null;
   lastTasks = null;
@@ -21146,11 +21161,15 @@ var AppShell = class {
         this.sessionItemMap = items;
         this.chipsChanged = true;
       }
-      const n = needsYouCount(state.backlog.views.values());
-      this.backlogBadge.hidden = n === 0;
-      this.backlogBadge.textContent = String(n);
-      this.backlogBadge.setAttribute("aria-label", needsYouLabel(n));
+      const needs = needsYouByRoot(state.backlog.views);
+      const needsSig = JSON.stringify([...needs]);
+      if (needsSig !== this.needsYouSig) {
+        this.needsYouSig = needsSig;
+        this.needsYou = needs;
+        this.needsYouChanged = true;
+      }
     }
+    setNeedsYouBadge(this.backlogBadge, state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0);
     if (state.backlog) this.backlogPane.update(state.backlog, state.selectedProject, state.sessions);
     this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
     const sessionsChanged = this.lastSessions !== state.sessions;
@@ -21160,7 +21179,8 @@ var AppShell = class {
     if (selectionChanged && state.selectedId) {
       this.setNav(false);
     }
-    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || this.lastRegisteredProjects !== state.registeredProjects || projectChanged) {
+    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || this.lastRegisteredProjects !== state.registeredProjects || this.needsYouChanged || projectChanged) {
+      this.needsYouChanged = false;
       this.lastProjectSessions = state.sessions;
       this.lastProjectTasks = state.tasks;
       this.lastRegisteredProjects = state.registeredProjects;
@@ -21629,7 +21649,7 @@ var AppShell = class {
     }
     for (const p of summaries) {
       const record = state.registeredProjects.find((r) => r.root === p.root);
-      children.push(this.projectItem(p, p.root === current, record));
+      children.push(this.projectItem(p, p.root === current, record, p.root === current ? 0 : this.needsYou.get(p.root) ?? 0));
     }
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
@@ -21700,7 +21720,7 @@ var AppShell = class {
    *  registration behind the row, when there is one — a registration whose
    *  recorded root is gone (path_exists=false) is marked missing, the state the
    *  footer Rebind action repairs. */
-  projectItem(p, current, record) {
+  projectItem(p, current, record, needsYou) {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
@@ -21712,10 +21732,16 @@ var AppShell = class {
       dot.setAttribute("aria-hidden", "true");
       name.prepend(dot, " ");
     }
+    let title = name;
+    if (needsYou > 0) {
+      const badge = h("span", { class: "af-viewtab-badge af-project-item-badge" });
+      setNeedsYouBadge(badge, needsYou);
+      title = h("span", { class: "af-project-item-title" }, name, badge);
+    }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      name,
+      title,
       h("span", { class: "af-project-item-path" }, p.path)
     );
     const meta = h(
@@ -22740,6 +22766,12 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
     }
   }
 }
+function setNeedsYouBadge(el2, n) {
+  el2.hidden = n === 0;
+  if (el2.textContent === String(n)) return;
+  el2.textContent = String(n);
+  el2.setAttribute("aria-label", needsYouLabel(n));
+}
 
 // src/project_color_writes.ts
 function createLatestWriter(write, onError) {
@@ -22904,6 +22936,12 @@ var BacklogLoader = class {
     }
     this.opts.commit({ views, errors, budget: fresh?.budget ?? cur.budget, usage, generation: gen });
     return ok;
+  }
+  /** Takes the budget and plan use a SetBudget reply carries. A GetBudget still in flight was read
+   *  before the save, so its reply is dropped. */
+  applyBudget(reply) {
+    this.budgetGeneration++;
+    this.opts.commit({ ...this.opts.current(), budget: reply.budget, usage: reply.usage });
   }
   /** Applies a backlog.spend payload. A GetBudget still in flight was read
    *  before it, so that reply's plan use is dropped. */
@@ -24896,6 +24934,7 @@ var actions = {
     token: () => token,
     refresh: (root2) => backlogLoader.refresh(root2),
     started: () => backlogLoader.started(),
+    applyBudget: (reply) => backlogLoader.applyBudget(reply),
     notify: (message) => showTransientNotice(message),
     openSession: openBacklogSession,
     archiveSession: (id) => {
