@@ -841,3 +841,33 @@ func (g *GitWorktree) isWorktreeRegistered() (bool, error) {
 	}
 	return worktreeListed(output, g.worktreePath)
 }
+
+// StopOrphanedHookScopes is the no-handle twin of stopSurvivingHookScopes for
+// a caller that has the identities a durable marker carries — the session id
+// and the worktree path — but no live *GitWorktree: the create that would own
+// the handle died with its daemon (#6259). It derives the same two prefixes
+// hookScopePrefixes does, so a scope surviving in the user manager or a
+// launcher caught before StartTransientUnit is stopped and joined here
+// exactly as it is on the cleanup path, and every failure — an unreachable
+// manager, an unreadable process table — refuses, because unknown is not gone.
+func StopOrphanedHookScopes(sessionID, worktreePath string) error {
+	if !systemdunit.RunningDaemonProcess() {
+		return nil
+	}
+	var prefixes []string
+	for _, identity := range []string{sessionID, worktreePathScopeIdentity(worktreePath)} {
+		prefix := systemdunit.HookScopeUnitPrefix(identity)
+		if prefix != "" {
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	if len(prefixes) == 0 {
+		return nil
+	}
+	if err := systemdunit.StopHookScopes(prefixes...); err != nil {
+		return fmt.Errorf(
+			"post-worktree hook scopes (%s) for %s could not be stopped; refusing to modify the worktree while a hook may still be using it: %w",
+			strings.Join(prefixes, ", "), worktreePath, err)
+	}
+	return nil
+}

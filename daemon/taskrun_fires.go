@@ -467,7 +467,16 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	//
 	// Ownership evidence is per-artifact: a bare derived branch, or several
 	// holders of it, still carries no per-attempt evidence at all.
-	wtBound := wtPath != "" && fire.WorktreePath != "" && fire.WorktreePath == wtPath
+	// The binding is compared as written AND canonicalized: the marker keeps
+	// the spelling worktree placement derived (a symlinked AGENT_FACTORY_HOME
+	// survives verbatim), while git registers the resolved path — the same
+	// directory must still match through either spelling (#6546 Codex).
+	boundPath := fire.WorktreePath
+	if canon, cerr := filepath.EvalSymlinks(boundPath); cerr == nil {
+		boundPath = canon
+	}
+	wtBound := wtPath != "" && fire.WorktreePath != "" &&
+		(fire.WorktreePath == wtPath || boundPath == wtPath)
 	proven := found && !unknown &&
 		(wtPath == "" || wtBound) &&
 		!(branchHeld && wtPath == "") &&
@@ -515,6 +524,18 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	// a tmux session that was proven but not confirmed stopped means proven is
 	// already false here, and an unanswerable probe fails closed to quarantine.
 	clean := proven && (wtPath == "" || !tmuxPresent || runtimeStopped)
+	if clean && wtPath != "" {
+		// The tmux branch above cannot see a post-worktree hook: a hook that
+		// outlived its daemon keeps running in its transient scope with no
+		// tmux session at all. Stop and join any survivor BEFORE the probes
+		// read the tree — files it could still land between the read and the
+		// later removal are work the probes would never see.
+		if herr := git.StopOrphanedHookScopes(fire.InstanceID, wtPath); herr != nil {
+			log.WarningLog.Printf("task %s: cannot join the interrupted-fire hooks for %q — quarantining it: %v",
+				t.ID, wtPath, herr)
+			clean = false
+		}
+	}
 	if clean && wtPath != "" {
 		dirty, derr := git.WorktreeDirtyFiles(wtPath)
 		commits, cerr := git.WorktreeCommitsBeyondRepo(identityRoot, wtPath)

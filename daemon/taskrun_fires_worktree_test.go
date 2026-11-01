@@ -178,32 +178,10 @@ func TestTaskFireLeftover_BoundWorktreeWithWorkStaysQuarantined(t *testing.T) {
 			},
 		},
 		{
-			name: "stash of its own",
-			prep: func(t *testing.T, repoPath string) {
-				t.Helper()
-				if err := os.WriteFile(filepath.Join(repoPath, "tracked.txt"), []byte("base"), 0o644); err != nil {
-					t.Fatalf("write tracked file: %v", err)
-				}
-				for _, args := range [][]string{
-					{"-C", repoPath, "add", "tracked.txt"},
-					{"-C", repoPath, "commit", "-m", "track a file"},
-				} {
-					if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
-						t.Fatalf("git %v: %v: %s", args, err, out)
-					}
-				}
-			},
-			soil: func(t *testing.T, wtPath string) {
-				t.Helper()
-				if err := os.WriteFile(filepath.Join(wtPath, "tracked.txt"), []byte("edited"), 0o644); err != nil {
-					t.Fatalf("edit tracked file: %v", err)
-				}
-				if out, err := exec.Command("git", "-C", wtPath, "stash").CombinedOutput(); err != nil {
-					t.Fatalf("git stash: %v: %s", err, out)
-				}
-			},
-		},
-		{
+			// A stash made inside the leftover lands in the SHARED refs/stash
+			// the main checkout also lists — it survives worktree removal, so
+			// it is not the tree's own to lose and must not quarantine. The
+			// worktree's own refs are what the private-refs gate counts.
 			name: "a refs/worktree ref of its own",
 			soil: func(t *testing.T, wtPath string) {
 				t.Helper()
@@ -342,5 +320,52 @@ func TestTaskFireLeftover_ReFiredMarkerCannotTouchPriorIncarnation(t *testing.T)
 	}
 	if _, statErr := os.Stat(wtPath); statErr != nil {
 		t.Fatalf("the prior incarnation's worktree must be left in place: %v", statErr)
+	}
+}
+
+// TestTaskFireLeftover_SharedRepoStashDoesNotQuarantine: `git stash` inside a
+// linked worktree writes the SHARED refs/stash the main checkout also lists,
+// so a stash — even one made inside this leftover before the crash — survives
+// the worktree's removal in the repository. It is not the tree's own to lose:
+// the bound clean leftover still tombstones (Codex on #6546).
+func TestTaskFireLeftover_SharedRepoStashDoesNotQuarantine(t *testing.T) {
+	title := "shared-stash-leftover"
+	repoPath, repo, sanitized, _ := fakeReapFixture(t, title)
+	// Give the repository a tracked file and stash a change to it — the stash
+	// entry lands in the common refs/stash, visible from every worktree.
+	if err := os.WriteFile(filepath.Join(repoPath, "tracked.txt"), []byte("base"), 0o644); err != nil {
+		t.Fatalf("write tracked file: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "add", "tracked.txt"},
+		{"-C", repoPath, "commit", "-m", "track a file"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	branch := worktreeBranchFor(t, title)
+	wtPath := filepath.Join(resolvedTempDir(t), "shared-stash-wt")
+	seedLeftoverWorktree(t, repoPath, branch, wtPath)
+	if err := os.WriteFile(filepath.Join(wtPath, "tracked.txt"), []byte("edited"), 0o644); err != nil {
+		t.Fatalf("edit tracked file: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", wtPath, "stash").CombinedOutput(); err != nil {
+		t.Fatalf("git stash in leftover: %v: %s", err, out)
+	}
+	installFakeReapTmux(t, sanitized, fakeReapTmux{absent: true})
+
+	fire := &taskFireMarker{
+		TaskID: "ab0r7207", IntendedAt: time.Now().Add(-time.Minute), Title: title,
+		InstanceID: reapInstanceID, WorktreePath: wtPath,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7207", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+		fire, repo, nil)
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row == nil || !row.UserKilled || row.StartupStateUnknown {
+		t.Fatalf("a shared stash is not the worktree's own state — the bound clean leftover must tombstone, got %+v", row)
 	}
 }
