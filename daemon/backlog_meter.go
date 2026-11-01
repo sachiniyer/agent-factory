@@ -310,7 +310,7 @@ func (m *Manager) startedItemRuns(home string) ([]itemRun, bool) {
 		repoID := filepath.Base(filepath.Dir(p))
 		b, err := backlog.Load(repoID)
 		if err != nil {
-			m.warn().Printf("plan meter: backlog of project %s: %v", repoID, err)
+			m.warnBacklogUnreadable("plan meter: backlog", repoID, err)
 			complete = false
 			continue
 		}
