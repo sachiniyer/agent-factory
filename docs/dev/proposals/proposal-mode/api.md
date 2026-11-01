@@ -50,6 +50,9 @@ path filled in:
 6. Do not change a `> [!decision]` callout without asking the user.
 7. To add a doc, run `af proposal add-doc`.
 8. If you lose track of the proposal, run `af proposal attach`.
+9. When the user asks you to make or update the proposal's backlog items,
+   write one `af backlog add --file -` batch: a sequential parent and one
+   draft child per PR-stack row.
 
 ### changes output
 
