@@ -164,7 +164,7 @@ func TestMouse_DoubleClickTreeTabRowEntersInteractive(t *testing.T) {
 	assert.Equal(t, p, h.focusedOpenPane())
 	_, cmd := h.Update(enterInteractiveMsg{pane: p})
 	runHermeticCmd(t, h, cmd, 0)
-	assert.True(t, h.interactive, "tab-row double-click still replays the Enter path")
+	assert.True(t, h.interactive, "tab-row double-click still re-enters via the Enter path")
 	require.Len(t, *fakes, 1)
 }
 
