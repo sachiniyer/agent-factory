@@ -25,9 +25,9 @@ const perMessageAttestation = false
 
 type peerState struct{}
 
-func enableAttestation(net.Conn) (peerState, error) { return peerState{}, nil }
+func enableAttestation(net.Conn) (*peerState, error) { return &peerState{}, nil }
 
-func readAttestedLine(conn net.Conn, _ peerState) ([]byte, int, error) {
+func readAttestedLine(conn net.Conn, _ *peerState) ([]byte, int, error) {
 	pid, err := peerPID(conn)
 	if err != nil {
 		return nil, 0, err

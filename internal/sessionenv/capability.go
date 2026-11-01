@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -287,6 +288,11 @@ func (b *CapabilityBroker) serveConn(conn net.Conn) {
 			resp.Error = cerr.Error()
 		}
 		_ = enc.Encode(resp)
+		// Hold the connection until the client has read the reply and closed.
+		// Closing first leaves a macOS client's LOCAL_PEERPID read with ENOTCONN
+		// and refuses a live claim (#6455). The deadline bounds a client that
+		// never closes.
+		_, _ = io.Copy(io.Discard, io.LimitReader(conn, 1<<10))
 		return
 	}
 }

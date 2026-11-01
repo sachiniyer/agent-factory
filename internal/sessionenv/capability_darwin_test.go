@@ -3,8 +3,11 @@
 package sessionenv
 
 import (
+	"bufio"
+	"encoding/json"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -85,4 +88,59 @@ func TestDarwin_PeerGoneBeforeIdentificationIsAStableError(t *testing.T) {
 	require.NoError(t, client.Close())
 	_, err := enableAttestation(server)
 	require.ErrorIs(t, err, errPeerGone)
+}
+
+// The broker keeps the connection open after its final reply until the client
+// closes. Closing first made the client's identity read fail with ENOTCONN and
+// refused a live claim (#6455). Uses only the wire types and peerPID, so it also
+// compiles against the code before the fix.
+func TestDarwin_TheBrokerHoldsTheConnectionUntilTheClientCloses(t *testing.T) {
+	b, sock := startBroker(t, paneOf("s", os.Getpid()))
+	token, err := b.Mint(testCap())
+	require.NoError(t, err)
+	conn, err := net.Dial("unix", sock)
+	require.NoError(t, err)
+	defer conn.Close()
+	rd := bufio.NewReader(conn)
+	for _, req := range []claimRequest{{Hello: true}, {Token: token, Pane: "%1"}} {
+		require.NoError(t, json.NewEncoder(conn).Encode(req))
+		line, err := rd.ReadBytes('\n')
+		require.NoError(t, err)
+		var resp claimResponse
+		require.NoError(t, json.Unmarshal(line, &resp))
+		require.True(t, resp.OK, resp.Error)
+	}
+	// The final reply is read; the broker must not have hung up yet.
+	pid, err := peerPID(conn)
+	require.NoError(t, err, "the broker closed before the client read its identity")
+	require.Equal(t, os.Getpid(), pid)
+}
+
+// LOCAL_PEERPID names the last process to use the peer socket, not the
+// connector (measured on macos-latest and macos-15-intel). The first message is
+// attributed to the identity read at connect; a later one is read afresh, so a
+// descriptor handed to another process after connect is not attributed to the
+// connector.
+func TestDarwin_ALaterMessageIsAttributedByAFreshRead(t *testing.T) {
+	client, server := dialedPair(t)
+	st, err := enableAttestation(server)
+	require.NoError(t, err)
+	_, err = client.Write([]byte("first\n"))
+	require.NoError(t, err)
+	line, pid, err := readAttestedLine(server, st)
+	require.NoError(t, err)
+	require.Equal(t, "first", string(line))
+	require.Equal(t, os.Getpid(), pid)
+
+	f, err := client.(*net.UnixConn).File()
+	require.NoError(t, err)
+	defer f.Close()
+	child := exec.Command("/bin/sh", "-c", "printf 'second\\n' >&3")
+	child.ExtraFiles = []*os.File{f}
+	require.NoError(t, child.Run())
+	line, pid, err = readAttestedLine(server, st)
+	require.NoError(t, err)
+	require.Equal(t, "second", string(line))
+	require.NotEqual(t, os.Getpid(), pid, "a message written by another process was attributed to the connector")
+	require.Positive(t, pid)
 }

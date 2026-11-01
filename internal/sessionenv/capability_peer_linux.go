@@ -57,8 +57,8 @@ const perMessageAttestation = true
 
 type peerState struct{}
 
-func enableAttestation(conn net.Conn) (peerState, error) {
-	return peerState{}, setPassCred(conn)
+func enableAttestation(conn net.Conn) (*peerState, error) {
+	return &peerState{}, setPassCred(conn)
 }
 
 func setPassCred(conn net.Conn) error {
@@ -82,7 +82,7 @@ func setPassCred(conn net.Conn) error {
 // readAttestedLine reads one newline-terminated message and returns the pid the
 // kernel attested for it. Every read must carry credentials and they must all
 // name the same sender, so a message cannot be stitched from two writers.
-func readAttestedLine(conn net.Conn, _ peerState) ([]byte, int, error) {
+func readAttestedLine(conn net.Conn, _ *peerState) ([]byte, int, error) {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		return nil, 0, fmt.Errorf("not a unix connection")

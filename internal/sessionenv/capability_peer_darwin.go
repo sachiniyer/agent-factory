@@ -13,15 +13,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// peerState is the peer identity read once, when the connection is made. macOS
-// answers LOCAL_PEERPID only while the peer still holds its end open: a client
-// that has sent its request and then waits for the answer is fine, but a server
-// that has written its last reply and closed (every claim ends that way) leaves
-// the client's getsockopt with ENOTCONN. Reading lazily, at the first read after
-// the request, raced exactly that close and refused a live shim's claim (#6455).
-// The identity is the kernel's record of who connected, so it does not change
-// afterwards; reading it before any exchange removes the race.
-type peerState struct{ pid int }
+// peerState carries the identity read when the connection was made.
+//
+// macOS answers LOCAL_PEERPID only while the peer still holds its end open: a
+// peer that wrote its last reply and closed leaves the other side's getsockopt
+// with ENOTCONN. Reading lazily, after sending the request, raced exactly that
+// close and refused a live shim's claim (#6455). The first message is therefore
+// attributed to the identity read at connect/accept, before any exchange.
+//
+// That value is not a constant: measured on macos-latest and macos-15-intel,
+// LOCAL_PEERPID reports the LAST process to use the peer socket (a forked child
+// that inherits the descriptor and writes changes it). So every later message is
+// attributed by a fresh read, as before, which still catches a descriptor handed
+// to another process after the connection was made. The broker keeps the
+// connection open after its final reply until the client closes, so that fresh
+// read does not race the close either (serveConn).
+type peerState struct {
+	pid  int
+	used bool
+}
 
 // errPeerGone is the refusal for a peer that was already gone when its identity
 // was read, so it is never confused with a failed identity check.
@@ -114,18 +124,26 @@ const perMessageAttestation = false
 
 // enableAttestation reads the peer's identity now, at connect/accept, and
 // refuses a peer that is another user.
-func enableAttestation(conn net.Conn) (peerState, error) {
+func enableAttestation(conn net.Conn) (*peerState, error) {
 	pid, uid, err := peerIdentity(conn)
 	if err != nil {
-		return peerState{}, err
+		return nil, err
 	}
 	if uid != uint32(os.Getuid()) {
-		return peerState{}, fmt.Errorf("the claim peer (pid %d) runs as uid %d, not this user", pid, uid)
+		return nil, fmt.Errorf("the claim peer (pid %d) runs as uid %d, not this user", pid, uid)
 	}
-	return peerState{pid: pid}, nil
+	return &peerState{pid: pid}, nil
 }
 
-func readAttestedLine(conn net.Conn, st peerState) ([]byte, int, error) {
+func readAttestedLine(conn net.Conn, st *peerState) ([]byte, int, error) {
+	pid := st.pid
+	if st.used {
+		var err error
+		if pid, err = peerPID(conn); err != nil {
+			return nil, 0, err
+		}
+	}
+	st.used = true
 	var line []byte
 	one := make([]byte, 1)
 	for len(line) < claimMaxMessage {
@@ -133,7 +151,7 @@ func readAttestedLine(conn net.Conn, st peerState) ([]byte, int, error) {
 			return nil, 0, err
 		}
 		if one[0] == '\n' {
-			return line, st.pid, nil
+			return line, pid, nil
 		}
 		line = append(line, one[0])
 	}
