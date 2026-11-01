@@ -71,6 +71,12 @@ async function openBacklog(page: Page): Promise<void> {
   const tab = page.locator('.af-viewtab[data-view="backlog"]');
   if (!await tab.isVisible()) await page.getByRole("button", { name: "More app controls", exact: true }).click();
   await tab.click();
+  // The tab opens the Inbox while its badge shows, and the fixture has an open question on B-4.
+  const filters = page.getByRole("group", { name: "Filter items" });
+  await expect(filters.getByRole("button", { name: "Inbox (1)" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("list", { name: "Inbox" })).toBeVisible();
+  await filters.getByRole("button", { name: "All", exact: true }).click();
+  await expect(page.getByRole("list", { name: "Inbox" })).toBeHidden();
   await expect(page.locator(".af-backlog-row")).toHaveCount(5);
 }
 
