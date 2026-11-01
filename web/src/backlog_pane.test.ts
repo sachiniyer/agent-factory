@@ -13,6 +13,16 @@ interface Call {
   body: Record<string, unknown>;
 }
 
+/** A thrown `TransportError` makes the fetch stub re-throw, simulating a lost
+ *  reply (a transport failure) rather than a daemon refusal: `af()` then
+ *  raises an `ApiError(0, …)`, which `isMutationOutcomeUncertain` classifies
+ *  as uncertain — the move may have committed even though its response was
+ *  lost. A plain `Error` thrown by `reply` is rendered as a daemon-rejected
+ *  envelope, i.e. a definitive refusal. */
+class TransportError extends Error {
+  constructor(msg = "transport") { super(msg); this.name = "TransportError"; }
+}
+
 let dom: ReturnType<typeof installFakeDom>;
 let doc: FakeDocument;
 let calls: Call[];
@@ -41,7 +51,8 @@ beforeEach(() => {
     try {
       data = await reply(method);
     } catch (e) {
-      return new Response(JSON.stringify({ data: null, error: { message: (e as Error).message } }), { status: 400 });
+      if (e instanceof TransportError) throw e;
+      return new Response(JSON.stringify({ data: null, error: { message: (e as Error).message, daemon_rejected: true } }), { status: 400 });
     }
     return new Response(JSON.stringify({ data, error: null }), { status: 200 });
   };
@@ -427,6 +438,27 @@ test("a refusal in one project does not drop a reorder queued in another after s
     { repo_path: "/b", id: 1, after: 2 },    // the post-switch move, not dropped by /a's refusal
   ]);
   assert.deepEqual(h.notices, ["B-1 cannot move there"]);
+});
+
+test("an uncertain refusal (the reply lost) does not drop a queued move", async () => {
+  // The first MoveBacklogItem's reply is lost — a transport (uncertain) error.
+  // The move may have committed, so the queued successor — whose target was
+  // computed against the optimistic order the first move made, which is the
+  // daemon's real order if it landed — is still sent, not dropped the way a
+  // definitive refusal drops it.
+  let first = true;
+  reply = async (method) => {
+    if (method === "MoveBacklogItem" && first) { first = false; throw new TransportError(); }
+    return {};
+  };
+  const h = host();
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1), item(2), item(3)) }), "/a", []);
+  key(row(pane, 3), "ArrowRight", { altKey: true });   // first move; its reply is lost
+  key(row(pane, 1), "ArrowDown", { altKey: true });    // queued against the optimistic order
+  await settle();
+  const moves = (): Call[] => calls.filter((c) => c.method === "MoveBacklogItem");
+  assert.equal(moves().length, 2, "the queued move is not dropped on an uncertain outcome");
 });
 
 test("a selected project with no backlog yet asks for one refresh", () => {

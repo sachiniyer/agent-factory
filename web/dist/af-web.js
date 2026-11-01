@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "908c4f85290e";
+var CLIENT_VERSION = "b65e277323fd";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -20068,10 +20068,12 @@ ${id}`;
         return this.host.refresh();
       }, (e) => {
         if (pending) {
-          this.movesGen.set(root2, (this.movesGen.get(root2) ?? 0) + 1);
+          if (!isMutationOutcomeUncertain(e)) this.movesGen.set(root2, (this.movesGen.get(root2) ?? 0) + 1);
           if (this.pending?.root === root2) this.pending = null;
-          this.focusId = id;
-          this.render();
+          if (this.root === root2) {
+            this.focusId = id;
+            this.render();
+          }
         }
         this.host.notify(errorText(e));
         return this.host.refresh();

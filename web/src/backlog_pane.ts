@@ -4,7 +4,7 @@
 // backlog.changed; a reorder shows at once and snaps back on refusal, and a
 // started item shows Starting until its session exists.
 
-import { errorText } from "./api.js";
+import { errorText, isMutationOutcomeUncertain } from "./api.js";
 import {
   type BudgetReply, addItem, addNote, answerQuestion, deleteItem, backlogRoutes, moveItem, runNext, setBudget, setItemStatus, setSettings, startItem, updateItem,
 } from "./backlog_api.js";
@@ -334,16 +334,24 @@ export class BacklogPane {
         return this.host.refresh();
       }, (e: unknown) => {
         if (pending) {
-          // A refusal invalidates the optimistic chain in this project only:
-          // clear the overlay if it is the one shown here (a newer move in
-          // another project keeps its own), and bump this project's gen so
-          // still-queued moves — whose targets were computed against this
-          // refused order — drop themselves rather than commit a phantom the
-          // user never saw. A refusal does not touch another project's chain.
-          this.movesGen.set(root, (this.movesGen.get(root) ?? 0) + 1);
+          // A definitive refusal invalidates the optimistic chain in this
+          // project only: bump this project's gen so still-queued moves — whose
+          // targets were computed against this refused order — drop themselves
+          // rather than commit a phantom the user never saw. An uncertain
+          // outcome (the reply was lost; the move may have committed) does not
+          // bump the gen, so a successor computed against the now-real order
+          // still goes out — only a definitive daemon refusal drops the chain.
+          // Either way the overlay snaps back if it is the one shown here (a
+          // newer move in another project keeps its own). A refusal does not
+          // touch another project's chain, and focus is restored only while the
+          // failed project is still on screen, so a background rejection never
+          // steals the keyboard focus from an unrelated project.
+          if (!isMutationOutcomeUncertain(e)) this.movesGen.set(root, (this.movesGen.get(root) ?? 0) + 1);
           if (this.pending?.root === root) this.pending = null;
-          this.focusId = id;
-          this.render();
+          if (this.root === root) {
+            this.focusId = id;
+            this.render();
+          }
         }
         this.host.notify(errorText(e));
         return this.host.refresh();
