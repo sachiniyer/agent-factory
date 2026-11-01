@@ -422,10 +422,14 @@ func relativeShellWrapper(command string) string {
 // resolves env (the shell wrapper) and codex (the detected agent) but not the
 // intervening operand, so a relative operand is a launch-directory-dependent
 // executable the doctor cannot verify from outside a repo. Leading shell
-// assignments are skipped, and nested env wrappers are unwrapped, mirroring
-// firstCommandTokenStrict in the tmux package. The full command is tokenized
-// (no word cap) so a long env prefix of literal assignments cannot truncate
-// before env's command operand and leave a relative launcher undetected.
+// assignments are skipped. The leading env wrapper is unwrapped to its command
+// operand; a nested env reached by unwrapping is itself an executable
+// obligation the session launches but CheckCommand does not resolve (`env
+// ./bin/env /usr/bin/codex` runs ./bin/env, which CheckCommand never verifies),
+// so it is returned for classification rather than unwrapped further. The full
+// command is tokenized (no word cap) so a long env prefix of literal
+// assignments cannot truncate before env's command operand and leave a
+// relative launcher undetected.
 func envCommandOperand(command string) string {
 	words, err := shellWords(command, 0)
 	if err != nil {
@@ -435,12 +439,25 @@ func envCommandOperand(command string) string {
 	for idx < len(words) && isAssignment(words[idx]) {
 		idx++
 	}
+	unwrapped := false
 	for idx < len(words) && isEnvExecutable(words[idx]) {
+		// A nested env reached by unwrapping (not the leading shell
+		// wrapper, which CheckCommand resolves via resolveShellExecutableAt)
+		// is env's command operand — an executable the session execs but
+		// CheckCommand does not resolve. Return it for classification so
+		// a relative nested env (env ./bin/env /usr/bin/codex) or a bare
+		// nested env looked up through a relative PATH anchors the
+		// command instead of being silently unwrapped to the final
+		// agent token.
+		if unwrapped {
+			return words[idx]
+		}
 		invocation, perr := envcommand.Parse(words[idx+1:], envcommand.Policy{AllowAssignments: true})
 		if perr != nil || invocation.CommandIndex < 0 {
 			return ""
 		}
 		idx += 1 + invocation.CommandIndex
+		unwrapped = true
 	}
 	if idx < len(words) {
 		return words[idx]
