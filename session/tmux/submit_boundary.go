@@ -66,7 +66,7 @@ var newBoundaryNonce = func() string {
 func (t *TmuxSession) sendEnterAndCaptureBoundary() (joined, grid string, enterOK bool, err error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	target := exactTarget(t.sanitizedName)
+	target := ExactTarget(t.sanitizedName)
 	gridMarker := deliveryBoundaryGridSentinel + "-" + newBoundaryNonce()
 	out, err := t.outputTmuxBounded(ctx,
 		"send-keys", "-t", target, "Enter", ";",

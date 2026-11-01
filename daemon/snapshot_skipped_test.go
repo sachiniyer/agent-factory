@@ -82,10 +82,12 @@ func TestManager_SkippedReposSeededAtStartupAndScoped(t *testing.T) {
 	// All-repo read reports the dropped repo; a scoped read to the valid repo
 	// reports nothing (its sessions are present); a scoped read to the corrupted
 	// repo reports it.
-	all := m.SkippedRepos("")
+	_, all := m.SnapshotWithSkipped("")
 	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(all), "all-repo read reports every dropped repo")
-	require.Empty(t, m.SkippedRepos("valid-r"), "valid repo is not skipped, so a scoped read reports nothing")
-	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(m.SkippedRepos("corrupt-r")),
+	_, validSkipped := m.SnapshotWithSkipped("valid-r")
+	require.Empty(t, validSkipped, "valid repo is not skipped, so a scoped read reports nothing")
+	_, corruptSkipped := m.SnapshotWithSkipped("corrupt-r")
+	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(corruptSkipped),
 		"scoped read to the corrupted repo reports it")
 }
 

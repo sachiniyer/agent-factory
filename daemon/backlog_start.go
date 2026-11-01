@@ -31,12 +31,19 @@ var validateBacklogCreate = validateCreateFirst
 //     the prompt absent (PromptNotDelivered with a nil error), or the send was
 //     refused before a byte reached the pane (a pre-flight failure). The caller
 //     disarms the run and restores the item.
+//     errBacklogTargetTearingDown also marks a refusal by an archive or a
+//     kill in progress, which a caller may wait out.
 //   - errBacklogDeliveryUncertain: the send may have landed (a timeout after
 //     Enter reached the pane, a lost reply). Unknown is never "not delivered":
 //     the caller keeps the run marker so the agent's completion is not ignored
 //     and a second start does not deliver duplicate work.
 var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
-	status, err := m.SendPromptWithStatus(req)
+	return classifyBacklogSend(m.SendPromptWithStatus(req))
+}
+
+// classifyBacklogSend is sendBacklogPrompt's classification of one send's
+// outcome.
+func classifyBacklogSend(status session.PromptDeliveryStatus, err error) error {
 	switch {
 	case err == nil && status == session.PromptNotDelivered:
 		return errBacklogPromptNotDelivered
@@ -44,6 +51,11 @@ var sendBacklogPrompt = func(m *Manager, req SendPromptRequest) error {
 		// The session hit a usage limit between the caller's check and the send's
 		// fenced one: nothing was sent, and the caller should hold, not fail.
 		return fmt.Errorf("%w: %v", errBacklogTargetLimited, err)
+	case err != nil && (errors.Is(err, errTargetTearingDown) || errors.Is(err, session.ErrAdoptionFenced)):
+		// An archive or a kill holds the session, by its claim or its adoption
+		// fence: refused before a byte reached the pane. A fenced refusal is
+		// otherwise an ordinary send error, which would read as uncertain.
+		return fmt.Errorf("%w: %w: %v", errBacklogPromptNotDelivered, errBacklogTargetTearingDown, err)
 	case err != nil && isNotAttemptedErr(err):
 		return fmt.Errorf("%w: %v", errBacklogPromptNotDelivered, err)
 	case err != nil:
@@ -56,6 +68,7 @@ var (
 	errBacklogPromptNotDelivered = errors.New("the agent did not take the prompt")
 	errBacklogDeliveryUncertain  = errors.New("af could not confirm the prompt reached the agent")
 	errBacklogTargetLimited      = errors.New("the session is at a usage limit")
+	errBacklogTargetTearingDown  = errors.New("the session is being archived or deleted")
 )
 
 func (s *controlServer) StartBacklogItem(req StartBacklogItemRequest, resp *StartBacklogItemResponse) error {

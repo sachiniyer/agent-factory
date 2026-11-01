@@ -348,7 +348,7 @@ func TestRunnerCapAsksOnlyWhenAttached(t *testing.T) {
 	m, repoID, inst := startedItem(t)
 	interrupted := stubInterrupt(t)
 	capUsage(t, m, inst.ID, 3)
-	m.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	m.PauseStatusPollFor(repoID, inst.Title, inst.ID, "")
 	pass(m, repoID, time.Now())
 	if len(*interrupted) != 0 {
 		t.Fatalf("Escape sent to an attached session: %v", *interrupted)
@@ -541,6 +541,67 @@ func TestAutomaticStartRevalidatesTheItemAtAdmission(t *testing.T) {
 	}
 	if it := loadItem(t, repoID, 1); len(it.Runs) != 0 {
 		t.Fatalf("the drafted item was started: %+v", it)
+	}
+}
+
+// pausableGroup adds a parent and a child under it to the project's backlog
+// and returns their ids; the test manager already holds an item, so they are
+// not B-1 and B-2.
+func pausableGroup(t *testing.T, repoID string) (group, child int) {
+	t.Helper()
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		g, err := b.Add(backlog.NewItem{Title: "group"}, time.Now())
+		if err != nil {
+			return err
+		}
+		c, err := b.Add(backlog.NewItem{Title: "child", Parent: g.ID}, time.Now())
+		if err != nil {
+			return err
+		}
+		group, child = g.ID, c.ID
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return group, child
+}
+
+// A group paused after the admission check, before the start is recorded,
+// stops an automatic start inside the start transaction (Codex P2 on #6468):
+// StartBacklogItem is called directly, past startBacklogItemCapped's check, as
+// the race would reach it. The refusal is errNotRunnable, so the runner does not
+// count it as a failed start.
+func TestAutomaticStartRefusesAnItemPausedBeforeItsStartIsRecorded(t *testing.T) {
+	m, repoID := runnerTestManager(t)
+	group, child := pausableGroup(t, repoID)
+	queueItem(t, m, repoID, child)
+	setRunner(t, m, repoID, true, 1)
+	if _, err := m.backlogService().UpdateItem(backlog.UpdateItemRequest{RepoID: repoID, ID: group, Paused: ptrTo(true)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: child}, backlog.StartedByRunner); !errors.Is(err, errNotRunnable) {
+		t.Fatalf("an automatic start under a paused group: %v", err)
+	}
+	if it := loadItem(t, repoID, child); it.Status != backlog.StatusQueued || len(it.Runs) != 0 {
+		t.Fatalf("the paused group's item was started: %+v", it)
+	}
+}
+
+// The same race for "af backlog run": RunNow chose the batch before the group
+// was paused, and each pick reaches the start as a pass start, which the
+// transaction refuses like the runner's (Codex P2 on #6468).
+func TestRunPassStartRefusesAnItemPausedAfterThePassChoseIt(t *testing.T) {
+	m, repoID := runnerTestManager(t)
+	group, child := pausableGroup(t, repoID)
+	queueItem(t, m, repoID, child)
+	if _, err := m.backlogService().UpdateItem(backlog.UpdateItemRequest{RepoID: repoID, ID: group, Paused: ptrTo(true)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.startBacklogItemCapped(backlog.StartRequest{RepoID: repoID, ID: child}, backlog.StartedByRunPass); !errors.Is(err, errNotRunnable) {
+		t.Fatalf("a pass start under a paused group: %v", err)
+	}
+	if it := loadItem(t, repoID, child); it.Status != backlog.StatusQueued || len(it.Runs) != 0 {
+		t.Fatalf("the paused group's item was started: %+v", it)
 	}
 }
 

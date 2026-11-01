@@ -527,7 +527,7 @@ func TestBashWrappedSubmitDoesNotDuplicateCommandPrefix(t *testing.T) {
 		require.NoError(t, closeErrX)
 	})
 
-	resizeCmd := exec.Command("tmux", "resize-window", "-t", exactTarget(session.sanitizedName), "-x", "24", "-y", "10")
+	resizeCmd := exec.Command("tmux", "resize-window", "-t", ExactTarget(session.sanitizedName), "-x", "24", "-y", "10")
 	require.NoError(t, session.cmdExec.Run(resizeCmd))
 
 	requireBashAdoptedWidth(t, session, 24)
@@ -589,7 +589,7 @@ func settledPane(t *testing.T, session *TmuxSession, want string) string {
 // precondition, and $COLUMNS only updates once bash has handled SIGWINCH.
 func requireBashAdoptedWidth(t *testing.T, session *TmuxSession, width int) {
 	t.Helper()
-	target := exactTarget(session.sanitizedName)
+	target := ExactTarget(session.sanitizedName)
 	sendKeys := func(text string) {
 		t.Helper()
 		require.NoError(t, session.cmdExec.Run(
@@ -1293,7 +1293,7 @@ func TestPriorVisibleDeliveryDoesNotAuthorizeALaterNegative(t *testing.T) {
 }
 
 func captureRawPane(session *TmuxSession) (string, error) {
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-t", exactTarget(session.sanitizedName))
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-t", ExactTarget(session.sanitizedName))
 	out, err := session.cmdExec.Output(cmd)
 	if err != nil {
 		return "", err

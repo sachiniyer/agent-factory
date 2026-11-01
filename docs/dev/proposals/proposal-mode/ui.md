@@ -7,7 +7,7 @@ The web UI only gets this tab, in step 2 and step 3.
 ```
 ┌───────────────────────────┬───────────────────────────────────────────┐
 │ Agent                     │ Docs · auth-rework                        │
-│                           │ goals  technical  api  +       ● Auto 2?  │
+│                           │ goals  technical  api  +            ● 2?  │
 │  (live terminal)          ├───────────────────────────────────────────┤
 │                           │ # API design                              │
 │                           │                                           │
@@ -24,8 +24,8 @@ The web UI only gets this tab, in step 2 and step 3.
 - **Doc strip:** one sub-tab for each file, in template order and then
   alphabetical order. The **+** menu lists the templates that are not used
   yet, and **Blank…**.
-- **Header right:** the Auto / Manual switch, and a count of open
-  `[!question]` callouts. Click the count to go to the next question.
+- **Header right:** a count of open `[!question]` callouts. Click the count to
+  go to the next question.
 
 ## Editor
 
@@ -65,7 +65,6 @@ The chip renders the `push` status from `GetProposal` and then each
 - **Hold** calls `HoldProposalPush`.
 - **Send now** calls `SendProposalChanges`. In Manual mode the chip is always
   a **Send now** button, and it is active when `unsent` is more than 0.
-- The Auto / Manual switch calls `SetProposalPushMode`.
 
 ## Copy
 

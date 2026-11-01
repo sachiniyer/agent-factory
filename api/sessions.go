@@ -209,7 +209,9 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 // corrupted instances.json (#603), a no-match caveats naming the dropped repos
 // rather than reporting a clean "not found", mirroring diskWhoami (#730).
 func whoamiSession(tmuxName string) (*session.InstanceData, error) {
-	data, skipped, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+	// Lenient: the tmux name is unique and the disk record answers it on its own,
+	// so a live-but-unanswering daemon may still be bypassed here.
+	data, skipped, fallBack, err := snapshotReadScoped(daemon.SnapshotRequest{}, false)
 	if err == nil {
 		for i := range data {
 			if data[i].TmuxName == tmuxName {

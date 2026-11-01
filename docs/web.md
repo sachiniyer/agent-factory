@@ -28,7 +28,7 @@ after the tour. [Remote daemon access](remote-http-auth.md) is the full setup gu
 <figcaption>Choose a project, then select a session to see its tabs.</figcaption>
 </figure>
 
-The app bar's **Sessions**, **Tasks**, and **Config** buttons switch views.
+The app bar's **Sessions**, **Backlog**, **Tasks**, and **Config** buttons switch views.
 The **project switcher** scopes Sessions and Tasks to one repository and remembers
 that choice across reloads. Its menu shows session and working counts per project.
 Config's **This browser** section holds settings saved only in this browser.
@@ -208,7 +208,9 @@ reveal the menu on hover or keyboard focus. Archive and Delete session each open
   old sandbox's conversation does not return. Restoring an SSH or sandbox session
   archived without a push reattaches its preserved workspace — the tree, index and
   ignored files come back exactly as archived and the agent resumes its
-  conversation. Reveal **Archived** in the filter first.
+  conversation, unless it ran under a synced account (whose directory is removed
+  on archive, so restore starts a fresh conversation). Reveal **Archived** in
+  the filter first.
 - **Delete session** permanently tears down the session and removes its record. It removes
   Agent Factory-managed worktrees and deletes only branches created by Agent
   Factory. In-place or external worktrees and pre-existing branches are preserved.
@@ -686,9 +688,13 @@ pool is full the editor stays on the same-origin mirror and the daemon's error n
 is never served on the web UI's address, so without a port of its own its pane says which
 setting to turn on. See [`network.editor_origin_ports`](configuration.md).
 
-Behind a front door that rewrites `Host`, forward the browser's for each of these ports too
-(`X-Forwarded-Host $http_host`), as for the main UI: an editor's WebSocket is accepted only
-from the editor's own page, judged the same way. See [behind a reverse
+An editor port answers only its own `Host` names, so a front-door name that
+`tailscale serve` or Caddy forwards must be listed in `network.allowed_hosts` — one
+entry covers the editor ports on any port. Behind a front door that rewrites `Host`,
+forward the browser's for each of these ports too (`X-Forwarded-Host $http_host`), as
+for the main UI: an editor's WebSocket is accepted only from the editor's own page,
+judged the same way. See [Host names the daemon answers
+to](remote-http-auth.md#host-names-the-daemon-answers-to) and [behind a reverse
 proxy](remote-http-auth.md#behind-a-reverse-proxy).
 
 ##### VS Code tabs get one too — per session
@@ -889,9 +895,9 @@ tab survives a restart and simply starts a new editor when you next open it.
 In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
 editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.
 
-### Docs tabs
+### Proposal tabs
 
-A **Docs tab** edits a proposal: a set of markdown docs that you and the agent
+A **Proposal tab** edits a proposal: a set of markdown docs that you and the agent
 write together. `af proposal start` and `af proposal attach` create it. From the
 CLI:
 
@@ -913,5 +919,5 @@ af sessions tab-create my-session --kind docs --proposal auth-rework
   close the tab or the page first, the doc saves with the markers in it, so no
   edit is lost and the agent sees both sides.
 
-The editor loads the first time a Docs tab opens. In the **TUI** a Docs tab
+The editor loads the first time a Proposal tab opens. In the **TUI** a Proposal tab
 shows a placeholder.

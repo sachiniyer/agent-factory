@@ -8,6 +8,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/backlog"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/planusage"
 )
 
@@ -30,9 +31,11 @@ type backlogState struct {
 	slots map[string]int
 	// continuing holds the items whose "continue" is being sent.
 	continuing map[string]bool
-	// deferredArchive holds the sessions whose on_done archive waits for an
-	// attached client to leave.
-	deferredArchive map[string]bool
+	// deferredArchive holds the sessions whose archive waits for an attached
+	// client to leave or the session to settle idle, with the reason af owes
+	// it (backlog.ArchiveDone or backlog.ArchiveAsk). The session's record
+	// carries the same owed archive durably (session.OwedArchiveData).
+	deferredArchive map[string]string
 	// pendingEnds holds, per session id, the run generation of an idle edge
 	// observed before the session's start record was committed: the completion
 	// has no item to land on yet, and is replayed by finishBacklogStart.
@@ -46,12 +49,32 @@ type backlogState struct {
 	// reason), kept apart from the attention display so dismissing the chip does not
 	// make a terminal answer invisible to the backlog.
 	asked sync.Map
+	// newerSchemaWarned holds the projects whose backlog.json a newer af wrote
+	// and whose refusal is already logged (warnBacklogUnreadable).
+	newerSchemaWarned sync.Map
 	// recovered, recovering and recoveryDone track restart recovery.
 	recovered    map[string]bool
 	recovering   bool
 	recoveryDone bool
 	meter        meterState
 	runner       runnerState
+}
+
+// warnBacklogUnreadable logs why a poll could not read a project's backlog. A
+// file a newer af wrote stays unreadable until af is upgraded, and an upgrade
+// restarts the daemon, so that refusal is logged once per project instead of on
+// every recovery, runner and meter poll (#6469); the file is still never
+// written. Any other failure is logged each time, as it may be passing.
+func (m *Manager) warnBacklogUnreadable(what, repoID string, err error) {
+	var newer *config.UnsupportedSchemaVersionError
+	if errors.As(err, &newer) {
+		if _, logged := m.backlog.newerSchemaWarned.LoadOrStore(repoID, true); logged {
+			return
+		}
+		m.warn().Printf("%s for project %s: %v (logged once; the backlog stays unavailable and its file untouched until af is upgraded)", what, repoID, err)
+		return
+	}
+	m.warn().Printf("%s for project %s: %v", what, repoID, err)
 }
 
 // restoreLock is the per-session restore mutex.
@@ -150,21 +173,30 @@ func (s *backlogState) endContinue(repoID string, id int) {
 	delete(s.continuing, continueKey(repoID, id))
 }
 
-func (s *backlogState) deferArchive(sessionID string) {
+// askedOf is the question the session showed, as remembered (asked), or the
+// empty seenQuestion.
+func (s *backlogState) askedOf(sessionID string) seenQuestion {
+	if q, ok := s.asked.Load(sessionID); ok {
+		return q.(seenQuestion)
+	}
+	return seenQuestion{}
+}
+
+func (s *backlogState) deferArchive(sessionID, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.deferredArchive == nil {
-		s.deferredArchive = map[string]bool{}
+		s.deferredArchive = map[string]string{}
 	}
-	s.deferredArchive[sessionID] = true
+	s.deferredArchive[sessionID] = reason
 }
 
-func (s *backlogState) takeDeferredArchive(sessionID string) bool {
+func (s *backlogState) takeDeferredArchive(sessionID string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	owed := s.deferredArchive[sessionID]
+	reason, owed := s.deferredArchive[sessionID]
 	delete(s.deferredArchive, sessionID)
-	return owed
+	return reason, owed
 }
 
 func (s *backlogState) beginRecovery() bool {

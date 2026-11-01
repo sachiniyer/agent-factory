@@ -930,9 +930,9 @@ func TestRefreshStatuses_AttachBreaksTheDebounceRun(t *testing.T) {
 	}
 
 	// The user attaches. The poll is paused for the duration and observes nothing.
-	manager.PauseStatusPoll(repoID, title, "")
+	manager.PauseStatusPollFor(repoID, title, "", "")
 	manager.RefreshStatuses()
-	manager.ResumeStatusPoll(repoID, title, "")
+	manager.ResumeStatusPollFor(repoID, title, "", "")
 
 	// One blip after detach.
 	manager.RefreshStatuses()

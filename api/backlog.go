@@ -142,8 +142,9 @@ func readText(cmd *cobra.Command, v string) (string, error) {
 }
 
 var (
-	backlogListAll   bool
-	backlogListState string
+	backlogListAll      bool
+	backlogListState    string
+	backlogListArchived bool
 )
 
 // backlogEntry is one item as list and show print it.
@@ -176,7 +177,8 @@ var backlogListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Print the backlog in order, as a tree, with each item's state",
 	Long: "Print the backlog in order, children under their parent, with each item's state and " +
-		"reason. Done and dropped items are hidden unless --all. With --json, print the items " +
+		"reason. Done and dropped items are hidden unless --all; archived groups and their items " +
+		"are hidden unless --archived. With --json, print the items " +
 		"as JSON in the {data,error} envelope.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -215,6 +217,8 @@ func backlogList() ([]backlogEntry, error) {
 	for _, it := range v.Backlog.Items {
 		st := v.States[it.ID].State
 		switch {
+		case !backlogListArchived && v.Backlog.ArchivedBy(it.ID) != 0:
+			continue
 		case want != "" && st != want:
 			continue
 		case want == "" && !backlogListAll && (st == backlog.StateDone || st == backlog.StateDropped):
@@ -245,6 +249,12 @@ func formatBacklogTree(entries []backlogEntry) string {
 			} else {
 				state += " · " + e.Reason
 			}
+		}
+		switch {
+		case e.Archived:
+			state += " · archived"
+		case e.Paused && len(e.Children) > 0:
+			state += " · paused"
 		}
 		fmt.Fprintf(&sb, "%s%s  %s  · %s\n", strings.Repeat("  ", d), backlog.FormatID(e.ID), e.Title, state)
 	}
@@ -523,6 +533,7 @@ func init() {
 	BacklogCmd.PersistentFlags().BoolVar(&envelopeOutput, "json", false, "Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list)")
 
 	backlogListCmd.Flags().BoolVar(&backlogListAll, "all", false, "Include done and dropped items")
+	backlogListCmd.Flags().BoolVar(&backlogListArchived, "archived", false, "Include archived groups and their items")
 	backlogListCmd.Flags().StringVar(&backlogListState, "state", "", "Only items in this `state` (draft, queued, waiting, starting, working, stopped, in_review, needs_you, done, dropped)")
 
 	f := backlogAddCmd.Flags()

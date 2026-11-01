@@ -5,8 +5,8 @@ import { type FakeDocument, FakeDataTransfer, type FakeElement, FakeEvent, insta
 import { bodyEditorLoader } from "./backlog_body.js";
 import { resetSerialState } from "./backlog_serial.js";
 import type { BacklogData } from "./backlog_data.js";
-import type { BacklogView, Budget, Item } from "./backlog_model.js";
-import { BacklogPane, type BacklogHost, runnerText } from "./backlog_pane.js";
+import type { BacklogView, Item } from "./backlog_model.js";
+import { BacklogPane, type BacklogHost } from "./backlog_pane.js";
 
 interface Call {
   method: string;
@@ -82,7 +82,7 @@ function view(...items: Item[]): BacklogView {
 }
 
 function data(views: Record<string, BacklogView>, generation = 1): BacklogData {
-  return { views: new Map(Object.entries(views)), errors: new Map(), budget: null, generation };
+  return { views: new Map(Object.entries(views)), errors: new Map(), budget: null, usage: null, generation };
 }
 
 function host(over: Partial<BacklogHost> = {}): BacklogHost & { notices: string[]; refreshes: number } {
@@ -96,6 +96,7 @@ function host(over: Partial<BacklogHost> = {}): BacklogHost & { notices: string[
     openSession: () => {},
     archiveSession: () => {},
     restoreSession: () => {},
+    confirm: async () => true,
     loadSessions: async () => {},
     ...over,
   };
@@ -115,21 +116,6 @@ const row = (pane: BacklogPane, id: number): FakeElement => el(pane).querySelect
 const key = (target: FakeElement, k: string, init: Partial<FakeEvent> = {}): void => {
   target.dispatchEvent(new FakeEvent("keydown", { key: k, ...init }));
 };
-
-test("runner text keeps the reason second, without its full stop", () => {
-  const v = view();
-  v.runner = { state: "off", reason: "Items run only when you start them.", used: 0, max: 1 };
-  const budget: Budget = { share: 30, stop_at: 80, max_per_run: 10, usd_limit: 0, usd_spent: 0 };
-  const r = runnerText(v, budget);
-  assert.equal([r.state, ...r.parts].join(" · "),
-    "Runner off · Items run only when you start them · 0 of 1 working · Backlog share 30% · stop at plan 80%");
-  v.runner = { state: "stopped", reason: "Usage limit until 14:00", used: 1, max: 2 };
-  const paused = runnerText(v, { ...budget, usd_limit: 5, usd_spent: 1.5 });
-  assert.equal(paused.state, "Runner paused");
-  assert.equal(paused.warn, true);
-  assert.deepEqual(paused.parts, ["Usage limit until 14:00", "1 of 2 working", "Backlog share 30% · stop at plan 80%", "$1.50 of $5.00"]);
-  assert.deepEqual(runnerText(view(), null).parts, ["0 of 1 working"]);
-});
 
 test("a project switch saves an unsaved body to the item's own project", async () => {
   const pane = mount(host());

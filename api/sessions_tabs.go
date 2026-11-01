@@ -71,7 +71,7 @@ preview works even when the web UI is viewed remotely (Tailscale/SSH); an extern
 URL is iframed directly (best-effort — many sites block embedding). The web tab
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
-Docs tab (--kind docs --proposal <slug>): the web UI's editor for a proposal of
+Proposal tab (--kind docs --proposal <slug>): the web UI's editor for a proposal of
 the session's project (see af proposal). It has no process. The TUI shows a
 placeholder, because the editor is web only. af proposal start and attach create
 this tab for you.

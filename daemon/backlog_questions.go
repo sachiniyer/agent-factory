@@ -35,6 +35,12 @@ var errBacklogAnswerHeld = errors.New("held")
 func (h backlogHost) SetAttention(repoID, sessionID string, questionID int, reason string) {
 	if reason == "" {
 		h.m.backlog.asked.Delete(sessionID)
+		// The session waits on an answer while any question of its item is open:
+		// an answer to one of several, on its way through a restore that may
+		// fail, keeps the mark (Codex P2 on #6475).
+		if questionID == 0 {
+			h.m.clearArchivedForAnswer(repoID, sessionID)
+		}
 	} else {
 		h.m.backlog.asked.Store(sessionID, seenQuestion{ID: questionID, Text: session.NormalizeAttentionReason(reason)})
 	}
@@ -100,10 +106,52 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 		}
 	}
 	defer release()
+	for waits := 0; ; waits++ {
+		inst, why := m.backlogAnswerTarget(repoID, a)
+		if why != "" {
+			m.backlogAnswerFailed(repoID, a, why, stop)
+			return
+		}
+		err := m.sendBacklogAnswerUntilSettled(stop, repoID, inst, a)
+		if err == nil {
+			release() // the armed run marker holds the slot from here
+			m.backlogAnswerDelivered(repoID, a, stop)
+			return
+		}
+		if !errors.Is(err, errBacklogAnswerTornDown) {
+			m.backlogAnswerFailed(repoID, a, err.Error(), stop)
+			return
+		}
+		// The session is being archived (af's archive after the agent asked, or
+		// the user's) or deleted. Wait for that to settle, then restore the
+		// session, or find it gone, and send again: the archive's guard checks
+		// the question just before it shuts the session, so an answer recorded
+		// after that check meets the archive here instead of failing.
+		if waits >= backlogAnswerTeardownWaits {
+			m.backlogAnswerFailed(repoID, a, "the session stayed busy being archived or deleted", stop)
+			return
+		}
+		if !backlogAnswerWait(stop) {
+			m.backlogAnswerFailed(repoID, a, "af stopped while the answer waited for the session's archive", stop)
+			return
+		}
+	}
+}
+
+// backlogAnswerTeardownWaits bounds how many waits an answer spends on an
+// archive or a kill of its session in progress (each backlogAnswerWait).
+const backlogAnswerTeardownWaits = 150
+
+// errBacklogAnswerTornDown marks a send that met an archive or a kill of the
+// session in progress: nothing was sent, and the caller waits it out.
+var errBacklogAnswerTornDown = errors.New("the session is being archived or deleted")
+
+// backlogAnswerTarget returns the live session an answer goes to, restoring it
+// first when it is archived, lost or dead, or why it cannot be had.
+func (m *Manager) backlogAnswerTarget(repoID string, a backlog.PendingAnswer) (*session.Instance, string) {
 	s, ok := m.itemSessions(repoID)[a.SessionID]
 	if !ok || s.view.UserKilled || s.view.InFlightOp == session.OpKilling {
-		m.backlogAnswerFailed(repoID, a, "the session is gone", stop)
-		return
+		return nil, "the session is gone"
 	}
 	// Restoration is serialized per session and rechecked under the lock: two
 	// answers to one archived session (recovery launches them together) must not
@@ -115,8 +163,7 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 		restored, err := restoreBacklogSession(m, RestoreSessionRequest{ID: a.SessionID, RepoID: repoID})
 		if err != nil {
 			restoreMu.Unlock()
-			m.backlogAnswerFailed(repoID, a, "af could not restore the session: "+err.Error(), stop)
-			return
+			return nil, "af could not restore the session: " + err.Error()
 		}
 		m.publishEvent(agentproto.EventSessionRestored, restored)
 		m.syncBacklogAttention(repoID, a)
@@ -124,41 +171,54 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 	}
 	restoreMu.Unlock()
 	if !ok {
-		m.backlogAnswerFailed(repoID, a, "the session is gone", stop)
-		return
+		return nil, "the session is gone"
 	}
-	inst := s.instance
-	if inst.TaskRunActive() {
-		m.backlogAnswerFailed(repoID, a, "the session is running a task", stop)
-		return
+	if s.instance.TaskRunActive() {
+		return nil, "the session is running a task"
 	}
+	return s.instance, ""
+}
+
+// sendBacklogAnswerUntilSettled sends the answer, holding it while a client is
+// attached or the session is at a usage limit. It returns nil once delivered,
+// errBacklogAnswerTornDown when an archive or a kill is in the way, or why the
+// answer cannot be delivered.
+func (m *Manager) sendBacklogAnswerUntilSettled(stop <-chan struct{}, repoID string, inst *session.Instance, a backlog.PendingAnswer) error {
 	for {
 		// The item may have been restarted in a new session while this answer waited
 		// (to be restored, or behind an attached client): it is no longer the
 		// item's latest run, and sending would leave two sessions working on it.
 		if !backlogSessionIsLatest(repoID, a.ID, a.SessionID) {
-			m.backlogAnswerFailed(repoID, a, "the item was started again in another session", stop)
-			return
+			return errors.New("the item was started again in another session")
 		}
 		err := m.sendBacklogAnswer(repoID, inst, a.Prompt)
-		if err == nil {
-			release() // the armed run marker holds the slot from here
-			m.backlogAnswerDelivered(repoID, a, stop)
-			return
-		}
-		if !errors.Is(err, errBacklogAnswerHeld) {
-			m.backlogAnswerFailed(repoID, a, err.Error(), stop)
-			return
+		if err == nil || !errors.Is(err, errBacklogAnswerHeld) {
+			return err
 		}
 		if !backlogAnswerWait(stop) {
-			m.backlogAnswerFailed(repoID, a, "af stopped while the answer was held", stop)
-			return
+			return errors.New("af stopped while the answer was held")
 		}
 		if _, ok := m.itemSessions(repoID)[a.SessionID]; !ok {
-			m.backlogAnswerFailed(repoID, a, "the session is gone", stop)
-			return
+			return errors.New("the session is gone")
 		}
 	}
+}
+
+// backlogTearingDown reports whether an archive or a kill of the session is in
+// progress or done: its claim is held, its op is archiving or killing, or it is
+// archived.
+func (m *Manager) backlogTearingDown(repoID string, inst *session.Instance) bool {
+	switch inst.GetInFlightOp() {
+	case session.OpArchiving, session.OpKilling:
+		return true
+	}
+	if inst.GetLiveness() == session.LiveArchived {
+		return true
+	}
+	m.mu.Lock()
+	_, claimed := m.killsInFlight[daemonInstanceKey(repoID, inst.Title)]
+	m.mu.Unlock()
+	return claimed
 }
 
 // sendBacklogAnswer sends under the per-target lock, or returns
@@ -172,6 +232,9 @@ func (m *Manager) sendBacklogAnswer(repoID string, inst *session.Instance, promp
 	defer unlock()
 	if m.isPollPaused(repoID, inst.Title, inst.ID) || inst.GetLiveness() == session.LiveLimitReached {
 		return errBacklogAnswerHeld
+	}
+	if m.backlogTearingDown(repoID, inst) {
+		return errBacklogAnswerTornDown
 	}
 	// A second answer can arrive while the first is still being worked on: the
 	// run that was already active is not ours to close if this send fails.
@@ -197,6 +260,9 @@ func (m *Manager) sendBacklogAnswer(repoID string, inst *session.Instance, promp
 		}
 		if errors.Is(err, errBacklogTargetLimited) {
 			return errBacklogAnswerHeld // a limit published since the check: hold the answer
+		}
+		if errors.Is(err, errBacklogTargetTearingDown) || m.backlogTearingDown(repoID, inst) {
+			return errBacklogAnswerTornDown // an archive or a kill since the check: wait it out
 		}
 		return err
 	}

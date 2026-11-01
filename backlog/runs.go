@@ -38,6 +38,15 @@ func (b *Backlog) BeginStart(id int, by string, facts Facts, now time.Time) (Sta
 	if !it.Status.Open() {
 		return StartPlan{}, fmt.Errorf("%s is %s; reopen it first with \"af backlog reopen %d\"", FormatID(id), it.Status, id)
 	}
+	// A group paused (or archived, which pauses it) after a runner pass or an
+	// "af backlog run" pass chose this item stops the start here, inside the
+	// transaction that records it: a choice made before the lock cannot see a
+	// pause that lands in between. A start by hand ignores pauses on purpose.
+	if by == StartedByRunner || by == StartedByRunPass {
+		if p := b.PausedBy(id); p != 0 {
+			return StartPlan{}, fmt.Errorf("%w: %s is under paused %s", ErrNotRunnable, FormatID(id), FormatID(p))
+		}
+	}
 	if last := it.lastRun(); last != nil {
 		switch {
 		case last.State == RunStarting:
@@ -256,14 +265,17 @@ type RunEnd struct {
 	ID int
 	// Changed is whether the item was written.
 	Changed bool
-	// Archive asks the caller to archive the session: the user marked the item
-	// done and the project's on_done is archive.
+	// Archive asks the caller to archive the session for Reason: ArchiveDone
+	// when the user marked the item done and on_done is archive, ArchiveAsk
+	// when the run ended on open questions asked with then archive.
 	Archive bool
+	Reason  string
 }
 
 // RunEnded applies the end of a backlog run in sessionID, the item's latest
 // run. A running item with no open question goes to review with a note from
-// af. It returns a zero RunEnd when sessionID is not an item's latest run.
+// af; one whose open questions were all asked with then archive asks for an
+// archive. It returns a zero RunEnd when sessionID is not an item's latest run.
 func (b *Backlog) RunEnded(sessionID string, now time.Time) RunEnd {
 	it := b.ItemForSession(sessionID)
 	if it == nil || it.lastRun().SessionID != sessionID {
@@ -272,9 +284,10 @@ func (b *Backlog) RunEnded(sessionID string, now time.Time) RunEnd {
 	out := RunEnd{ID: it.ID}
 	switch it.Status {
 	case StatusDone:
-		out.Archive = b.Settings.OnDone == OnDoneArchive
+		out.Archive, out.Reason = b.Settings.OnDone == OnDoneArchive, ArchiveDone
 	case StatusRunning:
 		if it.OpenQuestion() != nil {
+			out.Archive, out.Reason = b.ArchiveOwed(sessionID, ArchiveAsk), ArchiveAsk
 			return out
 		}
 		if it.answerPending() {

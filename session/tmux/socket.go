@@ -26,10 +26,10 @@ import (
 func (t *TmuxSession) SocketPath(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, tmuxCommandTimeout)
 	defer cancel()
-	// exactTarget forces an exact session match, mirroring panePID(): the bare
+	// ExactTarget forces an exact session match, mirroring panePID(): the bare
 	// `=name` form yields empty output for display-message, and the trailing `:`
 	// is what makes the format resolve (#1006).
-	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), "#{socket_path}")
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", ExactTarget(t.sanitizedName), "#{socket_path}")
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%w: display-message socket_path after %s", ErrTmuxTimeout, tmuxCommandTimeout)

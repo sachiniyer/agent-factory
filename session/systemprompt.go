@@ -174,14 +174,16 @@ const afBacklogSection = `Backlog (one project's work items in a strict order; i
 // (api) derives that list from the commands and pins this sentence to it.
 const afUsageBacklogInside = `Backlog items: when af started your session for a backlog item (your first prompt says "You are working on backlog item B-12"), report through that item, not only in your reply:
   af backlog done --self [--pr <url>]                  The work is finished; the item goes to the user for review. Pass --pr when you opened a pull request
-  af backlog ask --self <text>                         Ask the user a question on the item, then stop and wait; the answer arrives in this session as a prompt
+  af backlog ask --self <text>                         Ask the user a question on the item, then stop; when af can resume this conversation it archives this session, and the answer restores it and arrives here as a prompt; otherwise the session stays live
+  af backlog ask --self <text> --then wait             The same, but this session stays live until the answer arrives
+  af backlog ask --self <text> --handoff-file <path or ->  The same, with notes (at most 8 KB) for a later run of the item; the user sees them in af backlog inbox
   af backlog note --self <text>                        Add a note to the item's thread; nobody is notified
 ` + AfBacklogItemSessionRefusals + ` If you need one of them, ask with "af backlog ask --self". Do not create other af sessions from an item session.`
 
 // AfBacklogItemSessionRefusals is the sentence of afUsageBacklogInside that names
 // what an item session cannot run. It is exported only so the api package, which
 // owns those refusals, can pin it to them.
-const AfBacklogItemSessionRefusals = `From an item session af refuses these, which are the user's: add, edit, move, queue, draft, review, reopen, start, done <id>, drop, delete, note <id>, answer, run, and changing the runner or budget.`
+const AfBacklogItemSessionRefusals = `From an item session af refuses these, which are the user's: add, edit, move, queue, draft, review, reopen, start, done <id>, drop, delete, note <id>, answer, run, pause, unpause, archive, unarchive, and changing the runner or budget.`
 
 // afUsageProposalsInside names only the entry points; the working rules are
 // printed by af proposal start and attach, so they can change without a

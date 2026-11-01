@@ -148,6 +148,9 @@ func (d *deriver) leaf(it *Item) Derived {
 		if reason := d.waitReason(it); reason != "" {
 			return Derived{State: StateWaiting, Reason: reason}
 		}
+		if p := d.b.PausedBy(it.ID); p != 0 {
+			return Derived{State: StateQueued, Reason: fmt.Sprintf("Queued · paused (%s)", FormatID(p))}
+		}
 		return Derived{State: StateQueued}
 	}
 	return Derived{State: StateDraft}

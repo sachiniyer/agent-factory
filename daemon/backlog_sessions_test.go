@@ -274,8 +274,11 @@ func TestRecoverySkipsSkippedRepos(t *testing.T) {
 
 func TestDeferredArchive(t *testing.T) {
 	var s backlogState
-	s.deferArchive("a")
-	if !s.takeDeferredArchive("a") || s.takeDeferredArchive("a") {
+	s.deferArchive("a", backlog.ArchiveAsk)
+	if reason, ok := s.takeDeferredArchive("a"); !ok || reason != backlog.ArchiveAsk {
+		t.Fatalf("deferred archive = %q, %v; want the reason it was deferred for", reason, ok)
+	}
+	if _, ok := s.takeDeferredArchive("a"); ok {
 		t.Fatal("deferred archive is taken once")
 	}
 }

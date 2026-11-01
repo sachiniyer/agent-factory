@@ -154,7 +154,8 @@ func (m *Manager) applyRetrying(repoID string, stop <-chan struct{}, fn func(*ba
 }
 
 // settleRunEnd moves a silent run's item to review, and archives the session
-// when the user already marked the item done and on_done is archive. It is the
+// when the user already marked the item done and on_done is archive, or the run
+// ended on questions asked with then archive. It is the
 // one place a run's end is written, and keeps the lifecycle model:
 //
 //   - fenced: gen is the generation observed at the idle edge; the transaction
@@ -191,7 +192,7 @@ func (m *Manager) settleRunEnd(repoID, sessionID string, gen int, stop <-chan st
 		switch {
 		case err == nil || errors.Is(err, errBacklogNoChange):
 			if end.Archive {
-				m.archiveDoneItemSession(repoID, sessionID)
+				m.archiveItemSession(repoID, sessionID, end.Reason)
 			}
 			return
 		case errors.Is(err, backlog.ErrBusy):
@@ -209,51 +210,7 @@ func (m *Manager) settleRunEnd(repoID, sessionID string, gen int, stop <-chan st
 	}
 }
 
-// archiveDoneItemSession applies on_done archive to an idle item session whose
-// item the user marked done. While a client is attached the archive waits for
-// the next unpaused poll of the session.
-func (m *Manager) archiveDoneItemSession(repoID, sessionID string) {
-	b, err := backlog.Load(repoID)
-	if err != nil {
-		m.warn().Printf("backlog on_done for session %s: %v", sessionID, err)
-		return
-	}
-	it := b.ItemForSession(sessionID)
-	if it == nil || it.Status != backlog.StatusDone || b.Settings.OnDone != backlog.OnDoneArchive {
-		return
-	}
-	if r := b.LatestRun(it.ID); r == nil || r.SessionID != sessionID {
-		return
-	}
-	s, ok := m.itemSessions(repoID)[sessionID]
-	if !ok {
-		return
-	}
-	if m.isPollPaused(repoID, s.instance.Title, sessionID) {
-		m.backlog.deferArchive(sessionID)
-		return
-	}
-	// The pre-check only reads; the guard handed to the teardown closes the
-	// adoption fence (browser terminal input takes no manager lock and serializes
-	// against a teardown only through it) and reopens it however the archive
-	// ends, as the task-session lifecycle does.
-	if err := backlogArchiveCheck(sessionID, s.instance, s.instance.AdoptionDeliveries()); err != nil {
-		m.info().Printf("backlog on_done: keeping session %q: %v", s.instance.Title, err)
-		return
-	}
-	var fenced *session.Instance
-	defer func() {
-		if fenced != nil {
-			fenced.ReopenAdoptionFence()
-		}
-	}()
-	guard := backlogArchiveGuard(sessionID, func(cur *session.Instance) { fenced = cur })
-	if err := archiveSessionForLifecycle(m, ArchiveSessionRequest{ID: sessionID, RepoID: repoID}, guard); err != nil {
-		m.warn().Printf("backlog on_done archive of session %q: %v", s.instance.Title, err)
-	}
-}
-
-// backlogArchiveCheck refuses the on_done archive unless the session is still
+// backlogArchiveCheck refuses an item-session archive unless the session is still
 // the same idle item session with nothing done in it since its run ended: no
 // new run, no delivery (deliveries is the count read with the adoption fence
 // shut, or the live count for a pre-check), and no pane change.
@@ -299,35 +256,6 @@ func backlogArchiveGuard(sessionID string, fenced func(*session.Instance)) sessi
 		}
 		return nil
 	}
-}
-
-// drainBacklogDeferredArchive retries an on_done archive parked while a client
-// was attached, now that the session is polled normally again.
-func (m *Manager) drainBacklogDeferredArchive(repoID string, instance *session.Instance) {
-	if instance.BacklogItem == 0 || !m.backlog.takeDeferredArchive(instance.ID) {
-		return
-	}
-	sessionID := instance.ID
-	m.launchBackgroundMutation(func(<-chan struct{}) {
-		m.archiveDoneItemSession(repoID, sessionID)
-	})
-}
-
-// onBacklogItemDone applies on_done archive when the user marks an item done:
-// now if its session is idle; at the run's idle edge if a run is active.
-func (m *Manager) onBacklogItemDone(repoID string, it backlog.Item) {
-	if it.Status != backlog.StatusDone || len(it.Runs) == 0 {
-		return
-	}
-	r := it.Runs[len(it.Runs)-1]
-	s, ok := m.itemSessions(repoID)[r.SessionID]
-	if r.State != backlog.RunStarted || !ok || s.instance.BacklogRunActive() {
-		return
-	}
-	sessionID := r.SessionID
-	m.launchBackgroundMutation(func(<-chan struct{}) {
-		m.archiveDoneItemSession(repoID, sessionID)
-	})
 }
 
 // daemonProcessStart bounds restart recovery to starts made by an earlier
@@ -384,7 +312,7 @@ func (m *Manager) recoverBacklogStarts(stop <-chan struct{}) {
 func (m *Manager) recoverBacklog(repoID string, stop <-chan struct{}) bool {
 	b, err := backlog.Load(repoID)
 	if err != nil {
-		m.warn().Printf("backlog recovery for project %s: %v", repoID, err)
+		m.warnBacklogUnreadable("backlog recovery", repoID, err)
 		return false
 	}
 	sessions := m.itemSessions(repoID)
@@ -419,6 +347,7 @@ func (m *Manager) recoverBacklog(repoID string, stop <-chan struct{}) bool {
 			return false
 		}
 	}
+	settled := map[string]bool{}
 	for _, sessionID := range idleRunEnds(b, sessions) {
 		if answering[sessionID] {
 			continue
@@ -426,19 +355,26 @@ func (m *Manager) recoverBacklog(repoID string, stop <-chan struct{}) bool {
 		// The generation observed in the snapshot: a continue accepted since is
 		// not finished by this stale observation.
 		m.settleRunEnd(repoID, sessionID, sessions[sessionID].gen, stop)
+		settled[sessionID] = true
 	}
+	// An archive the earlier daemon decided on and did not finish (filed on the
+	// session before it ran): finished now if it is still owed, else cleared (an
+	// answer on its way cancels an ask archive).
+	m.redriveOwedArchives(repoID, sessions, settled)
 	return true
 }
 
 // idleRunEnds lists the sessions whose run ended unobserved: the item is still
-// running (or done, with on_done archive) on its latest started run, and the session is live with no run.
+// running (or done, with on_done archive) on its latest started run, and the
+// session is live with no run. A running item whose run ended on questions
+// asked with then archive is among them; its run end archives the session.
 func idleRunEnds(b *backlog.Backlog, sessions map[string]itemSession) []string {
 	var out []string
 	for _, it := range b.Items {
 		// A done item is settled too when on_done is archive: the user marked it
 		// done during the run, and the archive waits for the run's idle edge, which
 		// a crash between the marker clearing and the completion running loses.
-		// archiveDoneItemSession's guards decide whether it can still be archived.
+		// archiveItemSession's guards decide whether it can still be archived.
 		settle := it.Status == backlog.StatusRunning ||
 			(it.Status == backlog.StatusDone && b.Settings.OnDone == backlog.OnDoneArchive)
 		if !settle || len(it.Runs) == 0 {

@@ -24,8 +24,11 @@ type Host interface {
 	// flight plus item sessions with an active run or that af will restore.
 	SlotsUsed(repoID string) int
 	// SetAttention mirrors an item's open question on its session; reason ""
-	// clears it. Best effort: the thread is the source of truth. The service
-	// calls it under the backlog lock, so mirrors follow the thread's order.
+	// clears the mirror. questionID is the item's oldest open question, and 0
+	// only when none is open: an answer to a session af must restore clears
+	// the mirror but still names the question left. Best effort: the thread is
+	// the source of truth. The service calls it under the backlog lock, so
+	// mirrors follow the thread's order.
 	SetAttention(repoID, sessionID string, questionID int, reason string)
 	// AnswerTarget reports whether an answer can reach the session.
 	AnswerTarget(repoID, sessionID string) AnswerTarget
@@ -221,7 +224,7 @@ func (s *Service) UpdateItem(req UpdateItemRequest) (*ItemResponse, error) {
 	}
 	b, err := s.update(p, func(b *Backlog) ([]int, error) {
 		_, err := b.Edit(req.ID, Edit{Title: req.Title, Body: req.Body, Program: req.Program,
-			WaitsOn: req.WaitsOn, Sequential: req.Sequential}, s.now())
+			WaitsOn: req.WaitsOn, Sequential: req.Sequential, Paused: req.Paused, Archived: req.Archived}, s.now())
 		return []int{req.ID}, err
 	})
 	if err != nil {

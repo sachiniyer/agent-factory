@@ -33,8 +33,10 @@ var errRunnerOff = errors.New("the runner is off")
 var errViewIncomplete = errors.New("the project's session view is incomplete")
 
 // errNotRunnable refuses an automatic start of an item that is no longer a
-// queued, unblocked leaf.
-var errNotRunnable = errors.New("the item is no longer runnable")
+// queued, unblocked leaf outside a paused group. It is backlog.ErrNotRunnable,
+// so the admission check here and the check inside the start transaction
+// (BeginStart) are one outcome to the runner.
+var errNotRunnable = backlog.ErrNotRunnable
 
 // runnerState paces runner passes, holds what the runner remembers between
 // passes, and remembers the state each project's runner last published.
@@ -183,7 +185,7 @@ func (m *Manager) runBacklogPass(now time.Time) {
 func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 	b, err := backlog.Load(repoID)
 	if err != nil {
-		m.warn().Printf("backlog runner for project %s: %v", repoID, err)
+		m.warnBacklogUnreadable("backlog runner", repoID, err)
 		return
 	}
 	budget, err := backlog.LoadBudget()
@@ -269,9 +271,10 @@ func (m *Manager) startBacklogItemCapped(req backlog.StartRequest, by string) (b
 	if by == backlog.StartedByRunner && !b.Settings.Runner {
 		return backlog.RunRef{}, errRunnerOff
 	}
-	// Likewise the item itself: the user may have drafted it or added a
-	// dependency while this start waited for the lock; explicit starts ignore
-	// both on purpose, an automatic one must not override them.
+	// Likewise the item itself: the user may have drafted it, added a
+	// dependency or paused its group while this start waited for the lock;
+	// explicit starts ignore all three on purpose, an automatic one must not
+	// override them.
 	if by == backlog.StartedByRunner && !b.RunnerEligible(req.ID, b.DeriveAll(backlogHost{m: m}.Facts(ref.ID))) {
 		return backlog.RunRef{}, errNotRunnable
 	}
@@ -308,12 +311,17 @@ func (m *Manager) RunBacklog(req backlog.RunRequest) (backlog.RunResponse, error
 		if req.RepoPath != "" {
 			start = backlog.StartRequest{RepoPath: req.RepoPath, ID: id}
 		}
-		_, err := m.startBacklogItemCapped(start, backlog.StartedByUser)
+		// A pass start, not a start by hand: its transaction honours a pause
+		// that lands after RunNow chose the batch.
+		_, err := m.startBacklogItemCapped(start, backlog.StartedByRunPass)
 		if errors.Is(err, errSlotsFull) {
 			if len(out.Started) == 0 {
 				out.Reason = backlog.SlotsFull(b.Settings.MaxRunning)
 			}
 			break
+		}
+		if errors.Is(err, errNotRunnable) {
+			continue // its group was paused since the pass chose it; not a failed start
 		}
 		if err != nil {
 			if len(out.Started) == 0 {

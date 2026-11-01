@@ -231,14 +231,29 @@ func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 		persistedDrops: dropped,
 		armTask:        t,
 	}
-	// Resolve the repo the task belongs to so a delivery alarm can be scoped to
-	// the right repo's snapshot (#1238). A resolution failure only costs the
-	// alarm its repo scope — it never disables the watcher — so it is logged and
-	// left empty rather than propagated.
-	if repo, err := config.RepoFromPath(t.ProjectPath); err != nil {
-		log.WarningLog.Printf("watch task %s: cannot resolve repo for delivery-alarm scope: %v", t.ID, err)
-	} else {
-		w.repoID = repo.ID
+	// Scope the delivery-failure alarm to the repo whose snapshot should carry
+	// it (#1238). A task's retained RepoID is its authoritative project binding
+	// (#2719): the delivery boundary refuses an implicit rebind when the path
+	// later resolves elsewhere, and the task pane scopes by that same retained
+	// ID (task/repo_scope.go, app/remote_mode.go filterTasksToProject). Use it
+	// when present so the alarm follows the task the operator sees — otherwise a
+	// task bound to repo A whose ProjectPath now resolves to repo B (symlink
+	// retarget, daemon restart re-derivation) would land its alarm in B's
+	// snapshot, or in no repo-scoped snapshot at all for an unresolvable path,
+	// while the TUI still lists the task under A. A legacy/unbound row carries
+	// no retained binding, so it keeps the historical path-derived scope; a
+	// resolution failure there only costs the alarm its repo scope — it never
+	// disables the watcher — so it is logged and left empty rather than
+	// propagated.
+	switch {
+	case t.RepoID != "":
+		w.repoID = t.RepoID
+	default:
+		if repo, err := config.RepoFromPath(t.ProjectPath); err != nil {
+			log.WarningLog.Printf("watch task %s: cannot resolve repo for delivery-alarm scope: %v", t.ID, err)
+		} else {
+			w.repoID = repo.ID
+		}
 	}
 	// Recover any backlog a previous watcher/daemon left behind (#1129); the
 	// run loop starts the drainer if the queue is non-empty. A queue-dir

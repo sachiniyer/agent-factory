@@ -818,6 +818,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileBacklogRunState(d.BacklogRunActive) {
 		changed = true
 	}
+	changed = inst.ReconcileBacklogArchiveSnapshot(d.BacklogArchive) || changed
 	// The outage flag is daemon truth on every snapshot: this is the reconcile
 	// path for rows the snapshot updates IN PLACE, where FromInstanceData never
 	// runs (#5571 W1.3).
@@ -834,6 +835,20 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	lv := snapshotLiveness(inst.GetLiveness(), d)
 	if inst.GetLiveness() != lv {
 		_ = inst.Transition(session.ObserveLiveness(lv))
+		changed = true
+	}
+	// The agent's attention request is the same class of projection-only axis
+	// (#5461): it appears on `attention --self` and clears on the daemon's own
+	// rules while liveness stays Ready/Running, so an already-open rail must
+	// mirror it here or the row only learns of it at the next rebuild. It is
+	// applied AFTER the liveness transition on purpose: a Ready→Running churn
+	// transition the daemon deliberately marks attention-preserving
+	// (settleChurnedLiveness) would otherwise let noteAttentionLivenessLocked
+	// clear the just-mirrored request locally once its idle spell passes the
+	// ten-second answer window, dropping the marker until the next poll
+	// restores it. Daemon truth last — client-side clear rules may not
+	// override a snapshot that still carries the request.
+	if inst.ReconcileAttention(d.Attention) {
 		changed = true
 	}
 	// A kill tombstone is durable while an operation marker is process-local.

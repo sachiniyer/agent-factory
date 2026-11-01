@@ -645,8 +645,8 @@
       "id": "session.attention",
       "title": "Ask the user for attention",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/tree/render.go attentionIcon/showAttention/attentionText — a static ! in the theme attention role replaces the status glyph on live rows, and 'needs attention: <reason>' leads the row detail; the row reads the same Instance.Attention projection the web rail reads"
       },
       "web": {
         "status": "yes",
@@ -656,9 +656,9 @@
         "status": "yes",
         "pointer": "api/sessions_attention.go newSessionsAttentionCmd (af sessions attention) → daemon SetAttention RPC"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5461",
-      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. Only the web rail shows it so far: the TUI rail does not render InstanceData.Attention yet, so a TUI user gets no sign of the request (#5461). The generated theme.Attention colour is the token that work will use. session.Instance owns the clear rules: a submitted line on the agent pane (daemon/attention.go attentionClearingBinding), the dismiss control in the web session header (web/src/components.ts terminalChrome), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
+      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. Closed by the TUI half of #5461: the rail row paints a static bang in theme.Roles().Attention (the TUI has no animation, #1766) where the web blinks its dot, guards on the same live-only predicate the web's hasAttention applies, and leads the detail with the reason — outranking the ordinary idle detail, yielding to unreachable/restore reports, collapsed to glyph-only on unselected rows like the web's tooltip model. Clear rules stay daemon-owned and surface-agnostic: a submitted line on the agent pane (daemon/attention.go attentionClearingBinding wraps every client's PTY write path), the dismiss control in the web session header (web/src/components.ts terminalChrome), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
     },
     {
       "id": "project.color",
@@ -1848,8 +1848,8 @@
       "notes": "The web item panel offers Queue, Back to draft, Mark done, Drop, Reopen and Delete; Send to review arrives in backlog PR 8. The agent's done --self (session_id, pr) is CLI-only by design: it runs inside an item session. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
-      "id": "backlog.sessions",
-      "title": "Start backlog items as sessions",
+      "id": "backlog.groups",
+      "title": "Pause, unpause, archive and unarchive backlog groups",
       "tui": {
         "status": "no",
         "pointer": ""
@@ -1860,11 +1860,28 @@
       },
       "cli": {
         "status": "yes",
+        "pointer": "api/backlog_groups.go backlogPauseCmd/backlogUnpauseCmd/backlogArchiveCmd/backlogUnarchiveCmd, api/backlog.go backlogListCmd --archived → POST /v1/UpdateBacklogItem paused/archived (daemon/backlog.go)"
+      },
+      "verdict": "deliberate",
+      "notes": "Backlog v2 PR 2 adds the CLI and the UpdateBacklogItem fields; the web group panel gains Pause, Unpause and Archive in backlog v2 PR 7. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
+      "id": "backlog.sessions",
+      "title": "Start backlog items as sessions",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/backlog_panel.ts ItemPanel actionsRow (Start now) → web/src/backlog_pane.ts BacklogPane.start → web/src/backlog_api.ts startItem"
+      },
+      "cli": {
+        "status": "yes",
         "pointer": "api/backlog_self.go backlogStartCmd → POST /v1/StartBacklogItem (daemon/backlog_start.go)"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Backlog PR 4 starts items as sessions from the CLI; the web Start now button arrives in PR 8. Item sessions are ordinary sessions, so open, archive and restore use the session routes. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "verdict": "deliberate",
+      "notes": "Backlog PR 4 starts items as sessions from the CLI; PR 8 adds Start now to the web item panel, which shows Starting until the session exists. Item sessions are ordinary sessions, so open, archive and restore use the session routes. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.questions",
@@ -1874,16 +1891,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/backlog_panel.ts ItemPanel question box (Send answer) → web/src/backlog_api.ts answerQuestion"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/backlog_self.go backlogAskCmd (ask --self) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go)"
+        "pointer": "api/backlog_self.go backlogAskCmd (ask --self --then --handoff-file) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go); api/backlog_inbox.go backlogInboxCmd reads /v1/GetBacklog"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; the web answer box arrives in PR 8. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "verdict": "deliberate",
+      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; PR 8 adds the web answer box at the top of the item panel. Asking is agent-only (ask --self), so the web only answers. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.runner",
@@ -1893,16 +1909,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/backlog_pane.ts runnerBar (read only) → web/src/backlog_api.ts getBacklog/getBudget"
+        "status": "yes",
+        "pointer": "web/src/backlog_runner.ts RunnerBar (switch, max running, Run next, ⋯ budget and when-done settings) → web/src/backlog_api.ts getBudget/setBudget/setSettings/runNext"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_status.go backlogRunnerCmd/backlogBudgetCmd, api/backlog_self.go backlogRunCmd → POST /v1/SetBacklogSettings, GetBudget, SetBudget, GetBacklog, RunBacklog (daemon/backlog.go, daemon/backlog_runner.go)"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (share of the Claude plan, stop-at, cap per run, dollar limit); plan readings arrive in PR 6; PR 7 adds the runner loop in the daemon poll loop, af backlog run, and the backlog.runner event. PR 3 shows a read-only runner bar on the web and PR 7 makes it editable. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "verdict": "deliberate",
+      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (share of the Claude plan, stop-at, cap per run, dollar limit); plan readings arrive in PR 6 and the runner loop, af backlog run and the backlog.runner event in PR 7. PR 3 shows a read-only runner bar on the web and PR 8 makes it editable: the switch, max running, plan use, and the ⋯ budget settings. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     }
   ],
   "ledger": {
@@ -1922,6 +1937,7 @@
       "af backlog note": "backlog.items",
       "af backlog ask": "backlog.questions",
       "af backlog answer": "backlog.questions",
+      "af backlog inbox": "backlog.questions",
       "af backlog queue": "backlog.status",
       "af backlog draft": "backlog.status",
       "af backlog review": "backlog.status",
@@ -1929,6 +1945,10 @@
       "af backlog done": "backlog.status",
       "af backlog start": "backlog.sessions",
       "af backlog drop": "backlog.status",
+      "af backlog pause": "backlog.groups",
+      "af backlog unpause": "backlog.groups",
+      "af backlog archive": "backlog.groups",
+      "af backlog unarchive": "backlog.groups",
       "af backlog runner": "backlog.runner",
       "af backlog run": "backlog.runner",
       "af backlog budget": "backlog.runner",
@@ -2165,6 +2185,10 @@
       "PostBacklogMessage": "backlog.items",
       "SetBacklogItemStatus": "backlog.status",
       "GetBudget": "backlog.runner",
+      "SetBudget": "backlog.runner",
+      "SetBacklogSettings": "backlog.runner",
+      "RunBacklog": "backlog.runner",
+      "StartBacklogItem": "backlog.sessions",
       "SetAttention": "session.attention",
       "AccountLogin": "session.account-login",
       "ListAccounts": "session.accounts",
@@ -2234,8 +2258,15 @@
       "af backlog done --pr": "backlog.status",
       "af backlog note --self": "backlog.items",
       "af backlog ask --self": "backlog.questions",
+      "af backlog ask --handoff-file": "backlog.questions",
+      "af backlog ask --then": "backlog.questions",
+      "af backlog inbox --help": "meta.discovery",
       "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
+      "af backlog pause --help": "meta.discovery",
+      "af backlog unpause --help": "meta.discovery",
+      "af backlog archive --help": "meta.discovery",
+      "af backlog unarchive --help": "meta.discovery",
       "af backlog runner --help": "meta.discovery",
       "af backlog run --help": "meta.discovery",
       "af backlog budget --help": "meta.discovery",
@@ -2252,6 +2283,7 @@
       "af backlog edit --title": "backlog.items",
       "af backlog edit --waits-on": "backlog.items",
       "af backlog list --all": "backlog.items",
+      "af backlog list --archived": "backlog.groups",
       "af backlog list --state": "backlog.items",
       "af backlog move --after": "backlog.items",
       "af backlog move --before": "backlog.items",
@@ -3119,6 +3151,12 @@
         },
         "program": {
           "ok": "Program choice matters only when an item starts a session; the web gains it with Start now in backlog PR 8."
+        },
+        "paused": {
+          "ok": "The web group panel gains Pause and Unpause in backlog v2 PR 7; the CLI has af backlog pause and unpause."
+        },
+        "archived": {
+          "ok": "The web group panel gains Archive in backlog v2 PR 7; the CLI has af backlog archive and unarchive."
         }
       },
       "MoveBacklogItem": {
@@ -3138,8 +3176,11 @@
         "session_id": {
           "ok": "Set only for an agent's question (af backlog ask --self), which arrives with backlog PR 5."
         },
-        "question_id": {
-          "ok": "Names the question an answer closes; the web answer box arrives in backlog PR 8."
+        "handoff": {
+          "ok": "Set only on an agent's question (af backlog ask --self --handoff-file); the web only answers."
+        },
+        "then": {
+          "ok": "Set only on an agent's question (af backlog ask --self --then); the web only answers."
         }
       },
       "SetBacklogItemStatus": {
@@ -3151,6 +3192,21 @@
         },
         "pr": {
           "ok": "Set only by the agent's af backlog done --self --pr, which arrives with item sessions in backlog PR 4."
+        }
+      },
+      "StartBacklogItem": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        }
+      },
+      "SetBacklogSettings": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        }
+      },
+      "RunBacklog": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
         }
       },
       "SetAttention": {

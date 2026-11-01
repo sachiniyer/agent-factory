@@ -101,6 +101,29 @@ func TestServiceAnswerDelivers(t *testing.T) {
 	}
 }
 
+// An answer to a session af must restore mirrors no text on it, but still names
+// the question left open, so the host can tell it from a closed thread.
+func TestServiceAnswerToARestoreNamesTheQuestionLeft(t *testing.T) {
+	s, h := newTestService(t)
+	mustAdd(t, s, ItemInput{Key: "a", Title: "A"})
+	withRun(t, 1, StatusRunning)
+	ask(t, s, "Which db?")
+	second := ask(t, s, "Which port?")
+	h.target = TargetRestore
+	if _, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "Postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.attention["s1"] != "" || h.attentionID["s1"] != second.ID {
+		t.Fatalf("attention %q on question %d, want no text on question %d", h.attention["s1"], h.attentionID["s1"], second.ID)
+	}
+	if _, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "5432"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.attentionID["s1"] != 0 {
+		t.Fatalf("question %d after the last answer, want 0", h.attentionID["s1"])
+	}
+}
+
 func TestServiceAnswerResumesReviewAndRestores(t *testing.T) {
 	s, h := newTestService(t)
 	mustAdd(t, s, ItemInput{Key: "a", Title: "A"})
@@ -254,7 +277,7 @@ func TestAnswerDelivered(t *testing.T) {
 	it, _ := b.Add(NewItem{Title: "A"}, time.Now())
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
-	if _, err := b.Ask(1, "s1", "q", time.Now()); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: "q"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	out, err := b.Answer(1, 0, "a", true, time.Now())
@@ -307,7 +330,7 @@ func TestQueuedAnswersAllFailingRestoreTheOriginalStatus(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
 	for _, q := range []string{"one?", "two?"} {
-		if _, err := b.Ask(1, "s1", q, now); err != nil {
+		if _, err := b.Ask(1, "s1", Question{Text: q}, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -345,7 +368,7 @@ func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
 	it, _ := b.Add(NewItem{Title: "A"}, now)
 	it.Status = StatusRunning
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
-	if _, err := b.Ask(1, "s1", "first?", now); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: "first?"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.AnsweredInSessionText("s1", 0, "second?", nil, now); got != 0 {
@@ -354,7 +377,7 @@ func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
 	if got := b.AnsweredInSessionText("s1", 0, "", nil, now); got != 0 {
 		t.Fatal("no seen question must close nothing")
 	}
-	if _, err := b.Ask(1, "s1", "second?", now); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: "second?"}, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.AnsweredInSessionText("s1", 0, "second?", nil, now); got != 0 {
@@ -377,7 +400,7 @@ func TestALaterAnswerFailingKeepsEarlierDeliveredWorkRunning(t *testing.T) {
 	it.Status = StatusReview
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
 	for _, q := range []string{"one?", "two?"} {
-		if _, err := b.Ask(1, "s1", q, now); err != nil {
+		if _, err := b.Ask(1, "s1", Question{Text: q}, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -407,7 +430,7 @@ func TestAnsweredInSessionTextMatchesACappedQuestion(t *testing.T) {
 	it.Status = StatusRunning
 	it.Runs = []RunRef{{SessionID: "s1", State: RunStarted}}
 	long := strings.Repeat("why? ", 200)
-	if _, err := b.Ask(1, "s1", long, now); err != nil {
+	if _, err := b.Ask(1, "s1", Question{Text: long}, now); err != nil {
 		t.Fatal(err)
 	}
 	capped := func(s string) string {

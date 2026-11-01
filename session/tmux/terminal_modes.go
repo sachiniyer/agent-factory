@@ -34,7 +34,7 @@ const terminalStateFormat = "#{cursor_y} #{cursor_x} #{alternate_on} #{mouse_any
 func (t *TmuxSession) ReadTerminalState() (TerminalState, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), terminalStateFormat)
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", ExactTarget(t.sanitizedName), terminalStateFormat)
 	if err != nil {
 		if ctx.Err() != nil {
 			return TerminalState{}, fmt.Errorf("%w: terminal-state display-message after %s", ErrTmuxTimeout, tmuxCommandTimeout)

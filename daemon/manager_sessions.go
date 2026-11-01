@@ -477,7 +477,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(tearingDownError{title: req.Title})
 	}
 
 	opLock := m.opLockFor(key)
@@ -489,7 +489,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	_, killing = m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(tearingDownError{title: req.Title})
 	}
 	if current == nil {
 		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q was deleted; prompt not delivered", req.Title))
@@ -501,7 +501,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		instance = current
 	}
 	if instance.IsTearingDown() {
-		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(tearingDownError{title: req.Title})
 	}
 	if guard != nil {
 		if gerr := guard(instance, repoID); gerr != nil {
@@ -558,8 +558,10 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	// is the reliable command path automated deliveries need. This crosses the
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
-	status, err := instance.SendPromptWithEvidence(req.Prompt, nowFunc)
+	confirmation := beginSendConfirmation(instance)
+	status, err := instance.SendPromptWithEvidence(req.Prompt, sendAttemptClock(confirmation))
 	releaseObservationFence()
+	status = m.promoteUnverifiedSend(instance, status, err, confirmation)
 	// Delivery evidence changes the row even when liveness does not. Publish it
 	// immediately so list clients can distinguish a confirmed miss from #3162's
 	// honest could-not-confirm instead of waiting for the status poll.

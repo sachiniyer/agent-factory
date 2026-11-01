@@ -1042,9 +1042,10 @@ sandbox it cannot reach.
 What the sandbox host needs, and what af does to it:
 
 - **Tools.** `git`, `tmux` (3.2 or newer) and a POSIX `sh` on the
-  non-interactive `PATH` of the ssh login (af sends its provisioning scripts as
-  one ssh argument that the remote login shell parses). The static `af` binary
-  af copies over also has to run there: see the glibc rule under
+  non-interactive `PATH` of the ssh login (af wraps each remote script in
+  `sh -c '<script>'` and sends that as one ssh argument; the `sh` it invokes
+  parses the script, not the login shell). The static `af` binary af copies
+  over also has to run there: see the glibc rule under
   [Docker](#docker-backend) for the dynamic build.
 - **Git identity is repo-local.** After the clone, provisioning writes the
   committer identity into the workspace's own `.git/config` (`git config
@@ -1106,6 +1107,9 @@ What the sandbox host needs, and what af does to it:
     fresh sandbox is provisioned from the session's branch on `origin`.
     **Nothing is pushed first, so work the sandbox never pushed is not
     preserved on this path**; only what already reached `origin` comes back.
+    For a branch af chose at create and never saw pushed, the daemon verifies
+    it at `origin` before fetching; an `origin` it cannot reach refuses the
+    restore and reaps nothing rather than guess the branch.
     Provisioning needs the host, so a host that is still unreachable fails
     that attempt and the row stays Lost, but that is the provision failing,
     not a guard.

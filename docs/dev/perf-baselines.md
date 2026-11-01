@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1243724.000 | 1243724.000–1243724.000 | 0.000 | 1305910.200 |
-| gzip_bytes | 283682.000 | 283682.000–283682.000 | 0.000 | 297866.100 |
+| raw_bytes | 1275573.000 | 1275573.000–1275573.000 | 0.000 | 1339351.650 |
+| gzip_bytes | 291218.000 | 291218.000–291218.000 | 0.000 | 305778.900 |
 | lazy_raw_bytes | 371003.000 | 371003.000–371003.000 | 0.000 | 389553.150 |
 | lazy_gzip_bytes | 120125.000 | 120125.000–120125.000 | 0.000 | 126131.250 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
@@ -134,6 +134,10 @@ only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
 were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
 `report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
 so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,149,376 raw and 260,459 gzip bytes over `web/dist` without `lazy/`. Both are inside the existing shell budgets (raw 1,182,374; gzip 268,549), so those baselines are not moved. Lazy bundle: 371,003 raw / 120,125 gzip.
+
+### Bundle refresh provenance (#6298)
+
+Master's committed bundle (measured at the last merge, after #6297 and #6462/#6464) is 1,245,090 raw / 284,004 gzip over `web/dist/**.{js,css}` (gzip level 9). The Backlog actions port (Refs #6284, fork `0bdb649b62`: runner bar, Start now, answer box, usage gates, settings) takes it to 1,275,573 raw / 291,218 gzip, +30,483 raw / +7,214 gzip; the lazy Docs editor is unchanged (371,003 / 120,125). Comments do not ship (esbuild strips them), so the growth is feature code. Both shell entries are moved; each is the deterministic byte sum from `bundleBytes` in `scripts/perf/check.mjs` (the function `report.mjs` calls) over a clean `npm ci` build, three identical samples, margin baseline x 0.05, and every timing and layout-shift baseline is unchanged. Not recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6297)
 

@@ -107,7 +107,7 @@ func TestCheckGates(t *testing.T) {
 		}, GateNoAccount, "Af cannot tell which account"},
 		{"unmeterable", func() GateInput {
 			u := ok
-			u.Unmeterable = map[string]string{"s2": "the runner can't meter aider; start B-7 by hand", "s1": "no price for model x"}
+			u.Unmeterable = map[string]string{"s2": UnmeterableProgram(7, Where{Name: "detail"}, "aider"), "s1": "no price for model x"}
 			return gateIn(u)
 		}, GateUnmeterable, "No price for model x"},
 	}
@@ -438,7 +438,7 @@ func TestSendToReviewClosesAFQuestion(t *testing.T) {
 		t.Fatal(got)
 	}
 
-	if _, err := b.Ask(2, "s2", "which db?", runnerNow); err != nil {
+	if _, err := b.Ask(2, "s2", Question{Text: "which db?"}, runnerNow); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.SetStatus(2, StatusReview, ActorUser, nil, runnerNow); err != nil {
