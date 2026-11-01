@@ -15,6 +15,7 @@ package sessionenv
 //   NoRetouch        : control; refused either way.
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"os"
@@ -56,7 +57,7 @@ func init() {
 			os.Exit(24)
 		}
 		child := exec.Command(os.Getenv("AF_FORKEXEC_EVIL"))
-		child.Env = []string{"AF_FORKEXEC_ROLE=serve"}
+		child.Env = []string{"AF_FORKEXEC_ROLE=serve", "AF_FORKEXEC_LEAK=" + os.Getenv("AF_FORKEXEC_LEAK")}
 		child.ExtraFiles = []*os.File{f, pw}
 		if err := child.Start(); err != nil {
 			os.Exit(25)
@@ -110,14 +111,21 @@ func init() {
 			go func(fd int) {
 				defer unix.Close(fd)
 				b := make([]byte, 1)
+				var got []byte
 				for {
 					n, err := unix.Read(fd, b)
 					if n <= 0 || err != nil {
 						return
 					}
 					if b[0] != '\n' {
+						got = append(got, b[0])
 						continue
 					}
+					// The token is the secret the responder must never see.
+					if bytes.Contains(got, []byte("\"Token\":\"token\"")) {
+						_ = os.WriteFile(os.Getenv("AF_FORKEXEC_LEAK"), nil, 0o600)
+					}
+					got = got[:0]
 					forged := Capability{Session: "s", Agent: "claude", Account: "work", Command: "./evil"}
 					line, _ := json.Marshal(claimResponse{OK: true, Cap: &forged})
 					_, _ = unix.Write(fd, append(line, '\n'))
@@ -177,7 +185,7 @@ func TestForkThenExec_Mechanism_LocalPeerPIDIsLastToucher(t *testing.T) {
 	require.Equal(t, writer, afterHandoff, "a process the accepted fd was handed to moves it again")
 }
 
-func forkThenExecForkServe(t *testing.T, retouch bool) (Capability, error) {
+func forkThenExecForkServe(t *testing.T, retouch bool) (Capability, bool, error) {
 	self, err := os.Executable()
 	require.NoError(t, err)
 	data, err := os.ReadFile(self)
@@ -187,13 +195,14 @@ func forkThenExecForkServe(t *testing.T, retouch bool) (Capability, error) {
 	require.NoError(t, os.WriteFile(evil, data, 0o755))
 	sock := filepath.Join(shortSocketDir(t), "c.sock")
 	marker := filepath.Join(dir, "ready")
+	leak := filepath.Join(dir, "leaked")
 	rt := "0"
 	if retouch {
 		rt = "1"
 	}
 	parent := exec.Command(self)
 	parent.Env = []string{"AF_FORKEXEC_ROLE=parent", "AF_FORKEXEC_SOCK=" + sock,
-		"AF_FORKEXEC_EVIL=" + evil, "AF_FORKEXEC_MARKER=" + marker, "AF_FORKEXEC_RETOUCH=" + rt}
+		"AF_FORKEXEC_EVIL=" + evil, "AF_FORKEXEC_MARKER=" + marker, "AF_FORKEXEC_LEAK=" + leak, "AF_FORKEXEC_RETOUCH=" + rt}
 	parent.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	require.NoError(t, parent.Start())
 	pgid := parent.Process.Pid
@@ -201,22 +210,27 @@ func forkThenExecForkServe(t *testing.T, retouch bool) (Capability, error) {
 	require.Eventually(t, func() bool { _, err := os.Stat(marker); return err == nil }, 10*time.Second, 20*time.Millisecond)
 	time.Sleep(300 * time.Millisecond) // the parent has exec'd "the real af" (this binary at its own path)
 	t.Setenv("TMUX_PANE", "%1")
-	return ClaimCapability(sock, "token")
+	c, err := ClaimCapability(sock, "token")
+	time.Sleep(100 * time.Millisecond) // the responder records a received token asynchronously
+	_, statErr := os.Stat(leak)
+	return c, statErr == nil, err
 }
 
 // The #6179 shape on darwin, with the creator re-touching its listener after
 // the responder attached it. Master re-reads LOCAL_PEERPID per exchange and sees
 // the responder on the claim round; a connect-time snapshot sees the creator.
 func TestForkThenExec_RetouchedListener_ForkThenExecResponderIsRefused(t *testing.T) {
-	got, err := forkThenExecForkServe(t, true)
+	got, leaked, err := forkThenExecForkServe(t, true)
 	require.Error(t, err, "forged capability ACCEPTED from a responder that is not af: %+v", got)
 	require.ErrorContains(t, err, "the claim endpoint is not af")
+	require.False(t, leaked, "the token was sent to a responder that is not af; the hello must be refused first")
 }
 
-// Control: no re-touch, so the listener's last toucher is the responder itself.
-// Both master and the PR head refuse, but for a reason unrelated to who answers.
+// Control: no re-touch, so the listener's last toucher is the responder itself
+// and the hello is refused whichever way the pid is read.
 func TestForkThenExec_NoRetouch_Control(t *testing.T) {
-	got, err := forkThenExecForkServe(t, false)
+	got, leaked, err := forkThenExecForkServe(t, false)
 	require.Error(t, err, "forged capability accepted: %+v", got)
 	require.ErrorContains(t, err, "the claim endpoint is not af")
+	require.False(t, leaked, "the token was sent to a responder that is not af")
 }
