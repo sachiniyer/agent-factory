@@ -52,7 +52,9 @@ path filled in:
 8. If you lose track of the proposal, run `af proposal attach`.
 9. When the user asks you to make or update the proposal's backlog items,
    write one `af backlog add --file -` batch: a sequential parent and one
-   draft child per PR-stack row.
+   draft child per PR-stack row. To update, first read this proposal's
+   items with `af backlog list --all --json` and reuse each item's source
+   key for the PR it stands for, even if its row moved or was renamed.
 
 ### changes output
 
