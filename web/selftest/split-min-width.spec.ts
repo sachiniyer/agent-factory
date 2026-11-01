@@ -58,10 +58,12 @@ test("#6429: no pane renders under the floor; overflow degrades visibly, not to 
   expect(selected?.id).toBeTruthy();
   await page.goto(`/#/session/${encodeURIComponent(selected.id)}`);
   await page.locator("#app[data-af-resync-settled]").waitFor();
-  // The issue starts at 1440 — wide enough that all four panes fit during
-  // setup. The default 1280 host is already under the four-pane minimum, so
-  // the fit would hide one before the repro even begins.
-  await page.setViewportSize({ width: 1440, height: 900 });
+  // Wide enough that the nested four-pane layout below actually fits: splits
+  // open at a fixed 0.5 ratio, so the (left|right) pair only ever gets half
+  // the ~320px-rail-trimmed host, and its two leaves need 2*320+4 there —
+  // host >= ~1290 total. The default 1280 (and even 1440) already violates
+  // that, and the fit would hide a leaf before the repro even begins.
+  await page.setViewportSize({ width: 1680, height: 900 });
 
   // The issue's fleet: Agent plus three terminal tabs.
   const tabs = page.locator(".af-tabbar .af-tab");
