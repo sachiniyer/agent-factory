@@ -236,6 +236,26 @@ func TestEditorPathIsWebviewHost(t *testing.T) {
 	}
 }
 
+func TestEditorNonCanonicalRefusal(t *testing.T) {
+	refused := func(escapedRest string) bool {
+		return editorNonCanonicalRefusal(webTabRoute{escapedRest: escapedRest, rest: escapedRest}) != nil
+	}
+	// Canonical paths pass, a single trailing slash included.
+	for _, esc := range []string{"", "/", "stable-abc/static/out/vs/x.js", "proxy/3000/", "static/out/workbench.web.main.js", "vscode-remote-resource", "callback"} {
+		assert.False(t, refused(esc), "canonical: %q", esc)
+	}
+	// Empty segments (the editor-port bypass), dot segments, encoded separators, a
+	// malformed escape, and double trailing slashes are refused.
+	for _, esc := range []string{
+		"webview//browser/pre/index.html", "static//out/x.js", "a/b//c",
+		"webview/./browser/pre/x", "foo/../bar", "a/.",
+		"webview%2Fbrowser/pre/index.html", "static%2fout/x.js", "a%5Cb",
+		"foo/%2e%2e/bar", "bad%zz", "proxy/3000//",
+	} {
+		assert.True(t, refused(esc), "non-canonical: %q", esc)
+	}
+}
+
 func TestWebviewParentOrigin(t *testing.T) {
 	ok := func(q, want string) {
 		v, found := webviewParentOrigin(q)

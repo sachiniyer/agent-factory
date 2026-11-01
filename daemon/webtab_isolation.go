@@ -109,6 +109,13 @@ import (
 //     attests Sec-Fetch-Site: same-origin, or its parentOrigin query names the
 //     request's own origin (editorWebviewHostRefusal, the rule-4 comparison). This
 //     guards who may LOAD the page; rule 3 governs what origin it runs at.
+//
+// Rules 3 and 6 judge the path, so they stand on a precondition: an editor route
+// serves ONLY a canonical path (editorNonCanonicalRefusal, 400 otherwise). Without
+// it each path rule would have to anticipate every spelling a router collapses to
+// the same file — an empty segment ("webview//browser/pre", which an editor-origin
+// port has no mux to clean), a dot segment, an encoded separator — and miss one.
+// With it they judge the single form the editor will serve.
 
 // mirrorSandboxCSP is the opaque-origin sandbox for mirrored workspace documents.
 // Its flags must equal the web client's mirror iframe sandbox
@@ -275,10 +282,46 @@ func editorUpgradeRefusal(r *http.Request, allowedHosts []string) *crossSiteDeni
 // without starting the editor and the later one covers a session resolved only just
 // now.
 func editorRouteRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
+	if d := editorNonCanonicalRefusal(route); d != nil {
+		return d
+	}
 	if d := editorUpgradeRefusal(r, allowedHosts); d != nil {
 		return d
 	}
 	return editorWebviewHostRefusal(r, route, allowedHosts)
+}
+
+// editorNonCanonicalRefusal refuses (400) an editor path that is not already in its
+// cleaned, decoded form. This is the structural guard the path-based rules (3 and 6)
+// stand on: rather than have each of them anticipate every spelling a router might
+// collapse to the same file, an editor route serves ONLY canonical paths, so those
+// rules only ever judge the one form the editor will serve.
+//
+// Non-canonical means: an encoded separator (%2F or %5C, which the editor decodes
+// into a path separator), a malformed escape, or a decoded path that differs from
+// muxCleanPath's — an empty segment ("webview//browser/pre", which an editor-origin
+// port has no router to collapse, unlike the control listener's ServeMux), or a "."
+// or ".." segment. A single trailing slash is canonical and kept. Scoped to editor
+// tabs: a web tab's dev server owns its own path space and may use any of these.
+func editorNonCanonicalRefusal(route webTabRoute) *crossSiteDenial {
+	esc := strings.TrimPrefix(route.escapedRest, "/")
+	low := strings.ToLower(esc)
+	bad := strings.Contains(low, "%2f") || strings.Contains(low, "%5c")
+	if !bad {
+		if decoded, err := url.PathUnescape(esc); err != nil {
+			bad = true
+		} else if p := "/" + decoded; muxCleanPath(p) != p {
+			bad = true
+		}
+	}
+	if !bad {
+		return nil
+	}
+	return &crossSiteDenial{
+		status: http.StatusBadRequest,
+		err:    fmt.Errorf("refused a non-canonical editor path %q: an editor serves only cleaned paths", echoHost(route.rest)),
+		logKey: "editor-noncanonical",
+	}
 }
 
 // editorWebviewHostRefusal is rule 6. A request for the editor's webview host page

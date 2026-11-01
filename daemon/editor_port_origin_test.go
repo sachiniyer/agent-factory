@@ -358,3 +358,30 @@ func TestEditorPort_ProbePageIsServedWithoutACredentialAndCarriesNothing(t *test
 	assert.Empty(t, f.served, "the probe never reaches the editor proxy")
 	assert.Empty(t, rec.Result().Cookies(), "the probe sets no cookie")
 }
+
+// An editor-origin port has no router to clean a path, so the bare handler itself
+// must refuse a non-canonical one (webtab_isolation.go) — otherwise code-server
+// collapses an empty segment and serves the real webview host. Driven through the
+// bare handler into the real serveWebTabRoute; the 400 lands in the early block,
+// before any editor spawn.
+func TestEditorPortHandler_RefusesNonCanonicalPaths(t *testing.T) {
+	f := newEditorPortFixture(t)
+	editorPortServe = func(cs *controlServer, w http.ResponseWriter, r *http.Request, route webTabRoute) {
+		cs.serveWebTabRoute(w, r, route)
+	}
+	cookie := f.bootstrap(t, f.sidA, f.portA)
+	code := func(rawPath string) int {
+		req := httptest.NewRequest(http.MethodGet, "http://editora.localhost:"+strconv.Itoa(f.portA)+rawPath, nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		f.cs.editorPortHandler(f.portA, rec, req)
+		return rec.Code
+	}
+	host := "/stable-abc/static/out/vs/workbench/contrib"
+	assert.Equal(t, http.StatusBadRequest, code(host+"/webview//browser/pre/index.html"), "empty segment //")
+	assert.Equal(t, http.StatusBadRequest, code(host+"/webview/./browser/pre/index.html"), "/./ segment")
+	assert.Equal(t, http.StatusBadRequest, code(host+"/webview%2Fbrowser/pre/index.html"), "%2F separator")
+	// A canonical trailing slash is NOT refused by this rule: it reaches the core
+	// (which here cannot find an editor binary, so it is anything but a 400).
+	assert.NotEqual(t, http.StatusBadRequest, code("/proxy/3000/"), "a trailing slash is canonical")
+}
