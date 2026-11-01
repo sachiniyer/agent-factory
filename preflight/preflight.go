@@ -350,6 +350,12 @@ func RelativeExecutable(command string) bool {
 	// launch directory through PATH=bin); an absolute chdir fixes that
 	// lookup dir, so the bare-operand PATH check is gated on the working
 	// directory resolving against the doctor's cwd, like launch.Executable.
+	// The working directory in effect is the one the parent env execs the
+	// operand in (the parent envs' chdirs, not the operand's own env -C,
+	// which applies to its command), so the gate is per-operand: a nested
+	// env looked up through a relative PATH under a relative outer chdir
+	// that a later inner chdir resets to absolute is still gated by the
+	// relative outer working directory and anchors the command.
 	// The PATH active when the operand is resolved is the environment the
 	// parent env execs it in: each env wrapper applies its own PATH
 	// assignments before running its command operand, so a nested env
@@ -373,7 +379,7 @@ func RelativeExecutable(command string) bool {
 		if usesRelativeExecutable(op.operand) {
 			return true
 		}
-		if workingDirResolvesAgainstCwd(command, launch) && isBareExecutable(op.operand) {
+		if op.workingDirResolvesAgainstCwd && isBareExecutable(op.operand) {
 			if op.pathSet && pathHasRelativeEntry(op.operand, op.pathValue) {
 				return true
 			}
@@ -435,11 +441,23 @@ func relativeShellWrapper(command string) string {
 
 // envOperand is a single executable token GNU env execs (env's command
 // operand or a nested env reached by unwrapping), paired with the PATH in
-// effect when that token is resolved.
+// effect when that token is resolved and whether the working directory in
+// effect at that resolution flips with the doctor's cwd. A bare operand is
+// looked up through env's PATH against the working directory its parent env
+// execs it in — the directory after the parent env wrappers' chdirs but
+// before this operand's own env -C chdir (a chdir applies to env's command,
+// not to env itself) — so the cwd-dependence of that lookup turns on the
+// parent envs' chdirs, not the final launch working directory. An absolute
+// chdir among the parent envs fixes that directory independent of the
+// doctor's cwd; no chdir, a cwd-neutral chdir, or an all-relative chain
+// leaves it resolving against the doctor's cwd. The final command operand's
+// working directory is the accumulation of every env wrapper's chdir, so its
+// flag matches workingDirResolvesAgainstCwd(command, launch).
 type envOperand struct {
-	operand   string
-	pathValue string
-	pathSet   bool
+	operand                      string
+	pathValue                    string
+	pathSet                      bool
+	workingDirResolvesAgainstCwd bool
 }
 
 // envCommandOperand returns the executable tokens GNU env execs (env's
@@ -479,6 +497,23 @@ type envOperand struct {
 // operand (or a non-env first token) this equals effectivePathValue(launch);
 // for a nested env reached by unwrapping it is the parent env's PATH, so a
 // relative entry there anchors the bare nested operand.
+//
+// The returned workingDirResolvesAgainstCwd flag is the cwd-dependence of the
+// working directory in effect when the operand is resolved. A bare operand's
+// PATH lookup happens against the working directory its parent env execs it
+// in — the accumulation of the chdirs of the env wrappers up to but not
+// including the operand's own env -C — so an absolute chdir among those
+// parent envs fixes the lookup directory and the flag is false, while no
+// chdir, a cwd-neutral chdir, or an all-relative chain leaves it resolving
+// against the doctor's cwd and the flag is true. The final command
+// operand's working directory accumulates every env wrapper's chdir, so its
+// flag matches workingDirResolvesAgainstCwd(command, launch); without this
+// per-operand flag, a nested env looked up through a relative PATH under a
+// relative outer chdir that a later inner chdir resets to absolute
+// (`env -C rel PATH=bin env -C /abs PATH=/usr/bin /usr/bin/codex`) would be
+// gated by the final absolute working directory and the doctor would
+// falsely PASS while the session resolves the inner env from
+// <launch-dir>/rel/bin.
 func envCommandOperand(command string) []envOperand {
 	words, err := shellWords(command, 0)
 	if err != nil {
@@ -491,6 +526,24 @@ func envCommandOperand(command string) []envOperand {
 		pathValue, pathSet = applyPathAssignment(words[idx], pathValue, pathSet)
 		idx++
 	}
+	// chdirs accumulates the -C/--chdir operands of the env wrappers
+	// processed so far, in order. workingDirResolvesAgainstCwd reports
+	// whether the working directory these chdirs establish — the directory
+	// a bare operand is looked up through — flips with the doctor's cwd:
+	// an absolute chdir fixes it (false), and no chdir, a cwd-neutral
+	// chdir, or an all-relative chain resolves against the doctor's cwd
+	// (true). It is evaluated before the current env's own chdir is
+	// applied, since env -C changes the directory for env's command, not
+	// for env itself.
+	var chdirs []string
+	workingDirResolvesAgainstCwd := func() bool {
+		for _, c := range chdirs {
+			if filepath.IsAbs(c) {
+				return false
+			}
+		}
+		return true
+	}
 	unwrapped := false
 	for idx < len(words) && isEnvExecutable(words[idx]) {
 		// A nested env reached by unwrapping (not the leading shell
@@ -501,12 +554,15 @@ func envCommandOperand(command string) []envOperand {
 		// nested env looked up through a relative PATH anchors the command
 		// instead of being silently unwrapped to the final agent token.
 		// pathValue/pathSet already holds the parent env's environment,
-		// which is the PATH the nested env is looked up through. The walk
-		// then continues through the nested env to collect the operands it
-		// execs, so a relative operand behind an anchor-independent nested
-		// env is not missed.
+		// which is the PATH the nested env is looked up through, and
+		// workingDirResolvesAgainstCwd() reports the cwd-dependence of
+		// the parent env's working directory, which is where a bare
+		// nested env's PATH lookup happens. The walk then continues
+		// through the nested env to collect the operands it execs, so a
+		// relative operand behind an anchor-independent nested env is
+		// not missed.
 		if unwrapped {
-			ops = append(ops, envOperand{words[idx], pathValue, pathSet})
+			ops = append(ops, envOperand{words[idx], pathValue, pathSet, workingDirResolvesAgainstCwd()})
 		}
 		invocation, perr := envcommand.Parse(words[idx+1:], envcommand.Policy{AllowAssignments: true})
 		if perr != nil || invocation.CommandIndex < 0 {
@@ -517,11 +573,14 @@ func envCommandOperand(command string) []envOperand {
 		// environment, so a nested env reached on the next iteration is
 		// classified against this PATH rather than the final launch PATH.
 		pathValue, pathSet = applyEnvPathMutations(invocation, pathValue, pathSet)
+		if invocation.Chdir != "" {
+			chdirs = append(chdirs, invocation.Chdir)
+		}
 		idx += 1 + invocation.CommandIndex
 		unwrapped = true
 	}
 	if unwrapped && idx < len(words) {
-		ops = append(ops, envOperand{words[idx], pathValue, pathSet})
+		ops = append(ops, envOperand{words[idx], pathValue, pathSet, workingDirResolvesAgainstCwd()})
 	}
 	return ops
 }

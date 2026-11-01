@@ -379,6 +379,20 @@ func TestRelativeExecutable(t *testing.T) {
 		// /usr/bin/env and falsely pass while the session resolves the
 		// inner env from <launch-dir>/bin.
 		{name: "env nested bare env outer relative inner absolute PATH", command: "env PATH=bin env PATH=/usr/bin /usr/bin/codex", want: true},
+		// A nested env is looked up through its parent env's PATH against the
+		// working directory the parent env's chdir establishes — the parent
+		// envs' chdirs, not the nested env's own -C (a chdir applies to env's
+		// command, not to env itself). An outer relative -C chdir anchors a
+		// bare nested env's PATH lookup even when a later inner -C chdir
+		// resets the final launch working directory to absolute: the inner
+		// env is resolved from <launch-dir>/rel/bin before the inner -C /abs
+		// takes effect, so the doctor outside a repo must not verify it
+		// against the final absolute directory and falsely pass while the
+		// session cannot start. An outer absolute -C chdir fixes that lookup
+		// directory regardless of the inner chdir, so the bare nested env is
+		// not anchoring then.
+		{name: "env nested bare env outer relative chdir inner absolute chdir relative PATH", command: "env -C rel PATH=bin env -C /abs PATH=/usr/bin /usr/bin/codex", want: true},
+		{name: "env nested bare env outer absolute chdir inner chdir relative PATH not anchoring", command: "env -C /abs PATH=bin env -C /abs2 PATH=/usr/bin /usr/bin/codex", want: false},
 		// An anchor-independent nested env (absolute /usr/bin/env) is itself
 		// verified by the launch anchor, but the operand it execs is still a
 		// separate executable CheckCommand does not resolve. The walk must
