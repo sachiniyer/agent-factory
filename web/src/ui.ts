@@ -1811,6 +1811,13 @@ export class AppShell {
       this.renderFilterMenu(state, scoped);
     }
     const activeBefore = document.activeElement as HTMLElement | null;
+    // The row that owns the rail's DOM focus, captured BEFORE the rebuild:
+    // losing the selection strips a focused row's tabindex mid-reconcile,
+    // which blurs it and drops document.activeElement to body, so after the
+    // rebuild only this knows the rail was holding focus at all (#6409).
+    const activeRowBefore = activeBefore && this.railList.contains(activeBefore)
+      ? activeBefore.closest<HTMLElement>(".af-row")
+      : null;
     let restoreChangedFocus: (() => void) | undefined;
     const reopened: Array<ReturnType<typeof actionsDisclosure>> = [];
     const rows = this.railRows.reconcile(
@@ -1895,6 +1902,57 @@ export class AppShell {
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
     }
+    // With nothing selected nothing owns the roving stop, so the first real
+    // row carries it — the listbox never vanishes from the Tab order (#6409).
+    // Every row is normalized here, not only at build time: a reused element
+    // keeps whatever tabindex it last had, so a stale fallback would otherwise
+    // sit in the order beside the newly selected row's own stop. Unselected
+    // rows carry NO tabindex, not -1 — a plain click on an unfocusable li moves
+    // no DOM focus, which is what keeps a forced click on a creating
+    // placeholder from landing there either.
+    const railRows = this.railList.querySelectorAll<HTMLElement>(".af-row");
+    let hasStop = false;
+    for (const railRow of railRows) {
+      const isSelected = railRow.classList.contains("af-row-selected");
+      // Write only on a real change: this pass runs on EVERY snapshot, and a
+      // redundant setAttribute/tabIndex= still counts as a DOM write on an
+      // unchanged row (web-perf's rail audit asserts unchanged rows get none).
+      if (isSelected) {
+        if (railRow.getAttribute("tabindex") !== "0") railRow.setAttribute("tabindex", "0");
+      } else if (railRow.hasAttribute("tabindex")) {
+        railRow.removeAttribute("tabindex");
+      }
+      hasStop ||= isSelected;
+      // In-row controls rove with the row (#6409): the selected row's actions
+      // trigger and backlog chip are stops; other rows' leave the order. The
+      // carve-out mirrors rowActions — a row that can never be selected (the
+      // aria-disabled it carries: kill-only rows, the creating placeholder)
+      // keeps its controls tabbable because they are its only keyboard route.
+      const reachable = isSelected || railRow.getAttribute("aria-disabled") === "true";
+      for (const ctrl of railRow.querySelectorAll<HTMLElement>(".af-row-actions .af-term-more, .af-backlog-session-chip")) {
+        const wanted = reachable ? 0 : -1;
+        if (ctrl.tabIndex !== wanted) ctrl.tabIndex = wanted;
+      }
+    }
+    if (!hasStop) {
+      const fallback = [...railRows].find((railRow) => !railRow.classList.contains("af-row-creating"));
+      if (fallback && fallback.getAttribute("tabindex") !== "0") {
+        fallback.setAttribute("tabindex", "0");
+      }
+    }
+    // DOM focus follows the j/k selection: without this the ring strands on the
+    // row that lost the selection while Enter attaches the new one. Dead spots
+    // only, though — a restore above may have placed focus on a control inside
+    // a row (an open menu must keep its place across snapshots), so the ring
+    // moves only when it landed on body or on the deselected li itself.
+    if (activeRowBefore && !activeRowBefore.classList.contains("af-row-selected")) {
+      const after = document.activeElement as HTMLElement | null;
+      const afterRow = after && this.railList.contains(after) ? after.closest<HTMLElement>(".af-row") : null;
+      const deadSpot = !afterRow || (after === afterRow && !afterRow.classList.contains("af-row-selected"));
+      if (deadSpot) {
+        this.railList.querySelector<HTMLElement>(".af-row-selected")?.focus();
+      }
+    }
     const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : undefined;
     this.lifecycleBtn = selectedMenu?.panel.querySelector<HTMLElement>(".af-rail-lifecycle") ?? null;
     this.lifecycleAction = selectedSession(state)?.lifecycle_action ?? null;
@@ -1923,6 +1981,12 @@ export class AppShell {
     const menu = actionsDisclosure(`Actions for ${session.title}`);
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
+    // Only the selected row's actions button sits in the Tab order (#6409); a
+    // keyboard user reaches another row's menu by moving the selection to it.
+    // A managed row that can NEVER be selected — a kill-only row such as a
+    // startup-unknown session, which j/k skips because it cannot open a pane —
+    // keeps its stop, or its Delete would have no keyboard route at all.
+    menu.trigger.tabIndex = selected || !isOpenableSession(session) ? 0 : -1;
     menu.trigger.replaceChildren("…");
     menu.trigger.addEventListener("click", () => {
       if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
@@ -3741,6 +3805,16 @@ export function sessionRow(
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
+  // The rail pays a bounded Tab cost however many rows it holds (#6409): the
+  // selected row is the one listbox stop, with its in-row controls next. An
+  // unselected row carries NO tabindex, not -1 — it must stay as unfocusable
+  // as a plain li was, or a click would move DOM focus onto it (and a forced
+  // click on a creating placeholder would focus a row that cannot open).
+  if (selected) {
+    row.setAttribute("tabindex", "0");
+  } else {
+    row.removeAttribute("tabindex");
+  }
   const modelChange = s.model_change
     ? `; model changed from ${s.model_change.before} to ${s.model_change.after}`
     : "";
