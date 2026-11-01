@@ -210,6 +210,26 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 	// The backend/target selection comes from the one resolver validation used.
 	req.applyBackendSelection(&launchOpts)
+	// Journal the attempt BEFORE session.NewInstance can spawn anything (#6301):
+	// the fire-marker binds above exist only on the fire path, so this entry is
+	// the only durable record of a plain create's minted id — and therefore the
+	// only proof a later startup sweep can use on a session that new-session
+	// stamped AF_INSTANCE_ID with it but a crash left unrecorded. A failed write
+	// degrades the sweep, never the create: the residue stays for af doctor
+	// either way. The clears below follow the rule that a marker survives only
+	// while a possibly-live, unrecorded session may carry its id — every
+	// settled outcome (a committed row, a conclusively-answered teardown, or
+	// nothing ever spawned) drops it.
+	if err := notePendingCreate(pendingCreateMarker{
+		InstanceID:  pending.ID,
+		RepoID:      repo.ID,
+		Title:       title,
+		SessionName: tmux.SanitizedNameForRepo(title, repo.IdentityPath()),
+		Program:     req.Program,
+		MintedAt:    createdAt.UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		m.warn().Printf("create of session %q: could not journal the pending create (a crash-leftover would stay unprovable): %v", title, err)
+	}
 	instance, err := session.NewInstance(launchOpts)
 	// A create that does not finish must not leave a live credential behind
 	// (#3012 review). The mint happens INSIDE NewInstance, so a provisioning
@@ -252,6 +272,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			// clients delete the only visible handle to a tombstone that IS durable on
 			// disk, which is the opposite of what retaining it was for.
 			settleRetainedCreate(orphan.OrphanRecord())
+			// The committed row now owns this id; the journal entry is stale.
+			clearPendingCreate(pending.ID)
 			// COMMITTED on the wire (#3233): the row is durable and holds the title,
 			// so a plain error with an empty InstanceData would read as
 			// failed-nothing-committed and invite an immediate retry against a name
@@ -259,6 +281,11 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			return orphan.OrphanRecord().ToInstanceData(), &mutationCommittedError{err: fmt.Errorf("failed to create instance %q, and the sandbox provisioned for it could not be confirmed torn down; it is recorded and the daemon will keep retrying that cleanup — the record clears once it succeeds: %w",
 				title, err)}
 		}
+		// NewInstance failed before anything spawned — no session can carry the
+		// journaled id. A failed keepFailedCreate above reaches no clear on
+		// purpose: its row could not be made durable, so the journal stays as
+		// the next startup's only proof of whatever the attempt left behind.
+		clearPendingCreate(pending.ID)
 		return session.InstanceData{}, err
 	}
 	settleHookCreate := instance.HoldHookProgressUntilCreateSettled()
@@ -316,6 +343,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			// durable record is one no operator surface could ever revoke.
 			createCommitted = true
 			settleRetainedCreate(instance)
+			// Committed row owns the id; the journal entry is stale.
+			clearPendingCreate(pending.ID)
 			// COMMITTED on the wire too (#3233): the row and workspace are durable,
 			// so the retained projection rides back with the marker — a plain error
 			// with an empty InstanceData reads as failed-nothing-committed and
@@ -354,11 +383,17 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))
 			}
 			settleRetainedCreate(instance)
+			// Committed row owns the id; the journal entry is stale.
+			clearPendingCreate(pending.ID)
 			// Same committed contract as the unknown-start branch above (#3233):
 			// the tombstoned row is durable and the daemon owns its cleanup retry.
 			return instance.ToInstanceData(), &mutationCommittedError{err: fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely, so its workspace was left in place; the session is recorded and the daemon will keep retrying the cleanup — it will clear once that succeeds: %w",
 				title, errors.Join(serr, killErr))}
 		}
+		// Teardown answered (dead or never spawned), so nothing live can carry
+		// the journaled id. The failed keepFailedCreate above deliberately
+		// reaches no clear: an unrecorded leftover may still be out there.
+		clearPendingCreate(pending.ID)
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
 	}
 	if instance.LimitReached() {
@@ -408,14 +443,20 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// Same rule as the start-failure path above, minus the remedy: the record
 		// write is what just failed, so keeping a record is not available. Report the
 		// leftovers loudly instead of silently releasing the title over them (#1917).
+		// Kill could not answer, so a possibly-live session now has no committed
+		// row — the journal entry stays as the next startup's only proof of it.
 		if killErr := instance.Kill(); session.TeardownStateUnknown(killErr) {
 			return session.InstanceData{}, fmt.Errorf("failed to record session %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and must be cleaned up by hand: %w",
 				title, instance.GetWorktreePath(), errors.Join(persistErr, killErr))
 		}
+		// Kill answered; nothing live can carry the journaled id.
+		clearPendingCreate(pending.ID)
 		return session.InstanceData{}, persistErr
 	}
 	settleHookCreate()
 	creatingProjectionSettled = true
+	// The committed row owns this id now; the journal entry is stale.
+	clearPendingCreate(pending.ID)
 	// The session is on the roster and persisted, so its credential is now owned
 	// by the ordinary lifecycle — KillSession and archive revoke it from here.
 	createCommitted = true
