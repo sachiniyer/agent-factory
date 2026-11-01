@@ -178,6 +178,10 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	data.BacklogItem = i.BacklogItem
 	data.BacklogRunActive = i.backlogRunActive
 	data.BacklogRunEndedAt = i.backlogRunEndedAt
+	if i.owedArchive != nil {
+		owed := *i.owedArchive
+		data.OwedArchive = &owed
+	}
 	gate := i.runGateActiveLocked()
 	data.TaskRunIdleEdgeHeld = gate && i.taskRunIdleEdgeHeld
 	data.TaskRunTurnGateHeld = gate && i.taskRunTurnGateHeld
@@ -503,6 +507,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		BacklogItem:          data.BacklogItem,
 		backlogRunActive:     data.BacklogRunActive && data.BacklogItem != 0,
 		backlogRunEndedAt:    data.BacklogRunEndedAt,
+		owedArchive:          owedArchiveFromData(data),
 		taskRunInterrupted:   data.TaskRunInterrupted && !data.TaskRunActive,
 		taskRunInterruptedAt: data.TaskRunInterruptedAt,
 		taskRunIdleEdgeHeld:  runGateActiveInData(data) && data.TaskRunIdleEdgeHeld,

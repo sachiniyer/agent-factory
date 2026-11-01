@@ -1897,7 +1897,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/backlog_self.go backlogAskCmd (ask --self --handoff-file) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go); api/backlog_inbox.go backlogInboxCmd reads /v1/GetBacklog"
+        "pointer": "api/backlog_self.go backlogAskCmd (ask --self --then --handoff-file) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go); api/backlog_inbox.go backlogInboxCmd reads /v1/GetBacklog"
       },
       "verdict": "real-gap",
       "issue": "TBD",
@@ -2258,6 +2258,7 @@
       "af backlog note --self": "backlog.items",
       "af backlog ask --self": "backlog.questions",
       "af backlog ask --handoff-file": "backlog.questions",
+      "af backlog ask --then": "backlog.questions",
       "af backlog inbox --help": "meta.discovery",
       "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
@@ -3179,6 +3180,9 @@
         },
         "handoff": {
           "ok": "Set only on an agent's question (af backlog ask --self --handoff-file); the web only answers."
+        },
+        "then": {
+          "ok": "Set only on an agent's question (af backlog ask --self --then); the web only answers."
         }
       },
       "SetBacklogItemStatus": {

@@ -12,6 +12,9 @@ func (s *Service) PostMessage(req PostMessageRequest) (*MessageResponse, error) 
 	if req.Kind != KindQuestion && req.Handoff != "" {
 		return nil, errors.New("a handoff goes with a question")
 	}
+	if req.Kind != KindQuestion && req.Then != "" {
+		return nil, errors.New("then goes with a question")
+	}
 	switch req.Kind {
 	case KindNote, KindQuestion, KindAnswer:
 	default:
@@ -62,7 +65,7 @@ func (s *Service) ask(p *project, req PostMessageRequest) (*MessageResponse, err
 	}
 	var msg Message
 	_, err := s.update(p, func(b *Backlog) ([]int, error) {
-		m, err := b.Ask(req.ID, req.SessionID, Question{Text: req.Text, Handoff: req.Handoff}, s.now())
+		m, err := b.Ask(req.ID, req.SessionID, Question{Text: req.Text, Then: req.Then, Handoff: req.Handoff}, s.now())
 		if err != nil {
 			return nil, err
 		}

@@ -102,6 +102,9 @@ type PostMessageRequest struct {
 	Text       string `json:"text"`
 	SessionID  string `json:"session_id,omitempty"`
 	QuestionID int    `json:"question_id,omitempty"`
+	// Then goes with a question: what the asking session does once its run
+	// ends, ThenWait or ThenArchive. Empty waits, as before then existed.
+	Then string `json:"then,omitempty"`
 	// Handoff goes with a question: the asking agent's notes for a later run
 	// of the item (at most MaxHandoffBytes).
 	Handoff string `json:"handoff,omitempty"`

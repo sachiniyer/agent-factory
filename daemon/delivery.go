@@ -109,6 +109,19 @@ func notAttempted(err error) error {
 
 type notAttemptedError struct{ err error }
 
+// errTargetTearingDown matches a send refused because an archive or a kill of
+// the target holds its claim (killsInFlight). Nothing was sent, and once the
+// claim clears the target is archived, gone, or live again.
+var errTargetTearingDown = errors.New("the target session is being torn down")
+
+// tearingDownError is that refusal, worded as before.
+type tearingDownError struct{ title string }
+
+func (e tearingDownError) Error() string {
+	return fmt.Sprintf("target session %q is being deleted; prompt not delivered", e.title)
+}
+func (e tearingDownError) Is(target error) bool { return target == errTargetTearingDown }
+
 func (e *notAttemptedError) Error() string        { return e.err.Error() }
 func (e *notAttemptedError) Unwrap() error        { return e.err }
 func (e *notAttemptedError) Is(target error) bool { return target == errNotAttempted }

@@ -68,3 +68,38 @@ func TestFormatBacklogInbox(t *testing.T) {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
 	}
 }
+
+// --then defaults to archive, takes wait, and refuses anything else before it
+// reaches the daemon.
+func TestBacklogAskThen(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 1})
+	if _, err := runBacklogCmd(t, "ask", "--self", "which db?"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runBacklogCmd(t, "ask", "--self", "--then", "wait", "and the port?"); err != nil {
+		t.Fatal(err)
+	}
+	*methods = nil
+	if _, err := runBacklogCmd(t, "ask", "--self", "--then", "later", "x?"); err == nil || err.Error() != `--then is "later"; use wait or archive` {
+		t.Fatalf("--then later: %v", err)
+	}
+	if len(*methods) != 0 {
+		t.Fatalf("a bad --then reached the daemon: %v", *methods)
+	}
+	p, err := backlogProject()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := backlog.Load(p.repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range b.Item(1).Thread {
+		got = append(got, m.Text+"="+m.Then)
+	}
+	if strings.Join(got, ", ") != "which db?=archive, and the port?=wait" {
+		t.Fatalf("then on the questions: %v", got)
+	}
+}

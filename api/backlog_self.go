@@ -244,15 +244,20 @@ func postBacklogMessage(req daemon.PostBacklogMessageRequest) (any, error) {
 
 var (
 	backlogAskSelf        bool
+	backlogAskThen        string
 	backlogAskHandoffFile string
 )
 
 var backlogAskCmd = &cobra.Command{
-	Use:   "ask --self <text> [--handoff-file <path|->]",
+	Use:   "ask --self <text> [--then wait|archive] [--handoff-file <path|->]",
 	Short: "From an item session, ask the user a question",
 	Long: "Run from inside an item session: add a question to the item's thread and set the " +
-		"session's attention to it. The item shows Needs you until the user answers; the " +
-		"answer arrives in this session. Stop working after you ask.\n\n" +
+		"session's attention to it. The item shows Needs you until the user answers. Stop " +
+		"working after you ask.\n\n" +
+		"--then says what happens to this session once you stop. archive, the default: af " +
+		"archives it, and the user's answer restores it, with this conversation, and arrives " +
+		"here. wait: the session stays live until the answer arrives. If someone works in the " +
+		"session after you stop, af keeps it live and notes why on the item.\n\n" +
 		"--handoff-file stores notes for a later run of the item (at most 8 KB) with the " +
 		"question, read from a file or from stdin with -. The user sees them in \"af backlog inbox\".",
 	Args: cobra.MinimumNArgs(1),
@@ -260,6 +265,9 @@ var backlogAskCmd = &cobra.Command{
 		return runBacklog(func() (any, error) {
 			if !backlogAskSelf {
 				return nil, errors.New("af backlog ask needs --self; an agent asks from inside its item session")
+			}
+			if backlogAskThen != backlog.ThenWait && backlogAskThen != backlog.ThenArchive {
+				return nil, fmt.Errorf("--then is %q; use %s or %s", backlogAskThen, backlog.ThenWait, backlog.ThenArchive)
 			}
 			t, err := backlogProject()
 			if err != nil {
@@ -277,7 +285,7 @@ var backlogAskCmd = &cobra.Command{
 			}
 			return postBacklogMessage(daemon.PostBacklogMessageRequest{RepoID: t.repoID, RepoPath: t.repoPath,
 				ID: it.ID, Kind: backlog.KindQuestion, Text: strings.Join(args, " "), SessionID: sessionID,
-				Handoff: handoff})
+				Then: backlogAskThen, Handoff: handoff})
 		})
 	},
 }
@@ -314,6 +322,7 @@ var backlogAnswerCmd = &cobra.Command{
 func init() {
 	backlogAnswerCmd.Flags().IntVar(&backlogAnswerQuestion, "question", 0, "The `id` of the question to answer, from \"af backlog show\"; default the oldest open one")
 	backlogAskCmd.Flags().BoolVar(&backlogAskSelf, "self", false, "Ask on the item of the session this runs in")
+	backlogAskCmd.Flags().StringVar(&backlogAskThen, "then", backlog.ThenArchive, "What happens to this session once you stop: archive (the answer restores it) or wait (it stays live)")
 	backlogAskCmd.Flags().StringVar(&backlogAskHandoffFile, "handoff-file", "", "A `path` to notes for a later run of the item, or - for stdin (at most 8 KB)")
 	backlogDoneCmd.Flags().BoolVar(&backlogDoneSelf, "self", false, "From inside an item session: the work is finished; send the item to review")
 	backlogDoneCmd.Flags().StringVar(&backlogDonePR, "pr", "", "With --self, the `url` of the pull request for the work")

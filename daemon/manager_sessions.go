@@ -477,7 +477,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(tearingDownError{title: req.Title})
 	}
 
 	opLock := m.opLockFor(key)
@@ -489,7 +489,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	_, killing = m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(tearingDownError{title: req.Title})
 	}
 	if current == nil {
 		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q was deleted; prompt not delivered", req.Title))
@@ -501,7 +501,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		instance = current
 	}
 	if instance.IsTearingDown() {
-		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(tearingDownError{title: req.Title})
 	}
 	if guard != nil {
 		if gerr := guard(instance, repoID); gerr != nil {

@@ -163,3 +163,26 @@ func TestDisarmRestoresThePreviousRunEnd(t *testing.T) {
 	require.True(t, inst.DisarmBacklogRun())
 	require.True(t, inst.BacklogRunEndedAt().Equal(ended))
 }
+
+// The owed archive is filed before the archive runs, so it must come back from
+// disk; a new run drops it, and a session that is not an item session owes none.
+func TestOwedArchiveSurvivesRoundTripAndANewRunDropsIt(t *testing.T) {
+	inst := backlogRunSession(t)
+	filed := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	inst.SetOwedArchive(&OwedArchiveData{Reason: "ask", FiledAt: filed})
+
+	data := inst.ToInstanceData()
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.Equal(t, &OwedArchiveData{Reason: "ask", FiledAt: filed}, reloaded.OwedArchive())
+
+	data.BacklogItem = 0
+	plain, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.Nil(t, plain.OwedArchive())
+
+	require.True(t, reloaded.ArmBacklogRun(time.Now()))
+	require.Nil(t, reloaded.OwedArchive(), "a new run drops the archive owed to the one before")
+	require.Nil(t, reloaded.ToInstanceData().OwedArchive)
+}
