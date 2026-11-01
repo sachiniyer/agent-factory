@@ -185,7 +185,7 @@ func (m *Manager) runBacklogPass(now time.Time) {
 func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 	b, err := backlog.Load(repoID)
 	if err != nil {
-		m.warn().Printf("backlog runner for project %s: %v", repoID, err)
+		m.warnBacklogUnreadable("backlog runner", repoID, err)
 		return
 	}
 	budget, err := backlog.LoadBudget()

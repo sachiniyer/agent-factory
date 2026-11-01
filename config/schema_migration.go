@@ -153,7 +153,7 @@ type UnsupportedSchemaVersionError struct {
 }
 
 func (e *UnsupportedSchemaVersionError) Error() string {
-	return fmt.Sprintf("%s has schema_version %d, but this binary supports up to %d; upgrade af before using this state file",
+	return fmt.Sprintf("%s was written by a newer af: it has schema_version %d, and this binary supports up to %d; upgrade af before using this state file",
 		describeSchemaStore(e.StoreName, e.Path), e.FileVersion, e.SupportedVersion)
 }
 
