@@ -31,10 +31,12 @@ import (
 //     made it as context (fillPushCredentialBlockers).
 
 const (
-	refusePushHostTainted   = "push credentials are withheld: code the operator didn't place has run as this host's user. `af hosts check` on the daemon box says which, and `af hosts reset-trust` clears it once the user is recreated or wiped"
-	refusePushHostUnproven  = "push credentials are withheld because af can't establish which machine this host is: `af hosts check` on the daemon box says why"
-	refusePushTaintsLoading = "push credentials are withheld while af records where its restored sessions run; try again in a moment"
-	refuseSandboxCreateHost = "a sandbox credential can create sessions only on a listed host the operator makes available to it"
+	refusePushHostTainted  = "push credentials are withheld: code the operator didn't place has run as this host's user. `af hosts check` on the daemon box says which, and `af hosts reset-trust` clears it once the user is recreated or wiped"
+	refusePushHostUnproven = "push credentials are withheld because af can't establish which machine this host is: `af hosts check` on the daemon box says why"
+	// refusePushUnconfirmedFmt takes the entry ids, joined for one reset command.
+	refusePushUnconfirmedFmt = "push credentials are withheld on every host while af's ledger holds a placement it couldn't place on an identified machine: once that machine's users are recreated or wiped, run `af hosts reset-trust --entry %s` on the daemon box"
+	refusePushTaintsLoading  = "push credentials are withheld while af records where its restored sessions run; try again in a moment"
+	refuseSandboxCreateHost  = "a sandbox credential can create sessions only on a listed host the operator makes available to it"
 )
 
 // trackedInstances is every row the manager tracks, collected under m.mu and
@@ -134,7 +136,7 @@ func (m *Manager) pushTrustReport(name string, target session.RuntimeMachine, li
 	if thin, err := m.pushCreds.taints.unconfirmed(); err == nil {
 		for _, t := range thin {
 			if !shown[t.ID] {
-				out = append(out, fmt.Sprintf("%s. No host can be opted into push credentials until it is reset: `af hosts reset-trust --entry %s`", t, t.ID))
+				out = append(out, fmt.Sprintf("%s. No host gets push credentials, or can be opted into them, until it is reset: `af hosts reset-trust --entry %s`", t, t.ID))
 			}
 		}
 	}

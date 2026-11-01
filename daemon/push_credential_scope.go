@@ -208,14 +208,14 @@ func (m *Manager) pushEligible(inst *session.Instance) bool {
 	return ok && placement.Licensed(m.Config(), backend)
 }
 
-const refusePushEscalationText = "a session without push credentials (or on a machine af won't trust with them) cannot prompt, schedule a task for, or push-archive a session that has them"
+const refusePushEscalationText = "a session without push credentials (or on a machine af won't trust with them) cannot prompt, schedule a task for, or push-archive a session that has them, or any session on a machine opted into them"
 
 // refusePushEscalation is property 1's guard for a scoped verb that acts on
 // target on behalf of owner: refused when target is another session that is
 // eligible and owner is not. owner's row may be gone (a task outliving its
 // creator), which is ineligible.
 func (m *Manager) refusePushEscalation(owner string, target *session.Instance) error {
-	if target == nil || target.ID == owner || !m.pushEligible(target) {
+	if target == nil || target.ID == owner || (!m.pushEligible(target) && !m.onLicensedMachine(target)) {
 		return nil
 	}
 	m.mu.Lock()
@@ -225,6 +225,24 @@ func (m *Manager) refusePushEscalation(owner string, target *session.Instance) e
 		return nil
 	}
 	return sandboxRefusal(refusePushEscalationText)
+}
+
+// onLicensedMachine reports whether inst's runtime may run on a machine the
+// config licenses (Shares, so one af can't establish counts): any session
+// there, eligible or not, sits beside an eligible neighbour's callback files,
+// so a sandbox may not drive it either (final delta check on #6433). It may
+// resolve names (cached).
+func (m *Manager) onLicensedMachine(inst *session.Instance) bool {
+	machine, ok := instanceRuntimeMachine(inst)
+	if !ok {
+		return false
+	}
+	for _, lm := range pushLicensedMachines(m.Config()) {
+		if lm.Shares(machine) {
+			return true
+		}
+	}
+	return false
 }
 
 // pushMachineTrusted reports whether inst's machine is identified and carries no

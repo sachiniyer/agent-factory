@@ -296,6 +296,47 @@ func (s *pushTaintState) reset(scope resetScope) ([]pushTaint, error) {
 	return cleared, err
 }
 
+// grantBlockers is what withholds a grant on machine id, in ONE ledger read:
+// every taint that may be on it, and every unconfirmed entry, which can't be
+// shown to be on another machine (so it withholds grants everywhere, however a
+// licence arrived; a hand-edited config.toml skips refuseLicensingTainted). A
+// ledger that can't be read withholds everything.
+func (s *pushCredentialState) grantBlockers(id session.MachineIdentity) (taints, unconfirmed []pushTaint) {
+	err := s.taints.locked(func(l *pushLedger) (bool, error) {
+		for _, t := range l.Taints {
+			switch {
+			case t.Unconfirmed != "":
+				unconfirmed = append(unconfirmed, t)
+			case t.Identity.Shares(id):
+				taints = append(taints, t)
+			}
+		}
+		return false, nil
+	})
+	if err != nil {
+		return []pushTaint{{ID: "-", SessionID: "-", Title: "(unreadable ledger)", Why: "the ledger of tainted machines can't be read: " + err.Error(), Since: time.Now()}}, nil
+	}
+	return taints, unconfirmed
+}
+
+// grantRefusal is the refusal grantBlockers earns, or nil.
+func (m *Manager) grantRefusal(owner string, id session.MachineIdentity, when string) error {
+	taints, unconfirmed := m.pushCreds.grantBlockers(id)
+	if len(taints) > 0 {
+		m.info().Printf("push credential: withheld from session %s%s: %s", owner, when, taints[0])
+		return sandboxRefusal(refusePushHostTainted)
+	}
+	if len(unconfirmed) > 0 {
+		ids := make([]string, 0, len(unconfirmed))
+		for _, t := range unconfirmed {
+			ids = append(ids, t.ID)
+		}
+		m.info().Printf("push credential: withheld from session %s%s: %s", owner, when, unconfirmed[0])
+		return sandboxRefusal(fmt.Sprintf(refusePushUnconfirmedFmt, strings.Join(ids, " --entry ")))
+	}
+	return nil
+}
+
 // taintsFor is the taints on machine id, failing closed: a ledger that can't be
 // read taints every machine.
 func (s *pushCredentialState) taintsFor(id session.MachineIdentity) []pushTaint {
