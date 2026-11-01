@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -151,4 +152,35 @@ func VerifyWorktreeRegistrationPredates(worktreePath string, bound time.Time) er
 		}
 		return nil
 	})
+}
+
+// WorktreeCommitsBeyondRepo counts commits reachable from the worktree's HEAD
+// that are not reachable from the repo's current HEAD — the "did an agent
+// already commit work here" question for a leftover whose recorded base commit
+// af never persisted (#5503). The merge-base with the repo's HEAD stands in for
+// the unrecorded cut point: a worktree still exactly where the create left it
+// counts zero, one whose agent committed counts the new work, and one whose
+// base moved out from under it (rebase, force-push) counts more than zero and
+// therefore errs toward preservation. Every failure is an error out — the
+// caller fails closed rather than reading "could not count" as "clean".
+func WorktreeCommitsBeyondRepo(repoRoot, worktreePath string) (int, error) {
+	head, err := runBoundedWorktreeGit(repoRoot, false, "--no-optional-locks", "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return 0, fmt.Errorf("could not resolve %s's HEAD: %w", repoRoot, err)
+	}
+	base, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
+		"merge-base", "HEAD", strings.TrimSpace(string(head)))
+	if err != nil {
+		return 0, fmt.Errorf("could not merge-base %s against %s's HEAD: %w", worktreePath, repoRoot, err)
+	}
+	out, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
+		"rev-list", "--count", strings.TrimSpace(string(base))+"..HEAD")
+	if err != nil {
+		return 0, fmt.Errorf("could not count commits in %s beyond its merge-base: %w", worktreePath, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("could not parse commit count for %s: %w", worktreePath, err)
+	}
+	return n, nil
 }

@@ -62,13 +62,18 @@ var errTaskFireReconcile = errors.New("task fire reconcile failed")
 
 // taskFireMarker is the durable record of one intended cron fire. TaskID and
 // IntendedAt are written by RunTask before delivery; Title and InstanceID are
-// bound by the create path as it commits them — a marker without them died
-// before the reservation, which is itself information the reconcile uses.
+// bound by the create path as it commits them, and WorktreePath is bound the
+// instant before the local backend runs `git worktree add` — a marker without
+// them died before the reservation, which is itself information the reconcile
+// uses. WorktreePath is what lets reconcile prove a leftover worktree is this
+// attempt's: the exact intended path is recorded while nothing can yet exist
+// at it, so a discovered worktree at that path can only be the create's (#6259).
 type taskFireMarker struct {
-	TaskID     string    `json:"task_id"`
-	IntendedAt time.Time `json:"intended_at"`
-	Title      string    `json:"title,omitempty"`
-	InstanceID string    `json:"instance_id,omitempty"`
+	TaskID       string    `json:"task_id"`
+	IntendedAt   time.Time `json:"intended_at"`
+	Title        string    `json:"title,omitempty"`
+	InstanceID   string    `json:"instance_id,omitempty"`
+	WorktreePath string    `json:"worktree_path,omitempty"`
 }
 
 // daemonDrainingFn reports whether the owning daemon has closed mutation
@@ -197,17 +202,27 @@ func ensureTaskFireMarker(taskID string) (marker *taskFireMarker, pending bool, 
 	return m, false, nil
 }
 
-// noteTaskFireTitle and noteTaskFireInstance bind create-path artifacts onto a
-// task's marker. They are deliberately no-op when no marker exists — only
-// RunTask writes one, so interactive/API creates that carry a TaskID for the
-// concurrency cap but not through the cron path leave nothing behind. A failed
-// bind degrades the later reconcile to title-less evidence, never the create.
+// noteTaskFireTitle, noteTaskFireInstance and noteTaskFireWorktree bind
+// create-path artifacts onto a task's marker. They are deliberately no-op when
+// no marker exists — only RunTask writes one, so interactive/API creates that
+// carry a TaskID for the concurrency cap but not through the cron path leave
+// nothing behind. A failed bind degrades the later reconcile to title-less
+// evidence, never the create.
 func noteTaskFireTitle(taskID, title string) {
 	mutateTaskFireMarker(taskID, func(m *taskFireMarker) { m.Title = title })
 }
 
 func noteTaskFireInstance(taskID, instanceID string) {
 	mutateTaskFireMarker(taskID, func(m *taskFireMarker) { m.InstanceID = instanceID })
+}
+
+// noteTaskFireWorktree records the exact worktree path the create is about to
+// place on disk. The local backend invokes it through
+// InstanceOptions.BeforeWorktreeCreate the instant before `git worktree add`
+// runs (#6259): binding must land while nothing can yet exist at the path, or
+// a leftover found there later has no proof it is this attempt's.
+func noteTaskFireWorktree(taskID, worktreePath string) {
+	mutateTaskFireMarker(taskID, func(m *taskFireMarker) { m.WorktreePath = worktreePath })
 }
 
 func mutateTaskFireMarker(taskID string, mutate func(*taskFireMarker)) {
@@ -273,10 +288,14 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 //  3. A rowless live tmux session under the bound title is stopped only if its
 //     own environment proves this fire's spawn created it (the instance id the
 //     marker recorded before the spawn, stamped at new-session), and the kill is
-//     bound to the probed tmux session id. Anything unproven — no stamp, an
+//     bound to the probed tmux session id. A discovered worktree is torn down
+//     only when the marker bound its exact path before creation AND the tree is
+//     clean — no dirty files, no commits beyond the mainline — which tombstones
+//     the record for teardown (#6259). Anything unproven — no stamp, an
 //     unreadable environment, a probe that did not answer, a replaced session,
-//     any worktree or branch residue — is quarantined as a startup-state-unknown
-//     record for inspection rather than destroyed on a guess (#6258).
+//     an unbound or mismatched worktree, any bare branch residue — is
+//     quarantined as a startup-state-unknown record for inspection rather than
+//     destroyed on a guess (#6258).
 func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) {
 	repo, err := repoFromPathForCreate(t.ProjectPath)
 	if err != nil {
@@ -360,6 +379,9 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 	}
 	if row != nil {
 		verb := "quarantined unproven"
+		if row.UserKilled {
+			verb = "tombstoned proven"
+		}
 		if werr := appendInstanceData(repo.ID, *row); werr != nil {
 			return false, fmt.Errorf("%w: writing leftover record: %v", errTaskFireReconcile, werr)
 		}
@@ -434,27 +456,37 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		return nil, nil
 	}
 
-	// A discovered worktree is never proven this attempt's, so a fire that left
-	// one is quarantined, not torn down (#6258). The only evidence available for
-	// it was a registration timestamp compared to the intent — a clock, which any
-	// worktree registered after the intent satisfies. Binding the exact path into
-	// the marker before the worktree exists is #6259; until then the worktree and
-	// the work in it are kept for inspection.
+	// A discovered worktree is this attempt's only when the marker bound its
+	// exact path BEFORE the worktree could exist (#6259): the binding is written
+	// the instant before `git worktree add` runs, so a worktree found at the
+	// bound path can only be the create's. A missing binding, or a discovered
+	// path that differs from it, carries no per-attempt evidence — the worktree
+	// and the work in it stay quarantined, never auto-torn-down.
 	//
-	// Likewise a bare derived branch, or several holders of it, carries no
-	// per-attempt evidence at all.
-	proven := found && !unknown && wtPath == "" && !branchHeld && !(branchExists && !tmuxPresent)
+	// Ownership evidence is per-artifact: a bare derived branch, or several
+	// holders of it, still carries no per-attempt evidence at all.
+	wtBound := wtPath != "" && fire.WorktreePath != "" && fire.WorktreePath == wtPath
+	proven := found && !unknown &&
+		(wtPath == "" || wtBound) &&
+		!(branchHeld && wtPath == "") &&
+		!(branchExists && !branchHeld && !tmuxPresent)
 
 	program := t.Program
 	if program == "" {
 		program = defaultProgramFor(cfg.DefaultProgram, t.ProjectPath)
 	}
 
-	// A live tmux session is stopped only if THAT incarnation proves, from its own
-	// environment, that this fire's spawn created it, and the kill is bound to its
-	// tmux session id (#6258). Everything else — no marker, an unreadable
+	// A PROVEN leftover's live tmux runtime is stopped BEFORE the worktree's
+	// cleanliness is probed: the interrupted create may already have submitted
+	// its prompt, so its agent can still be writing in the worktree, and a
+	// dirty-check taken while it runs would authorize a `worktree remove -f`
+	// teardown that deletes work generated after the snapshot (#5503 review).
+	// The session itself is stopped only if THAT incarnation proves, from its
+	// own environment, that this fire's spawn created it, and the kill is bound
+	// to its tmux session id (#6258). Everything else — no stamp, an unreadable
 	// environment, a probe that did not answer, a replaced session — leaves it
 	// running and the leftover quarantined: unknown is never ours.
+	runtimeStopped := false
 	if proven && tmuxPresent {
 		ourHome, herr := config.GetConfigDir()
 		if herr != nil {
@@ -465,6 +497,7 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 				SessionName: sanitized, Home: ourHome, InstanceID: fire.InstanceID,
 			})
 			if reap.Stopped {
+				runtimeStopped = true
 				log.WarningLog.Printf("task %s: reaped proven leftover tmux session %q (instance %s) from an interrupted cron fire", t.ID, sanitized, fire.InstanceID)
 			} else {
 				proven = false
@@ -473,18 +506,39 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		}
 	}
 
-	if proven {
+	// Cleanliness is the second gate for a bound worktree: even proven leftovers
+	// are only torn down when they carry no work. Anything committed beyond the
+	// mainline or dirty in the tree is the only copy of that work — a quarantine
+	// preserves it. The probe runs only once no runtime can still be writing:
+	// a tmux session that was proven but not confirmed stopped means proven is
+	// already false here, and an unanswerable probe fails closed to quarantine.
+	clean := proven && (wtPath == "" || !tmuxPresent || runtimeStopped)
+	if clean && wtPath != "" {
+		dirty, derr := git.WorktreeDirtyFiles(wtPath)
+		commits, cerr := git.WorktreeCommitsBeyondRepo(identityRoot, wtPath)
+		if derr != nil || cerr != nil {
+			log.WarningLog.Printf("task %s: cannot prove interrupted-fire worktree %q clean (dirty probe: %v, commits probe: %v) — quarantining it",
+				t.ID, wtPath, derr, cerr)
+			clean = false
+		} else {
+			clean = dirty == 0 && commits == 0
+		}
+	}
+
+	reap := proven && clean
+	if reap && wtPath == "" {
 		// A proven tmux-only leftover has no worktree to reap through a
 		// tombstone record — and a record without a worktree path cannot
 		// materialize a teardown handle anyway. Its runtime was just stopped, so
 		// nothing remains of the attempt.
 		return nil, nil
 	}
-	// Anything unproven is recorded startup-state-unknown: nothing may
-	// auto-teardown under an identity af could not confirm (#2207), and the
-	// record is what gives inspection a handle. BranchCreatedByUs stays nil: a
-	// create may have reused a pre-existing branch, and unknown provenance must
-	// never authorize `git branch -D` (#1953's keep-unknown rule).
+	// An unproven or dirty leftover is recorded startup-state-unknown rather
+	// than tombstoned: nothing may auto-teardown under an identity af could not
+	// confirm (#2207), and the record is what gives inspection a handle.
+	// BranchCreatedByUs stays nil: the path binding proves the WORKTREE is this
+	// attempt's, but a create may have reused a pre-existing branch, and unknown
+	// provenance must never authorize `git branch -D` (#1953's keep-unknown rule).
 	var createdByUs *bool
 	// The record's own identity is fresh: the interrupted attempt's bound id
 	// stays in the marker, not on this row — a still-draining create writing
@@ -492,18 +546,23 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	// here would let a straggler write overwrite the leftover record.
 	now := time.Now()
 	return &session.InstanceData{
-		ID:                  session.NewInstanceID(),
-		TaskID:              t.ID,
-		Title:               fire.Title,
-		Path:                repo.WorkspacePath(),
-		Branch:              branch,
-		Status:              session.Loading,
-		Liveness:            session.LiveReady,
-		CreatedAt:           fire.IntendedAt,
-		UpdatedAt:           now,
-		Program:             program,
-		Prompt:              t.Prompt,
-		StartupStateUnknown: true,
+		ID:        session.NewInstanceID(),
+		TaskID:    t.ID,
+		Title:     fire.Title,
+		Path:      repo.WorkspacePath(),
+		Branch:    branch,
+		Status:    session.Loading,
+		Liveness:  session.LiveReady,
+		CreatedAt: fire.IntendedAt,
+		UpdatedAt: now,
+		Program:   program,
+		Prompt:    t.Prompt,
+		// A proven clean bound worktree tombstones: UserKilled is what the poll's
+		// finishUserKill reads to run the teardown that removes it. Everything
+		// else — unproven, unbound, dirty, unanswerable — is recorded
+		// startup-state-unknown and never auto-tears-down.
+		UserKilled:          reap,
+		StartupStateUnknown: !reap,
 		// The recovery handle must name the EXACT tmux session it stands for:
 		// restoreLocalTabs reads TmuxName (not Worktree.SessionName), and an
 		// empty one rebuilds an unscoped name that would address a different

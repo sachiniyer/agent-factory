@@ -94,6 +94,7 @@ func TestTaskFireMarkerRoundTrip(t *testing.T) {
 
 	noteTaskFireTitle("a1b2c3d4", "nightly-2")
 	noteTaskFireInstance("a1b2c3d4", "inst-xyz")
+	noteTaskFireWorktree("a1b2c3d4", "/home/u/.agent-factory/worktrees/repo/nightly-2")
 
 	fire, pending, err = ensureTaskFireMarker("a1b2c3d4")
 	if err != nil {
@@ -102,7 +103,7 @@ func TestTaskFireMarkerRoundTrip(t *testing.T) {
 	if !pending {
 		t.Fatal("second ensure must report the existing marker as pending")
 	}
-	if fire.Title != "nightly-2" || fire.InstanceID != "inst-xyz" {
+	if fire.Title != "nightly-2" || fire.InstanceID != "inst-xyz" || fire.WorktreePath != "/home/u/.agent-factory/worktrees/repo/nightly-2" {
 		t.Fatalf("binds did not persist: %+v", fire)
 	}
 

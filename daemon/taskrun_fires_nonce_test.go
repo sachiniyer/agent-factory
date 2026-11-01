@@ -31,6 +31,9 @@ type fakeReapTmux struct {
 	// unreadable makes every show-environment fail with an error that is not
 	// "unknown variable".
 	unreadable bool
+	// absent makes `tmux ls` report no sessions at all — the leftover under test
+	// has no live runtime (a worktree-only leftover, #6259).
+	absent bool
 }
 
 // installFakeReapTmux puts a fake `tmux` first on PATH for the test's duration and
@@ -48,10 +51,14 @@ func installFakeReapTmux(t *testing.T, sanitized string, spec fakeReapTmux) (log
 	if spec.unreadable {
 		envGuard = `echo "protocol version mismatch" >&2; exit 1`
 	}
+	lsAnswer := `echo '` + sanitized + `'`
+	if spec.absent {
+		lsAnswer = `:`
+	}
 	script := `#!/bin/sh
 echo "$*" >> '` + logPath + `'
 case "$1" in
-ls) echo '` + sanitized + `' ;;
+ls) ` + lsAnswer + ` ;;
 display-message)
   for last; do :; done
   case "$last" in
