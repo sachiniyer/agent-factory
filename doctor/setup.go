@@ -201,26 +201,39 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 		})
 		return
 	}
-	checkOneProgram("default_program", cfg.DefaultProgram, config.ResolveProgram(cfg, cfg.DefaultProgram), report)
+	// Anchor relative program_overrides to the session's launch directory
+	// (the repo the doctor is inside), never the doctor's own cwd. The
+	// daemon's create-validation path does the same with repo.WorkspacePath()
+	// (#5779); the doctor was left behind, so the same relative override
+	// flipped between PASS and FAIL purely on where `af doctor` was typed.
+	workspace, _ := currentRepoRoot()
+	checkOneProgram(workspace, "default_program", cfg.DefaultProgram, config.ResolveProgram(cfg, cfg.DefaultProgram), report)
 	for _, agent := range sortedKeys(cfg.ProgramOverrides) {
 		command := strings.TrimSpace(cfg.ProgramOverrides[agent])
 		if command == "" {
 			continue
 		}
-		checkOneProgram("program_overrides."+agent, agent, command, report)
+		checkOneProgram(workspace, "program_overrides."+agent, agent, command, report)
 	}
 }
 
-func checkOneProgram(field, agent, command string, report *Report) {
-	check, err := preflight.CheckCommand(command)
-	if err != nil {
-		report.addActionableFinding(Finding{
+func checkOneProgram(workspace, field, agent, command string, report *Report) {
+	outcome := checkProgramCommand(workspace, command)
+	if outcome.advisory {
+		report.addAdvisoryFinding(Finding{
 			Check:  "agent-program",
-			Detail: fmt.Sprintf("%s resolves to %q but is not runnable — %v", field, command, preflight.ProgramError(agent, command, err)),
+			Detail: fmt.Sprintf("%s resolves to %s", field, relativeOverrideNoAnchorDetail(command)),
 		})
 		return
 	}
-	report.Pass(sectionEnvironment, field, fmt.Sprintf("%q uses %s", command, check.Path))
+	if outcome.err != nil {
+		report.addActionableFinding(Finding{
+			Check:  "agent-program",
+			Detail: fmt.Sprintf("%s resolves to %q but is not runnable — %v", field, command, preflight.ProgramError(agent, command, outcome.err)),
+		})
+		return
+	}
+	report.Pass(sectionEnvironment, field, fmt.Sprintf("%q uses %s", command, outcome.check.Path))
 }
 
 func writableDir(dir string) error {

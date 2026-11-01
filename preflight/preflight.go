@@ -260,6 +260,50 @@ func LocalSessionPrereqsAt(cfg *config.Config, agent, workingDir string) error {
 	return nil
 }
 
+// RelativeExecutable reports whether command's resolved executable is a
+// relative path that resolves against the launch working directory — for
+// example ./venv/bin/claude, bin/claude, or an env-wrapped relative executable
+// such as env -C subdir ./codex. The doctor uses this to emit an advisory when
+// it runs outside any git repository: a relative program_overrides command has
+// no anchor there, and resolving it against the doctor's own cwd gives both
+// false failures (the cwd lacks it) and false passes (a decoy cwd contains it)
+// for a config shape af explicitly sanctions (#5779, doctor).
+//
+// Absolute paths, tilde paths, and bare names do not share the dependency:
+// they resolve the same way regardless of the launch directory, so a doctor
+// outside any repo may still verify them directly. The detected executable is
+// resolved through tmux.CommandEnvironmentFromCommand, so the same env-wrapper
+// and opaque-wrapper handling as the launch path applies. The classification is
+// conservative: a command that cannot be parsed (unterminated quotes, unknown
+// env options) returns false so CheckCommand surfaces the real error rather
+// than doctor emitting a different advisory for it.
+func RelativeExecutable(command string) bool {
+	launch, err := tmux.CommandEnvironmentFromCommand(command, "/")
+	if err != nil {
+		return false
+	}
+	return usesRelativeExecutable(launch.Executable)
+}
+
+// usesRelativeExecutable mirrors the relative-path branch of
+// resolveExecutableAt: a token with a path separator that is not absolute and
+// not a tilde is the one shape whose resolution depends on the launch
+// directory. Bare names depend on PATH entries' relativity, which CheckCommand
+// handles; tilde expands to an absolute home; absolute paths ignore the
+// working directory entirely.
+func usesRelativeExecutable(exe string) bool {
+	if exe == "" {
+		return false
+	}
+	if strings.HasPrefix(exe, "~") {
+		return false
+	}
+	if !strings.ContainsRune(exe, filepath.Separator) {
+		return false
+	}
+	return !filepath.IsAbs(config.ExpandTilde(exe))
+}
+
 // ProgramError renders the actionable user-facing error for an agent that
 // failed its preflight check. It classifies the cause so the lead line points
 // at the real fix: a missing binary says "not installed or not on PATH" (fix:

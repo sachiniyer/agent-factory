@@ -293,3 +293,47 @@ func TestLocalSessionPrereqsAtResolvesRelativeOverrideInWorkdir(t *testing.T) {
 	require.NoError(t, LocalSessionPrereqsAt(cfg, "claude", dir))
 	require.Error(t, LocalSessionPrereqsAt(cfg, "claude", t.TempDir()), "a directory without bin/claude must be refused")
 }
+
+// TestRelativeExecutable locks the doctor-side classification that drives the
+// "doctor outside any repo must not resolve a relative override against its
+// incidental cwd" branch (preflight.RelativeExecutable, doctor bug). The
+// detector must report exactly the command shapes whose resolution depends on
+// the launch working directory: a path-separator-containing executable that is
+// not absolute and not a tilde. Bare names, absolute paths, and tilde paths
+// are anchor-independent and must not be flagged — otherwise the doctor would
+// refuse to verify `default_program = "claude"` run outside a repo.
+func TestRelativeExecutable(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{name: "relative dot-slash", command: "./venv/bin/claude", want: true},
+		{name: "relative subdirs", command: "bin/claude", want: true},
+		{name: "relative parent", command: "../bin/claude", want: true},
+		{name: "bare name", command: "claude", want: false},
+		{name: "absolute path", command: "/usr/bin/claude", want: false},
+		{name: "tilde path", command: "~/bin/claude", want: false},
+		{name: "env chdir relative exe", command: "env -C subdir ./codex", want: true},
+		// env -C with an ABSOLUTE chdir still surfaces a relative detected
+		// executable, so the helper conservatively reports it: doctor's caller
+		// treats "true" as advisory, and "cannot verify" for a command whose
+		// chdir happens to be absolute is the safe side of the
+		// false-positive/false-negative trade.
+		{name: "env chdir absolute with relative exe is conservative", command: "env -C /abs ./codex", want: true},
+		{name: "env bare exe", command: "env codex", want: false},
+		{name: "env PATH override bare exe", command: "env PATH=bin codex", want: false},
+		{name: "shell assignment then bare exe", command: "PATH=bin codex", want: false},
+		{name: "opaque relative wrapper", command: "./my-wrapper --ready", want: true},
+		{name: "opaque bare wrapper", command: "my-wrapper --ready", want: false},
+		{name: "unterminated quote defers to CheckCommand", command: "claude --bad'", want: false},
+		{name: "empty command", command: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RelativeExecutable(tc.command); got != tc.want {
+				t.Errorf("RelativeExecutable(%q) = %v, want %v", tc.command, got, tc.want)
+			}
+		})
+	}
+}
