@@ -12,9 +12,9 @@ import (
 
 var runnerNow = time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 
-func planWindow(plan, backlog float64, resetsIn time.Duration) planusage.PlanWindow {
+func planWindow(plan float64, resetsIn time.Duration) planusage.PlanWindow {
 	at := runnerNow.Add(resetsIn)
-	return planusage.PlanWindow{Plan: plan, Backlog: backlog, ResetsAt: &at, All: 10}
+	return planusage.PlanWindow{Plan: plan, ResetsAt: &at, All: 10}
 }
 
 func readUsage(five, week planusage.PlanWindow, age time.Duration) planusage.Usage {
@@ -27,7 +27,7 @@ func gateIn(u planusage.Usage) GateInput {
 }
 
 func TestCheckGates(t *testing.T) {
-	ok := readUsage(planWindow(20, 5, 2*time.Hour), planWindow(30, 10, 4*24*time.Hour), time.Minute)
+	ok := readUsage(planWindow(20, 2*time.Hour), planWindow(30, 4*24*time.Hour), time.Minute)
 	cases := []struct {
 		name   string
 		in     func() GateInput
@@ -35,25 +35,33 @@ func TestCheckGates(t *testing.T) {
 		reason string
 	}{
 		{"open", func() GateInput { return gateIn(ok) }, "", ""},
-		{"share of the 5-hour window", func() GateInput {
-			return gateIn(readUsage(planWindow(60, 50, 2*time.Hour), planWindow(30, 10, 96*time.Hour), 0))
-		}, GateShare, "Backlog used its 50% of the 5-hour window · resumes 14:00"},
-		{"share of the week", func() GateInput {
-			return gateIn(readUsage(planWindow(20, 5, 2*time.Hour), planWindow(60, 51, 96*time.Hour), 0))
-		}, GateShare, "Backlog used its 50% of the week · resumes Mon 12:00"},
-		{"share 0 stops everything", func() GateInput {
+		{"limit in the 5-hour window", func() GateInput {
+			return gateIn(readUsage(planWindow(52, 2*time.Hour), planWindow(30, 96*time.Hour), 0))
+		}, GateLimit, "Plan at 52% of the 5-hour window (limit 50%) · resumes 14:00"},
+		{"limit in the week", func() GateInput {
+			return gateIn(readUsage(planWindow(20, 2*time.Hour), planWindow(60, 96*time.Hour), 0))
+		}, GateLimit, "Plan at 60% of the week (limit 50%) · resumes Mon 12:00"},
+		{"at the limit counts as over", func() GateInput {
+			return gateIn(readUsage(planWindow(50, 2*time.Hour), planWindow(30, 96*time.Hour), 0))
+		}, GateLimit, "Plan at 50% of the 5-hour window (limit 50%) · resumes 14:00"},
+		{"both over: the window that resets last", func() GateInput {
+			return gateIn(readUsage(planWindow(90, 2*time.Hour), planWindow(55, 96*time.Hour), 0))
+		}, GateLimit, "Plan at 55% of the week (limit 50%) · resumes Mon 12:00"},
+		{"a raised limit lets the runner start", func() GateInput {
+			in := gateIn(readUsage(planWindow(60, 2*time.Hour), planWindow(30, 96*time.Hour), 0))
+			in.Budget.Limit = 90
+			return in
+		}, "", ""},
+		{"limit 0 stops everything", func() GateInput {
 			in := gateIn(ok)
-			in.Budget.Share = 0
+			in.Budget.Limit = 0
 			return in
-		}, GateShare, "Backlog share is 0% · raise it with \"af backlog budget --share 50\""},
-		{"share 0 with a dollar limit and no reading", func() GateInput {
+		}, GateLimit, "Plan limit is 0% · raise it with \"af backlog budget --limit 50\""},
+		{"limit 0 with a dollar limit and no reading", func() GateInput {
 			in := gateIn(planusage.Usage{})
-			in.Budget.Share, in.Budget.USDLimit = 0, 10
+			in.Budget.Limit, in.Budget.USDLimit = 0, 10
 			return in
-		}, GateShare, ""},
-		{"stop at", func() GateInput {
-			return gateIn(readUsage(planWindow(91, 5, 2*time.Hour), planWindow(30, 10, 96*time.Hour), 0))
-		}, GateStopAt, "Plan at 91% of the 5-hour window (stop at 90%) · resumes 14:00"},
+		}, GateLimit, ""},
 		{"usage limit with reset", func() GateInput {
 			in := gateIn(ok)
 			in.Limited, in.LimitUntil = true, runnerNow.Add(3*time.Hour)
@@ -254,11 +262,11 @@ func TestRunnerHoldsItemAfterFailedStart(t *testing.T) {
 
 func TestPlanRunnerOffAndStopped(t *testing.T) {
 	b, states := runnerBacklog(t)
-	g := Gate{Name: GateShare, Reason: "Backlog used its 50% of the week · resumes Mon 09:00"}
+	g := Gate{Name: GateLimit, Reason: "Plan at 60% of the week (limit 50%) · resumes Mon 09:00"}
 	i := in(states, 0)
 	i.Gate = g
 	p := b.PlanRunner(i)
-	if len(p.Start) != 0 || p.View.State != RunnerStopped || p.View.Gate != GateShare || p.View.Reason != g.Reason {
+	if len(p.Start) != 0 || p.View.State != RunnerStopped || p.View.Gate != GateLimit || p.View.Reason != g.Reason {
 		t.Fatalf("%+v", p)
 	}
 	b.Settings.Runner = false
@@ -309,7 +317,7 @@ func TestRunNow(t *testing.T) {
 }
 
 func TestRunUse(t *testing.T) {
-	w := planWindow(40, 10, time.Hour)
+	w := planWindow(40, time.Hour)
 	if use, ok := RunUse(2.5, w); !ok || use != 10 {
 		t.Fatal(use, ok)
 	}
@@ -340,7 +348,7 @@ func oneWindow(w planusage.PlanWindow) func(string) planusage.PlanWindow {
 }
 
 func TestCheckCaps(t *testing.T) {
-	w := planWindow(40, 20, time.Hour)
+	w := planWindow(40, time.Hour)
 	reset := w.ResetsAt.Unix()
 	cost := map[string]float64{"s1": 3, "s2": 9, "s3": 9}
 	inWindow := RunRef{StartedAt: runnerNow.Add(-time.Hour)}
@@ -379,7 +387,7 @@ func TestCheckCapsAcrossWindowReset(t *testing.T) {
 	b, states := capBacklog(t, RunRef{StartedAt: runnerNow.Add(-3 * time.Hour), CapReset: oldReset, CapBase: 0})
 	// The new window has little metered cost so far; the run's lifetime cost
 	// of 30 would be 400% of it.
-	w := planWindow(4, 1, 5*time.Hour-time.Minute)
+	w := planWindow(4, 5*time.Hour-time.Minute)
 	w.All = 1
 	got := b.CheckCaps(states, map[string]float64{"s1": 30}, oneWindow(w), 10)
 	if len(got.Over) != 0 {

@@ -1,5 +1,5 @@
 // Package backlog holds the ordered tree of work items for one project and the
-// global budget, the share of the Claude plan the runner may use.
+// global budget, the Claude plan use under which the runner starts items.
 package backlog
 
 import (

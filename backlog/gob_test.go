@@ -30,7 +30,7 @@ func TestGobKeepsZeroPointers(t *testing.T) {
 	if got := gobRoundTrip(t, s); got.Runner == nil || *got.Runner || got.MaxRunning != nil {
 		t.Fatalf("%+v", got)
 	}
-	b := SetBudgetRequest{Share: ptr(0.0), USDLimit: ptr(0.0)}
+	b := SetBudgetRequest{Limit: ptr(0.0), USDLimit: ptr(0.0)}
 	if got := gobRoundTrip(t, b); !reflect.DeepEqual(got, b) {
 		t.Fatalf("%+v", got)
 	}

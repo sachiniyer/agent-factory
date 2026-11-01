@@ -30,7 +30,7 @@ func TestBudgetResponseJSONShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `{"budget":{"schema_version":1,"share":50,"stop_at":90,"max_per_run":10,"usd_limit":0,"usd_spent":0},` +
+	const want = `{"budget":{"schema_version":2,"limit":50,"max_per_run":10,"usd_limit":0,"usd_spent":0},` +
 		`"account":"default",` +
 		`"windows":{"five_hour":{"plan":40,"backlog":10,"all_cost":8,"resets_at":"2026-10-20T14:00:00Z"},"seven_day":{"plan":0,"backlog":0,"all_cost":0,"resets_at":null}},` +
 		`"reading_at":"2026-10-20T12:00:00Z",` +
