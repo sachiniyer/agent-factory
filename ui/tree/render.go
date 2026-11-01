@@ -34,6 +34,7 @@ type Theme struct {
 	Lost                lipgloss.TerminalColor
 	Dead                lipgloss.TerminalColor
 	ArchiveWarning      lipgloss.TerminalColor
+	Attention           lipgloss.TerminalColor
 }
 
 // deadIcon is hollow (not the filled readyIcon) so a dead session differs from
@@ -59,6 +60,14 @@ const archivedIcon = "▧ "
 // contrast and color-blindness, the same discipline as the dead/lost dots.
 // (Refines the provisional ◒ slot Phase 1e stubbed for #1204.)
 const limitIcon = "◆ "
+
+// attentionIcon marks a session whose agent asked for the user (#5461): a bang,
+// distinct in shape from every dot/diamond/box glyph and deliberately STATIC —
+// the TUI has no animation (#1766), where the web's attention dot blinks. It
+// echoes the automations rail's "[!]" needs-attention marker, and is drawn in
+// the generated attention role the web's dot uses rather than the dead/lost
+// ambers, so the request never reads as breakage.
+const attentionIcon = "! "
 
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
 // shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
@@ -90,6 +99,12 @@ var archivedStyle = lipgloss.NewStyle()
 // warning red-orange, distinct from the ready-green, lost-amber, and dead/
 // archived gray so the blocked state is unmistakable at a glance.
 var limitStyle = lipgloss.NewStyle()
+
+// attentionStyle paints the status glyph of a session whose agent asked for the
+// user (#5461) in the generated attention role — the same token the web's
+// blinking dot draws — and attentionColor paints the request's detail line.
+var attentionStyle = lipgloss.NewStyle()
+var attentionColor lipgloss.TerminalColor
 
 // limitBadgePrefix returns the sidebar title prefix for a usage-limit-blocked
 // session (#1146): "[limit] resets <t> " when a reset time is known, else a bare
@@ -176,6 +191,7 @@ func init() {
 		Lost:                t["lost"],
 		Dead:                t["dead"],
 		ArchiveWarning:      t["dead"],
+		Attention:           t["attention"],
 	})
 }
 
@@ -186,6 +202,8 @@ func ApplyTheme(t Theme) {
 	lostStyle = lipgloss.NewStyle().Foreground(t.Lost)
 	archivedStyle = lipgloss.NewStyle().Foreground(theme.Colors()["archived"])
 	limitStyle = lipgloss.NewStyle().Foreground(theme.Colors()["limit-reached"])
+	attentionColor = t.Attention
+	attentionStyle = lipgloss.NewStyle().Foreground(attentionColor)
 
 	InstanceTitleColor = t.Foreground
 	titleStyle = lipgloss.NewStyle().
@@ -350,8 +368,32 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// dot; every working/busy state renders blankIcon so the columns stay aligned.
 	liveness := i.GetLiveness()
 	op := i.GetInFlightOp()
+	// The agent's attention request (#5461). The guard mirrors the web's
+	// hasAttention (web/src/status.ts): the request paints only where the row
+	// reads as live — Ready or working, a busy-masked in-flight op included — so
+	// a stale projection cannot put it over a dead/lost/archived/limit glyph.
+	// The daemon clears the request on those states; this covers a projection
+	// that has not caught up.
+	att := i.Attention()
+	showAttention := att != nil &&
+		(op != session.OpNone ||
+			liveness == session.LiveReady ||
+			liveness == session.LiveRunning ||
+			liveness == session.LivenessUnset)
+	attentionText := ""
+	if showAttention {
+		attentionText = "needs attention"
+		if reason := strings.TrimSpace(att.Reason); reason != "" {
+			attentionText += ": " + reason
+		}
+	}
 	var join string
 	switch {
+	case showAttention:
+		// The ask outranks every status glyph the way the web's attention dot
+		// replaces the status dot — a Ready row's green returns when the request
+		// clears, and the reason rides the detail line below.
+		join = attentionStyle.Render(attentionIcon)
 	case op != session.OpNone:
 		// The op axis is checked FIRST and DELIBERATELY masks the liveness glyph:
 		// an in-flight create/restore is a loading state (nothing, not a spinner —
@@ -570,6 +612,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// why every other fact on the row may be stale, so it leads like a
 		// restore outcome does and the branch trails it (#5571 W1.3).
 		detail := fmt.Sprintf("unreachable %s · %s", formatPaneChurnAge(u.Since, r.now())+" ago", u.Error)
+		if attentionText != "" {
+			// The request may itself be part of the stale view — the outage
+			// leads — but it is still what the daemon reports, so the reason
+			// stays on the line rather than hiding until the row re-probes.
+			detail += idleDetailSeparator + attentionText
+		}
 		if branch != "" {
 			description = detail + " · " + branch
 		} else {
@@ -609,6 +657,19 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 			// detail truncated the branch away entirely (#4174).
 			description = fitIdleDetail(branch, detail, remainingWidth)
 		}
+	}
+	// The agent's ask (#5461) is the row's actionable fact, so it leads the
+	// detail the way the outage and restore-outcome details do and the branch
+	// trails. It outranks the ordinary idle detail — the way the web's
+	// attention bucket tops operatorKind — but yields to the staleness and
+	// restore reports above, which explain the row itself.
+	if attentionText != "" && !unreachableRow && !restoreFailed && !restoreWaiting {
+		if branch != "" {
+			description = attentionText + idleDetailSeparator + branch
+		} else {
+			description = attentionText
+		}
+		descS = descS.Foreground(attentionColor)
 	}
 	// Don't show the branch if there's no space for it; otherwise fit it into
 	// remainingWidth. runewidth.Truncate reserves the "…" tail (1 cell) inside
