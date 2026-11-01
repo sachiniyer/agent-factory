@@ -178,6 +178,35 @@ func TestTaskFireLeftover_BoundWorktreeWithWorkStaysQuarantined(t *testing.T) {
 			},
 		},
 		{
+			name: "an index-flag-hidden modification",
+			prep: func(t *testing.T, repoPath string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(repoPath, "flagged.txt"), []byte("base"), 0o644); err != nil {
+					t.Fatalf("write tracked file: %v", err)
+				}
+				for _, args := range [][]string{
+					{"-C", repoPath, "add", "flagged.txt"},
+					{"-C", repoPath, "commit", "-m", "track a file"},
+				} {
+					if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+						t.Fatalf("git %v: %v: %s", args, err, out)
+					}
+				}
+			},
+			// --assume-unchanged hides the edit from git status entirely: the
+			// tree reads clean while holding the only copy of the change.
+			soil: func(t *testing.T, wtPath string) {
+				t.Helper()
+				if out, err := exec.Command("git", "-C", wtPath, "update-index",
+					"--assume-unchanged", "flagged.txt").CombinedOutput(); err != nil {
+					t.Fatalf("git update-index: %v: %s", err, out)
+				}
+				if err := os.WriteFile(filepath.Join(wtPath, "flagged.txt"), []byte("edited"), 0o644); err != nil {
+					t.Fatalf("edit flagged file: %v", err)
+				}
+			},
+		},
+		{
 			// A stash made inside the leftover lands in the SHARED refs/stash
 			// the main checkout also lists — it survives worktree removal, so
 			// it is not the tree's own to lose and must not quarantine. The
@@ -377,5 +406,82 @@ func TestTaskFireLeftover_SharedRepoStashDoesNotQuarantine(t *testing.T) {
 	}
 	if row == nil || !row.UserKilled || row.StartupStateUnknown {
 		t.Fatalf("a shared stash is not the worktree's own state — the bound clean leftover must tombstone, got %+v", row)
+	}
+}
+
+// TestTaskFireLeftover_IncompleteWriterReapKeepsBoth: a proven session whose
+// process capture cannot be verified is Stopped but not WritersReaped — the
+// kill fired, yet a survivor could still be writing into the tree, so the
+// bound worktree quarantines rather than tombstoning on an unreadable answer.
+func TestTaskFireLeftover_IncompleteWriterReapKeepsBoth(t *testing.T) {
+	title := "incomplete-reap-leftover"
+	repoPath, repo, sanitized, home := fakeReapFixture(t, title)
+	branch := worktreeBranchFor(t, title)
+	wtPath := filepath.Join(resolvedTempDir(t), "incomplete-wt")
+	seedLeftoverWorktree(t, repoPath, branch, wtPath)
+	logPath := installFakeReapTmux(t, sanitized, fakeReapTmux{instance: reapInstanceID, home: home, badPanes: true})
+
+	fire := &taskFireMarker{
+		TaskID: "ab0r7208", IntendedAt: time.Now().Add(-time.Minute), Title: title,
+		InstanceID: reapInstanceID, WorktreePath: wtPath,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7208", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+		fire, repo, nil)
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row == nil || !row.StartupStateUnknown || row.UserKilled {
+		t.Fatalf("an incomplete writer reap must quarantine the worktree, got %+v", row)
+	}
+	if _, statErr := os.Stat(wtPath); statErr != nil {
+		t.Fatalf("the unproven-clean worktree must be left in place: %v", statErr)
+	}
+	if kills := killsIn(fakeTmuxLog(t, logPath)); len(kills) != 1 {
+		t.Fatalf("the proven session itself is still stopped — only its writers are unconfirmed; tmux was sent %q", kills)
+	}
+}
+
+// TestTaskFireLeftover_HookScopesJoinedBeforeCleanProbe: the fire's original
+// instance identity names every transient scope its hooks could still own —
+// the gate must join them before it judges the tree (a scope survivor can
+// still be writing into it), and with the fire's id, not the synthesized
+// row's fresh one.
+func TestTaskFireLeftover_HookScopesJoinedBeforeCleanProbe(t *testing.T) {
+	title := "hook-join-leftover"
+	repoPath, repo, sanitized, _ := fakeReapFixture(t, title)
+	branch := worktreeBranchFor(t, title)
+	wtPath := filepath.Join(resolvedTempDir(t), "hooked-wt")
+	seedLeftoverWorktree(t, repoPath, branch, wtPath)
+	installFakeReapTmux(t, sanitized, fakeReapTmux{absent: true})
+
+	var gotSession, gotPath string
+	calls := 0
+	prev := stopOrphanedHookScopes
+	stopOrphanedHookScopes = func(sessionID, worktreePath string) error {
+		calls++
+		gotSession, gotPath = sessionID, worktreePath
+		return nil
+	}
+	t.Cleanup(func() { stopOrphanedHookScopes = prev })
+
+	fire := &taskFireMarker{
+		TaskID: "ab0r7209", IntendedAt: time.Now().Add(-time.Minute), Title: title,
+		InstanceID: reapInstanceID, WorktreePath: wtPath,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7209", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+		fire, repo, nil)
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("the clean gate must join orphaned hook scopes exactly once before probing, got %d calls", calls)
+	}
+	if gotSession != reapInstanceID || gotPath != wtPath {
+		t.Fatalf("the join must name the fire's identities, got (%q, %q), want (%q, %q)", gotSession, gotPath, reapInstanceID, wtPath)
+	}
+	if row == nil || !row.UserKilled || row.StartupStateUnknown {
+		t.Fatalf("with the hook join answering, the bound clean worktree must tombstone, got %+v", row)
 	}
 }

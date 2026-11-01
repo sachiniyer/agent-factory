@@ -290,15 +290,24 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 //     marker recorded before the spawn, stamped at new-session), and the kill is
 //     bound to the probed tmux session id. A discovered worktree is torn down
 //     only when the marker bound its exact path before creation AND the tree is
-//     clean — no modified, staged, untracked, or ignored files, no commits
-//     beyond the mainline, and nothing in its own ref namespaces
-//     (refs/worktree/, refs/bisect/, refs/rewritten/ — a stash lives in the
+//     clean — no surviving writers (proven tmux runtime stopped with every
+//     captured process reaped, orphaned hook scopes joined), no modified,
+//     staged, untracked, ignored, or index-flag-hidden content, no locked
+//     registration, object storage, or submodule the kept branch cannot
+//     restore, no commits beyond the mainline, and nothing in its own ref
+//     namespaces (refs/worktree|bisect|rewritten — a stash lives in the
 //     SHARED refs/stash and survives) — which tombstones
 //     the record for teardown (#6259). Anything unproven — no stamp, an
 //     unreadable environment, a probe that did not answer, a replaced session,
 //     an unbound or mismatched worktree, any bare branch residue — is
 //     quarantined as a startup-state-unknown record for inspection rather than
 //     destroyed on a guess (#6258).
+//
+// stopOrphanedHookScopes is the seam the worktree clean gate calls through:
+// it joins every transient hook scope the fire's identities could still own.
+// Tests stub it to observe the call without a systemd manager.
+var stopOrphanedHookScopes = git.StopOrphanedHookScopes
+
 func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) {
 	repo, err := repoFromPathForCreate(t.ProjectPath)
 	if err != nil {
@@ -508,12 +517,21 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 			reap := tmux.ReapProvenIncarnation(cmdExec, program, tmux.IncarnationProof{
 				SessionName: sanitized, Home: ourHome, InstanceID: fire.InstanceID,
 			})
-			if reap.Stopped {
+			// A stopped session is enough when there is no worktree to judge.
+			// When there is, the gate additionally needs every writer reaped:
+			// a capture that did not answer, or a captured process that
+			// survived, can still land files between the probes and the later
+			// removal — work those probes never saw (#6546 Codex).
+			if reap.Stopped && (wtPath == "" || reap.WritersReaped) {
 				runtimeStopped = true
 				log.WarningLog.Printf("task %s: reaped proven leftover tmux session %q (instance %s) from an interrupted cron fire", t.ID, sanitized, fire.InstanceID)
 			} else {
 				proven = false
-				log.WarningLog.Printf("task %s: leaving interrupted-fire session %q alone — %s", t.ID, sanitized, reap.Why)
+				why := reap.Why
+				if reap.Stopped {
+					why = "the session is stopped but its process capture was incomplete or a writer survived; nothing proven about the tree's writers"
+				}
+				log.WarningLog.Printf("task %s: leaving interrupted-fire session %q alone — %s", t.ID, sanitized, why)
 			}
 		}
 	}
@@ -531,22 +549,26 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		// tmux session at all. Stop and join any survivor BEFORE the probes
 		// read the tree — files it could still land between the read and the
 		// later removal are work the probes would never see.
-		if herr := git.StopOrphanedHookScopes(fire.InstanceID, wtPath); herr != nil {
+		if herr := stopOrphanedHookScopes(fire.InstanceID, wtPath); herr != nil {
 			log.WarningLog.Printf("task %s: cannot join the interrupted-fire hooks for %q — quarantining it: %v",
 				t.ID, wtPath, herr)
 			clean = false
 		}
 	}
 	if clean && wtPath != "" {
-		dirty, derr := git.WorktreeDirtyFiles(wtPath)
+		// The unrecoverable-content probe is the dirty check PLUS what `git
+		// status` cannot see: index flags hiding modified content, a locked
+		// registration, object storage inside the tree, a submodule — every
+		// reason the kept branch cannot restore what removal deletes.
+		reasons, rerr := git.WorktreeUnrecoverableContent(wtPath)
 		commits, cerr := git.WorktreeCommitsBeyondRepo(identityRoot, wtPath)
 		priv, perr := git.WorktreePrivateRefs(wtPath)
-		if derr != nil || cerr != nil || perr != nil {
-			log.WarningLog.Printf("task %s: cannot prove interrupted-fire worktree %q clean (dirty probe: %v, commits probe: %v, refs probe: %v) — quarantining it",
-				t.ID, wtPath, derr, cerr, perr)
+		if rerr != nil || cerr != nil || perr != nil {
+			log.WarningLog.Printf("task %s: cannot prove interrupted-fire worktree %q clean (content probe: %v, commits probe: %v, refs probe: %v) — quarantining it",
+				t.ID, wtPath, rerr, cerr, perr)
 			clean = false
 		} else {
-			clean = dirty == 0 && commits == 0 && priv == 0
+			clean = len(reasons) == 0 && commits == 0 && priv == 0
 		}
 	}
 

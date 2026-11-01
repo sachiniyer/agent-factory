@@ -27,6 +27,13 @@ type IncarnationReap struct {
 	// Stopped: the proven incarnation was killed, or its id was already gone by
 	// the time the kill ran. Nothing of it remains to write into a workspace.
 	Stopped bool
+	// WritersReaped: the kill is Stopped AND every process captured from the
+	// verified incarnation was reaped — the pane listing verified, the capture
+	// was complete, and no captured pid survived. A caller about to judge the
+	// incarnation's workspace for removal needs this stronger word: a session
+	// can be Stopped while its capture was incomplete or a captured process
+	// ignored the reap and kept writing (#6546 Codex).
+	WritersReaped bool
 	// Why, when !Stopped, names the condition that kept the session alone:
 	// unproven, replaced, unreadable, or unanswered. Never empty then.
 	Why string
@@ -198,12 +205,13 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 	if captureNote != "" {
 		log.WarningLog.Printf("tmux session %s: stopped; %s", name, captureNote)
 	}
+	var survivors []proctree.Process
 	if len(leaked) > 0 {
 		// Synchronous: the boot reconcile that calls this is not latency-sensitive,
 		// and a caller told "stopped" should find the pane's processes stopped too.
-		incarnationReapProcesses(reapOnRequest, name, leaked, reapGraceWait, reapTermWait)
+		survivors = incarnationReapProcesses(reapOnRequest, name, leaked, reapGraceWait, reapTermWait)
 	}
-	return IncarnationReap{Stopped: true}
+	return IncarnationReap{Stopped: true, WritersReaped: captureNote == "" && len(survivors) == 0}
 }
 
 // captureVerifiedTrees captures the pane process trees of the incarnation, keeping

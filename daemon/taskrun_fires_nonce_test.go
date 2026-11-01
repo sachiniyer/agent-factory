@@ -34,6 +34,10 @@ type fakeReapTmux struct {
 	// absent makes `tmux ls` report no sessions at all — the leftover under test
 	// has no live runtime (a worktree-only leftover, #6259).
 	absent bool
+	// badPanes makes list-panes answer a row the verified-incarnation prefix
+	// does not stamp, so the process capture is incomplete: the guarded kill
+	// still fires (its own re-check passed) but WritersReaped stays false.
+	badPanes bool
 }
 
 // installFakeReapTmux puts a fake `tmux` first on PATH for the test's duration and
@@ -55,6 +59,10 @@ func installFakeReapTmux(t *testing.T, sanitized string, spec fakeReapTmux) (log
 	if spec.absent {
 		lsAnswer = `:`
 	}
+	listPanesAnswer := `:`
+	if spec.badPanes {
+		listPanesAnswer = `echo 'unstamped-pane-row 12345'`
+	}
 	script := `#!/bin/sh
 echo "$*" >> '` + logPath + `'
 case "$1" in
@@ -66,6 +74,8 @@ display-message)
     '#{pid} #{session_created}') echo '4242 1700000000' ;;
     *) exit 1 ;;
   esac ;;
+list-panes)
+  ` + listPanesAnswer + ` ;;
 show-environment)
   ` + envGuard + `
   if [ -z "$4" ]; then exit 0; fi
