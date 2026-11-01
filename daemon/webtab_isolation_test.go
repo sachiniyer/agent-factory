@@ -289,7 +289,7 @@ func TestWorkspaceIsolation_EditorWebSocketOnlyFromItsOwnOrigin(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "by title")
 	_, statErr := os.Stat(argsFile)
-	assert.True(t, os.IsNotExist(statErr), "a refused handshake must not start the editor (argv file: %v)", statErr)
+	assert.True(t, os.IsNotExist(statErr), "a refused handshake, by id or title, must not start the editor (argv file: %v)", statErr)
 
 	// The editor's own page (and a non-browser client, which sends no Origin) still
 	// gets a real, relaying connection.
