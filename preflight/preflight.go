@@ -350,12 +350,21 @@ func RelativeExecutable(command string) bool {
 	// launch directory through PATH=bin); an absolute chdir fixes that
 	// lookup dir, so the bare-operand PATH check is gated on the working
 	// directory resolving against the doctor's cwd, like launch.Executable.
-	if op := envCommandOperand(command); op != "" && op != launch.Executable {
+	// The PATH active when the operand is resolved is the environment the
+	// parent env execs it in: each env wrapper applies its own PATH
+	// assignments before running its command operand, so a nested env
+	// (`env PATH=bin env PATH=/usr/bin /usr/bin/codex`) is looked up through
+	// the outer env's relative PATH=bin even though the final launch PATH is
+	// /usr/bin — using the final PATH would let the doctor verify /usr/bin/env
+	// and falsely pass while the session resolves the inner env from
+	// <launch-dir>/bin. envCommandOperand therefore reports the PATH in
+	// effect at the operand alongside the operand itself.
+	if op, opPath, opPathSet := envCommandOperand(command); op != "" && op != launch.Executable {
 		if usesRelativeExecutable(op) {
 			return true
 		}
 		if workingDirResolvesAgainstCwd(command, launch) && isBareExecutable(op) {
-			if path, ok := effectivePathValue(launch); ok && pathHasRelativeEntry(op, path) {
+			if opPathSet && pathHasRelativeEntry(op, opPath) {
 				return true
 			}
 		}
@@ -430,13 +439,26 @@ func relativeShellWrapper(command string) string {
 // command is tokenized (no word cap) so a long env prefix of literal
 // assignments cannot truncate before env's command operand and leave a
 // relative launcher undetected.
-func envCommandOperand(command string) string {
+//
+// The returned pathValue/pathSet is the PATH in effect when the returned
+// operand is resolved. A bare operand is looked up through the environment
+// its parent env execs it in, which is the inherited PATH after leading shell
+// assignments and the parent env's own PATH mutations are applied — not the
+// final launch PATH, which a later nested env may have changed
+// (`env PATH=bin env PATH=/usr/bin /usr/bin/codex` looks up the inner env
+// through the outer env's relative PATH=bin). For a single env's command
+// operand (or a non-env first token) this equals effectivePathValue(launch);
+// for a nested env reached by unwrapping it is the parent env's PATH, so a
+// relative entry there anchors the bare nested operand.
+func envCommandOperand(command string) (operand, pathValue string, pathSet bool) {
 	words, err := shellWords(command, 0)
 	if err != nil {
-		return ""
+		return "", "", false
 	}
+	pathValue, pathSet = os.LookupEnv("PATH")
 	idx := 0
 	for idx < len(words) && isAssignment(words[idx]) {
+		pathValue, pathSet = applyPathAssignment(words[idx], pathValue, pathSet)
 		idx++
 	}
 	unwrapped := false
@@ -448,21 +470,66 @@ func envCommandOperand(command string) string {
 		// a relative nested env (env ./bin/env /usr/bin/codex) or a bare
 		// nested env looked up through a relative PATH anchors the
 		// command instead of being silently unwrapped to the final
-		// agent token.
+		// agent token. pathValue/pathSet already holds the parent env's
+		// environment, which is the PATH the nested env is looked up
+		// through.
 		if unwrapped {
-			return words[idx]
+			return words[idx], pathValue, pathSet
 		}
 		invocation, perr := envcommand.Parse(words[idx+1:], envcommand.Policy{AllowAssignments: true})
 		if perr != nil || invocation.CommandIndex < 0 {
-			return ""
+			return "", "", false
 		}
+		// Apply this env's mutations to obtain the environment it execs
+		// its command operand in; the operand is looked up through that
+		// environment, so a nested env reached on the next iteration is
+		// classified against this PATH rather than the final launch PATH.
+		pathValue, pathSet = applyEnvPathMutations(invocation, pathValue, pathSet)
 		idx += 1 + invocation.CommandIndex
 		unwrapped = true
 	}
 	if idx < len(words) {
-		return words[idx]
+		return words[idx], pathValue, pathSet
 	}
-	return ""
+	return "", "", false
+}
+
+// applyPathAssignment applies a leading shell PATH assignment to the inherited
+// (pathValue, pathSet) state envCommandOperand tracks. Shell assignments reach
+// RelativeExecutable only after CommandEnvironmentFromCommand has accepted
+// them, so a non-literal value would have turned the whole classification
+// false earlier; the IsLiteral guard keeps this helper self-consistent if it
+// is ever reused on an unvetted command.
+func applyPathAssignment(word, pathValue string, pathSet bool) (string, bool) {
+	name, value, assignment := strings.Cut(word, "=")
+	if !assignment || !isAssignment(word) || name != "PATH" {
+		return pathValue, pathSet
+	}
+	if !envcommand.IsLiteral(value) {
+		return "", false
+	}
+	return value, true
+}
+
+// applyEnvPathMutations applies an env invocation's PATH-affecting mutations to
+// the tracked (pathValue, pathSet) state: --ignore-environment/-i and -u PATH
+// clear PATH, and a PATH assignment sets it. envcommand.Parse rejects dynamic
+// values, so mutation values are literal.
+func applyEnvPathMutations(inv envcommand.Invocation, pathValue string, pathSet bool) (string, bool) {
+	if inv.ClearEnvironment {
+		pathValue, pathSet = "", false
+	}
+	for _, m := range inv.Mutations {
+		if m.Name != "PATH" {
+			continue
+		}
+		if m.Unset {
+			pathValue, pathSet = "", false
+		} else {
+			pathValue, pathSet = m.Value, true
+		}
+	}
+	return pathValue, pathSet
 }
 
 // workingDirResolvesAgainstCwd reports whether launch.WorkingDir is resolved
@@ -651,16 +718,16 @@ func resolvesAbsolute(dir, exe string) bool {
 }
 
 // usesRelativeExecutable mirrors the relative-path branch of
-// resolveExecutableAt: a token with a path separator that is not absolute and
-// not a tilde is the one executable shape whose resolution depends on the
-// launch directory. Bare names depend on PATH entries' relativity (handled by
-// RelativeExecutable via the PATH override), tilde expands to an absolute
-// home, and absolute paths ignore the working directory entirely.
+// resolveExecutableAt: a token with a path separator that is not absolute is
+// the one executable shape whose resolution depends on the launch directory.
+// Bare names depend on PATH entries' relativity (handled by RelativeExecutable
+// via the PATH override); a tilde expands to an absolute home only for "~" and
+// "~/..." (config.ExpandTilde leaves "~user/..." unchanged), and the unchanged
+// form is a relative path resolveExecutableAt joins against the working
+// directory, so the tilde exemption applies only after expansion actually
+// yields an absolute path; absolute paths ignore the working directory entirely.
 func usesRelativeExecutable(exe string) bool {
 	if exe == "" {
-		return false
-	}
-	if strings.HasPrefix(exe, "~") {
 		return false
 	}
 	if !strings.ContainsRune(exe, filepath.Separator) {

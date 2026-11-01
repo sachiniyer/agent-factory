@@ -322,6 +322,11 @@ func TestRelativeExecutable(t *testing.T) {
 		{name: "bare name", command: "claude", want: false},
 		{name: "absolute path", command: "/usr/bin/claude", want: false},
 		{name: "tilde path", command: "~/bin/claude", want: false},
+		// config.ExpandTilde expands only "~" and "~/..."; a "~user/..."
+		// form is left unchanged and resolveExecutableAt then joins it
+		// against the working directory, so it is a relative executable
+		// the doctor outside a repo cannot verify without anchoring.
+		{name: "unexpanded tilde user path is relative", command: "~user/bin/claude", want: true},
 		{name: "env chdir relative exe", command: "env -C subdir ./codex", want: true},
 		// An absolute env -C chdir fixes the launch working directory
 		// independent of the doctor's cwd, so a relative executable resolved
@@ -366,6 +371,14 @@ func TestRelativeExecutable(t *testing.T) {
 		{name: "env nested relative env wrapper", command: "env ./bin/env /usr/bin/codex", want: true},
 		{name: "env nested bare env relative PATH", command: "env PATH=bin env /usr/bin/codex", want: true},
 		{name: "env nested bare env absolute PATH not anchoring", command: "env PATH=/usr/bin env /usr/bin/codex", want: false},
+		// A nested env that the outer env looks up through a relative PATH
+		// anchors the command even when the inner env later resets PATH to
+		// an absolute value: the inner env is resolved against the outer
+		// env's environment (PATH=bin), not the final launch PATH
+		// (/usr/bin), so the doctor outside a repo must not verify
+		// /usr/bin/env and falsely pass while the session resolves the
+		// inner env from <launch-dir>/bin.
+		{name: "env nested bare env outer relative inner absolute PATH", command: "env PATH=bin env PATH=/usr/bin /usr/bin/codex", want: true},
 		// A bare env operand is looked up through env's PATH, so a relative or
 		// empty entry anchors it even though the detected agent token is an
 		// absolute path: CheckCommand resolves env and the absolute codex but
