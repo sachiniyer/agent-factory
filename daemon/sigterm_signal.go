@@ -106,7 +106,21 @@ func signalProcessChecked(proc proctree.Process) error {
 
 	deadline := time.Now().Add(sigtermFallbackGrace)
 	for time.Now().Before(deadline) {
-		if !proctree.AliveSame(proc) {
+		same, err := proctree.SameIdentity(proc)
+		if err != nil {
+			// A transient identity-read failure after SIGTERM is NOT a
+			// confirmed exit: proctree.AliveSame deliberately collapses every
+			// read error to "not alive", so polling with it would return nil
+			// here, skip SIGKILL on a daemon that may still be running, and
+			// report a false successful stop — the same false success the
+			// captured-identity path exists to prevent (#4793). Treat an
+			// unreadable identity as still alive and keep polling until the
+			// read resolves to a confirmed exit/identity change or the grace
+			// expires and we escalate to SIGKILL.
+			time.Sleep(sigtermFallbackPoll)
+			continue
+		}
+		if !same {
 			return nil
 		}
 		time.Sleep(sigtermFallbackPoll)
