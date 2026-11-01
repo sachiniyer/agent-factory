@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -63,6 +64,12 @@ func TestTaskFireLeftover_BoundCleanWorktreeTombstones(t *testing.T) {
 	}
 	if row.Worktree.WorktreePath != wtPath {
 		t.Fatalf("the tombstone must keep the exact worktree handle %q, got %q", wtPath, row.Worktree.WorktreePath)
+	}
+	// The row's own id is fresh, so its Worktree must carry the durable
+	// hook-scope handle the fire's original identity minted — the teardown's
+	// survivor pass names scopes from it.
+	if want := systemdunit.HookScopeUnitPrefix(reapInstanceID); row.Worktree.HookScopeUnitPrefix != want {
+		t.Fatalf("the tombstone must carry the fire's hook-scope handle %q, got %q", want, row.Worktree.HookScopeUnitPrefix)
 	}
 	if _, statErr := os.Stat(wtPath); statErr != nil {
 		t.Fatalf("reconcile only marks for teardown — the worktree itself must still exist: %v", statErr)
@@ -321,6 +328,37 @@ func TestTaskFireLeftover_BoundWorktreeWithUnprovenSessionKeepsBoth(t *testing.T
 	}
 	if row == nil || !row.StartupStateUnknown || row.UserKilled {
 		t.Fatalf("an unproven-session leftover must quarantine, got %+v", row)
+	}
+}
+
+// TestTaskFireLeftover_SymlinkSpelledBoundPathTombstones: the marker keeps
+// the spelling worktree placement derived, which through a symlinked home can
+// differ from git's canonical registration of the same directory. Binding is
+// still exact — the canonicalized comparison must reach the same tombstone.
+func TestTaskFireLeftover_SymlinkSpelledBoundPathTombstones(t *testing.T) {
+	title := "symlink-bound-leftover"
+	repoPath, repo, sanitized, _ := fakeReapFixture(t, title)
+	branch := worktreeBranchFor(t, title)
+	wtPath := filepath.Join(resolvedTempDir(t), "symlink-real-wt")
+	seedLeftoverWorktree(t, repoPath, branch, wtPath)
+	installFakeReapTmux(t, sanitized, fakeReapTmux{absent: true})
+	linkPath := filepath.Join(resolvedTempDir(t), "symlink-spelled-wt")
+	if err := os.Symlink(wtPath, linkPath); err != nil {
+		t.Fatalf("symlink the bound path: %v", err)
+	}
+
+	fire := &taskFireMarker{
+		TaskID: "ab0r7210", IntendedAt: time.Now().Add(-time.Minute), Title: title,
+		InstanceID: reapInstanceID, WorktreePath: linkPath,
+	}
+	row, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7210", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+		fire, repo, nil)
+	if err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if row == nil || !row.UserKilled || row.StartupStateUnknown {
+		t.Fatalf("a symlink spelling of the same bound directory must still prove exact binding, got %+v", row)
 	}
 }
 

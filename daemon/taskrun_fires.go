@@ -14,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -480,9 +481,13 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	// The binding is compared as written AND canonicalized: the marker keeps
 	// the spelling worktree placement derived (a symlinked AGENT_FACTORY_HOME
 	// survives verbatim), while git registers the resolved path — the same
-	// directory must still match through either spelling (#6546 Codex).
+	// directory must still match through either spelling (#6546 Codex). The
+	// resolve is BOUNDED: a wedged mount cannot stall the reconcile behind a
+	// synchronous stat — an unanswerable canonicalization just falls back to
+	// the written spelling, and a differing path then quarantines as ever.
 	boundPath := fire.WorktreePath
-	if canon, cerr := filepath.EvalSymlinks(boundPath); cerr == nil {
+	if canon, cerr := git.BoundedFSOp("canonicalizing "+boundPath,
+		func() (string, error) { return filepath.EvalSymlinks(boundPath) }); cerr == nil {
 		boundPath = canon
 	}
 	wtBound := wtPath != "" && fire.WorktreePath != "" &&
@@ -621,6 +626,12 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 			SessionName:       sanitized,
 			BranchName:        branch,
 			BranchCreatedByUs: createdByUs,
+			// The row's own id is fresh, so carry the durable hook-scope
+			// handle the fire's ORIGINAL instance identity would have minted
+			// (the scope session id IS the instance id): the teardown's own
+			// survivor pass can then name every scope this leftover's hooks
+			// could still be living in (#6546 Codex).
+			HookScopeUnitPrefix: systemdunit.HookScopeUnitPrefix(fire.InstanceID),
 		},
 	}, nil
 }
