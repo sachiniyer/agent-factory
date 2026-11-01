@@ -969,3 +969,31 @@ func TestUsageLimitWallOnAnAccountlessOverrideSessionIsThatAccountsWall(t *testi
 		t.Fatal("the ambient account was limited by work's wall")
 	}
 }
+
+// The same holds when the launch resolves to the ambient key while the daemon's own
+// environment names a registered account: the wall is the ambient account's, not
+// the daemon's (Codex P2 on #6467 c9b3a0135f).
+func TestUsageLimitWallOnAnOverrideToTheAmbientDirIsTheAmbientAccountsWall(t *testing.T) {
+	m, _, inst := queuedContinuationOn(t, "work")
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "accounts", "claude", "work"))
+	inst.Account = ""
+	repo := setupControlRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+	inst.Program = "CLAUDE_CONFIG_DIR=" + filepath.Join(t.TempDir(), ".claude") + " claude"
+	now := time.Now()
+	inst.SetLimitReached(now.Add(time.Hour))
+	if limited, _, err := m.claudeUsageLimit(planusage.DefaultAccount, now); err != nil || !limited {
+		t.Fatalf("ambient limited=%v err=%v: the wall on its override session was not counted", limited, err)
+	}
+	if limited, _, _ := m.claudeUsageLimit("work", now); limited {
+		t.Fatal("the daemon's account was limited by the ambient override's wall")
+	}
+}

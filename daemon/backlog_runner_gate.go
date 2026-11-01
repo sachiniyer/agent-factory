@@ -323,7 +323,7 @@ func (m *Manager) claudeUsageLimit(account string, now time.Time) (bool, time.Ti
 				// launch command's config dir names, the one a continuation gates on
 				// (#6309): an accountless session launched with CLAUDE_CONFIG_DIR=…/work
 				// that hit its limit is work's wall, not the ambient account's.
-				if launched, ok := launchConfigAccount(inst); ok && launched != planusage.DefaultAccount {
+				if launched, ok := launchConfigAccount(inst); ok {
 					acct = launched
 				}
 			}
