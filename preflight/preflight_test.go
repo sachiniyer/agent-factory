@@ -449,6 +449,16 @@ func TestRelativeExecutable(t *testing.T) {
 		{name: "env chdir cwd-neutral dot absolute exe", command: "env -C . /usr/bin/codex", want: false},
 		{name: "env chdir cwd-neutral dot bare exe", command: "env -C . codex", want: false},
 		{name: "env chdir absolute bare exe", command: "env -C /abs codex", want: false},
+		// A relative chdir before an absolute reset still anchors the
+		// command: the outer env must enter <launch-dir>/rel before the
+		// inner -C /tmp takes effect, so the doctor outside a repo must
+		// not verify the final /tmp and absolute executable and falsely
+		// PASS while the session cannot start. A relative chdir after an
+		// absolute chdir resolves against that absolute directory, not
+		// the doctor's cwd, so it does not anchor.
+		{name: "env relative chdir before absolute chdir bare exe", command: "env -C rel env -C /tmp codex", want: true},
+		{name: "env relative chdir before absolute chdir absolute exe", command: "env -C rel env -C /tmp /usr/bin/codex", want: true},
+		{name: "env absolute chdir then relative chdir not anchoring", command: "env -C /abs env -C rel /usr/bin/codex", want: false},
 		{name: "opaque relative wrapper", command: "./my-wrapper --ready", want: true},
 		{name: "opaque bare wrapper", command: "my-wrapper --ready", want: false},
 		{name: "unterminated quote defers to CheckCommand", command: "claude --bad'", want: false},
