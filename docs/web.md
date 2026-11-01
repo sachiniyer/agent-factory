@@ -889,9 +889,9 @@ tab survives a restart and simply starts a new editor when you next open it.
 In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
 editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.
 
-### Docs tabs
+### Proposal tabs
 
-A **Docs tab** edits a proposal: a set of markdown docs that you and the agent
+A **Proposal tab** edits a proposal: a set of markdown docs that you and the agent
 write together. `af proposal start` and `af proposal attach` create it. From the
 CLI:
 
@@ -913,5 +913,5 @@ af sessions tab-create my-session --kind docs --proposal auth-rework
   close the tab or the page first, the doc saves with the markers in it, so no
   edit is lost and the agent sees both sides.
 
-The editor loads the first time a Docs tab opens. In the **TUI** a Docs tab
+The editor loads the first time a Proposal tab opens. In the **TUI** a Proposal tab
 shows a placeholder.
