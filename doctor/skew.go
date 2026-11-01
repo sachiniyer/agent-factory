@@ -211,11 +211,18 @@ func scanDaemons(ctx *scanContext) []daemonProc {
 var selfUID = os.Getuid
 
 // daemonProcs returns the run's daemon scan, computing it at most once. The
-// doctor run is sequential, so a plain memo is enough.
+// doctor run is sequential, so a plain memo is enough — but the memo may only
+// latch once the process table exists: checkEnvironment runs before Run fills
+// ctx.snap, and a scan taken then would freeze "no daemons" into the record-
+// currentness gate every check afterwards reads (#6339). Callers ahead of the
+// snapshot get a fresh scan each time instead — cheap, since nothing can be
+// attributed before the table lands anyway.
 func (c *scanContext) daemonProcs() []daemonProc {
 	if !c.daemonsScanned {
 		c.daemons = scanDaemons(c)
-		c.daemonsScanned = true
+		if c.snap != nil || c.snapErr != nil {
+			c.daemonsScanned = true
+		}
 	}
 	return c.daemons
 }

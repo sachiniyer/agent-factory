@@ -74,13 +74,9 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	// session would read as dead and every one of its processes as a verified
 	// orphan. Silent for the same reason as the branch above — checkTmuxInspection
 	// already reported the blindness as a FAIL (#2874).
-	names, listErr := ctx.tmuxSessions()
+	live, listErr := ctx.tmuxSessions()
 	if listErr != nil {
 		return
-	}
-	live := map[string]bool{}
-	for _, name := range names {
-		live[name] = true
 	}
 
 	marked := map[string][]proctree.Process{}
@@ -115,7 +111,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	for _, name := range sortedKeys(marked) {
 		procs := marked[name]
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
-		sessionLive := live[name]
+		liveSocket, sessionLive := live[name]
 		if sessionLive {
 			// The pane tree comes from the EVIDENCE-BEARING capture. The
 			// best-effort SessionProcessTrees returns nil on any list-panes
@@ -126,7 +122,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// the read that would prove membership never returned. A read that
 			// cannot answer is reported once as blindness below (via
 			// observations.blindSessions) rather than classified either way.
-			tree, paneErr := captureSessionProcessTrees(ctx, name)
+			tree, paneErr := captureSessionProcessTrees(ctx, name, liveSocket)
 			// Build the captured-PID set from whatever the partial tree
 			// returned (may be non-empty even when paneErr != nil, e.g. one
 			// pane vanished between list-panes and the process snapshot while
@@ -282,46 +278,86 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// another agent-factory home" and leave it unfixed.
 			//
 			// A kill ALSO requires a corroborated session listing: the dead
-			// session this arm infers must be dead on the server the daemon
-			// ACTUALLY hosts sessions on, not on the one doctor's own
-			// $TMUX/$TMUX_TMPDIR happens to resolve. Without the pin a live
-			// session on a different tmux server is absent from the ambient
-			// listing and reads as a dead one here, arming killFix for a
-			// process whose session is still alive. The listing is pinned to
-			// the daemon's recorded socket in listTmuxSessions; an UNCONFIRMED
-			// record (present but unreadable, or naming no socket) means the
-			// listing could not be pinned and stays ambient, so this arm
-			// refuses the kill and reports instead. The record-ABSENT state
-			// (no record AND no live daemon) is corroborated PER PROCESS: the
-			// marked process's own TMUX env names the socket its session lived
-			// on, so the ambient listing corroborates death only when that
-			// socket matches the ambient one — the same "a successful listing
-			// of the wrong server is not evidence of death" rule the
-			// failed-listing guard above enforces for one that did not answer.
+			// session this arm infers must be dead on the server that ACTUALLY
+			// hosted it, and every socket generation the daemon has used must
+			// be accounted for — absence from the union listing is evidence of
+			// death only under both. sessionDeathProof asks the process's own
+			// TMUX env for the server its session lived on (a live answer there
+			// reroutes to the escaped classification), and falls back to the
+			// record only when the record can be proven current — the daemon
+			// generation that stamped it still serves this home, or a stamped
+			// record is the last word a dead daemon left (#6339). Anything else
+			// is reported, not killed: a live session on a socket the record
+			// does not account for looks exactly like a dead one here.
 			home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
 			hasHome := homeStatus == proctree.EnvFound
 			switch {
 			case hasHome && filepath.IsAbs(home) && sameHome(home, ctx.opts.ConfigDir):
-				if !ctx.sessionDeathCorroborated(p) {
+				verdict, proofSocket := ctx.sessionDeathProof(p, name)
+				switch verdict {
+				case deathLiveElsewhere:
+					// The session is absent from the union listing but live on
+					// the socket p's own TMUX env names — the stale-record or
+					// adopted-server shape #6339 pins. Classify it the way the
+					// live arm would: inside the pane tree, silent; outside it,
+					// escaped (report-only — never armed). A capture that
+					// cannot answer is neither — a read that cannot answer is
+					// not evidence.
+					tree, paneErr := captureSessionProcessTrees(ctx, name, proofSocket)
+					switch {
+					case errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture):
+						// The session vanished between listing and capture —
+						// the proof's live answer is already stale. Leave the
+						// process for the next run rather than classify on a
+						// racing world.
+						continue
+					case paneErr != nil:
+						report.addAdvisoryFinding(Finding{
+							Check: "orphaned-process",
+							Detail: fmt.Sprintf("%s marks session %s (home %s), which is live on "+
+								"tmux socket %s, but its pane tree could not be read (%v) — "+
+								"it is reported, not killed", describeProc(p), name, home, proofSocket, paneErr),
+						})
+						continue
+					}
+					inTree := false
+					for _, tp := range tree {
+						if tp.PID == p.PID {
+							inTree = true
+							break
+						}
+					}
+					if inTree {
+						continue
+					}
+					report.addAdvisoryFinding(Finding{
+						Check: "escaped-process",
+						Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
+							"(left alone while the session is alive)", describeProc(p), name),
+					})
+					continue
+				case deathProven:
+					report.addActionableFinding(Finding{
+						Check: "orphaned-process",
+						Detail: fmt.Sprintf("%s was spawned by dead session %s (home %s)",
+							describeProc(p), name, home),
+						FixAction: fmt.Sprintf("kill pid %d", p.PID),
+						fix:       killFix(ctx, p),
+					})
+					continue
+				default:
 					report.addAdvisoryFinding(Finding{
 						Check: "orphaned-process",
-						Detail: fmt.Sprintf("%s marks session %s (home %s) but the daemon's tmux "+
-							"server record is absent or could not be pinned to a socket, and the "+
-							"ambient listing cannot be tied to the socket the process's session "+
-							"lived on — so doctor cannot corroborate the session's death on the "+
-							"server that hosts it, and a live session on a different tmux server "+
-							"would look the same here; it is reported, not killed",
+						Detail: fmt.Sprintf("%s marks session %s (home %s) but doctor cannot "+
+							"corroborate the session's death on the server that hosts it — the "+
+							"daemon's tmux server record is absent, cannot be pinned to a socket, "+
+							"or cannot be proven current, and a live session on a socket the "+
+							"record does not account for would look the same here; it is "+
+							"reported, not killed",
 							describeProc(p), name, home),
 					})
 					continue
 				}
-				report.addActionableFinding(Finding{
-					Check: "orphaned-process",
-					Detail: fmt.Sprintf("%s was spawned by dead session %s (home %s)",
-						describeProc(p), name, home),
-					FixAction: fmt.Sprintf("kill pid %d", p.PID),
-					fix:       killFix(ctx, p),
-				})
 			case hasHome && filepath.IsAbs(home):
 				report.addAdvisoryFinding(Finding{
 					Check: "orphaned-process",

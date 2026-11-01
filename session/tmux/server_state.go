@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,13 @@ const (
 	// session is started in its own systemd scope and the first of them becomes
 	// the server for the socket.
 	ServerModeFallback ServerMode = "fallback"
+	// ServerModeAdopted: the daemon found a tmux server already running on its
+	// socket and attached its sessions to it rather than launching a dedicated
+	// one (#6339). The server is not af-owned and keeps its own lifecycle —
+	// af never mutates it — but the socket is still where the daemon's
+	// sessions live, and recording it is what lets doctor pin its reads to
+	// the server this daemon generation actually uses.
+	ServerModeAdopted ServerMode = "adopted"
 )
 
 // ServerState is what the daemon last decided about its tmux server. The daemon
@@ -39,6 +47,22 @@ type ServerState struct {
 	Unit   string    `json:"unit,omitempty"`
 	Reason string    `json:"reason,omitempty"`
 	At     time.Time `json:"at"`
+	// DaemonPID is the pid of the daemon generation that wrote this record
+	// (#6339). Doctor can prove the record is CURRENT only when a daemon
+	// serving this home still runs under the stamped pid — a restart that
+	// adopts an already-running server stamps a new record, so a record
+	// carrying a dead or mismatched pid is one a previous generation left
+	// behind and may name a socket the live daemon no longer uses. A record
+	// written before this field existed carries zero and is trusted only when
+	// no daemon is live to contradict it.
+	DaemonPID int `json:"daemon_pid,omitempty"`
+	// PriorSockets lists every earlier socket this daemon lineage recorded,
+	// oldest first. A restart under a different TMUX_TMPDIR moves the daemon
+	// to a new socket while the previous server and its sessions can stay
+	// alive; the record must account for every socket generation the daemon
+	// has used before doctor may read a session's absence from the current
+	// one as death (#6339).
+	PriorSockets []string `json:"prior_sockets,omitempty"`
 }
 
 // ServerDeath is the marker the dedicated server's wrapper leaves when tmux exits
@@ -101,18 +125,44 @@ var (
 )
 
 // recordServerState persists st under home, skipping the write when nothing but
-// the timestamp changed (the fallback path runs on every session spawn).
+// the timestamp changed (the fallback path runs on every session spawn). Every
+// record is stamped with this daemon's pid — the generation marker doctor uses
+// to prove the record is current — and carries forward every socket generation
+// the previous record knew about, so a restart that moves the daemon to a new
+// socket leaves the daemon's full socket history accountable (#6339).
 func recordServerState(home string, st ServerState) {
 	serverStateMu.Lock()
 	defer serverStateMu.Unlock()
+	st.DaemonPID = os.Getpid()
+	if prev, ok, err := ReadServerState(home); err == nil && ok {
+		st.PriorSockets = priorSocketGenerations(prev, st.Socket)
+	}
 	if st.Mode == lastServerState.Mode && st.Unit == lastServerState.Unit &&
-		st.Socket == lastServerState.Socket && st.Reason == lastServerState.Reason {
+		st.Socket == lastServerState.Socket && st.Reason == lastServerState.Reason &&
+		st.DaemonPID == lastServerState.DaemonPID &&
+		slices.Equal(st.PriorSockets, lastServerState.PriorSockets) {
 		return
 	}
 	if err := writeJSONFile(filepath.Join(home, serverStateFileName), st); err != nil {
 		return
 	}
 	lastServerState = st
+}
+
+// priorSocketGenerations returns prev's socket lineage with prev's own socket
+// moved into history when the daemon has moved on to current — deduplicated,
+// oldest first. When prev.Socket still equals current it is filtered out by
+// the seen set, so the result is simply prev's carried-forward history.
+func priorSocketGenerations(prev ServerState, current string) []string {
+	seen := map[string]bool{current: true}
+	var out []string
+	for _, s := range append([]string{prev.Socket}, prev.PriorSockets...) {
+		if s != "" && !seen[s] {
+			out = append(out, s)
+			seen[s] = true
+		}
+	}
+	return out
 }
 
 // ReadServerState returns the daemon's last recorded tmux server decision.

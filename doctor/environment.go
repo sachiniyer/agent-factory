@@ -249,8 +249,16 @@ func checkTmuxServerState(ctx *scanContext, report *Report) {
 		report.Warn(sectionEnvironment, "tmux server",
 			fmt.Sprintf("the dedicated tmux server could not be launched (%s), so sessions run in per-session systemd scopes on the shared socket %s: any plain `tmux` on this machine reaches every session, `kill-server` included", state.Reason, state.Socket),
 			"see tmux-server.log in the AF home; when the cause is gone the daemon launches a dedicated server again once no tmux server is running. For your own tmux use `env -u TMUX tmux -S <your own socket>`", true)
+	case ok && state.Mode == tmux.ServerModeAdopted:
+		report.Pass(sectionEnvironment, "tmux server",
+			fmt.Sprintf("adopted an already-running tmux server on socket %s — af did not launch it and leaves its lifecycle alone", state.Socket))
 	case ok:
 		report.Pass(sectionEnvironment, "tmux server", fmt.Sprintf("dedicated, unit %s.scope, socket %s", state.Unit, state.Socket))
+	}
+	if ok && len(state.PriorSockets) > 0 {
+		report.Info(sectionEnvironment, "tmux server history",
+			fmt.Sprintf("earlier daemon generations recorded %d prior socket(s): %s — sessions may still be live on them, and doctor accounts for each before calling a session dead",
+				len(state.PriorSockets), strings.Join(state.PriorSockets, ", ")))
 	}
 	if death, found, derr := tmux.ReadServerDeath(ctx.opts.ConfigDir); derr == nil && found {
 		report.Info(sectionEnvironment, "tmux server last exit", death.Describe())
