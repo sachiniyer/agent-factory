@@ -1811,6 +1811,13 @@ export class AppShell {
       this.renderFilterMenu(state, scoped);
     }
     const activeBefore = document.activeElement as HTMLElement | null;
+    // The row that owns the rail's DOM focus, captured BEFORE the rebuild:
+    // losing the selection strips a focused row's tabindex mid-reconcile,
+    // which blurs it and drops document.activeElement to body, so after the
+    // rebuild only this knows the rail was holding focus at all (#6409).
+    const activeRowBefore = activeBefore && this.railList.contains(activeBefore)
+      ? activeBefore.closest<HTMLElement>(".af-row")
+      : null;
     let restoreChangedFocus: (() => void) | undefined;
     const reopened: Array<ReturnType<typeof actionsDisclosure>> = [];
     const rows = this.railRows.reconcile(
@@ -1929,10 +1936,17 @@ export class AppShell {
       }
     }
     // DOM focus follows the j/k selection: without this the ring strands on the
-    // previously selected row while Enter attaches the new one.
-    const focusedRow = document.activeElement as HTMLElement | null;
-    if (focusedRow?.classList.contains("af-row") && !focusedRow.classList.contains("af-row-selected") && this.railList.contains(focusedRow)) {
-      this.railList.querySelector<HTMLElement>(".af-row-selected")?.focus();
+    // row that lost the selection while Enter attaches the new one. Dead spots
+    // only, though — a restore above may have placed focus on a control inside
+    // a row (an open menu must keep its place across snapshots), so the ring
+    // moves only when it landed on body or on the deselected li itself.
+    if (activeRowBefore && !activeRowBefore.classList.contains("af-row-selected")) {
+      const after = document.activeElement as HTMLElement | null;
+      const afterRow = after && this.railList.contains(after) ? after.closest<HTMLElement>(".af-row") : null;
+      const deadSpot = !afterRow || (after === afterRow && !afterRow.classList.contains("af-row-selected"));
+      if (deadSpot) {
+        this.railList.querySelector<HTMLElement>(".af-row-selected")?.focus();
+      }
     }
     const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : undefined;
     this.lifecycleBtn = selectedMenu?.panel.querySelector<HTMLElement>(".af-rail-lifecycle") ?? null;

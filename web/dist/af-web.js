@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "ed219b0d8730";
+var CLIENT_VERSION = "95ca1474aa76";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21308,6 +21308,7 @@ var AppShell = class {
       this.renderFilterMenu(state, scoped);
     }
     const activeBefore = document.activeElement;
+    const activeRowBefore = activeBefore && this.railList.contains(activeBefore) ? activeBefore.closest(".af-row") : null;
     let restoreChangedFocus;
     const reopened = [];
     const rows = this.railRows.reconcile(
@@ -21409,9 +21410,13 @@ var AppShell = class {
         fallback.setAttribute("tabindex", "0");
       }
     }
-    const focusedRow = document.activeElement;
-    if (focusedRow?.classList.contains("af-row") && !focusedRow.classList.contains("af-row-selected") && this.railList.contains(focusedRow)) {
-      this.railList.querySelector(".af-row-selected")?.focus();
+    if (activeRowBefore && !activeRowBefore.classList.contains("af-row-selected")) {
+      const after = document.activeElement;
+      const afterRow = after && this.railList.contains(after) ? after.closest(".af-row") : null;
+      const deadSpot = !afterRow || after === afterRow && !afterRow.classList.contains("af-row-selected");
+      if (deadSpot) {
+        this.railList.querySelector(".af-row-selected")?.focus();
+      }
     }
     const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : void 0;
     this.lifecycleBtn = selectedMenu?.panel.querySelector(".af-rail-lifecycle") ?? null;
