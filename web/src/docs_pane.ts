@@ -510,12 +510,16 @@ export class DocsPane {
   // iOS Safari fires no contextmenu event on a long press, so touch opens the
   // menu from its own timer.
   private startLongPress(e: PointerEvent, doc: ProposalDocRef, tab: HTMLElement): void {
+    // A fresh press drops any stale one-shot left by a touch long-press whose
+    // lift never synthesized a click (e.g. the Chrome path, which fires
+    // contextmenu/pointercancel and no compat click). Without this reset on
+    // non-touch pointerdowns, a subsequent mouse/trackpad click on the same tab
+    // would be treated as the long-press lift: the document mousedown closer
+    // returns early and the tab's click handler swallows the click, leaving the
+    // menu open on hybrid/touch devices when the user switches input methods.
+    this.longPressFired = false;
     if (e.pointerType !== "touch") return;
     this.cancelLongPress();
-    // A fresh press drops any stale one-shot left by a long-press whose lift
-    // never synthesized a click (the menu was dismissed some other way); a real
-    // following tap then opens the doc as it does without a touch.
-    this.longPressFired = false;
     const { clientX: x, clientY: y } = e;
     const timer = window.setTimeout(() => {
       this.longPress = null;
