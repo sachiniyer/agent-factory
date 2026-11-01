@@ -78,11 +78,13 @@ import (
 // the previewed app, and not /v1/webtab/ on the control listener for the same
 // reason: a framed app's own requests come from a sandboxed (opaque-origin) frame —
 // cross-site by definition — and go to the app's dev server or editor, never to an
-// af RPC; that surface keeps its own posture (the sandbox, unguessable session and
-// tab ids, code-server's WebSocket Origin check). Not the unix sockets: a browser
-// cannot reach one, and the documented `curl --unix-socket … -d` examples keep
-// working. Non-browser clients (the af CLI and TUI, the in-sandbox af, curl) send no
-// fetch metadata and no Origin, so only layer 4 ever applies to them.
+// af RPC; that surface keeps its own posture (webtab_isolation.go: the sandbox, a
+// relayed editor never on this origin, an editor's WebSocket only from its own
+// origin by originNamesRequest below; and unguessable session and tab ids). Not the
+// unix sockets: a browser cannot reach one, and the documented `curl --unix-socket
+// … -d` examples keep working. Non-browser clients (the af CLI and TUI, the
+// in-sandbox af, curl) send no fetch metadata and no Origin, so only layer 4 ever
+// applies to them.
 
 // crossSiteDenial is one refusal: the status and the sentence that explains it.
 type crossSiteDenial struct {

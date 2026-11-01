@@ -759,6 +759,13 @@ A proxy that rewrites `Host` and forwards nothing (nginx's bare `proxy_pass`)
 leaves such a request indistinguishable from a foreign page's, so it is refused
 with `403`, naming `X-Forwarded-Host`.
 
+The same holds for every **editor-origin port** (`network.editor_origin_ports`).
+af accepts an editor's WebSocket only from the editor's own page, judged exactly
+this way, so a front door for those ports either keeps `Host` or sends
+`X-Forwarded-Host $http_host`, not `$host`, in each port's server block. Otherwise
+the editor loads but never connects. An editor port answers a name in
+`network.allowed_hosts` on any port, so the one entry covers them all.
+
 ## CORS (for the browser web client)
 
 Browsers enforce CORS, so a web client served from a different origin than the
