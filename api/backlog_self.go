@@ -242,14 +242,19 @@ func postBacklogMessage(req daemon.PostBacklogMessageRequest) (any, error) {
 	return resp.Message, nil
 }
 
-var backlogAskSelf bool
+var (
+	backlogAskSelf        bool
+	backlogAskHandoffFile string
+)
 
 var backlogAskCmd = &cobra.Command{
-	Use:   "ask --self <text>",
+	Use:   "ask --self <text> [--handoff-file <path|->]",
 	Short: "From an item session, ask the user a question",
 	Long: "Run from inside an item session: add a question to the item's thread and set the " +
 		"session's attention to it. The item shows Needs you until the user answers; the " +
-		"answer arrives in this session. Stop working after you ask.",
+		"answer arrives in this session. Stop working after you ask.\n\n" +
+		"--handoff-file stores notes for a later run of the item (at most 8 KB) with the " +
+		"question, read from a file or from stdin with -. The user sees them in \"af backlog inbox\".",
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
@@ -264,8 +269,15 @@ var backlogAskCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
+			handoff := ""
+			if backlogAskHandoffFile != "" {
+				if handoff, err = readFileOrStdin(cmd, backlogAskHandoffFile); err != nil {
+					return nil, fmt.Errorf("read --handoff-file: %w", err)
+				}
+			}
 			return postBacklogMessage(daemon.PostBacklogMessageRequest{RepoID: t.repoID, RepoPath: t.repoPath,
-				ID: it.ID, Kind: backlog.KindQuestion, Text: strings.Join(args, " "), SessionID: sessionID})
+				ID: it.ID, Kind: backlog.KindQuestion, Text: strings.Join(args, " "), SessionID: sessionID,
+				Handoff: handoff})
 		})
 	},
 }
@@ -302,6 +314,7 @@ var backlogAnswerCmd = &cobra.Command{
 func init() {
 	backlogAnswerCmd.Flags().IntVar(&backlogAnswerQuestion, "question", 0, "The `id` of the question to answer, from \"af backlog show\"; default the oldest open one")
 	backlogAskCmd.Flags().BoolVar(&backlogAskSelf, "self", false, "Ask on the item of the session this runs in")
+	backlogAskCmd.Flags().StringVar(&backlogAskHandoffFile, "handoff-file", "", "A `path` to notes for a later run of the item, or - for stdin (at most 8 KB)")
 	backlogDoneCmd.Flags().BoolVar(&backlogDoneSelf, "self", false, "From inside an item session: the work is finished; send the item to review")
 	backlogDoneCmd.Flags().StringVar(&backlogDonePR, "pr", "", "With --self, the `url` of the pull request for the work")
 	backlogNoteCmd.Flags().BoolVar(&backlogNoteSelf, "self", false, "Note on the item of the session this runs in")

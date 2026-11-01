@@ -55,8 +55,9 @@ func (it *Item) appendMessage(m Message, now time.Time) *Message {
 }
 
 // Ask appends a question from the agent of sessionID, which must be the item's
-// latest run. The item must be open.
-func (b *Backlog) Ask(id int, sessionID, text string, now time.Time) (*Message, error) {
+// latest run. The item must be open. q.Handoff is kept on the question for a
+// later run of the item.
+func (b *Backlog) Ask(id int, sessionID string, q Question, now time.Time) (*Message, error) {
 	it, err := b.get(id)
 	if err != nil {
 		return nil, err
@@ -67,11 +68,15 @@ func (b *Backlog) Ask(id int, sessionID, text string, now time.Time) (*Message, 
 	if !it.Status.Open() {
 		return nil, fmt.Errorf("%s is %s; questions go on open items", FormatID(id), it.Status)
 	}
-	text = strings.TrimSpace(text)
+	text := strings.TrimSpace(q.Text)
 	if text == "" {
 		return nil, errors.New("a question needs text")
 	}
-	return it.appendMessage(Message{Kind: KindQuestion, Author: "agent:" + sessionID, Text: text}, now), nil
+	if err := q.check(); err != nil {
+		return nil, err
+	}
+	return it.appendMessage(Message{Kind: KindQuestion, Author: "agent:" + sessionID, Text: text,
+		Handoff: strings.TrimSpace(q.Handoff)}, now), nil
 }
 
 // Answered is what Answer did.
