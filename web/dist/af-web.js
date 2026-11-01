@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "b9741ae33a8b";
+var CLIENT_VERSION = "e35a716dbf89";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18082,6 +18082,20 @@ function reorderTargetIndex(from, insertion) {
   return target === from ? null : target;
 }
 
+// src/tabscroll.ts
+function scrollDeltaToReveal(barLeft, barRight, tabLeft, tabRight) {
+  if (tabLeft < barLeft) return tabLeft - barLeft;
+  if (tabRight - tabLeft > barRight - barLeft) return tabLeft - barLeft;
+  if (tabRight > barRight) return tabRight - barRight;
+  return 0;
+}
+function shouldRevealActive(previousKey, sessionId, activeIndex) {
+  return previousKey !== `${sessionId}:${activeIndex}`;
+}
+function activeRevealKey(sessionId, activeIndex) {
+  return `${sessionId}:${activeIndex}`;
+}
+
 // src/tabtouch.ts
 function tabPressVerdict(sample, limits) {
   if (sample.movedPx > limits.slopPx) {
@@ -18778,6 +18792,8 @@ var AppShell = class {
   // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
   // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
   lastTabBarSig = "";
+  /** The (session, active tab) whose strip position was last revealed (#6420). */
+  lastRevealedActive = null;
   // The insertion indicator for a reorder drag over the bar (#1813): a thin accent
   // rule drawn in the gap a drop would land in. It lives INSIDE the bar (which CSS
   // makes its containing block) and is re-appended after every rebuild, since
@@ -19796,6 +19812,16 @@ var AppShell = class {
       bar.append(this.tabInsert);
     }
     bar.scrollLeft = scrollLeft;
+    const sessionKey2 = selected.id ?? "";
+    if (shouldRevealActive(this.lastRevealedActive, sessionKey2, active)) {
+      this.lastRevealedActive = activeRevealKey(sessionKey2, active);
+      const btn = children[active];
+      if (btn) {
+        const b = bar.getBoundingClientRect();
+        const r = btn.getBoundingClientRect();
+        bar.scrollLeft += scrollDeltaToReveal(b.left, b.right, r.left, r.right);
+      }
+    }
     document.body.classList.remove("af-dragging-tab");
     this.dragFromIndex = null;
     this.lastTabBarSig = tabBarSig(state);
