@@ -414,7 +414,7 @@ func (s *Sidebar) renderTabRow(item SidebarItem, selected bool) string {
 // archivedHeaderLabel counts the archived sessions and, of those, the ones af
 // archived after their agent asked a question: they wait on your answer, and
 // the count shows while the folder is collapsed. Where the words do not fit in
-// width cells, the short form reuses the rows' tree.AwaitingAnswerGlyph:
+// width cells, the short form reuses the rows' tree.AwaitingAnswerIcon glyph:
 // "Archived (5 · ? 2)".
 func archivedHeaderLabel(instances []*session.Instance, archived []int, width int) string {
 	waiting := 0
@@ -433,5 +433,5 @@ func archivedHeaderLabel(instances []*session.Instance, archived []int, width in
 	if full := fmt.Sprintf("Archived (%d · %d %s you)", len(archived), waiting, verb); width <= 0 || runewidth.StringWidth(full) <= width {
 		return full
 	}
-	return fmt.Sprintf("Archived (%d · %s %d)", len(archived), tree.AwaitingAnswerGlyph, waiting)
+	return fmt.Sprintf("Archived (%d · %s %d)", len(archived), strings.TrimSpace(tree.AwaitingAnswerIcon), waiting)
 }

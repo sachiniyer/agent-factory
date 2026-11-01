@@ -64,25 +64,25 @@ const limitIcon = "◆ "
 // The rail's two needs-you marks keep the web's two concepts apart, and share one
 // rendering (needsYouMark): the same attention colour role, in the status glyph's
 // slot. Both are static: the TUI has no animation (#1766), where the web's
-// attention dot blinks.
+// attention dot blinks. Each is exported per concept.
 //
-//   - attentionGlyph: the session's agent asked for the user (#5461), the web's
+//   - AttentionIcon: the session's agent asked for the user (#5461), the web's
 //     bell and Attention chip. A bang, distinct in shape from every
 //     dot/diamond/box glyph, echoing the automations rail's "[!]" marker.
-//   - AwaitingAnswerGlyph: an item session af archived after its agent asked a
+//   - AwaitingAnswerIcon: an item session af archived after its agent asked a
 //     question, waiting on the user's answer, which restores it: the web
-//     Backlog's "?" Needs you. It takes the place of ▧ on the archived row, and
-//     the Archived header's short count reuses it.
+//     Backlog's "?" Needs you (#6475). It takes the place of ▧ on the archived
+//     row, and the Archived header's short count reuses its glyph.
 const (
-	attentionGlyph      = "!"
-	AwaitingAnswerGlyph = "?"
+	AttentionIcon      = "! "
+	AwaitingAnswerIcon = "? "
 )
 
-// needsYouMark draws a needs-you glyph in the generated attention role the web's
+// needsYouMark draws a needs-you icon in the generated attention role the web's
 // dot uses, rather than the dead/lost ambers, so a request never reads as
 // breakage.
-func needsYouMark(glyph string) string {
-	return attentionStyle.Render(glyph + " ")
+func needsYouMark(icon string) string {
+	return attentionStyle.Render(icon)
 }
 
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
@@ -409,7 +409,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// The ask outranks every status glyph the way the web's attention dot
 		// replaces the status dot — a Ready row's green returns when the request
 		// clears, and the reason rides the detail line below.
-		join = needsYouMark(attentionGlyph)
+		join = needsYouMark(AttentionIcon)
 	case op != session.OpNone:
 		// The op axis is checked FIRST and DELIBERATELY masks the liveness glyph:
 		// an in-flight create/restore is a loading state (nothing, not a spinner —
@@ -434,7 +434,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		case session.LiveArchived:
 			join = archivedStyle.Render(archivedIcon)
 			if i.AwaitsAnswer() {
-				join = needsYouMark(AwaitingAnswerGlyph)
+				join = needsYouMark(AwaitingAnswerIcon)
 			}
 		case session.LiveLimitReached:
 			join = limitStyle.Render(limitIcon)

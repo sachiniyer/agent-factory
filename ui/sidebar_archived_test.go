@@ -850,11 +850,11 @@ func TestSidebar_ArchivedSessionWaitingOnAnAnswerIsCounted(t *testing.T) {
 	for _, line := range strings.Split(view, "\n") {
 		switch {
 		case strings.Contains(line, "B-7 pick a db"):
-			assert.Contains(t, line, tree.AwaitingAnswerGlyph, "the waiting row shows the awaiting-answer glyph")
+			assert.Contains(t, line, strings.TrimSpace(tree.AwaitingAnswerIcon), "the waiting row shows the awaiting-answer glyph")
 			assert.NotContains(t, line, "▧")
 		case strings.Contains(line, "put-away"):
 			assert.Contains(t, line, "▧", "an ordinary archived row keeps ▧")
-			assert.NotContains(t, line, tree.AwaitingAnswerGlyph)
+			assert.NotContains(t, line, strings.TrimSpace(tree.AwaitingAnswerIcon))
 		}
 	}
 
@@ -879,5 +879,5 @@ func TestArchivedHeaderLabelCounts(t *testing.T) {
 	assert.Equal(t, "Archived (1)", archivedHeaderLabel(all, []int{2}, 10))
 	// A rail too narrow for the words keeps the count whole, with the rows' glyph.
 	assert.Equal(t, "Archived (3 · ? 2)", archivedHeaderLabel(all, []int{0, 1, 2}, 24))
-	assert.Equal(t, "?", tree.AwaitingAnswerGlyph, "the short form's glyph is the rows' awaiting-answer glyph")
+	assert.Equal(t, "?", strings.TrimSpace(tree.AwaitingAnswerIcon), "the short form's glyph is the rows' awaiting-answer glyph")
 }
