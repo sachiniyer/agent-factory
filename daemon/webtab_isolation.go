@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -283,12 +284,18 @@ func editorRouteRefusal(r *http.Request, route webTabRoute, allowedHosts []strin
 // editorWebviewHostRefusal is rule 6. A request for the editor's webview host page
 // is admitted only when it is loaded by the editor's own page: either the browser
 // attests Sec-Fetch-Site: same-origin (a same-port, same-scheme loader — the
-// workbench itself, which frames the host same-origin under code-server), or the
-// page's parentOrigin query names the request's own origin by the rule-4
-// comparison. A cross-port loader is same-SITE, not same-origin, and must set a
-// parentOrigin that is NOT this origin to receive the channel, so both arms refuse
-// it. A no-metadata, no-parentOrigin request cannot be a real host load and is
-// refused. Non-host paths are not this rule's.
+// workbench itself, which frames the host same-origin under code-server, and which
+// a cross-port same-SITE loader cannot forge), or its parentOrigin query names the
+// request's own origin by the rule-4 comparison. Everything else is refused: a
+// cross-port loader must set a parentOrigin that is NOT this origin to receive the
+// channel, and a no-metadata, no-parentOrigin request cannot be a real host load.
+//
+// The parentOrigin arm trusts the query only when the daemon and the browser must
+// read it the same way (webviewParentOrigin): Go's url.Query drops a pair with a
+// ";" or a malformed escape that a browser's URLSearchParams keeps, so without this
+// a crafted query could show the daemon one parentOrigin and the host page another.
+// The same-origin arm runs first, so a legitimate same-origin load whose URL has no
+// parentOrigin (the content frame pre/fake.html) is still admitted.
 func editorWebviewHostRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
 	if !editorPathIsWebviewHost(route.escapedRest) {
 		return nil
@@ -296,8 +303,8 @@ func editorWebviewHostRefusal(r *http.Request, route webTabRoute, allowedHosts [
 	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin") {
 		return nil
 	}
-	parent := r.URL.Query().Get("parentOrigin")
-	if parent != "" && originNamesRequest(parent, r, allowedHosts) {
+	parent, ok := webviewParentOrigin(r.URL.RawQuery)
+	if ok && parent != "" && originNamesRequest(parent, r, allowedHosts) {
 		return nil
 	}
 	return &crossSiteDenial{
@@ -308,19 +315,74 @@ func editorWebviewHostRefusal(r *http.Request, route webTabRoute, allowedHosts [
 	}
 }
 
-// editorPathIsWebviewHost reports whether escapedRest is one of VS Code's webview
-// host pages, served from webview/browser/pre/. Matched as consecutive path
-// SEGMENTS in the request's own encoding (the files are served from disk, so the
-// spelling is exact), the sequence anywhere because it sits under static/ and the
-// product segment. These are the only pages that read parentOrigin.
+// webviewParentOrigin returns the single parentOrigin of a webview-host query, and
+// false when the daemon cannot be sure a browser reads the same value: a ";"
+// anywhere (Go treats it as the end of the pair, a browser as a literal), a
+// malformed percent-escape in any pair (Go's Query drops that pair, a browser keeps
+// it), or other than exactly one parentOrigin. Parsed over the raw pairs rather
+// than through url.Query, which already applies those lossy rules.
+func webviewParentOrigin(rawQuery string) (string, bool) {
+	if strings.Contains(rawQuery, ";") {
+		return "", false
+	}
+	value, count := "", 0
+	for _, pair := range strings.Split(rawQuery, "&") {
+		if pair == "" {
+			continue
+		}
+		rawKey, rawVal, _ := strings.Cut(pair, "=")
+		key, kerr := url.QueryUnescape(rawKey)
+		val, verr := url.QueryUnescape(rawVal)
+		if kerr != nil || verr != nil {
+			return "", false
+		}
+		if key == "parentOrigin" {
+			value, count = val, count+1
+		}
+	}
+	if count != 1 {
+		return "", false
+	}
+	return value, true
+}
+
+// editorPathIsWebviewHost reports whether a path below an editor tab's prefix is one
+// of VS Code's webview host pages, served from webview/browser/pre/ (the only pages
+// that read parentOrigin). code-server's static server DECODES the path (percent
+// escapes, %2F included) and routes case-insensitively, so the match is on the
+// decoded, lower-cased path — a raw-segment match misses "%77ebview" and
+// "webview%2Fbrowser%2Fpre". Decoded repeatedly to a fixed point so a double-encoded
+// spelling cannot slip under one decode; a path that will not decode is treated as a
+// host path (fail safe: the guard only ever adds a refusal to a malformed request).
 func editorPathIsWebviewHost(escapedRest string) bool {
-	segs := strings.Split(strings.TrimPrefix(escapedRest, "/"), "/")
+	decoded, ok := decodeToFixedPoint(escapedRest)
+	if !ok {
+		return true
+	}
+	segs := strings.Split(strings.ToLower(decoded), "/")
 	for i := 0; i+2 < len(segs); i++ {
 		if segs[i] == "webview" && segs[i+1] == "browser" && segs[i+2] == "pre" {
 			return true
 		}
 	}
 	return false
+}
+
+// decodeToFixedPoint percent-decodes s until it stops changing (bounded), so an
+// n-times-encoded spelling reduces to what the editor's decoding layers serve. It
+// returns false if a round yields a malformed escape.
+func decodeToFixedPoint(s string) (string, bool) {
+	for i := 0; i < 5; i++ {
+		next, err := url.PathUnescape(s)
+		if err != nil {
+			return "", false
+		}
+		if next == s {
+			return s, true
+		}
+		s = next
+	}
+	return s, true
 }
 
 // requestsUpgrade reports whether r asks for a protocol switch: an Upgrade header,

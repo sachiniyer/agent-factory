@@ -216,15 +216,48 @@ func TestEditorPathIsWebviewHost(t *testing.T) {
 		"static/out/vs/workbench/contrib/webview/browser/pre/",
 		"a/b/webview/browser/pre/service-worker.js",
 		"webview/browser/pre/fake.html",
+		// code-server decodes and routes case-insensitively, so these reach the real
+		// host and must match: an upper-case segment, a percent-encoded letter, and
+		// encoded slashes that collapse the three segments into one.
+		"WEBVIEW/browser/pre/index.html",
+		"static/out/%77ebview/browser/pre/index.html",
+		"static/out/webview%2Fbrowser%2Fpre/index.html",
+		"static/out/WebView/Browser/Pre/index.html",
+		"static/out/%2577ebview/browser/pre/index.html", // double-encoded
+		"static/out/webview/browser/%ZZ/pre/x",          // malformed escape: treated as host, fail safe
 	} {
 		assert.True(t, editorPathIsWebviewHost(rest), rest)
 	}
 	for _, rest := range []string{
 		"", "static/out/x.js", "webview/browser/x.html", "webview/pre/index.html",
-		"browser/pre/index.html", "proxy/3000/", "WEBVIEW/browser/pre/index.html",
+		"browser/pre/index.html", "proxy/3000/",
 	} {
 		assert.False(t, editorPathIsWebviewHost(rest), rest)
 	}
+}
+
+func TestWebviewParentOrigin(t *testing.T) {
+	ok := func(q, want string) {
+		v, found := webviewParentOrigin(q)
+		assert.True(t, found, "%q should parse", q)
+		assert.Equal(t, want, v, "%q", q)
+	}
+	rejected := func(q string) {
+		_, found := webviewParentOrigin(q)
+		assert.False(t, found, "%q must be rejected as ambiguous", q)
+	}
+	ok("parentOrigin=http://127.0.0.1:9100", "http://127.0.0.1:9100")
+	ok("id=1&parentOrigin=http://x", "http://x")
+	ok("parentOrigin=http%3A%2F%2Fx%3A1", "http://x:1")
+	// A ";" anywhere: Go ends the pair there, a browser keeps it literal.
+	rejected("parentOrigin=http://good;x=1&parentOrigin=http://evil")
+	rejected("a=1;parentOrigin=http://evil")
+	// A malformed escape in any pair: Go's Query drops the pair, a browser keeps it.
+	rejected("x=%ZZ&parentOrigin=http://evil")
+	rejected("parentOrigin=%GG")
+	// Not exactly one parentOrigin.
+	rejected("id=1")
+	rejected("parentOrigin=http://a&parentOrigin=http://b")
 }
 
 // Rule 6: a webview-host request is admitted only when the editor's own page loads
@@ -255,6 +288,17 @@ func TestEditorWebviewHostRefusal(t *testing.T) {
 	assert.True(t, refused(hostPath, "parentOrigin=null", ""))
 	assert.True(t, refused(hostPath, "parentOrigin=http://attacker.example", ""))
 	assert.True(t, refused(hostPath, "", ""), "a real host load always carries parentOrigin")
+	// Bypass 1 (path spelling): an encoded or mixed-case host path is still the host,
+	// so a foreign loader of it is still refused; its own page still gets in.
+	encHost := testCommit + "/static/out/%77ebview/browser/pre/index.html"
+	assert.True(t, refused(encHost, "parentOrigin=http://127.0.0.1:9101", ""), "encoded host path, foreign loader")
+	assert.False(t, refused(encHost, "", "same-origin"), "encoded host path, own page")
+	// Bypass 2 (query parsing): a query the daemon and a browser could read
+	// differently is refused even when it carries a parentOrigin that names this
+	// origin, because the browser might act on a different value.
+	assert.True(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9100;x=1&parentOrigin=http://evil", ""), "semicolon")
+	assert.True(t, refused(hostPath, "x=%ZZ&parentOrigin=http://127.0.0.1:9100", ""), "malformed escape")
+	assert.True(t, refused(hostPath, "parentOrigin=http://127.0.0.1:9100&parentOrigin=http://evil", ""), "two parentOrigin")
 	// Not a webview-host path: not this rule's, even with a foreign parentOrigin.
 	assert.False(t, refused("static/out/x.js", "parentOrigin=http://evil", ""))
 	assert.False(t, refused("proxy/3000/", "parentOrigin=http://evil", ""))
@@ -277,6 +321,15 @@ func TestWorkspaceIsolation_WebviewHostRefusesAForeignLoader(t *testing.T) {
 	req.Host = "127.0.0.1:9100"
 	mux.ServeHTTP(foreign, req)
 	assert.Equal(t, http.StatusForbidden, foreign.Code, "a cross-port loader is refused: %s", foreign.Body.String())
+
+	// The same, reached by a percent-encoded host path that code-server would decode:
+	// still recognized as the host, still refused (bypass 1).
+	encPath := testCommit + "/static/out/vs/workbench/contrib/%77ebview/browser/pre/index.html"
+	enc := httptest.NewRecorder()
+	encReq := httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, tabID, encPath)+"?parentOrigin=http://127.0.0.1:9101", nil)
+	encReq.Host = "127.0.0.1:9100"
+	mux.ServeHTTP(enc, encReq)
+	assert.Equal(t, http.StatusForbidden, enc.Code, "an encoded host path is still guarded: %s", enc.Body.String())
 
 	own := httptest.NewRecorder()
 	ownReq := httptest.NewRequest(http.MethodGet, vscodeProxyPath(id, tabID, hostPath), nil)
