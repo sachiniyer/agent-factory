@@ -68,6 +68,13 @@ type ServerState struct {
 	// maxPriorSocketGenerations newest generations — so restarts cannot grow
 	// the file without limit.
 	PriorSockets []string `json:"prior_sockets,omitempty"`
+	// HistoryTruncated records that the PriorSockets cap dropped a socket
+	// generation whose file still existed — one the record can therefore no
+	// longer account for. Once set it never clears: the dropped server may
+	// still host sessions, so every later record inherits the admission that
+	// its history is incomplete. Doctor refuses any destructive reading that
+	// needs complete socket coverage while this is set (#6339).
+	HistoryTruncated bool `json:"history_truncated,omitempty"`
 }
 
 // ServerDeath is the marker the dedicated server's wrapper leaves when tmux exits
@@ -140,11 +147,14 @@ func recordServerState(home string, st ServerState) {
 	defer serverStateMu.Unlock()
 	st.DaemonPID = os.Getpid()
 	if prev, ok, err := ReadServerState(home); err == nil && ok {
-		st.PriorSockets = priorSocketGenerations(prev, st.Socket)
+		priors, truncated := priorSocketGenerations(prev, st.Socket)
+		st.PriorSockets = priors
+		st.HistoryTruncated = st.HistoryTruncated || prev.HistoryTruncated || truncated
 	}
 	if st.Mode == lastServerState.Mode && st.Unit == lastServerState.Unit &&
 		st.Socket == lastServerState.Socket && st.Reason == lastServerState.Reason &&
 		st.DaemonPID == lastServerState.DaemonPID &&
+		st.HistoryTruncated == lastServerState.HistoryTruncated &&
 		slices.Equal(st.PriorSockets, lastServerState.PriorSockets) {
 		return
 	}
@@ -173,7 +183,7 @@ const maxPriorSocketGenerations = 8
 // run. When more than maxPriorSocketGenerations generations survive that
 // prune, the oldest are dropped — the newest are the sockets a live leftover
 // server is most likely still answering on.
-func priorSocketGenerations(prev ServerState, current string) []string {
+func priorSocketGenerations(prev ServerState, current string) ([]string, bool) {
 	seen := map[string]bool{current: true}
 	var out []string
 	// prev.PriorSockets is already oldest-first; prev.Socket — the socket the
@@ -184,14 +194,19 @@ func priorSocketGenerations(prev ServerState, current string) []string {
 		}
 		seen[s] = true
 		if _, err := os.Lstat(s); err != nil {
-			continue // no client can ever reach that server again
+			// The socket file is gone, so no client can ever reach that
+			// server again — dropping it loses no coverage and does not
+			// count as truncation.
+			continue
 		}
 		out = append(out, s)
 	}
+	truncated := false
 	if len(out) > maxPriorSocketGenerations {
 		out = out[len(out)-maxPriorSocketGenerations:]
+		truncated = true
 	}
-	return out
+	return out, truncated
 }
 
 // ReadServerState returns the daemon's last recorded tmux server decision.

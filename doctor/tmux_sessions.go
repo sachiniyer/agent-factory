@@ -94,7 +94,7 @@ func (c *scanContext) sessionNamesOnSocket(socket string) ([]string, error) {
 //
 // Do not restore a "mirrors X" comment in either direction, and do not
 // re-inline the shell-out. State the property; keep the mechanism in one place.
-func liveTmuxSessionSockets(ctx *scanContext, fresh bool) (map[string]string, error) {
+func liveTmuxSessionSockets(ctx *scanContext, fresh bool) (map[string][]string, error) {
 	list := ctx.sessionNamesOnSocket
 	if fresh {
 		list = func(socket string) ([]string, error) {
@@ -102,13 +102,19 @@ func liveTmuxSessionSockets(ctx *scanContext, fresh bool) (map[string]string, er
 		}
 	}
 	socket, _ := ctx.recordedSocket()
-	live := map[string]string{}
+	// Each name maps to EVERY socket it was listed on, not just the first:
+	// session names derive from repository path and title, not AF home or
+	// socket, so two servers can legitimately host a same-named session that
+	// belongs to different installs. Deduplicating to one socket would lose
+	// the dropped copy's ownership marker — and a live session's home is the
+	// veto that keeps rm -rf away from it.
+	live := map[string][]string{}
 	names, err := list(socket)
 	if err != nil {
 		return nil, err
 	}
 	for _, name := range names {
-		live[name] = socket
+		live[name] = append(live[name], socket)
 	}
 	if st, ok, rerr := ctx.recordedServer(); rerr == nil && ok {
 		for _, prior := range st.PriorSockets {
@@ -121,9 +127,7 @@ func liveTmuxSessionSockets(ctx *scanContext, fresh bool) (map[string]string, er
 					prior, perr)
 			}
 			for _, name := range priorNames {
-				if _, dup := live[name]; !dup {
-					live[name] = prior
-				}
+				live[name] = append(live[name], prior)
 			}
 		}
 	}
@@ -327,8 +331,14 @@ func (c *scanContext) sessionDeathProof(p proctree.Process, name string) (sessio
 	if err != nil {
 		return deathUnproven, ""
 	}
-	if socket, found := live[name]; found {
-		return deathLiveElsewhere, socket
+	if sockets, found := live[name]; found {
+		return deathLiveElsewhere, sockets[0]
+	}
+	// A record whose socket history hit its cap has DROPPED a generation that
+	// may still host the session; absence from the sockets it retains is not
+	// complete coverage, so the union cannot corroborate a kill.
+	if st, ok, rerr := c.recordedServer(); rerr != nil || !ok || st.HistoryTruncated {
+		return deathUnproven, ""
 	}
 	return deathProven, ""
 }
@@ -365,11 +375,11 @@ func captureSessionProcessTrees(ctx *scanContext, name, socket string) ([]proctr
 }
 
 // tmuxSessions returns the run's memoized session listing — live session name
-// to the socket it lives on — or the error that made it unavailable. A caller
-// that treats a missing name as proof the session is DEAD must handle the
-// error and do nothing; see the scanContext field comments. The doctor run is
-// sequential, so a plain memo is enough (mirrors daemonProcs).
-func (c *scanContext) tmuxSessions() (map[string]string, error) {
+// to every socket it was listed on — or the error that made it unavailable. A
+// caller that treats a missing name as proof the session is DEAD must handle
+// the error and do nothing; see the scanContext field comments. The doctor run
+// is sequential, so a plain memo is enough (mirrors daemonProcs).
+func (c *scanContext) tmuxSessions() (map[string][]string, error) {
 	if !c.tmuxScanned {
 		c.tmuxLive, c.tmuxErr = liveTmuxSessionSockets(c, false)
 		c.tmuxScanned = true
@@ -388,8 +398,10 @@ func checkTmuxInspection(ctx *scanContext, report *Report) {
 	live, err := ctx.tmuxSessions()
 	if err == nil {
 		sockets := map[string]bool{}
-		for _, socket := range live {
-			sockets[socket] = true
+		for _, listed := range live {
+			for _, socket := range listed {
+				sockets[socket] = true
+			}
 		}
 		detail := fmt.Sprintf("listed the tmux server's sessions (%d)", len(live))
 		if len(sockets) > 1 {
@@ -407,12 +419,14 @@ func checkTmuxInspection(ctx *scanContext, report *Report) {
 			"tmux server and re-run")
 }
 
-// checkTmuxRecordCurrency warns when a live daemon serves this home but its
-// server-state record cannot be tied to that daemon generation — a restart
-// that adopts an already-running server used to leave the previous
-// generation's socket recorded (#6339). The recorded socket may no longer be
-// where the daemon's sessions live, so the orphaned-process kill arm refuses
-// to corroborate from it; this row says why rather than letting the refusal
+// checkTmuxRecordCurrency warns when the daemon's server-state record admits
+// a gap doctor must not act past: either a live daemon serves this home while
+// the record was stamped by a different generation — a restart that adopts an
+// already-running server used to leave the previous generation's socket
+// recorded (#6339) — or the socket history's bound dropped a generation the
+// record can no longer account for. The recorded sockets may then not cover
+// where sessions live, so the orphaned-process kill arm refuses to
+// corroborate from it; these rows say why rather than letting the refusal
 // look like whim. It runs after the process snapshot so the live daemon set
 // it compares against is real — environment checks run before it and could
 // only report on a snapshot that does not exist yet.
@@ -420,6 +434,14 @@ func checkTmuxRecordCurrency(ctx *scanContext, report *Report) {
 	state, ok, err := ctx.recordedServer()
 	if !ok || err != nil || state.Mode == "" {
 		return
+	}
+	if state.HistoryTruncated {
+		report.Warn(sectionProcesses, "tmux server record",
+			"the daemon's tmux socket history hit its bound and dropped a socket generation "+
+				"the record can no longer account for — a live session on the dropped socket "+
+				"reads exactly like a dead one, so record-only death proofs are refused",
+			"the bound keeps the record small but the admission never clears; if doctor reports "+
+				"sessions it cannot classify, list the live tmux servers and kill leftovers by hand", false)
 	}
 	daemons := activeHomeDaemons(ctx)
 	if len(daemons) == 0 || ctx.recordedServerCurrent() {
@@ -464,7 +486,7 @@ func checkRunawayChildren(ctx *scanContext, report *Report) {
 		// fully inspected — the same treatment the unmeasurable counter gives
 		// CPU blindness. Partial captures still yield verified processes that
 		// are evaluated for runaway findings before recording the blindness.
-		procs, paneErr := captureSessionProcessTrees(ctx, name, live[name])
+		procs, paneErr := captureSessionProcessTrees(ctx, name, live[name][0])
 		if paneErr != nil {
 			// A vanished session is conclusively no longer live: it is not a
 			// blind live session, so it gets no blindness row and the operator
@@ -570,7 +592,13 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 	for _, name := range leaked {
 		origin := "no ancestry marker"
 		ownedByActiveHome := false
-		switch home, present, markerErr := tmuxSessionHomeMarker(ctx, name, live[name]); {
+		// When the same name lives on several sockets the union preserves every
+		// pair, but this row reports one session: the first socket's copy is
+		// the one the marker and the manual remedy below pin to. Reading only
+		// the first errs advisory — a same-named session on another socket
+		// claiming this home keeps the row unactionable rather than arming a
+		// kill command for a session that might not be ours.
+		switch home, present, markerErr := tmuxSessionHomeMarker(ctx, name, live[name][0]); {
 		case markerErr != nil:
 			// Unanswered, not unmarked. Stays advisory below — the actionable
 			// row asserts this install created the session, and we do not know
@@ -604,7 +632,7 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 			origin = "created by another agent-factory home: " + home
 		}
 		killCmd := shellsuggest.Command("tmux", "kill-session", "-t", tmux.ExactTarget(name))
-		if socket := live[name]; socket != "" {
+		if socket := live[name][0]; socket != "" {
 			// tmux.ExactTarget spells "=name:", one argument, so it is one
 			// piece the seam quotes as a whole. `-S <socket>` pins
 			// the remedy to the server the listing found the session on.
@@ -738,11 +766,17 @@ func liveTmuxHomesNow(ctx *scanContext) (map[string]bool, error) {
 // the home is unused and removes it from under the session claiming it. The
 // union can only over-preserve a home, never over-remove one, and an unreadable
 // ambient listing fails the guard the same way an unreadable pinned one does.
-func unionLiveTmuxHomes(ctx *scanContext, live map[string]string, fresh bool) (map[string]bool, error) {
+func unionLiveTmuxHomes(ctx *scanContext, live map[string][]string, fresh bool) (map[string]bool, error) {
 	socket, _ := ctx.recordedSocket()
+	// Every (name, socket) pair gets its ownership marker read: session names
+	// derive from repo path and title, so a same-named session on another
+	// socket can claim a DIFFERENT home — dropping the pair drops the veto
+	// that keeps rm -rf away from a live session's home.
 	bySocket := map[string][]string{}
-	for name, sock := range live {
-		bySocket[sock] = append(bySocket[sock], name)
+	for name, sockets := range live {
+		for _, sock := range sockets {
+			bySocket[sock] = append(bySocket[sock], name)
+		}
 	}
 	homes := map[string]bool{}
 	for sock, names := range bySocket {
@@ -774,6 +808,13 @@ func unionLiveTmuxHomes(ctx *scanContext, live map[string]string, fresh bool) (m
 	}
 	for home := range more {
 		homes[home] = true
+	}
+	// A record whose socket history hit its bound has dropped a generation
+	// that may still host a session claiming any home here — no home's tmux
+	// use can then be ruled out, so the removal guard this feeds refuses.
+	if st, ok, rerr := ctx.recordedServer(); rerr == nil && ok && st.HistoryTruncated {
+		return nil, fmt.Errorf("the daemon's tmux socket history was truncated: a dropped socket " +
+			"generation may still host sessions, so no home's tmux use can be ruled out")
 	}
 	return homes, nil
 }

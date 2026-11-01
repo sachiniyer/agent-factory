@@ -314,7 +314,7 @@ type scanContext struct {
 	// for a kill, no matter what markers they carry.
 	selfAncestors map[int]bool
 	// The run's ONE tmux session listing, memoized by tmuxSessions — a union
-	// map from each live session name to the socket it was listed on, covering
+	// map from each live session name to every socket it was listed on, covering
 	// the daemon's recorded socket PLUS every prior socket generation the
 	// record names (#6339). A restart can move the daemon to a new socket
 	// while its previous server and sessions stay alive on the old one, so a
@@ -332,7 +332,7 @@ type scanContext struct {
 	// Memoized rather than re-listed per check so one run cannot see two
 	// different worlds — a check that disagrees with the row reporting the
 	// listing is worse than either answer alone.
-	tmuxLive    map[string]string
+	tmuxLive    map[string][]string
 	tmuxErr     error
 	tmuxScanned bool
 	// socketSessions memoizes the run's per-socket tmux listings: the union

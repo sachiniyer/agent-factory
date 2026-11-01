@@ -111,7 +111,11 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	for _, name := range sortedKeys(marked) {
 		procs := marked[name]
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
-		liveSocket, sessionLive := live[name]
+		liveSockets, sessionLive := live[name]
+		var liveSocket string
+		if sessionLive {
+			liveSocket = liveSockets[0]
+		}
 		if sessionLive {
 			// The pane tree comes from the EVIDENCE-BEARING capture. The
 			// best-effort SessionProcessTrees returns nil on any list-panes

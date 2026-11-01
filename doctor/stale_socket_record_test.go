@@ -414,3 +414,90 @@ func TestRecordWrittenByLiveDaemon_GenerationMatch_StillKills(t *testing.T) {
 	require.Eventually(t, func() bool { return !alive(orphan) }, 5*time.Second, 25*time.Millisecond,
 		"a genuine orphan whose record and prior sockets are all accounted for must still be killed")
 }
+
+// TestTruncatedSocketHistory_RecordOnlyProof_RefusesKill pins the bound's
+// other half: the record says its own history is incomplete. prior_sockets is
+// capped, and a socket generation evicted by the cap may still host the
+// session a TMUX-less process's absence would otherwise convict — so even a
+// current, daemon-stamped record with history_truncated set cannot corroborate
+// a record-only death proof. --fix must report the process and holster the
+// kill.
+func TestTruncatedSocketHistory_RecordOnlyProof_RefusesKill(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	daemonProc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	stubDaemonProcessArgv(t, func(pid int) []string {
+		if pid == daemonProc.PID {
+			return []string{"af", "--daemon"}
+		}
+		return nil
+	})
+	stubProcessHomes(t, map[int]string{daemonProc.PID: home})
+
+	sockAmbient := filepath.Join(os.Getenv("TMUX_TMPDIR"), fmt.Sprintf("tmux-%d/default", os.Getuid()))
+	deadPrior := testguard.SocketPath(t, "prior-dead")
+	writeServerStateJSON(t, home, fmt.Sprintf(
+		`{"mode":"dedicated","socket":%q,"unit":"agent-factory-tmux-server-new","at":%q,"daemon_pid":%d,"prior_sockets":[%q],"history_truncated":true}`,
+		sockAmbient, time.Now().Format(time.RFC3339), daemonProc.PID, deadPrior))
+
+	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-maybe-evicted-session",
+		tmux.EnvMarkerHome:    home,
+	})
+
+	opts := testOptionsWithHome(t, home, true, daemonProc.PID, orphan.PID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(orphan),
+		"`af doctor --fix` killed a process on a record that ADMITS its socket history is "+
+			"incomplete — a dropped generation may still host the session (#6339)")
+	for _, f := range findByCheck(report, "orphaned-process") {
+		require.Empty(t, f.FixAction,
+			"a truncated socket history must not arm a record-only kill: %s", f.Detail)
+		require.False(t, f.Fixed)
+	}
+}
+
+// TestSameNamedSession_TwoSockets_BothHomesClaimed pins the union's
+// (name, socket) coverage: session names derive from repo path and title, not
+// AF home, so two socket generations can legitimately host a same-named
+// session claiming DIFFERENT homes. The union must read the ownership marker
+// for every pair — deduplicating by name would drop one session's claim, and
+// that claim is the veto standing between a stale home and rm -rf.
+func TestSameNamedSession_TwoSockets_BothHomesClaimed(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	claimedByPrior := testguard.SocketTempDir(t)
+	claimedByCurrent := testguard.SocketTempDir(t)
+
+	const name = "af_doctor-shared-name"
+	sockA := testguard.SocketPath(t, "a")
+	out, err := exec.Command("tmux", "-S", sockA, "new-session", "-d", "-s", name,
+		"-e", tmux.EnvMarkerSession+"="+name, "-e", tmux.EnvMarkerHome+"="+claimedByPrior,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session on server A: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockA, "kill-server").Run() })
+
+	sockB := testguard.SocketPath(t, "b")
+	out, err = exec.Command("tmux", "-S", sockB, "new-session", "-d", "-s", name,
+		"-e", tmux.EnvMarkerSession+"="+name, "-e", tmux.EnvMarkerHome+"="+claimedByCurrent,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session on server B: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockB, "kill-server").Run() })
+
+	writeServerStateJSON(t, home, fmt.Sprintf(
+		`{"mode":"dedicated","socket":%q,"unit":"agent-factory-tmux-server-new","at":%q,"prior_sockets":[%q]}`,
+		sockB, time.Now().Format(time.RFC3339), sockA))
+
+	ctx, err := newScanContext(testOptionsWithHome(t, home, false))
+	require.NoError(t, err)
+	homes, err := liveTmuxHomes(ctx)
+	require.NoError(t, err)
+	require.True(t, homes[normalizeHome(claimedByPrior)],
+		"the session copy on the prior socket claims %s — dropping the pair loses that veto", claimedByPrior)
+	require.True(t, homes[normalizeHome(claimedByCurrent)],
+		"the session copy on the current socket claims %s", claimedByCurrent)
+}

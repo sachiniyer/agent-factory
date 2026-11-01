@@ -33,11 +33,12 @@ import (
 // field by field so a build that predates daemon_pid/prior_sockets simply
 // reads zero values for them — which is itself the assertion these tests make.
 type serverStateRecord struct {
-	Mode         string   `json:"mode"`
-	Socket       string   `json:"socket"`
-	Unit         string   `json:"unit"`
-	DaemonPID    int      `json:"daemon_pid"`
-	PriorSockets []string `json:"prior_sockets"`
+	Mode             string   `json:"mode"`
+	Socket           string   `json:"socket"`
+	Unit             string   `json:"unit"`
+	DaemonPID        int      `json:"daemon_pid"`
+	PriorSockets     []string `json:"prior_sockets"`
+	HistoryTruncated bool     `json:"history_truncated"`
 }
 
 func readServerStateRecord(t *testing.T, home string) serverStateRecord {
@@ -240,6 +241,9 @@ func TestRecordServerState_PriorSocketsDropsUnreachableGeneration(t *testing.T) 
 		t.Fatalf("prior_sockets with an unreachable generation = %v, want only the reachable %v",
 			rec.PriorSockets, want)
 	}
+	if rec.HistoryTruncated {
+		t.Fatal("dropping an unreachable socket loses no coverage — history_truncated must stay false")
+	}
 }
 
 // TestRecordServerState_PriorSocketsCapped pins the other half of the bound:
@@ -273,5 +277,17 @@ func TestRecordServerState_PriorSocketsCapped(t *testing.T) {
 			t.Fatalf("prior_sockets[%d] = %q, want %q — the bound keeps the newest generations",
 				i, rec.PriorSockets[i], want[i])
 		}
+	}
+	// Dropping a still-reachable generation is an admission the record can no
+	// longer account for every socket the daemon has used: the record must SAY
+	// so, and once said the admission never clears — the dropped server may
+	// host sessions forever.
+	if !rec.HistoryTruncated {
+		t.Fatal("cap eviction dropped a still-reachable generation — history_truncated must be set")
+	}
+	recordServerState(home, ServerState{Mode: ServerMode("dedicated"), Socket: socketForTest(t, sockDir, "later"), At: time.Now()})
+	rec2 := readServerStateRecord(t, home)
+	if !rec2.HistoryTruncated {
+		t.Fatal("a truncated history stays truncated on every later record")
 	}
 }

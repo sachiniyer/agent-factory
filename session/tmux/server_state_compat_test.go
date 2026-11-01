@@ -44,10 +44,11 @@ func TestServerState_OldBinaryReadsNewRecord(t *testing.T) {
 	lastServerState = ServerState{}
 	serverStateMu.Unlock()
 	recordServerState(home, ServerState{
-		Mode:         ServerMode("adopted"),
-		Socket:       sock,
-		PriorSockets: []string{prior},
-		At:           time.Now(),
+		Mode:             ServerMode("adopted"),
+		Socket:           sock,
+		PriorSockets:     []string{prior},
+		HistoryTruncated: true,
+		At:               time.Now(),
 	})
 
 	data, err := os.ReadFile(filepath.Join(home, serverStateFileName))
@@ -71,7 +72,8 @@ func TestServerState_OldBinaryReadsNewRecord(t *testing.T) {
 	}
 	// recordServerState always stamps the WRITER's pid — os.Getpid() here —
 	// over whatever a caller supplies, which is itself part of the contract.
-	if st.DaemonPID != os.Getpid() || len(st.PriorSockets) != 1 || st.PriorSockets[0] != prior {
+	if st.DaemonPID != os.Getpid() || len(st.PriorSockets) != 1 || st.PriorSockets[0] != prior ||
+		!st.HistoryTruncated {
 		t.Fatalf("new-schema read dropped the generation fields: %+v", st)
 	}
 }
