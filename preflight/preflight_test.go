@@ -434,6 +434,20 @@ func TestRelativeExecutable(t *testing.T) {
 		// ancestor directory.
 		{name: "env chdir climbs above probe anchors bare exe", command: "env -C ../../tools codex", want: true},
 		{name: "env chdir climbs above probe anchors absolute exe", command: "env -C ../../tools /usr/bin/codex", want: true},
+		// Nested relative chdirs that cancel back to the launch directory
+		// (env -C rel env -C ..) still enter <launch-dir>/rel before the
+		// inner chdir resets the directory, so WorkingDir collapses to the
+		// anchor even though the outer chdir depends on the doctor's cwd.
+		// The relative chdir operands must be inspected before the
+		// anchor-equality short-circuit, or the doctor outside a repo
+		// falsely PASSes against its incidental cwd.
+		{name: "env nested cancel relative chdirs bare exe", command: "env -C rel env -C .. /bin/true", want: true},
+		{name: "env nested cancel relative chdirs absolute exe", command: "env -C rel env -C .. /usr/bin/codex", want: true},
+		// A cwd-neutral -C . does not move the working directory, so it is
+		// not a relative chdir that anchors the command; the doctor can
+		// verify the absolute executable directly.
+		{name: "env chdir cwd-neutral dot absolute exe", command: "env -C . /usr/bin/codex", want: false},
+		{name: "env chdir cwd-neutral dot bare exe", command: "env -C . codex", want: false},
 		{name: "env chdir absolute bare exe", command: "env -C /abs codex", want: false},
 		{name: "opaque relative wrapper", command: "./my-wrapper --ready", want: true},
 		{name: "opaque bare wrapper", command: "my-wrapper --ready", want: false},

@@ -655,9 +655,12 @@ func workingDirResolvesAgainstCwd(command string, launch tmux.CommandEnvironment
 // the doctor's own cwd, which always exists) and an absolute chdir both return
 // false; only a relative chdir returns true. The anchor comparison misses a
 // parent-relative chdir that collapses both probe anchors (env -C ../../tools),
-// so a direct relative chdir check backs it up.
+// and a chain of relative chdirs that cancels back to the anchor (env -C rel
+// env -C .. /bin/true), so a direct relative chdir check backs both up. A
+// cwd-neutral chdir such as -C . does not move the directory and is excluded,
+// so it falls through to the anchor-equality short-circuit.
 func relativeChdir(command string, launch tmux.CommandEnvironment) bool {
-	if launch.WorkingDir == relativeExecutableAnchorA {
+	if launch.WorkingDir == relativeExecutableAnchorA && !relativeChdirOperand(command) {
 		return false
 	}
 	other, err := tmux.CommandEnvironmentFromCommand(command, relativeExecutableAnchorB)
@@ -671,22 +674,29 @@ func relativeChdir(command string, launch tmux.CommandEnvironment) bool {
 }
 
 // relativeChdirOperand reports whether command's env prefix applies a relative
-// -C/--chdir with no absolute chdir after it to fix the working directory. Such
-// a chain resolves launch.WorkingDir against the doctor's cwd (join(cwd,
-// chdir)) even when the two probe anchors collapse to the same root-relative
-// path, which the anchor comparison in workingDirResolvesAgainstCwd and
-// relativeChdir cannot distinguish from an absolute chdir.
+// -C/--chdir that actually moves the working directory, with no absolute chdir
+// to fix it. Such a chain resolves launch.WorkingDir against the doctor's cwd
+// (join(cwd, chdir)) even when the two probe anchors collapse to the same
+// root-relative path, which the anchor comparison in workingDirResolvesAgainstCwd
+// and relativeChdir cannot distinguish from an absolute chdir. A cwd-neutral
+// chdir (env -C . codex) does not move the directory, so it does not anchor the
+// command and is skipped.
 func relativeChdirOperand(command string) bool {
 	chdirs := envChdirs(command)
 	if len(chdirs) == 0 {
 		return false
 	}
+	hasMoving := false
 	for _, c := range chdirs {
 		if filepath.IsAbs(c) {
 			return false
 		}
+		if filepath.Clean(c) == "." {
+			continue
+		}
+		hasMoving = true
 	}
-	return true
+	return hasMoving
 }
 
 // envChdirs returns the ordered -C/--chdir operands from the GNU env wrappers
