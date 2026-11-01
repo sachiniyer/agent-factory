@@ -1042,9 +1042,10 @@ sandbox it cannot reach.
 What the sandbox host needs, and what af does to it:
 
 - **Tools.** `git`, `tmux` (3.2 or newer) and a POSIX `sh` on the
-  non-interactive `PATH` of the ssh login (af sends its provisioning scripts as
-  one ssh argument that the remote login shell parses). The static `af` binary
-  af copies over also has to run there: see the glibc rule under
+  non-interactive `PATH` of the ssh login (af wraps each remote script in
+  `sh -c '<script>'` and sends that as one ssh argument; the `sh` it invokes
+  parses the script, not the login shell). The static `af` binary af copies
+  over also has to run there: see the glibc rule under
   [Docker](#docker-backend) for the dynamic build.
 - **Git identity is repo-local.** After the clone, provisioning writes the
   committer identity into the workspace's own `.git/config` (`git config
