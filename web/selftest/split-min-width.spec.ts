@@ -58,6 +58,10 @@ test("#6429: no pane renders under the floor; overflow degrades visibly, not to 
   expect(selected?.id).toBeTruthy();
   await page.goto(`/#/session/${encodeURIComponent(selected.id)}`);
   await page.locator("#app[data-af-resync-settled]").waitFor();
+  // The issue starts at 1440 — wide enough that all four panes fit during
+  // setup. The default 1280 host is already under the four-pane minimum, so
+  // the fit would hide one before the repro even begins.
+  await page.setViewportSize({ width: 1440, height: 900 });
 
   // The issue's fleet: Agent plus three terminal tabs.
   const tabs = page.locator(".af-tabbar .af-tab");

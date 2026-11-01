@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "cde80f5db896";
+var CLIENT_VERSION = "26a8080f0bd0";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -15107,7 +15107,7 @@ var SplitView = class {
     if (!this.tree) {
       return;
     }
-    const ids = leaves(this.displayTree ?? this.tree).map((l) => l.id);
+    const ids = leaves(this.tree).map((l) => l.id);
     if (ids.length <= 1) {
       this.refocus();
       return;
@@ -15954,6 +15954,9 @@ var SplitView = class {
     this.focusedId = leafId;
     this.layoutGen++;
     this.applyFocusClass();
+    if (this.displayTree && !findLeaf(this.displayTree, leafId)) {
+      this.scheduleRefit();
+    }
     const pane = this.panes.get(leafId);
     if (pane) {
       this.cb.onStatus(pane.status, pane.status === "reconnecting" ? pane.retryAt : void 0);

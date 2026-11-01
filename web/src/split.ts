@@ -751,7 +751,13 @@ export class SplitView {
     if (!this.tree) {
       return;
     }
-    const ids = leaves(this.displayTree ?? this.tree).map((l) => l.id);
+    // Cycle the FULL tree, not just the visible leaves: a pane the fit hid
+    // (#6429) is not gone — focusing it makes it the protected leaf, and the
+    // next reconcile un-hides it (the same way the TUI restores a pane when
+    // focus moves to it). Cycling only the visible set would strand focus on
+    // narrow hosts, and on the phone-collapse layout it would break Alt+j/k
+    // entirely — exactly one pane is ever mounted there.
+    const ids = leaves(this.tree).map((l) => l.id);
     if (ids.length <= 1) {
       this.refocus();
       return;
@@ -2085,6 +2091,13 @@ export class SplitView {
     // that already holds focus must not invalidate an in-flight close.
     this.layoutGen++;
     this.applyFocusClass();
+    // Focus just moved to a leaf the fit hid (#6429): queue a refit so the
+    // protected-leaf rule mounts it again — focus must always land on something
+    // rendered. Not via commit(): the tree is untouched, and reconcile is far
+    // more than a focus move needs when the focused pane is already visible.
+    if (this.displayTree && !findLeaf(this.displayTree, leafId)) {
+      this.scheduleRefit();
+    }
     // The focused pane's status becomes the header status.
     const pane = this.panes.get(leafId);
     if (pane) {
