@@ -182,6 +182,16 @@ func TestTaskFireLeftover_BoundWorktreeWithWorkStaysQuarantined(t *testing.T) {
 			// the main checkout also lists — it survives worktree removal, so
 			// it is not the tree's own to lose and must not quarantine. The
 			// worktree's own refs are what the private-refs gate counts.
+			name: "a bisect of its own",
+			soil: func(t *testing.T, wtPath string) {
+				t.Helper()
+				if out, err := exec.Command("git", "-C", wtPath, "update-ref",
+					"refs/bisect/agent-bisect", "HEAD").CombinedOutput(); err != nil {
+					t.Fatalf("git update-ref: %v: %s", err, out)
+				}
+			},
+		},
+		{
 			name: "a refs/worktree ref of its own",
 			soil: func(t *testing.T, wtPath string) {
 				t.Helper()

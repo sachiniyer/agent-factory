@@ -291,8 +291,9 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 //     bound to the probed tmux session id. A discovered worktree is torn down
 //     only when the marker bound its exact path before creation AND the tree is
 //     clean — no modified, staged, untracked, or ignored files, no commits
-//     beyond the mainline, no stash or refs/worktree/* of its own — which
-//     tombstones
+//     beyond the mainline, and nothing in its own ref namespaces
+//     (refs/worktree/, refs/bisect/, refs/rewritten/ — a stash lives in the
+//     SHARED refs/stash and survives) — which tombstones
 //     the record for teardown (#6259). Anything unproven — no stamp, an
 //     unreadable environment, a probe that did not answer, a replaced session,
 //     an unbound or mismatched worktree, any bare branch residue — is
