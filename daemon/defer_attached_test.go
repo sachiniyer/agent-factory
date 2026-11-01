@@ -27,7 +27,7 @@ func TestDeliverPrompt_DefersWhileTargetAttached(t *testing.T) {
 
 	// A TUI attaches full-screen to the target: the daemon's pause-poll lease is
 	// the "attached" signal (#1160) the defer reuses.
-	manager.PauseStatusPoll(repoID, "captain", "")
+	manager.PauseStatusPollFor(repoID, "captain", "", "")
 
 	status, err := manager.DeliverPrompt(DeliverPromptRequest{
 		Title:              "captain",
@@ -47,7 +47,7 @@ func TestDeliverPrompt_DefersWhileTargetAttached(t *testing.T) {
 	}
 
 	// On detach the very same delivery lands normally.
-	manager.ResumeStatusPoll(repoID, "captain", "")
+	manager.ResumeStatusPollFor(repoID, "captain", "", "")
 	status, err = manager.DeliverPrompt(DeliverPromptRequest{
 		Title:              "captain",
 		RepoPath:           repoPath,
@@ -80,7 +80,7 @@ func TestDeliverPrompt_AttachedLimitedTargetParks(t *testing.T) {
 
 	// Attached to a limit-reached target: attachment alone defers, but the
 	// usage limit is the blocker the task record owns.
-	manager.PauseStatusPoll(repoID, "captain", "")
+	manager.PauseStatusPollFor(repoID, "captain", "", "")
 
 	status, err := manager.DeliverPrompt(DeliverPromptRequest{
 		Title:              "captain",
@@ -111,7 +111,7 @@ func TestDeliverPrompt_ManualSendDeliversWhileTargetAttached(t *testing.T) {
 	backend := recordingBackend{readyFakeBackend{session.NewFakeBackend()}, rec}
 	registerStarted(t, manager, repoID, repoPath, "captain", backend, true, session.Running)
 
-	manager.PauseStatusPoll(repoID, "captain", "")
+	manager.PauseStatusPollFor(repoID, "captain", "", "")
 
 	status, err := manager.DeliverPrompt(DeliverPromptRequest{
 		Title:    "captain",

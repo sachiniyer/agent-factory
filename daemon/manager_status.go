@@ -74,14 +74,6 @@ func statusPollLeaseKey(repoID, title, id string) string {
 	return statusPollTitleKey(repoID, title)
 }
 
-// PauseStatusPoll pauses the daemon's capture-pane liveness poll for one
-// attached session for statusPollLease from now (#1160). Renewing (the TUI's
-// heartbeat) just pushes the expiry out; the pause is per stable identity, so a
-// same-title successor never inherits the old attach's lease (#2358).
-func (m *Manager) PauseStatusPoll(repoID, title, id string) {
-	m.PauseStatusPollFor(repoID, title, id, "")
-}
-
 // PauseStatusPollFor is PauseStatusPoll for a client that identifies itself, so a
 // release only lifts the pause when the LAST holder leaves (#3027).
 //
@@ -103,18 +95,6 @@ func (m *Manager) PauseStatusPollFor(repoID, title, id, holder string) {
 	}
 	holders[holder] = nowFunc().Add(statusPollLease)
 	m.pausedMu.Unlock()
-}
-
-// ResumeStatusPoll clears a pause immediately on a clean detach so the poll
-// resumes on the next tick rather than waiting out the lease (#1160).
-//
-// It also frees the session's backstop-timer entry (#2015). That entry is keyed
-// by stableSessionKey (the stable instance ID), so an ID-bearing resume can delete
-// it directly. Legacy title-only callers resolve the tracked instance as before.
-// sweepPausedPollState reclaims any entry this cannot (a crashed TUI that never
-// resumes, a session torn down mid-pause), so a lookup miss here is harmless.
-func (m *Manager) ResumeStatusPoll(repoID, title, id string) {
-	m.ResumeStatusPollFor(repoID, title, id, "")
 }
 
 // ResumeStatusPollFor is ResumeStatusPoll for an identified holder; see
@@ -906,9 +886,3 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	m.noteBacklogRunEnd(repoID, instance, backlogRunWasActive)
 	m.drainBacklogDeferredArchive(repoID, instance)
 }
-
-// SaveInstances writes the manager's authoritative in-memory instances to disk
-// as a straight per-repo marshal (#960 PR 4). With the daemon the sole writer of
-// instances.json there is no competing snapshot to reconcile, so this is no
-// longer a merge. Every mutation already persists through a targeted writer
-// (appendInstanceData / persistInstanceData / DeleteInstanceByStableID) as it happens; this
