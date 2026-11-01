@@ -2,7 +2,7 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 import assert from "node:assert/strict";
 
 import { type FakeElement, FakeEvent, installFakeDom } from "./backlog_fakedom.js";
-import { PREVIEW_DELAY_MS, PREVIEW_TTL_MS, PreviewCache, PreviewPopover } from "./backlog_preview.js";
+import { PREVIEW_DELAY_MS, PREVIEW_TTL_MS, PreviewCache, PreviewPopover, previewPlacement } from "./backlog_preview.js";
 
 let dom: ReturnType<typeof installFakeDom>;
 let now: number;
@@ -178,4 +178,18 @@ test("a waiting ask that is cached by its turn resolves and the queue goes on", 
   assert.deepEqual(l.pending.map((p) => p.id), ["a", "b"]);
   l.pending[1].resolve("B");
   assert.deepEqual(await b, { text: "B" });
+});
+
+test("the popover's height is capped to the room on its side, so wrapped output stays in the viewport (Codex P2 on #6544)", () => {
+  // A phone: 390 × 844. A chip near the top opens the popover below it, capped to the rest of the screen.
+  const top = previewPlacement({ top: 100, height: 20, left: 300, width: 80 }, 390, 844);
+  assert.deepEqual([top.top, top.bottom, top.maxHeight], ["120px", "auto", "724px"]);
+  assert.deepEqual([top.left, top.right], ["auto", "10px"], "the chip is in the right half: aligned to its end");
+  // A chip low on the screen opens it above, capped to the room above the chip.
+  const low = previewPlacement({ top: 700, height: 20, left: 10, width: 80 }, 390, 844);
+  assert.deepEqual([low.top, low.bottom, low.maxHeight], ["auto", "144px", "700px"]);
+  assert.equal(low.left, "10px");
+  // An unknown viewport sets no caps.
+  const none = previewPlacement({ top: 100, height: 20, left: 0, width: 80 }, 0, 0);
+  assert.deepEqual([none.maxWidth, none.maxHeight], ["", ""]);
 });

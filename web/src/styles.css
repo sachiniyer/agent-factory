@@ -5221,9 +5221,14 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
   border-radius: var(--af-radius-control);
   pointer-events: none;
+  /* Capped to the viewport's room by previewPlacement: the text shrinks and clips. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .af-backlog-preview[hidden] { display: none; }
+.af-backlog-preview .af-backlog-preview-text { min-height: 0; overflow: hidden; }
 .af-backlog-preview-head { color: var(--af-ink-muted); font-size: var(--af-type-caption); padding-bottom: var(--af-space-1); }
 
 .af-backlog-preview-text, .af-backlog-card-preview {

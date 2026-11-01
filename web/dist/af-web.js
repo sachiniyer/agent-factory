@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "7601112c29b9";
+var CLIENT_VERSION = "bf3b5e89f445";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19747,23 +19747,30 @@ var PreviewPopover = class {
     this.heading.textContent = heading;
     this.body.textContent = p.error ? `Preview unavailable \xB7 ${p.error}` : p.text || "No output yet";
     this.body.classList.toggle("af-backlog-preview-error", Boolean(p.error));
-    const r = anchor.getBoundingClientRect();
     const vw = typeof window === "undefined" ? 0 : window.innerWidth;
     const vh = typeof window === "undefined" ? 0 : window.innerHeight;
-    const below = vh === 0 || r.top + r.height < vh * 0.6;
-    this.el.style.top = below ? `${r.top + r.height}px` : "auto";
-    this.el.style.bottom = below ? "auto" : `${vh - r.top}px`;
-    const left = Math.max(0, r.left);
-    const end = Math.min(vw || Infinity, r.left + r.width);
-    const fromRight = vw > 0 && end > vw / 2;
-    this.el.style.left = fromRight ? "auto" : `${left}px`;
-    this.el.style.right = fromRight ? `${Math.max(0, vw - end)}px` : "auto";
-    const room = fromRight ? Math.max(0, end) : vw > 0 ? vw - left : 0;
-    this.el.style.maxWidth = room > 0 ? `min(calc(var(--af-space-4) * 36), ${room}px)` : "";
+    Object.assign(this.el.style, previewPlacement(anchor.getBoundingClientRect(), vw, vh));
     this.el.hidden = false;
+    this.body.scrollTop = this.body.scrollHeight;
     anchor.setAttribute("aria-describedby", this.el.id);
   }
 };
+function previewPlacement(r, vw, vh) {
+  const below = vh === 0 || r.top + r.height < vh * 0.6;
+  const tall = vh > 0 ? Math.max(0, below ? vh - (r.top + r.height) : r.top) : 0;
+  const left = Math.max(0, r.left);
+  const end = Math.min(vw || Infinity, r.left + r.width);
+  const fromRight = vw > 0 && end > vw / 2;
+  const wide = fromRight ? Math.max(0, end) : vw > 0 ? vw - left : 0;
+  return {
+    top: below ? `${r.top + r.height}px` : "auto",
+    bottom: below ? "auto" : `${vh - r.top}px`,
+    left: fromRight ? "auto" : `${left}px`,
+    right: fromRight ? `${Math.max(0, vw - end)}px` : "auto",
+    maxWidth: wide > 0 ? `min(calc(var(--af-space-4) * 36), ${wide}px)` : "",
+    maxHeight: tall > 0 ? `${tall}px` : ""
+  };
+}
 
 // src/backlog_runner.ts
 var MAX_RUNNING = 8;

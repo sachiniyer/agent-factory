@@ -4673,9 +4673,16 @@ textarea[class] {
   border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
   border-radius: var(--af-radius-control);
   pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .af-backlog-preview[hidden] {
   display: none;
+}
+.af-backlog-preview .af-backlog-preview-text {
+  min-height: 0;
+  overflow: hidden;
 }
 .af-backlog-preview-head {
   color: var(--af-ink-muted);
