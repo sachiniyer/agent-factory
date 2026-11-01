@@ -52,6 +52,7 @@ jobs:
     # Routed through scripts/ci-apt-install.sh so a third-party source in the
     # runner image cannot fail this step by failing the update (#3774).
     - name: Install zsh
+      timeout-minutes: 25
       run: scripts/ci-apt-install.sh zsh
 
     # Every matrix cell runs this step on the amd64 ubuntu runner — GOOS/GOARCH are

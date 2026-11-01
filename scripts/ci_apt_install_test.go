@@ -39,6 +39,18 @@ const aptStub = `#!/usr/bin/env bash
 	for a in "$@"; do line="$line$a"$'\x1f'; done
 	printf '%s\n' "$line"
 } >> "$APT_CALL_LOG"
+# APT_WEDGE_<sub> hangs that subcommand: "all" every call, N only the first N
+# calls (counted in a file), so a retry can succeed. exec so the process that
+# timeout signals is the sleeper itself, not a shell that leaves it behind.
+wedge_var="APT_WEDGE_$(echo "${1:-}" | tr a-z A-Z)"
+if [ -n "${!wedge_var:-}" ]; then
+	n_file="$APT_CALL_LOG.wedge.${1}"
+	n=$(( $(cat "$n_file" 2>/dev/null || echo 0) + 1 ))
+	echo "$n" > "$n_file"
+	if [ "${!wedge_var}" = all ] || [ "$n" -le "${!wedge_var}" ]; then
+		exec sleep 60
+	fi
+fi
 case "${1:-}" in
 update)
 	echo "Hit:1 http://azure.archive.ubuntu.com/ubuntu noble InRelease"
@@ -206,6 +218,104 @@ func TestCIAptInstallStillFailsWhenBothUpdateAndInstallFail(t *testing.T) {
 	// the package could not be found.
 	if !strings.Contains(run.output, "403  Forbidden") {
 		t.Errorf("update errors missing from a double failure; output:\n%s", run.output)
+	}
+}
+
+// A wedged apt (#6457) must fail fast with a message that names the wedge, and
+// must have been retried first. Real `timeout` is used; only apt-get is stubbed.
+func wedgeEnv(extra map[string]string) map[string]string {
+	env := map[string]string{"APT_ATTEMPT_TIMEOUT": "1", "APT_ATTEMPTS": "2", "APT_RETRY_DELAY": "0"}
+	for k, v := range extra {
+		env[k] = v
+	}
+	return env
+}
+
+func TestCIAptInstallFailsFastAndNamesAWedgedInstall(t *testing.T) {
+	run := runAptInstall(t, wedgeEnv(map[string]string{"APT_WEDGE_INSTALL": "all"}), "zsh")
+	if run.err == nil {
+		t.Fatalf("a wedged install succeeded; output:\n%s", run.output)
+	}
+	if code := run.exitCode(t); code != 124 && code != 137 {
+		t.Errorf("exit code = %d, want timeout's 124/137", code)
+	}
+	if !strings.Contains(run.output, "WEDGED") {
+		t.Errorf("failure does not name the wedge; output:\n%s", run.output)
+	}
+	// update once, then install on both attempts.
+	if len(run.calls) != 3 {
+		t.Errorf("apt-get calls = %v, want update + 2 install attempts", run.calls)
+	}
+}
+
+func TestCIAptInstallRetriesAWedgeAndThenSucceeds(t *testing.T) {
+	run := runAptInstall(t, wedgeEnv(map[string]string{"APT_WEDGE_INSTALL": "1"}), "zsh")
+	if run.err != nil {
+		t.Fatalf("a single wedged attempt was not retried to success: %v\n%s", run.err, run.output)
+	}
+	if len(run.calls) != 3 {
+		t.Errorf("apt-get calls = %v, want update + 2 install attempts", run.calls)
+	}
+}
+
+func TestCIAptInstallSurvivesAWedgedUpdateWhenTheInstallWorks(t *testing.T) {
+	run := runAptInstall(t, wedgeEnv(map[string]string{"APT_WEDGE_UPDATE": "all"}), "zsh")
+	if run.err != nil {
+		t.Fatalf("a wedged advisory update failed the step: %v\n%s", run.err, run.output)
+	}
+	if !strings.Contains(run.output, "wedged") {
+		t.Errorf("wedged update not named; output:\n%s", run.output)
+	}
+}
+
+func TestCIAptInstallDoesNotRetryAnOrdinaryFailure(t *testing.T) {
+	run := runAptInstall(t, wedgeEnv(map[string]string{"APT_INSTALL_FAIL": "1"}), "zsh")
+	if run.err == nil || run.exitCode(t) != 100 {
+		t.Fatalf("want exit 100; err=%v\n%s", run.err, run.output)
+	}
+	if len(run.calls) != 2 {
+		t.Errorf("an ordinary failure was retried: %v", run.calls)
+	}
+	if strings.Contains(run.output, "WEDGED") {
+		t.Errorf("an ordinary failure was reported as a wedge; output:\n%s", run.output)
+	}
+}
+
+// Every workflow step that runs the wrapper needs its own timeout-minutes, so a
+// hang the script cannot bound (sudo itself) still cannot hold the job for the
+// 6h default.
+func TestEveryAptInstallStepHasATimeout(t *testing.T) {
+	root := filepath.Join(repoRoot(t), ".github", "workflows")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sites := 0
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(root, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(data), "\n")
+		for i, l := range lines {
+			if !strings.Contains(l, "run: scripts/ci-apt-install.sh") || strings.HasPrefix(strings.TrimSpace(l), "#") {
+				continue
+			}
+			sites++
+			indent := l[:len(l)-len(strings.TrimLeft(l, " "))]
+			ok := false
+			for j := i - 1; j >= 0 && strings.HasPrefix(lines[j], indent) && !strings.HasPrefix(lines[j][len(indent):], "- "); j-- {
+				if strings.HasPrefix(strings.TrimSpace(lines[j]), "timeout-minutes:") {
+					ok = true
+				}
+			}
+			if !ok {
+				t.Errorf("%s:%d: apt install step has no timeout-minutes (#6457)", e.Name(), i+1)
+			}
+		}
+	}
+	if sites < 6 {
+		t.Errorf("saw only %d call sites; the scan is looking in the wrong place", sites)
 	}
 }
 
