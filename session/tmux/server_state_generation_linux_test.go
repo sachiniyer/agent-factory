@@ -212,12 +212,12 @@ func TestRecordServerState_RetainsPriorSocketGenerations(t *testing.T) {
 	}
 }
 
-// TestRecordServerState_PriorSocketsDropsUnreachableGeneration pins one half
-// of the history bound: a prior socket whose file is gone can never be
-// connected to again — a tmux server owns its socket file for its whole life —
-// so keeping it would guarantee a permanently unlistable generation blinding
-// every doctor run.
-func TestRecordServerState_PriorSocketsDropsUnreachableGeneration(t *testing.T) {
+// TestRecordServerState_PriorSocketsRetainsUnreachableGeneration pins the
+// never-pruned half of the history bound: a prior socket whose file is gone
+// stays in the record. Proving a socket generation dead is hard — a wrong
+// guess hides its live sessions — while retention costs doctor only a bounded
+// listing that answers "no server running" definitively.
+func TestRecordServerState_PriorSocketsRetainsUnreachableGeneration(t *testing.T) {
 	home := t.TempDir()
 	sockDir := t.TempDir()
 	serverStateMu.Lock()
@@ -235,24 +235,27 @@ func TestRecordServerState_PriorSocketsDropsUnreachableGeneration(t *testing.T) 
 	recordServerState(home, ServerState{Mode: ServerMode("dedicated"), Socket: live, At: time.Now()})
 	recordServerState(home, ServerState{Mode: ServerMode("dedicated"), Socket: current, At: time.Now()})
 
+	// The dead generation stays in the record: never-pruned history means
+	// doctor will still list it — and a dead server answers "no server
+	// running" definitively, so retention costs a bounded listing while a
+	// wrong guess at death would hide its sessions.
 	rec := readServerStateRecord(t, home)
-	want := []string{live}
-	if len(rec.PriorSockets) != len(want) || rec.PriorSockets[0] != want[0] {
-		t.Fatalf("prior_sockets with an unreachable generation = %v, want only the reachable %v",
+	want := []string{dead, live}
+	if len(rec.PriorSockets) != len(want) || rec.PriorSockets[0] != want[0] || rec.PriorSockets[1] != want[1] {
+		t.Fatalf("prior_sockets must retain every generation, dead sockets included: got %v, want %v",
 			rec.PriorSockets, want)
 	}
 	if rec.HistoryTruncated {
-		t.Fatal("dropping an unreachable socket loses no coverage — history_truncated must stay false")
+		t.Fatal("nothing was capped — history_truncated must stay false")
 	}
 }
 
-// TestRecordServerState_PriorSocketsKeepsUnstatableGeneration pins the other
-// edge of the prune: only a confirmed not-exist drops a generation. An Lstat
-// that fails for any other reason — here EACCES on the socket's own directory —
-// cannot prove the server is unreachable, so the generation must be KEPT for
-// doctor to list rather than silently lost (a lost generation is exactly the
-// unaccounted-socket shape #6339 closes).
-func TestRecordServerState_PriorSocketsKeepsUnstatableGeneration(t *testing.T) {
+// TestRecordServerState_PriorSocketsNeverProbesFilesystem pins that the
+// record write path does no liveness probing at all: a generation sitting in
+// a directory doctor's daemon cannot even stat is still carried forward —
+// the write path never opens the socket path, so nothing about the server's
+// reachability is inferred at record time.
+func TestRecordServerState_PriorSocketsNeverProbesFilesystem(t *testing.T) {
 	home := t.TempDir()
 	blockedDir := t.TempDir()
 	openDir := t.TempDir()
@@ -264,8 +267,9 @@ func TestRecordServerState_PriorSocketsKeepsUnstatableGeneration(t *testing.T) {
 	current := socketForTest(t, openDir, "current")
 
 	recordServerState(home, ServerState{Mode: ServerMode("dedicated"), Socket: blocked, At: time.Now()})
-	// Deny search on the socket's directory: Lstat then fails EACCES without
-	// proving anything about the server behind it.
+	// Deny all access to the socket's directory: if the write path probed the
+	// prior socket for liveness it could not reach this one — the generation
+	// must still be carried forward unchanged.
 	if err := os.Chmod(blockedDir, 0o000); err != nil {
 		t.Fatalf("chmod %s: %v", blockedDir, err)
 	}
@@ -274,7 +278,7 @@ func TestRecordServerState_PriorSocketsKeepsUnstatableGeneration(t *testing.T) {
 
 	rec := readServerStateRecord(t, home)
 	if len(rec.PriorSockets) != 1 || rec.PriorSockets[0] != blocked {
-		t.Fatalf("an Lstat failure that does not prove absence must KEEP the generation: prior_sockets=%v, want [%s]",
+		t.Fatalf("the write path must never probe socket reachability: prior_sockets=%v, want [%s]",
 			rec.PriorSockets, blocked)
 	}
 	if rec.HistoryTruncated {

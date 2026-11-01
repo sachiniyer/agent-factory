@@ -61,12 +61,14 @@ type ServerState struct {
 	// to a new socket while the previous server and its sessions can stay
 	// alive; the record must account for every socket generation the daemon
 	// has used before doctor may read a session's absence from the current
-	// one as death (#6339). The list is bounded two ways at write time —
-	// sockets whose file no longer exists are dropped (a tmux server owns its
-	// socket file for its whole life, so a gone file means no client can ever
-	// reach that server again), and the list is capped at
-	// maxPriorSocketGenerations newest generations — so restarts cannot grow
-	// the file without limit.
+	// one as death (#6339). A generation is added only when the socket path
+	// changes — an environment change; a same-environment restart reuses the
+	// socket — and entries are never pruned by inferred death: proving a
+	// socket generation dead is hard, and a dead server still answers
+	// "no server running" definitively, so retention costs doctor a bounded
+	// listing while dropping a live one hides its sessions. The list is
+	// capped at maxPriorSocketGenerations newest generations; exceeding the
+	// cap marks HistoryTruncated rather than silently losing coverage.
 	PriorSockets []string `json:"prior_sockets,omitempty"`
 	// HistoryTruncated records that the PriorSockets cap dropped a socket
 	// generation whose file still existed — one the record can therefore no
@@ -165,24 +167,24 @@ func recordServerState(home string, st ServerState) {
 }
 
 // maxPriorSocketGenerations caps the socket history the record carries
-// (#6339). A generation is added per socket move; without a bound a daemon
-// restarted under many different TMUX_TMPDIRs would grow the file without
-// limit. Eight still accounts for every socket a realistic lineage leaves
-// alive — and any entry beyond it is first pruned for reachability anyway, so
-// the cap only ever drops a socket whose server is still running after eight
-// later generations, a shape the per-process TMUX-env corroboration in doctor
-// still covers directly.
+// (#6339). A generation is added only per socket move; without a bound a
+// daemon restarted under many different TMUX_TMPDIRs would grow the file
+// without limit. Eight still accounts for every socket a realistic lineage
+// leaves alive — and exceeding it sets HistoryTruncated on the record, which
+// blinds doctor's record-only death proofs rather than letting a dropped
+// generation read as accounted for.
 const maxPriorSocketGenerations = 8
 
 // priorSocketGenerations returns prev's socket lineage with prev's own socket
-// moved into history when the daemon has moved on to current — deduplicated,
-// oldest first, bounded. Entries whose socket file no longer exists are
-// dropped: a tmux server owns its socket file for its whole life, so a gone
-// file means that server can never be connected to again — keeping it would
-// only guarantee a permanently unlistable generation blinding every doctor
-// run. When more than maxPriorSocketGenerations generations survive that
-// prune, the oldest are dropped — the newest are the sockets a live leftover
-// server is most likely still answering on.
+// moved into history when the daemon has moved on to current — deduplicated
+// by path, oldest first, bounded. No generation is ever dropped by inferred
+// death: a dead server still answers "no server running" definitively, so
+// doctor lists it as an authoritative empty, while a wrong guess at death
+// would hide its live sessions entirely. When more than
+// maxPriorSocketGenerations generations accumulate, the oldest are dropped —
+// the newest are the sockets a live leftover server is most likely still
+// answering on — and the truncation is reported so doctor knows the history
+// it can account for is incomplete.
 func priorSocketGenerations(prev ServerState, current string) ([]string, bool) {
 	seen := map[string]bool{current: true}
 	var out []string
@@ -193,18 +195,6 @@ func priorSocketGenerations(prev ServerState, current string) ([]string, bool) {
 			continue
 		}
 		seen[s] = true
-		if _, err := os.Lstat(s); err != nil {
-			if os.IsNotExist(err) {
-				// The socket file is gone, so no client can ever reach that
-				// server again — dropping it loses no coverage and does not
-				// count as truncation.
-				continue
-			}
-			// Any other failure — a permission-denied directory, a transient
-			// I/O error — cannot prove the server is unreachable. Keep the
-			// generation so doctor still tries to list it: an unlistable
-			// socket blinds the run rather than silently losing coverage.
-		}
 		out = append(out, s)
 	}
 	truncated := false
