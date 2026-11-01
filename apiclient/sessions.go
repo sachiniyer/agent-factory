@@ -2,6 +2,10 @@ package apiclient
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
@@ -72,9 +76,22 @@ func SnapshotNoSpawn(req daemon.SnapshotRequest) ([]session.InstanceData, []daem
 		if IsRemoteTarget() {
 			return nil, nil, err
 		}
-		return nil, nil, daemon.ErrDaemonUnavailable
+		return nil, nil, classifyLocalSnapshotFailure(err)
 	}
 	return instances, skipped, nil
+}
+
+// classifyLocalSnapshotFailure separates "no daemon exists" from "a daemon did
+// not answer" (#6503). Only positive evidence of absence — a missing socket or a
+// refused connect — is ErrDaemonUnavailable, the cue to read disk. Everything
+// else (the warm-up envelope, a dial timeout under load, an undecodable reply, a
+// daemon-side error) came from or toward a live daemon, so it is
+// ErrDaemonNotAnswering and the caller decides whether disk can stand in.
+func classifyLocalSnapshotFailure(err error) error {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
+		return daemon.ErrDaemonUnavailable
+	}
+	return fmt.Errorf("%w: %v", daemon.ErrDaemonNotAnswering, err)
 }
 
 // CallerNoSpawn returns the session a sandbox credential is bound to together

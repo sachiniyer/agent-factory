@@ -661,6 +661,15 @@ func ReorderTab(req ReorderTabRequest) (string, int, error) {
 // (#1029 PR 2).
 var ErrDaemonUnavailable = errors.New("daemon not available")
 
+// ErrDaemonNotAnswering is the other half of ErrDaemonUnavailable (#6503): a
+// daemon IS there — the socket accepted or half-accepted the request — but gave
+// no authoritative answer: it is still restoring, the dial timed out under
+// load, or the reply could not be decoded. ErrDaemonUnavailable means no daemon
+// exists, where the on-disk records are the only truth there is; this means a
+// live daemon whose in-memory state the disk may lag, so a fallback must not be
+// presented as the answer for a scope the disk cannot vouch for.
+var ErrDaemonNotAnswering = errors.New("daemon is running but did not give an authoritative answer")
+
 // PreviewSessionSnapshot captures one session tab through the daemon's sole
 // Preview handler and returns the WHOLE response, mirroring
 // apiclient.PreviewSnapshot on the remote side. Unlike ListTasksNoSpawn,

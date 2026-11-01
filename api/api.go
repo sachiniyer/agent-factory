@@ -42,12 +42,30 @@ import (
 // including their distinct not-found and corrupt-repo errors) while centralizing
 // the one decision that must never regress: whether disk may be read at all.
 func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, skipped []daemon.SkippedRepo, fallBackToDisk bool, err error) {
+	return snapshotReadScoped(req, true)
+}
+
+// snapshotReadScoped is snapshotRead with the all-projects refusal (#6503)
+// switchable. A live daemon that did not answer (starting, timed out, undecodable)
+// is not a daemon that is absent: its in-memory state is the truth and the disk
+// may lag it, so for a request that spans every project (req.RepoID empty — the
+// outside-a-repo scope of api/scope.go rule 3) a disk answer would be
+// authoritative-looking `[]` or "not found" for a scope the disk cannot vouch
+// for. Such a read reports the daemon as not ready instead. A repo-scoped read
+// keeps its fallback: that repo's own instances.json is the complete record for
+// that one scope. strict is false only for a lookup keyed on something the disk
+// record answers by itself (whoami's tmux name).
+func snapshotReadScoped(req daemon.SnapshotRequest, strict bool) (data []session.InstanceData, skipped []daemon.SkippedRepo, fallBackToDisk bool, err error) {
 	data, skipped, err = snapshotViaDaemon(req)
 	if err == nil {
 		return data, skipped, false, nil
 	}
 	if apiclient.IsRemoteTarget() {
 		return nil, nil, false, err
+	}
+	if strict && req.RepoID == "" && errors.Is(err, daemon.ErrDaemonNotAnswering) {
+		return nil, nil, false, fmt.Errorf("the agent-factory daemon is running but not ready to answer (%w); "+
+			"from outside a git repository this spans every project, which the on-disk records cannot answer for live sessions — retry in a moment, or scope it with --repo", err)
 	}
 	return nil, nil, true, err
 }
