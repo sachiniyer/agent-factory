@@ -61,7 +61,12 @@ type ServerState struct {
 	// to a new socket while the previous server and its sessions can stay
 	// alive; the record must account for every socket generation the daemon
 	// has used before doctor may read a session's absence from the current
-	// one as death (#6339).
+	// one as death (#6339). The list is bounded two ways at write time —
+	// sockets whose file no longer exists are dropped (a tmux server owns its
+	// socket file for its whole life, so a gone file means no client can ever
+	// reach that server again), and the list is capped at
+	// maxPriorSocketGenerations newest generations — so restarts cannot grow
+	// the file without limit.
 	PriorSockets []string `json:"prior_sockets,omitempty"`
 }
 
@@ -149,18 +154,42 @@ func recordServerState(home string, st ServerState) {
 	lastServerState = st
 }
 
+// maxPriorSocketGenerations caps the socket history the record carries
+// (#6339). A generation is added per socket move; without a bound a daemon
+// restarted under many different TMUX_TMPDIRs would grow the file without
+// limit. Eight still accounts for every socket a realistic lineage leaves
+// alive — and any entry beyond it is first pruned for reachability anyway, so
+// the cap only ever drops a socket whose server is still running after eight
+// later generations, a shape the per-process TMUX-env corroboration in doctor
+// still covers directly.
+const maxPriorSocketGenerations = 8
+
 // priorSocketGenerations returns prev's socket lineage with prev's own socket
 // moved into history when the daemon has moved on to current — deduplicated,
-// oldest first. When prev.Socket still equals current it is filtered out by
-// the seen set, so the result is simply prev's carried-forward history.
+// oldest first, bounded. Entries whose socket file no longer exists are
+// dropped: a tmux server owns its socket file for its whole life, so a gone
+// file means that server can never be connected to again — keeping it would
+// only guarantee a permanently unlistable generation blinding every doctor
+// run. When more than maxPriorSocketGenerations generations survive that
+// prune, the oldest are dropped — the newest are the sockets a live leftover
+// server is most likely still answering on.
 func priorSocketGenerations(prev ServerState, current string) []string {
 	seen := map[string]bool{current: true}
 	var out []string
-	for _, s := range append([]string{prev.Socket}, prev.PriorSockets...) {
-		if s != "" && !seen[s] {
-			out = append(out, s)
-			seen[s] = true
+	// prev.PriorSockets is already oldest-first; prev.Socket — the socket the
+	// previous record named — is the NEWEST generation and joins at the tail.
+	for _, s := range append(slices.Clone(prev.PriorSockets), prev.Socket) {
+		if s == "" || seen[s] {
+			continue
 		}
+		seen[s] = true
+		if _, err := os.Lstat(s); err != nil {
+			continue // no client can ever reach that server again
+		}
+		out = append(out, s)
+	}
+	if len(out) > maxPriorSocketGenerations {
+		out = out[len(out)-maxPriorSocketGenerations:]
 	}
 	return out
 }

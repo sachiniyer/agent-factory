@@ -290,6 +290,51 @@ func TestRecordWrittenByOlderDaemonGeneration_RefusesKillWithoutTmuxEnv(t *testi
 	}
 }
 
+// TestRecordWithoutDaemonBinding_LiveDaemon_RefusesKillWithoutTmuxEnv is the
+// upgrade half of record compatibility: a record written before daemon_pid
+// existed decodes with no generation binding, and while a live daemon serves
+// the home that record cannot be proven its work — a previous generation may
+// have run other sockets. Doctor reads the record, reports the process, and
+// refuses the kill: merely more cautious, never broken (#6339).
+func TestRecordWithoutDaemonBinding_LiveDaemon_RefusesKillWithoutTmuxEnv(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	daemonProc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	stubDaemonProcessArgv(t, func(pid int) []string {
+		if pid == daemonProc.PID {
+			return []string{"af", "--daemon"}
+		}
+		return nil
+	})
+	stubProcessHomes(t, map[int]string{daemonProc.PID: home})
+
+	sockAmbient := filepath.Join(os.Getenv("TMUX_TMPDIR"), fmt.Sprintf("tmux-%d/default", os.Getuid()))
+	// No daemon_pid: the exact record shape every pre-fix daemon leaves.
+	writeServerStateJSON(t, home, fmt.Sprintf(
+		`{"mode":"dedicated","socket":%q,"unit":"agent-factory-tmux-server-old","at":%q}`,
+		sockAmbient, time.Now().Format(time.RFC3339)))
+
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-gone-session",
+		tmux.EnvMarkerHome:    home,
+	})
+
+	opts := testOptionsWithHome(t, home, true, daemonProc.PID, victim.PID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process on the strength of a record that predates "+
+			"generation binding — an unstamped record under a live daemon cannot be "+
+			"proven current (#6339)")
+	for _, f := range findByCheck(report, "orphaned-process") {
+		require.Empty(t, f.FixAction,
+			"an unstamped record must not arm a kill while a daemon is live: %s", f.Detail)
+		require.False(t, f.Fixed)
+	}
+}
+
 // TestRecordWithoutDaemonBinding_DeadDaemon_RefusesKillWithoutTmuxEnv is the
 // same refusal for a record that predates generation binding entirely: with no
 // live daemon to author it and no daemon_pid to trust, the record's socket set
