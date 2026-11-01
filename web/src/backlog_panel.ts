@@ -1,8 +1,9 @@
-// The Backlog view's item panel (backlog proposal, ui.md "Item panel"). The
-// title field, the body section and the note box live across renders so a
-// backlog.changed event never eats what the user is typing, or their focus;
-// the parts above and below the body rebuild. The open question's answer box
-// lives across renders for the same reason.
+// The Backlog view's item panel (backlog proposal, ui.md "Item panel"), which
+// backlog v2 starts with a session card. The title field, the body section and
+// the note box live across renders so a backlog.changed event never eats what
+// the user is typing, or their focus; the parts above and below the body
+// rebuild. The open question's answer box lives across renders for the same
+// reason.
 
 import { h } from "./dom.js";
 import { icon } from "./icon.js";
@@ -10,9 +11,10 @@ import { BodyEditor } from "./backlog_body.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
 import type { ItemUpdate } from "./backlog_api.js";
 import {
-  ACTION_LABELS, type BacklogView, type Item, type ItemAction, type MoveTarget, STATE_GLYPHS, STATE_LABELS, type Status,
-  childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, neededBy, openQuestion, safeHttpUrl,
+  ACTION_LABELS, type BacklogView, type Item, type ItemAction, type MoveTarget, type RunRef, STATE_GLYPHS, STATE_LABELS, type Status,
+  childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, latestRun, neededBy, openQuestion, safeHttpUrl,
 } from "./backlog_model.js";
+import type { PreviewCache } from "./backlog_preview.js";
 import { ROW_KIND_LABELS, isArchived, rowKind } from "./status.js";
 import { type Usage, pct, runUse, usd } from "./backlog_usage.js";
 import { SerialSaver, getDraft, queueFor, setDraft } from "./backlog_serial.js";
@@ -61,10 +63,31 @@ const ACTION_STATUS: Record<Exclude<ItemAction, "delete" | "start">, Status> = {
   reopen: "draft",
 };
 
-export function stateChip(view: BacklogView, id: number, reason = derivedOf(view, id).reason ?? ""): HTMLElement {
+/** Makes a state chip a link to a session. */
+export interface ChipLink {
+  /** Text after the state label, such as " · archived". */
+  extra: string;
+  open(): void;
+  decorate?(chip: HTMLElement): void;
+}
+
+export function stateChip(view: BacklogView, id: number, reason = derivedOf(view, id).reason ?? "", link?: ChipLink): HTMLElement {
   const d = derivedOf(view, id);
-  const chip = h("span", { class: `af-backlog-chip af-backlog-state-${d.state}` },
-    h("span", { class: "af-backlog-glyph", ariaHidden: "true" }, STATE_GLYPHS[d.state]), STATE_LABELS[d.state]);
+  const glyph = h("span", { class: "af-backlog-glyph", ariaHidden: "true" }, STATE_GLYPHS[d.state]);
+  let chip: HTMLElement;
+  if (link) {
+    const label = `${STATE_LABELS[d.state]}${link.extra}`;
+    chip = h("button", { type: "button", class: `af-backlog-chip af-backlog-chip-link af-backlog-state-${d.state}`, tabIndex: -1 },
+      glyph, label, h("span", { class: "af-backlog-chip-arrow", ariaHidden: "true" }, "↗"));
+    chip.setAttribute("aria-label", `${label} · Open session`);
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      link.open();
+    });
+    link.decorate?.(chip);
+  } else {
+    chip = h("span", { class: `af-backlog-chip af-backlog-state-${d.state}` }, glyph, STATE_LABELS[d.state]);
+  }
   return reason ? h("span", { class: "af-backlog-state" }, chip, h("span", { class: "af-backlog-reason" }, reason)) : chip;
 }
 
@@ -99,6 +122,8 @@ export class ItemPanel {
   private readonly body: BodyEditor;
   private readonly note: HTMLTextAreaElement;
   private readonly head: HTMLElement;
+  private readonly card = h("section", { class: "af-backlog-card", hidden: true });
+  private earlierOpen = false;
   private readonly question: HTMLElement;
   private readonly questionText = h("span", {});
   private readonly answer: HTMLTextAreaElement;
@@ -129,7 +154,8 @@ export class ItemPanel {
   private readonly titles: SerialSaver<string>;
   private readonly waits: SerialSaver<number[]>;
 
-  constructor(readonly root: string, readonly id: number, private readonly actions: PanelActions) {
+  constructor(readonly root: string, readonly id: number, private readonly actions: PanelActions,
+    private readonly previews: PreviewCache | null = null) {
     this.titleKey = `${root}\u0000${id}\u0000title`;
     this.waitsKey = `${root}\u0000${id}\u0000waits`;
     // A refused or confirmed save has an answer, so its draft is released; an unconfirmed one
@@ -195,7 +221,8 @@ export class ItemPanel {
     this.closeButton = close;
     const top = h("div", { class: "af-backlog-panel-top" },
       h("span", { class: "af-backlog-id" }, formatID(id)), this.title, close);
-    this.el = h("aside", { class: "af-backlog-panel" }, top, this.head, this.question, this.above, section("Body", this.body.el), this.below,
+    this.card.setAttribute("aria-label", "Session");
+    this.el = h("aside", { class: "af-backlog-panel" }, top, this.head, this.card, this.question, this.above, section("Body", this.body.el), this.below,
       section("Thread", this.threadList, h("div", { class: "af-backlog-note-row" }, this.note, addNote)));
     this.el.setAttribute("aria-label", `Item ${formatID(id)}`);
     this.el.addEventListener("keydown", (e) => {
@@ -273,11 +300,13 @@ export class ItemPanel {
     if ((q?.id ?? 0) !== this.questionId) this.answer.value = "";
     this.questionId = q?.id ?? 0;
     this.questionText.textContent = q ? (q.author === "af" ? `af asks: ${q.text}` : q.text) : "";
+    const card = this.sessionCard(view, it);
+    this.card.hidden = card.length === 0;
+    this.card.replaceChildren(...card);
     this.above.replaceChildren(this.actionsRow(view, it));
     const below: HTMLElement[] = [this.waitsSection(view, it)];
     const children = this.childrenSection(view, it);
     if (children) below.push(children);
-    below.push(this.runsSection(it));
     if (it.source?.proposal) below.push(h("p", { class: "af-backlog-source" }, icon("file-text"), `From proposal ${it.source.proposal}`));
     this.below.replaceChildren(...below);
     this.threadList.replaceChildren(...(it.thread ?? []).map((m) => h("li", { class: `af-backlog-msg af-backlog-msg-${m.kind}` },
@@ -294,7 +323,7 @@ export class ItemPanel {
    *  left, else to the state chip. */
   private keepField(): () => void {
     const active = document.activeElement as HTMLInputElement | null;
-    const box = [this.above, this.below].find((b) => active && b.contains(active));
+    const box = [this.card, this.above, this.below].find((b) => active && b.contains(active));
     if (!box || !active) return () => {};
     const tag = active.tagName;
     const label = active.getAttribute("aria-label");
@@ -318,7 +347,9 @@ export class ItemPanel {
 
   private actionsRow(view: BacklogView, it: Item): HTMLElement {
     const row = h("div", { class: "af-backlog-actions" });
+    const hasRuns = (it.runs ?? []).length > 0;
     for (const a of itemActions(view.backlog, it, derivedOf(view, it.id))) {
+      if (a === "start" && hasRuns) continue;
       const b = button(ACTION_LABELS[a], () => {
         if (a === "delete") this.actions.remove(it.id);
         else if (a === "start") this.actions.start(it.id);
@@ -445,42 +476,100 @@ export class ItemPanel {
     return section("Children", ...parts);
   }
 
-  private runsSection(it: Item): HTMLElement {
+  /** The latest run: its preview, branch and PR, its session actions, Start
+   *  again, and the earlier runs folded. Empty when the item has no run or PR. */
+  private sessionCard(view: BacklogView, it: Item): HTMLElement[] {
     const runs = it.runs ?? [];
-    const parts: (Node | string)[] = [];
     const pr = safeHttpUrl(it.pr);
-    if (pr) parts.push(h("a", { class: "af-backlog-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, icon("external-link"), "Pull request"));
-    if (runs.length === 0) parts.push(h("p", { class: "af-backlog-reason" }, "No runs yet"));
-    const list = h("ul", { class: "af-backlog-runs" });
-    for (const run of [...runs].reverse()) {
-      const s = run.session_id ? this.sessions.find((x) => x.id === run.session_id) : undefined;
-      const asked = run.session_id ? this.lookups.get(run.session_id) : undefined;
-      const absent = asked === "pending" ? "Checking…" : asked === "failed" ? "Unavailable" : "Gone";
-      const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : absent;
-      const by = run.started_by === "runner" ? "runner" : "you";
-      const meta = h("div", { class: "af-backlog-reason" }, [`Started by ${by}`, formatTime(run.started_at), live].join(" · "));
-      const cost = run.session_id ? this.usage?.runs[run.session_id] : undefined;
-      if (cost !== undefined && this.usage) {
-        const use = runUse(run.session_id, this.usage, Date.now(), s?.account);
-        const words = use === null ? [`${usd(cost)} at API prices`] : [`${pct(use)} of the 5-hour window`, `${usd(cost)} at API prices`];
-        const span = h("span", { class: "af-backlog-run-use" }, words.join(" · "));
-        span.title = use === null ? "No reading for the 5-hour window" : `${usd(this.usage.run_window[run.session_id] ?? 0)} in this 5-hour window`;
-        meta.append(" · ", span);
-      }
-      const btns = h("div", { class: "af-backlog-run-actions" });
-      if (s?.id) {
-        const sid = s.id;
-        btns.append(button("Open", () => this.actions.openSession(sid)));
-        const kind = rowKind(s);
-        if (kind === "archived" || kind === "lost" || kind === "dead") btns.append(button("Restore", () => this.actions.restoreSession(sid)));
-        if (!isArchived(s)) btns.append(button("Archive", () => this.actions.archiveSession(sid)));
-      }
-      list.append(h("li", { class: "af-backlog-run" },
-        h("div", { class: "af-backlog-run-main" }, h("div", { class: "af-backlog-run-title" }, run.title || run.session_id),
-          meta), btns));
+    const latest = latestRun(it);
+    if (!latest && !pr) return [];
+    const out: HTMLElement[] = [];
+    const s = latest?.session_id ? this.sessions.find((x) => x.id === latest.session_id) : undefined;
+    if (latest) {
+      const main = this.runMain(latest, s);
+      main.classList.add("af-backlog-card-head");
+      out.push(main, this.cardPreview(latest, s));
     }
-    parts.push(list);
-    return section("Runs", ...parts);
+    const facts = h("div", { class: "af-backlog-card-facts" });
+    if (s?.branch) facts.append(h("span", { class: "af-backlog-card-branch", title: "Branch" }, icon("git-branch"), s.branch));
+    if (pr) facts.append(h("a", { class: "af-backlog-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, icon("external-link"), "Pull request"));
+    if (facts.firstChild) out.push(facts);
+    const btns = s ? this.sessionButtons(s) : h("div", { class: "af-backlog-run-actions" });
+    if (latest && itemActions(view.backlog, it, derivedOf(view, it.id)).includes("start")) {
+      btns.append(button("Start again", () => this.actions.start(it.id)));
+    }
+    if (btns.firstChild) out.push(btns);
+    const earlier = runs.slice(0, -1).reverse();
+    if (earlier.length > 0) {
+      const list = h("ul", { class: "af-backlog-runs" }, ...earlier.map((run) => {
+        const rs = run.session_id ? this.sessions.find((x) => x.id === run.session_id) : undefined;
+        return h("li", { class: "af-backlog-run" }, this.runMain(run, rs), rs ? this.sessionButtons(rs) : h("span", {}));
+      }));
+      const details = h("details", { class: "af-backlog-earlier", open: this.earlierOpen },
+        h("summary", {}, `Earlier runs (${earlier.length})`), list);
+      details.addEventListener("toggle", () => { this.earlierOpen = details.open; });
+      out.push(details);
+    }
+    return out;
+  }
+
+  private runMain(run: RunRef, s: SessionData | undefined): HTMLElement {
+    const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : this.absent(run);
+    const by = run.started_by === "runner" ? "runner" : "you";
+    const meta = h("div", { class: "af-backlog-reason" }, [live, `Started by ${by}`, formatTime(run.started_at)].join(" · "));
+    const cost = run.session_id ? this.usage?.runs[run.session_id] : undefined;
+    if (cost !== undefined && this.usage) {
+      const use = runUse(run.session_id, this.usage, Date.now(), s?.account);
+      const words = use === null ? [`${usd(cost)} at API prices`] : [`${pct(use)} of the 5-hour window`, `${usd(cost)} at API prices`];
+      const span = h("span", { class: "af-backlog-run-use" }, words.join(" · "));
+      span.title = use === null ? "No reading for the 5-hour window" : `${usd(this.usage.run_window[run.session_id] ?? 0)} in this 5-hour window`;
+      meta.append(" · ", span);
+    }
+    return h("div", { class: "af-backlog-run-main" }, h("div", { class: "af-backlog-run-title" }, run.title || run.session_id), meta);
+  }
+
+  /** A run session the rail does not hold: Checking… while lookUpMissing asks the
+   *  daemon for it, Unavailable when that failed, else Gone. */
+  private absent(run: RunRef): string {
+    const asked = run.session_id ? this.lookups.get(run.session_id) : undefined;
+    return asked === "pending" ? "Checking…" : asked === "failed" ? "Unavailable" : "Gone";
+  }
+
+  private sessionButtons(s: SessionData): HTMLElement {
+    const btns = h("div", { class: "af-backlog-run-actions" });
+    const sid = s.id ?? "";
+    if (!sid) return btns;
+    btns.append(button("Open", () => this.actions.openSession(sid)));
+    const kind = rowKind(s);
+    if (kind === "archived" || kind === "lost" || kind === "dead") btns.append(button("Restore", () => this.actions.restoreSession(sid)));
+    if (!isArchived(s)) btns.append(button("Archive", () => this.actions.archiveSession(sid)));
+    return btns;
+  }
+
+  /** The read-only preview of the latest run's session. Its request is kept,
+   *  so a hover never supersedes it. The answer re-renders the panel; the cache
+   *  keeps that from asking again for 5 s. */
+  private cardPreview(run: RunRef, s: SessionData | undefined): HTMLElement {
+    const note = (text: string): HTMLElement => h("p", { class: "af-backlog-reason af-backlog-card-note" }, text);
+    if (!s?.id) {
+      const absent = this.absent(run);
+      return note(run.state === "starting" ? "Starting…" : run.state === "failed" ? "Run failed to start"
+        : absent === "Checking…" ? absent : `Session ${absent.toLowerCase()}`);
+    }
+    if (isArchived(s)) return note("Archived · Restore to see the session");
+    if (!this.previews) return note("No preview");
+    const sid = s.id;
+    const hit = this.previews.cached(sid);
+    if (!hit) {
+      void this.previews.get(sid, true).then((p) => {
+        if (this.view && this.el.isConnected) this.render(this.view, this.sessions, this.usage);
+      });
+      return note("Loading preview…");
+    }
+    if (hit.error) return note(`Preview unavailable · ${hit.error}`);
+    const pre = h("pre", { class: "af-backlog-card-preview", tabIndex: 0 }, hit.text || "No output yet");
+    pre.setAttribute("aria-label", "Session preview");
+    return pre;
   }
 
   dispose(): void {

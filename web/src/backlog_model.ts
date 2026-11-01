@@ -252,6 +252,7 @@ export interface SessionItem {
   root: string;
   id: number;
   title: string;
+  state: State;
 }
 
 /** The proposals the backlog's items came from, in first-seen order. */
@@ -262,7 +263,7 @@ export function sources(b: Backlog): string[] {
 /** What a rail chip draws and navigates by: a change in any part redraws it. The project
  *  root is part of it, since a rebound project keeps its items' ids and titles. */
 export function sessionItemsSig(items: ReadonlyMap<string, SessionItem>): string {
-  return JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title, it.root]));
+  return JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title, it.root, it.state]));
 }
 
 /** Maps each item session id to its item, from the items' run refs. A session
@@ -272,7 +273,7 @@ export function sessionItems(views: ReadonlyMap<string, BacklogView>): Map<strin
   for (const [root, v] of views) {
     for (const it of v.backlog.items) {
       for (const run of it.runs ?? []) {
-        if (run.session_id) out.set(run.session_id, { root, id: it.id, title: it.title });
+        if (run.session_id) out.set(run.session_id, { root, id: it.id, title: it.title, state: derivedOf(v, it.id).state });
       }
     }
   }
@@ -465,6 +466,24 @@ export function overlayMove(fresh: Backlog, moved: Backlog, base: Backlog): Back
 /** Items that wait on id. */
 export function neededBy(b: Backlog, id: number): Item[] {
   return b.items.filter((it) => (it.waits_on ?? []).includes(id));
+}
+
+/** Open items that wait on id: the row's "blocks n". */
+export function blocking(b: Backlog, id: number): Item[] {
+  return neededBy(b, id).filter((it) => it.status !== "done" && it.status !== "dropped");
+}
+
+/** The items id waits on and the items that wait on it. */
+export function relatedIDs(b: Backlog, id: number): Set<number> {
+  const out = new Set<number>((itemByID(b, id)?.waits_on ?? []).filter((w) => itemByID(b, w)));
+  for (const it of neededBy(b, id)) out.add(it.id);
+  out.delete(id);
+  return out;
+}
+
+/** The newest run: the one the state chip links to and the session card shows. */
+export function latestRun(it: Item): RunRef | undefined {
+  return it.runs?.at(-1);
 }
 
 export type ItemAction = "queue" | "draft" | "start" | "review" | "done" | "drop" | "reopen" | "delete";
