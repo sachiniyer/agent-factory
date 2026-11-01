@@ -138,8 +138,9 @@ full run.
 
 A probe can run on any branch, including a PR's head, and every job in
 `pr.yml` reports a check run on that commit, skipped jobs included. The
-required checks are `Build` and `Lint`. Auto Gate reads them by exact name and
-takes the newest, and a repository ruleset counts a skipped check as passing.
+required checks are `Build` and `Lint`. The auto-merger (`.github/auto-merge.md`)
+reads them by exact name, and a repository ruleset counts a skipped check as
+passing.
 A probe that reported a `Build` could therefore pass a PR whose real run failed,
 or block one whose real run passed. `pr.yml` prevents that three ways:
 
@@ -149,8 +150,9 @@ or block one whose real run passed. `pr.yml` prevents that three ways:
   evaluate a skipped job's name, so the row is named by the expression itself,
   which matches no check. `Test` runs in a probe and reads `Test (probe)`.
 - A probe has its own concurrency group, `probe-<ref>`. It cannot cancel a PR
-  run or Auto Gate's recovery dispatch on the same branch.
-- Auto Gate's recovery dispatch passes no inputs, so it still gets the full run.
+  run on the same branch.
+- A non-probe dispatch on the same branch gets the full run, since `probe`
+  defaults to `false`.
 
 `.github/scripts/pr-probe.test.js` pins all of this in the required `Lint` job.
 

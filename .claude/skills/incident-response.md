@@ -13,7 +13,10 @@ lost sessions as recoverable until proven otherwise.
 
 1. **Classify before acting** — a `LOST` session is recoverable, not terminal.
    `Instance.Recover` re-spawns the agent and resumes it with the backend's
-   continuation command, such as `codex resume --last` or `claude --continue`.
+   exact continuation command (the recorded conversation id), such as
+   `codex resume <id>` or `claude --continue`. A Codex or Amp session whose id
+   was never captured starts fresh instead — af no longer resumes the
+   account-wide "latest", which could name a sibling's conversation.
 
 2. **Recover vanished worktrees** — if the worktree is gone but the branch is
    alive, re-add the worktree and then let lost-restore resume the session:
