@@ -1481,6 +1481,7 @@ body[data-project-color] [data-af-theme=dark] {
   flex: 1;
   min-height: 0;
   display: flex;
+  flex-direction: column;
   background: var(--af-surface);
   overflow: hidden;
 }
@@ -1498,6 +1499,15 @@ body[data-project-color] [data-af-theme=dark] {
 }
 .af-split-column {
   flex-direction: column;
+}
+.af-split-narrow {
+  flex: 0 0 auto;
+  padding: var(--af-space-1) var(--af-space-3);
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  background: var(--af-surface-raised);
+  border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  text-align: center;
 }
 .af-divider {
   flex: 0 0 auto;
