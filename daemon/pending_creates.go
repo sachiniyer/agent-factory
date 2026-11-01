@@ -75,7 +75,7 @@ func notePendingCreate(marker pendingCreateMarker) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := config.MkdirAllUnderAFHome(dir, 0o755); err != nil {
 		return err
 	}
 	payload, err := json.Marshal(marker)
