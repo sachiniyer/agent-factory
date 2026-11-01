@@ -1983,7 +1983,7 @@ its fix. The entry is kept either way; use --no-check to skip the probe.
 
 --push-credentials opts the host into push credentials in the same write, so it
 is never listed without them: a listed host that is not opted in is one a
-sandbox may create sessions on. Opt in only a fresh, dedicated host user that
+sandbox may create sessions on. Opt in only a fresh, dedicated machine that
 runs nothing but your own af sessions (see "Push credentials" in
 docs/backends.md).
 
@@ -1999,7 +1999,7 @@ af hosts add <name> <ssh-destination> [flags]
 | `--host-key-verification` | `string` | strict \| accept-new \| insecure (default: the global ssh.host_key_verification) |
 | `--identity-file` | `string` | Absolute path of the ssh key for this host |
 | `--no-check` |  | Save the host without probing it |
-| `--push-credentials` |  | Opt the host into push credentials in the same write (a dedicated host user only) |
+| `--push-credentials` |  | Opt the host into push credentials in the same write (a dedicated machine only) |
 | `--workspace-root` | `string` | Absolute directory on the host under which each session's dir is created (default ~/.af-sessions) |
 
 **Global flags**
