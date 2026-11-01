@@ -406,6 +406,29 @@ test("a move queued after an earlier refusal still goes out against the refreshe
   assert.deepEqual(h.notices, ["B-3 cannot move there"]);
 });
 
+test("a refusal in one project does not drop a reorder queued in another after switching", async () => {
+  let first = true;
+  reply = async (method) => {
+    if (method === "MoveBacklogItem" && first) { first = false; throw new Error("B-1 cannot move there"); }
+    return {};
+  };
+  const h = host();
+  const pane = mount(h);
+  pane.update(data({ "/a": view(item(1), item(2)), "/b": view(item(1), item(2)) }), "/a", []);
+  key(row(pane, 1), "ArrowDown", { altKey: true });   // /a move queued, will be refused
+  // Switch to /b and queue a reorder there before /a settles. Its target comes
+  // from /b's own backlog and stays valid — a refusal in /a must not drop it.
+  pane.update(data({ "/a": view(item(1), item(2)), "/b": view(item(1), item(2)) }, 2), "/b", []);
+  key(row(pane, 1), "ArrowDown", { altKey: true });
+  await settle();
+  const moves = (): Call[] => calls.filter((c) => c.method === "MoveBacklogItem");
+  assert.deepEqual(moves().map((m) => m.body), [
+    { repo_path: "/a", id: 1, after: 2 },   // the refused attempt, sent over the wire and rejected
+    { repo_path: "/b", id: 1, after: 2 },    // the post-switch move, not dropped by /a's refusal
+  ]);
+  assert.deepEqual(h.notices, ["B-1 cannot move there"]);
+});
+
 test("a selected project with no backlog yet asks for one refresh", () => {
   const h = host();
   const pane = mount(h);

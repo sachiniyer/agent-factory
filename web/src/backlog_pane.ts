@@ -74,11 +74,13 @@ export class BacklogPane {
   // Reorder writes go out one at a time: each target is computed from the previous
   // optimistic order, so they must commit in the order they were made.
   private moves: Promise<unknown> = Promise.resolve();
-  // A refusal breaks the optimistic chain. Each move captures the value at queue
-  // time and skips itself when a refusal has bumped it by the time its segment
+  // A refusal breaks the optimistic chain — but only within the project it
+  // happened in. Each move captures its project's gen at queue time and skips
+  // itself when a refusal has bumped that project's gen by the time its segment
   // runs, so a queued move whose target was computed against a refused order is
-  // dropped instead of being sent against the daemon's real order.
-  private movesGen = 0;
+  // dropped instead of being sent against the daemon's real order. A refusal in
+  // one project does not discard a reorder queued in another after switching.
+  private movesGen = new Map<string, number>();
   private panel: ItemPanel | null = null;
   private dragId: number | null = null;
   private focusId: number | null = null;
@@ -324,21 +326,22 @@ export class BacklogPane {
     }
     const token = this.host.token();
     if (token === null) return;
-    const gen = this.movesGen;
+    const gen = this.movesGen.get(root) ?? 0;
     this.moves = this.moves.then(() => {
-      if (this.movesGen !== gen) return;
+      if ((this.movesGen.get(root) ?? 0) !== gen) return;
       return moveItem(root, id, to, token).then(() => {
         if (pending) pending.gen = this.host.started();
         return this.host.refresh();
       }, (e: unknown) => {
         if (pending) {
-          // A refusal invalidates the whole optimistic chain: clear the overlay
-          // regardless of whether it is still the newest (the confirming refresh
-          // re-establishes the daemon's real order) and bump the gen so still-
-          // queued moves — whose targets were computed against this refused
-          // order — drop themselves rather than commit a phantom the user never saw.
-          this.movesGen++;
-          this.pending = null;
+          // A refusal invalidates the optimistic chain in this project only:
+          // clear the overlay if it is the one shown here (a newer move in
+          // another project keeps its own), and bump this project's gen so
+          // still-queued moves — whose targets were computed against this
+          // refused order — drop themselves rather than commit a phantom the
+          // user never saw. A refusal does not touch another project's chain.
+          this.movesGen.set(root, (this.movesGen.get(root) ?? 0) + 1);
+          if (this.pending?.root === root) this.pending = null;
           this.focusId = id;
           this.render();
         }
