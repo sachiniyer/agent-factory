@@ -243,25 +243,3 @@ func worktreeWriterProcessesMatching(
 	}
 	return procs
 }
-
-// ReapAndVerifyWorktreeWriters is the evidence-bearing form of
-// reapWorktreeWriters for a caller that JUDGES the tree rather than merely
-// deleting it (#6546 Codex): it reaps every process cwd'd inside
-// worktreePath — a git post-checkout hook orphaned with its daemon runs
-// there, in no tmux pane and no hook scope — then re-reads the process table
-// and returns how many writers remain. An unreadable table is an error out:
-// unknown is not zero. Any survivor means the tree is still being written,
-// so the caller fails closed instead of probing a tree a live process can
-// still change underneath it.
-func ReapAndVerifyWorktreeWriters(worktreePath string) (int, error) {
-	reapWorktreeWriters(worktreePath)
-	snap, err := proctree.Snapshot()
-	if err != nil {
-		return 0, err
-	}
-	root := normalizeWorktreePath(worktreePath)
-	return len(worktreeWriterProcessesMatching(snap, os.Getpid(), func(pid int) bool {
-		cwd, ok := proctree.WorkingDir(pid)
-		return ok && pathutil.IsAtOrInside(filepath.Clean(cwd), root)
-	}, proctree.IsTmuxProcess)), nil
-}

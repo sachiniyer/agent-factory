@@ -14,7 +14,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -289,32 +288,15 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 //  3. A rowless live tmux session under the bound title is stopped only if its
 //     own environment proves this fire's spawn created it (the instance id the
 //     marker recorded before the spawn, stamped at new-session), and the kill is
-//     bound to the probed tmux session id. A discovered worktree is torn down
-//     only when the marker bound its exact path before creation AND the tree is
-//     clean — no surviving writers (proven tmux runtime stopped with every
-//     captured process reaped, orphaned hook scopes joined), no modified,
-//     staged, untracked, ignored, or index-flag-hidden content, no locked
-//     registration, object storage, or submodule the kept branch cannot
-//     restore, no commits beyond the mainline, and nothing in its own ref
-//     namespaces (refs/worktree|bisect|rewritten — a stash lives in the
-//     SHARED refs/stash and survives) — which tombstones
-//     the record for teardown (#6259). Anything unproven — no stamp, an
-//     unreadable environment, a probe that did not answer, a replaced session,
-//     an unbound or mismatched worktree, any bare branch residue — is
-//     quarantined as a startup-state-unknown record for inspection rather than
-//     destroyed on a guess (#6258).
-//
-// stopOrphanedHookScopes is the seam the worktree clean gate calls through:
-// it joins every transient hook scope the fire's identities could still own.
-// Tests stub it to observe the call without a systemd manager.
-var stopOrphanedHookScopes = git.StopOrphanedHookScopes
-
-// reapAndVerifyWorktreeWriters is the seam the clean gate calls through to
-// reap and count the processes cwd'd inside a leftover worktree — a git
-// post-checkout hook orphaned with its daemon writes there in no tmux pane
-// and no hook scope. Tests stub it to model a survivor the process table
-// cannot clear.
-var reapAndVerifyWorktreeWriters = git.ReapAndVerifyWorktreeWriters
+//     bound to the probed tmux session id. A discovered worktree bound into
+//     the marker before creation is reported — the log names it as this
+//     fire's, with the path, the fire and task, what it holds, and the exact
+//     removal command — but is NEVER deleted automatically (#6259, narrowed
+//     on #6546: no enumeration of "clean" can prove removal safe). Anything
+//     unproven — no stamp, an unreadable environment, a probe that did not
+//     answer, a replaced session, any worktree, any bare branch residue — is
+//     quarantined as a startup-state-unknown record for inspection rather
+//     than destroyed on a guess (#6258).
 
 func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) {
 	repo, err := repoFromPathForCreate(t.ProjectPath)
@@ -399,9 +381,6 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 	}
 	if row != nil {
 		verb := "quarantined unproven"
-		if row.UserKilled {
-			verb = "tombstoned proven"
-		}
 		if werr := appendInstanceData(repo.ID, *row); werr != nil {
 			return false, fmt.Errorf("%w: writing leftover record: %v", errTaskFireReconcile, werr)
 		}
@@ -476,22 +455,17 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 		return nil, nil
 	}
 
-	// A discovered worktree is this attempt's only when the marker bound its
-	// exact path BEFORE the worktree could exist (#6259): the binding is written
-	// the instant before `git worktree add` runs, so a worktree found at the
-	// bound path can only be the create's. A missing binding, or a discovered
-	// path that differs from it, carries no per-attempt evidence — the worktree
-	// and the work in it stay quarantined, never auto-torn-down.
-	//
-	// Ownership evidence is per-artifact: a bare derived branch, or several
-	// holders of it, still carries no per-attempt evidence at all.
-	// The binding is compared as written AND canonicalized: the marker keeps
-	// the spelling worktree placement derived (a symlinked AGENT_FACTORY_HOME
-	// survives verbatim), while git registers the resolved path — the same
-	// directory must still match through either spelling (#6546 Codex). The
-	// resolve is BOUNDED: a wedged mount cannot stall the reconcile behind a
-	// synchronous stat — an unanswerable canonicalization just falls back to
-	// the written spelling, and a differing path then quarantines as ever.
+	// A discovered worktree is never torn down (#6258). What the #6259 path
+	// binding adds is ATTRIBUTION: the marker recorded the exact intended path
+	// the instant before `git worktree add` ran, so a worktree found there can
+	// only be this attempt's — the report below names it as such instead of
+	// an anonymous leftover. The binding is compared as written AND
+	// canonicalized: the marker keeps the spelling placement derived (a
+	// symlinked AGENT_FACTORY_HOME survives verbatim), while git registers
+	// the resolved path — the same directory must still match through either
+	// spelling. The resolve is BOUNDED: a wedged mount cannot stall the
+	// reconcile behind a synchronous stat; an unanswerable canonicalization
+	// falls back to the written spelling.
 	boundPath := fire.WorktreePath
 	if canon, cerr := git.BoundedFSOp("canonicalizing "+boundPath,
 		func() (string, error) { return filepath.EvalSymlinks(boundPath) }); cerr == nil {
@@ -499,27 +473,18 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	}
 	wtBound := wtPath != "" && fire.WorktreePath != "" &&
 		(fire.WorktreePath == wtPath || boundPath == wtPath)
-	proven := found && !unknown &&
-		(wtPath == "" || wtBound) &&
-		!(branchHeld && wtPath == "") &&
-		!(branchExists && !branchHeld && !tmuxPresent)
+	proven := found && !unknown && wtPath == "" && !branchHeld && !(branchExists && !tmuxPresent)
 
 	program := t.Program
 	if program == "" {
 		program = defaultProgramFor(cfg.DefaultProgram, t.ProjectPath)
 	}
 
-	// A PROVEN leftover's live tmux runtime is stopped BEFORE the worktree's
-	// cleanliness is probed: the interrupted create may already have submitted
-	// its prompt, so its agent can still be writing in the worktree, and a
-	// dirty-check taken while it runs would authorize a `worktree remove -f`
-	// teardown that deletes work generated after the snapshot (#5503 review).
-	// The session itself is stopped only if THAT incarnation proves, from its
-	// own environment, that this fire's spawn created it, and the kill is bound
-	// to its tmux session id (#6258). Everything else — no stamp, an unreadable
+	// A live tmux session is stopped only if THAT incarnation proves, from its own
+	// environment, that this fire's spawn created it, and the kill is bound to its
+	// tmux session id (#6258). Everything else — no marker, an unreadable
 	// environment, a probe that did not answer, a replaced session — leaves it
 	// running and the leftover quarantined: unknown is never ours.
-	runtimeStopped := false
 	if proven && tmuxPresent {
 		ourHome, herr := config.GetConfigDir()
 		if herr != nil {
@@ -529,88 +494,41 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 			reap := tmux.ReapProvenIncarnation(cmdExec, program, tmux.IncarnationProof{
 				SessionName: sanitized, Home: ourHome, InstanceID: fire.InstanceID,
 			})
-			// A stopped session is enough when there is no worktree to judge.
-			// When there is, the gate additionally needs every writer reaped:
-			// a capture that did not answer, or a captured process that
-			// survived, can still land files between the probes and the later
-			// removal — work those probes never saw (#6546 Codex).
-			if reap.Stopped && (wtPath == "" || reap.WritersReaped) {
-				runtimeStopped = true
+			if reap.Stopped {
 				log.WarningLog.Printf("task %s: reaped proven leftover tmux session %q (instance %s) from an interrupted cron fire", t.ID, sanitized, fire.InstanceID)
 			} else {
 				proven = false
-				why := reap.Why
-				if reap.Stopped {
-					why = "the session is stopped but its process capture was incomplete or a writer survived; nothing proven about the tree's writers"
-				}
-				log.WarningLog.Printf("task %s: leaving interrupted-fire session %q alone — %s", t.ID, sanitized, why)
+				log.WarningLog.Printf("task %s: leaving interrupted-fire session %q alone — %s", t.ID, sanitized, reap.Why)
 			}
 		}
 	}
 
-	// Cleanliness is the second gate for a bound worktree: even proven leftovers
-	// are only torn down when they carry no work. Anything committed beyond the
-	// mainline or dirty in the tree is the only copy of that work — a quarantine
-	// preserves it. The probe runs only once no runtime can still be writing:
-	// a tmux session that was proven but not confirmed stopped means proven is
-	// already false here, and an unanswerable probe fails closed to quarantine.
-	clean := proven && (wtPath == "" || !tmuxPresent || runtimeStopped)
-	if clean && wtPath != "" {
-		// The tmux branch above cannot see a post-worktree hook: a hook that
-		// outlived its daemon keeps running in its transient scope with no
-		// tmux session at all. Stop and join any survivor BEFORE the probes
-		// read the tree — files it could still land between the read and the
-		// later removal are work the probes would never see.
-		if herr := stopOrphanedHookScopes(fire.InstanceID, wtPath); herr != nil {
-			log.WarningLog.Printf("task %s: cannot join the interrupted-fire hooks for %q — quarantining it: %v",
-				t.ID, wtPath, herr)
-			clean = false
-		}
-	}
-	if clean && wtPath != "" {
-		// The tmux proof covers pane trees and the scope stop covers AF hook
-		// scopes; neither sees a git post-checkout hook orphaned mid-Setup —
-		// it writes inside the worktree with no session and no scope. Reap
-		// every process cwd'd inside, then require the re-scan to find none.
-		// An unreadable table or a survivor is unknown-is-not-clean.
-		remaining, werr := reapAndVerifyWorktreeWriters(wtPath)
-		if werr != nil || remaining > 0 {
-			log.WarningLog.Printf("task %s: cannot prove no writers remain in interrupted-fire worktree %q (reap: %v, remaining: %d) — quarantining it",
-				t.ID, wtPath, werr, remaining)
-			clean = false
-		}
-	}
-	if clean && wtPath != "" {
-		// The unrecoverable-content probe is the dirty check PLUS what `git
-		// status` cannot see: index flags hiding modified content, a locked
-		// registration, object storage inside the tree, a submodule — every
-		// reason the kept branch cannot restore what removal deletes.
-		reasons, rerr := git.WorktreeUnrecoverableContent(wtPath)
-		commits, cerr := git.WorktreeCommitsBeyondRepo(identityRoot, wtPath)
-		priv, perr := git.WorktreePrivateRefs(wtPath)
-		if rerr != nil || cerr != nil || perr != nil {
-			log.WarningLog.Printf("task %s: cannot prove interrupted-fire worktree %q clean (content probe: %v, commits probe: %v, refs probe: %v) — quarantining it",
-				t.ID, wtPath, rerr, cerr, perr)
-			clean = false
-		} else {
-			clean = len(reasons) == 0 && commits == 0 && priv == 0
-		}
-	}
-
-	reap := proven && clean
-	if reap && wtPath == "" {
+	if proven {
 		// A proven tmux-only leftover has no worktree to reap through a
 		// tombstone record — and a record without a worktree path cannot
 		// materialize a teardown handle anyway. Its runtime was just stopped, so
 		// nothing remains of the attempt.
 		return nil, nil
 	}
-	// An unproven or dirty leftover is recorded startup-state-unknown rather
-	// than tombstoned: nothing may auto-teardown under an identity af could not
-	// confirm (#2207), and the record is what gives inspection a handle.
-	// BranchCreatedByUs stays nil: the path binding proves the WORKTREE is this
-	// attempt's, but a create may have reused a pre-existing branch, and unknown
-	// provenance must never authorize `git branch -D` (#1953's keep-unknown rule).
+	// A leftover WORKTREE is reported, never deleted: af does not decide what
+	// of it is work and what is scratch, so the log names it — as this fire's
+	// when the binding proves it — with the path, the fire and task, what it
+	// holds, and the command that removes it once a user has looked (#6546).
+	if wtPath != "" {
+		attribution := fmt.Sprintf("a worktree the interrupted cron fire %q (instance %s, intended %s) was never bound to — it cannot be attributed to this attempt",
+			fire.Title, fire.InstanceID, fire.IntendedAt.Format(time.RFC3339))
+		if wtBound {
+			attribution = fmt.Sprintf("the worktree the interrupted cron fire %q (instance %s, intended %s) bound before creation — it is this attempt's",
+				fire.Title, fire.InstanceID, fire.IntendedAt.Format(time.RFC3339))
+		}
+		log.WarningLog.Printf("task %s: interrupted fire left %s at %s; it stays quarantined, holding: %s. Look at it, then remove it with `af sessions kill %q`.",
+			t.ID, attribution, wtPath, taskFireWorktreeResidue(wtPath, identityRoot), fire.Title)
+	}
+	// Anything unproven is recorded startup-state-unknown: nothing may
+	// auto-teardown under an identity af could not confirm (#2207), and the
+	// record is what gives inspection a handle. BranchCreatedByUs stays nil: a
+	// create may have reused a pre-existing branch, and unknown provenance must
+	// never authorize `git branch -D` (#1953's keep-unknown rule).
 	var createdByUs *bool
 	// The record's own identity is fresh: the interrupted attempt's bound id
 	// stays in the marker, not on this row — a still-draining create writing
@@ -618,23 +536,18 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 	// here would let a straggler write overwrite the leftover record.
 	now := time.Now()
 	return &session.InstanceData{
-		ID:        session.NewInstanceID(),
-		TaskID:    t.ID,
-		Title:     fire.Title,
-		Path:      repo.WorkspacePath(),
-		Branch:    branch,
-		Status:    session.Loading,
-		Liveness:  session.LiveReady,
-		CreatedAt: fire.IntendedAt,
-		UpdatedAt: now,
-		Program:   program,
-		Prompt:    t.Prompt,
-		// A proven clean bound worktree tombstones: UserKilled is what the poll's
-		// finishUserKill reads to run the teardown that removes it. Everything
-		// else — unproven, unbound, dirty, unanswerable — is recorded
-		// startup-state-unknown and never auto-tears-down.
-		UserKilled:          reap,
-		StartupStateUnknown: !reap,
+		ID:                  session.NewInstanceID(),
+		TaskID:              t.ID,
+		Title:               fire.Title,
+		Path:                repo.WorkspacePath(),
+		Branch:              branch,
+		Status:              session.Loading,
+		Liveness:            session.LiveReady,
+		CreatedAt:           fire.IntendedAt,
+		UpdatedAt:           now,
+		Program:             program,
+		Prompt:              t.Prompt,
+		StartupStateUnknown: true,
 		// The recovery handle must name the EXACT tmux session it stands for:
 		// restoreLocalTabs reads TmuxName (not Worktree.SessionName), and an
 		// empty one rebuilds an unscoped name that would address a different
@@ -646,27 +559,31 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 			SessionName:       sanitized,
 			BranchName:        branch,
 			BranchCreatedByUs: createdByUs,
-			// The row's own id is fresh, so carry the durable hook-scope
-			// handle the fire's ORIGINAL instance identity would have minted
-			// (the scope session id IS the instance id): the teardown's own
-			// survivor pass can then name every scope this leftover's hooks
-			// could still be living in (#6546 Codex). Only the systemd daemon
-			// can mint a scope — elsewhere the handle stays empty rather than
-			// naming scopes that never existed.
-			HookScopeUnitPrefix: taskFireHookScopeHandle(fire.InstanceID),
 		},
 	}, nil
 }
 
-// taskFireHookScopeHandle derives the durable scope-unit prefix the fire's
-// instance id would mint — but only where such scopes can exist: on a daemon
-// without the user manager nothing ever entered a scope, and persisting a
-// synthesized handle would name scopes that never ran (Codex on #6546).
-func taskFireHookScopeHandle(instanceID string) string {
-	if !systemdunit.RunningDaemonProcess() {
-		return ""
+// taskFireWorktreeResidue describes what a leftover worktree holds for the
+// report — never for a delete decision, so every probe degrades to "unknown"
+// rather than blocking the record. `git status` with --ignored covers
+// modified, staged, untracked and ignored entries; the mainline comparison
+// counts commits the kept branch does not have.
+func taskFireWorktreeResidue(wtPath, repoRoot string) string {
+	var parts []string
+	if n, sample, err := git.WorktreeDirtyEntries(wtPath); err != nil {
+		parts = append(parts, "dirty state unknown: "+err.Error())
+	} else if n == 0 {
+		parts = append(parts, "no modified, staged, untracked or ignored entries")
+	} else {
+		parts = append(parts, fmt.Sprintf("%d modified/staged/untracked/ignored entries (e.g. %s)",
+			n, strings.Join(sample, ", ")))
 	}
-	return systemdunit.HookScopeUnitPrefix(instanceID)
+	if c, err := git.WorktreeCommitsBeyondRepo(repoRoot, wtPath); err != nil {
+		parts = append(parts, "unpushed commit count unknown: "+err.Error())
+	} else if c > 0 {
+		parts = append(parts, fmt.Sprintf("%d unpushed commits", c))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // taskFireForeignRowReason names the identity through which a persisted row

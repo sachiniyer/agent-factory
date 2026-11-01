@@ -184,31 +184,3 @@ func WorktreeCommitsBeyondRepo(repoRoot, worktreePath string) (int, error) {
 	}
 	return n, nil
 }
-
-// WorktreePrivateRefs returns how much state lives in the worktree's OWN ref
-// namespaces — every per-worktree ref `git status` and the ahead-of probe
-// never see, which are lost with the worktree's refdir on removal. Those are
-// the three namespaces git maps into the worktree's own refdir:
-// refs/worktree/, refs/bisect/, and refs/rewritten/ (gitrevisions(7); Codex on
-// #6546). A stash is deliberately NOT counted: `git stash` inside a linked
-// worktree writes the shared refs/stash the main checkout also sees, so the
-// entry survives the removal and is not the tree's own to lose. Any private
-// entry means the tree is not empty in the sense teardown needs, and every
-// probe failure is an error out — the caller fails closed rather than
-// reading "could not list" as "clean".
-func WorktreePrivateRefs(worktreePath string) (int, error) {
-	n := 0
-	for _, ns := range []string{"refs/worktree/", "refs/bisect/", "refs/rewritten/"} {
-		out, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
-			"for-each-ref", ns)
-		if err != nil {
-			return 0, err
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			if line != "" {
-				n++
-			}
-		}
-	}
-	return n, nil
-}
