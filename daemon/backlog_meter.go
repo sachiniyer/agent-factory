@@ -274,6 +274,15 @@ func accountOfRun(home, configDir string) string {
 	return planusage.AccountForConfigDir(home, configDir)
 }
 
+// meterWhere names the project of repoID for an unmeterable reason: its
+// registered root when the registry has one, else the name a live session gives.
+func (m *Manager) meterWhere(repoID string) backlog.Where {
+	if root, err := registeredProjectRootForRepoID(repoID); err == nil && root != "" {
+		return backlog.Where{Name: filepath.Base(root), Root: root}
+	}
+	return backlog.Where{Name: backlogHost{m: m}.ProjectName(repoID)}
+}
+
 // itemRun is one started run of an item, with its session when it still exists.
 type itemRun struct {
 	repoID string
@@ -359,6 +368,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	runSnaps := map[string]planusage.RunSnapshot{}
 	runConfigs := map[string][]string{}
 	itemRuns, runsComplete := m.startedItemRuns(home)
+	wheres := map[string]backlog.Where{}
 	for _, r := range itemRuns {
 		usage.Runs[r.run.SessionID] = r.run.Cost()
 		// Only the item's CURRENT run can be an active-run metering failure: an
@@ -367,6 +377,25 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		// Historical runs are still metered for their cost.
 		running := r.item.Status == backlog.StatusRunning && len(r.item.Runs) > 0 &&
 			r.item.Runs[len(r.item.Runs)-1].SessionID == r.run.SessionID
+		// And only while that run is at work (Refs #6284, fork add59406df): the
+		// runner's gate is shared by every project, so a run that is over must not
+		// hold it. A killed or archived session is not at work, and neither is an
+		// item waiting on the user's answer: it stays running after its run ends,
+		// until the answer's delivery starts the next run. Pane churn after the end
+		// means someone is working in it again.
+		running = running && r.inst != nil &&
+			backlog.RunBlocksRunner(r.item.Status, r.inst.IsArchived(), r.inst.BacklogRunEndedAt(), r.inst.LastPaneChurnAt())
+		// The reason is shown in every project, so a run that can block it names
+		// its own. Only those runs pay for the registry read.
+		var where backlog.Where
+		if running {
+			if w, ok := wheres[r.repoID]; ok {
+				where = w
+			} else {
+				where = m.meterWhere(r.repoID)
+				wheres[r.repoID] = where
+			}
+		}
 		var configDir string
 		var dirs []string
 		if r.inst != nil {
@@ -378,7 +407,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 					if program == "" {
 						program = r.inst.Program
 					}
-					usage.Unmeterable[r.run.SessionID] = backlog.UnmeterableProgram(r.item.ID, program)
+					usage.Unmeterable[r.run.SessionID] = backlog.UnmeterableProgram(r.item.ID, where, program)
 				}
 				// The session ran Claude before a manual cross-agent handoff: its
 				// remembered Claude transcripts still hold usage that belongs to
@@ -407,7 +436,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		// them on the account window's schedule would let a resumed or forked
 		// transcript re-add old history to a run continued after more than a week
 		// (Codex P2 on #6299).
-		rm := backlog.MeterRun(r.item.ID, r.run, planusage.TranscriptFiles(dirs), seen, overrides, now)
+		rm := backlog.MeterRun(r.item.ID, where, r.run, planusage.TranscriptFiles(dirs), seen, overrides, now)
 		usage.Runs[r.run.SessionID] = rm.Cost()
 		// Each message belongs to the account whose config root holds its transcript,
 		// not to the session's account now: a session that switched accounts has
