@@ -106,13 +106,20 @@ func (m *Manager) deliverBacklogAnswer(stop <-chan struct{}, repoID string, a ba
 		}
 	}
 	defer release()
+	send := a
 	for waits := 0; ; waits++ {
-		inst, why := m.backlogAnswerTarget(repoID, a)
+		inst, fresh, why := m.backlogAnswerTarget(repoID, a)
 		if why != "" {
 			m.backlogAnswerFailed(repoID, a, why, stop)
 			return
 		}
-		err := m.sendBacklogAnswerUntilSettled(stop, repoID, inst, a)
+		if fresh {
+			// The session came back without its agent conversation: the answer
+			// carries the notes the agent left when it asked, and keeps them on a
+			// later send of this delivery.
+			send.Prompt = backlog.WithHandoff(a.Prompt, a.Handoff)
+		}
+		err := m.sendBacklogAnswerUntilSettled(stop, repoID, inst, send)
 		if err == nil {
 			release() // the armed run marker holds the slot from here
 			m.backlogAnswerDelivered(repoID, a, stop)
@@ -147,11 +154,12 @@ const backlogAnswerTeardownWaits = 150
 var errBacklogAnswerTornDown = errors.New("the session is being archived or deleted")
 
 // backlogAnswerTarget returns the live session an answer goes to, restoring it
-// first when it is archived, lost or dead, or why it cannot be had.
-func (m *Manager) backlogAnswerTarget(repoID string, a backlog.PendingAnswer) (*session.Instance, string) {
+// first when it is archived, lost or dead, or why it cannot be had. fresh is
+// whether it restored a session that came back without its agent conversation.
+func (m *Manager) backlogAnswerTarget(repoID string, a backlog.PendingAnswer) (inst *session.Instance, fresh bool, why string) {
 	s, ok := m.itemSessions(repoID)[a.SessionID]
 	if !ok || s.view.UserKilled || s.view.InFlightOp == session.OpKilling {
-		return nil, "the session is gone"
+		return nil, false, "the session is gone"
 	}
 	// Restoration is serialized per session and rechecked under the lock: two
 	// answers to one archived session (recovery launches them together) must not
@@ -160,23 +168,27 @@ func (m *Manager) backlogAnswerTarget(repoID string, a backlog.PendingAnswer) (*
 	restoreMu := m.backlog.restoreLock(a.SessionID)
 	restoreMu.Lock()
 	if s, ok = m.itemSessions(repoID)[a.SessionID]; ok && backlogNeedsRestore(s) {
+		// Asked before the restore, by the check the restore makes: afterwards the
+		// session records whatever conversation it came back on.
+		exact, _ := backlogExactResume(s.instance)
 		restored, err := restoreBacklogSession(m, RestoreSessionRequest{ID: a.SessionID, RepoID: repoID})
 		if err != nil {
 			restoreMu.Unlock()
-			return nil, "af could not restore the session: " + err.Error()
+			return nil, false, "af could not restore the session: " + err.Error()
 		}
+		fresh = !exact
 		m.publishEvent(agentproto.EventSessionRestored, restored)
 		m.syncBacklogAttention(repoID, a)
 		s, ok = m.itemSessions(repoID)[a.SessionID]
 	}
 	restoreMu.Unlock()
 	if !ok {
-		return nil, "the session is gone"
+		return nil, false, "the session is gone"
 	}
 	if s.instance.TaskRunActive() {
-		return nil, "the session is running a task"
+		return nil, false, "the session is running a task"
 	}
-	return s.instance, ""
+	return s.instance, fresh, ""
 }
 
 // sendBacklogAnswerUntilSettled sends the answer, holding it while a client is

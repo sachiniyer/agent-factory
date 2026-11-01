@@ -15,6 +15,10 @@ export interface RunRef {
   prev_status: Status;
   started_by: string;
   started_at: string;
+  /** The run's session branch, recorded when it starts. */
+  branch?: string;
+  /** The kept answers (delivery "new_run") this run's first prompt carries. */
+  answers?: number[];
 }
 
 export interface Message {
@@ -25,6 +29,8 @@ export interface Message {
   answers?: number;
   closed?: string;
   at: string;
+  /** An answer's way to the agent; "new_run" and "superseded" do not close its question. */
+  delivery?: string;
 }
 
 export interface Item {
@@ -212,8 +218,15 @@ export function derivedOf(view: BacklogView, id: number): Derived {
 
 /** The item's oldest question that no answer names and that is not closed. */
 export function openQuestion(it: Item): Message | undefined {
+  // An answer to a gone session starts a new run that carries it: while that
+  // run starts, the item does not need the user (backlog.Item.AnswerStarting).
+  const last = it.runs?.[it.runs.length - 1];
+  if (last?.state === "starting" && last.answers?.length) return undefined;
   const thread = it.thread ?? [];
-  const answered = new Set(thread.filter((m) => m.kind === "answer" && m.answers).map((m) => m.answers));
+  // An answer kept for a new run, or one a later answer replaced, leaves its
+  // question open until a run starts with it (backlog.Message.closesQuestion).
+  const closes = (m: Message) => m.kind === "answer" && !!m.answers && m.delivery !== "new_run" && m.delivery !== "superseded";
+  const answered = new Set(thread.filter(closes).map((m) => m.answers));
   return thread.find((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
 }
 
