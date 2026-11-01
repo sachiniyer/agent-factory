@@ -356,6 +356,15 @@ func TestRelativeExecutable(t *testing.T) {
 		// advisory, not a false PASS against the doctor's cwd.
 		{name: "env command operand relative wrapper", command: "env ./bin/launcher codex", want: true},
 		{name: "env command operand bare wrapper is not anchoring", command: "env launcher codex", want: false},
+		// A bare shell wrapper (env) is looked up through the shell-prefix
+		// PATH, so a relative PATH entry anchors it even when the detected
+		// agent token is an absolute path a chdir would otherwise fix.
+		{name: "relative shell PATH anchors bare wrapper", command: "PATH=bin env /usr/bin/codex", want: true},
+		{name: "absolute shell PATH does not anchor bare wrapper", command: "PATH=/usr/bin env /usr/bin/codex", want: false},
+		// A long env prefix of literal assignments must not truncate before
+		// env's command operand: the relative launcher the session execs but
+		// CheckCommand does not resolve must still be detected.
+		{name: "env command operand past word cap", command: "env A1=1 A2=2 A3=3 A4=4 A5=5 A6=6 A7=7 A8=8 A9=9 A10=10 A11=11 ./bin/launcher codex", want: true},
 		{name: "env absolute chdir relative command operand still unverified", command: "env -C /abs ./bin/launcher codex", want: true},
 		// A relative env -C chdir makes the launch working directory depend on
 		// the doctor's cwd; an absolute chdir does not. A parent-relative chdir
@@ -364,6 +373,13 @@ func TestRelativeExecutable(t *testing.T) {
 		{name: "env chdir relative bare exe", command: "env -C subdir codex", want: true},
 		{name: "env chdir parent-relative bare exe", command: "env -C ../tools codex", want: true},
 		{name: "env chdir parent-relative absolute exe", command: "env -C ../tools /usr/bin/codex", want: true},
+		// A chdir with enough parent components to climb above both probe
+		// anchors collapses the anchor comparison to the same root-relative
+		// path; the relative chdir must still be detected directly so the
+		// doctor outside any repo does not validate against its incidental
+		// ancestor directory.
+		{name: "env chdir climbs above probe anchors bare exe", command: "env -C ../../tools codex", want: true},
+		{name: "env chdir climbs above probe anchors absolute exe", command: "env -C ../../tools /usr/bin/codex", want: true},
 		{name: "env chdir absolute bare exe", command: "env -C /abs codex", want: false},
 		{name: "opaque relative wrapper", command: "./my-wrapper --ready", want: true},
 		{name: "opaque bare wrapper", command: "my-wrapper --ready", want: false},
