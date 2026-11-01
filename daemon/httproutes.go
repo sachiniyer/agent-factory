@@ -608,7 +608,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/UpdateBacklogItem",
-		Description: "Change an item's title, body, waits-on, program or sequential flag.",
+		Description: "Change an item's title, body, waits-on, program or sequential flag, or pause, unpause, archive or unarchive a group.",
 		requestType: reflect.TypeOf(UpdateBacklogItemRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UpdateBacklogItem) },
 	},

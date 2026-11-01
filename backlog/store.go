@@ -15,7 +15,7 @@ import (
 const (
 	BacklogFileName      = "backlog.json"
 	BudgetFileName       = "budget.json"
-	BacklogSchemaVersion = 1
+	BacklogSchemaVersion = 2
 	BudgetSchemaVersion  = 1
 )
 
@@ -118,6 +118,8 @@ type store[T any] struct {
 	empty    func() *T
 	finish   func(*T) error
 	setStamp func(*T, int)
+	// migrate holds the migrators from version 1 up, by source version.
+	migrate map[int]config.SchemaMigrator
 }
 
 var backlogStore = store[Backlog]{
@@ -126,6 +128,10 @@ var backlogStore = store[Backlog]{
 	empty:    New,
 	finish:   (*Backlog).normalize,
 	setStamp: func(b *Backlog, v int) { b.SchemaVersion = v },
+	// Version 2 only adds fields (paused and archived on items, then and handoff
+	// on messages), so its migrator only stamps. The bump stops an older af from
+	// saving the file and dropping them.
+	migrate: map[int]config.SchemaMigrator{1: stampVersion(2)},
 }
 
 var budgetStore = store[Budget]{
@@ -140,6 +146,11 @@ func (s store[T]) plan(path string) config.SchemaMigrationPlan {
 	reg := config.NewSchemaMigrationRegistry()
 	if err := reg.Register(config.LegacySchemaVersion, stampVersion(1)); err != nil {
 		panic(err)
+	}
+	for from, m := range s.migrate {
+		if err := reg.Register(from, m); err != nil {
+			panic(err)
+		}
 	}
 	return config.SchemaMigrationPlan{
 		StoreName:           s.name,

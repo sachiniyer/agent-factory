@@ -262,9 +262,10 @@ func (m *Manager) startBacklogItemCapped(req backlog.StartRequest, by string) (b
 	if by == backlog.StartedByRunner && !b.Settings.Runner {
 		return backlog.RunRef{}, errRunnerOff
 	}
-	// Likewise the item itself: the user may have drafted it or added a
-	// dependency while this start waited for the lock; explicit starts ignore
-	// both on purpose, an automatic one must not override them.
+	// Likewise the item itself: the user may have drafted it, added a
+	// dependency or paused its group while this start waited for the lock;
+	// explicit starts ignore all three on purpose, an automatic one must not
+	// override them.
 	if by == backlog.StartedByRunner && !b.RunnerEligible(req.ID, b.DeriveAll(backlogHost{m: m}.Facts(ref.ID))) {
 		return backlog.RunRef{}, errNotRunnable
 	}

@@ -214,7 +214,8 @@ func (it *Item) heldAfterFailure() bool {
 }
 
 // Runnable lists up to n items the runner may start, in tree order: leaves in
-// the Queued state whose last start did not fail, and that skip does not name.
+// the Queued state whose last start did not fail, with no paused ancestor, and
+// that skip does not name.
 func (b *Backlog) Runnable(states map[int]Derived, n int, skip func(int) bool) []int {
 	var out []int
 	for i := range b.Items {
@@ -222,7 +223,7 @@ func (b *Backlog) Runnable(states map[int]Derived, n int, skip func(int) bool) [
 		if len(out) >= n {
 			break
 		}
-		if states[it.ID].State != StateQueued || b.IsParent(it.ID) || it.heldAfterFailure() || (skip != nil && skip(it.ID)) {
+		if states[it.ID].State != StateQueued || b.IsParent(it.ID) || it.heldAfterFailure() || b.PausedBy(it.ID) != 0 || (skip != nil && skip(it.ID)) {
 			continue
 		}
 		out = append(out, it.ID)
@@ -231,12 +232,13 @@ func (b *Backlog) Runnable(states map[int]Derived, n int, skip func(int) bool) [
 }
 
 // RunnerEligible reports whether the runner may start item id now: it is a
-// queued leaf (not held after a failed start) in the given derived states. The
-// admission check for an automatic start, which must not override a draft or a
-// new dependency the user set since the pass chose the item.
+// queued leaf (not held after a failed start, with no paused ancestor) in the
+// given derived states. The admission check for an automatic start, which must
+// not override a draft, a new dependency or a pause the user set since the pass
+// chose the item.
 func (b *Backlog) RunnerEligible(id int, states map[int]Derived) bool {
 	it := b.Item(id)
-	return it != nil && states[id].State == StateQueued && !b.IsParent(id) && !it.heldAfterFailure()
+	return it != nil && states[id].State == StateQueued && !b.IsParent(id) && !it.heldAfterFailure() && b.PausedBy(id) == 0
 }
 
 // RunnerInput is one runner pass's view of a project.
