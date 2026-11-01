@@ -819,9 +819,10 @@ tab survives a restart and simply starts a new editor when you next open it.
     only from the editor's own page: af refuses a handshake whose `Origin` names any
     other origin, on every address the editor is served on. It works behind the
     same front doors the web UI's own streams do: a proxy that rewrites `Host` must
-    forward the browser's in `X-Forwarded-Host`. An **off-box** session's editor is
-    never served on the web UI's address at all (above). Do not expose the daemon's
-    listener to a network you do not trust.
+    forward the browser's in `X-Forwarded-Host` (see [behind a reverse
+    proxy](remote-http-auth.md#behind-a-reverse-proxy)). An **off-box** session's
+    editor is never served on the web UI's address at all (above). Do not expose the
+    daemon's listener to a network you do not trust.
 
 In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
 editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.
