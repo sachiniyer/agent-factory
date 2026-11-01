@@ -14,15 +14,19 @@ import (
 
 // captureDaemonIdentity snapshots the process-instance identity proctree uses to
 // revalidate a PID before signaling it, at the point classifyDaemonHome (or
-// pidBelongsToThisHome) just proved the PID serves this home. The snapshot is
-// bound to the instance whose home was checked so a PID the kernel recycled
-// between this classification and the signal is not terminated: proctree.Signal
-// revalidates the StartID and refuses (ErrIdentityChanged) when the PID no
-// longer names that instance. A PID that exited before the snapshot (or one the
-// backend could not read) returns the zero Process, so signalClassifiedDaemon
-// does not fall back to a PID-only signal that could hit the recycled PID
-// (#4793).
-func captureDaemonIdentity(pid int) proctree.Process {
+// verifyScopedDaemon, or pidBelongsToThisHome) just proved the PID serves this
+// home. The snapshot is bound to the instance whose home was checked so a PID
+// the kernel recycled between this classification and the signal is not
+// terminated: proctree.Signal revalidates the StartID and refuses
+// (ErrIdentityChanged) when the PID no longer names that instance. A PID that
+// exited before the snapshot (or one the backend could not read) returns the
+// zero Process, so signalClassifiedDaemon does not fall back to a PID-only
+// signal that could hit the recycled PID (#4793).
+//
+// A package var so a test can simulate a PID the kernel recycled between the
+// classification decision and the signal — a real recycle cannot be arranged on
+// demand (#5007) — the same way processStartTokenFn simulates PID reuse.
+var captureDaemonIdentity = func(pid int) proctree.Process {
 	proc, err := proctree.Lookup(pid)
 	if err != nil {
 		return proctree.Process{}
@@ -90,7 +94,23 @@ func signalClassifiedDaemon(pid int, proc proctree.Process) error {
 func signalProcessChecked(proc proctree.Process) error {
 	if err := proctree.Signal(proc, syscall.SIGTERM); err != nil {
 		if errors.Is(err, proctree.ErrIdentityChanged) {
-			if !pidLooksAlive(proc.PID) {
+			// Require a confirmed absence before accepting this as a successful
+			// stop, as the grace poll and SIGKILL step do: proctree.Signal
+			// revalidates via AliveSame, which collapses any identity-read error
+			// to "not alive", so a transiently unreadable identity (for example
+			// under an LSM where a signal-0 probe then returns EPERM) surfaces
+			// here as ErrIdentityChanged with no SIGTERM sent. !pidLooksAlive
+			// collapses every signal-0 error to "dead", so it would treat that
+			// unsignalable PID as a confirmed exit and return nil — a false
+			// successful stop with no signal sent, which lets reset's liveness
+			// barrier abort on the still-running daemon later instead of
+			// completing the teardown (#4793). pidExitObserved reports an exit
+			// only for a confirmed absence (ESRCH / os.ErrProcessDone); a
+			// non-absence signal-0 error (EPERM) is preserved as "not exited",
+			// so only a genuinely gone daemon returns nil and a recycled
+			// (still-alive) or unreadable PID surfaces the scoped refusal
+			// rather than being appended to stopped.
+			if pidExitObserved(proc.PID) {
 				// The classified daemon exited on its own; it is gone, which
 				// is the desired outcome and not a recycled-PID signal.
 				return nil
@@ -102,7 +122,21 @@ func signalProcessChecked(proc proctree.Process) error {
 
 	deadline := time.Now().Add(sigtermFallbackGrace)
 	for time.Now().Before(deadline) {
-		if !proctree.AliveSame(proc) {
+		same, err := proctree.SameIdentity(proc)
+		if err != nil {
+			// A transient identity-read failure after SIGTERM is NOT a
+			// confirmed exit: proctree.AliveSame deliberately collapses every
+			// read error to "not alive", so polling with it would return nil
+			// here, skip SIGKILL on a daemon that may still be running, and
+			// report a false successful stop — the same false success the
+			// captured-identity path exists to prevent (#4793). Treat an
+			// unreadable identity as still alive and keep polling until the
+			// read resolves to a confirmed exit/identity change or the grace
+			// expires and we escalate to SIGKILL.
+			time.Sleep(sigtermFallbackPoll)
+			continue
+		}
+		if !same {
 			return nil
 		}
 		time.Sleep(sigtermFallbackPoll)
@@ -111,9 +145,31 @@ func signalProcessChecked(proc proctree.Process) error {
 	log.WarningLog.Printf("sigterm fallback: pid %d did not exit within %s; escalating to SIGKILL", proc.PID, sigtermFallbackGrace)
 	if err := proctree.Signal(proc, syscall.SIGKILL); err != nil {
 		if errors.Is(err, proctree.ErrIdentityChanged) {
-			// Exited between the grace poll and SIGKILL — the daemon is gone,
-			// which is the desired outcome; a recycled PID is not signaled.
-			return nil
+			// Distinguish a confirmed exit from a transient identity-read
+			// failure, as the grace poll above does: proctree.Signal
+			// revalidates via AliveSame, which collapses any read error to
+			// "not alive", so a transiently unreadable identity surfaces here
+			// as ErrIdentityChanged with no SIGKILL sent. Treating that as a
+			// successful stop would report a still-running daemon as stopped
+			// and let reset's liveness barrier abort on it later instead of
+			// completing the teardown (#4793). Re-check via SameIdentity so
+			// only a confirmed exit/identity change returns nil.
+			same, rerr := proctree.SameIdentity(proc)
+			if rerr == nil && !same {
+				// Confirmed exit or identity change — the daemon is gone,
+				// which is the desired outcome; a recycled PID is not signaled.
+				return nil
+			}
+			// Unreadable identity, or still our live instance (the AliveSame
+			// false was a transient read race): in both cases no SIGKILL was
+			// sent and the daemon may still be running. Surface the failure
+			// so the caller does not append this PID to stopped and the
+			// liveness barrier sees the daemon honestly rather than trusting
+			// a false stop.
+			if rerr != nil {
+				return fmt.Errorf("SIGKILL: cannot revalidate pid %d identity: %w", proc.PID, rerr)
+			}
+			return errSignalTargetChanged
 		}
 		return fmt.Errorf("SIGKILL: %w", err)
 	}
