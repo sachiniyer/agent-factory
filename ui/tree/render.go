@@ -53,11 +53,6 @@ const lostIcon = "◌ "
 // row reads as "put away, restartable" rather than any live/vanished state.
 const archivedIcon = "▧ "
 
-// awaitingIcon marks an archived item session that af archived after its agent
-// asked a question: it waits on your answer, which restores it. The "?" the web
-// Backlog gives Needs you, in the attention colour, in place of ▧.
-const awaitingIcon = "? "
-
 // limitIcon marks a session blocked at a usage-limit wall (#1146): a filled
 // diamond, distinct in shape from every dot/box glyph so "blocked on limit"
 // never reads as a live Running/Ready session — the honest surface the whole
@@ -66,13 +61,29 @@ const awaitingIcon = "? "
 // (Refines the provisional ◒ slot Phase 1e stubbed for #1204.)
 const limitIcon = "◆ "
 
-// attentionIcon marks a session whose agent asked for the user (#5461): a bang,
-// distinct in shape from every dot/diamond/box glyph and deliberately STATIC —
-// the TUI has no animation (#1766), where the web's attention dot blinks. It
-// echoes the automations rail's "[!]" needs-attention marker, and is drawn in
-// the generated attention role the web's dot uses rather than the dead/lost
-// ambers, so the request never reads as breakage.
-const attentionIcon = "! "
+// The rail's two needs-you marks keep the web's two concepts apart, and share one
+// rendering (needsYouMark): the same attention colour role, in the status glyph's
+// slot. Both are static: the TUI has no animation (#1766), where the web's
+// attention dot blinks.
+//
+//   - attentionGlyph: the session's agent asked for the user (#5461), the web's
+//     bell and Attention chip. A bang, distinct in shape from every
+//     dot/diamond/box glyph, echoing the automations rail's "[!]" marker.
+//   - AwaitingAnswerGlyph: an item session af archived after its agent asked a
+//     question, waiting on the user's answer, which restores it: the web
+//     Backlog's "?" Needs you. It takes the place of ▧ on the archived row, and
+//     the Archived header's short count reuses it.
+const (
+	attentionGlyph      = "!"
+	AwaitingAnswerGlyph = "?"
+)
+
+// needsYouMark draws a needs-you glyph in the generated attention role the web's
+// dot uses, rather than the dead/lost ambers, so a request never reads as
+// breakage.
+func needsYouMark(glyph string) string {
+	return attentionStyle.Render(glyph + " ")
+}
 
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
 // shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
@@ -100,17 +111,14 @@ var lostStyle = lipgloss.NewStyle()
 // as live. Reused for the title/desc foreground below.
 var archivedStyle = lipgloss.NewStyle()
 
-// awaitingStyle paints awaitingIcon in the attention colour.
-var awaitingStyle = lipgloss.NewStyle()
-
 // limitStyle paints the status glyph of a usage-limit-blocked session (#1146): a
 // warning red-orange, distinct from the ready-green, lost-amber, and dead/
 // archived gray so the blocked state is unmistakable at a glance.
 var limitStyle = lipgloss.NewStyle()
 
-// attentionStyle paints the status glyph of a session whose agent asked for the
-// user (#5461) in the generated attention role — the same token the web's
-// blinking dot draws — and attentionColor paints the request's detail line.
+// attentionStyle paints the needs-you marks (needsYouMark) in the generated
+// attention role — the same token the web's blinking dot draws — and
+// attentionColor paints an attention request's detail line.
 var attentionStyle = lipgloss.NewStyle()
 var attentionColor lipgloss.TerminalColor
 
@@ -209,7 +217,6 @@ func ApplyTheme(t Theme) {
 	deadStyle = lipgloss.NewStyle().Foreground(t.Dead)
 	lostStyle = lipgloss.NewStyle().Foreground(t.Lost)
 	archivedStyle = lipgloss.NewStyle().Foreground(theme.Colors()["archived"])
-	awaitingStyle = lipgloss.NewStyle().Foreground(theme.Colors()["attention"])
 	limitStyle = lipgloss.NewStyle().Foreground(theme.Colors()["limit-reached"])
 	attentionColor = t.Attention
 	attentionStyle = lipgloss.NewStyle().Foreground(attentionColor)
@@ -402,7 +409,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// The ask outranks every status glyph the way the web's attention dot
 		// replaces the status dot — a Ready row's green returns when the request
 		// clears, and the reason rides the detail line below.
-		join = attentionStyle.Render(attentionIcon)
+		join = needsYouMark(attentionGlyph)
 	case op != session.OpNone:
 		// The op axis is checked FIRST and DELIBERATELY masks the liveness glyph:
 		// an in-flight create/restore is a loading state (nothing, not a spinner —
@@ -427,7 +434,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		case session.LiveArchived:
 			join = archivedStyle.Render(archivedIcon)
 			if i.AwaitsAnswer() {
-				join = awaitingStyle.Render(awaitingIcon)
+				join = needsYouMark(AwaitingAnswerGlyph)
 			}
 		case session.LiveLimitReached:
 			join = limitStyle.Render(limitIcon)
