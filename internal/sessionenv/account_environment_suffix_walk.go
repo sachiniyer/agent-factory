@@ -65,6 +65,11 @@ type operandTailMemo struct {
 	// verdict suffix from here mutate, for a wrapper's returned child tail
 	// (ionice --/default and taskset mask).
 	literalChildTails map[*syntax.Word]bool
+	// unmodeledLiteralChildTails: laterUnmodeledWrapperChildSuffixMutates —
+	// the exclusion-filtered parallel for an unmodeled argv-passthrough
+	// wrapper's tail; see unmodeledWrapperChildTailBuriesMutation for why it
+	// is a separate cache from literalChildTails.
+	unmodeledLiteralChildTails map[*syntax.Word]bool
 	// childJudgements counts the suffix judgements child-tail walks have
 	// started in this validation. It is shared by pointer so every copy of
 	// the memo draws on one budget; see shadowedChildJudgementLimit.
@@ -94,14 +99,15 @@ func newOperandTailMemo() operandTailMemo {
 		xargsMarkersFollowed: map[string]struct{}{},
 		xargsInput:           map[xargsInputKey]bool{},
 
-		xargsCommandFollows:    map[*syntax.Word]bool{},
-		xargsMarkerAnywhereMap: map[xargsMarkerKey]bool{},
-		xargsNested:            map[xargsNestedKey]xargsNestedResult{},
-		xargsNestedAny:         map[xargsMarkerKey]bool{},
-		literalChildTails:      map[*syntax.Word]bool{},
-		childJudgements:        new(int),
-		straceRunWork:          new(int),
-		straceRuns:             map[straceRunKey]straceRunVerdict{},
+		xargsCommandFollows:        map[*syntax.Word]bool{},
+		xargsMarkerAnywhereMap:     map[xargsMarkerKey]bool{},
+		xargsNested:                map[xargsNestedKey]xargsNestedResult{},
+		xargsNestedAny:             map[xargsMarkerKey]bool{},
+		literalChildTails:          map[*syntax.Word]bool{},
+		unmodeledLiteralChildTails: map[*syntax.Word]bool{},
+		childJudgements:            new(int),
+		straceRunWork:              new(int),
+		straceRuns:                 map[straceRunKey]straceRunVerdict{},
 	}
 }
 
