@@ -1,13 +1,17 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -110,7 +114,8 @@ func TestWorkspaceIsolation_MirrorRefusesARelayedEditor(t *testing.T) {
 	manager.mu.Lock()
 	manager.instances[daemonInstanceKey("repo-offbox", "offbox")] = inst
 	manager.mu.Unlock()
-	require.True(t, manager.tabIsRelayedEditor(inst.ID, "tab-editor"))
+	editor, relayed := manager.trackedEditorTab(inst.ID, "tab-editor")
+	require.True(t, editor && relayed)
 
 	cs := &controlServer{manager: manager}
 	rec := httptest.NewRecorder()
@@ -156,4 +161,146 @@ func TestWorkspaceSandboxPolicyMatrix(t *testing.T) {
 // pins webSandbox(false, false) to the same literal.
 func TestMirrorSandboxMatchesTheClientsFrameSandbox(t *testing.T) {
 	assert.Equal(t, "sandbox allow-scripts allow-forms allow-popups allow-modals", mirrorSandboxCSP)
+}
+
+// Rule 4: an editor's WebSocket is accepted only from the editor's own origin. The
+// fake stands in for openvscode-server, which checks no Origin itself, so whatever
+// is refused here af refused. A refused handshake is answered before the target
+// resolves, so it never starts the editor either.
+func TestWorkspaceIsolation_EditorWebSocketOnlyFromItsOwnOrigin(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "argv")
+	binary := writeFakeVSCodeBinary(t, "openvscode-server", map[string]string{fakeVSCodeArgsEnv: argsFile})
+	manager, id, tabID, _ := newVSCodeFixture(t, binary)
+	srv := httptest.NewServer(newHTTPMux(&controlServer{manager: manager}))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + vscodeProxyPath(id, tabID, "ws")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	dial := func(origin string) (*websocket.Conn, *http.Response, error) {
+		h := http.Header{}
+		if origin != "" {
+			h.Set("Origin", origin)
+		}
+		return websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: h})
+	}
+	_, port, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://"), ":")
+	foreign := []string{
+		"http://127.0.0.1:3000", // a dev server on another port of this host
+		"null",                  // a sandboxed page: rule 3's, or a mirrored web tab's
+		"http://localhost:" + port,
+		"http://attacker.example",
+		"http://127.0.0.1:" + port + ".attacker.example",
+	}
+	for _, origin := range foreign {
+		c, resp, err := dial(origin)
+		if c != nil {
+			_ = c.CloseNow()
+		}
+		require.Error(t, err, "Origin %q must not reach the editor's WebSocket", origin)
+		require.NotNil(t, resp, "Origin %q: %v", origin, err)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode, "Origin %q", origin)
+	}
+	_, statErr := os.Stat(argsFile)
+	assert.True(t, os.IsNotExist(statErr), "a refused handshake must not start the editor (argv file: %v)", statErr)
+
+	// The editor's own page (and a non-browser client, which sends no Origin) still
+	// gets a real, relaying connection.
+	waitForVSCodeReady(t, srv.Client(), srv.URL+vscodeProxyPath(id, tabID, ""))
+	for _, origin := range []string{srv.URL, ""} {
+		c, _, err := dial(origin)
+		require.NoError(t, err, "Origin %q is the editor's own", origin)
+		require.NoError(t, c.Write(ctx, websocket.MessageText, []byte("af-own-origin")))
+		_, got, err := c.Read(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "af-own-origin", string(got))
+		_ = c.CloseNow()
+	}
+	// A running editor is refused the same way.
+	c, resp, err := dial("http://127.0.0.1:3000")
+	if c != nil {
+		_ = c.CloseNow()
+	}
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// Rule 4 holds on an editor's OWN origin too (the preview listener's editor origin
+// and the editor-origin ports reach the same core with previewOrigin set): there it
+// protects the editor from a page on any other origin, the browser's other tabs
+// included.
+func TestWorkspaceIsolation_EditorWebSocketRuleOnItsOwnOrigin(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "openvscode-server", nil)
+	manager, id, tabID, _ := newVSCodeFixture(t, binary)
+	cs := &controlServer{manager: manager}
+	const host = "afabc123.localhost:8444"
+	serve := func(origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+		req.Host = host
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Origin", origin)
+		rec := httptest.NewRecorder()
+		cs.serveWebTabRoute(rec, req, webTabRoute{sessionID: id, tabID: tabID, escapedRest: "ws", rest: "ws", previewOrigin: true})
+		return rec
+	}
+	const refusal = "editor accepts connections only from its own page"
+	for _, origin := range []string{
+		"http://127.0.0.1:8443",         // the web UI's origin is another origin here
+		"http://afother.localhost:8444", // another session's editor
+		"null",
+	} {
+		rec := serve(origin)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "Origin %q on %s: %s", origin, host, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), refusal)
+	}
+	// Its own origin passes the rule (and goes on to the editor, which a recorder
+	// cannot hand a connection to — what matters here is that af did not refuse it).
+	assert.NotContains(t, serve("http://"+host).Body.String(), refusal)
+}
+
+func TestEditorUpgradeRefusal(t *testing.T) {
+	upgrade := func(host, origin string, mutate func(*http.Request)) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/v1/webtab/s/t/ws", nil)
+		r.Host = host
+		r.Header.Set("Connection", "keep-alive, Upgrade")
+		r.Header.Set("Upgrade", "websocket")
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if mutate != nil {
+			mutate(r)
+		}
+		return r
+	}
+	refused := func(r *http.Request, allowed ...string) bool { return editorUpgradeRefusal(r, allowed) != nil }
+
+	// Its own origin, and no Origin at all (not a browser), are admitted.
+	assert.False(t, refused(upgrade("127.0.0.1:8443", "http://127.0.0.1:8443", nil)))
+	assert.False(t, refused(upgrade("127.0.0.1:8443", "", nil)))
+	assert.False(t, refused(upgrade("box.ts.net", "https://box.ts.net", func(r *http.Request) {
+		r.Header.Set("X-Forwarded-Proto", "https") // tailscale serve keeps Host
+	})))
+	// Behind a same-host proxy that rewrote Host: the browser's name, admitted by
+	// network.allowed_hosts, from a loopback peer — exactly as the web UI's streams.
+	behindProxy := func(r *http.Request) {
+		r.RemoteAddr = "127.0.0.1:5555"
+		r.Header.Set("X-Forwarded-Host", "box.example.com")
+	}
+	assert.False(t, refused(upgrade("127.0.0.1:8443", "http://box.example.com", behindProxy), "box.example.com"))
+	assert.True(t, refused(upgrade("127.0.0.1:8443", "http://box.example.com", behindProxy)), "a forwarded name the daemon does not answer to vouches for nothing")
+
+	// Any other origin is refused, whatever the upgrade's spelling.
+	for _, origin := range []string{"null", "http://127.0.0.1:3000", "http://localhost:8443", "https://127.0.0.1:8443/x", "http://attacker.example"} {
+		assert.True(t, refused(upgrade("127.0.0.1:8443", origin, nil)), origin)
+	}
+	assert.True(t, refused(upgrade("127.0.0.1:8443", "null", func(r *http.Request) { r.Header.Set("Connection", "upgrade") })))
+	assert.True(t, refused(upgrade("127.0.0.1:8443", "null", func(r *http.Request) { r.Header.Del("Upgrade") })), "a Connection: upgrade alone counts")
+	assert.True(t, refused(upgrade("127.0.0.1:8443", "null", func(r *http.Request) { r.Header.Set("Upgrade", "h2c") })), "every upgrade, not only websocket")
+
+	// A request that asks for no protocol switch is not this rule's.
+	plain := httptest.NewRequest(http.MethodGet, "/v1/webtab/s/t/", nil)
+	plain.Host = "127.0.0.1:8443"
+	plain.Header.Set("Origin", "null")
+	assert.False(t, refused(plain))
 }

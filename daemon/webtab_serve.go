@@ -229,12 +229,20 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// The control origin's mirror never serves a relayed editor (webtab_isolation.go,
-	// rule 2) — refused before the target resolves, because resolving it would start
-	// the editor on the workspace's host only for the mirror to turn it away.
-	if !route.previewOrigin && cs.manager.tabIsRelayedEditor(route.sessionID, route.tabID) {
-		writeVSCodeNoticePage(w, relayedEditorNeedsOwnOrigin)
-		return
+	// An editor's WebSocket only from its own origin (webtab_isolation.go, rule 4),
+	// and never a relayed editor on the control origin's mirror (rule 2). Both are
+	// refused before the target resolves, because resolving it would start the
+	// editor (on the workspace's host, for a relayed one) only to turn it away.
+	allowedHosts := cs.webTabAllowedHosts(r)
+	if editor, relayed := cs.manager.trackedEditorTab(route.sessionID, route.tabID); editor {
+		if d := editorUpgradeRefusal(r, allowedHosts); d != nil {
+			refuseCrossSite(w, r, d)
+			return
+		}
+		if relayed && !route.previewOrigin {
+			writeVSCodeNoticePage(w, relayedEditorNeedsOwnOrigin)
+			return
+		}
 	}
 	// Addressed by the tab's STABLE id: a stale id (its tab was closed) is a clean
 	// 404 here, never a silent bind to whatever tab took its old ordinal (#1810).
@@ -293,6 +301,20 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 		writeHTTPError(w, r, http.StatusNotFound, err)
 		return
 	}
+	// Rules 4 and 2 again on the resolved target, which is authoritative: a session
+	// the manager was not tracking yet resolved only just now (webtab_isolation.go).
+	// After the target resolved, so the install and starting notices above still
+	// reach the pane.
+	if target.Kind == session.TabKindVSCode {
+		if d := editorUpgradeRefusal(r, allowedHosts); d != nil {
+			refuseCrossSite(w, r, d)
+			return
+		}
+		if target.RelayedEditor && !route.previewOrigin {
+			writeVSCodeNoticePage(w, relayedEditorNeedsOwnOrigin)
+			return
+		}
+	}
 	// Only loopback targets are proxied. An external target must never be fetched
 	// by the daemon (open-proxy / SSRF) — the web UI iframes those directly.
 	//
@@ -304,14 +326,6 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 	// stronger guarantee than the string check the TCP path settles for — under
 	// which the old editor target passed precisely because it WAS loopback, the
 	// confused-deputy hole this transport closes.
-	// A relayed editor's bytes come from its workspace and VS Code cannot run
-	// sandboxed, so the control origin's mirror never serves one
-	// (webtab_isolation.go, rule 2). Checked after the target resolved, so the
-	// install and starting notices above still reach the pane.
-	if !route.previewOrigin && target.Kind == session.TabKindVSCode && target.RelayedEditor {
-		writeVSCodeNoticePage(w, relayedEditorNeedsOwnOrigin)
-		return
-	}
 	if !target.isServerOwnedEditor() && !session.IsLoopbackWebTarget(target.URL) {
 		writeHTTPError(w, r, http.StatusBadRequest,
 			fmt.Errorf("web tab target %q is not loopback; external URLs are iframed directly, not proxied",

@@ -1,21 +1,25 @@
 package daemon
 
 import (
+	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// Workspace content never runs with the control origin's authority.
+// Workspace content never runs with the control origin's authority, nor with an
+// editor's.
 //
 // The /v1/webtab/ mirror serves a session's dev server or editor on the SAME origin
 // as the web UI, which holds the bearer token in localStorage and passes every
-// same-origin check the daemon makes (#6443's cross-site guard admits it as its
-// own). So anything a workspace serves there — a dev server's page, a file from the
+// same-origin check the daemon makes (the cross-site guard admits it as its own).
+// So anything a workspace serves there — a dev server's page, a file from the
 // worktree, an editor relayed from a sandbox — must not execute script as that
-// origin. Two rules, both judged on the mirror only (route.previewOrigin is false);
-// the per-tab preview origin and the editor-origin ports are separate origins by
-// construction and keep their own posture.
+// origin. Rules 1 and 2 are judged on the mirror only (route.previewOrigin is
+// false): the per-tab preview origin and the editor-origin ports are separate
+// origins by construction. Rules 3 and 4 protect the EDITOR, whose origin is worth
+// as much as a terminal, so they hold on every route that serves one.
 //
 //  1. Every mirrored WEB-tab response carries a CSP sandbox (mirrorSandboxCSP),
 //     the same flags the web client puts on the mirror's iframe and no
@@ -53,6 +57,22 @@ import (
 //     itself: a page at the editor's origin is same-origin with its WebSocket,
 //     which is a terminal in that workspace, so a dev server reached through
 //     /proxy/<port>/ must not run there as a real origin either.
+//
+//  4. An editor's WebSocket is accepted only from the editor's own origin, on every
+//     route that serves an editor (editorUpgradeRefusal). The editor's channel IS a
+//     terminal in the workspace, and openvscode-server checks no Origin on it:
+//     handleUpgrade reads none, and under --without-connection-token (which af
+//     passes, since the socket's permissions authenticate the daemon) the token
+//     check always passes. A browser does not apply CORS to a WebSocket handshake,
+//     so without this a page on any other origin — a dev server on another port of
+//     the same host, or a page rule 3 made opaque — could open that terminal
+//     wherever it could reach the route. code-server has checked Origin on its
+//     WebSockets since 4.10.1; this gives both editors the same rule, enforced by
+//     af. "Own origin" is originNamesRequest's, the same comparison the cross-site
+//     guard (crosssite.go) applies to the web UI's own streams, so an editor
+//     connects behind exactly the front doors the web UI does. A handshake with no
+//     Origin is not a browser's (the Fetch standard sends one on every WebSocket
+//     handshake) and is admitted, as the cross-site guard and code-server both do.
 
 // mirrorSandboxCSP is the opaque-origin sandbox for mirrored workspace documents.
 // Its flags must equal the web client's mirror iframe sandbox
@@ -104,21 +124,78 @@ func editorServesWorkspaceContent(rest string) bool {
 	return false
 }
 
-// tabIsRelayedEditor reports whether (sessionID, tabID) is the VS Code tab of an
-// off-box workspace, judged from the already-tracked session WITHOUT resolving the
-// tab's target: resolving a relayed editor STARTS it on the workspace's host, and
-// the mirror is about to refuse it, so it must not be started for nothing. The
-// target's own RelayedEditor bit stays the authoritative check after resolution.
-func (m *Manager) tabIsRelayedEditor(sessionID, tabID string) bool {
+// trackedEditorTab reports whether (sessionID, tabID) is a VS Code tab, and whether
+// its editor is RELAYED from an off-box workspace, judged from the already-tracked
+// session WITHOUT resolving the tab's target: resolving an editor STARTS it (on the
+// workspace's host, for a relayed one), and rules 2 and 4 refuse before that, so an
+// editor is never started only to be turned away. The resolved target's Kind and
+// RelayedEditor stay the authoritative checks after resolution, for a session that
+// is not tracked yet.
+func (m *Manager) trackedEditorTab(sessionID, tabID string) (editor, relayed bool) {
 	if m == nil {
-		return false
+		return false, false
 	}
 	instance := m.trackedStreamSession(sessionID)
 	if instance == nil {
-		return false
+		return false, false
 	}
 	kind, _, ok := instance.TabTargetByID(tabID)
-	return ok && kind == session.TabKindVSCode && instance.Capabilities().Workspace == session.WorkspaceRemote
+	if !ok || kind != session.TabKindVSCode {
+		return false, false
+	}
+	return true, instance.Capabilities().Workspace == session.WorkspaceRemote
+}
+
+// editorUpgradeRefusal is rule 4 for one request on an editor tab's route: a
+// protocol upgrade whose Origin is not the origin the request was addressed to is
+// refused. Every upgrade counts, not only "websocket": httputil.ReverseProxy relays
+// any Upgrade the upstream accepts, and a browser cannot set Upgrade or Connection
+// itself, so judging every request that names one costs no legitimate request.
+// allowedHosts is network.allowed_hosts, for originNamesRequest's X-Forwarded-Host
+// admission behind a same-host proxy.
+func editorUpgradeRefusal(r *http.Request, allowedHosts []string) *crossSiteDenial {
+	if !requestsUpgrade(r) {
+		return nil
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" || originNamesRequest(origin, r, allowedHosts) {
+		return nil
+	}
+	return &crossSiteDenial{
+		status: http.StatusForbidden,
+		err: fmt.Errorf("refused an editor connection from Origin %q: an editor accepts connections only "+
+			"from its own page. Behind a reverse proxy that rewrites Host, forward the browser's with "+
+			"X-Forwarded-Host (and X-Forwarded-Proto) or keep Host", echoHost(origin)),
+		logKey: "editor-origin:" + echoHost(origin),
+	}
+}
+
+// requestsUpgrade reports whether r asks for a protocol switch: an Upgrade header,
+// or an "upgrade" token in Connection. Broader than ReverseProxy's own test (both),
+// so nothing it would relay as an upgrade escapes the check.
+func requestsUpgrade(r *http.Request) bool {
+	if r.Header.Get("Upgrade") != "" {
+		return true
+	}
+	for _, v := range r.Header.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// webTabAllowedHosts is network.allowed_hosts for this request: from the posture
+// the control and preview listeners already built for it (one config read per
+// request), else from the live config — an editor-origin port's Host guard reads
+// the list the same way and puts no posture in the context.
+func (cs *controlServer) webTabAllowedHosts(r *http.Request) []string {
+	if p, ok := requestPostureFrom(r.Context()); ok {
+		return p.allowedHosts
+	}
+	return editorPortAllowedHosts(cs)
 }
 
 // relayedEditorNeedsOwnOrigin is the notice the mirror shows in place of a relayed
