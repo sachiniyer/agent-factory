@@ -468,9 +468,11 @@ export function neededBy(b: Backlog, id: number): Item[] {
   return b.items.filter((it) => (it.waits_on ?? []).includes(id));
 }
 
-/** Open items that wait on id: the row's "blocks n". */
-export function blocking(b: Backlog, id: number): Item[] {
-  return neededBy(b, id).filter((it) => it.status !== "done" && it.status !== "dropped");
+/** Open items that wait on id: the row's "blocks n". Open by derived state, the
+ *  one listRows hides closed rows by: a parent whose children all finished
+ *  derives done while its stored status can still read running. */
+export function blocking(view: BacklogView, id: number): Item[] {
+  return neededBy(view.backlog, id).filter((it) => !closedState(derivedOf(view, it.id).state));
 }
 
 /** The items id waits on and the items that wait on it. */

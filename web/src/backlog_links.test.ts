@@ -108,8 +108,11 @@ const lit = (pane: BacklogPane, cls: string): number[] =>
   el(pane).querySelectorAll(`.af-backlog-row.${cls}`).map((r) => Number(r.dataset.itemId));
 
 test("model: blocks counts open waiters; related joins waits-on and needed-by", () => {
-  const v = view([item(1), item(2, { waits_on: [1] }), item(3, { waits_on: [1], status: "done" }), item(4, { waits_on: [2, 99] })]);
-  assert.deepEqual(blocking(v.backlog, 1).map((i) => i.id), [2]);
+  const v = view([item(1), item(2, { waits_on: [1] }), item(3, { waits_on: [1], status: "done" }), item(4, { waits_on: [2, 99] }),
+    // A parent whose children all finished derives done while its stored status still reads running (Codex P2 on #6544).
+    item(5, { waits_on: [1], status: "running" }), item(6, { parent: 5, status: "done" })],
+  { 2: "draft", 3: "done", 4: "draft", 5: "done", 6: "done" });
+  assert.deepEqual(blocking(v, 1).map((i) => i.id), [2], "closed by derived state, not stored status: the list hides them too");
   assert.deepEqual([...relatedIDs(v.backlog, 2)].sort(), [1, 4]);
   assert.deepEqual([...relatedIDs(v.backlog, 4)], [2]);
   assert.equal(latestRun(item(5, { runs: [run("a"), run("", { state: "starting" })] }))?.state, "starting");

@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "eb8a58baa7e6";
+var CLIENT_VERSION = "7601112c29b9";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18469,8 +18469,8 @@ function overlayMove(fresh, moved, base) {
 function neededBy(b, id) {
   return b.items.filter((it) => (it.waits_on ?? []).includes(id));
 }
-function blocking(b, id) {
-  return neededBy(b, id).filter((it) => it.status !== "done" && it.status !== "dropped");
+function blocking(view, id) {
+  return neededBy(view.backlog, id).filter((it) => !closedState(derivedOf(view, it.id).state));
 }
 function relatedIDs(b, id) {
   const out = new Set((itemByID(b, id)?.waits_on ?? []).filter((w) => itemByID(b, w)));
@@ -20412,7 +20412,7 @@ ${id}`;
     const focused = active && this.listSlot.contains(active) ? Number(active.dataset.itemId) : null;
     const hot = this.hoverId ?? focused;
     const related = hot !== null ? relatedIDs(v.backlog, hot) : /* @__PURE__ */ new Set();
-    const picked = new Set(this.pinned !== null ? blocking(v.backlog, this.pinned).map((it) => it.id) : []);
+    const picked = new Set(this.pinned !== null ? blocking(v, this.pinned).map((it) => it.id) : []);
     for (const [id, el2] of this.rowEls) {
       el2.classList.toggle("af-backlog-row-hot", related.size > 0 && id === hot);
       el2.classList.toggle("af-backlog-row-related", related.has(id));
@@ -20525,7 +20525,7 @@ ${id}`;
   /** "Blocks n" and the PR link at the row's end. */
   rowTail(v, it) {
     const out = [];
-    const blocked = blocking(v.backlog, it.id);
+    const blocked = blocking(v, it.id);
     if (blocked.length > 0) {
       const on = this.pinned === it.id;
       const b = h("button", {
@@ -20567,7 +20567,7 @@ ${id}`;
       this.render();
       return;
     }
-    const blocked = blocking(v.backlog, id);
+    const blocked = blocking(v, id);
     if (blocked.length === 0) return;
     for (const x of blocked) {
       const seen = /* @__PURE__ */ new Set();

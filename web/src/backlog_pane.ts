@@ -455,7 +455,7 @@ export class BacklogPane {
     const focused = active && this.listSlot.contains(active) ? Number(active.dataset.itemId) : null;
     const hot = this.hoverId ?? focused;
     const related = hot !== null ? relatedIDs(v.backlog, hot) : new Set<number>();
-    const picked = new Set(this.pinned !== null ? blocking(v.backlog, this.pinned).map((it) => it.id) : []);
+    const picked = new Set(this.pinned !== null ? blocking(v, this.pinned).map((it) => it.id) : []);
     for (const [id, el] of this.rowEls) {
       el.classList.toggle("af-backlog-row-hot", related.size > 0 && id === hot);
       el.classList.toggle("af-backlog-row-related", related.has(id));
@@ -559,7 +559,7 @@ export class BacklogPane {
   /** "Blocks n" and the PR link at the row's end. */
   private rowTail(v: BacklogView, it: Item): HTMLElement[] {
     const out: HTMLElement[] = [];
-    const blocked = blocking(v.backlog, it.id);
+    const blocked = blocking(v, it.id);
     if (blocked.length > 0) {
       const on = this.pinned === it.id;
       const b = h("button", { type: "button", class: `af-backlog-blocks${on ? " af-backlog-blocks-on" : ""}`, tabIndex: -1,
@@ -592,7 +592,7 @@ export class BacklogPane {
       this.render();
       return;
     }
-    const blocked = blocking(v.backlog, id);
+    const blocked = blocking(v, id);
     if (blocked.length === 0) return;
     for (const x of blocked) {
       const seen = new Set<number>();
