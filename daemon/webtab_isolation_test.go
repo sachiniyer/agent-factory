@@ -233,28 +233,57 @@ func TestEditorPathUnderStaticRoot(t *testing.T) {
 	}
 }
 
+func TestEditorNonCanonicalRefusal(t *testing.T) {
+	refused := func(escapedRest string) bool {
+		return editorNonCanonicalRefusal(webTabRoute{escapedRest: escapedRest, rest: escapedRest}) != nil
+	}
+	// Canonical rests (no leading slash, already cleaned) pass; a single trailing
+	// slash is canonical.
+	for _, esc := range []string{"", "static/out/x.js", "proxy/3000/", testCommit + "/static/out/x.js", "vscode/" + testCommit + "/static/"} {
+		assert.False(t, refused(esc), "canonical: %q", esc)
+	}
+	// An EXTRA leading slash — what an editor-origin port leaves after stripping one
+	// from "//…" (P1b) — is a leading empty segment and must be refused, not trimmed.
+	for _, esc := range []string{"/static/out/x.js", "/webview/browser/pre/index.html", "//x"} {
+		assert.True(t, refused(esc), "leading empty segment: %q", esc)
+	}
+	// The rest of the class: inner empty/dot segments, encoded separators, malformed.
+	for _, esc := range []string{"static//out/x.js", "a/./b", "a/../b", "static%2fout/x", "a%5cb", "bad%zz"} {
+		assert.True(t, refused(esc), "non-canonical: %q", esc)
+	}
+}
+
+// webviewParentOrigin must read the query exactly as the host page's URLSearchParams
+// does, so the daemon judges the value the page acts on.
 func TestWebviewParentOrigin(t *testing.T) {
-	ok := func(q, want string) {
-		v, found := webviewParentOrigin(q)
-		assert.True(t, found, "%q should parse", q)
+	present := func(q, want string) {
+		v, count := webviewParentOrigin(q)
+		assert.GreaterOrEqual(t, count, 1, "%q: parentOrigin should be present", q)
 		assert.Equal(t, want, v, "%q", q)
 	}
-	rejected := func(q string) {
-		_, found := webviewParentOrigin(q)
-		assert.False(t, found, "%q must be rejected as ambiguous", q)
+	absent := func(q string) {
+		_, count := webviewParentOrigin(q)
+		assert.Equal(t, 0, count, "%q: no parentOrigin key", q)
 	}
-	ok("parentOrigin=http://127.0.0.1:9100", "http://127.0.0.1:9100")
-	ok("id=1&parentOrigin=http://x", "http://x")
-	ok("parentOrigin=http%3A%2F%2Fx%3A1", "http://x:1")
-	// A ";" anywhere: Go ends the pair there, a browser keeps it literal.
-	rejected("parentOrigin=http://good;x=1&parentOrigin=http://evil")
-	rejected("a=1;parentOrigin=http://evil")
-	// A malformed escape in any pair: Go's Query drops the pair, a browser keeps it.
-	rejected("x=%ZZ&parentOrigin=http://evil")
-	rejected("parentOrigin=%GG")
-	// Not exactly one parentOrigin.
-	rejected("id=1")
-	rejected("parentOrigin=http://a&parentOrigin=http://b")
+	present("parentOrigin=http://127.0.0.1:9100", "http://127.0.0.1:9100")
+	present("id=1&parentOrigin=http://x", "http://x")
+	present("parentOrigin=http%3A%2F%2Fx%3A1", "http://x:1")
+	// An encoded KEY still decodes to parentOrigin, as URLSearchParams reads it.
+	present("%70arentOrigin=http://evil", "http://evil")
+	present("%70%61rentOrigin=http://evil", "http://evil")
+	// URLSearchParams.get returns the FIRST; a ";" is a literal, not a separator.
+	present("parentOrigin=http://a&parentOrigin=http://b", "http://a")
+	if _, count := webviewParentOrigin("parentOrigin=http://a&parentOrigin=http://b"); count != 2 {
+		t.Errorf("two parentOrigin keys should count 2, got %d", count)
+	}
+	present("parentOrigin=http://good;x=1&y=2", "http://good;x=1")
+	present("parentOrigin=", "")
+	// No parentOrigin KEY: a ";" does not start one (URLSearchParams ignores ";"),
+	// "+" is a space (so "parent Origin" is a different key), and %2b is a literal "+".
+	absent("id=1")
+	absent("a=1;parentOrigin=http://evil")
+	absent("parent+Origin=http://evil")
+	absent("par%2bentOrigin=http://evil")
 }
 
 // Rule 6: a webview-host request is admitted only when the editor's own page loads
@@ -293,21 +322,34 @@ func TestEditorStaticDocumentRefusal(t *testing.T) {
 			assert.False(t, refused(p, "", dest, "none"), "%s none as %s", p, dest)
 		}
 	}
-	// A sub-resource under static (a script) is not a framing: admitted whatever the site.
-	assert.False(t, refused(testCommit+"/static/out/x.js", "", "script", "same-site"))
-	assert.False(t, refused(testCommit+"/static/out/x.css", "", "style", "cross-site"))
+	// A sub-resource under static is not a framing: admitted whatever the site, across
+	// the allow-list.
+	for _, dest := range []string{"script", "style", "image", "font", "empty", "worker", "serviceworker", "manifest", "audio", "video"} {
+		assert.False(t, refused(testCommit+"/static/out/x", "", dest, "cross-site"), "sub-resource dest %q", dest)
+	}
+	// Inverted allow-list: a dest this does not recognise — a future nested context
+	// like fencedframe, or anything new — is treated as framing and refused cross-port.
+	for _, dest := range []string{"fencedframe", "somenewdest"} {
+		assert.True(t, refused(webviewHost, "", dest, "same-site"), "unknown/new nested dest %q is refused cross-port", dest)
+		assert.False(t, refused(webviewHost, "", dest, "same-origin"), "unknown/new nested dest %q is allowed same-origin", dest)
+	}
 	// Not under a static root: the port proxy and the shell are this rule's business
 	// never, even framed cross-site.
 	assert.False(t, refused("proxy/3000/", "", "iframe", "cross-site"), "the port proxy is not a static root")
 	assert.False(t, refused("", "", "iframe", "cross-site"), "the shell root is exempt (framed cross-origin to show an editor port)")
-	// Old browser (no Sec-Fetch-Dest): the parentOrigin fallback. A host-page load
-	// carries parentOrigin; a bare sub-resource does not.
+	// Old browser (no Sec-Fetch-Dest): the parentOrigin fallback, judged on DECODED
+	// keys exactly as URLSearchParams reads them. A host-page load carries
+	// parentOrigin; a bare sub-resource does not.
 	assert.True(t, refused(webviewHost, "parentOrigin=http://127.0.0.1:9101", "", ""), "old browser, foreign parentOrigin")
 	assert.True(t, refused(workerHost, "parentOrigin=http://127.0.0.1:9101", "", ""), "old browser, foreign parentOrigin (worker)")
 	assert.False(t, refused(webviewHost, "parentOrigin=http://127.0.0.1:9100", "", ""), "old browser, own parentOrigin")
 	assert.False(t, refused(webviewHost, "id=1", "", ""), "old browser, no parentOrigin (sub-resource)")
-	assert.True(t, refused(webviewHost, "parentOrigin=http://a;x=1&parentOrigin=http://b", "", ""), "old browser, ambiguous query")
-
+	// An ENCODED parentOrigin key must not slip past (P1a): %70arentOrigin decodes
+	// to parentOrigin, which the page reads but a raw-substring test would miss.
+	assert.True(t, refused(webviewHost, "%70arentOrigin=http://127.0.0.1:9101", "", ""), "old browser, encoded foreign parentOrigin key")
+	assert.True(t, refused(workerHost, "%70%61rentOrigin=http://127.0.0.1:9101", "", ""), "old browser, encoded foreign parentOrigin key (worker)")
+	assert.False(t, refused(webviewHost, "%70arentOrigin=http://127.0.0.1:9100", "", ""), "old browser, encoded own parentOrigin key")
+	assert.True(t, refused(webviewHost, "parentOrigin=http://a;x=1&parentOrigin=http://b", "", ""), "old browser, first parentOrigin names another origin")
 }
 
 // Rule 6 through the real proxy: a foreign loader is refused before the editor

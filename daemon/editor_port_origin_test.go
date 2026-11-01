@@ -381,6 +381,10 @@ func TestEditorPortHandler_RefusesNonCanonicalPaths(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, code(host+"/webview//browser/pre/index.html"), "empty segment //")
 	assert.Equal(t, http.StatusBadRequest, code(host+"/webview/./browser/pre/index.html"), "/./ segment")
 	assert.Equal(t, http.StatusBadRequest, code(host+"/webview%2Fbrowser/pre/index.html"), "%2F separator")
+	// An EXTRA leading slash (P1b): editorPortHandler strips only one, so "//static/…"
+	// leaves "/static/…" in route.escapedRest. It must be refused, not trimmed —
+	// otherwise the loader rule sees an empty first segment and skips.
+	assert.Equal(t, http.StatusBadRequest, code("//stable-abc/static/out/vs/workbench/contrib/webview/browser/pre/index.html"), "extra leading slash")
 	// A canonical trailing slash is NOT refused by this rule: it reaches the core
 	// (which here cannot find an editor binary, so it is anything but a 400).
 	assert.NotEqual(t, http.StatusBadRequest, code("/proxy/3000/"), "a trailing slash is canonical")

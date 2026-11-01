@@ -306,12 +306,19 @@ func editorRouteRefusal(r *http.Request, route webTabRoute, allowedHosts []strin
 // or ".." segment. A single trailing slash is canonical and kept. Scoped to editor
 // tabs: a web tab's dev server owns its own path space and may use any of these.
 func editorNonCanonicalRefusal(route webTabRoute) *crossSiteDenial {
-	esc := strings.TrimPrefix(route.escapedRest, "/")
+	// route.escapedRest is the path AFTER the route mount, and it must already be
+	// canonical — no EXTRA leading slash. The mount strips one slash, so a "//x"
+	// request leaves "/x" here; trimming it would hide that the path was
+	// non-canonical (and editorPathUnderStaticRoot would then see an empty first
+	// segment and skip the loader rule). So the leading slash is judged, not removed.
+	esc := route.escapedRest
 	low := strings.ToLower(esc)
 	bad := strings.Contains(low, "%2f") || strings.Contains(low, "%5c")
 	if !bad {
 		if decoded, err := url.PathUnescape(esc); err != nil {
 			bad = true
+		} else if strings.HasPrefix(decoded, "/") {
+			bad = true // an extra leading slash the mount did not strip
 		} else if p := "/" + decoded; muxCleanPath(p) != p {
 			bad = true
 		}
@@ -351,9 +358,11 @@ func editorNonCanonicalRefusal(route webTabRoute) *crossSiteDenial {
 // The static-root scope is deliberate: content the editor RELAYS (the port proxy,
 // vscode-remote-resource) is already opaque-origin under rule 3, so its own document
 // sub-requests arrive cross-site — applying this rule there would refuse a sandboxed
-// dev server loading its own frames. The editor's root shell is exempt too (it is
-// not under a static root), because the web UI legitimately frames an editor-origin
-// port's shell cross-origin to display it.
+// dev server loading its own frames. Two real-origin editor pages sit OUTSIDE a
+// static root and are exempt by that: the shell at the root, which the web UI
+// legitimately frames cross-origin to display an editor-origin port; and the sign-in
+// callback page, which OAuth providers navigate to cross-site — refusing a cross-site
+// load of callback would break sign-in, and it reads no parentOrigin to abuse.
 func editorStaticDocumentRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
 	if !editorPathUnderStaticRoot(route.escapedRest) {
 		return nil
@@ -368,58 +377,114 @@ func editorStaticDocumentRefusal(r *http.Request, route webTabRoute, allowedHost
 	}
 	dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
 	if dest != "" {
-		switch dest {
-		case "document", "iframe", "frame", "object", "embed":
-			site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
-			if site == "same-origin" || site == "none" {
-				return nil
-			}
-			return refuse(echoHost(dest))
-		default:
-			return nil // a sub-resource (script, style, image, fetch): not a framing
+		// An ALLOW-LIST of sub-resource destinations, not a deny-list of framing ones:
+		// a value this does not recognise — a future nested context like fencedframe,
+		// or anything new — is treated as a framing/navigation and must be same-origin.
+		if isSubresourceDest(dest) {
+			return nil
 		}
+		site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
+		if site == "same-origin" || site == "none" {
+			return nil
+		}
+		return refuse(echoHost(dest))
 	}
-	// No fetch metadata (an old browser). A parentOrigin query marks a host-page
-	// load; without one this is an ordinary sub-resource.
-	if !strings.Contains(r.URL.RawQuery, "parentOrigin") {
+	// No fetch metadata (an old browser). A parentOrigin query (judged on DECODED
+	// keys, as the page reads it — so %70arentOrigin counts) marks a host-page load;
+	// without one this is an ordinary sub-resource. It must carry exactly one
+	// parentOrigin naming this origin; zero is a sub-resource, more than one is
+	// ambiguous, and a non-naming value is the cross-port parent.
+	value, count := webviewParentOrigin(r.URL.RawQuery)
+	if count == 0 {
 		return nil
 	}
-	parent, ok := webviewParentOrigin(r.URL.RawQuery)
-	if ok && parent != "" && originNamesRequest(parent, r, allowedHosts) {
+	if count == 1 && originNamesRequest(value, r, allowedHosts) {
 		return nil
 	}
 	return refuse("parentOrigin")
 }
 
-// webviewParentOrigin returns the single parentOrigin of a webview-host query, and
-// false when the daemon cannot be sure a browser reads the same value: a ";"
-// anywhere (Go treats it as the end of the pair, a browser as a literal), a
-// malformed percent-escape in any pair (Go's Query drops that pair, a browser keeps
-// it), or other than exactly one parentOrigin. Parsed over the raw pairs rather
-// than through url.Query, which already applies those lossy rules.
-func webviewParentOrigin(rawQuery string) (string, bool) {
-	if strings.Contains(rawQuery, ";") {
-		return "", false
-	}
-	value, count := "", 0
+// webviewParentOrigin reads parentOrigin from a query EXACTLY as the host page's
+// URLSearchParams does, so the daemon judges the same value the page will act on:
+// split on "&" only (a browser does not treat ";" as a separator), split each pair
+// on the first "=", and form-decode key and value — "+" is a space and %XX is
+// decoded leniently, an invalid escape left literal (formURLDecode). value is the
+// FIRST decoded parentOrigin value (what URLSearchParams.get returns); count is how
+// many pairs have a decoded key of parentOrigin. A key spelled %70arentOrigin
+// decodes to parentOrigin and so is counted, which a raw-substring test would miss.
+// The caller admits a host-page load only when count is exactly one AND that value
+// names this origin: zero means an ordinary sub-resource, and more than one is
+// ambiguous enough to refuse.
+func webviewParentOrigin(rawQuery string) (value string, count int) {
 	for _, pair := range strings.Split(rawQuery, "&") {
 		if pair == "" {
 			continue
 		}
 		rawKey, rawVal, _ := strings.Cut(pair, "=")
-		key, kerr := url.QueryUnescape(rawKey)
-		val, verr := url.QueryUnescape(rawVal)
-		if kerr != nil || verr != nil {
-			return "", false
-		}
-		if key == "parentOrigin" {
-			value, count = val, count+1
+		if formURLDecode(rawKey) == "parentOrigin" {
+			if count == 0 {
+				value = formURLDecode(rawVal)
+			}
+			count++
 		}
 	}
-	if count != 1 {
-		return "", false
+	return value, count
+}
+
+// formURLDecode decodes an application/x-www-form-urlencoded component the way a
+// browser's URLSearchParams does: "+" becomes a space, then each valid %XX becomes
+// its byte; an incomplete or non-hex escape is left literal (lenient, unlike Go's
+// url.QueryUnescape, which errors). Byte-wise, which is all the ASCII key compare
+// and the origin parse need.
+func formURLDecode(s string) string {
+	s = strings.ReplaceAll(s, "+", " ")
+	if !strings.Contains(s, "%") {
+		return s
 	}
-	return value, true
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if h1, ok1 := fromHexDigit(s[i+1]); ok1 {
+				if h2, ok2 := fromHexDigit(s[i+2]); ok2 {
+					b.WriteByte(h1<<4 | h2)
+					i += 2
+					continue
+				}
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// isSubresourceDest reports whether a Sec-Fetch-Dest names a sub-resource rather
+// than a nested browsing context or navigation. It is an allow-list: the Fetch
+// destinations that load no framed document (scripts, styles, media, workers,
+// fetch/XHR "empty", …). Everything else — document, iframe, frame, object, embed,
+// fencedframe, or a value added to the platform after this was written — is treated
+// as a framing/navigation, so a new nested context cannot slip past by being
+// unknown here.
+func isSubresourceDest(dest string) bool {
+	switch dest {
+	case "empty", "audio", "audioworklet", "font", "image", "json", "manifest",
+		"paintworklet", "report", "script", "serviceworker", "sharedworker",
+		"style", "track", "video", "worker", "xslt", "speculationrules":
+		return true
+	}
+	return false
+}
+
+func fromHexDigit(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
 }
 
 // editorPathUnderStaticRoot reports whether a path below an editor tab's prefix is
