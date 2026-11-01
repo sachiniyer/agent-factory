@@ -899,3 +899,73 @@ func TestContinuationAccountFollowsTheLaunchCommandsConfigDir(t *testing.T) {
 		t.Fatalf("an accountless session launched with CLAUDE_CONFIG_DIR=…/work continues on %q, want work", got)
 	}
 }
+
+// The runner view agrees with the starts: when the pacer holds an account back
+// (its reading is stale and a start already used the last reading), nothing is
+// started on it, so the view is not "running" for that account either (Codex P2 on
+// #6467 4448a7bf7c).
+func TestRunnerViewIsNotRunningForAnAccountThePacerHoldsBack(t *testing.T) {
+	m, repoID, _ := queuedContinuationOn(t, "alt")
+	var sent []SendPromptRequest
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(_ *Manager, req SendPromptRequest) error { sent = append(sent, req); return nil }
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	setRunner(t, m, repoID, true, 3)
+	writeFreshReading(t, 95)
+	readAt := time.Now().UTC()
+	if err := planusage.WriteReading("alt", planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 10, ResetsAt: readAt.Add(3 * time.Hour).Unix()}, ReadAt: readAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.meterUsageWithin(0)
+	events := runnerEvents(t, m)
+	// The reading is stale at the pass, and a start was made after it was taken.
+	at := readAt.Add(backlog.StaleReadingAfter + time.Minute)
+	m.backlog.runner.noteStarted(readAt.Add(time.Minute))
+
+	pass(m, repoID, at)
+
+	if len(sent) != 0 {
+		t.Fatalf("a start was made on an account the pacer holds back: %d prompts", len(sent))
+	}
+	var last backlog.RunnerEvent
+	for _, ev := range events() {
+		if ev.RepoID == repoID {
+			last = ev
+		}
+	}
+	if last.State == backlog.RunnerRunning {
+		t.Fatalf("the runner event says running while the pacer holds the account back: %+v", last)
+	}
+}
+
+// A usage-limit wall on a session with no account field belongs to the account its
+// launch command's config dir names, the account a continuation gates on, not the
+// ambient one (Codex P2 on #6467 4448a7bf7c).
+func TestUsageLimitWallOnAnAccountlessOverrideSessionIsThatAccountsWall(t *testing.T) {
+	m, _, inst := queuedContinuationOn(t, "work")
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Account = ""
+	repo := setupControlRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+	inst.Program = "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "accounts", "claude", "work") + " claude"
+	now := time.Now()
+	inst.SetLimitReached(now.Add(time.Hour))
+	if _, acct, ok := inst.LimitIdentity(); !ok || acct != "" {
+		t.Fatalf("precondition: a wall attributed to no account, got %q ok=%v", acct, ok)
+	}
+	if limited, _, err := m.claudeUsageLimit("work", now); err != nil || !limited {
+		t.Fatalf("work limited=%v err=%v: the wall on its override session was not counted", limited, err)
+	}
+	if limited, _, _ := m.claudeUsageLimit(planusage.DefaultAccount, now); limited {
+		t.Fatal("the ambient account was limited by work's wall")
+	}
+}

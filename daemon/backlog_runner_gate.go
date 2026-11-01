@@ -168,9 +168,15 @@ func (m *Manager) viewGate(repoID string, b *backlog.Backlog, states map[int]bac
 		if acct == "" {
 			continue // a new session spends the default account, whose gate is closed
 		}
-		if m.backlogGateFor(acct, budget, usage, now).Open() {
-			return backlog.Gate{}
+		if !m.backlogGateFor(acct, budget, usage, now).Open() {
+			continue
 		}
+		// selectStarts also paces each account, and its start waits for a fresh
+		// reading when the pacer allows none: that is not running either.
+		if limit := m.backlog.runner.startLimit(func(p *backlog.StartPacer) int { return p.Limit(usageFor(usage, acct), now) }); limit == 0 {
+			continue
+		}
+		return backlog.Gate{}
 	}
 	return def
 }
@@ -184,17 +190,27 @@ func (m *Manager) continuationAccount(repoID string, b *backlog.Backlog, id int)
 	if s == nil {
 		return ""
 	}
-	// The account the meter files the session's usage under: its effective Claude
-	// config dir, which an operator override in the launch command
-	// (CLAUDE_CONFIG_DIR=… claude) sets without setting Account (#6309). The
-	// session's own account field is only the fallback when that dir cannot be
-	// resolved.
-	if configDir, _, err := s.instance.ClaudeRunTranscriptDirs(); err == nil && configDir != "" {
-		if home, herr := config.GetConfigDir(); herr == nil {
-			return accountOfRun(home, configDir)
-		}
+	if acct, ok := launchConfigAccount(s.instance); ok {
+		return acct
 	}
 	return planAccount(s.instance.Account)
+}
+
+// launchConfigAccount is the account the meter files a session's usage under: its
+// effective Claude config dir, which an operator override in the launch command
+// (CLAUDE_CONFIG_DIR=… claude) sets without setting Account (#6309). It reports
+// false when that dir cannot be resolved, and the session's own account field is
+// the only fallback.
+func launchConfigAccount(inst *session.Instance) (string, bool) {
+	configDir, _, err := inst.ClaudeRunTranscriptDirs()
+	if err != nil || configDir == "" {
+		return "", false
+	}
+	home, herr := config.GetConfigDir()
+	if herr != nil {
+		return "", false
+	}
+	return accountOfRun(home, configDir), true
 }
 
 // liveContinuation is the live session an automatic start of item id would
@@ -293,17 +309,29 @@ func usageFor(usage planusage.Usage, account string) planusage.Usage {
 func (m *Manager) claudeUsageLimit(account string, now time.Time) (bool, time.Time, error) {
 	var obs []session.AccountLimitObservationData
 	m.mu.Lock()
+	insts := make([]*session.Instance, 0, len(m.instances))
 	for _, inst := range m.instances {
-		if inst == nil {
-			continue
+		if inst != nil {
+			insts = append(insts, inst)
 		}
+	}
+	m.mu.Unlock()
+	for _, inst := range insts {
 		if agent, acct, ok := inst.LimitIdentity(); ok {
+			if acct == "" {
+				// A wall on a session with no account field belongs to the account its
+				// launch command's config dir names, the one a continuation gates on
+				// (#6309): an accountless session launched with CLAUDE_CONFIG_DIR=…/work
+				// that hit its limit is work's wall, not the ambient account's.
+				if launched, ok := launchConfigAccount(inst); ok && launched != planusage.DefaultAccount {
+					acct = launched
+				}
+			}
 			at, _ := inst.LimitResetAt()
 			obs = append(obs, session.AccountLimitObservationData{Agent: agent, Account: acct, ResetAt: at})
 		}
 		obs = append(obs, inst.AccountLimitObservations()...)
 	}
-	m.mu.Unlock()
 	rs := &m.backlog.runner
 	// The live sessions, the retained ledger and every durable session row: a row
 	// that cannot materialize after a restart is absent from m.instances but its
