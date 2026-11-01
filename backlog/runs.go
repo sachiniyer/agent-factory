@@ -156,7 +156,7 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title stri
 		run.SessionID, run.Title, run.State = sessionID, title, RunStarted
 		return nil
 	}
-	run.State = RunFailed
+	run.State, run.EndedAt = RunFailed, now
 	if it.Status == StatusRunning && it.lastRun() == run {
 		if CheckStatusChange(StatusChange{ID: id, From: it.Status, To: run.PrevStatus, By: ActorAF,
 			StartFailed: true, PrevStatus: run.PrevStatus}) == nil {
