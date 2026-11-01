@@ -358,13 +358,23 @@ func RelativeExecutable(command string) bool {
 	// /usr/bin — using the final PATH would let the doctor verify /usr/bin/env
 	// and falsely pass while the session resolves the inner env from
 	// <launch-dir>/bin. envCommandOperand therefore reports the PATH in
-	// effect at the operand alongside the operand itself.
-	if op, opPath, opPathSet := envCommandOperand(command); op != "" && op != launch.Executable {
-		if usesRelativeExecutable(op) {
+	// effect at the operand alongside the operand itself. Every nested env
+	// reached by unwrapping is collected, and the walk continues past an
+	// anchor-independent nested env (an absolute /usr/bin/env) to classify
+	// the operands it in turn execs: a relative command operand hidden
+	// behind an absolute nested env (`env /usr/bin/env ./bin/launcher
+	// /usr/bin/codex` runs ./bin/launcher, which CheckCommand never
+	// verifies) is otherwise missed and the doctor can PASS while the
+	// session cannot start.
+	for _, op := range envCommandOperand(command) {
+		if op.operand == "" || op.operand == launch.Executable {
+			continue
+		}
+		if usesRelativeExecutable(op.operand) {
 			return true
 		}
-		if workingDirResolvesAgainstCwd(command, launch) && isBareExecutable(op) {
-			if opPathSet && pathHasRelativeEntry(op, opPath) {
+		if workingDirResolvesAgainstCwd(command, launch) && isBareExecutable(op.operand) {
+			if op.pathSet && pathHasRelativeEntry(op.operand, op.pathValue) {
 				return true
 			}
 		}
@@ -423,39 +433,59 @@ func relativeShellWrapper(command string) string {
 	return shellExecutable(words)
 }
 
-// envCommandOperand returns the executable token GNU env execs (env's command
-// operand) when the command begins with one or more env wrappers, or "" if the
-// command has no env wrapper or the wrapper's command cannot be found. af
-// models env as exec'ing its command operand; when a supported agent token is
-// nested behind that operand (`env ./bin/launcher codex`), CheckCommand
-// resolves env (the shell wrapper) and codex (the detected agent) but not the
+// envOperand is a single executable token GNU env execs (env's command
+// operand or a nested env reached by unwrapping), paired with the PATH in
+// effect when that token is resolved.
+type envOperand struct {
+	operand   string
+	pathValue string
+	pathSet   bool
+}
+
+// envCommandOperand returns the executable tokens GNU env execs (env's
+// command operand chain) when the command begins with one or more env
+// wrappers, in the order the session execs them, or nil if the command has
+// no env wrapper or the wrapper's command cannot be found. af models env as
+// exec'ing its command operand; when a supported agent token is nested
+// behind that operand (`env ./bin/launcher codex`), CheckCommand resolves
+// env (the shell wrapper) and codex (the detected agent) but not the
 // intervening operand, so a relative operand is a launch-directory-dependent
 // executable the doctor cannot verify from outside a repo. Leading shell
-// assignments are skipped. The leading env wrapper is unwrapped to its command
-// operand; a nested env reached by unwrapping is itself an executable
-// obligation the session launches but CheckCommand does not resolve (`env
-// ./bin/env /usr/bin/codex` runs ./bin/env, which CheckCommand never verifies),
-// so it is returned for classification rather than unwrapped further. The full
-// command is tokenized (no word cap) so a long env prefix of literal
-// assignments cannot truncate before env's command operand and leave a
-// relative launcher undetected.
+// assignments are skipped. The leading env wrapper is unwrapped to its
+// command operand; a nested env reached by unwrapping is itself an
+// executable obligation the session launches but CheckCommand does not
+// resolve (`env ./bin/env /usr/bin/codex` runs ./bin/env, which CheckCommand
+// never verifies), so it is collected for classification rather than
+// unwrapped silently to the final agent token. The full command is
+// tokenized (no word cap) so a long env prefix of literal assignments
+// cannot truncate before env's command operand and leave a relative
+// launcher undetected.
+//
+// The walk continues past an anchor-independent nested env (an absolute
+// /usr/bin/env, or a bare env looked up through an absolute PATH): such a
+// wrapper is itself verified by the launch anchor, but the operand it in
+// turn execs is still a separate executable CheckCommand does not resolve,
+// so a relative operand hidden behind it (`env /usr/bin/env
+// ./bin/launcher /usr/bin/codex` runs ./bin/launcher) is collected too
+// rather than the walk stopping at the first nested wrapper.
 //
 // The returned pathValue/pathSet is the PATH in effect when the returned
 // operand is resolved. A bare operand is looked up through the environment
-// its parent env execs it in, which is the inherited PATH after leading shell
-// assignments and the parent env's own PATH mutations are applied — not the
-// final launch PATH, which a later nested env may have changed
+// its parent env execs it in, which is the inherited PATH after leading
+// shell assignments and the parent env's own PATH mutations are applied —
+// not the final launch PATH, which a later nested env may have changed
 // (`env PATH=bin env PATH=/usr/bin /usr/bin/codex` looks up the inner env
 // through the outer env's relative PATH=bin). For a single env's command
 // operand (or a non-env first token) this equals effectivePathValue(launch);
 // for a nested env reached by unwrapping it is the parent env's PATH, so a
 // relative entry there anchors the bare nested operand.
-func envCommandOperand(command string) (operand, pathValue string, pathSet bool) {
+func envCommandOperand(command string) []envOperand {
 	words, err := shellWords(command, 0)
 	if err != nil {
-		return "", "", false
+		return nil
 	}
-	pathValue, pathSet = os.LookupEnv("PATH")
+	var ops []envOperand
+	pathValue, pathSet := os.LookupEnv("PATH")
 	idx := 0
 	for idx < len(words) && isAssignment(words[idx]) {
 		pathValue, pathSet = applyPathAssignment(words[idx], pathValue, pathSet)
@@ -466,19 +496,21 @@ func envCommandOperand(command string) (operand, pathValue string, pathSet bool)
 		// A nested env reached by unwrapping (not the leading shell
 		// wrapper, which CheckCommand resolves via resolveShellExecutableAt)
 		// is env's command operand — an executable the session execs but
-		// CheckCommand does not resolve. Return it for classification so
+		// CheckCommand does not resolve. Collect it for classification so
 		// a relative nested env (env ./bin/env /usr/bin/codex) or a bare
-		// nested env looked up through a relative PATH anchors the
-		// command instead of being silently unwrapped to the final
-		// agent token. pathValue/pathSet already holds the parent env's
-		// environment, which is the PATH the nested env is looked up
-		// through.
+		// nested env looked up through a relative PATH anchors the command
+		// instead of being silently unwrapped to the final agent token.
+		// pathValue/pathSet already holds the parent env's environment,
+		// which is the PATH the nested env is looked up through. The walk
+		// then continues through the nested env to collect the operands it
+		// execs, so a relative operand behind an anchor-independent nested
+		// env is not missed.
 		if unwrapped {
-			return words[idx], pathValue, pathSet
+			ops = append(ops, envOperand{words[idx], pathValue, pathSet})
 		}
 		invocation, perr := envcommand.Parse(words[idx+1:], envcommand.Policy{AllowAssignments: true})
 		if perr != nil || invocation.CommandIndex < 0 {
-			return "", "", false
+			return ops
 		}
 		// Apply this env's mutations to obtain the environment it execs
 		// its command operand in; the operand is looked up through that
@@ -488,10 +520,10 @@ func envCommandOperand(command string) (operand, pathValue string, pathSet bool)
 		idx += 1 + invocation.CommandIndex
 		unwrapped = true
 	}
-	if idx < len(words) {
-		return words[idx], pathValue, pathSet
+	if unwrapped && idx < len(words) {
+		ops = append(ops, envOperand{words[idx], pathValue, pathSet})
 	}
-	return "", "", false
+	return ops
 }
 
 // applyPathAssignment applies a leading shell PATH assignment to the inherited

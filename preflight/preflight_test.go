@@ -379,6 +379,16 @@ func TestRelativeExecutable(t *testing.T) {
 		// /usr/bin/env and falsely pass while the session resolves the
 		// inner env from <launch-dir>/bin.
 		{name: "env nested bare env outer relative inner absolute PATH", command: "env PATH=bin env PATH=/usr/bin /usr/bin/codex", want: true},
+		// An anchor-independent nested env (absolute /usr/bin/env) is itself
+		// verified by the launch anchor, but the operand it execs is still a
+		// separate executable CheckCommand does not resolve. The walk must
+		// continue past the absolute nested env to classify that operand, so
+		// a relative launcher hidden behind it (env /usr/bin/env
+		// ./bin/launcher /usr/bin/codex runs ./bin/launcher) anchors the
+		// command instead of the doctor falsely PASSing against the absolute
+		// wrapper and absolute agent token.
+		{name: "env absolute nested env relative command operand", command: "env /usr/bin/env ./bin/launcher /usr/bin/codex", want: true},
+		{name: "env absolute nested env absolute command operand not anchoring", command: "env /usr/bin/env /usr/bin/launcher /usr/bin/codex", want: false},
 		// A bare env operand is looked up through env's PATH, so a relative or
 		// empty entry anchors it even though the detected agent token is an
 		// absolute path: CheckCommand resolves env and the absolute codex but
