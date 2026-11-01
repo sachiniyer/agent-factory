@@ -119,6 +119,16 @@ func runAptInstall(t *testing.T, env map[string]string, args ...string) aptRun {
 			t.Fatalf("write %s stub: %v", name, err)
 		}
 	}
+	// macOS has no GNU timeout. The script only ever runs on Linux runners, but
+	// the contract tests are hermetic, so give them a pass-through stand-in
+	// there (`timeout -k 10 N cmd…`); the wedge tests skip, since a stand-in
+	// cannot time anything out.
+	if _, err := exec.LookPath("timeout"); err != nil {
+		shim := "#!/usr/bin/env bash\nshift 3\nexec \"$@\"\n"
+		if werr := os.WriteFile(filepath.Join(binDir, "timeout"), []byte(shim), 0o755); werr != nil {
+			t.Fatalf("write timeout stub: %v", werr)
+		}
+	}
 	callLog := filepath.Join(tmp, "apt-calls.log")
 
 	script := filepath.Join(repoRoot(t), "scripts", "ci-apt-install.sh")
@@ -223,7 +233,11 @@ func TestCIAptInstallStillFailsWhenBothUpdateAndInstallFail(t *testing.T) {
 
 // A wedged apt (#6457) must fail fast with a message that names the wedge, and
 // must have been retried first. Real `timeout` is used; only apt-get is stubbed.
-func wedgeEnv(extra map[string]string) map[string]string {
+func wedgeEnv(t *testing.T, extra map[string]string) map[string]string {
+	t.Helper()
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("needs GNU timeout (not on macOS without coreutils)")
+	}
 	env := map[string]string{"APT_ATTEMPT_TIMEOUT": "1", "APT_ATTEMPTS": "2", "APT_RETRY_DELAY": "0"}
 	for k, v := range extra {
 		env[k] = v
@@ -232,7 +246,7 @@ func wedgeEnv(extra map[string]string) map[string]string {
 }
 
 func TestCIAptInstallFailsFastAndNamesAWedgedInstall(t *testing.T) {
-	run := runAptInstall(t, wedgeEnv(map[string]string{"APT_WEDGE_INSTALL": "all"}), "zsh")
+	run := runAptInstall(t, wedgeEnv(t, map[string]string{"APT_WEDGE_INSTALL": "all"}), "zsh")
 	if run.err == nil {
 		t.Fatalf("a wedged install succeeded; output:\n%s", run.output)
 	}
@@ -249,7 +263,7 @@ func TestCIAptInstallFailsFastAndNamesAWedgedInstall(t *testing.T) {
 }
 
 func TestCIAptInstallRetriesAWedgeAndThenSucceeds(t *testing.T) {
-	run := runAptInstall(t, wedgeEnv(map[string]string{"APT_WEDGE_INSTALL": "1"}), "zsh")
+	run := runAptInstall(t, wedgeEnv(t, map[string]string{"APT_WEDGE_INSTALL": "1"}), "zsh")
 	if run.err != nil {
 		t.Fatalf("a single wedged attempt was not retried to success: %v\n%s", run.err, run.output)
 	}
@@ -259,7 +273,7 @@ func TestCIAptInstallRetriesAWedgeAndThenSucceeds(t *testing.T) {
 }
 
 func TestCIAptInstallSurvivesAWedgedUpdateWhenTheInstallWorks(t *testing.T) {
-	run := runAptInstall(t, wedgeEnv(map[string]string{"APT_WEDGE_UPDATE": "all"}), "zsh")
+	run := runAptInstall(t, wedgeEnv(t, map[string]string{"APT_WEDGE_UPDATE": "all"}), "zsh")
 	if run.err != nil {
 		t.Fatalf("a wedged advisory update failed the step: %v\n%s", run.err, run.output)
 	}
@@ -269,7 +283,7 @@ func TestCIAptInstallSurvivesAWedgedUpdateWhenTheInstallWorks(t *testing.T) {
 }
 
 func TestCIAptInstallDoesNotRetryAnOrdinaryFailure(t *testing.T) {
-	run := runAptInstall(t, wedgeEnv(map[string]string{"APT_INSTALL_FAIL": "1"}), "zsh")
+	run := runAptInstall(t, wedgeEnv(t, map[string]string{"APT_INSTALL_FAIL": "1"}), "zsh")
 	if run.err == nil || run.exitCode(t) != 100 {
 		t.Fatalf("want exit 100; err=%v\n%s", run.err, run.output)
 	}
