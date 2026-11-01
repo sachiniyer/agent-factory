@@ -98,6 +98,32 @@ func TestTaskFireLeftover_BoundWorktreeReportedAndQuarantined(t *testing.T) {
 	}
 }
 
+// TestTaskFireLeftover_ReportedKillCommandIsShellLiteral: the removal command
+// is printed for a user to paste, so a title carrying $( ) or backticks must
+// be single-quoted shell-literal — %q's double quotes would still expand.
+func TestTaskFireLeftover_ReportedKillCommandIsShellLiteral(t *testing.T) {
+	title := "nasty-$(printf expanded)"
+	repoPath, repo, sanitized, _ := fakeReapFixture(t, title)
+	branch := worktreeBranchFor(t, title)
+	wtPath := filepath.Join(resolvedTempDir(t), "quoted-wt")
+	seedLeftoverWorktree(t, repoPath, branch, wtPath)
+	installFakeReapTmux(t, sanitized, fakeReapTmux{absent: true})
+	warnings := captureWarnings(t)
+
+	fire := &taskFireMarker{
+		TaskID: "ab0r7212", IntendedAt: time.Now().Add(-time.Minute), Title: title,
+		InstanceID: reapInstanceID, WorktreePath: wtPath,
+	}
+	if _, err := taskFireLeftoverRecord(
+		&task.Task{ID: "ab0r7212", ProjectPath: repoPath, Prompt: "p", Program: "claude"},
+		fire, repo, nil); err != nil {
+		t.Fatalf("taskFireLeftoverRecord: %v", err)
+	}
+	if !strings.Contains(warnings.String(), "af sessions kill 'nasty-$(printf expanded)'") {
+		t.Fatalf("the command must pass the title shell-literally; logged: %s", warnings.String())
+	}
+}
+
 // TestTaskFireLeftover_UnboundWorktreeReportedWithoutAttribution: without an
 // exact pre-creation binding the worktree cannot be called this fire's — a
 // missing binding and a differing binding both report unattributed and
