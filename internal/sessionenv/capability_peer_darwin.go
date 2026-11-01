@@ -13,25 +13,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// peerState carries the identity read when the connection was made.
-//
-// macOS answers LOCAL_PEERPID only while the peer still holds its end open: a
-// peer that wrote its last reply and closed leaves the other side's getsockopt
-// with ENOTCONN. Reading lazily, after sending the request, raced exactly that
-// close and refused a live shim's claim (#6455). The first message is therefore
-// attributed to the identity read at connect/accept, before any exchange.
-//
-// That value is not a constant: measured on macos-latest and macos-15-intel,
-// LOCAL_PEERPID reports the LAST process to use the peer socket (a forked child
-// that inherits the descriptor and writes changes it). So every later message is
-// attributed by a fresh read, as before, which still catches a descriptor handed
-// to another process after the connection was made. The broker keeps the
-// connection open after its final reply until the client closes, so that fresh
-// read does not race the close either (serveConn).
-type peerState struct {
-	pid  int
-	used bool
-}
+// peerState is empty on darwin: the identity of a message is never taken from
+// a snapshot (see readAttestedLine). It exists so the platforms share one shape.
+type peerState struct{}
 
 // errPeerGone is the refusal for a peer that was already gone when its identity
 // was read, so it is never confused with a failed identity check.
@@ -122,8 +106,16 @@ func platformExeIdentity(pid int) (exeID, error) {
 // defeats it. Documented residual (#4731); nothing here pretends otherwise.
 const perMessageAttestation = false
 
-// enableAttestation reads the peer's identity now, at connect/accept, and
-// refuses a peer that is another user.
+// enableAttestation checks, at connect/accept, that the peer is identifiable and
+// runs as this user. The pid it saw is deliberately discarded.
+//
+// LOCAL_PEERPID is the peer socket's last_pid, not "who connected": the kernel
+// overwrites it on every bind, listen, accept, read/write and kqueue attach on
+// that socket, and a connection still in the listen queue inherits the
+// LISTENER's last_pid. Measured on macos-latest and macos-15-intel. A value read
+// at connect therefore names whoever last touched the listener (the creator that
+// re-listens before exec'ing into af, #6179), not whoever will answer, and
+// judging a message on it reopens the fork-then-exec attack.
 func enableAttestation(conn net.Conn) (*peerState, error) {
 	pid, uid, err := peerIdentity(conn)
 	if err != nil {
@@ -132,18 +124,16 @@ func enableAttestation(conn net.Conn) (*peerState, error) {
 	if uid != uint32(os.Getuid()) {
 		return nil, fmt.Errorf("the claim peer (pid %d) runs as uid %d, not this user", pid, uid)
 	}
-	return &peerState{pid: pid}, nil
+	return &peerState{}, nil
 }
 
-func readAttestedLine(conn net.Conn, st *peerState) ([]byte, int, error) {
-	pid := st.pid
-	if st.used {
-		var err error
-		if pid, err = peerPID(conn); err != nil {
-			return nil, 0, err
-		}
-	}
-	st.used = true
+// readAttestedLine reads one message and then reads LOCAL_PEERPID: the process
+// that last used the socket is the one that just wrote the message, so the pid
+// is attributed after the bytes arrive, never before. The other side is alive
+// and blocked on our answer at this point (the broker also holds its connection
+// until the client closes, serveConn), so this read does not race a close. A
+// peer that is gone anyway is refused with errPeerGone.
+func readAttestedLine(conn net.Conn, _ *peerState) ([]byte, int, error) {
 	var line []byte
 	one := make([]byte, 1)
 	for len(line) < claimMaxMessage {
@@ -151,6 +141,10 @@ func readAttestedLine(conn net.Conn, st *peerState) ([]byte, int, error) {
 			return nil, 0, err
 		}
 		if one[0] == '\n' {
+			pid, err := peerPID(conn)
+			if err != nil {
+				return nil, 0, err
+			}
 			return line, pid, nil
 		}
 		line = append(line, one[0])

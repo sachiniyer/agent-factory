@@ -59,26 +59,22 @@ func dialedPair(t *testing.T) (client, server net.Conn) {
 }
 
 // The mechanism behind #6455: once the peer has closed, macOS answers
-// LOCAL_PEERPID with ENOTCONN, so an identity read after the request was sent
-// (and the server replied and closed) fails for a live client. Read at connect,
-// it holds, and the reply the peer wrote before closing is still delivered.
-func TestDarwin_PeerIdentityIsReadAtConnect(t *testing.T) {
+// LOCAL_PEERPID with ENOTCONN, so a read after the final reply (the broker closed
+// at once) failed for a live client. A reply written before the close is still
+// delivered, and the failure is the stable peer-gone error.
+func TestDarwin_AReadAfterThePeerClosedIsAStableError(t *testing.T) {
 	client, server := dialedPair(t)
 	st, err := enableAttestation(client)
 	require.NoError(t, err)
-	require.Equal(t, os.Getpid(), st.pid)
 
 	_, err = server.Write([]byte("answer\n"))
 	require.NoError(t, err)
 	require.NoError(t, server.Close())
 
 	_, lateErr := peerPID(client)
-	require.ErrorIs(t, lateErr, errPeerGone, "a read after the peer closed must fail with the stable peer-gone error")
-
-	line, pid, err := readAttestedLine(client, st)
-	require.NoError(t, err)
-	require.Equal(t, "answer", string(line))
-	require.Equal(t, os.Getpid(), pid, "the identity captured at connect must survive the peer closing")
+	require.ErrorIs(t, lateErr, errPeerGone)
+	_, _, err = readAttestedLine(client, st)
+	require.ErrorIs(t, err, errPeerGone)
 }
 
 // A peer that is truly gone before it can be identified is refused with the
