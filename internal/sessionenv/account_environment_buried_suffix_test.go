@@ -27,8 +27,11 @@ func TestWrapperChildTailBuriedSuffixMatchesIonice(t *testing.T) {
 		// PATH-shadowed copy (`shift N; exec "$@"`) promotes the buried suffix
 		// the same way a shadowed nohup does, so each must give the verdict
 		// ionice gives. gdb --args is the argv-passthrough spelling; a bare gdb
-		// (and /usr/bin/perf, ltrace, valgrind) are matched by basename.
+		// (and /usr/bin/perf, ltrace, valgrind) are matched by basename. The
+		// util-linux argv-passthrough launchers (chrt/numactl/unshare/prlimit)
+		// exec a child and forward argv the same way, so they join the class.
 		"strace", "perf", "valgrind", "gdb --args", "gdb", "/usr/bin/perf", "ltrace",
+		"chrt 0", "numactl", "unshare", "prlimit",
 	}
 	payloads := []struct {
 		tail string
@@ -96,7 +99,8 @@ func TestUnmodeledWrapperBuriedSuffixMatchesModeledWrappers(t *testing.T) {
 	for name := range accountShellStartupNames {
 		names[name] = struct{}{}
 	}
-	heads := []string{"perf", "strace", "valgrind", "gdb", "gdb --args", "/usr/bin/perf", "ltrace"}
+	heads := []string{"perf", "strace", "valgrind", "gdb", "gdb --args", "/usr/bin/perf", "ltrace",
+		"chrt 0", "numactl", "unshare", "prlimit"}
 	// Parity cases: a payload whose unmodeled-wrapper verdict must equal the
 	// verdict the modeled wrappers give for the same tail. Each is asserted
 	// against the expected verdict and against nohup (the modeled reference).

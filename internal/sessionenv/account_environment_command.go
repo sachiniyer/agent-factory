@@ -441,7 +441,8 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 			return nil, false, true
 		}
 		// An unmodeled argv-passthrough wrapper (strace/perf/valgrind/
-		// gdb --args/...) runs a child command and forwards argv, so a
+		// gdb --args/chrt/numactl/unshare/prlimit/...) runs a child
+		// command and forwards argv, so a
 		// PATH-shadowed copy (`shift N; exec "$@"`) can promote a buried
 		// literal suffix the modeled arms already refuse (#5711/#5714/#6329)
 		// to the executed command. cd685703 added the modeled arms' buried-
@@ -646,28 +647,31 @@ func childTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, me
 // promotes a buried literal suffix to the executed command exactly the way a
 // shadowed nohup or ionice does. Matched by basename, the way the modeled arms
 // match (isAccountCommandName uses filepath.Base), so a path form
-// (/usr/bin/perf) is the same wrapper. The class is open in principle
-// (the unmodeled-wrapper tail scan names it "..."); this names the members
-// the buried-suffix parity test enumerates, mirroring the closed list the
-// strace special-case in unrecognizedWrapperHidesAccountAssignment already
-// keeps. Ordinary commands that do not exec a child (echo/rg/codex/grep/...)
-// are intentionally NOT wrappers: their arguments never reach an exec
-// boundary, so the buried-suffix scan is not applied to them (see
-// unmodeledWrapperChildTailBuriesMutation).
+// (/usr/bin/perf) is the same wrapper. The class is open in principle; this
+// names the members the buried-suffix parity test enumerates — the tracing
+// tools (strace/ltrace/perf/valgrind/gdb) and the util-linux argv-passthrough
+// launchers that exec a child and forward argv the same way (chrt/numactl/
+// unshare/prlimit) — mirroring the closed list the strace special-case in
+// unrecognizedWrapperHidesAccountAssignment already keeps. Ordinary commands
+// that do not exec a child (echo/rg/codex/grep/...) are intentionally NOT
+// wrappers: their arguments never reach an exec boundary, so the buried-suffix
+// scan is not applied to them (see unmodeledWrapperChildTailBuriesMutation).
 func isUnmodeledArgvPassthroughWrapper(word *syntax.Word) bool {
 	value, literal := literalShellWord(word)
 	if !literal {
 		return false
 	}
 	switch filepath.Base(value) {
-	case "strace", "ltrace", "perf", "valgrind", "gdb":
+	case "strace", "ltrace", "perf", "valgrind", "gdb",
+		"chrt", "numactl", "unshare", "prlimit":
 		return true
 	}
 	return false
 }
 
 // unmodeledWrapperChildTailBuriesMutation scans the tail an unmodeled
-// argv-passthrough wrapper (strace/perf/valgrind/gdb --args) forwards for a
+// argv-passthrough wrapper (strace/perf/valgrind/gdb --args/chrt/numactl/
+// unshare/prlimit) forwards for a
 // LITERAL buried suffix a PATH-shadowed `shift N; exec "$@"` wrapper would
 // promote to the executed command, mirroring childTailBuriesMutation for the
 // modeled arms. cd685703 added that scan to nohup/nice/timeout/setsid/stdbuf
