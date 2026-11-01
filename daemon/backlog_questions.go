@@ -35,7 +35,12 @@ var errBacklogAnswerHeld = errors.New("held")
 func (h backlogHost) SetAttention(repoID, sessionID string, questionID int, reason string) {
 	if reason == "" {
 		h.m.backlog.asked.Delete(sessionID)
-		h.m.clearArchivedForAnswer(repoID, sessionID)
+		// The session waits on an answer while any question of its item is open:
+		// an answer to one of several, on its way through a restore that may
+		// fail, keeps the mark (Codex P2 on #6475).
+		if questionID == 0 {
+			h.m.clearArchivedForAnswer(repoID, sessionID)
+		}
 	} else {
 		h.m.backlog.asked.Store(sessionID, seenQuestion{ID: questionID, Text: session.NormalizeAttentionReason(reason)})
 	}

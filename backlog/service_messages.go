@@ -128,9 +128,14 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 		if out.SessionID != sessionID {
 			return nil, fmt.Errorf("%s changed while answering; retry", FormatID(req.ID))
 		}
+		// The next open question's id goes to the host for any target, so 0
+		// always means no question is left; only a live session mirrors its text.
 		next, nextID := "", 0
-		if out.Next != nil && target == TargetLive {
-			next, nextID = out.Next.Text, out.Next.ID
+		if out.Next != nil {
+			nextID = out.Next.ID
+			if target == TargetLive {
+				next = out.Next.Text
+			}
 		}
 		s.host.SetAttention(p.id, sessionID, nextID, next)
 		pending = PendingAnswer{ID: req.ID, AnswerID: out.Answer.ID, SessionID: sessionID,

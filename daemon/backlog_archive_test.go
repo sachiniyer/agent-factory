@@ -369,3 +369,40 @@ func TestRecoveryMarksAnAskArchiveThatCommittedBeforeARestart(t *testing.T) {
 		t.Fatalf("archives %v, awaits %v, owed %+v", *results, inst.AwaitsAnswer(), inst.OwedArchive())
 	}
 }
+
+// An answer to one of two questions keeps the session marked while the other is
+// open, so a restore that fails leaves the mark on the archived row (Codex P2 on
+// #6475); the answer to the last one drops it.
+func TestTheMarkStaysWhileAQuestionIsOpen(t *testing.T) {
+	stubExactResume(t, true, "")
+	m, repoID, inst := startedItem(t)
+	for _, q := range []string{"Which db?", "Which port?"} {
+		if _, err := m.backlogService().PostMessage(backlog.PostMessageRequest{RepoID: repoID, ID: 1,
+			Kind: backlog.KindQuestion, Text: q, SessionID: inst.ID, Then: backlog.ThenArchive}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idleItemSession(t, inst)
+	stubGuardedArchive(t, inst, nil)
+	m.backlogRunEnded(repoID, inst.ID)
+	m.backgroundMutationWG.Wait()
+	if inst.GetLiveness() != session.LiveArchived || !inst.AwaitsAnswer() {
+		t.Fatalf("liveness %v, awaits %v; want archived and marked", inst.GetLiveness(), inst.AwaitsAnswer())
+	}
+	stubBacklogSend(t, m, repoID)
+	prevRestore := restoreBacklogSession
+	restoreBacklogSession = func(*Manager, RestoreSessionRequest) (session.InstanceData, error) {
+		return inst.ToInstanceData(), errors.New("stand-in restore")
+	}
+	t.Cleanup(func() { restoreBacklogSession = prevRestore })
+	answer(t, m, repoID, "Postgres")
+	m.backgroundMutationWG.Wait()
+	if !inst.AwaitsAnswer() {
+		t.Fatal("the mark was dropped while a question is still open")
+	}
+	answer(t, m, repoID, "5432")
+	m.backgroundMutationWG.Wait()
+	if inst.AwaitsAnswer() {
+		t.Fatal("the mark outlived the last question")
+	}
+}

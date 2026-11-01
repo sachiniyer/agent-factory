@@ -54,3 +54,27 @@ func TestExactResumeNeedsARecordedConversation(t *testing.T) {
 	require.False(t, ok)
 	require.True(t, strings.HasPrefix(why, "af cannot resume this claude session's recorded conversation"), why)
 }
+
+// remoteWorkspaceBackend is a sandbox backend (docker, ssh, hook) for the gate:
+// only its remote workspace matters.
+type remoteWorkspaceBackend struct{ *FakeBackend }
+
+func (b remoteWorkspaceBackend) Capabilities() Capabilities {
+	c := b.FakeBackend.Capabilities()
+	c.Workspace = WorkspaceRemote
+	return c
+}
+
+// An off-box session is never archived on ask, even with a conversation id its
+// command could resume: archiving reaps the sandbox, and the fresh one a restore
+// provisions starts a new conversation (Codex P1 on #6475).
+func TestExactResumeRefusesASandboxSession(t *testing.T) {
+	inst := exactResumeSession(t, tmux.ProgramClaude)
+	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "conv-1", CapturedAt: time.Now()}}}
+	ok, _ := inst.ExactResume()
+	require.True(t, ok, "the control: a local claude session with a recorded id resumes exactly")
+	inst.SetBackend(remoteWorkspaceBackend{NewFakeBackend()})
+	ok, why := inst.ExactResume()
+	require.False(t, ok, "a sandbox session must stay live on ask")
+	require.Equal(t, "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation", why)
+}

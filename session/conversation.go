@@ -261,7 +261,15 @@ func (i *Instance) resumableConversation() AgentConversationData {
 // conversation, by the check every restore makes (prepareExactResumeConversation
 // on the program resolveLaunchProgramForInstance resolves), and when it would
 // not, why: archived, the session would come back as a fresh agent.
+//
+// An off-box session (docker, ssh, hook) never qualifies: its archive reaps the
+// sandbox, and the restore provisions a fresh one whose agent store does not hold
+// the old transcript, so the agent-server starts a new conversation
+// (launchWorkspace, ConversationResumableHere) whatever the command can express.
 func (i *Instance) ExactResume() (bool, string) {
+	if i.Capabilities().Workspace == WorkspaceRemote {
+		return false, "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"
+	}
 	program := resolveLaunchProgramForInstance(i).command
 	if _, ok := prepareExactResumeConversation(i, program); ok {
 		return true, ""
