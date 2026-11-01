@@ -536,10 +536,11 @@ paths where af must NOT move, where the wall is where the session stays. The
 stand-in walls every identity except the swap target for exactly that reason.
 
 For "the replacement really runs as the account", ask the LIVE process rather
-than matching its startup line: enter the pane and echo `$CLAUDE_CONFIG_DIR`. A
-startup line proves what the process was told at exec; the echo proves what it
-still has — and the in-session switch notice is long enough to push that startup
-line out of the visible pane anyway.
+than matching its startup line: enter the pane, send `Ctrl-C` (the swap notice
+can leave bash mid-quote), then echo `$CLAUDE_CONFIG_DIR`. A startup line
+proves what the process was told at exec; the echo proves what it still has —
+and the in-session switch notice is long enough to push that startup line out
+of the visible pane anyway.
 
 ### Tree / selection / focus changes (the #1156, #1084 class)
 
