@@ -229,6 +229,13 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// The control origin's mirror never serves a relayed editor (webtab_isolation.go,
+	// rule 2) — refused before the target resolves, because resolving it would start
+	// the editor on the workspace's host only for the mirror to turn it away.
+	if !route.previewOrigin && cs.manager.tabIsRelayedEditor(route.sessionID, route.tabID) {
+		writeVSCodeNoticePage(w, relayedEditorNeedsOwnOrigin)
+		return
+	}
 	// Addressed by the tab's STABLE id: a stale id (its tab was closed) is a clean
 	// 404 here, never a silent bind to whatever tab took its old ordinal (#1810).
 	target, err := cs.manager.WebTabTarget(route.sessionID, route.tabID)
@@ -297,6 +304,14 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 	// stronger guarantee than the string check the TCP path settles for — under
 	// which the old editor target passed precisely because it WAS loopback, the
 	// confused-deputy hole this transport closes.
+	// A relayed editor's bytes come from its workspace and VS Code cannot run
+	// sandboxed, so the control origin's mirror never serves one
+	// (webtab_isolation.go, rule 2). Checked after the target resolved, so the
+	// install and starting notices above still reach the pane.
+	if !route.previewOrigin && target.Kind == session.TabKindVSCode && target.RelayedEditor {
+		writeVSCodeNoticePage(w, relayedEditorNeedsOwnOrigin)
+		return
+	}
 	if !target.isServerOwnedEditor() && !session.IsLoopbackWebTarget(target.URL) {
 		writeHTTPError(w, r, http.StatusBadRequest,
 			fmt.Errorf("web tab target %q is not loopback; external URLs are iframed directly, not proxied",
@@ -491,6 +506,14 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 			// daemon.
 			resp.Header.Del("X-Frame-Options")
 			stripFrameAncestors(resp.Header)
+			// Workspace documents run sandboxed — opaque origin, the same flags as the
+			// client's frame — whether framed or opened top-level: a web tab's on the
+			// control origin's mirror, and an editor's workspace-content routes
+			// everywhere (webtab_isolation.go, rules 1 and 3). Added after the strip,
+			// beside any policy the app sent: CSPs intersect, so this only narrows.
+			if policy := workspaceSandboxPolicy(route, tabKind); policy != "" {
+				resp.Header.Add("Content-Security-Policy", policy)
+			}
 			// Cross-tab read isolation is the whole point of the per-tab origin, and it
 			// holds only while NO Access-Control-Allow-Origin comes back. Forcing the
 			// daemon's own allow-list empty (livePosture.previewOrigin) is not enough:

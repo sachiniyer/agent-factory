@@ -449,8 +449,12 @@ terminal streams, or previews. Installing is optional.
 ### Web tabs
 
 The preview toolbar's **Reload** refreshes the frame; **Open** opens its target
-in a separate browser tab. A stopped dev server offers **Retry** in the fallback
-panel after you restart it.
+in a separate browser tab. A preview reached through the web UI's own address
+(the `/v1/webtab/` mirror) opens there under the same sandbox as its frame: an
+opaque origin, so it cannot read the web UI's storage or call its API as the web
+UI. A preview on its own [per-tab origin](#per-tab-preview-origins) opens on that
+origin. A stopped dev server offers **Retry** in the fallback panel after you
+restart it.
 
 Alongside terminal tabs, a session can hold **web tabs** — a tab that renders a
 **site in an iframe** instead of a terminal. The primary use is a **live
@@ -698,7 +702,10 @@ carry across every session's editor, which is why af shares it in the first plac
     origins do not apply remotely.
 
 A mirrored preview is sandboxed to an opaque origin, so it cannot reach the web UI
-or read its token. A preview on its **own** origin is sandboxed too, but with a real
+or read its token — framed, and opened on its own alike: the daemon sends a
+`Content-Security-Policy: sandbox …` with every mirrored response, carrying the
+same flags as the frame, so a mirror address opened in a browser tab, bookmarked
+or pasted runs exactly as it does in the pane. A preview on its **own** origin is sandboxed too, but with a real
 origin of its own (it needs one for `localStorage`, cookies and service workers) —
 safe because the browser's own cross-origin rules already keep it away from the web
 UI. A small **reload** control sits above every web tab for dev-preview refreshes.
@@ -754,10 +761,20 @@ af sessions tab-create my-session --kind vscode --name editor
 every VS Code tab and pane in it — the first time a pane renders, listening on
 a **0600 unix socket** in a `0700` directory under the af home (no TCP listener
 at all). For an off-box session the agent-server on the session's host starts
-that code-server instead, and the daemon relays its socket. The browser reaches the editor through the daemon's `/v1/webtab/` proxy,
+that code-server instead, and the daemon relays its socket. A local editor is
+reached through the daemon's `/v1/webtab/` proxy when it has no origin of its own,
 which is what makes it work for a **remote viewer** (Tailscale/SSH) and what puts
 the daemon's auth policy in front of that route. On a cold start the pane briefly
 shows "VS Code is still starting…" and resolves itself.
+
+**An off-box session's editor opens only on an origin of its own.** Its bytes come
+from the session's workspace, and VS Code cannot run sandboxed, so af never serves
+it on the web UI's address: a compromised workspace would otherwise run script as
+the web UI itself. It opens on the [per-session editor
+origin](#per-tab-preview-origins) when `network.preview_listen_addr` is set to a
+fixed loopback port and you view from this machine, or on an [editor-origin
+port](#per-session-editor-origins-for-remote-viewers) when you view from
+elsewhere. With neither, the pane says which one to turn on.
 
 The editor is stopped when its last VS Code tab is closed, and when the session is
 archived or killed — and, **locally**, on daemon shutdown, so nothing is left
@@ -790,10 +807,17 @@ tab survives a restart and simply starts a new editor when you next open it.
     whatever your `launch_cmd` exposes it on — not a same-user socket.
 
     Note that a VS Code pane is deliberately **not** origin-sandboxed the way a web
-    tab is: VS Code cannot run under an opaque origin. That is acceptable because
-    the daemon controls what is served there (a code-server it started, on your
-    worktree) — and that editor already gives whoever reaches it a terminal on your
-    machine. Do not expose the daemon's listener to a network you do not trust.
+    tab is: VS Code cannot run under an opaque origin. For a **local** session that
+    is acceptable because the daemon controls what is served there (a code-server it
+    started, on your worktree), and a local workspace already runs as you. What the
+    editor relays rather than serves itself is still sandboxed on every origin it is
+    reached through: code-server's port forwarding (`/proxy/<port>/`,
+    `/absproxy/<port>/`) and VS Code's route for worktree files
+    (`vscode-remote-resource`) answer as opaque-origin pages, so a dev server or a
+    repository's HTML never runs as the web UI, or as the editor, whose origin is
+    its terminal. An **off-box** session's editor is never served on the web UI's
+    address at all (above). Do not expose the daemon's listener to a network you do
+    not trust.
 
 In the **TUI** a VS Code tab shows a placeholder — a terminal can't render an
 editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other tab.
