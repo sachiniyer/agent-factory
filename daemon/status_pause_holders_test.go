@@ -87,11 +87,11 @@ func TestPauseStatusPoll_LegacyHolderStillPausesAndResumes(t *testing.T) {
 	registerStarted(t, manager, repoID, repoPath, "legacy", session.NewFakeBackend(), true, session.Running)
 	inst := manager.instances[daemonInstanceKey(repoID, "legacy")]
 
-	manager.PauseStatusPoll(repoID, "legacy", inst.ID)
+	manager.PauseStatusPollFor(repoID, "legacy", inst.ID, "")
 	if !manager.isPollPaused(repoID, "legacy", inst.ID) {
 		t.Fatal("the legacy path must still pause")
 	}
-	manager.ResumeStatusPoll(repoID, "legacy", inst.ID)
+	manager.ResumeStatusPollFor(repoID, "legacy", inst.ID, "")
 	if manager.isPollPaused(repoID, "legacy", inst.ID) {
 		t.Fatal("the legacy path must still resume")
 	}

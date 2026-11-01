@@ -347,7 +347,7 @@ func TestRunnerCapAsksOnlyWhenAttached(t *testing.T) {
 	m, repoID, inst := startedItem(t)
 	interrupted := stubInterrupt(t)
 	capUsage(t, m, inst.ID, 3)
-	m.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	m.PauseStatusPollFor(repoID, inst.Title, inst.ID, "")
 	pass(m, repoID, time.Now())
 	if len(*interrupted) != 0 {
 		t.Fatalf("Escape sent to an attached session: %v", *interrupted)

@@ -122,7 +122,7 @@ func TestBacklogAnswerHeldWhileAttached(t *testing.T) {
 	sent := stubBacklogSend(t, m, repoID)
 	held, resume := stubAnswerWait(t)
 
-	m.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	m.PauseStatusPollFor(repoID, inst.Title, inst.ID, "")
 	answer(t, m, repoID, "yes")
 	<-held
 	if sent.count() != 0 {
@@ -138,7 +138,7 @@ func TestBacklogAnswerHeldWhileAttached(t *testing.T) {
 	if st := v.States[1].State; st != backlog.StateWorking || m.backlogSlotsUsed(repoID) != 1 {
 		t.Fatalf("held answer shows %s with %d slots", st, m.backlogSlotsUsed(repoID))
 	}
-	m.ResumeStatusPoll(repoID, inst.Title, inst.ID)
+	m.ResumeStatusPollFor(repoID, inst.Title, inst.ID, "")
 	resume <- true
 	m.backgroundMutationWG.Wait()
 	if len(sent.reqs) != 1 || sent.paused[0] {
@@ -159,7 +159,7 @@ func TestBacklogAnswerStopWhileHeld(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	m.PauseStatusPollFor(repoID, inst.Title, inst.ID, "")
 	answer(t, m, repoID, "yes")
 	<-held
 	resume <- false
