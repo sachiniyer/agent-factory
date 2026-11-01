@@ -112,42 +112,58 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 		procs := marked[name]
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
 		liveSockets, sessionLive := live[name]
-		var liveSocket string
 		if sessionLive {
-			liveSocket = liveSockets[0]
-		}
-		if sessionLive {
-			// The pane tree comes from the EVIDENCE-BEARING capture. The
-			// best-effort SessionProcessTrees returns nil on any list-panes
-			// failure, and reading that nil as a proven-empty tree is the
-			// defect this arm exists to avoid: with inSession empty, every
-			// marked process for this live session would render as an
+			// The pane tree comes from the EVIDENCE-BEARING capture — on EVERY
+			// socket the name lives on, because names derive from repo path
+			// and title, not AF home: a same-named session on another server
+			// is a different session, and a member of that other copy compared
+			// against only the first socket's tree would misclassify as
+			// escaped. The best-effort SessionProcessTrees returns nil on any
+			// list-panes failure, and reading that nil as a proven-empty tree
+			// is the defect this arm exists to avoid: with inSession empty,
+			// every marked process for this live session would render as an
 			// escaped-process finding the check has no evidence for, because
 			// the read that would prove membership never returned. A read that
 			// cannot answer is reported once as blindness below (via
 			// observations.blindSessions) rather than classified either way.
-			tree, paneErr := captureSessionProcessTrees(ctx, name, liveSocket)
-			// Build the captured-PID set from whatever the partial tree
-			// returned (may be non-empty even when paneErr != nil, e.g. one
-			// pane vanished between list-panes and the process snapshot while
-			// other panes' descendants were captured successfully).
+			var tree []proctree.Process
+			var failedSockets int
+			liveOnAnySocket := false
+			for _, sock := range liveSockets {
+				sub, paneErr := captureSessionProcessTrees(ctx, name, sock)
+				tree = append(tree, sub...)
+				switch {
+				case paneErr == nil:
+					liveOnAnySocket = true
+				case errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture):
+					// This copy conclusively exited. The name can still be
+					// live on another socket: not blindness, and by itself
+					// not proof of death.
+				default:
+					failedSockets++
+				}
+			}
+			// Build the captured-PID set from whatever the partial trees
+			// returned (may be non-empty even for a socket that errored, e.g.
+			// one pane vanished between list-panes and the process snapshot
+			// while other panes' descendants were captured successfully).
 			capturedPIDs := map[int]bool{}
 			for _, p := range tree {
 				capturedPIDs[p.PID] = true
 			}
-			if paneErr != nil {
-				// A session that vanished between the memoized listing and the
-				// pane capture is conclusively gone: route its surviving
-				// candidates through the dead-session (orphaned-process)
-				// classification below, just like a session that was never in
-				// the live list. The vanished sentinel is not a blindness event
-				// because the absence is authoritative, not a failed read.
-				if errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture) {
-					sessionLive = false
-				} else {
+			if !liveOnAnySocket && failedSockets == 0 {
+				// The session vanished on EVERY socket it was listed on —
+				// conclusively gone: route its surviving candidates through
+				// the dead-session (orphaned-process) classification below,
+				// just like a session that was never in the live list. The
+				// vanished sentinel is not a blindness event because the
+				// absence is authoritative, not a failed read.
+				sessionLive = false
+			} else {
+				if failedSockets > 0 {
 					// Revalidate candidates before declaring blindness: if every
 					// marked process for this session already exited (normal churn),
-					// or is already verified by the partial tree, there is nothing
+					// or is already verified by the partial trees, there is nothing
 					// left to be blind about and no row is needed.
 					var anyBlind bool
 					for _, p := range procs {

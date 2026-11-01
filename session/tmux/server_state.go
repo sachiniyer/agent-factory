@@ -194,10 +194,16 @@ func priorSocketGenerations(prev ServerState, current string) ([]string, bool) {
 		}
 		seen[s] = true
 		if _, err := os.Lstat(s); err != nil {
-			// The socket file is gone, so no client can ever reach that
-			// server again — dropping it loses no coverage and does not
-			// count as truncation.
-			continue
+			if os.IsNotExist(err) {
+				// The socket file is gone, so no client can ever reach that
+				// server again — dropping it loses no coverage and does not
+				// count as truncation.
+				continue
+			}
+			// Any other failure — a permission-denied directory, a transient
+			// I/O error — cannot prove the server is unreachable. Keep the
+			// generation so doctor still tries to list it: an unlistable
+			// socket blinds the run rather than silently losing coverage.
 		}
 		out = append(out, s)
 	}

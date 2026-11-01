@@ -246,6 +246,42 @@ func TestRecordServerState_PriorSocketsDropsUnreachableGeneration(t *testing.T) 
 	}
 }
 
+// TestRecordServerState_PriorSocketsKeepsUnstatableGeneration pins the other
+// edge of the prune: only a confirmed not-exist drops a generation. An Lstat
+// that fails for any other reason — here EACCES on the socket's own directory —
+// cannot prove the server is unreachable, so the generation must be KEPT for
+// doctor to list rather than silently lost (a lost generation is exactly the
+// unaccounted-socket shape #6339 closes).
+func TestRecordServerState_PriorSocketsKeepsUnstatableGeneration(t *testing.T) {
+	home := t.TempDir()
+	blockedDir := t.TempDir()
+	openDir := t.TempDir()
+	serverStateMu.Lock()
+	lastServerState = ServerState{}
+	serverStateMu.Unlock()
+
+	blocked := socketForTest(t, blockedDir, "blocked")
+	current := socketForTest(t, openDir, "current")
+
+	recordServerState(home, ServerState{Mode: ServerMode("dedicated"), Socket: blocked, At: time.Now()})
+	// Deny search on the socket's directory: Lstat then fails EACCES without
+	// proving anything about the server behind it.
+	if err := os.Chmod(blockedDir, 0o000); err != nil {
+		t.Fatalf("chmod %s: %v", blockedDir, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blockedDir, 0o700) })
+	recordServerState(home, ServerState{Mode: ServerMode("dedicated"), Socket: current, At: time.Now()})
+
+	rec := readServerStateRecord(t, home)
+	if len(rec.PriorSockets) != 1 || rec.PriorSockets[0] != blocked {
+		t.Fatalf("an Lstat failure that does not prove absence must KEEP the generation: prior_sockets=%v, want [%s]",
+			rec.PriorSockets, blocked)
+	}
+	if rec.HistoryTruncated {
+		t.Fatal("a kept generation is not a truncated one")
+	}
+}
+
 // TestRecordServerState_PriorSocketsCapped pins the other half of the bound:
 // however many socket generations a lineage accumulates, the record keeps at
 // most maxPriorSocketGenerations of them — the newest, since those are the

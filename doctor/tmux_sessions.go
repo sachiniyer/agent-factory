@@ -486,18 +486,30 @@ func checkRunawayChildren(ctx *scanContext, report *Report) {
 		// fully inspected — the same treatment the unmeasurable counter gives
 		// CPU blindness. Partial captures still yield verified processes that
 		// are evaluated for runaway findings before recording the blindness.
-		procs, paneErr := captureSessionProcessTrees(ctx, name, live[name][0])
-		if paneErr != nil {
-			// A vanished session is conclusively no longer live: it is not a
-			// blind live session, so it gets no blindness row and the operator
-			// needs no nudge to inspect it — it simply exited.
-			if errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture) {
-				continue
-			}
+		// A same-named session may live on several sockets at once — names
+		// derive from repo path and title, not AF home, so each copy is a
+		// different session. Capture every socket's tree and union them, or a
+		// runaway process on the other server is silently omitted.
+		var procs []proctree.Process
+		var failedSockets int
+		for _, sock := range live[name] {
+			sub, paneErr := captureSessionProcessTrees(ctx, name, sock)
 			// Partial captures (non-nil procs alongside an error) still carry
 			// verified processes; evaluate them for runaway findings before
 			// recording the blindness warning so a CPU-pegged child in an
 			// unaffected pane is not silently dropped.
+			procs = append(procs, sub...)
+			switch {
+			case paneErr == nil:
+			case errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture):
+				// That copy conclusively exited — it is not a blind live
+				// session, so it gets no blindness row, and the name may
+				// still be live on another socket.
+			default:
+				failedSockets++
+			}
+		}
+		if failedSockets > 0 {
 			blindSessions = append(blindSessions, name)
 		}
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
