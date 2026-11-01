@@ -299,6 +299,22 @@ test("focusing a row from the keyboard previews its session after 300 ms", async
   assert.equal(pop.hidden, true);
 });
 
+test("a row's focus preview does not follow its rebuilt chip once Enter takes focus into the panel (Codex P2 on #6544)", async () => {
+  reply = async (m) => (m === "PreviewSession" ? { text: "hi" } : {});
+  const pane = mount(host());
+  pane.update(data(view([item(1), item(2, { status: "running", runs: [run("s2")] })], { 2: "working" })), "/a", [session("s2")]);
+  row(pane, 1).focus();
+  row(pane, 1).dispatchEvent(new FakeEvent("keydown", { key: "ArrowDown" }));
+  mock.timers.tick(PREVIEW_DELAY_MS);
+  await settle();
+  const pop = el(pane).querySelector(".af-backlog-preview")!;
+  assert.equal(pop.hidden, false, "the focused row's preview shows");
+  row(pane, 2).dispatchEvent(new FakeEvent("keydown", { key: "Enter" }));
+  assert.ok(el(pane).querySelector(".af-backlog-panel")?.contains(doc.activeElement), "Enter moved focus into the panel");
+  assert.equal(pop.hidden, true, "the preview no longer floats over the panel");
+  assert.equal(row(pane, 2).querySelector(".af-backlog-chip-link")?.getAttribute("aria-describedby"), null);
+});
+
 test("Blocks n unfolds and clears a filter so the picked rows show", () => {
   const pane = mount(host());
   pane.update(data(view([item(1), item(3), item(2, { parent: 3, waits_on: [1] })], { 1: "queued", 2: "draft", 3: "draft" })), "/a", []);

@@ -443,6 +443,7 @@ export class BacklogPane {
     }
     this.focusPanel = false;
     this.focusId = null;
+    this.popover.settle();
     this.applyHighlight();
   }
 

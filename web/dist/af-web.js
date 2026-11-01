@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "24c81d7f7cb8";
+var CLIENT_VERSION = "3a899285911d";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19687,16 +19687,21 @@ var PreviewPopover = class {
   timer = null;
   anchor = null;
   sessionId = "";
+  // What opened the preview: the pointer on its chip, or keyboard focus on the chip's row.
+  via = "hover";
+  // Each chip's focus owner (its row), so a rebuilt chip's row can be asked.
+  owners = /* @__PURE__ */ new WeakMap();
   /** Wires an anchor to show the session's preview on hover, and on focus of
    *  focusEl (its row, for keyboard users). */
   attach(anchor, sessionId, heading, focusEl = anchor) {
     anchor.dataset.previewSession = sessionId;
-    const show = () => this.schedule(anchor, sessionId, heading);
+    this.owners.set(anchor, focusEl);
+    const show = (via) => this.schedule(anchor, sessionId, heading, via);
     const hide = () => {
       if (this.anchor === anchor) this.hide();
     };
-    anchor.addEventListener("mouseenter", show);
-    focusEl.addEventListener("focus", show);
+    anchor.addEventListener("mouseenter", () => show("hover"));
+    focusEl.addEventListener("focus", () => show("focus"));
     anchor.addEventListener("mouseleave", hide);
     focusEl.addEventListener("blur", () => {
       if (anchor.isConnected) hide();
@@ -19713,6 +19718,14 @@ var PreviewPopover = class {
     this.anchor = next;
     if (!this.el.hidden) next.setAttribute("aria-describedby", this.el.id);
   }
+  /** After the list has settled its focus: a preview a row's focus opened stays
+   *  only while that row (rebuilt or not) still has focus, so it never floats over
+   *  the panel Enter moved focus into. A hover preview is the pointer's to end. */
+  settle() {
+    if (!this.anchor || this.via !== "focus") return;
+    const owner = this.owners.get(this.anchor) ?? this.anchor;
+    if (!owner.contains(document.activeElement)) this.hide();
+  }
   hide() {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
@@ -19721,11 +19734,12 @@ var PreviewPopover = class {
     this.sessionId = "";
     this.el.hidden = true;
   }
-  schedule(anchor, sessionId, heading) {
+  schedule(anchor, sessionId, heading, via) {
     if (this.anchor === anchor) return;
     this.hide();
     this.anchor = anchor;
     this.sessionId = sessionId;
+    this.via = via;
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.cache.get(sessionId).then((p) => {
@@ -20395,6 +20409,7 @@ ${id}`;
     }
     this.focusPanel = false;
     this.focusId = null;
+    this.popover.settle();
     this.applyHighlight();
   }
   /** Lights up the items the hovered or focused row waits on and those that

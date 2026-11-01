@@ -92,6 +92,10 @@ export class PreviewPopover {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private anchor: HTMLElement | null = null;
   private sessionId = "";
+  // What opened the preview: the pointer on its chip, or keyboard focus on the chip's row.
+  private via: "hover" | "focus" = "hover";
+  // Each chip's focus owner (its row), so a rebuilt chip's row can be asked.
+  private readonly owners = new WeakMap<HTMLElement, HTMLElement>();
 
   constructor(private readonly cache: PreviewCache) {
     this.el = h("div", { class: "af-backlog-preview", role: "tooltip", hidden: true }, this.heading, this.body);
@@ -102,12 +106,13 @@ export class PreviewPopover {
    *  focusEl (its row, for keyboard users). */
   attach(anchor: HTMLElement, sessionId: string, heading: string, focusEl: HTMLElement = anchor): void {
     anchor.dataset.previewSession = sessionId;
-    const show = (): void => this.schedule(anchor, sessionId, heading);
+    this.owners.set(anchor, focusEl);
+    const show = (via: "hover" | "focus"): void => this.schedule(anchor, sessionId, heading, via);
     const hide = (): void => {
       if (this.anchor === anchor) this.hide();
     };
-    anchor.addEventListener("mouseenter", show);
-    focusEl.addEventListener("focus", show);
+    anchor.addEventListener("mouseenter", () => show("hover"));
+    focusEl.addEventListener("focus", () => show("focus"));
     anchor.addEventListener("mouseleave", hide);
     // A row removed by a rebuild may blur; rebind() decides for that one.
     focusEl.addEventListener("blur", () => {
@@ -128,6 +133,15 @@ export class PreviewPopover {
     if (!this.el.hidden) next.setAttribute("aria-describedby", this.el.id);
   }
 
+  /** After the list has settled its focus: a preview a row's focus opened stays
+   *  only while that row (rebuilt or not) still has focus, so it never floats over
+   *  the panel Enter moved focus into. A hover preview is the pointer's to end. */
+  settle(): void {
+    if (!this.anchor || this.via !== "focus") return;
+    const owner = this.owners.get(this.anchor) ?? this.anchor;
+    if (!owner.contains(document.activeElement)) this.hide();
+  }
+
   hide(): void {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
@@ -137,11 +151,12 @@ export class PreviewPopover {
     this.el.hidden = true;
   }
 
-  private schedule(anchor: HTMLElement, sessionId: string, heading: string): void {
+  private schedule(anchor: HTMLElement, sessionId: string, heading: string, via: "hover" | "focus"): void {
     if (this.anchor === anchor) return;
     this.hide();
     this.anchor = anchor;
     this.sessionId = sessionId;
+    this.via = via;
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.cache.get(sessionId).then((p) => {
