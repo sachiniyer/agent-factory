@@ -44,11 +44,11 @@ type SendConfirmation struct {
 	eligible bool
 }
 
-// BeginSendConfirmation captures the pre-send frame. sentAt is the send's
-// attempt instant — the same boundary the daemon records for the send. An agent
+// BeginSendConfirmation captures the pre-send frame. An agent
 // with no in-turn signature, an unreadable pane, or a pane already mid-turn
 // yields a confirmation that never promotes.
-func BeginSendConfirmation(ctx context.Context, target ReadinessTarget, sentAt time.Time) *SendConfirmation {
+func BeginSendConfirmation(ctx context.Context, target ReadinessTarget) *SendConfirmation {
+	sentAt := time.Now()
 	c := &SendConfirmation{target: target, sentAt: sentAt}
 	agent := target.ResolvedAgent()
 	if !turnSignaturedAgent(agent) {
@@ -62,6 +62,17 @@ func BeginSendConfirmation(ctx context.Context, target ReadinessTarget, sentAt t
 	c.watch.Observe(before, sentAt)
 	c.eligible = true
 	return c
+}
+
+// BindAttempt rebinds the evidence boundary to the send's ACTUAL attempt
+// instant, the one the session records. The pre-send capture can lag it (a
+// remote preview), and a turn that began in that gap is not this prompt's.
+func (c *SendConfirmation) BindAttempt(attemptedAt time.Time) {
+	if c == nil || c.watch == nil || attemptedAt.IsZero() {
+		return
+	}
+	c.sentAt = attemptedAt
+	c.watch.boundary = attemptedAt
 }
 
 // Confirm polls for the bound evidence for up to the confirmation budget and
@@ -91,6 +102,6 @@ func (c *SendConfirmation) Confirm(ctx context.Context) bool {
 }
 
 // BeginInstanceSendConfirmation is BeginSendConfirmation for a live session.
-func BeginInstanceSendConfirmation(ctx context.Context, inst *session.Instance, sentAt time.Time) *SendConfirmation {
-	return BeginSendConfirmation(ctx, instanceReadinessTarget{inst: inst}, sentAt)
+func BeginInstanceSendConfirmation(ctx context.Context, inst *session.Instance) *SendConfirmation {
+	return BeginSendConfirmation(ctx, instanceReadinessTarget{inst: inst})
 }

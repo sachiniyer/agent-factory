@@ -36,7 +36,8 @@ func confirms(t *testing.T, pane *scriptedPane, age time.Duration) bool {
 	t.Helper()
 	compressConfirmWindow(t)
 	ctx := context.Background()
-	c := BeginSendConfirmation(ctx, pane, time.Now().Add(-age))
+	c := BeginSendConfirmation(ctx, pane)
+	c.BindAttempt(time.Now().Add(-age))
 	return c.Confirm(ctx)
 }
 

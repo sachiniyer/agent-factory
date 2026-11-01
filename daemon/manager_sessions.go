@@ -559,7 +559,7 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
 	confirmation := beginSendConfirmation(instance)
-	status, err := instance.SendPromptWithEvidence(req.Prompt, nowFunc)
+	status, err := instance.SendPromptWithEvidence(req.Prompt, sendAttemptClock(confirmation))
 	releaseObservationFence()
 	status = m.promoteUnverifiedSend(instance, status, err, confirmation)
 	// Delivery evidence changes the row even when liveness does not. Publish it
