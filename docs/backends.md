@@ -1004,8 +1004,9 @@ can read a session's callback file and ask for its push credential as that
 session. That includes your own sessions, a repository's hooks and build scripts,
 and a process left behind by a session that has since ended, including one from
 before you opted in. Neither archiving a session nor killing it reaps a process
-its hooks detached. af keeps the sessions it can see in line (below), but it
-can't prove that no such process exists. So opt in only a fresh, dedicated host
+its hooks detached. af taints a host user whenever it places code you didn't
+place there (below). It can't see what ran there before it kept those records,
+or outside af, so it can't prove that no such process exists. So opt in only a fresh, dedicated host
 user that runs nothing but your own af sessions, and opt it in from the moment
 you list it: a listed host that isn't opted in is one other sessions may start
 sessions on. One command does both:
@@ -1029,31 +1030,32 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
   created, such as one from before af kept that record: re-create it to make it
   eligible. A session without push credentials also can't prompt, schedule a
   task for, or `archive --push` one that has them.
-- **Only while every session on the machine is yours.** af refuses to start a
-  session from inside another session on a host you opted in, or on any listed
-  host it can't show is a different machine. While a session you didn't place
-  runs on that machine, no session there gets push credentials. That covers a
-  session:
-  - started from inside another session;
-  - af has no record of who created;
-  - on a repository's own `[ssh]` target, which the repository chose;
-  - still being created or re-provisioned there.
+- **Only a host user no code you didn't place has run as.** When af places
+  code you didn't place on a host user, it records a *taint* on that machine
+  and user first, before any of the code can run. That covers:
+  - a session started from inside another session;
+  - one on a repository's own `[ssh]` target;
+  - a create that failed after its hooks ran;
+  - a re-provision of any of these;
+  - a session from before af kept these records.
 
-  `af hosts check` and `af doctor` name it and say what ends it: kill a
-  session (archiving it isn't enough), wait for a create or re-provision to
-  finish, or fix a name that doesn't resolve. If af can't establish which
-  machine an opted-in host is, they say that instead. Neither changes the host's
-  readiness or the command's exit code.
-- **One machine, compared carefully.** af treats two hosts as one machine when
-  a name matches or an address does. Case, a trailing dot, and a short name for
-  a full one don't matter. Addresses count as configured, as af's ssh dialed
+  A tainted machine gives no push credentials, and can't be opted in, until you
+  recreate or wipe that host user and run `af hosts reset-trust <name>`.
+  Nothing else clears a taint: not killing the session, not archiving it, not
+  restarting the daemon. `af hosts check` and `af doctor` show each taint and
+  the session that made it. A sandbox can't start a session on an opted-in host
+  at all, or on any listed host af can't show is a different machine.
+- **One machine and user, compared carefully.** af treats two hosts as one
+  machine when a name matches or an address does, and as one user unless both
+  logins are known and differ. Another Unix user's sessions can't read this
+  user's files, so they don't taint it. Case, a trailing dot, and a short name
+  for a full one don't matter. Addresses count as configured, as af's ssh dialed
   them, and as DNS resolves them. A `sandbox.ssh` command's destination is the
   one `ssh -G` reports, so your ssh config's `HostName` counts. A name that
   doesn't resolve, or a `sandbox.ssh` that ssh can't confirm (a `ProxyCommand`,
-  a wrapper script, shell syntax), counts as every machine. af can't link two
-  literal addresses of one machine that no name connects. Nor can it link a
-  repository's `[ssh]` target whose name differs from the opted-in one when its
-  ssh pinned no address (`accept-new` and `insecure` host-key postures don't).
+  a wrapper script, shell syntax), counts as every machine. A taint on such a
+  machine is cleared only by `af hosts reset-trust --all`. af can't link two
+  literal addresses of one machine that no name connects.
 - **Only through the session's own connection.** Every af callback, not only
   this one, is accepted only through the requesting session's own ssh forward.
   A callback credential copied out of a session directory doesn't work through
@@ -1130,8 +1132,8 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
 
 | Who | Gets the token? |
 |---|---|
-| Another session on the same host | **Not through af.** Its wiring names its own session directory, the daemon answers it only for its own origin and only through its own forward, and the token is never stored on the host. While the host is opted in, every live session af knows of on it is one you placed: af refuses any other there, and answers nobody on the host while one runs. **But** sessions on one host share its ssh user. Any process running as that user can read a session's `0600` `af-callback.env`, connect to that session's own socket, and ask as that session, for that session's origin, until that session ends. That includes one of your sessions, or something a past session left running. That is the trust opting in grants (above). A Unix user per session would close it ([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)). |
-| A repository running on a host you didn't opt in | **No.** A session it creates through af is never eligible and can't be created on a host you opted in. If one runs on such a host anyway, that host gets no push credentials until you remove it. It also can't prompt, schedule for or `archive --push` a session that is eligible. |
+| Another session on the same host | **Not through af.** Its wiring names its own session directory, the daemon answers it only for its own origin and only through its own forward, and the token is never stored on the host. While the host is opted in, af has placed no code you didn't place on its user since the last reset: it refuses to, and answers nobody on a machine and user where such code ever went. **But** sessions on one host share its ssh user. Any process running as that user can read a session's `0600` `af-callback.env`, connect to that session's own socket, and ask as that session, for that session's origin, until that session ends. That includes one of your sessions, or something a past session left running. That is the trust opting in grants (above). A Unix user per session would close it ([#6432](https://github.com/sachiniyer/agent-factory/issues/6432)). |
+| A repository running on a host you didn't opt in | **No.** A session it creates through af is never eligible and can't be created on a host you opted in. A host user one ran as is tainted: no push credentials, and no opting it in, until you recreate or wipe that user and run `af hosts reset-trust`. It also can't prompt, schedule for or `archive --push` a session that is eligible. |
 | Programs the agent runs (a Makefile, a script, a repository's git hooks) | **Never handed it.** af puts the token in no environment, command line or file of theirs. They run with the agent's authority, so they can run `git push` or `gh` themselves, exactly as on a local worktree with your `gh` login, and git is answered only for the session's own origin. |
 | Commands af runs itself | **The same, stated plainly.** `post_worktree_commands` and process tabs run in the session after provisioning has wired the helper and the shim and the callback is up. While the switch is on, they can call the helper or `gh` like any program in the session, and none of them is handed the token. `on_archive_command` for a sandbox session runs on the daemon machine, after the archive has revoked the callback, so it never sees the credential. |
 | Other users on the host | **No.** The session directory is `0700`, the callback file and socket are `0600`, and the token is never on a command line. Root on the host is trusted, as for synced accounts. |
