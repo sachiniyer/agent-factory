@@ -3144,6 +3144,9 @@
         },
         "repo_id": {
           "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        },
+        "session_id": {
+          "ok": "Only an item session's agent names its session, to file work it found as a draft with its origin noted (af backlog add from inside the session); the user adds items in their own name."
         }
       },
       "UpdateBacklogItem": {

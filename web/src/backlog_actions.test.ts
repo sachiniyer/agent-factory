@@ -240,14 +240,14 @@ test("the open question takes an answer, kept across a rerender until it is sent
   assert.equal(doc.activeElement, answer);
   assert.equal(answer.value, "30%");
   reply = async (m) => {
-    if (m === "PostBacklogMessage") throw new Error("the session for B-6 is gone");
+    if (m === "PostBacklogMessage") throw new Error("B-6 is done; reopen it with \"af backlog reopen 6\" to start a new session with your answer");
     return {};
   };
   buttonNamed(el(pane), "Send answer")!.click();
   await settle();
   assert.deepEqual(sent("PostBacklogMessage")[0].body, { repo_path: "/a", id: 6, kind: "answer", text: "30%", question_id: 4 });
   assert.equal(answer.value, "30%");
-  assert.deepEqual(h.notices, ["the session for B-6 is gone"]);
+  assert.deepEqual(h.notices, ["B-6 is done; reopen it with \"af backlog reopen 6\" to start a new session with your answer"]);
   reply = async () => ({ message: {} });
   buttonNamed(el(pane), "Send answer")!.click();
   await settle();

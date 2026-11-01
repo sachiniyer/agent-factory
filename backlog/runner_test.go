@@ -239,7 +239,7 @@ func TestRunnerHoldsItemAfterFailedStart(t *testing.T) {
 	if _, err := b.BeginStart(1, StartedByRunner, nil, runnerNow); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.FinishStart(1, runnerNow, "", "", errors.New("no worktree"), runnerNow); err != nil {
+	if err := b.FinishStart(1, runnerNow, "", "", "", errors.New("no worktree"), runnerNow); err != nil {
 		t.Fatal(err)
 	}
 	if b.Item(1).Status != StatusQueued {

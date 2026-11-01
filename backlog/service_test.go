@@ -28,6 +28,17 @@ type testHost struct {
 	// onTarget runs inside AnswerTarget, between the service reading the item and
 	// its transaction.
 	onTarget func()
+	// answerRuns are the StartAnswerRun requests; answerRunErr fails them.
+	answerRuns   []AnswerRunRequest
+	answerRunErr error
+}
+
+func (h *testHost) StartAnswerRun(_ string, req AnswerRunRequest) (Message, error) {
+	h.answerRuns = append(h.answerRuns, req)
+	if h.answerRunErr != nil {
+		return Message{}, h.answerRunErr
+	}
+	return Message{Kind: KindAnswer, Author: AuthorUser, Text: req.Text, Answers: req.QuestionID, Delivery: DeliveryNewRun}, nil
 }
 
 func (h *testHost) SetAttention(_, sessionID string, questionID int, reason string) {

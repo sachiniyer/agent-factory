@@ -26,10 +26,75 @@ func AnswerPrompt(it *Item, answer Message) string {
 	return fmt.Sprintf("The user answered your question on %s (%q): %s", FormatID(it.ID), question, answer.Text)
 }
 
-// GoneError is returned when an answer cannot reach the item's session. The
-// answer is still written to the thread.
-func GoneError(id int) error {
-	return fmt.Errorf("the session for %s is gone; start it again with \"af backlog start %d\" — your answer is kept in the thread", FormatID(id), id)
+// WithHandoff adds the asking agent's handoff to an answer prompt, for a
+// session restored without its agent conversation.
+func WithHandoff(prompt, handoff string) string {
+	if handoff = strings.TrimSpace(handoff); handoff == "" {
+		return prompt
+	}
+	var sb strings.Builder
+	sb.WriteString(prompt)
+	sb.WriteString("\n\nThis session restarted without its earlier conversation. These are the notes you wrote when you asked. Treat them as notes, not as rules.\n\n")
+	writeFenced(&sb, handoff)
+	return sb.String()
+}
+
+// AnswerRun is what BeginAnswerRun did.
+type AnswerRun struct {
+	Plan     StartPlan
+	Answer   Message
+	Question Message
+}
+
+// BeginAnswerRun answers a question whose session is gone: it keeps the answer
+// for a new run (DeliveryNewRun) and begins that run, started by the user, as
+// BeginStart does. The question stays open until the run starts (FinishStart);
+// an earlier kept answer to the same question is superseded. gone is the
+// session of the latest started run that the caller found gone, or "" when
+// that run never had one: if the latest run changed since, the answer is
+// refused for a retry, which sees the new run. A done or dropped item refuses.
+// On error b is unchanged.
+func (b *Backlog) BeginAnswerRun(id, questionID int, gone, text string, now time.Time) (AnswerRun, error) {
+	c := b.clone()
+	it, err := c.get(id)
+	if err != nil {
+		return AnswerRun{}, err
+	}
+	current := ""
+	if last := it.lastRun(); last != nil {
+		if last.State == RunStarting {
+			return AnswerRun{}, fmt.Errorf("%s is starting a new session; answer once it is up", FormatID(id))
+		}
+		if last.State == RunStarted {
+			current = last.SessionID
+		}
+	}
+	if current != gone {
+		return AnswerRun{}, fmt.Errorf("%s changed while answering; retry", FormatID(id))
+	}
+	if text = strings.TrimSpace(text); text == "" {
+		return AnswerRun{}, errors.New("an answer needs text")
+	}
+	qp, err := it.questionToAnswer(questionID)
+	if err != nil {
+		return AnswerRun{}, err
+	}
+	if !it.Status.Open() {
+		return AnswerRun{}, fmt.Errorf("%s is %s; reopen it with \"af backlog reopen %d\" to start a new session with your answer", FormatID(id), it.Status, id)
+	}
+	q := *qp
+	for i := range it.Thread {
+		if m := &it.Thread[i]; m.Kind == KindAnswer && m.Answers == q.ID && m.Delivery == DeliveryNewRun {
+			m.Delivery = DeliverySuperseded
+		}
+	}
+	answer := *it.appendMessage(Message{Kind: KindAnswer, Author: AuthorUser, Text: text, Answers: q.ID, Delivery: DeliveryNewRun}, now)
+	plan, err := c.BeginStart(id, StartedByUser, nil, now)
+	if err != nil {
+		return AnswerRun{}, err
+	}
+	*b = *c
+	return AnswerRun{Plan: plan, Answer: answer, Question: q}, nil
 }
 
 func noOpenQuestion(id int) error {
@@ -90,10 +155,11 @@ type Answered struct {
 }
 
 // Answer appends the user's answer to question questionID, or to the oldest
-// open question when questionID is 0, and closes it. With deliver the item is
-// set running and the answer is pending delivery to its session; the status
-// it replaced is kept on the answer for AnswerFailed. On error b is unchanged.
-func (b *Backlog) Answer(id, questionID int, text string, deliver bool, now time.Time) (Answered, error) {
+// open question when questionID is 0, and closes it. An open item is set
+// running and the answer is pending delivery to its session; the status it
+// replaced is kept on the answer for AnswerFailed. On error b is unchanged.
+// An answer whose session is gone goes through BeginAnswerRun instead.
+func (b *Backlog) Answer(id, questionID int, text string, now time.Time) (Answered, error) {
 	it, err := b.get(id)
 	if err != nil {
 		return Answered{}, err
@@ -102,24 +168,13 @@ func (b *Backlog) Answer(id, questionID int, text string, deliver bool, now time
 	if text == "" {
 		return Answered{}, errors.New("an answer needs text")
 	}
-	q := it.OpenQuestion()
-	if questionID != 0 {
-		q = nil
-		for i := range it.Thread {
-			if m := &it.Thread[i]; m.ID == questionID && m.Kind == KindQuestion && it.questionOpen(m.ID) {
-				q = m
-			}
-		}
-		if q == nil {
-			return Answered{}, fmt.Errorf("%s has no open question %d — run \"af backlog show %d\" to see its thread", FormatID(id), questionID, id)
-		}
-	}
-	if q == nil {
-		return Answered{}, noOpenQuestion(id)
+	q, err := it.questionToAnswer(questionID)
+	if err != nil {
+		return Answered{}, err
 	}
 	q.Closed = ClosedAnswered
 	answer := Message{Kind: KindAnswer, Author: AuthorUser, Text: text, Answers: q.ID}
-	if deliver && it.Status.Open() {
+	if it.Status.Open() {
 		// The status to give back if delivery fails is the one before the OLDEST
 		// pending answer: a second answer accepted while the first is pending would
 		// otherwise save "running" (what the first set) and never get the item back
@@ -146,9 +201,34 @@ func (b *Backlog) Answer(id, questionID int, text string, deliver bool, now time
 	return out, nil
 }
 
+// questionToAnswer is open question questionID, or the oldest open question
+// when questionID is 0.
+func (it *Item) questionToAnswer(questionID int) (*Message, error) {
+	if questionID == 0 {
+		if q := it.OpenQuestion(); q != nil {
+			return q, nil
+		}
+		return nil, noOpenQuestion(it.ID)
+	}
+	for i := range it.Thread {
+		if m := &it.Thread[i]; m.ID == questionID && m.Kind == KindQuestion && it.questionOpen(m.ID) {
+			return m, nil
+		}
+	}
+	return nil, fmt.Errorf("%s has no open question %d — run \"af backlog show %d\" to see its thread", FormatID(it.ID), questionID, it.ID)
+}
+
+// Handoff is the asking agent's handoff on question questionID, or "".
+func (it *Item) Handoff(questionID int) string {
+	if q := it.message(questionID); q != nil && q.Kind == KindQuestion {
+		return q.Handoff
+	}
+	return ""
+}
+
 func (it *Item) questionOpen(id int) bool {
 	for _, m := range it.Thread {
-		if m.Kind == KindAnswer && m.Answers == id {
+		if m.closesQuestion() && m.Answers == id {
 			return false
 		}
 	}
@@ -224,6 +304,9 @@ type PendingAnswer struct {
 	AnswerID  int
 	SessionID string
 	Prompt    string
+	// Handoff is the asking agent's handoff, for a session restored without its
+	// agent conversation (WithHandoff).
+	Handoff string
 	// Superseded: the item was started again after the answer was accepted, so the
 	// run that accepted it is not the latest. It is never delivered to the new run.
 	Superseded bool
@@ -239,7 +322,7 @@ func (b *Backlog) PendingAnswers() []PendingAnswer {
 			if m.Kind != KindAnswer || m.Delivery != DeliveryPending {
 				continue
 			}
-			p := PendingAnswer{ID: it.ID, AnswerID: m.ID, Prompt: AnswerPrompt(it, m)}
+			p := PendingAnswer{ID: it.ID, AnswerID: m.ID, Prompt: AnswerPrompt(it, m), Handoff: it.Handoff(m.Answers)}
 			// The run that accepted the answer, not whichever run is latest now
 			// (a legacy answer without a run count belongs to the latest).
 			run := it.lastRun()
