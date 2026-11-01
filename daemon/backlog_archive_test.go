@@ -406,3 +406,70 @@ func TestTheMarkStaysWhileAQuestionIsOpen(t *testing.T) {
 		t.Fatal("the mark outlived the last question")
 	}
 }
+
+// twoQuestions starts item 1, has its agent ask two questions with then archive,
+// and leaves the session idle with its run over.
+func twoQuestions(t *testing.T) (*Manager, string, *session.Instance) {
+	t.Helper()
+	stubExactResume(t, true, "")
+	m, repoID, inst := startedItem(t)
+	for _, q := range []string{"Which db?", "Which port?"} {
+		if _, err := m.backlogService().PostMessage(backlog.PostMessageRequest{RepoID: repoID, ID: 1,
+			Kind: backlog.KindQuestion, Text: q, SessionID: inst.ID, Then: backlog.ThenArchive}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idleItemSession(t, inst)
+	return m, repoID, inst
+}
+
+// An answer to one of two questions that lands after the archive's guard passed
+// and before it committed leaves the row marked for the question left (Codex P2
+// on #6475): the mark follows the open questions, not the one the decision saw.
+func TestAnAnswerDuringTheTeardownKeepsTheMarkForTheQuestionLeft(t *testing.T) {
+	m, repoID, inst := twoQuestions(t)
+	stubBacklogSend(t, m, repoID)
+	prev := archiveSessionForLifecycle
+	archiveSessionForLifecycle = func(_ *Manager, _ ArchiveSessionRequest, guard sessionTeardownGuard) error {
+		if err := guard(inst); err != nil {
+			return err
+		}
+		answer(t, m, repoID, "Postgres") // after the guard, before the commit
+		if err := inst.Transition(session.BeginArchive()); err != nil {
+			return err
+		}
+		return inst.Transition(session.CommitArchive())
+	}
+	t.Cleanup(func() { archiveSessionForLifecycle = prev })
+	m.backlogRunEnded(repoID, inst.ID)
+	m.backgroundMutationWG.Wait()
+	if inst.GetLiveness() != session.LiveArchived || !inst.AwaitsAnswer() || inst.OwedArchive() != nil {
+		t.Fatalf("liveness %v, awaits %v, owed %+v; want archived and marked for the question left",
+			inst.GetLiveness(), inst.AwaitsAnswer(), inst.OwedArchive())
+	}
+}
+
+// A restart that finds an ask archive committed but not marked, with an answer
+// to one of two questions still pending, marks the row: the other question
+// waits whether or not that answer's restore succeeds.
+func TestRecoveryMarksAnArchiveWithAQuestionLeftAndAnAnswerPending(t *testing.T) {
+	m, repoID, inst := twoQuestions(t)
+	m.fileOwedArchive(repoID, inst, backlog.ArchiveAsk)
+	if err := inst.Transition(session.BeginArchive()); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.Transition(session.CommitArchive()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		_, err := b.Answer(1, 0, "Postgres", true, time.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	results := stubGuardedArchive(t, inst, nil)
+	m.redriveOwedArchives(repoID, m.itemSessions(repoID), nil)
+	if len(*results) != 0 || !inst.AwaitsAnswer() || inst.OwedArchive() != nil {
+		t.Fatalf("archives %v, awaits %v, owed %+v", *results, inst.AwaitsAnswer(), inst.OwedArchive())
+	}
+}

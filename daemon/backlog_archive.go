@@ -38,8 +38,9 @@ func (m *Manager) archiveItemSession(repoID, sessionID, reason string) {
 	owed := b.ArchiveOwed(sessionID, reason)
 	if s.view.Liveness == session.LiveArchived {
 		// Archived already, by an earlier daemon that stopped before it finished
-		// here: an ask archive whose questions are still open marks the row.
-		if owed && reason == backlog.ArchiveAsk && inst.OwedArchive() != nil {
+		// here: an ask archive whose item still has an open question marks the
+		// row, an answer to another one pending or not.
+		if reason == backlog.ArchiveAsk && inst.OwedArchive() != nil && questionOpenFor(b, sessionID) {
 			m.markArchivedForAnswer(repoID, inst)
 			return
 		}
@@ -115,11 +116,45 @@ func (m *Manager) archiveItemSession(repoID, sessionID, reason string) {
 		// Archived, with a warning (an on_archive hook failed, or files were
 		// skipped): finish it as a clean archive.
 	}
-	if reason == backlog.ArchiveAsk && m.backlog.askedOf(sessionID) == decided {
+	// Archived: the row is marked while the item has an open question, whatever
+	// answers came during the teardown. An answer on its way restores the
+	// session, and if that fails the row still shows the question waiting
+	// (Codex P2 on #6475). The read is after the teardown, outside its locks.
+	if reason == backlog.ArchiveAsk && m.askArchiveWaits(repoID, sessionID) {
 		m.markArchivedForAnswer(repoID, inst)
+		// An answer that closed the last question between the read and the mark
+		// found the filing unsettled and left it (clearArchivedForAnswer): read
+		// again now that the mark is down.
+		if !m.askArchiveWaits(repoID, sessionID) {
+			m.clearArchivedForAnswer(repoID, sessionID)
+		}
 		return
 	}
 	m.settleOwedArchive(repoID, inst)
+}
+
+// askArchiveWaits reads whether the item of sessionID still has an open
+// question for the archived session to wait on. When the backlog cannot be
+// read it says yes: the mark goes when the session is restored, or when the
+// last question closes.
+func (m *Manager) askArchiveWaits(repoID, sessionID string) bool {
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		m.warn().Printf("backlog archive of session %s: %v", sessionID, err)
+		return true
+	}
+	return questionOpenFor(b, sessionID)
+}
+
+// questionOpenFor is whether the item whose latest run is sessionID has an open
+// question.
+func questionOpenFor(b *backlog.Backlog, sessionID string) bool {
+	it := b.ItemForSession(sessionID)
+	if it == nil {
+		return false
+	}
+	r := b.LatestRun(it.ID)
+	return r != nil && r.SessionID == sessionID && it.OpenQuestion() != nil
 }
 
 // markArchivedForAnswer marks the row of a session archived while its question
