@@ -1,7 +1,11 @@
 package session
 
 import (
+	"context"
+	"errors"
+	"net/netip"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -258,72 +262,8 @@ func TestRuntimeMachineReadsTheRecordedRuntime(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, RuntimeMachine{SandboxSSH: "ssh box3"}, m)
 
-	for name, inst := range map[string]*Instance{
-		"reaped": {Title: "x", backend: &sshBackend{}},
-		"local":  {Title: "y", backend: &LocalBackend{}},
-	} {
-		_, ok := inst.RuntimeMachine()
-		assert.False(t, ok, name)
-	}
-}
-
-// Codex P2 on #6433 at 50552b4: an archive af confirmed stopped while keeping its
-// workspace runs nothing, so it blocks no host — but only while every condition
-// of "confirmed stopped" holds.
-func TestStoppedPreservedArchiveNeedsEveryConditionOfAConfirmedStop(t *testing.T) {
-	stopped := func() *Instance {
-		return &Instance{Title: "a", liveness: LiveArchived, archivedWorkspace: &ArchivedWorkspaceData{Host: "box1", Dir: "/s"}}
-	}
-	assert.True(t, stopped().StoppedPreservedArchive())
-	for name, mutate := range map[string]func(*Instance){
-		"no preserved workspace":        func(i *Instance) { i.archivedWorkspace = nil },
-		"not archived (being restored)": func(i *Instance) { i.liveness = LiveReady },
-		"started":                       func(i *Instance) { i.started = true },
-		"an agent server attached":      func(i *Instance) { i.agentSrv = &remoteAgentServer{} },
-		"stop not confirmed":            func(i *Instance) { i.runtimeCleanupStateUnknown = true },
-	} {
-		i := stopped()
-		mutate(i)
-		assert.False(t, i.StoppedPreservedArchive(), name)
-	}
-
-	// And it survives storage: a restarted daemon still knows the archive stopped.
-	data := InstanceData{ID: "a1", Title: "a", Path: t.TempDir(), Status: Archived, BackendType: "ssh", CreatedBySandbox: "p",
-		Worktree:          GitWorktreeData{RepoPath: "/r", WorktreePath: "/r/wt"},
-		ArchivedWorkspace: &ArchivedWorkspaceData{Host: "box1", Dir: "/s"}}
-	restored, err := FromInstanceData(data)
-	require.NoError(t, err)
-	assert.True(t, restored.StoppedPreservedArchive())
-}
-
-// Third review of #6433, B: while a re-provision replaces the runtime, the
-// machine is Unknown (fail closed), and an archive mid-restore is not "stopped".
-func TestRuntimeMachineIsUnknownWhileAReprovisionRuns(t *testing.T) {
-	listed := &Instance{Title: "l", Host: "box1", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1",
-		Config: config.SSHConfig{Host: "box1.example"}}}}
-	end := listed.beginProvisioning()
-	m, ok := listed.RuntimeMachine()
-	require.True(t, ok)
-	assert.Equal(t, RuntimeMachine{Unknown: true}, m, "a listed host the operator named stays operator-placed")
-	end()
-	end() // idempotent
-	m, _ = listed.RuntimeMachine()
-	assert.False(t, m.Unknown)
-
-	reaped := &Instance{Title: "r", backend: &sshBackend{}}
-	_, ok = reaped.RuntimeMachine()
-	assert.False(t, ok, "a reaped runtime runs nowhere")
-	end = reaped.beginProvisioning()
-	m, ok = reaped.RuntimeMachine()
-	require.True(t, ok, "but one being re-provisioned runs somewhere af can't name")
-	assert.Equal(t, RuntimeMachine{Unknown: true, RepoChosen: true}, m, "with no named host, not shown to be the operator's placement")
-	end()
-
-	archived := &Instance{Title: "a", liveness: LiveArchived, archivedWorkspace: &ArchivedWorkspaceData{Host: "box1", Dir: "/s"}}
-	end = archived.beginProvisioning()
-	assert.False(t, archived.StoppedPreservedArchive(), "an archive being restored is not stopped")
-	end()
-	assert.True(t, archived.StoppedPreservedArchive())
+	_, ok = (&Instance{Title: "y", backend: &LocalBackend{}}).RuntimeMachine()
+	assert.False(t, ok, "a local row runs nowhere off-box")
 }
 
 func TestPlannedRuntimeMachineResolvesTheTargetTheRuntimeWill(t *testing.T) {
@@ -356,4 +296,157 @@ func TestPlannedRuntimeMachineResolvesTheTargetTheRuntimeWill(t *testing.T) {
 
 	_, offBox = PlannedRuntimeMachine(InstanceOptions{Backend: BackendLocal}, t.TempDir())
 	assert.False(t, offBox, "a local session gets no callback")
+}
+
+// Codex P1 on #6433 at 3abfd87: a sandbox.ssh's destination can be remapped by
+// ssh_config (-F, ~/.ssh/config, HostName), so the machine is what ssh itself
+// reports with -G, and anything af can't prove is Unknown.
+func TestSandboxSSHMachineIsWhatSSHActuallyConnectsTo(t *testing.T) {
+	t.Cleanup(SetMachineLookupForTest(map[string][]string{
+		"box1.example": {"198.51.100.7"},
+		"box9":         {"198.51.100.9"},
+	}))
+	var asked [][]string
+	t.Cleanup(SetSSHPrintConfigForTest(func(ssh string, args []string) (string, error) {
+		asked = append(asked, append([]string{ssh}, args...))
+		switch strings.Join(args, " ") {
+		case "-F /etc/af/ssh.conf 192.0.2.10": // a config whose HostName remaps it
+			return "user dev\nhostname 198.51.100.7\nport 22\n", nil
+		case "-p 2222 -i ~/.ssh/k dev@box9":
+			return "hostname box9\nport 2222\n", nil
+		case "jump-alias":
+			return "hostname box9\nproxycommand /usr/local/bin/route-somewhere %h\n", nil
+		case "broken":
+			return "", errors.New("ssh: Could not resolve hostname")
+		}
+		return "", errors.New("unexpected ssh -G call")
+	}))
+	box1 := RuntimeMachine{Host: "box1.example", Addr: "198.51.100.7"}
+	free := func(cmd string) RuntimeMachine { return RuntimeMachine{SandboxSSH: cmd} }
+
+	assert.True(t, free("ssh -F /etc/af/ssh.conf 192.0.2.10").Shares(box1), "the command line names 192.0.2.10, but ssh connects to box1")
+	assert.Equal(t, []string{"ssh", "-G", "-F", "/etc/af/ssh.conf", "192.0.2.10"}, append([]string{asked[0][0], "-G"}, asked[0][1:]...),
+		"ssh is asked with the command's own arguments")
+	assert.False(t, free("ssh -p 2222 -i ~/.ssh/k dev@box9").Shares(box1), "anti-vacuous: a proven other machine differs")
+
+	for name, cmd := range map[string]string{
+		"a ProxyCommand in effect": "ssh jump-alias",
+		"ssh -G fails":             "ssh broken",
+		"quoted shell syntax":      `ssh -o "ProxyCommand=nc %h %p" box9`,
+		"a shell operator":         "ssh box9; true",
+		"a wrapper script":         "/usr/local/bin/to-box",
+	} {
+		assert.Truef(t, free(cmd).Shares(RuntimeMachine{Host: "box9"}), "%s: unproven, so it shares every machine", name)
+		assert.Truef(t, free(cmd).Shares(box1), "%s: even one it names nothing of", name)
+	}
+}
+
+// Third and fourth reviews of #6433: while a re-provision replaces the runtime,
+// the machine is Unknown (fail closed), and whether the repository chose the
+// placement comes from the recorded runtime, never from Instance.Host, which a
+// default_host session leaves empty.
+func TestRuntimeMachineIsUnknownWhileAReprovisionRuns(t *testing.T) {
+	handle := func(hostName string) *sshBackend {
+		return &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: hostName, Config: config.SSHConfig{Host: "box1.example"}}}
+	}
+	for name, tc := range map[string]struct {
+		inst     *Instance
+		wantRepo bool
+	}{
+		"a named listed host":             {&Instance{Title: "l", Host: "box1", backend: handle("box1")}, false},
+		"default_host (no Instance.Host)": {&Instance{Title: "d", backend: handle("box1")}, false},
+		"a repository's own [ssh] target": {&Instance{Title: "r", backend: handle("")}, true},
+		"a reaped runtime with no record": {&Instance{Title: "x", backend: &sshBackend{}}, true},
+		"the free-form target":            {&Instance{Title: "f", backend: &sandboxBackend{}}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			end := tc.inst.beginProvisioning()
+			m, ok := tc.inst.RuntimeMachine()
+			require.True(t, ok)
+			assert.True(t, m.Unknown)
+			assert.Equal(t, tc.wantRepo, m.RepoChosen)
+			reason, kind := m.Unproven()
+			assert.Equal(t, UnprovenInFlight, kind)
+			assert.Contains(t, reason, "re-provisioned")
+			end()
+			end() // idempotent
+			m, _ = tc.inst.RuntimeMachine()
+			_, kind = m.Unproven()
+			assert.NotEqual(t, UnprovenInFlight, kind)
+		})
+	}
+}
+
+// Fourth review of #6433, 1: a reap or a pushed archive clears the runtime
+// handle, but not a process a hook detached, so the row keeps standing for the
+// machine it ran on until it is killed, across a restart too.
+func TestRuntimeMachineOutlivesItsRuntimeHandle(t *testing.T) {
+	inst := &Instance{Title: "child", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1",
+		Config: config.SSHConfig{Host: "box1.example"}, DialAddress: "198.51.100.7"}}}
+	before, ok := inst.RuntimeMachine()
+	require.True(t, ok)
+	inst.clearDischargedRuntimeCleanup() // a confirmed reap
+	after, ok := inst.RuntimeMachine()
+	require.True(t, ok, "a reaped row still stands for its machine")
+	assert.Equal(t, before, after)
+
+	assert.Nil(t, inst.ToInstanceData().PlacedMachine, "never in a snapshot response: it names a host")
+	data := inst.ToInstanceData().ForStorage()
+	require.NotNil(t, data.PlacedMachine, "but it is persisted")
+	assert.Equal(t, before, *data.PlacedMachine)
+	data.Path, data.Status, data.BackendType = t.TempDir(), Archived, "ssh"
+	data.Worktree = GitWorktreeData{RepoPath: "/r", WorktreePath: "/r/wt"}
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	got, ok := restored.RuntimeMachine()
+	require.True(t, ok)
+	assert.Equal(t, "box1.example", got.Host)
+	assert.Equal(t, "198.51.100.7", got.Addr, "restored after a daemon restart")
+
+	// A row from before af recorded machines, whose runtime was reaped: it ran
+	// off the daemon box, somewhere af can't name, so it is every machine.
+	old, ok := (&Instance{Title: "old", backend: &sshBackend{}}).RuntimeMachine()
+	require.True(t, ok)
+	reason, kind := old.Unproven()
+	assert.Equal(t, UnprovenOther, kind)
+	assert.Contains(t, reason, "before af recorded where")
+	_, ok = (&Instance{Title: "local", backend: &LocalBackend{}}).RuntimeMachine()
+	assert.False(t, ok, "a local row never ran off-box")
+}
+
+// Fourth review of #6433, 2: RuntimeMachine copies under the instance lock and
+// resolves nothing there, so a slow resolver can never stall a writer.
+func TestRuntimeMachineResolvesNothingUnderTheInstanceLock(t *testing.T) {
+	var lookups int
+	prev := machineLookup
+	machineLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		lookups++
+		return nil, errors.New("no DNS in this test")
+	}
+	t.Cleanup(func() { machineLookup = prev; flushMachineLookups() })
+	flushMachineLookups()
+	for _, inst := range []*Instance{
+		{Title: "a", backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1", Config: config.SSHConfig{Host: "box1.example"}}}},
+		{Title: "b", backend: &sandboxBackend{cleanup: &SandboxRuntimeCleanupData{SessionDir: "/s", SSHCommand: "ssh box3"}}},
+	} {
+		_, ok := inst.RuntimeMachine()
+		require.True(t, ok)
+	}
+	assert.Zero(t, lookups, "RuntimeMachine resolved a name, which it would do under the instance lock")
+}
+
+// Fourth review of #6433, 3: the cause of an unproven machine is classified, so
+// a message can name the remedy that actually ends it.
+func TestUnprovenNamesItsCause(t *testing.T) {
+	t.Cleanup(SetMachineLookupForTest(map[string][]string{"box1.example": {"198.51.100.7"}}))
+	reason, kind := RuntimeMachine{Host: "box1.example"}.Unproven()
+	assert.Equal(t, Proven, kind)
+	assert.Empty(t, reason)
+	reason, kind = RuntimeMachine{Host: "nowhere.example"}.Unproven()
+	assert.Equal(t, UnprovenName, kind)
+	assert.Contains(t, reason, "nowhere.example doesn't resolve")
+	_, kind = RuntimeMachine{SandboxSSH: "/usr/local/bin/to-box"}.Unproven()
+	assert.Equal(t, UnprovenOther, kind)
+	_, kind = RuntimeMachine{}.Unproven()
+	assert.Equal(t, Proven, kind, "a machine that names nothing is not unproven, it is nowhere")
 }

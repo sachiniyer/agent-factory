@@ -629,6 +629,7 @@ func (i *Instance) resetRemoteRuntime() {
 	// provisioner's (bound to runtimeTeardown, already nilled above), not this
 	// field, so clearing it does not affect a teardown still in flight.
 	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		i.rememberMachineLocked(provider)
 		provider.clearRuntimeCleanupData()
 	}
 	if i.runtimeCleanupStateUnknown {
@@ -689,6 +690,7 @@ func (i *Instance) clearDischargedRuntimeCleanup() {
 	i.mu.Lock()
 	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 		if provider.runtimeCleanupData() != nil {
+			i.rememberMachineLocked(provider)
 			provider.clearRuntimeCleanupData()
 			i.touchLocked()
 		}

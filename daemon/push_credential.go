@@ -186,9 +186,13 @@ func (m *Manager) authorizePushCredential(ask pushAsk) (pushcred.Origin, *sessio
 	if !ok || !placement.Licensed(m.Config(), backend) {
 		return pushcred.Origin{}, nil, sandboxRefusal(refusePushNotLicensed)
 	}
+	if reason, _ := placement.Machine.Unproven(); reason != "" {
+		m.info().Printf("push credential: withheld from session %s: af can't establish which machine its host is, because %s", ask.owner, reason)
+		return pushcred.Origin{}, nil, sandboxRefusal(refusePushHostUnproven)
+	}
 	if blockers := m.pushHostBlockers([]session.RuntimeMachine{placement.Machine}); len(blockers) > 0 {
 		m.info().Printf("push credential: withheld from session %s: %s", ask.owner, blockers[0])
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushHostShared)
+		return pushcred.Origin{}, nil, pushRefusalFor(blockers)
 	}
 	if m.pushCreds.autoPushFenced(inst.ID, placement.CallbackRef) {
 		return pushcred.Origin{}, nil, sandboxRefusal(refusePushAutoPreserve)

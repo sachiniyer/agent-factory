@@ -2521,6 +2521,7 @@
       "af hosts add --host-key-verification": "host.manage",
       "af hosts add --identity-file": "host.manage",
       "af hosts add --no-check": "host.manage",
+      "af hosts add --push-credentials": "host.manage",
       "af hosts add --workspace-root": "host.manage",
       "af hosts add --help": "meta.discovery",
       "af hosts check --help": "meta.discovery",

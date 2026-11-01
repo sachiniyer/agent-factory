@@ -61,10 +61,17 @@ type InstanceData struct {
 	// drops these fields) and is treated like a sandbox-created one, failing
 	// closed: an operator re-creates it to make it eligible (security review of
 	// #6433, N1). omitempty + additive.
-	CreatedByOperator bool   `json:"created_by_operator,omitempty"`
-	Title             string `json:"title"`
-	Path              string `json:"path"`
-	Branch            string `json:"branch"`
+	CreatedByOperator bool `json:"created_by_operator,omitempty"`
+	// PlacedMachine is the machine the session's off-box runtime last ran on,
+	// kept after its runtime handle is cleared (Instance.lastMachine, #5571 W7.8).
+	// DISK-ONLY, like RuntimeCleanup: ToInstanceData stages it in placedMachine,
+	// ForStorage publishes it, and no snapshot response carries it (it names an
+	// ssh host, a dialed address or the operator's sandbox.ssh). omitempty.
+	PlacedMachine *RuntimeMachine `json:"placed_machine,omitempty"`
+	placedMachine *RuntimeMachine
+	Title         string `json:"title"`
+	Path          string `json:"path"`
+	Branch        string `json:"branch"`
 	// Status is the legacy single-axis status int (#1195). Still written for one
 	// release for rollback safety and read as the fallback source for records
 	// that predate the `liveness` field. New code should read Liveness.
@@ -626,6 +633,7 @@ func (d InstanceData) ForClientRead() InstanceData {
 	// daemonless `sessions list`/`get` path exposes the same shape the live path
 	// does, not the cleanup identity an ordinary row now carries on disk.
 	d.RuntimeCleanup = nil
+	d.PlacedMachine = nil // disk-only for the same reason
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}
