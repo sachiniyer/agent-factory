@@ -833,10 +833,19 @@ tab survives a restart and simply starts a new editor when you next open it.
     with its token. Open notebooks only from repositories you trust there, or give
     local editors an origin of their own: `network.preview_listen_addr` when you
     view from this machine, `network.editor_origin_ports` from elsewhere (above).
-    af does bound who may load that host page: a webview-host request is accepted
-    only from the editor's own page, so one session's editor origin cannot hand its
-    webview channel to a page on another — which matters because two editor-origin
-    ports share a hostname and differ only by port.
+    af does bound who may load those host pages — both the webview host and the
+    web-worker extension host iframe, the two pages that trust a parent on a
+    hostname-only match: each is accepted only from the editor's own page, so one
+    session's editor origin cannot hand its channel to a page on another, which
+    matters because two editor-origin ports share a hostname and differ only by port.
+
+    Editor routes also serve only a **canonical** path. A request whose path has an
+    empty segment (`//`), a `.`/`..` segment, or an encoded separator (`%2F`, `%5C`)
+    is answered with `400` rather than left for the editor to collapse. One
+    user-visible effect: a **code-server port-forwarded app** (reached through
+    `/proxy/<port>/` or `/absproxy/<port>/`) that requests a URL containing `//` or
+    an encoded slash now gets a `400`; it must send the cleaned path. A dev server
+    reached as a web tab is unaffected.
 
     The editor's WebSocket, which carries that terminal, is accepted
     only from the editor's own page: af refuses a handshake whose `Origin` names any

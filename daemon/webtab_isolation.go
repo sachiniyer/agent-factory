@@ -98,8 +98,10 @@ import (
 //     tab's own prefix: no tab's script can become a worker for the web UI at "/",
 //     which would outlive any fix.
 //
-//  6. An editor's webview host page is served only to the editor's own page. VS
-//     Code's webview host (the pages under webview/browser/pre/) is part of the
+//  6. An editor's parentOrigin host pages are served only to the editor's own page.
+//     VS Code has two that read parentOrigin and hand over a channel on a
+//     hostname-only match (webview/browser/pre/ and webWorkerExtensionHostIframe
+//     .html); each is part of the
 //     workbench, so rule 3 keeps it on a real origin — but code-server serves it
 //     from the editor's OWN origin and patches it to hand its message channel to a
 //     parent whose HOSTNAME matches, ignoring the port. Two editor origins on one
@@ -324,7 +326,9 @@ func editorNonCanonicalRefusal(route webTabRoute) *crossSiteDenial {
 	}
 }
 
-// editorWebviewHostRefusal is rule 6. A request for the editor's webview host page
+// editorWebviewHostRefusal is rule 6. A request for one of the editor's parentOrigin
+// host pages (editorPathIsParentOriginHost: the webview host, the web-worker
+// extension host iframe)
 // is admitted only when it is loaded by the editor's own page: either the browser
 // attests Sec-Fetch-Site: same-origin (a same-port, same-scheme loader — the
 // workbench itself, which frames the host same-origin under code-server, and which
@@ -340,7 +344,7 @@ func editorNonCanonicalRefusal(route webTabRoute) *crossSiteDenial {
 // The same-origin arm runs first, so a legitimate same-origin load whose URL has no
 // parentOrigin (the content frame pre/fake.html) is still admitted.
 func editorWebviewHostRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
-	if !editorPathIsWebviewHost(route.escapedRest) {
+	if !editorPathIsParentOriginHost(route.escapedRest) {
 		return nil
 	}
 	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "same-origin") {
@@ -352,7 +356,7 @@ func editorWebviewHostRefusal(r *http.Request, route webTabRoute, allowedHosts [
 	}
 	return &crossSiteDenial{
 		status: http.StatusForbidden,
-		err: fmt.Errorf("refused a webview-host request with parentOrigin %q: an editor's webview host is "+
+		err: fmt.Errorf("refused a webview-host request with parentOrigin %q: an editor's host pages are "+
 			"loaded only by the editor's own page", echoHost(parent)),
 		logKey: "editor-webview:" + echoHost(parent),
 	}
@@ -389,22 +393,37 @@ func webviewParentOrigin(rawQuery string) (string, bool) {
 	return value, true
 }
 
-// editorPathIsWebviewHost reports whether a path below an editor tab's prefix is one
-// of VS Code's webview host pages, served from webview/browser/pre/ (the only pages
-// that read parentOrigin). code-server's static server DECODES the path (percent
-// escapes, %2F included) and routes case-insensitively, so the match is on the
-// decoded, lower-cased path — a raw-segment match misses "%77ebview" and
-// "webview%2Fbrowser%2Fpre". Decoded repeatedly to a fixed point so a double-encoded
-// spelling cannot slip under one decode; a path that will not decode is treated as a
-// host path (fail safe: the guard only ever adds a refusal to a malformed request).
-func editorPathIsWebviewHost(escapedRest string) bool {
+// editorPathIsParentOriginHost reports whether a path below an editor tab's prefix
+// is one of VS Code's host pages that READ parentOrigin and hand a caller a message
+// channel keyed on a hostname-only match (code-server's patch). There are two in
+// this VS Code line, and both must be guarded or the cross-port hand-off reopens
+// through the one left out:
+//
+//   - the webview host, any file under webview/browser/pre/ (notebook outputs,
+//     extension views);
+//   - the web-worker extension host iframe, webWorkerExtensionHostIframe.html under
+//     services/extensions/worker/ (found serving a real code-server 4.129.0).
+//
+// This list tracks upstream: a new parentOrigin host page in a future release is a
+// new entry, which the real-code-server proof is there to catch.
+//
+// code-server's static server DECODES the path (percent escapes, %2F included) and
+// routes case-insensitively, so the match is on the decoded, lower-cased path — a
+// raw-segment match misses "%77ebview" and "webview%2Fbrowser%2Fpre". Decoded
+// repeatedly to a fixed point so a double-encoded spelling cannot slip under one
+// decode; a path that will not decode is treated as a host page (fail safe: the
+// guard only ever adds a refusal to a malformed request).
+func editorPathIsParentOriginHost(escapedRest string) bool {
 	decoded, ok := decodeToFixedPoint(escapedRest)
 	if !ok {
 		return true
 	}
 	segs := strings.Split(strings.ToLower(decoded), "/")
-	for i := 0; i+2 < len(segs); i++ {
-		if segs[i] == "webview" && segs[i+1] == "browser" && segs[i+2] == "pre" {
+	for i, seg := range segs {
+		if seg == "webworkerextensionhostiframe.html" {
+			return true
+		}
+		if i+2 < len(segs) && seg == "webview" && segs[i+1] == "browser" && segs[i+2] == "pre" {
 			return true
 		}
 	}

@@ -210,12 +210,18 @@ func TestConfineOriginHeaders(t *testing.T) {
 	assert.Equal(t, "/", run(own, session.TabKindWeb, map[string]string{"Service-Worker-Allowed": "/"}).Get("Service-Worker-Allowed"))
 }
 
-func TestEditorPathIsWebviewHost(t *testing.T) {
+func TestEditorPathIsParentOriginHost(t *testing.T) {
 	for _, rest := range []string{
 		"stable-abc/static/out/vs/workbench/contrib/webview/browser/pre/index.html",
 		"static/out/vs/workbench/contrib/webview/browser/pre/",
 		"a/b/webview/browser/pre/service-worker.js",
 		"webview/browser/pre/fake.html",
+		// The web-worker extension host iframe — the second parentOrigin host page,
+		// NOT under webview/browser/pre (found serving a real code-server 4.129.0).
+		"stable-abc/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html",
+		"a/webWorkerExtensionHostIframe.html",
+		"static/out/vs/workbench/services/extensions/worker/WEBWORKEREXTENSIONHOSTIFRAME.HTML",
+		"static/out/vs/.../worker/webWorkerExtensionHostIframe%2ehtml", // encoded dot
 		// code-server decodes and routes case-insensitively, so these reach the real
 		// host and must match: an upper-case segment, a percent-encoded letter, and
 		// encoded slashes that collapse the three segments into one.
@@ -226,13 +232,13 @@ func TestEditorPathIsWebviewHost(t *testing.T) {
 		"static/out/%2577ebview/browser/pre/index.html", // double-encoded
 		"static/out/webview/browser/%ZZ/pre/x",          // malformed escape: treated as host, fail safe
 	} {
-		assert.True(t, editorPathIsWebviewHost(rest), rest)
+		assert.True(t, editorPathIsParentOriginHost(rest), rest)
 	}
 	for _, rest := range []string{
 		"", "static/out/x.js", "webview/browser/x.html", "webview/pre/index.html",
-		"browser/pre/index.html", "proxy/3000/",
+		"browser/pre/index.html", "proxy/3000/", "static/out/webWorkerExtensionHost.js",
 	} {
-		assert.False(t, editorPathIsWebviewHost(rest), rest)
+		assert.False(t, editorPathIsParentOriginHost(rest), rest)
 	}
 }
 
@@ -308,6 +314,11 @@ func TestEditorWebviewHostRefusal(t *testing.T) {
 	assert.True(t, refused(hostPath, "parentOrigin=null", ""))
 	assert.True(t, refused(hostPath, "parentOrigin=http://attacker.example", ""))
 	assert.True(t, refused(hostPath, "", ""), "a real host load always carries parentOrigin")
+	// The web-worker extension host iframe is the OTHER parentOrigin host page; the
+	// same guard covers it (a cross-port loader refused, its own page admitted).
+	workerPath := testCommit + "/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html"
+	assert.True(t, refused(workerPath, "parentOrigin=http://127.0.0.1:9101", ""), "worker host, another editor port")
+	assert.False(t, refused(workerPath, "", "same-origin"), "worker host, own page")
 	// Bypass 1 (path spelling): an encoded or mixed-case host path is still the host,
 	// so a foreign loader of it is still refused; its own page still gets in.
 	encHost := testCommit + "/static/out/%77ebview/browser/pre/index.html"
