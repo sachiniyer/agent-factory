@@ -188,9 +188,9 @@ func requestsUpgrade(r *http.Request) bool {
 }
 
 // webTabAllowedHosts is network.allowed_hosts for this request: from the posture
-// the control and preview listeners already built for it (one config read per
-// request), else from the live config — an editor-origin port's Host guard reads
-// the list the same way and puts no posture in the context.
+// the control listener's Host guard already built for it (one config read per
+// request), else from the live config: the preview listener and the editor-origin
+// ports put no posture in the context.
 func (cs *controlServer) webTabAllowedHosts(r *http.Request) []string {
 	if p, ok := requestPostureFrom(r.Context()); ok {
 		return p.allowedHosts
