@@ -277,13 +277,13 @@ func TestRecoveryFinishesAnOwedArchiveAndClearsOneNoLongerOwed(t *testing.T) {
 func TestDeferredAskArchiveKeepsItsReason(t *testing.T) {
 	m, repoID, inst := askedThen(t, backlog.ThenArchive)
 	results := stubGuardedArchive(t, inst, nil)
-	m.PauseStatusPoll(repoID, inst.Title, inst.ID)
+	m.PauseStatusPollFor(repoID, inst.Title, inst.ID, "")
 	m.backlogRunEnded(repoID, inst.ID)
 	m.backgroundMutationWG.Wait()
 	if len(*results) != 0 || inst.OwedArchive() == nil {
 		t.Fatalf("archived while attached: %v, owed %+v", *results, inst.OwedArchive())
 	}
-	m.ResumeStatusPoll(repoID, inst.Title, inst.ID)
+	m.ResumeStatusPollFor(repoID, inst.Title, inst.ID, "")
 	m.drainBacklogDeferredArchive(repoID, inst)
 	m.backgroundMutationWG.Wait()
 	if len(*results) != 1 || inst.GetLiveness() != session.LiveArchived {
