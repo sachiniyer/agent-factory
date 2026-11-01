@@ -58,6 +58,20 @@ async function openMenu(page: Page): Promise<void> {
   await expect(page.locator(".af-project-menu")).toBeVisible();
 }
 
+// Whether a row's name is cut short, read in one page task. The events socket's open
+// triggers a resync, and a resync that replaces the session list rebuilds the
+// switcher's rows, at whatever point of the test it lands. A locator's evaluate
+// resolves the element and measures it in two round trips, so a rebuild between them
+// measured a detached row as 0 by 0 (#4217, run 41317193186). Querying and measuring
+// in the same task always reads the row on the page.
+async function nameFit(page: Page, root: string): Promise<string> {
+  return page.evaluate(selector => {
+    const el = document.querySelector(selector);
+    if (!el) return "no row";
+    return el.scrollWidth > el.clientWidth ? "cut short" : `fits: scrollWidth ${el.scrollWidth}, clientWidth ${el.clientWidth}`;
+  }, `.af-project-menu [data-project-focus="project:${root}"] .af-project-item-name`);
+}
+
 async function switchTo(page: Page, root: string): Promise<void> {
   await openMenu(page);
   await option(page, root).click();
@@ -85,8 +99,10 @@ test("the Backlog badge counts the selected project and the switcher shows the o
   // The long name is cut short, and the badge beside it is still drawn whole: the
   // intersection check counts what an overflow-clipping ancestor hides. The name's
   // text is the project's name alone, so lookups by name still match.
+  // The poll waits out a rebuild. A name that still fits fails with its measurements:
+  // the fixture no longer fills the menu, so the badge check below proves nothing.
+  await expect.poll(() => nameFit(page, TWO), { message: "the name is long enough to be cut short" }).toBe("cut short");
   const name = option(page, TWO).locator(".af-project-item-name");
-  expect(await name.evaluate(el => el.scrollWidth > el.clientWidth), "the name is long enough to be cut short").toBe(true);
   await expect(name).toHaveText(TWO.split("/").pop()!);
   await expect(twoBadge).toBeInViewport({ ratio: 1 });
   await page.keyboard.press("Escape");
