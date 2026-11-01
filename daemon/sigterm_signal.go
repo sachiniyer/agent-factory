@@ -94,7 +94,23 @@ func signalClassifiedDaemon(pid int, proc proctree.Process) error {
 func signalProcessChecked(proc proctree.Process) error {
 	if err := proctree.Signal(proc, syscall.SIGTERM); err != nil {
 		if errors.Is(err, proctree.ErrIdentityChanged) {
-			if !pidLooksAlive(proc.PID) {
+			// Require a confirmed absence before accepting this as a successful
+			// stop, as the grace poll and SIGKILL step do: proctree.Signal
+			// revalidates via AliveSame, which collapses any identity-read error
+			// to "not alive", so a transiently unreadable identity (for example
+			// under an LSM where a signal-0 probe then returns EPERM) surfaces
+			// here as ErrIdentityChanged with no SIGTERM sent. !pidLooksAlive
+			// collapses every signal-0 error to "dead", so it would treat that
+			// unsignalable PID as a confirmed exit and return nil — a false
+			// successful stop with no signal sent, which lets reset's liveness
+			// barrier abort on the still-running daemon later instead of
+			// completing the teardown (#4793). pidExitObserved reports an exit
+			// only for a confirmed absence (ESRCH / os.ErrProcessDone); a
+			// non-absence signal-0 error (EPERM) is preserved as "not exited",
+			// so only a genuinely gone daemon returns nil and a recycled
+			// (still-alive) or unreadable PID surfaces the scoped refusal
+			// rather than being appended to stopped.
+			if pidExitObserved(proc.PID) {
 				// The classified daemon exited on its own; it is gone, which
 				// is the desired outcome and not a recycled-PID signal.
 				return nil
