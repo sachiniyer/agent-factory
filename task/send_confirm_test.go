@@ -99,7 +99,7 @@ func TestSendConfirmation_AgentAlreadyBusyIsNotEvidence(t *testing.T) {
 		}
 	})
 	t.Run("codex already working", func(t *testing.T) {
-		busy := "• Working (esc to interrupt)\n› \n"
+		busy := "› \n  esc to interrupt\n"
 		pane := &scriptedPane{agent: "codex", frames: []string{busy, busy}}
 		if confirms(t, pane, 30*time.Second) {
 			t.Fatal("codex chrome present before the send is not this prompt's")
@@ -113,5 +113,22 @@ func TestSendConfirmation_UnsignaturedAgentNeverPromotes(t *testing.T) {
 	pane := &scriptedPane{agent: "aider", frames: []string{idleComposer, turnRow("1s"), turnRow("2s")}}
 	if confirms(t, pane, 30*time.Second) {
 		t.Fatal("an agent without an in-turn signature has no bound evidence")
+	}
+}
+
+// A clockless agent's watch is armed by the pre-send frame, so that frame must
+// sit at the send's attempt instant: codex promotes when it does, and not when
+// a delayed capture leaves a gap an earlier pending turn could have started in.
+func TestSendConfirmation_ClocklessSeedMustBeAtTheAttemptInstant(t *testing.T) {
+	busy := "› \n  esc to interrupt\n"
+	frames := []string{"› \n", busy, busy}
+	if !confirms(t, &scriptedPane{agent: "codex", frames: frames}, 0) {
+		t.Fatal("codex chrome appearing after an at-boundary idle frame must promote")
+	}
+	compressConfirmWindow(t)
+	c := BeginSendConfirmation(context.Background(), &scriptedPane{agent: "codex", frames: frames})
+	c.BindAttempt(time.Now().Add(30 * time.Second)) // the attempt lands long after the idle frame
+	if c.Confirm(context.Background()) {
+		t.Fatal("an idle frame far older than the attempt cannot bound a clockless turn's start")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The confirmation window for an unverified send (#6474). A send whose pane
@@ -42,7 +43,19 @@ type SendConfirmation struct {
 	sentAt   time.Time
 	watch    *TurnWatch
 	eligible bool
+	// preAt is when the pre-send frame was requested; clockless is set for
+	// agents whose chrome carries no elapsed clock to bound a turn's start.
+	preAt     time.Time
+	clockless bool
 }
+
+// clocklessSeedSlack bounds how long before the send's attempt instant the
+// pre-send frame may have been requested for an agent whose chrome has no
+// clock (codex, amp, opencode). Their watch is armed by "chrome absent" in that
+// frame, so a turn starting between the frame and the attempt would otherwise
+// read as this prompt's; a longer gap (a delayed remote preview) makes the send
+// ineligible instead. Var so tests can pin it.
+var clocklessSeedSlack = 2 * time.Second
 
 // BeginSendConfirmation captures the pre-send frame. An agent
 // with no in-turn signature, an unreadable pane, or a pane already mid-turn
@@ -61,6 +74,8 @@ func BeginSendConfirmation(ctx context.Context, target ReadinessTarget) *SendCon
 	c.watch = NewTurnWatch(agent, sentAt)
 	c.watch.Observe(before, sentAt)
 	c.eligible = true
+	c.preAt = sentAt
+	c.clockless = agent != tmux.ProgramClaude && agent != tmux.ProgramDevin
 	return c
 }
 
@@ -70,6 +85,9 @@ func BeginSendConfirmation(ctx context.Context, target ReadinessTarget) *SendCon
 func (c *SendConfirmation) BindAttempt(attemptedAt time.Time) {
 	if c == nil || c.watch == nil || attemptedAt.IsZero() {
 		return
+	}
+	if c.clockless && attemptedAt.Sub(c.preAt) > clocklessSeedSlack {
+		c.eligible = false
 	}
 	c.sentAt = attemptedAt
 	c.watch.boundary = attemptedAt
