@@ -1050,7 +1050,11 @@ host the daemon's `GH_HOST` names. An ssh origin keeps using the host's own ssh 
   clears that one entry. A sandbox can't start a session on an opted-in host at
   all, or on any listed host af can't show is a different machine. While any
   host is opted in, af also refuses to place code you didn't place on a machine
-  it can't identify, rather than guess.
+  it can't identify, rather than guess. One placed while nothing was opted in is
+  kept as an *unconfirmed* taint. Since af can't show it ran on another machine,
+  no host can be opted in until you clear it with
+  `af hosts reset-trust --entry <id>`. A reset is durable: restarting the daemon
+  doesn't bring a cleared taint back.
 - **One machine, compared carefully.** af treats two hosts as one machine when
   a name matches or an address does. Case, a trailing dot, and a short name for
   a full one don't matter. Addresses count as configured, as af's ssh dialed
