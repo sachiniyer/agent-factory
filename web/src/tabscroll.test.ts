@@ -13,13 +13,26 @@ test("a tab past the end scrolls forward by exactly its overhang", () => {
   assert.equal(scrollDeltaToReveal(422, 879, 800, 940), 940 - 879);
 });
 
+test("sub-pixel overhang is not an overhang", () => {
+  assert.equal(scrollDeltaToReveal(422, 879, 421.6, 504), 0);
+  assert.equal(scrollDeltaToReveal(422, 879, 700, 879.4), 0);
+});
+
 test("a tab before the start scrolls back by exactly its overhang", () => {
   assert.equal(scrollDeltaToReveal(422, 879, 300, 440), 300 - 422);
 });
 
 test("a tab wider than the bar aligns its start, so the label stays readable", () => {
   assert.equal(scrollDeltaToReveal(422, 879, 500, 1100), 500 - 422);
-  assert.equal(scrollDeltaToReveal(422, 879, 100, 900), 100 - 422);
+  assert.equal(scrollDeltaToReveal(422, 879, 300, 700), 300 - 422, "start hidden, end inside: show the label");
+});
+
+test("a tab wider than the bar that already fills the viewport is left alone (#6420 fix-forward)", () => {
+  // Selftest geometry: a 142px strip showing the middle/end of a 250px tab.
+  assert.equal(scrollDeltaToReveal(626, 768, 626, 876), 0, "starts at the left edge");
+  assert.equal(scrollDeltaToReveal(626, 768, 500, 900), 0, "spans both edges");
+  assert.equal(scrollDeltaToReveal(626, 768, 518, 767.6), 0, "sub-pixel short of the end is still filling it");
+  assert.equal(scrollDeltaToReveal(626, 768, 700, 950), 700 - 626, "starts inside the bar: align the label");
 });
 
 test("reveal fires on a new active tab or session, never on a plain re-render", () => {

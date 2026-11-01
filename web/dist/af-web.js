@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "79d10f3c0af8";
+var CLIENT_VERSION = "3695eab17d6b";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18084,9 +18084,13 @@ function reorderTargetIndex(from, insertion) {
 
 // src/tabscroll.ts
 function scrollDeltaToReveal(barLeft, barRight, tabLeft, tabRight) {
-  if (tabLeft < barLeft) return tabLeft - barLeft;
-  if (tabRight - tabLeft > barRight - barLeft) return tabLeft - barLeft;
-  if (tabRight > barRight) return tabRight - barRight;
+  const slack = 1;
+  if (tabRight - tabLeft > barRight - barLeft) {
+    if (tabLeft <= barLeft + slack && tabRight >= barRight - slack) return 0;
+    return tabLeft - barLeft;
+  }
+  if (tabLeft < barLeft - slack) return tabLeft - barLeft;
+  if (tabRight > barRight + slack) return tabRight - barRight;
   return 0;
 }
 function shouldRevealActive(previousKey, sessionId, activeIndex) {
