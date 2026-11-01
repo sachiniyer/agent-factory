@@ -128,8 +128,16 @@ func (h backlogHost) Gate(repoID string) backlog.Gate {
 	if err != nil {
 		return backlog.Gate{Name: "budget", Reason: err.Error()}
 	}
-	g, _ := h.m.backlogGate(repoID, *budget, h.m.backlogUsage(), time.Now())
-	return g
+	now, usage := time.Now(), h.m.backlogUsage()
+	g, _ := h.m.backlogGate(repoID, *budget, usage, now)
+	if g.Open() {
+		return g
+	}
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		return g
+	}
+	return h.m.viewGate(repoID, b, b.DeriveAll(h.Facts(repoID)), *budget, usage, now, g)
 }
 
 // backlogGate checks the gates for the account the project's item sessions
@@ -142,6 +150,31 @@ func (m *Manager) backlogGate(repoID string, budget backlog.Budget, usage planus
 	return m.backlogGateFor(account, budget, usage, now), account
 }
 
+// viewGate is the gate the runner view shows for a project whose default
+// account's gate def is closed. The runner is stopped only when no queued item
+// can start: an item that continues a live session spends that session's account,
+// so an open gate there means the runner is working, whatever the default
+// account's gate says (#6309). A closed default gate that does not depend on the
+// account (plan usage off, no meter) always stands.
+func (m *Manager) viewGate(repoID string, b *backlog.Backlog, states map[int]backlog.Derived, budget backlog.Budget, usage planusage.Usage, now time.Time, def backlog.Gate) backlog.Gate {
+	if def.Open() || def.Name == backlog.GatePlanUsageOff || def.Name == backlog.GateMeterUnavailable {
+		return def
+	}
+	for _, id := range b.Runnable(states, len(b.Items), nil) {
+		if m.startUnmeterable(repoID, b, id) {
+			continue
+		}
+		acct := m.continuationAccount(repoID, b, id)
+		if acct == "" {
+			continue // a new session spends the default account, whose gate is closed
+		}
+		if m.backlogGateFor(acct, budget, usage, now).Open() {
+			return backlog.Gate{}
+		}
+	}
+	return def
+}
+
 // continuationAccount names the account an automatic start of item id would
 // spend: the account of its live session when it continues one (the work goes to
 // that session whatever the project's default is now), else "" (a new session,
@@ -150,6 +183,16 @@ func (m *Manager) continuationAccount(repoID string, b *backlog.Backlog, id int)
 	s := m.liveContinuation(repoID, b, id)
 	if s == nil {
 		return ""
+	}
+	// The account the meter files the session's usage under: its effective Claude
+	// config dir, which an operator override in the launch command
+	// (CLAUDE_CONFIG_DIR=… claude) sets without setting Account (#6309). The
+	// session's own account field is only the fallback when that dir cannot be
+	// resolved.
+	if configDir, _, err := s.instance.ClaudeRunTranscriptDirs(); err == nil && configDir != "" {
+		if home, herr := config.GetConfigDir(); herr == nil {
+			return accountOfRun(home, configDir)
+		}
 	}
 	return planAccount(s.instance.Account)
 }

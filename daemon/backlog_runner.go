@@ -209,6 +209,13 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 			gate, account := m.backlogGate(repoID, *budget, usage, now)
 			in.Gate = gate
 			in.Limit = rs.startLimit(func(p *backlog.StartPacer) int { return p.Limit(usageFor(usage, account), now) })
+			if !gate.Open() {
+				// The view says stopped only when no queued item's account is open;
+				// selectStarts below makes the real per-account choice.
+				if g := m.viewGate(repoID, b, states, *budget, usage, now, gate); g.Open() {
+					in.Gate, in.Limit = g, -1
+				}
+			}
 		}
 		p := b.PlanRunner(in)
 		p.Start = m.selectStarts(repoID, b, states, p, *budget, usage, now)

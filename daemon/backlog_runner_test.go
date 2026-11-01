@@ -709,3 +709,122 @@ func TestPickStartsFreshRecomputesTheChoiceOnAFreshReading(t *testing.T) {
 		t.Fatalf("nothing picked should not refresh: %+v (refreshed %d)", p, refreshed)
 	}
 }
+
+// A queued item with a live session that spends a registered account: the review
+// ended its run and the user queued it again, so the runner would continue it in
+// place.
+func queuedContinuationOn(t *testing.T, account string) (*Manager, string, *session.Instance) {
+	t.Helper()
+	m, repoID := runnerTestManager(t)
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account != "" {
+		if err := os.MkdirAll(filepath.Join(home, "accounts", "claude", account), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoID: repoID, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatal(err)
+	}
+	m.backgroundMutationWG.Wait()
+	inst := m.itemSessions(repoID)[loadItem(t, repoID, 1).Runs[0].SessionID].instance
+	inst.Account = account
+	if !inst.DisarmBacklogRun() {
+		t.Fatal("precondition: run active")
+	}
+	m.backlogRunEnded(repoID, inst.ID)
+	queueItem(t, m, repoID, 1)
+	return m, repoID, inst
+}
+
+// The runner is stopped only when no queued item can start. With the project's
+// default account over its stop-at and a queued continuation on an account with
+// room, selectStarts starts the continuation, so the runner view (the event and
+// what Get returns) must not say "stopped by the budget" (#6309, found on
+// 7d8eac6c14).
+func TestRunnerViewIsNotStoppedWhileAContinuationOnAnOpenAccountStarts(t *testing.T) {
+	m, repoID, _ := queuedContinuationOn(t, "alt")
+	var sent []SendPromptRequest
+	prev := sendBacklogPrompt
+	sendBacklogPrompt = func(_ *Manager, req SendPromptRequest) error { sent = append(sent, req); return nil }
+	t.Cleanup(func() { sendBacklogPrompt = prev })
+	setRunner(t, m, repoID, true, 3)
+	writeFreshReading(t, 95) // the default account is past its stop-at
+	now := time.Now().UTC()
+	if err := planusage.WriteReading("alt", planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 10, ResetsAt: now.Add(2 * time.Hour).Unix()}, ReadAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.meterUsageWithin(0) // one real pass, so both accounts have a reading
+	events := runnerEvents(t, m)
+
+	pass(m, repoID, time.Now())
+
+	if len(sent) != 1 {
+		t.Fatalf("the continuation on the open account was not started: %d prompts", len(sent))
+	}
+	var last backlog.RunnerEvent
+	for _, ev := range events() {
+		if ev.RepoID == repoID {
+			last = ev
+		}
+	}
+	if last.State == backlog.RunnerStopped || last.Gate != "" {
+		t.Fatalf("the runner event says stopped while it starts work: %+v", last)
+	}
+	v, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Runner.State == backlog.RunnerStopped || v.Runner.Gate != "" {
+		t.Fatalf("Get says stopped while a queued continuation can start: %+v", v.Runner)
+	}
+}
+
+// With nothing queued on an open account the default account's closed gate still
+// stands: a new session would spend it.
+func TestRunnerViewStaysStoppedWhenNoQueuedItemsAccountIsOpen(t *testing.T) {
+	m, repoID, _ := queuedContinuationOn(t, "alt")
+	setRunner(t, m, repoID, true, 3)
+	writeFreshReading(t, 95)
+	now := time.Now().UTC()
+	if err := planusage.WriteReading("alt", planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 96, ResetsAt: now.Add(2 * time.Hour).Unix()}, ReadAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.meterUsageWithin(0)
+	v, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Runner.State != backlog.RunnerStopped || v.Runner.Gate != backlog.GateStopAt {
+		t.Fatalf("every account is past its stop-at: %+v", v.Runner)
+	}
+}
+
+// A launch command that sets CLAUDE_CONFIG_DIR itself puts the session's usage
+// under that dir's account, which is where the meter files it; the continuation
+// gate must read the same account, not the ambient key (#6309).
+func TestContinuationAccountFollowsTheLaunchCommandsConfigDir(t *testing.T) {
+	m, repoID, inst := queuedContinuationOn(t, "work")
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Account = "" // no account field: only the launch command names the dir
+	inst.Program = "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "accounts", "claude", "work") + " claude"
+	if _, _, err := inst.ClaudeRunTranscriptDirs(); err != nil {
+		t.Fatalf("precondition: the session resolves its transcript dirs: %v", err)
+	}
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.continuationAccount(repoID, b, 1); got != "work" {
+		t.Fatalf("an accountless session launched with CLAUDE_CONFIG_DIR=…/work continues on %q, want work", got)
+	}
+}
