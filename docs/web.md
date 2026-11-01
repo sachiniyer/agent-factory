@@ -686,9 +686,13 @@ pool is full the editor stays on the same-origin mirror and the daemon's error n
 is never served on the web UI's address, so without a port of its own its pane says which
 setting to turn on. See [`network.editor_origin_ports`](configuration.md).
 
-Behind a front door that rewrites `Host`, forward the browser's for each of these ports too
-(`X-Forwarded-Host $http_host`), as for the main UI: an editor's WebSocket is accepted only
-from the editor's own page, judged the same way. See [behind a reverse
+An editor port answers only its own `Host` names, so a front-door name that
+`tailscale serve` or Caddy forwards must be listed in `network.allowed_hosts` — one
+entry covers the editor ports on any port. Behind a front door that rewrites `Host`,
+forward the browser's for each of these ports too (`X-Forwarded-Host $http_host`), as
+for the main UI: an editor's WebSocket is accepted only from the editor's own page,
+judged the same way. See [Host names the daemon answers
+to](remote-http-auth.md#host-names-the-daemon-answers-to) and [behind a reverse
 proxy](remote-http-auth.md#behind-a-reverse-proxy).
 
 ##### VS Code tabs get one too — per session
