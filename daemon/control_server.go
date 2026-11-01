@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/rpc"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -841,6 +843,7 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 		_ = listener.Close()
 		return nil, err
 	}
+	listener = testHookControlListener(listener)
 
 	// Every accepted connection gets its own rpc.Server because its
 	// controlServer carries that connection's kernel-verified requester
@@ -881,11 +884,38 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 	serveWG.Add(1)
 	go func() {
 		defer serveWG.Done()
+		// Classify accept errors, not treat all as fatal. A bare return on
+		// any error used to silently kill the control plane on a transient
+		// EMFILE/ENFILE (#718/#767 orphan class); net/http retries.
+		var tempDelay time.Duration
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return // shutdown/cleanup closed the listener
+				}
+				if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+					// Transient fd exhaustion: retry with exponential backoff so
+					// a momentary shortage cannot wedge the plane.
+					if tempDelay == 0 {
+						tempDelay = 5 * time.Millisecond
+					} else {
+						tempDelay *= 2
+					}
+					if max := time.Second; tempDelay > max {
+						tempDelay = max
+					}
+					log.WarningLog.Printf("daemon control socket: accept error: %v; retrying in %v", err, tempDelay)
+					time.Sleep(tempDelay)
+					continue
+				}
+				// Non-recoverable: log and close the listener so net unlinks
+				// the socket — clients get "no such file", not a hang.
+				log.WarningLog.Printf("daemon control socket: fatal accept error, closing listener: %v", err)
+				_ = listener.Close()
 				return
 			}
+			tempDelay = 0
 			connectionsMu.Lock()
 			if closing {
 				connectionsMu.Unlock()
@@ -953,7 +983,9 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 			// Remove, a new daemon can pass its ping check and bind a fresh
 			// socket at the same path, and the Remove would delete the new
 			// daemon's socket, orphaning it — the same race class as #718/#767.
-			closeErr = listener.Close()
+			if err := listener.Close(); !errors.Is(err, net.ErrClosed) {
+				closeErr = err
+			}
 			// Closing accepted connections stops them from admitting another RPC.
 			// net/rpc's ServeConn waits for methods already dispatched before it
 			// returns; joining our ServeConn goroutines therefore joins every call
