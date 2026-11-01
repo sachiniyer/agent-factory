@@ -46,7 +46,6 @@ func TestServerState_OldBinaryReadsNewRecord(t *testing.T) {
 	recordServerState(home, ServerState{
 		Mode:         ServerMode("adopted"),
 		Socket:       sock,
-		DaemonPID:    4242,
 		PriorSockets: []string{prior},
 		At:           time.Now(),
 	})
@@ -70,7 +69,9 @@ func TestServerState_OldBinaryReadsNewRecord(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("new-schema read of its own record: ok=%v err=%v", ok, err)
 	}
-	if st.DaemonPID != 4242 || len(st.PriorSockets) != 1 || st.PriorSockets[0] != prior {
+	// recordServerState always stamps the WRITER's pid — os.Getpid() here —
+	// over whatever a caller supplies, which is itself part of the contract.
+	if st.DaemonPID != os.Getpid() || len(st.PriorSockets) != 1 || st.PriorSockets[0] != prior {
 		t.Fatalf("new-schema read dropped the generation fields: %+v", st)
 	}
 }

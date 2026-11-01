@@ -223,7 +223,7 @@ func TestRecordServerState_PriorSocketsDropsUnreachableGeneration(t *testing.T) 
 	lastServerState = ServerState{}
 	serverStateMu.Unlock()
 
-	dead := filepath.Join(sockDir, "gone")
+	dead := socketForTest(t, sockDir, "gone")
 	live := socketForTest(t, sockDir, "live")
 	current := socketForTest(t, sockDir, "current")
 
