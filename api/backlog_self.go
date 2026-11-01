@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -82,7 +84,11 @@ func (t *backlogTarget) selfItem() (string, *backlog.Item, error) {
 // project cannot be resolved (its recorded worktree was deleted, moved, or is
 // unreadable): the second return is that error, so a confused agent that points
 // --repo at another project cannot make the guard consult that unrelated
-// backlog and let the mutation through.
+// backlog and let the mutation through. It holds too when the session has no
+// recorded path and the command target's project — the fallback in that case —
+// cannot be resolved: the second return is that error, so a guarded mutation
+// that does not re-resolve a project before reaching the daemon (the global
+// budget command) cannot pass the guard as a non-item session.
 func inItemSession() (*session.InstanceData, error) {
 	s, err := backlogSelfSession()
 	if err != nil || s == nil {
@@ -123,7 +129,13 @@ func inItemSession() (*session.InstanceData, error) {
 // session) and let the mutation through. A session with no recorded path, or a
 // --daemon-url target whose path is on the daemon host, has nothing to resolve,
 // so it returns false with no error and the guard falls back to the command
-// target's project (the prior behavior).
+// target's project. When that fallback itself cannot be resolved (no --repo and
+// the cwd is not a git repository), the second return is that error rather than
+// nil: a guarded mutation that does not re-resolve the project before reaching
+// the daemon (the global budget command, SetBudget) would otherwise pass the
+// guard as a non-item session and let the mutation through, so the guard fails
+// closed and names the fallback resolution failure rather than claiming an item
+// session.
 func itemSessionFromAuthoritativeLink(s *session.InstanceData) (bool, error) {
 	t, resolveErr := sessionOwnBacklogTarget(s)
 	if resolveErr != nil {
@@ -138,7 +150,7 @@ func itemSessionFromAuthoritativeLink(s *session.InstanceData) (bool, error) {
 	}
 	t, err := backlogProject()
 	if err != nil {
-		return false, nil
+		return false, backlogUnresolvableFallbackProjectErr(err)
 	}
 	v, err := t.get()
 	if err != nil {
@@ -156,16 +168,34 @@ func itemSessionFromAuthoritativeLink(s *session.InstanceData) (bool, error) {
 // cannot be resolved to a git repository (the worktree was deleted, moved, or is
 // unreadable), it returns (nil, err) so the guard fails closed rather than
 // consulting an unrelated project a confused agent pointed --repo at.
+//
+// The resolution runs under backlogGuardRepoProbeTimeout: RepoFromPath's own
+// entry point uses an unbounded background context, so a worktree on a stale or
+// unreachable mount would block the guard forever before it returns — putting
+// every guarded backlog mutation from a dropped-chip or ordinary session on
+// that unbounded path. The bounded RepoFromPathContext lookup caps that wait,
+// and a timeout or other unanswered probe propagates through the caller's
+// fail-closed error path rather than falling back to an unrelated project.
 func sessionOwnBacklogTarget(s *session.InstanceData) (*backlogTarget, error) {
 	if apiclient.IsRemoteTarget() || s.Path == "" {
 		return nil, nil
 	}
-	repo, err := config.RepoFromPath(s.Path)
+	ctx, cancel := context.WithTimeout(context.Background(), backlogGuardRepoProbeTimeout)
+	defer cancel()
+	repo, err := config.RepoFromPathContext(ctx, s.Path)
 	if err != nil {
 		return nil, err
 	}
 	return &backlogTarget{repoID: repo.ID, name: filepath.Base(repo.Root)}, nil
 }
+
+// backlogGuardRepoProbeTimeout bounds the session's own-project resolution the
+// guard runs on every guarded backlog mutation. It is a var, not a const, only
+// so tests can drive it below git's response time; production never changes it.
+// A generous interactive budget (matching the claude login-shell probe) gives a
+// healthy resolution room under load while capping a wedged mount that the
+// unbounded RepoFromPath entry point would wait on forever.
+var backlogGuardRepoProbeTimeout = 5 * time.Second
 
 const backlogSelfAskHint = "ask the user with \"af backlog ask --self\""
 
@@ -188,6 +218,18 @@ func backlogUnreadableItemSessionErr(readErr error) error {
 // pointed --repo at.
 func backlogUnresolvableSessionProjectErr(resolveErr error) error {
 	return fmt.Errorf("cannot resolve this session's own project to check for an item session: %w; retry", resolveErr)
+}
+
+// backlogUnresolvableFallbackProjectErr is the fail-closed refusal a guarded
+// mutation gets when the session has no recorded path (or the client is talking
+// to a remote daemon) and the command target's project — the fallback the guard
+// consults in that case — cannot be resolved either (no --repo and the cwd is
+// not a git repository). The global budget command does not re-resolve a
+// project before reaching SetBudget, so letting this fall through as a non-item
+// session would pass the guard; the guard fails closed and names the fallback
+// resolution failure rather than claiming an item session.
+func backlogUnresolvableFallbackProjectErr(resolveErr error) error {
+	return fmt.Errorf("cannot resolve the command target's project to check for an item session: %w; retry", resolveErr)
 }
 
 // refuseFromItemSession stops an agent in an item session from running a

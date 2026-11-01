@@ -531,3 +531,85 @@ func TestBacklogGuardRailsFailClosedOnUnresolvableSessionProject(t *testing.T) {
 		t.Fatalf("runner on did not fail closed with the real cause: %v", err)
 	}
 }
+
+// TestBacklogGuardRailsFailClosedOnUnresolvableFallbackProject pins the
+// fail-closed behavior for the third gap raised on #6498: a dropped-chip item
+// session (BacklogItem: 0) with no recorded worktree path — the compatibility
+// case — has nothing to resolve as its own project, so the guard falls back to
+// the command target's project. When that fallback cannot be resolved either
+// (no --repo and the cwd is not a git repository), the guard must fail closed
+// rather than treat the session as a non-item session and let the mutation
+// through. The global budget command does not re-resolve a project before
+// reaching SetBudget, so failing open here would let an item-session agent
+// change the budget; the runner control runs the guard before its own project
+// lookup, so it is refused at the guard too. The refusal names the fallback
+// resolution failure (it does not claim an item session), and no daemon call
+// is made.
+func TestBacklogGuardRailsFailClosedOnUnresolvableFallbackProject(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// Item 1 runs in session s1; the chip was dropped (BacklogItem: 0) and the
+	// session has no recorded worktree path, so the guard falls back to the
+	// command target's project. withRunningItem set up the run under repo-a
+	// (repoFlag's value at setup); the command below retargets --repo at a path
+	// that is not a git repository, so backlogProject() cannot resolve it.
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0, Path: ""})
+	notARepo := filepath.Join(t.TempDir(), "not-a-repo")
+	if err := os.MkdirAll(notARepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	prevRepo := repoFlag
+	repoFlag = notARepo
+	t.Cleanup(func() { repoFlag = prevRepo })
+	*methods = nil
+	// A guarded budget control is refused with the real cause — the fallback
+	// project resolution failure — not allowed through to SetBudget.
+	if _, err := runBacklogCmd(t, "budget", "--limit", "40"); err == nil {
+		t.Fatal("budget --limit from a dropped-chip session with no fallback project was allowed through")
+	} else if !strings.Contains(err.Error(), "cannot resolve the command target's project to check for an item session") {
+		t.Fatalf("budget refusal does not name the fallback resolution failure: %v", err)
+	}
+	// A runner control is refused at the guard before its own project lookup.
+	if _, err := runBacklogCmd(t, "runner", "on"); err == nil {
+		t.Fatal("runner on from a dropped-chip session with no fallback project was allowed through")
+	} else if !strings.Contains(err.Error(), "cannot resolve the command target's project to check for an item session") {
+		t.Fatalf("runner refusal does not name the fallback resolution failure: %v", err)
+	}
+	for _, m := range *methods {
+		if m == "SetBudget" || m == "SetBacklogSettings" {
+			t.Fatalf("a refused control reached the daemon: %v", *methods)
+		}
+	}
+}
+
+// TestBacklogGuardRailsBindsSessionProjectResolution pins the bound raised on
+// #6498: the session's own-project resolution runs on every guarded backlog
+// mutation, so a worktree on a stale or unreachable mount must not block the
+// guard forever. The resolution runs under backlogGuardRepoProbeTimeout (a
+// bounded RepoFromPathContext); driving that deadline below git's response
+// time makes the probe unanswered, and an unanswered probe propagates through
+// the existing fail-closed error path rather than falling back to an unrelated
+// project. The refusal names the resolution failure (it does not claim an item
+// session), and no daemon call is made.
+func TestBacklogGuardRailsBindsSessionProjectResolution(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// Item 1 runs in session s1; the chip was dropped (BacklogItem: 0) and the
+	// session's recorded worktree is repo-a (a real repository), so without a
+	// bound a healthy probe would resolve it and the guard would read the
+	// backlog. Driving the probe deadline below git's response time makes the
+	// probe unanswered instead.
+	aRoot := repoFlag
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0, Path: aRoot})
+	prev := backlogGuardRepoProbeTimeout
+	backlogGuardRepoProbeTimeout = time.Nanosecond
+	t.Cleanup(func() { backlogGuardRepoProbeTimeout = prev })
+	*methods = nil
+	if _, err := runBacklogCmd(t, "done", "1"); err == nil {
+		t.Fatal("done 1 with a wedged session-project probe was allowed through")
+	} else if !strings.Contains(err.Error(), "cannot resolve this session's own project to check for an item session") {
+		t.Fatalf("refusal does not name the resolution failure: %v", err)
+	}
+	// The probe never answered, so the guard fails before any backlog read.
+	if len(*methods) != 0 {
+		t.Fatalf("a refused command reached the daemon: %v", *methods)
+	}
+}
