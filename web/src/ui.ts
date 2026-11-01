@@ -2306,15 +2306,19 @@ export class AppShell {
       dot.setAttribute("aria-hidden", "true");
       name.prepend(dot, " ");
     }
+    // The badge sits beside the name, not inside it: the name cuts a long project
+    // name short with an ellipsis, which would cut the badge off with it, and the
+    // name's text stays the project's name alone.
+    let title: HTMLElement = name;
     if (needsYou > 0) {
       const badge = h("span", { class: "af-viewtab-badge af-project-item-badge" });
       setNeedsYouBadge(badge, needsYou);
-      name.append(badge);
+      title = h("span", { class: "af-project-item-title" }, name, badge);
     }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      name,
+      title,
       h("span", { class: "af-project-item-path" }, p.path),
     );
     // The missing marker leads the glance: a dead checkout is the consequential

@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "d16c1b332920";
+var CLIENT_VERSION = "d1049bbe8759";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21079,15 +21079,16 @@ var AppShell = class {
       dot.setAttribute("aria-hidden", "true");
       name.prepend(dot, " ");
     }
+    let title = name;
     if (needsYou > 0) {
       const badge = h("span", { class: "af-viewtab-badge af-project-item-badge" });
       setNeedsYouBadge(badge, needsYou);
-      name.append(badge);
+      title = h("span", { class: "af-project-item-title" }, name, badge);
     }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      name,
+      title,
       h("span", { class: "af-project-item-path" }, p.path)
     );
     const meta = h(

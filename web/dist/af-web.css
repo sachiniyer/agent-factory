@@ -353,6 +353,17 @@ button:disabled,
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.af-project-item-title {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+}
+.af-project-item-title .af-project-item-name {
+  min-width: 0;
+}
+.af-project-item-badge {
+  flex: none;
+}
 .af-project-item-path {
   font-size: var(--af-type-caption);
   color: var(--af-ink-muted);
