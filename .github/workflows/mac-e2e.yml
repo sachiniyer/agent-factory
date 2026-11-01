@@ -1,0 +1,152 @@
+name: macOS end-to-end
+
+# Runs the REAL af binary through its core journey on macOS: build, install,
+# daemon, a session with a stand-in agent, an account-scoped launch through the
+# #6373 shim, a new window, a terminal tab, archive/restore, doctor, the web UI,
+# and codesign. See #6384 for why: `Test (macOS)` runs go test on a SIP-disabled
+# VM and never executes the shipped binary end to end, and PR CI skips macOS.
+#
+# Report-only (#6384): every job is continue-on-error, so a red job is visible on
+# the run without holding anything. It becomes a gate once it has run clean for a
+# while. What SIP-on Macs do is covered by scripts/mac-smoke.sh run by hand on a
+# real Mac (docs/dev/mac-smoke.md) — this workflow runs the same script.
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+concurrency:
+  # Every master push is a question worth answering, so runs queue rather than
+  # cancel one another; macOS minutes are expensive but the tip is not the only
+  # commit that can break a Mac.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  journey:
+    name: Journey (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is arm64; macos-15-intel is the Intel image GitHub still
+        # offers. ubuntu-24.04 is not a Mac: it runs the same script so a defect
+        # in the script itself shows up there for the price of a Linux minute.
+        os: [macos-latest, macos-15-intel, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      # tmux is not preinstalled on the macOS runners. Homebrew's tmux is what
+      # Mac users have, so the journey runs against it.
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux
+
+      - name: Install tmux (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/ci-apt-install.sh tmux
+
+      - name: Record the runner
+        run: |
+          uname -a
+          if [ "$(uname -s)" = Darwin ]; then
+            sw_vers; csrutil status || true; sysctl -n machdep.cpu.brand_string || true
+          fi
+          echo "bash: $BASH_VERSION"; /bin/bash --version | head -1
+          tmux -V
+          echo "TMPDIR=${TMPDIR:-unset} (${#TMPDIR} bytes)"
+
+      # The documented from-source install (dev-install.sh), into a throwaway bin
+      # dir: it builds with go and moves the binary into BIN_DIR.
+      - name: Install af (dev-install.sh)
+        run: |
+          BIN_DIR="$RUNNER_TEMP/afbin" ./dev-install.sh
+          "$RUNNER_TEMP/afbin/af" version
+
+      # The shipped artifact is not the one we just built: go build output is
+      # ad-hoc signed by the linker on arm64, a release tarball goes through the
+      # release pipeline. Check the real thing.
+      - name: Check the latest release artifact (install.sh)
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          work="$(mktemp -d /tmp/afrel.XXXXXX)"
+          export AGENT_FACTORY_HOME="$work/home" HOME="$work/user"
+          mkdir -p "$AGENT_FACTORY_HOME" "$HOME"
+          AF_INSTALL_DIR="$work/bin" sh install.sh
+          bin="$work/bin/af"
+          echo "--- file"; file "$bin"
+          echo "--- lipo"; lipo -info "$bin"
+          echo "--- codesign -dv"; codesign -dv --verbose=4 "$bin" 2>&1 || true
+          # arm64 refuses to run an unsigned or invalidly signed binary
+          # (`Killed: 9`), so there the signature must be valid. x86_64 runs
+          # unsigned code, and Go's linker only signs arm64: unsigned is reported,
+          # a signature that is present but broken still fails.
+          want="$(uname -m)"
+          if codesign -d "$bin" 2>&1 | grep -q "not signed at all" && [ "$want" = x86_64 ]; then
+            echo "--- codesign -v: release binary is unsigned (allowed on x86_64)"
+          else
+            echo "--- codesign -v"; codesign -v --verbose=2 "$bin"
+          fi
+          lipo -archs "$bin" | tr ' ' '\n' | grep -qx "$want" || { echo "release binary lacks $want"; exit 1; }
+          "$bin" version
+          # install.sh restarted a daemon in the throwaway home: stop exactly that
+          # one, by the pid it recorded (never by pattern).
+          if [ -f "$AGENT_FACTORY_HOME/daemon.pid" ]; then
+            kill "$(tr -dc '0-9' < "$AGENT_FACTORY_HOME/daemon.pid")" 2>/dev/null || true
+          fi
+
+      # Informational: can a launchd user agent be registered on this runner?
+      # The result decides whether the journey could run the daemon under
+      # launchd; today it runs it supervised by the job.
+      - name: Probe launchd user agents
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          work="$(mktemp -d /tmp/aflc.XXXXXX)"
+          export AGENT_FACTORY_HOME="$work/home" HOME="$work/user"
+          mkdir -p "$AGENT_FACTORY_HOME" "$HOME/Library/LaunchAgents"
+          id -u; launchctl print "gui/$(id -u)" 2>&1 | head -3 || true
+          "$RUNNER_TEMP/afbin/af" daemon install || echo "launchd install failed: exit $?"
+          "$RUNNER_TEMP/afbin/af" daemon status || true
+          "$RUNNER_TEMP/afbin/af" daemon uninstall || true
+
+      # `shell: bash` (not the default) adds -o pipefail: without it the exit
+      # status of `| tee` hides a failing journey, and a step that could not even
+      # start the script reported success. /bin/bash is the stock bash 3.2 on a Mac.
+      - name: Journey
+        shell: bash
+        run: |
+          /bin/bash scripts/mac-smoke.sh --keep --af "$RUNNER_TEMP/afbin/af" 2>&1 | tee "$RUNNER_TEMP/journey.txt"
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### Journey (${{ matrix.os }})"
+            echo '```'
+            sed -n '/^== environment/,$p' "$RUNNER_TEMP/journey.txt" 2>/dev/null || echo "no output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the journey log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journey-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/journey.txt
+            /tmp/afms.*/smoke.log
+          if-no-files-found: ignore
