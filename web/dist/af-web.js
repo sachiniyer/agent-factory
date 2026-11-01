@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "4346c572b852";
+var CLIENT_VERSION = "f5890cb332cc";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7371,12 +7371,12 @@ async function fetchPreviewOrigin(sessionId, tabId, token2) {
 }
 async function fetchEditorPortOrigin(sessionId, token2) {
   const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
-  const headers = {};
+  const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }
   try {
-    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    const resp = await fetch(url, { method: "POST", headers, body: "{}", cache: "no-store" });
     if (!resp.ok) {
       return null;
     }
@@ -7465,13 +7465,13 @@ function spawnConfigAssistant(token2) {
   return af("config-assistant", {}, token2);
 }
 async function reapConfigAssistant(token2) {
-  const headers = {};
+  const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }
   let resp;
   try {
-    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers });
+    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers, body: "{}" });
   } catch (e) {
     throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
   }
@@ -18082,6 +18082,24 @@ function reorderTargetIndex(from, insertion) {
   return target === from ? null : target;
 }
 
+// src/tabscroll.ts
+function scrollDeltaToReveal(barLeft, barRight, tabLeft, tabRight) {
+  const slack = 1;
+  if (tabRight - tabLeft > barRight - barLeft) {
+    if (tabLeft <= barLeft + slack && tabRight >= barRight - slack) return 0;
+    return tabLeft - barLeft;
+  }
+  if (tabLeft < barLeft - slack) return tabLeft - barLeft;
+  if (tabRight > barRight + slack) return tabRight - barRight;
+  return 0;
+}
+function shouldRevealActive(previousKey, sessionId, activeIndex) {
+  return previousKey !== `${sessionId}:${activeIndex}`;
+}
+function activeRevealKey(sessionId, activeIndex) {
+  return `${sessionId}:${activeIndex}`;
+}
+
 // src/tabtouch.ts
 function tabPressVerdict(sample, limits) {
   if (sample.movedPx > limits.slopPx) {
@@ -20303,6 +20321,8 @@ var AppShell = class {
   // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
   // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
   lastTabBarSig = "";
+  /** The (session, active tab) whose strip position was last revealed (#6420). */
+  lastRevealedActive = null;
   // The insertion indicator for a reorder drag over the bar (#1813): a thin accent
   // rule drawn in the gap a drop would land in. It lives INSIDE the bar (which CSS
   // makes its containing block) and is re-appended after every rebuild, since
@@ -21365,6 +21385,16 @@ var AppShell = class {
       bar.append(this.tabInsert);
     }
     bar.scrollLeft = scrollLeft;
+    const sessionKey2 = selected.id ?? "";
+    if (shouldRevealActive(this.lastRevealedActive, sessionKey2, active)) {
+      this.lastRevealedActive = activeRevealKey(sessionKey2, active);
+      const btn = children[active];
+      if (btn) {
+        const b = bar.getBoundingClientRect();
+        const r = btn.getBoundingClientRect();
+        bar.scrollLeft += scrollDeltaToReveal(b.left, b.right, r.left, r.right);
+      }
+    }
     document.body.classList.remove("af-dragging-tab");
     this.dragFromIndex = null;
     this.lastTabBarSig = tabBarSig(state);

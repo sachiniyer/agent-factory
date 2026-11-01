@@ -77,6 +77,7 @@ import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js"
 import { docsShortcuts } from "./docs_shortcut.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
+import { activeRevealKey, scrollDeltaToReveal, shouldRevealActive } from "./tabscroll.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
 import { KeyedRows, orderChildren } from "./keyed-rows.js";
 import { sessionKey } from "./sessions.js";
@@ -1151,6 +1152,8 @@ export class AppShell {
   // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
   // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
   private lastTabBarSig = "";
+  /** The (session, active tab) whose strip position was last revealed (#6420). */
+  private lastRevealedActive: string | null = null;
   // The insertion indicator for a reorder drag over the bar (#1813): a thin accent
   // rule drawn in the gap a drop would land in. It lives INSIDE the bar (which CSS
   // makes its containing block) and is re-appended after every rebuild, since
@@ -2699,6 +2702,18 @@ export class AppShell {
       bar.append(this.tabInsert);
     }
     bar.scrollLeft = scrollLeft;
+    // Reveal the active tab when IT changed (new tab, digit key, another session), and
+    // only then: the line above exists so a deliberate scroll survives a re-render (#6420).
+    const sessionKey = selected.id ?? "";
+    if (shouldRevealActive(this.lastRevealedActive, sessionKey, active)) {
+      this.lastRevealedActive = activeRevealKey(sessionKey, active);
+      const btn = children[active];
+      if (btn) {
+        const b = bar.getBoundingClientRect();
+        const r = btn.getBoundingClientRect();
+        bar.scrollLeft += scrollDeltaToReveal(b.left, b.right, r.left, r.right);
+      }
+    }
     // Rebuilding the bar detaches EVERY tab button — including the source of an
     // in-flight drag. A native dragend can't fire on a detached node, so the delegated
     // dragend (on the bar) would never run and the drag flag would stick, leaving the UI

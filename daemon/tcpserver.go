@@ -671,6 +671,13 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 				cors = nil
 			}
 			return requestPosture{gate: g, cors: cors, allowedHosts: c.AllowedHosts,
+				// Every TCP listener refuses cross-site browser requests to its
+				// control plane except the preview origin, whose whole path space
+				// belongs to the previewed app (crosssite.go).
+				refuseCrossSite: !live.previewOrigin,
+				// The control listener's clients all declare JSON, the web client's
+				// bodyless calls included, so it refuses a bodyless request without one.
+				strictBodies:  live.policyFromConfig,
 				previewOrigin: live.previewOrigin, previewWarmingUp: live.previewWarmingUp}
 		}
 		handler = withLivePosture(mux, build)
@@ -682,7 +689,12 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 			tokenDisabled:           policy.tokenDisabled,
 			loopbackExempt:          policy.loopbackExempt,
 		}
-		handler = withAuth(mux, gate, cfg.CORSAllowedOrigins)
+		// The static posture (the agent-server): a fixed gate and CORS list, and the
+		// cross-site guard every TCP listener's control plane carries.
+		static := requestPosture{gate: gate, cors: cfg.CORSAllowedOrigins, refuseCrossSite: true}
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			servePosture(w, r, mux, static)
+		})
 	}
 
 	// The DAEMON's TCP listener also serves the embedded browser SPA (#1592 Phase 5

@@ -87,6 +87,7 @@ jobs:
     # release must not be blocked by a repository it never installs from.
     - name: Install zsh
       if: steps.check.outputs.should_release == 'true'
+      timeout-minutes: 25
       run: scripts/ci-apt-install.sh zsh
 
     # Test (macOS) is the only darwin test run and lives on master's pr.yml, which
