@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "f88162dd5812";
+var CLIENT_VERSION = "e46b6b6548ac";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21386,7 +21386,13 @@ var AppShell = class {
       activeBefore.focus({ preventScroll: true });
     }
     const railRows = this.railList.querySelectorAll(".af-row");
-    if (![...railRows].some((r) => r.tabIndex === 0) && railRows.length > 0) {
+    let hasStop = false;
+    for (const railRow of railRows) {
+      const isSelected = railRow.classList.contains("af-row-selected");
+      railRow.tabIndex = isSelected ? 0 : -1;
+      hasStop ||= isSelected;
+    }
+    if (!hasStop && railRows.length > 0) {
       railRows[0].tabIndex = 0;
     }
     const focusedRow = document.activeElement;
@@ -21419,7 +21425,7 @@ var AppShell = class {
     const menu = actionsDisclosure(`Actions for ${session.title}`);
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
-    menu.trigger.tabIndex = selected ? 0 : -1;
+    menu.trigger.tabIndex = selected || !isOpenableSession(session) ? 0 : -1;
     menu.trigger.replaceChildren("\u2026");
     menu.trigger.addEventListener("click", () => {
       if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);

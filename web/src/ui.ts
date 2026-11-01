@@ -1895,9 +1895,18 @@ export class AppShell {
       activeBefore.focus({ preventScroll: true });
     }
     // With nothing selected nothing owns the roving stop, so the first row
-    // carries it — the listbox never vanishes from the Tab order (#6409).
+    // carries it — the listbox never vanishes from the Tab order (#6409). Every
+    // row is normalized here, not only at build time: a reused element keeps
+    // whatever tabindex it last had, so a stale fallback would otherwise sit in
+    // the order beside the newly selected row's own stop.
     const railRows = this.railList.querySelectorAll<HTMLElement>(".af-row");
-    if (![...railRows].some(r => r.tabIndex === 0) && railRows.length > 0) {
+    let hasStop = false;
+    for (const railRow of railRows) {
+      const isSelected = railRow.classList.contains("af-row-selected");
+      railRow.tabIndex = isSelected ? 0 : -1;
+      hasStop ||= isSelected;
+    }
+    if (!hasStop && railRows.length > 0) {
       railRows[0].tabIndex = 0;
     }
     // DOM focus follows the j/k selection: without this the ring strands on the
@@ -1936,7 +1945,10 @@ export class AppShell {
     this.railMenus.set(sessionKey(session), menu);
     // Only the selected row's actions button sits in the Tab order (#6409); a
     // keyboard user reaches another row's menu by moving the selection to it.
-    menu.trigger.tabIndex = selected ? 0 : -1;
+    // A managed row that can NEVER be selected — a kill-only row such as a
+    // startup-unknown session, which j/k skips because it cannot open a pane —
+    // keeps its stop, or its Delete would have no keyboard route at all.
+    menu.trigger.tabIndex = selected || !isOpenableSession(session) ? 0 : -1;
     menu.trigger.replaceChildren("…");
     menu.trigger.addEventListener("click", () => {
       if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);

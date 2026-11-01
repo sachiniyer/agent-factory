@@ -102,3 +102,24 @@ test("#6409: the rail is a bounded number of Tab stops and every row menu stays 
   await expect(menu).toBeHidden();
   await expect(trigger, "Escape returns focus to the actions button").toBeFocused();
 });
+
+test("#6409: with nothing selected the first row holds the stop, and it roves cleanly", async ({ page }) => {
+  await seedExtraRows(page);
+  await page.goto("/");
+  await page.locator("#app[data-af-resync-settled]").waitFor();
+  // A hashless load selects nothing: the FIRST row carries the stop so the
+  // listbox never leaves the Tab order.
+  await expect(page.locator(".af-rail-list .af-row.af-row-selected")).toHaveCount(0);
+  const first = page.locator(".af-rail-list .af-row").first();
+  await expect(first).toHaveJSProperty("tabIndex", 0);
+  // k from no selection picks the LAST row; the reused first-row element must
+  // drop its stop, not keep a second one beside the selected row's.
+  await page.keyboard.press("k");
+  const selected = page.locator(".af-rail-list .af-row.af-row-selected");
+  await expect(selected).toHaveJSProperty("tabIndex", 0);
+  await expect(first).toHaveJSProperty("tabIndex", -1);
+  const tabbable = await page.locator(".af-rail-list").evaluate((list) =>
+    [...list.querySelectorAll<HTMLElement>(".af-row")].filter((r) => r.tabIndex === 0).length,
+  );
+  expect(tabbable, "exactly one row is a Tab stop").toBe(1);
+});
