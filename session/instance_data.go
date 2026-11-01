@@ -178,6 +178,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	data.BacklogItem = i.BacklogItem
 	data.CreatedBySandbox = i.createdBySandbox
 	data.CreatedByOperator = i.createdByOperator
+	data.placedMachine = i.placedMachineLocked()
 	data.BacklogRunActive = i.backlogRunActive
 	data.BacklogRunEndedAt = i.backlogRunEndedAt
 	gate := i.runGateActiveLocked()
@@ -503,7 +504,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		// finished run from an interrupted one.
 		taskRunActive:        data.TaskRunActive,
 		BacklogItem:          data.BacklogItem,
-		provenance:           provenance{createdBySandbox: data.CreatedBySandbox, createdByOperator: data.CreatedByOperator},
+		provenance:           provenanceFromData(data),
 		backlogRunActive:     data.BacklogRunActive && data.BacklogItem != 0,
 		backlogRunEndedAt:    data.BacklogRunEndedAt,
 		taskRunInterrupted:   data.TaskRunInterrupted && !data.TaskRunActive,

@@ -111,6 +111,12 @@ type provenance struct {
 	// one runs, the runtime handle may be cleared or replaced, so the machine the
 	// session runs on cannot be named, and RuntimeMachine reports Unknown.
 	provisioning int
+	// lastMachine is the machine the row's runtime last ran on, kept when its
+	// handle is cleared (a reap, a pushed archive) and persisted
+	// (InstanceData.PlacedMachine): a reap kills the agent and deletes the
+	// session directory, but not a process a hook detached, so the row keeps
+	// blocking that machine until it is killed. Under i.mu.
+	lastMachine RuntimeMachine
 }
 
 // CreatedBySandbox is the id of the session whose sandbox callback credential
@@ -124,20 +130,6 @@ func (i *Instance) CreatedBySandbox() string {
 // provenance (InstanceData.CreatedByOperator), which fails closed.
 func (i *Instance) OperatorCreated() bool {
 	return i.createdByOperator && i.createdBySandbox == ""
-}
-
-// StoppedPreservedArchive reports whether this row is an archive that kept its
-// workspace after af CONFIRMED its agent and every tab stopped
-// (ArchiveSandboxPreserving): nothing of it runs on its host, though its runtime
-// identity stays so a later kill can reap the directory. Every condition is
-// needed. A restore clears the record only once its agent is back, so an
-// attached agent server means it runs. A rollback that could not confirm the
-// stop re-records the archive with its cleanup state unknown.
-func (i *Instance) StoppedPreservedArchive() bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.archivedWorkspace != nil && i.liveness == LiveArchived && !i.started &&
-		i.agentSrv == nil && !i.runtimeCleanupStateUnknown && i.provisioning == 0
 }
 
 // ProvenanceText describes a row that OperatorCreated refuses, for a message

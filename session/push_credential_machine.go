@@ -25,18 +25,61 @@ import (
 // sandbox.ssh command.
 type RuntimeMachine struct {
 	// Host is the ssh destination's host, as configured.
-	Host string
+	Host string `json:"host,omitempty"`
 	// Addr is the address the ssh runtime dialed and pinned; empty when none was
 	// recorded.
-	Addr string
+	Addr string `json:"addr,omitempty"`
 	// SandboxSSH is the free-form target's sandbox.ssh command.
-	SandboxSSH string
+	SandboxSSH string `json:"sandbox_ssh,omitempty"`
 	// RepoChosen marks an ssh runtime on a repository's own [ssh] target: a
 	// placement the repository chose, not the operator.
-	RepoChosen bool
+	RepoChosen bool `json:"repo_chosen,omitempty"`
 	// Unknown marks a runtime whose machine af cannot name right now (a
-	// re-provision or create in flight). It shares every machine.
-	Unknown bool
+	// re-provision or create in flight, or a runtime from before af recorded
+	// machines). It shares every machine.
+	Unknown bool `json:"unknown,omitempty"`
+	// why says why it is Unknown, for a message that names the cause; inFlight
+	// marks the Unknown of a re-provision still running.
+	why      string
+	inFlight bool
+}
+
+// UnprovenKind classifies why a machine can't be established, so a message can
+// name the remedy that actually ends it.
+type UnprovenKind int
+
+const (
+	// Proven: the machine is known (or names nothing).
+	Proven UnprovenKind = iota
+	// UnprovenInFlight: a re-provision is replacing the runtime; it ends.
+	UnprovenInFlight
+	// UnprovenName: a host name doesn't resolve.
+	UnprovenName
+	// UnprovenOther: anything else (an unconfirmable sandbox.ssh, no record).
+	UnprovenOther
+)
+
+// recorded reports whether m names anything, without resolving it.
+func (m RuntimeMachine) recorded() bool {
+	return m.Unknown || strings.TrimSpace(m.Host) != "" || strings.TrimSpace(m.Addr) != "" || strings.TrimSpace(m.SandboxSSH) != ""
+}
+
+// Unproven says why af cannot establish which machine m is, and so treats it as
+// every machine (a runtime in flight, a name that does not resolve, a
+// sandbox.ssh whose destination ssh cannot confirm), and what kind of reason
+// that is. Empty and Proven when the machine is known, or m names nothing. It
+// may resolve names: never call it under a lock.
+func (m RuntimeMachine) Unproven() (string, UnprovenKind) {
+	id := m.identity()
+	switch {
+	case id.unknown == "":
+		return "", Proven
+	case m.Unknown && m.inFlight:
+		return id.unknown, UnprovenInFlight
+	case id.unresolved:
+		return id.unknown, UnprovenName
+	}
+	return id.unknown, UnprovenOther
 }
 
 // Shares reports whether two runtimes may run on the same machine. They do when
@@ -56,7 +99,7 @@ func (m RuntimeMachine) Shares(o RuntimeMachine) bool {
 	if a.empty() || b.empty() {
 		return false
 	}
-	if a.unknown || b.unknown {
+	if a.unknown != "" || b.unknown != "" {
 		return true
 	}
 	for x := range a.names {
@@ -74,28 +117,33 @@ func (m RuntimeMachine) Shares(o RuntimeMachine) bool {
 	return false
 }
 
-// machineIdentity is a RuntimeMachine's canonical names and addresses.
+// machineIdentity is a RuntimeMachine's canonical names and addresses. unknown,
+// when set, is why its machine cannot be established.
 type machineIdentity struct {
-	names   map[string]bool
-	addrs   map[netip.Addr]bool
-	unknown bool
+	names      map[string]bool
+	addrs      map[netip.Addr]bool
+	unknown    string
+	unresolved bool
 }
 
 func (id machineIdentity) empty() bool {
-	return !id.unknown && len(id.names) == 0 && len(id.addrs) == 0
+	return id.unknown == "" && len(id.names) == 0 && len(id.addrs) == 0
 }
 
 func (m RuntimeMachine) identity() machineIdentity {
 	id := machineIdentity{names: map[string]bool{}, addrs: map[netip.Addr]bool{}}
 	if m.Unknown {
-		id.unknown = true
+		id.unknown = m.why
+		if id.unknown == "" {
+			id.unknown = "af can't name its machine right now"
+		}
 		return id
 	}
 	hosts := []string{m.Host, m.Addr}
 	if strings.TrimSpace(m.SandboxSSH) != "" {
 		dest, ok := sandboxSSHEffectiveHost(m.SandboxSSH)
 		if !ok {
-			id.unknown = true
+			id.unknown = "ssh can't confirm which machine its sandbox.ssh command reaches"
 			return id
 		}
 		hosts = append(hosts, dest)
@@ -121,7 +169,9 @@ func (id *machineIdentity) add(h string) {
 	id.names[h] = true
 	addrs, err := resolveMachine(h)
 	if err != nil || len(addrs) == 0 {
-		id.unknown = true
+		if id.unknown == "" {
+			id.unknown, id.unresolved = "its host name "+h+" doesn't resolve", true
+		}
 		return
 	}
 	for _, a := range addrs {
@@ -372,26 +422,83 @@ func flushMachineLookups() {
 
 // RuntimeMachine reports the machine this session's off-box runtime runs on,
 // for any ssh runtime (a listed host or a repository's [ssh] target) and the
-// free-form sandbox target. While a re-provision is replacing the runtime, the
-// machine is Unknown. ok is false when no runtime is recorded and none is being
-// provisioned: a local, docker or hook session, or one whose runtime has been
-// reaped.
+// free-form sandbox target. It copies the row's fields under the instance lock
+// and resolves nothing there (a slow resolver must never stall a writer).
+//
+//   - While a re-provision is replacing the runtime, the machine is Unknown;
+//     whether the repository chose the placement comes from the recorded
+//     runtime, never from Instance.Host (default_host leaves that empty).
+//   - With no runtime handle, it is the machine the row last ran on: a reap
+//     does not reach a process a hook detached, so the row keeps standing for
+//     that machine until it is killed. An off-box row with no record (from
+//     before af kept one) is Unknown.
+//
+// ok is false for a row that never ran off-box: local, docker or hook.
 func (i *Instance) RuntimeMachine() (RuntimeMachine, bool) {
 	i.mu.RLock()
-	defer i.mu.RUnlock()
-	if i.provisioning > 0 {
-		// The repository chose the placement unless the row says the operator
-		// did: the free-form target, or a named listed host.
-		_, sandbox := i.backend.(*sandboxBackend)
-		_, ssh := i.backend.(*sshBackend)
-		return RuntimeMachine{Unknown: true, RepoChosen: !sandbox && !(ssh && strings.TrimSpace(i.Host) != "")}, true
+	var current RuntimeMachine
+	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		current = machineOf(provider.runtimeCleanupData())
 	}
-	provider, ok := i.backend.(runtimeCleanupProvider)
-	if !ok {
-		return RuntimeMachine{}, false
+	last, provisioning := i.lastMachine, i.provisioning > 0
+	_, sandbox := i.backend.(*sandboxBackend)
+	_, ssh := i.backend.(*sshBackend)
+	i.mu.RUnlock()
+
+	recorded := current
+	if !recorded.recorded() {
+		recorded = last
 	}
-	m := machineOf(provider.runtimeCleanupData())
-	return m, !m.identity().empty()
+	switch {
+	case provisioning:
+		repo := !sandbox
+		if recorded.recorded() {
+			repo = recorded.RepoChosen
+		}
+		return RuntimeMachine{Unknown: true, RepoChosen: repo, why: "it is being re-provisioned onto a machine af can't name yet", inFlight: true}, true
+	case recorded.recorded():
+		return recorded, true
+	case ssh || sandbox:
+		return RuntimeMachine{Unknown: true, RepoChosen: !sandbox, why: "it ran off the daemon box before af recorded where"}, true
+	}
+	return RuntimeMachine{}, false
+}
+
+// placedMachineLocked is the machine to persist: the live runtime's, else the
+// last one recorded. Caller holds i.mu.
+func (i *Instance) placedMachineLocked() *RuntimeMachine {
+	m := i.lastMachine
+	if provider, ok := i.backend.(runtimeCleanupProvider); ok {
+		if cur := machineOf(provider.runtimeCleanupData()); cur.recorded() {
+			m = cur
+		}
+	}
+	if !m.recorded() || m.Unknown {
+		return nil
+	}
+	return &m
+}
+
+// rememberMachineLocked keeps the machine of a runtime handle about to be
+// cleared. Caller holds i.mu.
+func (i *Instance) rememberMachineLocked(provider runtimeCleanupProvider) {
+	if m := machineOf(provider.runtimeCleanupData()); m.recorded() {
+		i.lastMachine = m
+	}
+}
+
+// provenanceFromData restores who created a row and where it last ran.
+func provenanceFromData(data InstanceData) provenance {
+	p := provenance{createdBySandbox: data.CreatedBySandbox, createdByOperator: data.CreatedByOperator}
+	placed := data.PlacedMachine
+	if placed == nil {
+		placed = data.placedMachine // a live snapshot, not yet stored
+	}
+	if placed != nil {
+		p.lastMachine = *placed
+		p.lastMachine.Unknown = false
+	}
+	return p
 }
 
 // beginProvisioning marks a re-provision in flight; the returned func ends it.
@@ -429,16 +536,17 @@ func machineOf(data *RuntimeCleanupData) RuntimeMachine {
 // false for a runtime that gets no af callback (local, docker, hook). A target
 // that cannot be resolved here is Unknown.
 func PlannedRuntimeMachine(opts InstanceOptions, repoRoot string) (m RuntimeMachine, offBox bool) {
+	unknown := RuntimeMachine{Unknown: true, RepoChosen: true, why: "af can't resolve where its create will run"}
 	kind, err := BackendKindFor(opts, repoRoot)
 	if err != nil {
-		return RuntimeMachine{Unknown: true, RepoChosen: true}, true
+		return unknown, true
 	}
 	if !kind.InjectsSandboxCallback() {
 		return RuntimeMachine{}, false
 	}
 	cfg, err := resolvedConfigFor(repoRoot)
 	if err != nil || cfg == nil {
-		return RuntimeMachine{Unknown: true, RepoChosen: true}, true
+		return unknown, true
 	}
 	if kind == BackendSandbox {
 		return RuntimeMachine{SandboxSSH: cfg.SandboxSSH}, true
@@ -446,13 +554,13 @@ func PlannedRuntimeMachine(opts InstanceOptions, repoRoot string) (m RuntimeMach
 	name, listed, err := chooseListedHost(opts.Host, cfg)
 	switch {
 	case err != nil:
-		return RuntimeMachine{Unknown: true, RepoChosen: true}, true
+		return unknown, true
 	case name != "" && listed != nil:
 		return RuntimeMachine{Host: listed.Host}, true
 	case cfg.SSH != nil && strings.TrimSpace(cfg.SSH.Host) != "":
 		return RuntimeMachine{Host: cfg.SSH.Host, RepoChosen: true}, true
 	}
-	return RuntimeMachine{Unknown: true, RepoChosen: true}, true
+	return unknown, true
 }
 
 // resolvedConfigFor is the config a runtime resolves for repoRoot; a var so a
@@ -465,4 +573,10 @@ var resolvedConfigFor = func(repoRoot string) (*config.ResolvedConfig, error) {
 		return nil, err
 	}
 	return config.ResolveConfig(repoRoot)
+}
+
+// InFlightRuntimeMachineForTest is the machine RuntimeMachine reports while a
+// re-provision runs, for tests outside this package that place a row mid-flight.
+func InFlightRuntimeMachineForTest(repoChosen bool) RuntimeMachine {
+	return RuntimeMachine{Unknown: true, RepoChosen: repoChosen, why: "it is being re-provisioned onto a machine af can't name yet", inFlight: true}
 }

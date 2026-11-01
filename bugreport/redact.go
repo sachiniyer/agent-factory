@@ -378,6 +378,10 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// and the branch of a preserved off-box workspace (#5571 W8.5). Whether the
 	// archive published is diagnosable from the archive report; the locators are not.
 	d.ArchivedWorkspace = nil
+	// PlacedMachine (#5571 W7.8) names the host, the address af dialed, or the
+	// operator's sandbox.ssh command a session last ran on: locators, like the
+	// runtime cleanup handle above.
+	d.PlacedMachine = nil
 	// Placement (#5571 W6.4) is a derived projection of fields this redactor
 	// already handles: Host is the redacted host pick, Location a workspace or
 	// worktree path, and Kind/Backend restate BackendType. Dropping it, rather than

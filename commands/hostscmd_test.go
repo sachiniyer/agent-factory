@@ -82,6 +82,7 @@ func installHostsFake(t *testing.T, f *hostsFake) {
 		hostsLoad, hostsConfigSet, hostsCheckProbe, hostsEditApply, hostsPosture = pl, ps, pc, pe, pp
 		hostsAddIdentityFile, hostsAddWorkspaceRoot, hostsAddHostKeyPosture = "", "", ""
 		hostsAddDefault, hostsAddNoCheck, hostsRemoveClearDefault, hostsJSONFlag = false, false, false, false
+		hostsAddPushCredentials = false
 	})
 }
 
@@ -322,4 +323,19 @@ func TestHostsCheck_NamesPushCredentialBlockers(t *testing.T) {
 	assert.Contains(t, out, `push credentials withheld: session "child" (child-7)`)
 	assert.Contains(t, out, "sandbox.ssh target:")
 	assert.Contains(t, out, `push credentials withheld: session "legacy" (legacy-3)`)
+}
+
+// Fourth review of #6433: --push-credentials lists and opts a host in with ONE
+// write, so it is never listed (and open to sandbox creates) without them.
+func TestHostsAdd_PushCredentialsOptsInInTheSameWrite(t *testing.T) {
+	f := &hostsFake{hosts: map[string]config.HostConfig{}}
+	installHostsFake(t, f)
+	hostsAddNoCheck, hostsAddPushCredentials = true, true
+	_, err := runHosts(t, hostsAddCmd, "build", "af-push@build.ts.net")
+	require.NoError(t, err)
+	require.Len(t, f.edits, 1, "one write")
+	require.NotNil(t, f.edits[0].Host)
+	assert.True(t, f.edits[0].Host.PushCredentials, "the add itself carries the opt-in")
+	assert.Equal(t, config.HostConfig{Host: "build.ts.net", User: "af-push", PushCredentials: true}, f.hosts["build"])
+	assert.Empty(t, f.sets, "no second write")
 }

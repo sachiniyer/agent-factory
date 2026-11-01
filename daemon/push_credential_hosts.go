@@ -29,23 +29,44 @@ import (
 // host name or pinned address, ignoring the login and the port.
 
 const (
-	refusePushHostShared    = "push credentials are withheld on this host while a session the operator did not create runs there: `af hosts check` on the daemon box names it"
-	refuseSandboxCreateHost = "a sandbox credential can create sessions only on a listed host the operator makes available to it"
+	refusePushHostShared       = "push credentials are withheld on this host while a session the operator did not place is on it: `af hosts check` on the daemon box names it"
+	refusePushHostProvisioning = "push credentials are withheld on this host while a session the operator did not place is being created or re-provisioned on it: `af hosts check` on the daemon box names it"
+	refusePushHostUnproven     = "push credentials are withheld because af can't establish which machine this host is: `af hosts check` on the daemon box says why"
+	refuseSandboxCreateHost    = "a sandbox credential can create sessions only on a listed host the operator makes available to it"
 )
 
 // instanceRuntimeMachine is a package var so a test can place a session on a
 // machine without provisioning one.
 var instanceRuntimeMachine = func(i *session.Instance) (session.RuntimeMachine, bool) { return i.RuntimeMachine() }
 
-// pushBlocker is one live session that keeps a licensed machine from being
-// answered.
+// pushBlocker is one session that keeps a licensed machine from being answered,
+// with why, and what ends it.
 type pushBlocker struct {
-	ID, Title, Why string
+	ID, Title, Why, Remedy string
+	// inFlight marks a create or re-provision still running: waiting ends it.
+	inFlight bool
 }
 
 func (b pushBlocker) String() string {
-	return fmt.Sprintf("session %q (%s) is %s: remove it (af sessions kill) to restore push credentials here", b.Title, b.ID, b.Why)
+	return fmt.Sprintf("session %q (%s) %s: %s", b.Title, b.ID, b.Why, b.Remedy)
 }
+
+// pushRefusalFor is the refusal blockers earn: the in-flight kind when every
+// one is in flight, else the placed kind.
+func pushRefusalFor(blockers []pushBlocker) error {
+	for _, b := range blockers {
+		if !b.inFlight {
+			return sandboxRefusal(refusePushHostShared)
+		}
+	}
+	return sandboxRefusal(refusePushHostProvisioning)
+}
+
+const (
+	remedyKill     = "remove it with `af sessions kill`; archiving it isn't enough, because a process a hook detached outlives the archive"
+	remedyWait     = "wait for it to finish; it is named here again if it still blocks"
+	remedyKillOrNS = "make its host name resolve, or remove it with `af sessions kill`"
+)
 
 // trackedInstances is every row the manager tracks, collected under m.mu and
 // returned for reading outside it, so no caller holds the manager lock across an
@@ -87,34 +108,43 @@ func (m *Manager) pushHostBlockers(machines []session.RuntimeMachine) []pushBloc
 	tracked := m.trackedInstances()
 	var out []pushBlocker
 	seen := map[string]bool{}
-	add := func(id, title, why string, machine session.RuntimeMachine) {
-		if seen[id] {
+	add := func(b pushBlocker, machine session.RuntimeMachine) {
+		if seen[b.ID] {
 			return
 		}
 		for _, lm := range machines {
 			if lm.Shares(machine) {
-				seen[id] = true
-				out = append(out, pushBlocker{ID: id, Title: title, Why: why})
+				seen[b.ID] = true
+				out = append(out, b)
 				return
 			}
 		}
 	}
 	for _, inst := range tracked {
+		// Every row that stood on the machine counts until it is KILLED, archived
+		// or not: neither an archive nor a reap ends a process a hook detached.
 		machine, ok := instanceRuntimeMachine(inst)
-		if !ok || inst.StoppedPreservedArchive() || (inst.OperatorCreated() && !machine.RepoChosen) {
+		if !ok || (inst.OperatorCreated() && !machine.RepoChosen) {
 			continue
 		}
-		why := inst.ProvenanceText()
+		b := pushBlocker{ID: inst.ID, Title: inst.Title, Why: "was " + inst.ProvenanceText(), Remedy: remedyKill}
 		if inst.OperatorCreated() {
-			why = "on a repository's own [ssh] target, which the repository chose"
+			b.Why = "is on a repository's own [ssh] target, which the repository chose"
 		}
-		if machine.Unknown {
-			why += ", and being re-provisioned onto a machine af can't name yet"
+		if reason, kind := machine.Unproven(); reason != "" {
+			b.Why += ", and counts as every machine because " + reason
+			switch kind {
+			case session.UnprovenInFlight:
+				b.Remedy, b.inFlight = remedyWait, true
+			case session.UnprovenName:
+				b.Remedy = remedyKillOrNS
+			}
 		}
-		add(inst.ID, inst.Title, why, machine)
+		add(b, machine)
 	}
 	for id, c := range inflight {
-		add(id, c.title, "still being created there, by another session's af or onto a repository's own [ssh] target", c.machine)
+		add(pushBlocker{ID: id, Title: c.title, Why: "is still being created there, by another session's af or onto a repository's own [ssh] target",
+			Remedy: remedyWait, inFlight: true}, c.machine)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -229,9 +259,21 @@ func (m *Manager) fillPushCredentialBlockers(cfg *config.Config, resp *CheckHost
 		if !ok || !entry.PushCredentials {
 			continue
 		}
-		resp.Hosts[i].PushCredentialBlockers = pushBlockerTexts(m.pushHostBlockers(m.listedHostMachines(resp.Hosts[i].Name, entry)))
+		resp.Hosts[i].PushCredentialBlockers = m.pushBlockerReport(session.RuntimeMachine{Host: entry.Host}, m.listedHostMachines(resp.Hosts[i].Name, entry))
 	}
 	if cfg.SandboxPushCredentials && strings.TrimSpace(cfg.SandboxSSH) != "" {
-		resp.SandboxPushCredentialBlockers = pushBlockerTexts(m.pushHostBlockers([]session.RuntimeMachine{{SandboxSSH: cfg.SandboxSSH}}))
+		target := session.RuntimeMachine{SandboxSSH: cfg.SandboxSSH}
+		resp.SandboxPushCredentialBlockers = m.pushBlockerReport(target, []session.RuntimeMachine{target})
 	}
+}
+
+// pushBlockerReport is what CheckHost says withholds a licensed target: first
+// the target itself when af can't establish which machine it is, then each
+// session sharing it.
+func (m *Manager) pushBlockerReport(target session.RuntimeMachine, machines []session.RuntimeMachine) []string {
+	var out []string
+	if reason, _ := target.Unproven(); reason != "" {
+		out = append(out, "af can't establish which machine this is, because "+reason+": fix that, and push credentials resume")
+	}
+	return append(out, pushBlockerTexts(m.pushHostBlockers(machines))...)
 }
