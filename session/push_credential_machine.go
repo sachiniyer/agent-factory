@@ -17,14 +17,16 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// Which machine, and which user on it, a runtime runs as (#5571 W7.8, security
-// reviews of #6433). Code the operator did not place TAINTS the machine and user
-// it is placed on, durably, before any of it runs (RecordPlacement); a tainted
-// machine gets no push credential until the operator resets its trust. The
-// identity is compared CONSERVATIVELY: where two cannot be shown to differ, they
+// Which machine a runtime runs on (#5571 W7.8, security reviews of #6433). Code
+// the operator did not place TAINTS the machine it is placed on, durably, before
+// any of it runs (RecordPlacement); a tainted machine gets no push credential
+// until the operator resets its trust. The whole MACHINE, whichever user the
+// code ran as: af can't prove a login is unprivileged, and a sudo-capable one (a
+// cloud VM's default user) reads every other user's files. The identity is
+// compared CONSERVATIVELY: where two machines cannot be shown to differ, they
 // are one.
 
-// RuntimeMachine names the machine and login user an off-box runtime runs as,
+// RuntimeMachine names the machine an off-box runtime runs on,
 // from the handle its provision recorded (or the target a provision will
 // resolve): the ssh destination and the address af actually dialed (the ssh
 // runtime pins it, ssh_machine_pin.go), or the free-form sandbox.ssh command.
@@ -34,8 +36,6 @@ type RuntimeMachine struct {
 	// Addr is the address the ssh runtime dialed and pinned; empty when none was
 	// recorded.
 	Addr string
-	// User is the ssh login user; empty when af cannot tell (any user).
-	User string
 	// SandboxSSH is the free-form target's sandbox.ssh command.
 	SandboxSSH string
 	// RepoChosen marks an ssh runtime on a repository's own [ssh] target: a
@@ -45,13 +45,11 @@ type RuntimeMachine struct {
 
 // MachineIdentity is a machine's canonical identities: lowercased names without
 // a trailing dot, and unmapped, zone-less addresses (as configured, pinned, or
-// resolved), plus the login user. Unproven, when set, says why af cannot
-// establish the machine, which then counts as every machine. It is what a taint
-// persists.
+// resolved). Unproven, when set, says why af cannot establish the machine, which
+// then counts as every machine. Its Names and Addrs are what a taint persists.
 type MachineIdentity struct {
 	Names    []string `json:"names,omitempty"`
 	Addrs    []string `json:"addrs,omitempty"`
-	User     string   `json:"user,omitempty"`
 	Unproven string   `json:"unproven,omitempty"`
 }
 
@@ -60,15 +58,11 @@ func (id MachineIdentity) Empty() bool {
 	return id.Unproven == "" && len(id.Names) == 0 && len(id.Addrs) == 0
 }
 
-// Shares reports whether two identities may be one machine and one user: either
-// is Unproven, a canonical name matches (a short name matching a longer one's
-// first label), or an address does; and the users match, or either is unknown.
-// It resolves nothing.
+// Shares reports whether two identities may be one machine: either is Unproven,
+// a canonical name matches (a short name matching a longer one's first label),
+// or an address does. It resolves nothing.
 func (id MachineIdentity) Shares(o MachineIdentity) bool {
 	if id.Empty() || o.Empty() {
-		return false
-	}
-	if id.User != "" && o.User != "" && id.User != o.User {
 		return false
 	}
 	if id.Unproven != "" || o.Unproven != "" {
@@ -93,10 +87,7 @@ func (id MachineIdentity) Shares(o MachineIdentity) bool {
 
 // Merge is the union of two identities of one placement.
 func (id MachineIdentity) Merge(o MachineIdentity) MachineIdentity {
-	out := MachineIdentity{Names: union(id.Names, o.Names), Addrs: union(id.Addrs, o.Addrs), User: id.User, Unproven: id.Unproven}
-	if out.User == "" {
-		out.User = o.User
-	}
+	out := MachineIdentity{Names: union(id.Names, o.Names), Addrs: union(id.Addrs, o.Addrs), Unproven: id.Unproven}
 	if out.Unproven == "" {
 		out.Unproven = o.Unproven
 	}
@@ -119,8 +110,8 @@ func union(a, b []string) []string {
 	return out
 }
 
-// Shares reports whether two runtimes may run on the same machine as the same
-// user (MachineIdentity.Shares). It may resolve names: never call it under a lock.
+// Shares reports whether two runtimes may run on the same machine
+// (MachineIdentity.Shares). It may resolve names: never call it under a lock.
 func (m RuntimeMachine) Shares(o RuntimeMachine) bool {
 	return m.Identity().Shares(o.Identity())
 }
@@ -146,17 +137,13 @@ func (m RuntimeMachine) recorded() bool {
 func (m RuntimeMachine) Identity() MachineIdentity {
 	var names, addrs []string
 	unproven := ""
-	user := strings.TrimSpace(m.User)
 	hosts := []string{m.Host, m.Addr}
 	if strings.TrimSpace(m.SandboxSSH) != "" {
-		dest, sshUser, ok := sandboxSSHEffective(m.SandboxSSH)
+		dest, ok := sandboxSSHEffectiveHost(m.SandboxSSH)
 		if !ok {
 			return MachineIdentity{Unproven: "ssh can't confirm which machine its sandbox.ssh command reaches"}
 		}
 		hosts = append(hosts, dest)
-		if user == "" {
-			user = sshUser
-		}
 	}
 	for _, h := range hosts {
 		h = canonicalMachineName(h)
@@ -179,7 +166,7 @@ func (m RuntimeMachine) Identity() MachineIdentity {
 			addrs = append(addrs, a.String())
 		}
 	}
-	return MachineIdentity{Names: union(names, nil), Addrs: union(addrs, nil), User: user, Unproven: unproven}
+	return MachineIdentity{Names: union(names, nil), Addrs: union(addrs, nil), Unproven: unproven}
 }
 
 // canonicalMachineName lowercases a host, and drops IPv6 brackets and a
@@ -214,17 +201,6 @@ const sshFlagsWithArgument = "BbcDEeFIiJLlmOoPpQRSWw"
 //   - ssh -G fails or prints no hostname;
 //   - a ProxyCommand is in effect, which can reach any machine whatever the
 //     hostname says.
-func sandboxSSHEffective(command string) (host, user string, ok bool) {
-	host, ok = sandboxSSHEffectiveHost(command)
-	if !ok {
-		return "", "", false
-	}
-	sshEffectiveHosts.mu.Lock()
-	user = sshEffectiveHosts.m[strings.TrimSpace(command)].user
-	sshEffectiveHosts.mu.Unlock()
-	return host, user, true
-}
-
 func sandboxSSHEffectiveHost(command string) (string, bool) {
 	command = strings.TrimSpace(command)
 	if command == "" || strings.ContainsAny(command, "'\"`$;&|<>(){}*?[]#!\\\n") {
@@ -243,14 +219,12 @@ func sandboxSSHEffectiveHost(command string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), machineLookupTimeout)
 	defer cancel()
 	out, err := sshPrintConfig(ctx, words[0], words[1:])
-	host, user, ok := "", "", err == nil
+	host, ok := "", err == nil
 	for _, line := range strings.Split(out, "\n") {
 		k, v, _ := strings.Cut(strings.TrimSpace(line), " ")
 		switch strings.ToLower(k) {
 		case "hostname":
 			host = strings.TrimSpace(v)
-		case "user":
-			user = strings.TrimSpace(v)
 		case "proxycommand":
 			if v = strings.TrimSpace(v); v != "" && !strings.EqualFold(v, "none") {
 				ok = false
@@ -263,15 +237,15 @@ func sandboxSSHEffectiveHost(command string) (string, bool) {
 		ttl = machineLookupFailTTL
 	}
 	sshEffectiveHosts.mu.Lock()
-	sshEffectiveHosts.m[command] = sshEffectiveHost{host: host, user: user, ok: ok, until: time.Now().Add(ttl)}
+	sshEffectiveHosts.m[command] = sshEffectiveHost{host: host, ok: ok, until: time.Now().Add(ttl)}
 	sshEffectiveHosts.mu.Unlock()
 	return host, ok
 }
 
 type sshEffectiveHost struct {
-	host, user string
-	ok         bool
-	until      time.Time
+	host  string
+	ok    bool
+	until time.Time
 }
 
 var sshEffectiveHosts = struct {
@@ -436,8 +410,8 @@ func flushMachineLookups() {
 	sshEffectiveHosts.mu.Unlock()
 }
 
-// RuntimeMachine reports the machine and user this session's off-box runtime
-// runs as, from its runtime handle: any ssh runtime (a listed host or a
+// RuntimeMachine reports the machine this session's off-box runtime runs on,
+// from its runtime handle: any ssh runtime (a listed host or a
 // repository's [ssh] target) or the free-form sandbox target. It copies the
 // handle under the instance lock and resolves nothing there, so a slow resolver
 // can never stall a writer. ok is false with no runtime handle.
@@ -458,7 +432,7 @@ func machineOf(data *RuntimeCleanupData) RuntimeMachine {
 		return RuntimeMachine{}
 	case data.SSH != nil:
 		addr, _ := sshPinnedCleanupTarget(data.SSH)
-		return RuntimeMachine{Host: data.SSH.Config.Host, Addr: addr, User: sshLoginUser(data.SSH.Config), RepoChosen: data.SSH.HostName == ""}
+		return RuntimeMachine{Host: data.SSH.Config.Host, Addr: addr, RepoChosen: data.SSH.HostName == ""}
 	case data.Sandbox != nil:
 		return RuntimeMachine{SandboxSSH: data.Sandbox.SSHCommand}
 	}
@@ -493,10 +467,17 @@ func placementWhy(createdBySandbox string, createdByOperator bool, m RuntimeMach
 	return ""
 }
 
+// recordPlacement records p when it is not the operator's placement. With no
+// recorder to take it (no daemon attached), the placement is refused rather
+// than made unrecorded: a provision of code the operator didn't place never
+// runs without its taint written first.
 func recordPlacement(creds SandboxCredentials, p Placement) error {
-	recorder, ok := creds.(PlacementRecorder)
-	if !ok || p.Why == "" || !p.Machine.recorded() {
+	if p.Why == "" || !p.Machine.recorded() {
 		return nil
+	}
+	recorder, ok := creds.(PlacementRecorder)
+	if !ok {
+		return fmt.Errorf("no daemon is attached to record where it will run")
 	}
 	return recorder.RecordPlacement(p)
 }
@@ -507,7 +488,13 @@ func recordPlacement(creds SandboxCredentials, p Placement) error {
 // address it dialed) recorded after, whether or not the create later fails.
 func provisionRecordingPlacement(opts InstanceOptions, absPath string, kind BackendKind) (ProvisionResult, error) {
 	createdByOperator := opts.CreatedBySandbox == ""
-	if planned, offBox, err := planRuntimeMachine(opts, absPath); err == nil && offBox {
+	planned, offBox, err := planRuntimeMachine(opts, absPath)
+	if err != nil {
+		// The runtime resolves its target exactly so, and would fail the same way;
+		// refusing here keeps a placement that couldn't be recorded from running.
+		return ProvisionResult{}, err
+	}
+	if offBox {
 		why := placementWhy(opts.CreatedBySandbox, createdByOperator, planned)
 		if err := recordPlacement(opts.SandboxCredentials, Placement{SessionID: opts.ID, Title: opts.Title, Why: why, Machine: planned}); err != nil {
 			return ProvisionResult{}, fmt.Errorf("cannot record where this session's code will run, so it is not provisioned: %w", err)
@@ -543,7 +530,10 @@ func (i *Instance) recordReprovisionPlacement() error {
 		return nil
 	}
 	planned, offBox, err := planRuntimeMachine(InstanceOptions{Host: host, Backend: kind}, path)
-	if err != nil || !offBox {
+	if err != nil {
+		return fmt.Errorf("session %q: cannot resolve where it would be re-provisioned: %w", title, err)
+	}
+	if !offBox {
 		return nil
 	}
 	if err := recordPlacement(creds, Placement{SessionID: id, Title: title, Why: placementWhy(bySandbox, byOperator, planned), Machine: planned}); err != nil {
@@ -599,9 +589,9 @@ func PlannedRuntimeMachine(opts InstanceOptions, repoRoot string) (m RuntimeMach
 	case err != nil:
 		return RuntimeMachine{}, true, err
 	case name != "" && listed != nil:
-		return RuntimeMachine{Host: listed.Host, User: sshLoginUser(sshConfigForHost(*listed))}, true, nil
+		return RuntimeMachine{Host: listed.Host}, true, nil
 	case cfg.SSH != nil && strings.TrimSpace(cfg.SSH.Host) != "":
-		return RuntimeMachine{Host: cfg.SSH.Host, User: sshLoginUser(*cfg.SSH), RepoChosen: true}, true, nil
+		return RuntimeMachine{Host: cfg.SSH.Host, RepoChosen: true}, true, nil
 	}
 	return RuntimeMachine{}, true, fmt.Errorf("no ssh target is configured")
 }
@@ -618,10 +608,9 @@ var resolvedConfigFor = func(repoRoot string) (*config.ResolvedConfig, error) {
 	return config.ResolveConfig(repoRoot)
 }
 
-// HostMachine is the machine and login user a listed host entry names, as its
-// ssh runtime will dial it.
+// HostMachine is the machine a listed host entry names.
 func HostMachine(entry config.HostConfig) RuntimeMachine {
-	return RuntimeMachine{Host: entry.Host, User: sshLoginUser(sshConfigForHost(entry))}
+	return RuntimeMachine{Host: entry.Host}
 }
 
 // planRuntimeMachine is PlannedRuntimeMachine, as provisioning calls it; a var so

@@ -2525,6 +2525,7 @@
       "af hosts remove --clear-default": "host.manage",
       "af hosts remove --help": "meta.discovery",
       "af hosts reset-trust --all": "host.manage",
+      "af hosts reset-trust --entry": "host.manage",
       "af hosts reset-trust --help": "meta.discovery",
       "af target show --help": "meta.discovery",
       "af token --help": "meta.discovery",

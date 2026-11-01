@@ -60,7 +60,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
 - [`af hosts list`](#af-hosts-list) — Show the saved hosts
 - [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
-- [`af hosts reset-trust`](#af-hosts-reset-trust) — Clear a host's push-credential taint after recreating or wiping its user
+- [`af hosts reset-trust`](#af-hosts-reset-trust) — Clear a host's push-credential taint after recreating or wiping its users
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
@@ -1955,7 +1955,7 @@ af hosts
 - [`af hosts check`](#af-hosts-check) — Probe a host (or every saved host) for what a session needs
 - [`af hosts list`](#af-hosts-list) — Show the saved hosts
 - [`af hosts remove`](#af-hosts-remove) — Drop a host from the list
-- [`af hosts reset-trust`](#af-hosts-reset-trust) — Clear a host's push-credential taint after recreating or wiping its user
+- [`af hosts reset-trust`](#af-hosts-reset-trust) — Clear a host's push-credential taint after recreating or wiping its users
 
 **Flags**
 
@@ -2075,19 +2075,20 @@ af hosts remove <name> [flags]
 
 ## af hosts reset-trust
 
-Clear a host's push-credential taint after recreating or wiping its user
+Clear a host's push-credential taint after recreating or wiping its users
 
-Clear the push-credential taint on <name>'s machine and ssh user.
+Clear the push-credential taint on <name>'s machine.
 
-A host whose user has run code you didn't place (a session started from inside
+A machine that has run code you didn't place (a session started from inside
 another session, a repository's own [ssh] target, a create that failed after
 its hooks ran) gives no push credentials, because a process that code left
-behind can outlive every session. Run this only after you recreated or wiped
-that host user. It clears the taints known to be on that machine and user, and
-prints the identities it reset. <name> is a listed host, or sandbox.ssh for the
-free-form target. --all clears every taint, including ones af couldn't place on
-any machine: use it only once you have reset every host user they could have
-reached. See "Push credentials" in docs/backends.md.
+behind can outlive every session, and any login on the machine able to sudo can
+reach every other login's files. Run this only after you recreated or wiped the
+machine's users. It clears the taints known to be only on that machine (every
+address they recorded is one of its own), and prints the identities it reset.
+<name> is a listed host, or sandbox.ssh for the free-form target. --entry <id>
+clears one taint by the id `af hosts check` shows; --all clears every taint. See
+"Push credentials" in docs/backends.md.
 
 ```
 af hosts reset-trust <name> [flags]
@@ -2097,7 +2098,8 @@ af hosts reset-trust <name> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--all` |  | Clear every taint (only once every host user they could have reached is reset) |
+| `--all` |  | Clear every taint (only once every machine they could have reached is reset) |
+| `--entry` | `string` | Clear one taint by the id `af hosts check` shows |
 
 **Global flags**
 
