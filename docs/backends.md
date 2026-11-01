@@ -1107,6 +1107,9 @@ What the sandbox host needs, and what af does to it:
     fresh sandbox is provisioned from the session's branch on `origin`.
     **Nothing is pushed first, so work the sandbox never pushed is not
     preserved on this path**; only what already reached `origin` comes back.
+    For a branch af chose at create and never saw pushed, the daemon verifies
+    it at `origin` before fetching; an `origin` it cannot reach refuses the
+    restore and reaps nothing rather than guess the branch.
     Provisioning needs the host, so a host that is still unreachable fails
     that attempt and the row stays Lost, but that is the provision failing,
     not a guard.
