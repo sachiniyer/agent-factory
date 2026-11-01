@@ -78,7 +78,11 @@ func (t *backlogTarget) selfItem() (string, *backlog.Item, error) {
 // through. (A confused agent cannot cause the read to fail; the failure is
 // transient, e.g. a backlog lock timeout, and naming it costs the caller one
 // retry in exactly the window where the mutation would itself contend for the
-// same backlog.)
+// same backlog.) The same fail-closed stance holds when the session's own
+// project cannot be resolved (its recorded worktree was deleted, moved, or is
+// unreadable): the second return is that error, so a confused agent that points
+// --repo at another project cannot make the guard consult that unrelated
+// backlog and let the mutation through.
 func inItemSession() (*session.InstanceData, error) {
 	s, err := backlogSelfSession()
 	if err != nil || s == nil {
@@ -112,14 +116,23 @@ func inItemSession() (*session.InstanceData, error) {
 // When the backlog read itself fails (a transient lock timeout, etc.) the second
 // return is that error, so inItemSession can fail closed on it instead of
 // silently treating an unreadable link as a non-item session. A failure to
-// resolve a target (no recorded path and backlogProject errors) is not a read
-// failure: there is no backlog to read, so it returns false with no error and
-// the guard falls through to its chip-first stance.
+// resolve the session's own project (a recorded worktree that is deleted, moved,
+// or unreadable) is also a read-class failure for this guard: the second return
+// is that error so a confused agent that points --repo at another project cannot
+// make the guard consult that unrelated backlog (which has no link for this
+// session) and let the mutation through. A session with no recorded path, or a
+// --daemon-url target whose path is on the daemon host, has nothing to resolve,
+// so it returns false with no error and the guard falls back to the command
+// target's project (the prior behavior).
 func itemSessionFromAuthoritativeLink(s *session.InstanceData) (bool, error) {
-	if t := sessionOwnBacklogTarget(s); t != nil {
+	t, resolveErr := sessionOwnBacklogTarget(s)
+	if resolveErr != nil {
+		return false, backlogUnresolvableSessionProjectErr(resolveErr)
+	}
+	if t != nil {
 		v, err := t.get()
 		if err != nil {
-			return false, err
+			return false, backlogUnreadableItemSessionErr(err)
 		}
 		return v.Backlog.ItemForSession(s.ID) != nil, nil
 	}
@@ -129,26 +142,29 @@ func itemSessionFromAuthoritativeLink(s *session.InstanceData) (bool, error) {
 	}
 	v, err := t.get()
 	if err != nil {
-		return false, err
+		return false, backlogUnreadableItemSessionErr(err)
 	}
 	return v.Backlog.ItemForSession(s.ID) != nil, nil
 }
 
 // sessionOwnBacklogTarget resolves the session's own project — the project its
 // worktree path belongs to — as a backlog target, independent of the command
-// target. It returns nil when the session has no recorded path or the path
-// cannot be resolved to a git repository (including a --daemon-url target, whose
-// session path is on the daemon host and so unreadable on this client); callers
-// then fall back to the command target's project.
-func sessionOwnBacklogTarget(s *session.InstanceData) *backlogTarget {
+// target. It returns (nil, nil) when the session has no recorded path or the
+// client is talking to a remote daemon (a --daemon-url target's session path is
+// on the daemon host and unreadable on this client); callers then fall back to
+// the command target's project. When the session has a recorded path but it
+// cannot be resolved to a git repository (the worktree was deleted, moved, or is
+// unreadable), it returns (nil, err) so the guard fails closed rather than
+// consulting an unrelated project a confused agent pointed --repo at.
+func sessionOwnBacklogTarget(s *session.InstanceData) (*backlogTarget, error) {
 	if apiclient.IsRemoteTarget() || s.Path == "" {
-		return nil
+		return nil, nil
 	}
 	repo, err := config.RepoFromPath(s.Path)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return &backlogTarget{repoID: repo.ID, name: filepath.Base(repo.Root)}
+	return &backlogTarget{repoID: repo.ID, name: filepath.Base(repo.Root)}, nil
 }
 
 const backlogSelfAskHint = "ask the user with \"af backlog ask --self\""
@@ -163,15 +179,27 @@ func backlogUnreadableItemSessionErr(readErr error) error {
 	return fmt.Errorf("cannot read this project's backlog to check for an item session: %w; retry", readErr)
 }
 
+// backlogUnresolvableSessionProjectErr is the fail-closed refusal a guarded
+// mutation gets when af cannot resolve the session's own project to determine
+// whether it runs a backlog item (its recorded worktree was deleted, moved, or
+// is unreadable). Like the unreadable-backlog refusal it names the real cause,
+// not "item sessions cannot run", so a plain session retries; and it fails
+// closed rather than falling back to an unrelated project a confused agent
+// pointed --repo at.
+func backlogUnresolvableSessionProjectErr(resolveErr error) error {
+	return fmt.Errorf("cannot resolve this session's own project to check for an item session: %w; retry", resolveErr)
+}
+
 // refuseFromItemSession stops an agent in an item session from running a
 // command that changes the backlog's plan. It stops a confused agent, not a
 // hostile one. When the item-session membership cannot be determined because
-// the authoritative backlog read failed, it refuses with the real cause rather
-// than letting the mutation through.
+// the authoritative backlog read or the session's own project resolution
+// failed, it refuses with the real cause (already wrapped by
+// itemSessionFromAuthoritativeLink) rather than letting the mutation through.
 func refuseFromItemSession(command string) error {
 	s, err := inItemSession()
 	if err != nil {
-		return backlogUnreadableItemSessionErr(err)
+		return err
 	}
 	if s == nil {
 		return nil
@@ -182,7 +210,7 @@ func refuseFromItemSession(command string) error {
 func refuseControlsFromItemSession() error {
 	s, err := inItemSession()
 	if err != nil {
-		return backlogUnreadableItemSessionErr(err)
+		return err
 	}
 	if s == nil {
 		return nil

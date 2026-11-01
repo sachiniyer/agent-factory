@@ -315,7 +315,7 @@ var backlogAddCmd = &cobra.Command{
 		return runBacklog(func() (any, error) {
 			self, mErr := inItemSession()
 			if mErr != nil {
-				return nil, backlogUnreadableItemSessionErr(mErr)
+				return nil, mErr
 			}
 			if self != nil {
 				if err := refuseItemSessionAddFlags(cmd); err != nil {

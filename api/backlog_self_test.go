@@ -471,3 +471,63 @@ func TestBacklogGuardRailsFailClosedOnUnreadableBacklog(t *testing.T) {
 		t.Fatalf("runner on did not fail closed with the real cause: %v", err)
 	}
 }
+
+// TestBacklogGuardRailsFailClosedOnUnresolvableSessionProject pins the fail-closed
+// behavior for the cross-project gap raised on #6498: when the session's
+// BacklogItem chip has been dropped (the version-skew case) and the session's
+// recorded worktree cannot be resolved to a git repository (it was deleted,
+// moved, or is unreadable), af cannot determine the session's own project to
+// check its backlog for the run. The guard must fail closed rather than fall
+// back to the command target's project: a confused agent that points --repo at
+// another project would otherwise consult that project's backlog (which has no
+// run for this session) and let the mutation reach the daemon. The refusal
+// names the resolution failure (it does not claim an item session), so a plain
+// session retries rather than sees a misleading "item sessions cannot run"
+// error. The session's own project is resolved before any backlog read, so no
+// daemon call is made in this window.
+func TestBacklogGuardRailsFailClosedOnUnresolvableSessionProject(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// A second project B is the command target; the session's own project is A
+	// (set by setupRepoForCmd), but its recorded worktree path is gone.
+	bRoot := filepath.Join(t.TempDir(), "repo-b")
+	if err := os.MkdirAll(bRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", bRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init B: %v (%s)", err, out)
+	}
+	// Item 1 runs in session s1; the run record in backlog.json is the
+	// authoritative link. The session record has lost its BacklogItem field
+	// (an older daemon dropped the omitempty key on its next write) and its
+	// recorded worktree no longer resolves (deleted/moved/unreadable).
+	deletedWorktree := filepath.Join(t.TempDir(), "deleted-worktree")
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0, Path: deletedWorktree})
+	prevRepo := repoFlag
+	repoFlag = bRoot
+	t.Cleanup(func() { repoFlag = prevRepo })
+	*methods = nil
+	// A guarded mutation is refused with the real cause (the resolution
+	// failure), not allowed through and not misclaimed as an item session.
+	_, err := runBacklogCmd(t, "done", "1")
+	if err == nil {
+		t.Fatal("done --repo B with an unresolvable session project was allowed through")
+	}
+	if !strings.Contains(err.Error(), "cannot resolve this session's own project to check for an item session") {
+		t.Fatalf("refusal does not name the resolution failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatalf("refusal misclaims an item session: %v", err)
+	}
+	if !strings.Contains(err.Error(), deletedWorktree) {
+		t.Fatalf("refusal does not name the unresolvable path: %v", err)
+	}
+	// The guard fails before any backlog read, so no daemon call is made.
+	if len(*methods) != 0 {
+		t.Fatalf("a refused command reached the daemon: %v", *methods)
+	}
+	// A runner/budget control is refused with the same real cause.
+	if _, err := runBacklogCmd(t, "runner", "on"); err == nil ||
+		!strings.Contains(err.Error(), "cannot resolve this session's own project to check for an item session") {
+		t.Fatalf("runner on did not fail closed with the real cause: %v", err)
+	}
+}
