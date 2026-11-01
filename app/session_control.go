@@ -402,7 +402,7 @@ func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (daemon.Hando
 // daemon.
 var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectation) error {
 	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
-		return c.TriggerTask(taskID, expect)
+		return c.TriggerTask(taskID, expect, task.ActorTUI)
 	})
 }
 
@@ -700,7 +700,10 @@ func SetAllReposSnapshotFetcherForTest(f func(context.Context) ([]session.Instan
 // every tab to its persisted tmux session by name so a snapshot-discovered session
 // is immediately attachable. A package-level var so reconcile tests can inject a
 // fake builder and stay tmux-reattach-free (the #961 flake lesson).
-var buildInstanceFromSnapshot = session.FromInstanceData
+//
+// The *RestoreContext is the batch-shared repo/config resolution (#6446): a batch
+// passes one to every build, a single-row build passes nil.
+var buildInstanceFromSnapshot = session.FromInstanceDataWithContext
 
 func SetSessionStarterForTest(f func(*session.Instance, sessionStartRequest) (*session.Instance, error)) func() {
 	prev := startSessionThroughDaemon
@@ -782,6 +785,16 @@ func SetTabRenamerForTest(f func(daemon.RenameTabRequest) (string, error)) func(
 }
 
 func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {
+	prev := buildInstanceFromSnapshot
+	buildInstanceFromSnapshot = func(d session.InstanceData, _ *session.RestoreContext) (*session.Instance, error) {
+		return f(d)
+	}
+	return func() { buildInstanceFromSnapshot = prev }
+}
+
+// SetInstanceBuilderWithContextForTest is SetInstanceBuilderForTest for a test
+// that observes the RestoreContext a batch hands to each build.
+func SetInstanceBuilderWithContextForTest(f func(session.InstanceData, *session.RestoreContext) (*session.Instance, error)) func() {
 	prev := buildInstanceFromSnapshot
 	buildInstanceFromSnapshot = f
 	return func() { buildInstanceFromSnapshot = prev }

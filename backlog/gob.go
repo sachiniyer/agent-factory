@@ -15,3 +15,6 @@ func (r *SetSettingsRequest) GobDecode(data []byte) error { return json.Unmarsha
 
 func (r SetBudgetRequest) GobEncode() ([]byte, error)   { return json.Marshal(r) }
 func (r *SetBudgetRequest) GobDecode(data []byte) error { return json.Unmarshal(data, r) }
+
+func (r BudgetResponse) GobEncode() ([]byte, error)   { return json.Marshal(r) }
+func (r *BudgetResponse) GobDecode(data []byte) error { return json.Unmarshal(data, r) }

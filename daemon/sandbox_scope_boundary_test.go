@@ -42,7 +42,7 @@ func (f *scopeFixture) useScheduler() {
 	cs.createSessionFn = func(_ context.Context, req CreateSessionRequest, resp *CreateSessionResponse) error {
 		resp.Instance = session.InstanceData{
 			ID: "created-1", Title: req.Title, Program: req.Program, Branch: "af/" + req.Title,
-			Path: f.me.Path, TmuxName: "af_" + req.Title, BackendType: req.Backend,
+			Path: f.me.Path, TmuxName: "af_" + req.Title, BackendType: req.Backend, Host: req.Host,
 			Worktree: session.GitWorktreeData{RepoPath: f.me.Path, WorktreePath: f.me.Path + "/.wt/" + req.Title},
 		}
 		return nil
@@ -613,10 +613,13 @@ func TestSandboxScope_NoAdmittedRouteStreams(t *testing.T) {
 }
 
 // The create response is the manager's complete InstanceData; a sandbox gets the
-// snapshot projection (#5888).
+// snapshot projection (#5888). The picked host survives it, so the CLI's post-create
+// guard (api/sessions.go) can audit what came back against the --host it sent; the
+// daemon-host layout (Path, TmuxName, Worktree) is still withheld.
 func TestSandboxCreateResponseIsProjected(t *testing.T) {
 	resp := CreateSessionResponse{Instance: session.InstanceData{
 		ID: "sess-1", Title: "child", Path: "/home/op/proj", TmuxName: "af_child",
+		Host:     "box1",
 		Worktree: session.GitWorktreeData{WorktreePath: "/home/op/wt/child", RepoPath: "/home/op/proj"},
 	}}
 	projectSandboxCreateResponse(&resp)
@@ -624,9 +627,43 @@ func TestSandboxCreateResponseIsProjected(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "sess-1", resp.Instance.ID)
 	assert.Equal(t, "child", resp.Instance.Title)
+	assert.Equal(t, "box1", resp.Instance.Host, "the picked host survives the projection so the CLI guard does not misread it as version skew")
 	for _, leaked := range []string{"/home/op", "af_child"} {
 		assert.NotContains(t, string(raw), leaked)
 	}
+}
+
+// A sandbox create that honors the --host pick must carry the host BACK in the
+// create response, or the CLI's post-create guard (api/sessions.go, "did not
+// record host") misreads the deliberately scoped/withheld field as version skew
+// and reports a false failure for every sandbox-credentialed create (# introduced
+// by 3e42066f). This drives the real scoped handler through the gated mux so the
+// projection boundary — not a hand-built context — is what the assertion measures.
+func TestSandboxCreateResponseCarriesTheHostPickThroughTheProjection(t *testing.T) {
+	f := newScopeFixture(t)
+	f.useScheduler()
+	code, out := f.call(t, f.secret, "/v1/CreateSession", `{"title":"child","host":"box1"}`)
+	require.Equalf(t, http.StatusOK, code, "a sandbox create with --host must succeed: %s", out)
+	var env struct {
+		Data CreateSessionResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &env))
+	data := env.Data.Instance
+	assert.Equal(t, "box1", data.Host, "the picked host must survive the sandbox create-response projection so the CLI guard does not see version skew")
+
+	// The CLI guard's exact condition: it must NOT fire for a create that honored the pick.
+	createHostFlag := "box1"
+	assert.Falsef(t, createHostFlag != "" && data.Host != createHostFlag,
+		"the CLI post-create guard would fire (createHostFlag=%q, data.Host=%q) and report a false failure", createHostFlag, data.Host)
+
+	// The host survives the projection, but the daemon-host LAYOUT it names — the
+	// absolute repo root, the worktree, the tmux session — must still be withheld.
+	assert.Empty(t, data.Path, "the daemon host's absolute repo root is still withheld")
+	assert.Empty(t, data.TmuxName, "the tmux session name is still withheld")
+	assert.Empty(t, data.Worktree.WorktreePath, "the worktree path is still withheld")
+	assert.Empty(t, data.Worktree.RepoPath, "the worktree's repo root is still withheld")
+	assert.Empty(t, data.Program, "the caller's program text is still withheld")
+	assert.NotContains(t, out, f.me.Path, "no daemon-host layout path leaked alongside the host name")
 }
 
 // --- (2) authorization atomic with the action ---------------------------------

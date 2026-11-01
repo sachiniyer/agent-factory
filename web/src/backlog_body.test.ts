@@ -160,3 +160,70 @@ test("a save held by a closed editor cannot land after the reopened editor's", a
   assert.equal(sent.at(-1), "latest");
   reopened.dispose();
 });
+
+test("a later snapshot that carries a saved body whose confirming read failed releases the draft", async () => {
+  const ed = new BodyEditor(() => Promise.resolve(false), "Body", "k");
+  ed.setText("old");
+  await settle();
+  change("edited");
+  mock.timers.tick(SAVE_DELAY_MS);
+  await settle();
+  ed.setText("old");
+  assert.equal(text, "edited", "the unconfirmed edit is still shown over the stale body");
+  ed.setText("edited");
+  ed.setText("edited elsewhere");
+  assert.equal(text, "edited elsewhere", "the draft was released, so a newer remote body shows");
+  change("typing");
+  ed.setText("edited elsewhere again");
+  assert.equal(text, "typing", "new typing is still protected");
+});
+
+test("a stale snapshot that matches the draft does not release it while a write is in flight or unsaved typing is waiting", async () => {
+  const finish: ((ok: boolean) => void)[] = [];
+  const ed = new BodyEditor(() => new Promise<boolean>((r) => { finish.push(r); }), "Body", "k2");
+  ed.setText("stored");
+  await settle();
+  change("first");
+  mock.timers.tick(SAVE_DELAY_MS);
+  await settle();
+  change("stored");                       // typed back to the old text; the debounce is running
+  ed.setText("stored");                   // a stale refresh carrying the stored text
+  ed.setText("first");                    // then the first save's confirming refresh
+  assert.equal(text, "stored", "the newer typing was not reverted");
+  mock.timers.tick(SAVE_DELAY_MS);
+  finish[0](true);
+  await settle();
+  assert.equal(finish.length, 2, "the latest text is saved");
+  ed.setText("first");
+  assert.equal(text, "stored", "still protected while that save is in flight");
+  finish[1](true);
+  await settle();
+  ed.setText("stored");
+  ed.setText("remote");
+  assert.equal(text, "remote", "released once everything settled");
+});
+
+test("an acknowledgement does not clear a draft that was typed back to the acknowledged text", async () => {
+  const sent: string[] = [];
+  const finish: ((ok: boolean) => void)[] = [];
+  const ed = new BodyEditor((t) => { sent.push(t); return new Promise<boolean>((r) => { finish.push(r); }); }, "Body", "k3");
+  ed.setText("stored");
+  await settle();
+  change("A");
+  mock.timers.tick(SAVE_DELAY_MS);          // A is in flight
+  change("B");
+  mock.timers.tick(SAVE_DELAY_MS);          // B waits behind it
+  change("A");                              // the user's final edit is A again, unsaved
+  finish[0](true);                          // A's acknowledgement
+  await settle();
+  ed.setText("A");
+  assert.equal(text, "A");
+  ed.setText("B");                          // B's confirming snapshot must not replace the typing
+  assert.equal(text, "A", "the draft survived A's acknowledgement");
+  mock.timers.tick(SAVE_DELAY_MS);
+  finish[1]?.(true);
+  await settle();
+  finish[2]?.(true);
+  await settle();
+  assert.equal(sent.at(-1), "A", "the last write is the user's final edit");
+});

@@ -21,34 +21,39 @@ var processExec = syscall.Exec
 // executable path, the selected agent, explicit variable NAMES, and the
 // original pane command; environment values never enter argv.
 func WrapCommand(executable, agent string, extras []string, command string) (string, error) {
-	return wrapCommand(executable, agent, "", AccountLaunchProof{}, extras, command)
+	return wrapCommand(executable, agent, extras, command)
 }
 
-// WrapAccountCommand is WrapCommand for a session scoped to a named account.
+// WrapAccountCommand builds the pane command for an account-scoped agent launch.
 //
-// Only the account NAME travels in argv — never its directory and never a
-// credential. The shim resolves the name against its own AF home, so argv stays
-// free of anything worth reading out of `ps` (#3051).
-// proof carries the exact executable and argument words af authored for the pane
-// command, so the boundary can verify its own output instead of refusing it.
-// These are not secrets and are already visible in the command operand beside
-// them; what argv gains is the CLAIM that af authored them (#3083, #3108).
-func WrapAccountCommand(executable, agent, account string, proof AccountLaunchProof, extras []string, command string) (string, error) {
-	if strings.TrimSpace(account) == "" {
-		return "", fmt.Errorf("account-scoped launch requires an account name")
-	}
-	return wrapCommand(executable, agent, account, proof, extras, command)
+// It carries no account, agent, proof or passthrough name: those live in the
+// launch capability the launcher minted (#4731), which the shim claims over the
+// socket. Argv holds only where to claim, the bearer token, and the pane command
+// — the last as the record paneLaunchIsRecorded matches the pane's recorded start
+// command against. The shim IGNORES that trailing command and runs the capability's
+// own, so editing it changes nothing about what launches.
+func WrapAccountCommand(executable, socket, token, command string) (string, error) {
+	return wrapClaimedCommand(executable, AccountExecMarker, socket, token, command)
 }
 
 // WrapAccountEnvironmentCommand applies a selected account to a sibling pane's
-// environment. Unlike WrapAccountCommand, the pane command may be a shell or an
-// arbitrary process; the account still resolves in the child and never falls
-// back to ambient credentials.
-func WrapAccountEnvironmentCommand(executable, agent, account string, extras []string, command string) (string, error) {
-	if strings.TrimSpace(account) == "" {
-		return "", fmt.Errorf("account-scoped environment requires an account name")
+// environment through the same capability protocol. The pane command may be a
+// shell or an arbitrary process; the account still resolves in the child and
+// never falls back to ambient credentials.
+func WrapAccountEnvironmentCommand(executable, socket, token, command string) (string, error) {
+	return wrapClaimedCommand(executable, AccountEnvironmentExecMarker, socket, token, command)
+}
+
+func wrapClaimedCommand(executable, marker, socket, token, command string) (string, error) {
+	if socket == "" || token == "" {
+		return "", fmt.Errorf("account-scoped launch requires a claim endpoint and a launch capability")
 	}
-	return wrapCommandWithMarker(executable, AccountEnvironmentExecMarker, agent, account, AccountLaunchProof{}, extras, command)
+	args := []string{executable, marker, socket, token, command}
+	quoted := make([]string, len(args))
+	for idx, arg := range args {
+		quoted[idx] = shellquote.Quote(arg)
+	}
+	return strings.Join(quoted, " "), nil
 }
 
 // WrapAgentServerCommand builds the effect-bound Docker/SSH handoff. Unlike the
@@ -97,29 +102,12 @@ func WrapAgentServerAccountCommand(executable, accountAgent string, extras, agen
 	return strings.Join(quoted, " "), nil
 }
 
-func wrapCommand(executable, agent, account string, proof AccountLaunchProof, extras []string, command string) (string, error) {
-	marker := ExecMarker
-	if account != "" {
-		marker = AccountExecMarker
-	}
-	return wrapCommandWithMarker(executable, marker, agent, account, proof, extras, command)
-}
-
-func wrapCommandWithMarker(executable, marker, agent, account string, proof AccountLaunchProof, extras []string, command string) (string, error) {
+func wrapCommand(executable, agent string, extras []string, command string) (string, error) {
 	normalized, err := NormalizeExtraNames(extras)
 	if err != nil {
 		return "", err
 	}
-	args := []string{executable, marker, agent, strconv.Itoa(len(normalized))}
-	if account != "" {
-		// Both COUNTS are length-prefixed rather than delimiter-separated, for the
-		// reason the extras count already is: a generated argument is an arbitrary
-		// string (a path can contain anything), so any sentinel could appear inside
-		// one and a mis-split would hand the guard a different claim than the
-		// launcher made.
-		args = append(args, account, proof.TrustedExecutable, strconv.Itoa(len(proof.GeneratedArgs)))
-		args = append(args, proof.GeneratedArgs...)
-	}
+	args := []string{executable, ExecMarker, agent, strconv.Itoa(len(normalized))}
 	args = append(args, normalized...)
 	args = append(args, command)
 	quoted := make([]string, len(args))
@@ -155,25 +143,89 @@ func HandleInternalExec() {
 	if os.Args[1] != ExecMarker && !scoped && !environmentOnly {
 		return
 	}
-	if err := execInvocationMode(os.Args[2:], scoped || environmentOnly, environmentOnly); err != nil {
+	var err error
+	if scoped || environmentOnly {
+		err = claimedExecInvocation(os.Args[2:], environmentOnly)
+	} else {
+		err = execInvocation(os.Args[2:])
+	}
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "launch capability refused") {
+			// Value-free, and says what to do: this is what a window sees when the
+			// daemon that launched its session has since been replaced.
+			_, _ = fmt.Fprintf(os.Stderr,
+				"af: could not start this window in its account scope (%v); if the af daemon was restarted, run af daemon restart and reopen the session\n", err)
+			os.Exit(127)
+		}
 		_, _ = fmt.Fprintln(os.Stderr, "af: could not start the filtered session process")
 		os.Exit(127)
 	}
 }
 
-func execInvocation(args []string, scoped bool) error {
-	return execInvocationMode(args, scoped, false)
-}
+// claimCapability is a seam for tests; production claims over the unix socket.
+var claimCapability = ClaimCapability
 
-func execInvocationMode(args []string, scoped, environmentOnly bool) error {
+// claimedExecInvocation is the account-scoped shim. args is exactly
+// [socket, token, command]. Everything the launch means comes from the claimed
+// capability — the agent, account, command, passthrough names and launch proof the
+// launcher admitted. The shim's own argv command and environment are never
+// consulted for them, so a config edit after admission, an LD_PRELOAD added to the
+// passthrough list, or a re-derivation that disagrees with the launcher cannot
+// change what runs (#4731). A missing or refused claim is fatal: it never falls
+// back to the ambient identity.
+func claimedExecInvocation(args []string, environmentOnly bool) error {
 	if err := stampPaneRootPid(); err != nil {
 		return err
 	}
-	trailing := 3
-	if scoped {
-		trailing = 6
+	if len(args) != 3 {
+		// A window started by an af that predates the capability protocol carries
+		// the old argv (account, proof and counts inline). It is not a corrupt
+		// invocation: the daemon that launched the session has not been replaced
+		// yet. Take the refused-capability path so the window says to restart it.
+		return fmt.Errorf("launch capability refused: this window was started by an older af")
 	}
-	if len(args) < trailing {
+	c, err := claimCapability(args[0], args[1])
+	if err != nil {
+		return err
+	}
+	if c.Account == "" || c.EnvironmentOnly != environmentOnly {
+		return fmt.Errorf("launch capability refused: it does not describe this launch")
+	}
+	extras, err := NormalizeExtraNames(c.Extras)
+	if err != nil {
+		return err
+	}
+	if !environmentOnly && AgentForCommand(c.Command) != c.Agent {
+		// The capability names an agent, but the command it carries must still
+		// resolve to it: an account boundary must not inject material into a program
+		// this check cannot attribute (#5265). The workdir-based grant check is NOT
+		// repeated here — the launcher made it when it minted, and re-running it
+		// against the pane's cwd is what let a worktree layout change the answer.
+		return fmt.Errorf(
+			"account-scoped launch refused: %q does not resolve to an operator-attributable %s executable",
+			c.Command, c.Agent)
+	}
+	environ := FilterForCommand(os.Environ(), c.Agent, c.Command, extras)
+	// The account boundary is applied HERE, in the pane, after filtering and
+	// immediately before exec — the last point where anything can still change
+	// what the agent will see. A failure REFUSES the launch (#3051).
+	if environmentOnly {
+		environ, err = applyAccountEnvironmentScope(environ, c.Agent, c.Account, c.Command)
+	} else {
+		environ, err = applyAccountScope(environ, c.Agent, c.Account, c.Command, c.Proof)
+	}
+	if err != nil {
+		return err
+	}
+	shell := "/bin/sh"
+	return processExec(shell, []string{shell, "-c", c.Command}, environ)
+}
+
+func execInvocation(args []string) error {
+	if err := stampPaneRootPid(); err != nil {
+		return err
+	}
+	if len(args) < 3 {
 		return fmt.Errorf("malformed internal session environment invocation")
 	}
 	agent := args[0]
@@ -181,70 +233,25 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 	if err != nil || count < 0 {
 		return fmt.Errorf("malformed internal session environment invocation")
 	}
-	offset := 2
-	account := ""
-	proof := AccountLaunchProof{}
-	if scoped {
-		account = args[2]
-		proof.TrustedExecutable = args[3]
-		generatedCount, gerr := strconv.Atoi(args[4])
-		// Compared against the REMAINING room, never `trailing+generatedCount`: a
-		// maximum-sized integer makes that addition overflow to a negative bound, the
-		// check passes, and the slice below PANICS instead of returning this
-		// function's generic refusal (#3083 review). Subtraction cannot overflow here
-		// because trailing is a constant no larger than len(args), already checked.
-		if gerr != nil || generatedCount < 0 || generatedCount > len(args)-trailing {
-			return fmt.Errorf("malformed internal session environment invocation")
-		}
-		proof.GeneratedArgs = args[5 : 5+generatedCount]
-		offset = 5 + generatedCount
-	}
-	// The exact total, checked AFTER both counts are known. A length that merely
-	// fits leaves room for an unaccounted argument between the two lists, and this
-	// argv is what the boundary's whole claim rests on.
-	if len(args) != offset+count+1 {
+	// The exact total: a length that merely fits leaves room for an unaccounted
+	// argument, and this argv is what the boundary's whole claim rests on.
+	if len(args) != 2+count+1 {
 		return fmt.Errorf("malformed internal session environment invocation")
 	}
-	extras, err := NormalizeExtraNames(args[offset : offset+count])
+	extras, err := NormalizeExtraNames(args[2 : 2+count])
 	if err != nil {
 		return err
 	}
 	command := args[len(args)-1]
 	filterAgent := agent
-	if !environmentOnly && GrantAgentForCommand(command, os.Environ(), paneWorkingDirectory()) != agent {
+	if GrantAgentForCommand(command, os.Environ(), paneWorkingDirectory()) != agent {
 		// The argv protocol names an agent, but it is not authority by itself: a
 		// repository can invoke the private marker too. Re-derive the grant from the
 		// direct command through the SAME predicate the launcher used, and on
-		// disagreement retain only common/explicit values. Agent-server uses its
-		// effect-bound protocol above instead of asking this generic path to
-		// infer identity from nested argv.
-		if scoped {
-			// A scoped launch cannot just strip and continue: the account
-			// boundary below would still inject the selected account's material
-			// into a program this check could not attribute, which is the same
-			// credential leak through a different door. Refuse instead (#5265).
-			return fmt.Errorf(
-				"account-scoped launch refused: %q does not resolve to an operator-attributable %s executable",
-				command, agent)
-		}
+		// disagreement retain only common/explicit values.
 		filterAgent = ""
 	}
 	environ := FilterForCommand(os.Environ(), filterAgent, command, extras)
-	// The account boundary is applied HERE, in the pane, after filtering and
-	// immediately before exec — the last point where anything can still change
-	// what the agent will see. A failure REFUSES the launch rather than falling
-	// through to the ambient identity, which would be the silent wrong-account
-	// outcome the whole feature exists to prevent (#3051).
-	if scoped {
-		if environmentOnly {
-			environ, err = applyAccountEnvironmentScope(environ, agent, account, command)
-		} else {
-			environ, err = applyAccountScope(environ, agent, account, command, proof)
-		}
-		if err != nil {
-			return err
-		}
-	}
 	// tmux runs shell-command through the system shell, not the user's login
 	// shell. Keep that POSIX contract: program overrides and injected commands
 	// commonly use assignment prefixes, redirects, and quoting that fish/tcsh

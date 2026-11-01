@@ -1,0 +1,569 @@
+package daemon
+
+import (
+	"fmt"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+// Workspace content never runs with the control origin's authority, nor with an
+// editor's.
+//
+// The /v1/webtab/ mirror serves a session's dev server or editor on the SAME origin
+// as the web UI, which holds the bearer token in localStorage and passes every
+// same-origin check the daemon makes (the cross-site guard admits it as its own).
+// So anything a workspace serves there — a dev server's page, a file from the
+// worktree, an editor relayed from a sandbox — must not execute script as that
+// origin. Rules 1 and 2 are judged on the mirror only (route.previewOrigin is
+// false): the per-tab preview origin and the editor-origin ports are separate
+// origins by construction. Rules 3 and 4 protect the EDITOR, whose origin is worth
+// as much as a terminal, so they hold on every route that serves one.
+//
+//  1. Every mirrored WEB-tab response carries a CSP sandbox (mirrorSandboxCSP),
+//     the same flags the web client puts on the mirror's iframe and no
+//     allow-same-origin. Framed, that changes nothing: the iframe was already
+//     opaque. Opened top-level — the pane's "Open", a copied link, a bookmark —
+//     the page used to run unsandboxed as the control origin, able to read the
+//     token and drive the API. Now a top-level mirror document is opaque too, so
+//     it behaves exactly as it does in the frame. A response's own CSP is kept;
+//     policies intersect, so this can only narrow it. CSP sandbox governs
+//     documents only, so scripts, styles and images the app loads are unaffected.
+//
+//  2. A RELAYED editor — the VS Code tab of an off-box workspace (docker, SSH,
+//     remote-hook, sandbox), whose bytes come from the workspace itself — is never
+//     served on the mirror. VS Code cannot run under an opaque origin, so rule 1
+//     cannot contain it, and a workspace that controls the editor's HTML would run
+//     script as the control origin: a sandbox escape to the daemon host. It is
+//     served only on its own origin — the preview listener's per-session
+//     *.localhost name, or an editor-origin port — and the mirror answers with a
+//     notice naming how to turn one on.
+//
+// A LOCAL editor (code-server or openvscode-server spawned by this daemon on this
+// machine, for a local-worktree session) stays on the mirror when no editor origin
+// is available, deliberately: its workbench is software from the daemon host, not
+// workspace content, and a local workspace already runs with the operator's own
+// authority (same user, the daemon's unix socket, its token file), so the workbench
+// crosses no boundary the workspace does not already hold. Moving it would break
+// the default local editor, which has no other origin unless the operator enabled
+// network.preview_listen_addr.
+//
+//  3. Everything an editor serves, except its own workbench, is sandboxed on EVERY
+//     route that serves an editor — the mirror, the preview listener's editor
+//     origin and an editor-origin port alike. The rule is an ALLOW-list of the
+//     workbench's paths (editorPathKeepsItsOrigin), not a list of the routes that
+//     relay content: code-server's router matches case-insensitively, so a list
+//     of bad routes (/proxy/) misses their other spellings (/PROXY/), and every
+//     editor release can add one. What keeps a real origin is only what the
+//     workbench needs one for, matched exactly, in the request's own encoding.
+//     Everything else — code-server's port proxy, VS Code's worktree-file route,
+//     anything unknown — answers as an opaque-origin document. On the mirror the
+//     reason is the control origin; on an editor's own origin it is the editor
+//     itself: a page at the editor's origin is same-origin with its WebSocket,
+//     which is a terminal in that workspace.
+//
+//     What this does NOT cover: VS Code renders webviews (notebook outputs,
+//     extension views) inside its webview host, a workbench page, in a frame it
+//     gives allow-same-origin, and code-server serves that host from its own
+//     static route. So a webview runs with the workbench's origin — the control
+//     origin, for a local editor on the mirror. Closing that needs the local
+//     editor on an origin of its own by default, which is a separate decision.
+//
+//  4. An editor's WebSocket is accepted only from the editor's own origin, on every
+//     route that serves an editor (editorUpgradeRefusal). The editor's channel IS a
+//     terminal in the workspace, and openvscode-server checks no Origin on it:
+//     handleUpgrade reads none, and under --without-connection-token (which af
+//     passes, since the socket's permissions authenticate the daemon) the token
+//     check always passes. A browser does not apply CORS to a WebSocket handshake,
+//     so without this a page on any other origin — a dev server on another port of
+//     the same host, or a page rule 3 made opaque — could open that terminal
+//     wherever it could reach the route. code-server has checked Origin on its
+//     WebSockets since 4.10.1; this gives both editors the same rule, enforced by
+//     af. "Own origin" is originNamesRequest's, the same comparison the cross-site
+//     guard (crosssite.go) applies to the web UI's own streams, so an editor
+//     connects behind exactly the front doors the web UI does. A handshake with no
+//     Origin is not a browser's (the Fetch standard sends one on every WebSocket
+//     handshake) and is admitted, as the cross-site guard and code-server both do.
+
+//  5. No workspace response acts on a whole origin it shares (confineOriginHeaders).
+//     Clear-Site-Data wipes the storage of the origin the RESPONSE came from,
+//     whatever document asked for it, so a sandboxed page fetching a mirror URL
+//     could clear the web UI's token, and one on an editor origin the editor's
+//     state; it is stripped everywhere but a web tab's own preview origin, which
+//     belongs to that app. Service-Worker-Allowed widens how far a service worker
+//     registered from a script may reach, so on the mirror it is clamped to the
+//     tab's own prefix: no tab's script can become a worker for the web UI at "/",
+//     which would outlive any fix.
+//
+//  6. An editor's static DOCUMENTS are framed or navigated only by the editor's own
+//     origin (editorStaticDocumentRefusal). VS Code serves host pages that hand a
+//     caller a message channel on a hostname-only match (code-server's patch): the
+//     webview host under webview/browser/pre/, the web-worker extension host iframe
+//     webWorkerExtensionHostIframe.html, and whatever a future release adds. They
+//     are part of the workbench, so rule 3 keeps them on a real origin — but two
+//     editor origins on one front-door host (the editor-origin ports) differ only
+//     by port, so a page on one could be handed another's channel. Rather than name
+//     those pages, this closes the CLASS: a nested-browsing-context load (Sec-Fetch
+//     -Dest document/iframe/frame/object/embed) of anything under a static root is
+//     refused unless Sec-Fetch-Site is same-origin or none, with the parentOrigin
+//     query as the fallback when a browser sends no fetch metadata. It guards who
+//     may LOAD the page; rule 3 governs what origin it runs at.
+//
+// Rules 3 and 6 judge the path, so they stand on a precondition: an editor route
+// serves ONLY a canonical path (editorNonCanonicalRefusal, 400 otherwise). Without
+// it each path rule would have to anticipate every spelling a router collapses to
+// the same file — an empty segment ("webview//browser/pre", which an editor-origin
+// port has no mux to clean), a dot segment, an encoded separator — and miss one.
+// With it they judge the single form the editor will serve.
+
+// mirrorSandboxCSP is the opaque-origin sandbox for mirrored workspace documents.
+// Its flags must equal the web client's mirror iframe sandbox
+// (web/src/tabaddr.ts webSandbox(false, false)), so a page behaves the same framed
+// and top-level; TestMirrorSandboxMatchesTheClientsFrameSandbox and its TS twin pin
+// both to this literal.
+const mirrorSandboxCSP = "sandbox allow-scripts allow-forms allow-popups allow-modals"
+
+// workspaceSandboxPolicy is the CSP the proxy adds to a response, or "" for none:
+// rule 1 for a web tab on the mirror (a web tab's own preview origin is separate
+// from everything else by design and keeps a real origin), and rule 3 for every
+// editor path outside the workbench, on any route.
+func workspaceSandboxPolicy(route webTabRoute, kind session.TabKind) string {
+	switch kind {
+	case session.TabKindWeb:
+		if !route.previewOrigin {
+			return mirrorSandboxCSP
+		}
+	case session.TabKindVSCode:
+		if !editorPathKeepsItsOrigin(route.escapedRest) {
+			return mirrorSandboxCSP
+		}
+	}
+	return ""
+}
+
+// editorPathKeepsItsOrigin reports whether a path below an editor tab's prefix is
+// the editor's own workbench, the only part of an editor that needs a real origin
+// (rule 3). escapedRest is the path in the request's OWN encoding, and segments are
+// compared exactly, case included: the editor sees that same spelling, so a
+// spelling only a case-insensitive or decoding router would route — "/STATIC/",
+// "%73tatic" — is not the workbench here and is sandboxed. The workbench is:
+//
+//   - the shell, at the root (VS Code's "/"; code-server's too, and its "/vscode");
+//   - VS Code's own files under static/: scripts, styles, workers, and the
+//     webview host page;
+//   - VS Code's sign-in callback page, callback;
+//
+// each optionally under VS Code's <quality>-<commit> product segment, which its
+// server strips; and code-server's own assets under _static/, at its root. Both
+// static trees are files from the editor's install, not from the workspace.
+func editorPathKeepsItsOrigin(escapedRest string) bool {
+	segs := strings.Split(strings.TrimPrefix(escapedRest, "/"), "/")
+	if len(segs) >= 2 && segs[0] == "_static" {
+		return true
+	}
+	if segs[0] == "vscode" {
+		segs = segs[1:]
+	}
+	if len(segs) > 0 && editorProductSegment.MatchString(segs[0]) {
+		segs = segs[1:]
+		if len(segs) == 0 {
+			return false // "/stable-…" with no slash is no route of VS Code's
+		}
+	}
+	switch {
+	case len(segs) == 0, len(segs) == 1 && segs[0] == "":
+		return true
+	case len(segs) >= 2 && segs[0] == "static":
+		return true
+	case len(segs) == 1 && segs[0] == "callback":
+		return true
+	}
+	return false
+}
+
+// editorProductSegment is VS Code's server product path segment, <quality>-<commit>
+// (getServerProductSegment), such as stable-<40 hex>; "oss-dev" for an unbuilt one.
+var editorProductSegment = regexp.MustCompile(`^[a-z]+-(?:[0-9a-f]{7,64}|dev)$`)
+
+// confineOriginHeaders is rule 5 on one upstream response.
+func confineOriginHeaders(h http.Header, route webTabRoute, kind session.TabKind) {
+	if !(route.previewOrigin && kind == session.TabKindWeb) {
+		h.Del("Clear-Site-Data")
+	}
+	if route.prefix != "" && len(h.Values("Service-Worker-Allowed")) > 0 {
+		// Set the scope to exactly the tab's prefix — never a value computed from the
+		// app's, which cannot be clamped safely: Go's url/path read "\" as an ordinary
+		// character while a browser reads it as "/", so a "\..\..\" an app sends
+		// survives a path-based clamp and a worker escapes to "/". The whole tab
+		// subtree is the widest legitimate scope here anyway, so this costs the app
+		// nothing a narrower scope would not.
+		h.Set("Service-Worker-Allowed", route.prefix+"/")
+	}
+}
+
+// trackedEditorTab reports whether (sessionID, tabID) is a VS Code tab, and whether
+// its editor is RELAYED from an off-box workspace, judged from the already-tracked
+// session WITHOUT resolving the tab's target: resolving an editor STARTS it (on the
+// workspace's host, for a relayed one), and rules 2 and 4 refuse before that, so an
+// editor is never started only to be turned away. The session is addressed the way
+// WebTabTarget addresses it — a stable id, else a title unique across projects —
+// so the claim holds for either spelling of the route. The resolved target's Kind
+// and RelayedEditor stay the authoritative checks after resolution, for a session
+// that is not tracked yet.
+func (m *Manager) trackedEditorTab(sessionID, tabID string) (editor, relayed bool) {
+	if m == nil {
+		return false, false
+	}
+	instance := m.trackedWebTabSession(sessionID)
+	if instance == nil {
+		return false, false
+	}
+	kind, _, ok := instance.TabTargetByID(tabID)
+	if !ok || kind != session.TabKindVSCode {
+		return false, false
+	}
+	return true, instance.Capabilities().Workspace == session.WorkspaceRemote
+}
+
+// trackedWebTabSession is the tracked half of WebTabTarget's session resolution
+// (resolveStreamSession, unscoped): the stable id first, then a title that exactly
+// one project holds. It never refreshes from disk; an ambiguous or unknown name is
+// nil here and is left to the resolution, which reports it.
+func (m *Manager) trackedWebTabSession(idOrTitle string) *session.Instance {
+	if instance := m.trackedStreamSession(idOrTitle); instance != nil || idOrTitle == "" {
+		return instance
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var match *session.Instance
+	var repos []string
+	for key, instance := range m.instances {
+		if instance == nil || instance.Title != idOrTitle {
+			continue
+		}
+		rid, _ := splitDaemonInstanceKey(key)
+		repos = append(repos, rid)
+		match = instance
+	}
+	if len(session.DedupeSorted(repos)) != 1 {
+		return nil
+	}
+	return match
+}
+
+// editorUpgradeRefusal is rule 4 for one request on an editor tab's route: a
+// protocol upgrade whose Origin is not the origin the request was addressed to is
+// refused. Every upgrade counts, not only "websocket": httputil.ReverseProxy relays
+// any Upgrade the upstream accepts, and a browser cannot set Upgrade or Connection
+// itself, so judging every request that names one costs no legitimate request.
+// allowedHosts is network.allowed_hosts, for originNamesRequest's X-Forwarded-Host
+// admission behind a same-host proxy.
+func editorUpgradeRefusal(r *http.Request, allowedHosts []string) *crossSiteDenial {
+	if !requestsUpgrade(r) {
+		return nil
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" || originNamesRequest(origin, r, allowedHosts) {
+		return nil
+	}
+	return &crossSiteDenial{
+		status: http.StatusForbidden,
+		err: fmt.Errorf("refused an editor connection from Origin %q: an editor accepts connections only "+
+			"from its own page. Behind a reverse proxy that rewrites Host, forward the browser's with "+
+			"X-Forwarded-Host (and X-Forwarded-Proto) or keep Host", echoHost(origin)),
+		logKey: "editor-origin:" + echoHost(origin),
+	}
+}
+
+// editorRouteRefusal is every request-time refusal an editor route carries: the
+// WebSocket/upgrade Origin rule (4) and the webview-host loader rule (6). Both call
+// sites — before the target resolves and after — run it, so the earlier one refuses
+// without starting the editor and the later one covers a session resolved only just
+// now.
+func editorRouteRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
+	if d := editorNonCanonicalRefusal(route); d != nil {
+		return d
+	}
+	if d := editorUpgradeRefusal(r, allowedHosts); d != nil {
+		return d
+	}
+	return editorStaticDocumentRefusal(r, route, allowedHosts)
+}
+
+// editorNonCanonicalRefusal refuses (400) an editor path that is not already in its
+// cleaned, decoded form. This is the structural guard the path-based rules (3 and 6)
+// stand on: rather than have each of them anticipate every spelling a router might
+// collapse to the same file, an editor route serves ONLY canonical paths, so those
+// rules only ever judge the one form the editor will serve.
+//
+// Non-canonical means: an encoded separator (%2F or %5C, which the editor decodes
+// into a path separator), a malformed escape, or a decoded path that differs from
+// muxCleanPath's — an empty segment ("webview//browser/pre", which an editor-origin
+// port has no router to collapse, unlike the control listener's ServeMux), or a "."
+// or ".." segment. A single trailing slash is canonical and kept. Scoped to editor
+// tabs: a web tab's dev server owns its own path space and may use any of these.
+func editorNonCanonicalRefusal(route webTabRoute) *crossSiteDenial {
+	// route.escapedRest is the path AFTER the route mount, and it must already be
+	// canonical — no EXTRA leading slash. The mount strips one slash, so a "//x"
+	// request leaves "/x" here; trimming it would hide that the path was
+	// non-canonical (and editorPathUnderStaticRoot would then see an empty first
+	// segment and skip the loader rule). So the leading slash is judged, not removed.
+	esc := route.escapedRest
+	low := strings.ToLower(esc)
+	bad := strings.Contains(low, "%2f") || strings.Contains(low, "%5c")
+	if !bad {
+		if decoded, err := url.PathUnescape(esc); err != nil {
+			bad = true
+		} else if strings.HasPrefix(decoded, "/") {
+			bad = true // an extra leading slash the mount did not strip
+		} else if p := "/" + decoded; muxCleanPath(p) != p {
+			bad = true
+		}
+	}
+	if !bad {
+		return nil
+	}
+	return &crossSiteDenial{
+		status: http.StatusBadRequest,
+		err:    fmt.Errorf("refused a non-canonical editor path %q: an editor serves only cleaned paths", echoHost(route.rest)),
+		logKey: "editor-noncanonical",
+	}
+}
+
+// editorStaticDocumentRefusal is rule 6, as a CLASS rather than a list of pages: an
+// editor's static documents are only ever framed or navigated by the editor's OWN
+// origin. It closes the hand-off whatever version of code-server a user runs — a
+// third parentOrigin host page in some release needs no new code here.
+//
+// Scoped to the editor's static roots (editorPathUnderStaticRoot: the static/ and
+// _static/ trees, where the real-origin documents live). Judged by fetch metadata,
+// which the browser sets and a page cannot forge:
+//
+//   - If Sec-Fetch-Dest names a nested browsing context (document, iframe, frame,
+//     object, embed), the load is admitted only when Sec-Fetch-Site is same-origin
+//     or none (the editor's own page, or a user-typed URL); a same-site (another
+//     port of this host) or cross-site framer is refused. This is what catches the
+//     webview host AND the web-worker extension host iframe AND any future one,
+//     without naming them.
+//   - A non-nested dest (a script, style, image, fetch) is a sub-resource, not a
+//     framing, and is admitted.
+//   - No Sec-Fetch-Dest at all (a browser too old to send it) falls back to the
+//     parentOrigin query: a request that carries one must carry exactly one that
+//     names this origin (webviewParentOrigin + the rule-4 comparison), else it is
+//     refused; a request with none is an ordinary sub-resource and is admitted.
+//
+// The static-root scope is deliberate: content the editor RELAYS (the port proxy,
+// vscode-remote-resource) is already opaque-origin under rule 3, so its own document
+// sub-requests arrive cross-site — applying this rule there would refuse a sandboxed
+// dev server loading its own frames. Two real-origin editor pages sit OUTSIDE a
+// static root and are exempt by that: the shell at the root, which the web UI
+// legitimately frames cross-origin to display an editor-origin port; and the sign-in
+// callback page, which OAuth providers navigate to cross-site — refusing a cross-site
+// load of callback would break sign-in, and it reads no parentOrigin to abuse.
+func editorStaticDocumentRefusal(r *http.Request, route webTabRoute, allowedHosts []string) *crossSiteDenial {
+	if !editorPathUnderStaticRoot(route.escapedRest) {
+		return nil
+	}
+	refuse := func(why string) *crossSiteDenial {
+		return &crossSiteDenial{
+			status: http.StatusForbidden,
+			err: fmt.Errorf("refused a %s load of an editor static document: an editor's documents are "+
+				"framed only by the editor's own page", why),
+			logKey: "editor-static-doc",
+		}
+	}
+	dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
+	if dest != "" {
+		// An ALLOW-LIST of sub-resource destinations, not a deny-list of framing ones:
+		// a value this does not recognise — a future nested context like fencedframe,
+		// or anything new — is treated as a framing/navigation and must be same-origin.
+		if isSubresourceDest(dest) {
+			return nil
+		}
+		site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
+		if site == "same-origin" || site == "none" {
+			return nil
+		}
+		return refuse(echoHost(dest))
+	}
+	// No fetch metadata (an old browser). A parentOrigin query (judged on DECODED
+	// keys, as the page reads it — so %70arentOrigin counts) marks a host-page load;
+	// without one this is an ordinary sub-resource. It must carry exactly one
+	// parentOrigin naming this origin; zero is a sub-resource, more than one is
+	// ambiguous, and a non-naming value is the cross-port parent.
+	value, count := webviewParentOrigin(r.URL.RawQuery)
+	if count == 0 {
+		return nil
+	}
+	if count == 1 && originNamesRequest(value, r, allowedHosts) {
+		return nil
+	}
+	return refuse("parentOrigin")
+}
+
+// webviewParentOrigin reads parentOrigin from a query EXACTLY as the host page's
+// URLSearchParams does, so the daemon judges the same value the page will act on:
+// split on "&" only (a browser does not treat ";" as a separator), split each pair
+// on the first "=", and form-decode key and value — "+" is a space and %XX is
+// decoded leniently, an invalid escape left literal (formURLDecode). value is the
+// FIRST decoded parentOrigin value (what URLSearchParams.get returns); count is how
+// many pairs have a decoded key of parentOrigin. A key spelled %70arentOrigin
+// decodes to parentOrigin and so is counted, which a raw-substring test would miss.
+// The caller admits a host-page load only when count is exactly one AND that value
+// names this origin: zero means an ordinary sub-resource, and more than one is
+// ambiguous enough to refuse.
+func webviewParentOrigin(rawQuery string) (value string, count int) {
+	for _, pair := range strings.Split(rawQuery, "&") {
+		if pair == "" {
+			continue
+		}
+		rawKey, rawVal, _ := strings.Cut(pair, "=")
+		if formURLDecode(rawKey) == "parentOrigin" {
+			if count == 0 {
+				value = formURLDecode(rawVal)
+			}
+			count++
+		}
+	}
+	return value, count
+}
+
+// formURLDecode decodes an application/x-www-form-urlencoded component the way a
+// browser's URLSearchParams does: "+" becomes a space, then each valid %XX becomes
+// its byte; an incomplete or non-hex escape is left literal (lenient, unlike Go's
+// url.QueryUnescape, which errors). Byte-wise, which is all the ASCII key compare
+// and the origin parse need.
+func formURLDecode(s string) string {
+	s = strings.ReplaceAll(s, "+", " ")
+	if !strings.Contains(s, "%") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if h1, ok1 := fromHexDigit(s[i+1]); ok1 {
+				if h2, ok2 := fromHexDigit(s[i+2]); ok2 {
+					b.WriteByte(h1<<4 | h2)
+					i += 2
+					continue
+				}
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// isSubresourceDest reports whether a Sec-Fetch-Dest names a sub-resource rather
+// than a nested browsing context or navigation. It is an allow-list: the Fetch
+// destinations that load no framed document (scripts, styles, media, workers,
+// fetch/XHR "empty", …). Everything else — document, iframe, frame, object, embed,
+// fencedframe, or a value added to the platform after this was written — is treated
+// as a framing/navigation, so a new nested context cannot slip past by being
+// unknown here.
+func isSubresourceDest(dest string) bool {
+	switch dest {
+	case "empty", "audio", "audioworklet", "font", "image", "json", "manifest",
+		"paintworklet", "report", "script", "serviceworker", "sharedworker",
+		"style", "track", "video", "worker", "xslt", "speculationrules":
+		return true
+	}
+	return false
+}
+
+func fromHexDigit(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+// editorPathUnderStaticRoot reports whether a path below an editor tab's prefix is
+// inside one of VS Code's static file trees — static/ (under the optional vscode and
+// <quality>-<commit> prefixes) or code-server's _static/ at the root — where the
+// editor's real-origin documents (the webview host, the web-worker extension host
+// iframe, and any future host page) live. The port proxy's own "static" (proxy/
+// <port>/static/…) is NOT matched: its first segment is "proxy", so it stays the
+// relayed, opaque-origin content rule 3 governs.
+//
+// code-server's static server DECODES the path (percent escapes, %2F included) and
+// routes case-insensitively, so the match is on the decoded, lower-cased path — a
+// raw-segment match misses "%73tatic" and encoded slashes. Decoded repeatedly to a
+// fixed point; a path that will not decode is treated as under a static root (fail
+// safe: the guard only ever adds a refusal to a malformed request).
+func editorPathUnderStaticRoot(escapedRest string) bool {
+	decoded, ok := decodeToFixedPoint(escapedRest)
+	if !ok {
+		return true
+	}
+	segs := strings.Split(strings.ToLower(decoded), "/")
+	if len(segs) > 0 && segs[0] == "vscode" {
+		segs = segs[1:]
+	}
+	if len(segs) > 0 && editorProductSegment.MatchString(segs[0]) {
+		segs = segs[1:]
+	}
+	return len(segs) > 0 && (segs[0] == "static" || segs[0] == "_static")
+}
+
+// decodeToFixedPoint percent-decodes s until it stops changing (bounded), so an
+// n-times-encoded spelling reduces to what the editor's decoding layers serve. It
+// returns false if a round yields a malformed escape.
+func decodeToFixedPoint(s string) (string, bool) {
+	for i := 0; i < 5; i++ {
+		next, err := url.PathUnescape(s)
+		if err != nil {
+			return "", false
+		}
+		if next == s {
+			return s, true
+		}
+		s = next
+	}
+	return s, true
+}
+
+// requestsUpgrade reports whether r asks for a protocol switch: an Upgrade header,
+// or an "upgrade" token in Connection. Broader than ReverseProxy's own test (both),
+// so nothing it would relay as an upgrade escapes the check.
+func requestsUpgrade(r *http.Request) bool {
+	if r.Header.Get("Upgrade") != "" {
+		return true
+	}
+	for _, v := range r.Header.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// webTabAllowedHosts is network.allowed_hosts for this request: from the posture
+// the control listener's Host guard already built for it (one config read per
+// request), else from the live config: the preview listener and the editor-origin
+// ports put no posture in the context.
+func (cs *controlServer) webTabAllowedHosts(r *http.Request) []string {
+	if p, ok := requestPostureFrom(r.Context()); ok {
+		return p.allowedHosts
+	}
+	return editorPortAllowedHosts(cs)
+}
+
+// relayedEditorNeedsOwnOrigin is the notice the mirror shows in place of a relayed
+// editor (rule 2). It names both ways to give the editor an origin of its own.
+const relayedEditorNeedsOwnOrigin = "This session's editor runs in its workspace, so af opens it only on an " +
+	"origin of its own, never on the web UI's. To open it from this machine, set network.preview_listen_addr " +
+	"to a fixed loopback port (for example `af config set network.preview_listen_addr 127.0.0.1:8444`). " +
+	"To open it from another machine, set network.editor_origin_ports and expose those ports behind your " +
+	"front door (see docs/web.md, per-session editor origins). Then reopen this tab."

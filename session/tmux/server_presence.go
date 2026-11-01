@@ -17,6 +17,27 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 )
 
+// socketTmuxArgs prepends tmux's `-S <socket>` server option to a command's
+// per-command args when socket is non-empty, pinning the command to that one
+// tmux server. An empty socket returns args unchanged so the client resolves
+// the server from its own environment ($TMUX, else $TMUX_TMPDIR, else the
+// default) — the historical behavior callers that already operate on their
+// own daemon's ambient socket keep.
+//
+// Pinned with `-S <path>` rather than named with `-L <name>` because the
+// daemon's sessions live on a socket PATH it records, not a socket NAME a
+// client re-resolves from TMUX_TMPDIR: a doctor process whose own
+// $TMUX/$TMUX_TMPDIR resolves a different server would still reach the wrong
+// one through `-L default`. This mirrors the `-S` pin app/config_agent.go
+// and commands/accountslogincmd.go already use for this same daemon-vs-client
+// divergence (#2019).
+func socketTmuxArgs(socket string, args ...string) []string {
+	if socket == "" {
+		return args
+	}
+	return append([]string{"-S", socket}, args...)
+}
+
 // missingTmuxSession recognizes tmux's explicit exact-target absence answer.
 // Exit status 1 alone is ambiguous: wrapper, policy, and unclassified connection
 // failures can return the same status while the named session remains unknown.
@@ -69,16 +90,21 @@ func missingTmuxSession(err error, name string) bool {
 // the package invariant intact rather than bending it: absence is still proved
 // by a read that happened, never inferred from one that failed.
 //
+// The corroboration listing is pinned to socket when non-empty, so a caller
+// that already pinned its own command to a recorded server corroborates
+// against that SAME server rather than re-resolving one from its ambient
+// environment and asking the wrong server whether the session is absent.
+//
 // Only tmux's own exit 1 is widened this way. Any other status is a failure mode
 // tmux documents no diagnostic for, and was never a candidate for absence.
-func tmuxProvedSessionAbsent(cmdExec cmd.Executor, err error, name string) bool {
+func tmuxProvedSessionAbsent(cmdExec cmd.Executor, err error, name, socket string) bool {
 	if missingTmuxSession(err, name) {
 		return true
 	}
 	if _, exitOne := tmuxExitOneDiagnostic(err); !exitOne {
 		return false
 	}
-	names, listErr := ListSessionNames(cmdExec)
+	names, listErr := ListSessionNamesOnSocket(cmdExec, socket)
 	if listErr != nil {
 		return false
 	}
@@ -174,6 +200,19 @@ const (
 // give a different result from a container that has none.
 var tmuxServerProcessPIDs = liveTmuxServerPIDs
 
+// tmuxServerSignal delivers the SIGUSR1 recreate-socket probe to a positively
+// identified tmux server. It is a package var, not a bare syscall.Kill call, for
+// the same reason proctree.Kill is one: a non-ESRCH signal failure such as EPERM
+// or EACCES from a sandbox/LSM signal policy is a real state (cleanup.go and
+// reap_test.go both call it out — "a D-state sleeper or a process this uid may
+// not signal") that a test cannot conjure on demand against a same-uid live
+// process. Tests override it to model a denied signal and exercise the
+// kill-error branch of tmuxSocketClaimed deterministically, without installing
+// a real seccomp filter or a process owned by another uid. It scopes only the
+// ownership probe; the reaper delivers SIGTERM/SIGKILL through proctree.Signal,
+// so overriding this var cannot change how a teardown signals anything.
+var tmuxServerSignal = syscall.Kill
+
 // PinServerProbeForTest fixes the "is a tmux server alive for this uid?" answer
 // and returns the restore. It exists for internal/testguard.IsolateTmux, which
 // declares a private-socket world for a test; without it that isolation is
@@ -243,19 +282,33 @@ func liveTmuxServerPIDs() []int {
 // A tripped deadline is an error, never an empty list: a server that did not
 // answer has told us nothing about what is running on it.
 func ListSessionNames(cmdExec cmd.Executor) ([]string, error) {
-	return listSessionField(cmdExec, "#{session_name}")
+	return listSessionField(cmdExec, "#{session_name}", "")
+}
+
+// ListSessionNamesOnSocket is ListSessionNames pinned to a specific tmux server
+// socket via `tmux -S <socket> ls`, exported for `af doctor` (#2874/#2910).
+// Doctor observes sessions a daemon in ANOTHER process created: the daemon and
+// the doctor process can resolve DIFFERENT $TMUX/$TMUX_TMPDIR values, so a bare
+// `tmux ls` lists whatever server doctor's ambient environment reaches, a live
+// session on the daemon's socket is absent from the result, and every process
+// carrying its marker reads as a verified orphan. Pinning to the socket the
+// daemon records makes the listing name the server that actually hosts this
+// home's sessions. An empty socket is the ambient listing of ListSessionNames,
+// so callers without a recorded socket keep that behavior.
+func ListSessionNamesOnSocket(cmdExec cmd.Executor, socket string) ([]string, error) {
+	return listSessionField(cmdExec, "#{session_name}", socket)
 }
 
 // listSessionIDs is the ListSessionNames contract for #{session_id}: the
 // generation probe's corroboration asks which IDS the server still knows,
 // and a name list cannot answer that.
 func listSessionIDs(cmdExec cmd.Executor) ([]string, error) {
-	return listSessionField(cmdExec, "#{session_id}")
+	return listSessionField(cmdExec, "#{session_id}", "")
 }
 
-func listSessionField(cmdExec cmd.Executor, format string) ([]string, error) {
+func listSessionField(cmdExec cmd.Executor, format, socket string) ([]string, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "ls", "-F", format)
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, socketTmuxArgs(socket, "ls", "-F", format)...)
 	timedOut := ctx.Err() != nil
 	cancel()
 	if err != nil {
@@ -274,32 +327,6 @@ func listSessionField(cmdExec cmd.Executor, format string) ([]string, error) {
 		}
 	}
 	return names, nil
-}
-
-// SessionCreatedUnix returns the server's recorded creation time for one tmux
-// session — per-launch temporal evidence the env markers alone cannot carry
-// (#5503): a same-named session killed and respawned gets a fresh timestamp, so
-// a leftover created at-or-after a recorded intent can be attributed to that
-// attempt. Any failure — absent session, wedged server, unparseable answer —
-// is an error; the caller must not read it as "not ours". Second granularity
-// is all tmux records; callers comparing against a finer bound should compare
-// at whole seconds.
-func SessionCreatedUnix(cmdExec cmd.Executor, sanitizedName string) (time.Time, error) {
-	ctx, cancel := tmuxTimeoutContext()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "display-message", "-t", exactTarget(sanitizedName), "-p", "#{session_created}")
-	timedOut := ctx.Err() != nil
-	cancel()
-	if err != nil {
-		if timedOut {
-			return time.Time{}, fmt.Errorf("%w: display-message for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
-		}
-		return time.Time{}, fmt.Errorf("could not read %s's creation time: %w", sanitizedName, err)
-	}
-	sec, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if perr != nil {
-		return time.Time{}, fmt.Errorf("could not parse %s's creation time %q: %w", sanitizedName, strings.TrimSpace(string(out)), perr)
-	}
-	return time.Unix(sec, 0), nil
 }
 
 // CommandDiagnostic returns what tmux wrote to stderr for a failed command,
@@ -483,8 +510,28 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 			unprobedOwnerPossible = true
 			continue
 		}
-		if err := syscall.Kill(pid, syscall.SIGUSR1); err == nil {
+		kerr := tmuxServerSignal(pid, syscall.SIGUSR1)
+		switch {
+		case kerr == nil:
 			signaled = true
+		case errors.Is(kerr, syscall.ESRCH):
+			// The pid vanished between the positive identity check and the
+			// signal. Gone is gone: this candidate IS disproved, so it is
+			// neither counted as signalled nor remembered as a possible owner.
+		default:
+			// A positively-identified live server we could not signal — e.g.
+			// EPERM or EACCES from a sandbox/LSM signal policy, the denied-signal
+			// state cleanup.go and reap_test.go acknowledge as real. A live
+			// owner that kill() refuses is NOT disproved, and a socket that
+			// stays absent is NOT evidence against it: the safe direction is
+			// "claimed" (unknown), exactly the branch the IsTmuxServer skip
+			// above takes. The doc comment's contract — "a table with live
+			// servers that could not all be signaled answers claimed" — already
+			// says so; before this arm existed a mixed table (one kill
+			// succeeding, one failing) answered "unclaimed", manufacturing a
+			// determinate empty for a live owner that was never disproved and
+			// licensing CleanupSessions' destructive path against it.
+			unprobedOwnerPossible = true
 		}
 	}
 	if !signaled {

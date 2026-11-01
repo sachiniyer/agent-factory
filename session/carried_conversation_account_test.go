@@ -48,6 +48,6 @@ func TestRespawnWithoutASwapStillResumesExactly(t *testing.T) {
 func TestOffBoxAccountRecordRetiresTheCarriedConversation(t *testing.T) {
 	conv := AgentConversationData{Agent: "codex", ID: carriedOldAccountID}
 	inst := &Instance{Title: "t", Tabs: []*Tab{{Conversation: conv}}, carriedConversation: conv, reportedConversation: conv}
-	inst.recordOffBoxAccount("work", "codex", false, "codex")
+	inst.recordOffBoxAccount("work", "codex", false, "codex", nil)
 	assert.Equal(t, "codex", prepareResumeConversation(inst, "codex"))
 }

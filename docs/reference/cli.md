@@ -76,7 +76,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
 - [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
 - [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
-- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Proposal tab sends the user's edits to this session by itself
 - [`af proposal remove-doc`](#af-proposal-remove-doc) — Remove a doc from a proposal; it stays in the proposal's history
 - [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
 - [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
@@ -241,7 +241,7 @@ reporting the one you asked for. Sessions on one host share its ssh user, so the
 read each other's synced credentials.
 
 sandbox and hook targets cannot be listed, so they refuse an explicit account. docker
-bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
+bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
 
 By default af never switches accounts on its own. With limit_auto_resume enabled,
 an explicit limit_account_candidates list may opt an unpinned local session into
@@ -616,10 +616,10 @@ af backlog ask --self <text> [flags]
 
 Show or change the global budget
 
-The budget is the share of your Claude plan the backlog may use, for all projects. --share is the percent of each plan window (5-hour and weekly) the backlog may use. --stop-at is the plan percent, from any use, at which the runner stops. --max-per-run is the percent of the 5-hour window one run may use. --usd-limit is a dollar limit at API prices for accounts with no plan readings (an API key); 0 turns it off. With no flags, print the settings.
+The budget is the share of your Claude plan the backlog may use, in each plan window (5-hour and weekly), for all projects. With no flags, print it with each window's plan %, the backlog's part of it, the reset time and the age of the newest reading. --share sets the backlog's % of each window (default 50). --stop-at sets the plan % at which the runner stops (default 90). --max-per-run sets the % of the 5-hour window one run may use (default 10). --usd-limit sets a dollar limit at API prices for accounts with no plan readings; 0 turns it off.
 
 ```
-af backlog budget [flags]
+af backlog budget [--share <pct>] [--stop-at <pct>] [--max-per-run <pct>] [--usd-limit <usd>] [flags]
 ```
 
 **Flags**
@@ -1440,13 +1440,16 @@ Settable keys:
   docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
+  network.allowed_hosts      comma-separated extra host names (no scheme or port) the web UI and API answer to, e.g. the
+                             name tailscale serve forwards, or "" for none — the whole list is replaced. localhost,
+                             loopback IPs and the listener's own address always work; any other Host is refused.
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
   hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config} (global-only)
   default_host               name of the listed host used when a session does not pick one (global-only)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
 require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
-docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
+allowed_hosts, docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
 remain accepted and edit the same canonical grouped values.
 
 Structured values must be shell-quoted so the JSON remains one argument. A write
@@ -1519,7 +1522,7 @@ With --project, unset targets a project's machine-local config (a prj_ id from
 'af projects list', or a path inside a registered repository). Without
 --project, it clears one migrated global setting — a network.* key
 (listen_addr, preview_listen_addr, require_token, require_loopback_token,
-cors_allowed_origins) or a backend key (docker.mount_agent_credentials,
+cors_allowed_origins, allowed_hosts) or a backend key (docker.mount_agent_credentials,
 ssh.host_key_verification, sandbox.ssh). Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
@@ -1844,6 +1847,14 @@ accumulate silently on a machine running agent-factory:
     no session owns it — live, archived, mid-kill and awaiting-teardown
     sessions all count — and removes nothing at all when any part of that
     inventory cannot be read
+  - listed host readiness: one row per host in the global hosts list (ready,
+    blocked by a prerequisite problem, unknown, or unreachable) when the
+    daemon can complete the host check. Silent when no host is listed; a
+    daemon that is not answering emits one aggregate warning instead of
+    per-host rows and marks the check incomplete rather than a pass — the
+    daemon runs the probe, doctor does not dial the host. The probe is the
+    one thing a default run can write: under accept-new host-key
+    verification its ssh can pin a newly learned key
 
 The version-skew check exists because a skewed daemon fails quietly: it keeps
 answering while rejecting fields a newer client sends, which surfaces as
@@ -1885,7 +1896,8 @@ thousands on a busy machine. Use --verbose to show each item behind those
 summaries. A summary from a check that did not finish reads "at least N … a
 lower bound" in its own row, so its count is never mistaken for the total.
 
-Read-only by default. With --fix, applies the safe remediations — killing
+Read-only by default — apart from the listed-host probe, whose ssh can
+learn a host key under accept-new. With --fix, applies the safe remediations — killing
 orphans whose ancestry markers prove they came from a dead af session, removing
 stale temp homes, stopping daemons proven to be running a temp-dir binary,
 removing directories holding nothing but a dead daemon socket, and removing the
@@ -2301,7 +2313,7 @@ af proposal
 - [`af proposal detach`](#af-proposal-detach) — Remove this session's proposal attachment and cursor
 - [`af proposal list`](#af-proposal-list) — List the project's proposals, newest edit first
 - [`af proposal path`](#af-proposal-path) — Print the absolute folder path of a proposal
-- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Docs tab sends the user's edits to this session by itself
+- [`af proposal push-mode`](#af-proposal-push-mode) — Set whether the Proposal tab sends the user's edits to this session by itself
 - [`af proposal remove-doc`](#af-proposal-remove-doc) — Remove a doc from a proposal; it stays in the proposal's history
 - [`af proposal send`](#af-proposal-send) — Send the user's unsent edits to this session now
 - [`af proposal start`](#af-proposal-start) — Create a proposal from templates, attach this session, and print the rules
@@ -2348,7 +2360,7 @@ af proposal add-doc <slug> <name> [flags]
 
 Attach this session to a proposal and print the rules
 
-Attach the session to an existing proposal and print the rules. A session holds one proposal at a time, so this detaches it from any other. With no slug, print the current proposal and the rules again. The session gets a Docs tab for the proposal when it has none, and "tab" names it.
+Attach the session to an existing proposal and print the rules. A session holds one proposal at a time, so this detaches it from any other. With no slug, print the current proposal and the rules again. The session gets a Proposal tab when it has none, and "tab" names it.
 
 ```
 af proposal attach [<slug>] [flags]
@@ -2440,7 +2452,7 @@ af proposal checkpoint [flags]
 
 Remove this session's proposal attachment and cursor
 
-Remove the session's proposal attachment and cursor, and close its Docs tab for the proposal.
+Remove the session's proposal attachment and cursor, and close its Proposal tab.
 
 ```
 af proposal detach [flags]
@@ -2499,9 +2511,9 @@ af proposal path <slug>
 
 ## af proposal push-mode
 
-Set whether the Docs tab sends the user's edits to this session by itself
+Set whether the Proposal tab sends the user's edits to this session by itself
 
-Set the push mode of this session's Docs tab. In auto mode, af sends the user's edits to the agent as a prompt 10 s after the last save, when the agent is idle. In manual mode, af sends them only on "af proposal send" or the tab's Send now button. Prints the push status.
+Set the push mode of this session's Proposal tab. In auto mode, af sends the user's edits to the agent as a prompt 10 s after the last save, when the agent is idle. In manual mode, af sends them only on "af proposal send" or the tab's Send now button. Prints the push status.
 
 ```
 af proposal push-mode auto|manual [flags]
@@ -2549,7 +2561,7 @@ af proposal remove-doc <slug> <doc> [flags]
 
 Send the user's unsent edits to this session now
 
-Send this session the edits to its proposal that it has not seen, as one prompt, the same as the Docs tab's Send now button. When the agent is busy, af sends them when it is next idle. Prints the push status.
+Send this session the edits to its proposal that it has not seen, as one prompt, the same as the Proposal tab's Send now button. When the agent is busy, af sends them when it is next idle. Prints the push status.
 
 ```
 af proposal send [flags]
@@ -2574,7 +2586,7 @@ af proposal send [flags]
 
 Create a proposal from templates, attach this session, and print the rules
 
-Create a proposal from templates, attach the session to it, and print the rules the agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and dashes. A doc with no template starts blank; user templates in <AF_HOME>/templates/proposal/<name>.md override the built-in ones. The session gets a Docs tab for the proposal, and "tab" names it.
+Create a proposal from templates, attach the session to it, and print the rules the agent follows. Fails when the slug exists. A slug is 1-63 lowercase letters, digits and dashes. A doc with no template starts blank; user templates in <AF_HOME>/templates/proposal/<name>.md override the built-in ones. The session gets a Proposal tab, and "tab" names it.
 
 ```
 af proposal start <slug> [flags]
@@ -2981,7 +2993,8 @@ Hand a session's work over to another agent or account without losing it.
 Use --account to choose a registered account. Omit --to to keep the same
 agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
-respects it. Targets with current usage-limit evidence are refused.
+respects it. Targets with current usage-limit evidence are refused on a
+local session; an off-box account rotation does not re-check the ledger.
 
 An account belongs to one agent, so a scoped session that changes agents
 must name the incoming agent's account with --account — unless the target
@@ -3003,9 +3016,11 @@ agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
 
 A same-agent account handoff (--account alone, or --to naming the current
-agent) keeps the conversation for claude and codex: af copies the transcript
-into the new account's home and resumes it. If that copy cannot be made, the
-new account starts a fresh conversation, and its brief says why.
+agent) keeps the conversation for claude and codex on a local worktree: af copies
+the transcript into the new account's home and resumes it. If that copy cannot be
+made, the new account starts a fresh conversation, and its brief says why. An
+off-box (listed-host sandbox) account swap cannot reach the previous account's
+transcript and always starts a fresh conversation with a notice saying why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
@@ -3017,12 +3032,17 @@ handoff the incoming agent cannot read what its predecessor was thinking, only
 the working tree and the git history. The brief points it at both. Because of
 that, a handoff is recorded — the swap and the branch tip at the moment it
 happened — so a reviewer reading the resulting diff can tell which agent wrote
-which part.
+which part. An off-box account rotation is the exception: it updates the
+session's account and runtime metadata only, with no handoff record and no
+recorded branch tip.
 
-Local-worktree sessions and ssh/sandbox sessions whose agent-server supports it
-can be handed off in place: the sandbox's agent-server swaps the agent in the same
-workspace and resolves the new agent's program on its own host. An account-scoped
-sandbox session, and docker or hook sessions, cannot be handed off yet.
+Local-worktree sessions, ssh/sandbox sessions whose agent-server advertises
+agent-swap, and an already account-scoped listed-host ssh/sandbox session whose
+agent-server advertises account-swap (same-agent --account only, rotating its
+existing scope) can be handed off in place: the sandbox's agent-server swaps the
+agent in the same workspace and resolves the new agent's program on its own host.
+A cross-agent --to on an account-scoped sandbox session, and any handoff on
+docker or hook sessions, cannot be handed off yet.
 
 Examples:
   af sessions handoff fix-auth --account personal
@@ -3459,10 +3479,10 @@ af sessions tab-create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a Proposal tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
-| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
+| `--proposal` | `string` | Proposal `slug` the tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
@@ -3647,10 +3667,10 @@ af sessions tabs create <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
-| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a proposal's Docs tab |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, "vscode" for VS Code, or "docs" for a Proposal tab |
 | `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
-| `--proposal` | `string` | Proposal `slug` the Docs tab edits (required with --kind docs) |
+| `--proposal` | `string` | Proposal `slug` the tab edits (required with --kind docs) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
 **Global flags**
@@ -4090,7 +4110,7 @@ af tasks restart <id-or-name>
 
 Show one task's schedule health and audit trail
 
-Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, or disabled it.
+Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, disabled, or manually triggered it.
 
 Overdue is derived, never stored: a cron task is overdue when it has gone more than one period (or five minutes, whichever is larger) past its most recent scheduled occurrence, measured from the latest of its last run, its last enable, and its creation — so a task paused and switched back on does not report the occurrences it missed while it was off. Watch tasks have no schedule and are never overdue — their arming state is the signal.
 

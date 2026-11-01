@@ -147,12 +147,16 @@ func checkGit(report *Report) {
 			report.addActionableFinding(Finding{
 				Check:  "git-repo",
 				Detail: fmt.Sprintf("%s — run `af doctor` again; if it persists, check that git runs here: %v", config.RepoProbeUnansweredClaim("the current directory", cwd), err),
+				// The probe never answered, so this is NOT "not a repository": do
+				// not send a user who may already be in a checkout to `git init`.
+				Remediation: "rerun `af doctor --setup`; if it persists, check that git runs in this directory",
 			})
 			return
 		}
 		report.addActionableFinding(Finding{
-			Check:  "git-repo",
-			Detail: fmt.Sprintf("%s is not inside a git repository — run `af` from a repo root or pass --repo where supported", cwd),
+			Check:       "git-repo",
+			Detail:      fmt.Sprintf("%s is not inside a git repository — run `af` from a repo root or pass --repo where supported", cwd),
+			Remediation: "cd into a git repository (or run `git init` in your project), then rerun `af doctor --setup`",
 		})
 		return
 	}

@@ -54,6 +54,10 @@ func TestMain(m *testing.M) {
 	log.Initialize(false)
 	goroutinesBefore := testguard.GoroutineBaseline()
 	code := m.Run()
+	// The launch-capability endpoint is a process-lifetime singleton the first
+	// account-scoped launch starts (#4731); stop it so its accept loop and sweep are
+	// not mistaken for a leak below.
+	sessionenv.ShutdownLaunchCapabilities()
 	// A product goroutine that outlives the whole package reads package-level state
 	// (a logger, a hook, a resolver) that a later test reassigns, and -race then
 	// blames the LATER test (#6088, and the log-pointer race that followed). Name

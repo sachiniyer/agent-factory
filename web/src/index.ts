@@ -161,8 +161,11 @@ import {
 } from "./ui.js";
 import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
-import type { AccountsResponse, SessionData, SkippedRepo, TaskData, WireEvent } from "./types.js";
+import { type AccountsResponse, type SessionData, type SkippedRepo, TabKind, type TaskData, type WireEvent } from "./types.js";
+import { publishProposalChange, publishProposalPush, publishProposalResync } from "./docs_tab.js";
+import { parseProposalChange, parseProposalPush } from "./proposal_api.js";
 import { BacklogLoader, EMPTY_BACKLOG_DATA, backlogEventAction, runSessionIds } from "./backlog_data.js";
+import { trackViewportInsets } from "./viewport-insets.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
 // mounts (before first paint), so an explicit light/dark choice shows no flash. This
@@ -215,6 +218,14 @@ const store = new Store<AppState>({
   // state but archived — when nothing is stored.
   statusFilter: loadFilter(),
 });
+
+// The durable status filter: the user's last explicit choice, mirrored from
+// localStorage at boot. A deep link widens the in-memory `statusFilter` for the
+// visit only (a transient reveal), so it must NOT contaminate this durable
+// copy. setStatusFilter / resetStatusFilter rebase persistence on it, so a
+// route-only override (e.g. revealing Archived) can never become the saved
+// preference through a later unrelated menu edit. See resolveRoute() / #6323.
+let durableFilter = loadFilter();
 
 // The credential and the push stream are process-local singletons: one token
 // drives the REST resync fetch, the events WS, and the PTY stream; one events
@@ -338,12 +349,16 @@ let accountLogin: AccountLoginController | null = null;
 // the app is installable; see install.ts.
 const installAffordance = new InstallAffordance();
 
+// Overlays lay out against the visible area above a soft keyboard, not the layout
+// viewport the keyboard does not shrink (#6431).
+trackViewportInsets(document.documentElement);
+
 // The split-pane view bound to termHost: it owns the per-instance layout tree and one
 // live AttachTerminal per pane, rebuilt/reconciled as the selection, tab list, or
 // layout changes (see syncSplit). It diffs the session internally, so syncSplit can
 // call setSession on every store change without tearing down unchanged panes.
 const splitView = new SplitView(termHost, {
-  onStatus: (s: TerminalStatus) => store.set({ termStatus: s }),
+  onStatus: (s: TerminalStatus, retryAt?: number) => store.set({ termStatus: s, termRetryAt: retryAt ?? null }),
   // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
   // pane, so a click straight into a pane enters terminal mode (and clicking/tabbing
   // away from all panes returns to rail mode) without going through Enter/Escape.
@@ -673,7 +688,7 @@ function resolveRoute(): void {
     lookup = !session && route !== null && store.get().archive.lazy && store.get().archive.total > 0;
     if (session?.id) {
       if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
-      setStatusFilter(operatorKind(session), true);
+      store.set({ statusFilter: withKind(durableFilter, operatorKind(session), true) });
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
@@ -892,7 +907,8 @@ function switchView(view: View): void {
  * keeps streaming, and the rail re-highlights it when its state is shown again.
  */
 function setStatusFilter(kind: OperatorKind, on: boolean): void {
-  const next = withKind(store.get().statusFilter, kind, on);
+  const next = withKind(durableFilter, kind, on);
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }
@@ -900,6 +916,7 @@ function setStatusFilter(kind: OperatorKind, on: boolean): void {
 /** Restores the default filter — every state but archived. */
 function resetStatusFilter(): void {
   const next = defaultFilter();
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }
@@ -3303,7 +3320,10 @@ function syncSplit(state: AppState): void {
   const tabRealIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabRealId) : [""];
   // The per-tab iframe target for web tabs (undefined for terminal tabs), parallel
   // to tabIds, so the split view can iframe a web leaf.
-  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.url) : [];
+  // A Docs tab has no URL; its target is the proposal slug it edits.
+  const tabTargets = runtimeSelected
+    ? sessionTabs(runtimeSelected).map((t) => (t.kind === TabKind.Docs ? t.proposal : t.url))
+    : [];
   // The kind of each tab, parallel to tabIds — the split view reads it to tell a web
   // tab from a terminal one now that the identity is the opaque stable id (#1738).
   const tabKinds = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind) : [];
@@ -3347,10 +3367,12 @@ function startStream(tok: string): void {
       requestResync();
       // Events missed while the stream was down: re-read the backlogs too.
       backlogLoader.request();
+      // Missed events are not replayed, so open Docs tabs refresh themselves.
+      publishProposalResync();
     },
-    onStatus: (s: EventStreamStatus) => {
+    onStatus: (s: EventStreamStatus, retryAt?: number) => {
       if (s !== "open") markArchiveDirty();
-      store.set({ live: s });
+      store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
@@ -3414,6 +3436,16 @@ function stopStream(): void {
  * terminal down for.
  */
 function onEvent(ev: WireEvent): void {
+  if (ev.type === "proposal.changed") {
+    const change = parseProposalChange(ev);
+    if (change) publishProposalChange(change);
+    return;
+  }
+  if (ev.type === "proposal.push") {
+    const status = parseProposalPush(ev);
+    if (status) publishProposalPush(status);
+    return;
+  }
   // Task deltas (#1592 Phase 5 PR8) don't touch the session list; the daemon owns
   // tasks.json, so a task.created/updated/removed event just triggers a debounced
   // ListTasks refetch (the authoritative task projection). The session reducer
@@ -3735,6 +3767,7 @@ function isNativeControl(el: HTMLElement | null): boolean {
     return false;
   }
   return (
+    el.isContentEditable ||
     el.tagName === "BUTTON" ||
     el.tagName === "INPUT" ||
     el.tagName === "TEXTAREA" ||
@@ -3761,7 +3794,9 @@ function onKeydown(e: KeyboardEvent): void {
   // native control inside termHost; only the xterm <textarea> must stay on the nav state
   // machine, so the gate keys on the textarea tag rather than on "anything in termHost".
   const target = e.target as HTMLElement | null;
-  const inTerminal = target ? termHost.contains(target) : false;
+  // The Docs editor is contenteditable inside termHost, but it types text rather
+  // than driving a PTY, so it keeps its keys like any other field.
+  const inTerminal = target ? termHost.contains(target) && !target.isContentEditable : false;
   const isTerminalTextarea = inTerminal && target?.tagName === "TEXTAREA";
   if (!isTerminalTextarea && e.key !== "Escape" && isNativeControl(target)) {
     return;

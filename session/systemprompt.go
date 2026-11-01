@@ -35,7 +35,7 @@ import (
 // generated plugin artifacts must never carry a verbatim copy of the "you are
 // running inside af" opening, which is false for the audience that installed
 // them.
-const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageAttentionInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageBacklogInside + "\n\n" + afUsageAttentionInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
 
 // afUsageReferenceCallbackless replaces afUsageReference for an instance that
 // has NO af callback — a sandbox session whose credential could not be minted
@@ -148,6 +148,8 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
   af tasks remove <id-or-name>
 Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, --target-session "" reverts to session-per-run, and --project-path moves the task to another project (--repo still scopes its current project). A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
 
+` + afBacklogSection + `
+
 Root-agent configuration (global unless --project <id-or-path> selects a personal project override):
   af config set root_agent <compact-json>             Merge the enabled/program profile as one table
   af config set root_agent.enabled <bool>             Enable or disable the singleton profile
@@ -156,6 +158,31 @@ Root-agent configuration is frozen at daemon start. An already-running root sess
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".`
 
+// afBacklogSection is the backlog part of afUsageBody, a constant of its own so
+// guidance can drop it where the backlog is unreachable (guidanceCaps.HostStores).
+// It teaches reading and adding drafts only: queueing and starting items are the
+// user's, so an agent outside an item session does them only when asked.
+const afBacklogSection = `Backlog (one project's work items in a strict order; ids are B-12 or 12; items you add are always drafts; do not queue or start items unless the user asks):
+  af backlog list [--all] [--state <s>]                Items in order, as a tree, with each one's state (--all includes done and dropped)
+  af backlog show <id>                                 One item: body, state and reason, waits-on, children, runs, and thread
+  af backlog add <title> [--body <text or ->] [--parent <id>] [--waits-on <id>,…]  Add one draft item
+  af backlog add --file <path or ->                    Add or update many items at once from JSON: {"proposal": "<slug>", "items": [{"key", "title", "body", "parent", "waits_on", "program", "sequential"}]}; every item needs a title; parent and waits_on take a key (a string) or an item id (a number, such as 12), and "12" or "B-12" as a string is read as a key; with "proposal" set, an item with the same proposal and key is updated, not added again`
+
+// afUsageBacklogInside is inside-only: --self resolves the calling session, so
+// it works only in a session af started for a backlog item. The refused list is
+// the one api/backlog_self.go enforces; TestItemSessionGuidanceNamesEveryRefusal
+// (api) derives that list from the commands and pins this sentence to it.
+const afUsageBacklogInside = `Backlog items: when af started your session for a backlog item (your first prompt says "You are working on backlog item B-12"), report through that item, not only in your reply:
+  af backlog done --self [--pr <url>]                  The work is finished; the item goes to the user for review. Pass --pr when you opened a pull request
+  af backlog ask --self <text>                         Ask the user a question on the item, then stop and wait; the answer arrives in this session as a prompt
+  af backlog note --self <text>                        Add a note to the item's thread; nobody is notified
+` + AfBacklogItemSessionRefusals + ` If you need one of them, ask with "af backlog ask --self". Do not create other af sessions from an item session.`
+
+// AfBacklogItemSessionRefusals is the sentence of afUsageBacklogInside that names
+// what an item session cannot run. It is exported only so the api package, which
+// owns those refusals, can pin it to them.
+const AfBacklogItemSessionRefusals = `From an item session af refuses these, which are the user's: add, edit, move, queue, draft, review, reopen, start, done <id>, drop, delete, note <id>, answer, and changing the runner or budget.`
+
 // afUsageProposalsInside names only the entry points; the working rules are
 // printed by af proposal start and attach, so they can change without a
 // skill update. Proposal commands need a session, so plugins do not get it.
@@ -163,7 +190,7 @@ const afUsageProposalsInside = `Proposals: when the user asks to make a proposal
 
 // afSkillDescriptionInside is AfSkillDescription for an agent inside an af
 // session, where proposal commands work.
-const afSkillDescriptionInside = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, proposals, and the daemon via the af CLI"
+const afSkillDescriptionInside = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, proposals, the backlog, and the daemon via the af CLI"
 
 // afProposalTrigger is the activation text for proposal requests. Agents load a
 // skill body only when the request matches its description, and "make a
@@ -305,7 +332,17 @@ func injectSystemPromptWithEnv(resolved string, target skillTarget, caps guidanc
 		// Instance.Program (the injected form only reaches tmux SetProgram),
 		// and claude's --plugin-dir is repeatable, so one in a user's
 		// program_overrides is additive rather than a conflict.
-		return resolved + " --plugin-dir " + shellQuote(pluginDir)
+		out := resolved + " --plugin-dir " + shellQuote(pluginDir)
+		// Opt-in plan-usage tap ([backlog] plan_usage): nothing is added, and
+		// nothing logged, unless the user turned it on.
+		if planUsageEnabled() {
+			if hasSettingsFlag(resolved) {
+				log.WarningLog.Printf("plan usage: the claude command already passes --settings, so af does not add its status line tap")
+			} else if settings := planTapSettings(target.root); settings != "" {
+				out += " --settings " + shellQuote(settings)
+			}
+		}
+		return out
 	case tmux.ProgramCodex:
 		if _, err := ensureCodexSkillDir(target); err != nil {
 			log.WarningLog.Printf("failed to set up codex af skill, af guidance unavailable to codex: %v", err)

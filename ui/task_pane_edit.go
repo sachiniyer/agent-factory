@@ -13,6 +13,12 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
+// taskLabelWidth is the form's label column, in cells. It must exceed the
+// longest label ("Max runs:", 9 cells) so a value never touches its label, and
+// every width budget — inputs, wrapped explanations and their continuation
+// indent — derives from it.
+const taskLabelWidth = 10
+
 // validateForm enforces the shared create/edit form contract, mirroring
 // `af tasks add` (api/tasks.go). The trigger-type selector already guarantees
 // at most one trigger, so validation reduces to: a name, a non-empty value
@@ -371,7 +377,7 @@ func (s *TaskPane) renderEditMode() string {
 		Background(t.Accent).
 		Foreground(t.Surface)
 
-	inputWidth := s.width - 9
+	inputWidth := s.width - taskLabelWidth
 	if inputWidth < 1 {
 		inputWidth = 1
 	}
@@ -400,7 +406,7 @@ func (s *TaskPane) renderEditMode() string {
 	}
 
 	label := func(text string) string {
-		return labelStyle.Render(fmt.Sprintf("%-9s", text))
+		return labelStyle.Render(fmt.Sprintf("%-*s", taskLabelWidth, text))
 	}
 	// fieldErr renders the inline validation message directly under the
 	// field it belongs to, instead of a global error footer — ellipsized to
@@ -734,8 +740,8 @@ func (s *TaskPane) renderOnCompleteSelector() string {
 	if focused {
 		picker := SelectionMarker("◂ ") + selectedStyle.Render(value) + SelectionMarker(" ▸")
 		hint := "←/→ " + onCompleteHint(value)
-		if s.width > 0 && 9+lipgloss.Width(picker)+3+lipgloss.Width(hint) > s.width {
-			return picker + "\n         " + hintStyle.Render(s.wrapFieldText(hint))
+		if s.width > 0 && taskLabelWidth+lipgloss.Width(picker)+3+lipgloss.Width(hint) > s.width {
+			return picker + "\n" + strings.Repeat(" ", taskLabelWidth) + hintStyle.Render(s.wrapFieldText(hint))
 		}
 		return picker + hintStyle.Render("   "+hint)
 	}
@@ -757,14 +763,14 @@ func (s *TaskPane) renderCapField() string {
 
 // Keep consequences readable in the actual modal content width, which is
 // narrower than the terminal. Continuations align with the value after the
-// nine-cell label; the form's focus range includes these lines so scrolling
+// label column (taskLabelWidth); the form's focus range includes these lines so scrolling
 // keeps the whole explanation visible when this field is selected.
 func (s *TaskPane) wrapFieldText(text string) string {
 	if s.width <= 0 {
 		return text
 	}
-	width := max(1, s.width-9)
-	return strings.ReplaceAll(xansi.Wrap(text, width, ""), "\n", "\n         ")
+	width := max(1, s.width-taskLabelWidth)
+	return strings.ReplaceAll(xansi.Wrap(text, width, ""), "\n", "\n"+strings.Repeat(" ", taskLabelWidth))
 }
 
 // onCompleteHint says what the SELECTED verb does to the session a run created,

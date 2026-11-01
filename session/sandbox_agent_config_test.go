@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,7 +52,8 @@ func read(t *testing.T, path string) string {
 func TestAgentConfigPlacesOnlyTheDeclaredFilesInTheSessionScope(t *testing.T) {
 	operatorHome(t)
 	w := configWorkspace(t, "claude", "box1", "claude:settings.json", "claude:.claude.json")
-	require.NoError(t, w.syncAgentConfigIn(time.Minute))
+	_, err := w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
 
 	scope := w.AccountDir()
 	assert.Equal(t, `{"theme":"dark"}`, read(t, filepath.Join(scope, "settings.json")))
@@ -73,13 +75,15 @@ func TestAgentConfigNeedsAListedHostAndAnAccountScope(t *testing.T) {
 
 	unlisted := configWorkspace(t, "claude", "", "claude:settings.json")
 	unlisted.shell = sh
-	require.NoError(t, unlisted.syncAgentConfigIn(time.Second))
+	_, err := unlisted.syncAgentConfigIn(time.Second)
+	require.NoError(t, err)
 	assert.Empty(t, sh.scripts, "an unlisted target receives no config")
 	assert.Empty(t, sh.stdin)
 
 	noAccount := &sandboxWorkspace{shell: sh, SessionDir: "/s",
 		spec: ProvisionSpec{AccountSyncHost: "box1", AgentConfigFiles: []string{"claude:settings.json"}}}
-	require.NoError(t, noAccount.syncAgentConfigIn(time.Second))
+	_, err = noAccount.syncAgentConfigIn(time.Second)
+	require.NoError(t, err)
 	assert.Empty(t, sh.scripts, "without an account scope there is nowhere to put it")
 }
 
@@ -88,7 +92,8 @@ func TestAgentConfigIgnoresEntriesForAnotherAgent(t *testing.T) {
 	sh := &recordingShell{}
 	w := configWorkspace(t, "claude", "box1", "codex:config.toml")
 	w.shell = sh
-	require.NoError(t, w.syncAgentConfigIn(time.Second))
+	_, err := w.syncAgentConfigIn(time.Second)
+	require.NoError(t, err)
 	assert.Empty(t, sh.scripts)
 }
 
@@ -97,9 +102,43 @@ func TestAgentConfigSkipsAMissingFile(t *testing.T) {
 	operatorHome(t)
 	require.NoError(t, os.Remove(filepath.Join(os.Getenv("HOME"), ".claude", "CLAUDE.md")))
 	w := configWorkspace(t, "claude", "box1", "claude:CLAUDE.md", "claude:settings.json")
-	require.NoError(t, w.syncAgentConfigIn(time.Minute))
+	_, err := w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(w.AccountDir(), "CLAUDE.md"))
 	assert.FileExists(t, filepath.Join(w.AccountDir(), "settings.json"))
+}
+
+// A .claude.json over the old 1 MiB credential bound but under the larger
+// agent-config bound is now PLACED: the feature's headline file (the MCP server
+// config) no longer silently no-ops for an operator whose per-project history
+// grew it past a megabyte (#5571 W7.7).
+func TestAgentConfigPlacesAClaudeJsonOverTheOldCredentialBound(t *testing.T) {
+	operatorHome(t)
+	big := bytes.Repeat([]byte(" "), 2<<20) // 2 MiB: over the 1 MiB credential cap, under the 64 MiB agent-config cap
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), ".claude.json"), big, 0o600))
+	w := configWorkspace(t, "claude", "box1", "claude:.claude.json")
+	_, err := w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(w.AccountDir(), ".claude.json"))
+	got, err := os.ReadFile(filepath.Join(w.AccountDir(), ".claude.json"))
+	require.NoError(t, err)
+	assert.Len(t, got, len(big), "the whole file travels, byte for byte")
+}
+
+// The bound is the archive's total, not only each file's: the whole selection is
+// staged into one retained buffer, so two files each under the per-file cap but
+// over it together place the first and skip the second — the closed claude set
+// near the cap cannot hold ~192 MiB in the daemon's memory at once.
+func TestAgentConfigSkipsAFileThatWouldOverflowTheArchiveBound(t *testing.T) {
+	operatorHome(t)
+	big := bytes.Repeat([]byte(" "), agentConfigMaxFileBytes/2+1) // each under the cap; two together exceed it
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), ".claude", "settings.json"), big, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), ".claude.json"), big, 0o600))
+	w := configWorkspace(t, "claude", "box1", "claude:settings.json", "claude:.claude.json")
+	_, err := w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(w.AccountDir(), "settings.json"))
+	assert.NoFileExists(t, filepath.Join(w.AccountDir(), ".claude.json"), "over the aggregate bound it is skipped, not placed")
 }
 
 // A copied codex config.toml must not override the session's account: the
@@ -107,7 +146,8 @@ func TestAgentConfigSkipsAMissingFile(t *testing.T) {
 func TestAgentConfigForcesTheCodexFileCredentialStore(t *testing.T) {
 	operatorHome(t)
 	w := configWorkspace(t, "codex", "box1", "codex:config.toml")
-	require.NoError(t, w.syncAgentConfigIn(time.Minute))
+	_, err := w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
 	got := read(t, filepath.Join(w.AccountDir(), "config.toml"))
 	assert.NotContains(t, got, "keyring")
 	assert.Equal(t, "file", decodeCodexConfig(t, got)[codexCredStoreKey])
@@ -191,7 +231,8 @@ func TestAgentConfigRefusesAnUnparsableCodexConfig(t *testing.T) {
 	_, err := forceCodexFileCredentialStore([]byte("a = [\n"))
 	require.Error(t, err)
 	w := configWorkspace(t, "codex", "box1", "codex:config.toml")
-	require.NoError(t, w.syncAgentConfigIn(time.Minute))
+	_, err = w.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(w.AccountDir(), "config.toml"))
 }
 
@@ -200,7 +241,8 @@ func TestAgentConfigNeverLandsInAnotherSessionsScope(t *testing.T) {
 	operatorHome(t)
 	a := configWorkspace(t, "claude", "box1", "claude:settings.json")
 	b := configWorkspace(t, "claude", "box1", "claude:settings.json")
-	require.NoError(t, a.syncAgentConfigIn(time.Minute))
+	_, err := a.syncAgentConfigIn(time.Minute)
+	require.NoError(t, err)
 	assert.FileExists(t, filepath.Join(a.AccountDir(), "settings.json"))
 	assert.NoDirExists(t, b.AccountDir())
 }

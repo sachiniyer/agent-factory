@@ -142,6 +142,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 		}
 		return nil
 	}},
+	"network.allowed_hosts": {kind: cfgStringList, section: "network", validate: validateAllowedHostsValue},
 	// Empty is meaningful (detect code-server/openvscode-server on PATH) and any
 	// non-empty value is a path the daemon resolves — including a "~" it expands
 	// and a binary that may not exist yet — so there is nothing to validate here
@@ -239,6 +240,9 @@ var settableKeySpecs = map[string]settableKeySpec{
 		"terminal_font_size_desktop": {kind: cfgFloat, validate: validateWebTerminalFontSize},
 	}},
 	"keys": {structured: true},
+	"backlog": {structured: true, subkeys: map[string]settableLeafSpec{
+		"plan_usage": {kind: cfgBool},
+	}},
 }
 
 func requirePositiveInt(name, v string) error {

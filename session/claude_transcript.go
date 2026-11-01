@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -171,4 +174,61 @@ func claudeProjectName(path string) string {
 		absHash = -absHash
 	}
 	return name[:200] + "-" + strconv.FormatInt(absHash, 36)
+}
+
+// claudeProjectCandidates names the project directories, relative to a Claude
+// config dir, that Claude may file a conversation launched in dir under: the
+// path as recorded and, where it differs, as the kernel reports it, since a
+// symlinked worktree parent yields a different project name.
+func claudeProjectCandidates(dir string) []string {
+	out := []string{filepath.Join("projects", claudeProjectName(dir))}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != dir {
+		out = append(out, filepath.Join("projects", claudeProjectName(resolved)))
+	}
+	return out
+}
+
+// ErrNotClaude is returned for a session whose program is not Claude Code.
+var ErrNotClaude = errors.New("the session does not run claude")
+
+// ClaudeRunTranscriptDirs returns the Claude config dir a session's agent
+// writes to and the absolute project directories that hold its transcripts.
+func (i *Instance) ClaudeRunTranscriptDirs() (string, []string, error) {
+	if i.ResolvedAgent() != tmux.ProgramClaude {
+		return "", nil, ErrNotClaude
+	}
+	program := i.ResolvedPaneProgram()
+	if program == "" {
+		program = i.RuntimeProgram()
+	}
+	if program == "" {
+		program = i.Program
+	}
+	workDir := i.GetWorktreePath()
+	if workDir == "" {
+		return "", nil, errors.New("the session has no worktree")
+	}
+	configDir, launchDir, err := claudeTranscriptLaunchContext(program, workDir)
+	if account := strings.TrimSpace(i.Account); account != "" {
+		home, herr := config.GetConfigDir()
+		if herr != nil {
+			return "", nil, herr
+		}
+		selected, serr := agentaccount.Selected(home, tmux.ProgramClaude, account)
+		if serr != nil {
+			return "", nil, serr
+		}
+		configDir = selected.Dir
+		if err != nil {
+			launchDir, err = workDir, nil
+		}
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	var dirs []string
+	for _, project := range claudeProjectCandidates(launchDir) {
+		dirs = append(dirs, filepath.Join(configDir, project))
+	}
+	return configDir, dirs, nil
 }

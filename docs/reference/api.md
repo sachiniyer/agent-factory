@@ -25,6 +25,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/ListPrograms` | `repo_path` | List the agent programs a session can be created with, and the program an unspecified create defaults to. |
 | `POST` | `/v1/SuggestSessionName` | — | Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder. |
 | `POST` | `/v1/Snapshot` | `repo_id`, `live`, `statuses`, `created_after`, `limit`, `lazy_archive`, `newest_first`, `before`, `project_path`, `ids` | List sessions from the daemon's authoritative in-memory state, with optional live/status, created-after, and limit filters applied before transfer (empty repo_id = all repos). |
+| `POST` | `/v1/PreviewSession` | `id`, `lines` | Read the last lines (1-40, default 40) of a session's agent tab, by stable id, as plain text with escapes and control characters removed; read only. |
 | `POST` | `/v1/KillSession` | `title`, `repo_id`, `id` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
 | `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id`, `push` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it. |
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id`, `id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
@@ -54,20 +55,20 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/GetConfig` | — | List every user-facing global config key with its purpose, type, default, and current value. |
 | `POST` | `/v1/ExplainConfig` | `key` | Explain one global config key's provenance: every source candidate with its value, location, and the reason it won, was shadowed, was absent, or is disallowed. |
 | `POST` | `/v1/SetConfigValue` | `key`, `value`, `hosts_edit` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
-| `POST` | `/v1/UnsetConfigValue` | `key` | Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically). |
+| `POST` | `/v1/UnsetConfigValue` | `key` | Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins, allowed_hosts) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically). |
 | `POST` | `/v1/ListProposals` | `session_id`, `repo_id`, `repo_path` | List a project's proposals, newest edit first. Name the project with exactly one of session_id, repo_id or repo_path (a path on the daemon host). |
-| `POST` | `/v1/GetProposal` | `session_id`, `repo_id`, `repo_path`, `slug` | Describe one proposal for the Docs tab: head commit, docs, unused templates, open question count, and attached sessions. |
-| `POST` | `/v1/StartProposal` | `session_id`, `slug`, `docs` | Create a proposal from templates, attach the session to it, open its Docs tab, and return the rules for the agent. |
-| `POST` | `/v1/AttachProposal` | `session_id`, `slug` | Attach the session to a proposal (or, with no slug, report its current one), open its Docs tab, and return the rules. |
-| `POST` | `/v1/DetachProposal` | `session_id` | Remove the session's proposal attachment and cursor, and close its Docs tab. |
+| `POST` | `/v1/GetProposal` | `session_id`, `repo_id`, `repo_path`, `slug` | Describe one proposal for the Proposal tab: head commit, docs, unused templates, open question count, and attached sessions. |
+| `POST` | `/v1/StartProposal` | `session_id`, `slug`, `docs` | Create a proposal from templates, attach the session to it, open its Proposal tab, and return the rules for the agent. |
+| `POST` | `/v1/AttachProposal` | `session_id`, `slug` | Attach the session to a proposal (or, with no slug, report its current one), open its Proposal tab, and return the rules. |
+| `POST` | `/v1/DetachProposal` | `session_id` | Remove the session's proposal attachment and cursor, and close its Proposal tab. |
 | `POST` | `/v1/AddProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `name`, `author` | Add a doc to a proposal from a template, or blank, and commit it as the given author. |
 | `POST` | `/v1/RemoveProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `author` | Remove a doc from a proposal and commit the deletion as the given author; the doc stays in the proposal's history. |
 | `POST` | `/v1/ReadProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc` | Read a proposal doc and the commit it is at, after committing its uncommitted edits as external. |
-| `POST` | `/v1/SaveProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `base` | Save a proposal doc as a human edit against a base commit; merges with git merge-file, and answers 409 proposal_conflict with ours/theirs/base when the edits conflict. |
+| `POST` | `/v1/SaveProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `base`, `writer`, `seq` | Save a proposal doc as a human edit against a base commit; merges with git merge-file, and answers 409 proposal_conflict with ours/theirs/base when the edits conflict. A save with writer and seq is refused with 409 proposal_stale_save when the daemon has already seen that seq or a later one from the writer for the doc. |
 | `POST` | `/v1/WriteProposalDoc` | `session_id`, `repo_id`, `repo_path`, `slug`, `doc`, `text`, `author` | Replace a proposal doc and commit it as the given author, with no merge. |
 | `POST` | `/v1/PullProposalChanges` | `session_id` | Return the edits to the session's proposal that it has not seen, then move its cursor. |
 | `POST` | `/v1/CheckpointProposal` | `session_id` | Commit the session's edits to its proposal as its own and move its cursor past them. |
-| `POST` | `/v1/SetProposalPushMode` | `session_id`, `mode` | Set the push mode (auto or manual) of the session's Docs tabs for its proposal, and return its push status. |
+| `POST` | `/v1/SetProposalPushMode` | `session_id`, `mode` | Set the push mode (auto or manual) of the session's Proposal tabs for its proposal, and return its push status. |
 | `POST` | `/v1/HoldProposalPush` | `session_id` | Hold the session's pending proposal push until the next human save, and return its push status. |
 | `POST` | `/v1/SendProposalChanges` | `session_id` | Send the session its unseen proposal edits as a prompt now when the agent is Ready, or on the next tick where it is, and return its push status. |
 | `POST` | `/v1/GetBacklog` | `repo_id`, `repo_path` | Read a project's backlog in tree order, with each item's derived state and reason and the runner's state and slots. |
@@ -76,18 +77,18 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/MoveBacklogItem` | `repo_id`, `repo_path`, `id`, `before`, `after`, `into`, `top`, `bottom` | Move an item and its subtree before or after an item, to the top or bottom of its parent, or into a parent. |
 | `POST` | `/v1/SetBacklogItemStatus` | `repo_id`, `repo_path`, `id`, `status`, `session_id`, `pr` | Set an item's status (draft, queued, review, done, dropped); on a parent, queue queues its draft children and drop drops its open children. |
 | `POST` | `/v1/DeleteBacklogItem` | `repo_id`, `repo_path`, `id` | Delete a draft item that has no runs, thread or children. |
-| `POST` | `/v1/PostBacklogMessage` | `repo_id`, `repo_path`, `id`, `kind`, `text`, `session_id`, `question_id` | Add a note to an item's thread; notes are not delivered to a session. |
+| `POST` | `/v1/PostBacklogMessage` | `repo_id`, `repo_path`, `id`, `kind`, `text`, `session_id`, `question_id` | Add a note, a question, or an answer to an item's thread; a note is not delivered to a session, but an answer is. |
 | `POST` | `/v1/StartBacklogItem` | `repo_id`, `repo_path`, `id` | Start an item now, ignoring the runner switch and budget: send "continue" to its live session, or create a session for it; returns the run, which is starting until the session exists. |
 | `POST` | `/v1/SetBacklogSettings` | `repo_id`, `repo_path`, `runner`, `max_running`, `on_done` | Change a project's runner switch, max running, or what happens to an item's session when the item is done. |
-| `POST` | `/v1/GetBudget` | — | Read the global backlog budget: the share of each Claude plan window the backlog may use, the plan percent at which the runner stops, the cap per run, and the dollar limit for accounts with no plan readings. |
-| `POST` | `/v1/SetBudget` | `share`, `stop_at`, `max_per_run`, `usd_limit` | Change the global backlog budget: share, stop_at and max_per_run as percents from 0 to 100, and usd_limit in US dollars at API prices (0 turns it off). |
+| `POST` | `/v1/GetBudget` | — | Read the global backlog budget: the share of each Claude plan window the backlog may use, the plan percent at which the runner stops, the cap per run, and the dollar limit for accounts with no plan readings, with each plan window's plan %, the backlog's part of it, the metered cost of everything in it (all_cost) and its reset time, per Claude account, and each item session's cost in total (runs) and within its account's current 5-hour window (run_window). Usage comes from the last metering pass; before the first one ends, metering is true. |
+| `POST` | `/v1/SetBudget` | `share`, `stop_at`, `max_per_run`, `usd_limit` | Change the global backlog budget: share, stop_at and max_per_run as percents from 0 to 100, and usd_limit in US dollars at API prices (0 turns it off). Returns the budget with the plan windows. |
 | `POST` | `/v1/ListOnComplete` | — | List task spawned-session lifecycle choices and consequences, least destructive first. |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
 | `POST` | `/v1/AddTask` | `task`, `actor`, `validate_path` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
 | `POST` | `/v1/UpdateTask` | `id`, `update`, `expect`, `actor`, `validate_path` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |
 | `POST` | `/v1/RemoveTask` | `id`, `expect` | Remove a task by ID. |
 | `POST` | `/v1/RestartTask` | `id`, `expect` | Stop and replace one enabled watch task without overlapping its process tree. |
-| `POST` | `/v1/TriggerTask` | `id`, `expect` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |
+| `POST` | `/v1/TriggerTask` | `id`, `expect`, `actor` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |
 
 ## Nested request payloads
 

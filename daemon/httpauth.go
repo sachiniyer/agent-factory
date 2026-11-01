@@ -253,6 +253,21 @@ type requestPosture struct {
 	// cors is the exact-match browser-origin allow-list; empty ⇒ no
 	// Access-Control-Allow-Origin is emitted.
 	cors []string
+	// allowedHosts is network.allowed_hosts from the same config read, judged by
+	// withLiveHostGuard before routing (hostguard.go). servePosture never consults
+	// it: by the time a request reaches the gate its Host has been admitted.
+	allowedHosts []string
+	// refuseCrossSite turns on the cross-site request guard (crosssite.go): a
+	// browser request from another site never reaches a control-plane route. Set
+	// by startTCPListenerWithListen for every TCP listener except the preview
+	// origin (whose path space is the previewed app's); left false by the unix
+	// sockets, which no browser can reach.
+	refuseCrossSite bool
+	// strictBodies makes the guard require Content-Type: application/json on every
+	// request that can carry a body, bodyless ones included (jsonBodyRefusal). The
+	// control web listener sets it; the agent-server, whose daemon client sends
+	// bodyless calls with no Content-Type, does not.
+	strictBodies bool
 	// previewOrigin marks a listener that carries NO control plane and whose whole
 	// path space belongs to the previewed app (#1856 step 3b). It changes three
 	// things below, and all three follow from that one fact:
@@ -279,6 +294,15 @@ type requestPosture struct {
 // caller has ALREADY built from a single config read. It performs no config read
 // of its own — that is the whole point: the one read happened once, above.
 func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p requestPosture) {
+	// The cross-site guard runs first — before the CORS headers, the OPTIONS and
+	// auth-info shortcuts, and the gate — so a refused request is answered by
+	// nothing but its refusal. It reads only this posture's cors list.
+	if p.refuseCrossSite {
+		if d := crossSiteRefusal(r, p.cors, p.allowedHosts, p.strictBodies); d != nil {
+			refuseCrossSite(w, r, d)
+			return
+		}
+	}
 	applyCORSPolicy(w, r, p.cors)
 	// Both shortcuts below are CONTROL-PLANE conveniences, and both are withheld on a
 	// per-tab preview origin, where every path and every method belongs to the
@@ -365,9 +389,18 @@ func withAuth(next http.Handler, gate *authGate, corsOrigins []string) http.Hand
 // rebind succeeds, so a security change can never fail in the permissive direction
 // because a socket operation failed. buildPosture must read its config snapshot
 // exactly once and derive the whole returned posture from it.
+//
+// When withLiveHostGuard sits outside (the control listener), it has already made
+// that one read to judge the Host and passes the posture in on the request
+// context; this serves THAT posture rather than reading a second time, so the
+// Host verdict and the auth decision always come from one config generation.
 func withLivePosture(next http.Handler, buildPosture func() requestPosture) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		servePosture(w, r, next, buildPosture())
+		p, ok := requestPostureFrom(r.Context())
+		if !ok {
+			p = buildPosture()
+		}
+		servePosture(w, r, next, p)
 	})
 }
 
@@ -393,7 +426,9 @@ func writeAuthInfo(w http.ResponseWriter, r *http.Request, gate *authGate) {
 // (TUI/CLI, curl) don't do CORS and are unaffected.
 func applyCORSPolicy(w http.ResponseWriter, r *http.Request, allowedOrigins []string) {
 	origin := r.Header.Get("Origin")
-	if origin == "" || !originAllowed(origin, allowedOrigins) {
+	// "null" is never echoed: it names no origin, and allowing it would hand every
+	// sandboxed frame and file:// page a readable response (crosssite.go).
+	if origin == "" || origin == "null" || !originAllowed(origin, allowedOrigins) {
 		return
 	}
 	h := w.Header()
@@ -407,7 +442,13 @@ func applyCORSPolicy(w http.ResponseWriter, r *http.Request, allowedOrigins []st
 	// escape hatch from an assistant left running. Harmless for the same-origin SPA
 	// default (which does no preflight), which is why nothing else surfaced it.
 	h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	// X-AF-Client-Version is non-safelisted, so a cross-origin SPA's af() POST
+	// (web/src/api.ts) preflights it; without advertising it here the browser blocks
+	// the request before it reaches the daemon, breaking the documented
+	// cross-origin web-client flow. Same-origin (the default, no preflight) is
+	// unaffected. The header's PRESENCE is what opts the body into the daemon's
+	// tolerant decoder (agentproto.ClientVersionHeader), so CORS must let it through.
+	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+agentproto.ClientVersionHeader)
 }
 
 // originAllowed reports whether origin exactly matches an allow-list entry. No

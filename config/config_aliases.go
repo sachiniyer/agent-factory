@@ -34,6 +34,7 @@ var configKeyAliases = []configKeyAlias{
 	{canonical: "network.require_loopback_token", legacy: "require_loopback_token", section: "network", leaf: "require_loopback_token"},
 	{canonical: "network.allow_unauthenticated_network", legacy: "allow_unauthenticated_network", section: "network", leaf: "allow_unauthenticated_network"},
 	{canonical: "network.cors_allowed_origins", legacy: "cors_allowed_origins", section: "network", leaf: "cors_allowed_origins"},
+	{canonical: "network.allowed_hosts", legacy: "allowed_hosts", section: "network", leaf: "allowed_hosts"},
 }
 
 // globalSettingsTables is decoded in addition to Config on the TOML path. It
@@ -58,6 +59,7 @@ type globalSettingsTables struct {
 		RequireLoopbackToken        bool     `toml:"require_loopback_token"`
 		AllowUnauthenticatedNetwork bool     `toml:"allow_unauthenticated_network"`
 		CORSAllowedOrigins          []string `toml:"cors_allowed_origins"`
+		AllowedHosts                []string `toml:"allowed_hosts"`
 	} `toml:"network"`
 }
 

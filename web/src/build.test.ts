@@ -47,3 +47,50 @@ test("the build wipes stale dist artifacts so the embedded set is a pure functio
     rmSync(stale, { force: true });
   }
 });
+
+// The Docs tab's CodeMirror bundle loads on demand (docs_tab.ts). The shell must not
+// carry it, and must not import anything at startup: the service worker caches only
+// the shell files, so a static import of another file breaks the offline shell.
+test("the Docs editor is a separate lazy bundle that the shell does not import", () => {
+  execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
+  const shell = readFileSync(join(webRoot, "dist", "af-web.js"), "utf8");
+  const lazy = readFileSync(join(webRoot, "dist", "lazy", "docs-editor.js"), "utf8");
+  assert.ok(shell.includes('"./lazy/docs-editor.js"'), "the shell must load the Docs bundle by its path");
+  assert.doesNotMatch(shell, /^\s*import\s[^(]/m, "the shell must have no static imports");
+  assert.ok(!shell.includes("cm-scroller"), "CodeMirror must not be in the shell");
+  assert.ok(lazy.includes("cm-scroller"), "CodeMirror must be in the Docs bundle");
+  assert.match(lazy, /export\s*\{[^}]*DocsPane/, "the Docs bundle must export DocsPane");
+});
+
+// af() (src/api.ts) sends X-AF-Client-Version on every /v1/ request so the daemon
+// decodes the body with its tolerant (additive-field) decoder instead of the strict
+// DisallowUnknownFields path reserved for hand-authored curl (daemon/httpserver.go).
+// The header's PRESENCE is the discriminator; the value is a content hash build.mjs
+// stamps into the bundle at build time. This pins both halves of that contract on the
+// built artifact the daemon embeds.
+test("the build stamps af()'s X-AF-Client-Version into the bundle and is reproducible", () => {
+  const apiSource = readFileSync(join(webRoot, "src", "api.ts"), "utf8");
+  assert.ok(
+    apiSource.includes("__AF_CLIENT_VERSION__"),
+    "src/api.ts must carry the __AF_CLIENT_VERSION__ placeholder af() sends pre-stamp (and the build replaces)",
+  );
+
+  // Two consecutive builds must reproduce dist/af-web.js byte-for-byte: esbuild is
+  // deterministic and the stamp is sha256 of the placeholder bundle (stable per
+  // source), so a rebuild reproduces the committed bytes — the property the
+  // `make web-build && git status --porcelain -- web/dist` gate relies on.
+  execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
+  const first = readFileSync(join(webRoot, "dist", "af-web.js"), "utf8");
+  execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
+  const second = readFileSync(join(webRoot, "dist", "af-web.js"), "utf8");
+
+  assert.equal(first, second, "a rebuild must reproduce dist/af-web.js byte-for-byte (deterministic stamp)");
+  assert.ok(
+    !first.includes("__AF_CLIENT_VERSION__"),
+    "build.mjs must replace the placeholder in dist/af-web.js — the browser must never send the literal sentinel",
+  );
+  assert.ok(
+    first.includes("X-AF-Client-Version"),
+    "the bundle must carry the header name so af() opts the browser into the daemon's tolerant decode",
+  );
+});

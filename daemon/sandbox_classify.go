@@ -76,6 +76,14 @@ var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 		"lifecycle_action": closedVocab("lifecycle action enum"), "current_agent": closedVocab("supported agent names"),
 		"backend_type": closedVocab("backend enum"), "idle_reason": closedVocab("idle reason enum"),
 		"last_prompt_delivery_status": closedVocab("delivery status enum"),
+		// Host is the listed-host name the sandbox itself supplied via --host, so it
+		// is caller text that comes back verbatim in the CREATE response
+		// (projectSandboxCreateResponse preserves it; the shared snapshot projection
+		// withholds it, so a sibling session's operator-chosen host never leaks).
+		// The create's post-create guard (api/sessions.go) audits it against the
+		// pick. caller, not classDaemon, so the backstop scrub does not treat a
+		// guessed host as a layout existence oracle.
+		"host": callerText,
 	},
 	// The projected task (sandboxSafeTask). last_run_status is projected to the
 	// closed head of the status (sandboxRunStatusHead): the rest is free-form.

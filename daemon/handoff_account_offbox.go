@@ -103,7 +103,8 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 
 // finishOffBoxNotice delivers the replacement's notice unless the swap was only
 // reconciled (its response was lost, so the new agent's start is unconfirmed), and
-// folds a credential-cleanup failure into the result.
+// folds a credential-cleanup failure and any skipped agent-config files into the
+// result.
 func (m *Manager) finishOffBoxNotice(instance *session.Instance, agent string, res session.OffBoxAccountSwap, reason string) error {
 	var errs []error
 	if res.Reconciled {
@@ -113,6 +114,12 @@ func (m *Manager) finishOffBoxNotice(instance *session.Instance, agent string, r
 	}
 	if res.CleanupErr != nil {
 		errs = append(errs, fmt.Errorf("account handoff of %q completed, but %w; the credentials are removed with the session at the latest", instance.Title, res.CleanupErr))
+	}
+	// The staged scope is live even though some declared personalization never
+	// landed in it — name the skip under the cross-surface prefix so the CLI's
+	// handoff warning and the session row tell the same story (#6337).
+	if len(res.AgentConfigSkipped) > 0 {
+		errs = append(errs, fmt.Errorf("account handoff of %q completed, but %s%s", instance.Title, session.AgentConfigSkippedPrefix, strings.Join(res.AgentConfigSkipped, "; ")))
 	}
 	return errors.Join(errs...)
 }

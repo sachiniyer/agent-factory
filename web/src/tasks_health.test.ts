@@ -208,3 +208,15 @@ test("without the daemon's flag the list never re-derives far-out", () => {
   const unflagged = task({ cron_expr: "0 7 21 9 *", next_run_at: next, arming: "armed" });
   assert.doesNotMatch(taskArmingSummary(unflagged, now), /months/);
 });
+
+// The last-run line reads like the next-run line beside it: a relative time for
+// a recent run, never the daemon's raw RFC 3339 string.
+import { lastRunSummary } from "./tasks.js";
+
+test("last run is humanised, not the raw RFC 3339 timestamp", () => {
+  const now = new Date("2026-10-31T19:50:30Z");
+  const t = task({ last_run_at: "2026-10-31T19:46:00.528053779Z", last_run_status: "started" });
+  assert.equal(lastRunSummary(t, now), "last run 4m ago (started)");
+  assert.ok(!lastRunSummary(t, now).includes("T19:46"), "no raw timestamp");
+  assert.equal(lastRunSummary(task(), now), "never run");
+});

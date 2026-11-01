@@ -118,6 +118,8 @@ type Service struct {
 	push  map[string]*pushEntry
 	now   func() time.Time
 	spawn func(func())
+	// fence refuses a save that arrives after a later save of the same writer.
+	fence fenceTable
 }
 
 // NewService returns a service that uses host.
@@ -414,7 +416,7 @@ func (s *Service) Detach(sessionID string) (*DetachResult, error) {
 		return res, nil
 	}
 	if res.Tab, err = s.host.CloseDocsTabs(r.session.ID, slug); err != nil {
-		return nil, fmt.Errorf("still attached to %s: closing its Docs tab failed: %w", slug, err)
+		return nil, fmt.Errorf("still attached to %s: closing its Proposal tab failed: %w", slug, err)
 	}
 	if _, err := r.store.Detach(r.session.ID); err != nil {
 		return nil, err
@@ -607,6 +609,16 @@ func (s *Service) Write(t Target, slug, doc, text string, author Author) (*DocRe
 
 // Save is the Docs tab save: a human edit with a three-way merge against base.
 func (s *Service) Save(t Target, slug, doc, text, base string) (*SaveDocResult, error) {
+	return s.SaveFenced(t, slug, doc, text, base, "", 0)
+}
+
+// SaveFenced is Save with a writer fence. writer names one editor (a Docs tab's sync) and seq
+// counts its saves upward: a save whose seq is not above the highest the daemon has seen from
+// that writer for the doc is refused with a *StaleSaveError and commits nothing. That is what
+// stops a request that outlived its client (a timeout, a closed tab) from landing after the
+// writer's later saves: a three-way merge against base cannot, because the late edit merges
+// cleanly. An empty writer or a zero seq is not fenced.
+func (s *Service) SaveFenced(t Target, slug, doc, text, base, writer string, seq int64) (*SaveDocResult, error) {
 	r, err := s.resolve(t)
 	if err != nil {
 		return nil, err
@@ -615,11 +627,18 @@ func (s *Service) Save(t Target, slug, doc, text, base string) (*SaveDocResult, 
 	if n, err := NormalizeDocName(doc); err == nil {
 		file = docFile(n)
 	}
+	var guard SaveGuard
+	if writer != "" && seq > 0 {
+		// Checked, saved and recorded inside the store's lock: two saves of one writer cannot both
+		// pass, and a save that does not commit (a conflict, an I/O error) leaves the mark where it
+		// was, so the writer can send it again with the same seq.
+		guard = &writerGuard{table: &s.fence, key: r.repoID + "\x00" + slug + "\x00" + file + "\x00" + writer, writer: writer, seq: seq}
+	}
 	before, err := r.store.Head()
 	if err != nil {
 		return nil, err
 	}
-	res, err := r.store.Save(slug, doc, text, base)
+	res, err := r.store.SaveGuarded(slug, doc, text, base, guard)
 	if err != nil {
 		var conflict *ConflictError
 		if errors.As(err, &conflict) {

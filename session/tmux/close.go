@@ -197,11 +197,19 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 				break
 			}
 			_ = r.tmux("kill-session", "-t", exactTarget(mate))
+			// A mate's windows are gone or going with the group; whatever
+			// default-command capability it held ends with it.
+			revokeLaunchCapabilities(mate)
 		}
 	}
+	// gone: the session no longer exists on tmux's own answer (killed, or already
+	// absent). Only then does its per-pane launch capability end — a close that
+	// could not tell, or that left the session live, keeps it (#4731).
+	gone := true
 	if err := r.tmux("kill-session", "-t", exactTarget(t.sanitizedName)); err != nil {
 		switch {
 		case r.unknown:
+			gone = false
 			// r.tmux already wrapped this as ErrTmuxTimeout.
 			errs = append(errs, err)
 			// The deadline tripped, so the session's real state is UNKNOWN. Do NOT
@@ -219,9 +227,11 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 			exists, ok := r.probe()
 			switch {
 			case !ok:
+				gone = false
 				errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%v)", ErrTmuxTimeout, err))
 				leaked = nil
 			case exists:
+				gone = false
 				errs = append(errs, errors.Join(fmt.Errorf("error killing tmux session: %w", err), ErrSessionStillAlive))
 				// tmux refused the teardown and answered that the session is live, so
 				// no af request describes it any more — provided the live session is
@@ -246,6 +256,9 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 				leaked = nil
 			}
 		}
+	}
+	if gone {
+		revokeLaunchCapabilities(t.sanitizedName)
 	}
 
 	// The process that asked for this teardown is still blocked on its reply

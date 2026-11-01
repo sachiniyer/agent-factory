@@ -68,6 +68,13 @@ func shortCommit(c string) string {
 // three-way merge: a clean merge commits the merged text, and a conflict
 // commits nothing and returns a *ConflictError.
 func (s *Store) Save(slug, doc, text, base string) (*SaveResult, error) {
+	return s.SaveGuarded(slug, doc, text, base, nil)
+}
+
+// SaveGuarded is Save held to guard (nil for none): guard.Admit runs under the store's lock
+// before anything is written, and guard.Committed runs under the same lock once the save has
+// succeeded.
+func (s *Store) SaveGuarded(slug, doc, text, base string, guard SaveGuard) (*SaveResult, error) {
 	if strings.TrimSpace(base) == "" {
 		return nil, errors.New("base is required: send the commit from the last read or save of this doc")
 	}
@@ -76,6 +83,11 @@ func (s *Store) Save(slug, doc, text, base string) (*SaveResult, error) {
 	}
 	var res *SaveResult
 	err := s.withLock(func() error {
+		if guard != nil {
+			if err := guard.Admit(); err != nil {
+				return err
+			}
+		}
 		_, file, err := s.docPath(slug, doc)
 		if err != nil {
 			return err
@@ -129,6 +141,9 @@ func (s *Store) Save(slug, doc, text, base string) (*SaveResult, error) {
 			}
 		}
 		res = &SaveResult{Text: next, Commit: commit, Merged: merged, saved: commit != head, snapshotted: snap != ""}
+		if guard != nil {
+			guard.Committed()
+		}
 		return nil
 	})
 	return res, err

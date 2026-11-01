@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -45,33 +47,50 @@ import (
 // takes to connect, the hook never counts the death, and the fixture flakes.
 // exec then replaces the launcher image under the same pid, so the stamped
 // #{pane_pid} is still the dead root's.
-func startHeldPane(t *testing.T, name, command string) {
+// afPaneLaunch is the pane command an af launch leaves in pane_start_command —
+// the exec marker af stamps into every pane it launches and the recorded
+// command as the wrapper's last word — which is also what makes it runnable
+// here: tmux executes the string through the default shell, so the pane runs
+// `sh -c <command>` with the marker present in its environment.
+func afPaneLaunch(command string) string {
+	return "env " + sessionenv.ExecMarker + "=1 sh -c " + shellquote.Quote(command)
+}
+
+func startHeldPane(t *testing.T, name, command string) string {
 	t.Helper()
-	startHeldPaneWithHook(t, name, command, nil)
+	return startHeldPaneWithHook(t, name, command, nil)
 }
 
 // startHeldPaneWithHookLag is startHeldPane with the pane-died hook's
 // increment delayed behind a blocking run-shell: pane_dead becomes
 // observable while @af_pane_deaths is still unset — the #5335 window,
 // measured on tmux 3.8.
-func startHeldPaneWithHookLag(t *testing.T, name, command string) {
+func startHeldPaneWithHookLag(t *testing.T, name, command string) string {
 	t.Helper()
-	startHeldPaneWithHook(t, name, command,
+	return startHeldPaneWithHook(t, name, command,
 		[]string{`run-shell "sleep 0.5" ; ` + sessionenv.PaneDeathsHookCommand})
 }
 
 // startHeldPaneWithHook is startHeldPane with an optional pane-died hook
 // override: nil installs the production hook verbatim through
 // panePidStampArgs; anything else replaces sessionenv.PaneDeathsHookName
-// after the stamp lands, still before the pane is released to die.
-func startHeldPaneWithHook(t *testing.T, name, command string, hookOverride []string) {
+// after the stamp lands, still before the pane is released to die. It returns
+// the pane's recorded program — the wrapped command afPaneLaunch leaves as
+// pane_start_command's last word — for the TmuxSession that probes it.
+func startHeldPaneWithHook(t *testing.T, name, command string, hookOverride []string) string {
 	t.Helper()
 	dir := t.TempDir()
 	release := filepath.Join(dir, "release")
 	script := filepath.Join(dir, "run.sh")
 	require.NoError(t, os.WriteFile(script, []byte(
 		"while [ ! -f "+release+" ]; do sleep 0.01; done\nexec "+command+"\n"), 0o700))
-	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, "sh "+strconv.Quote(script),
+	// The recorded program must exec into the script: `sh -c 'sh run.sh'`
+	// forks the script as a child, and the -c shell then WAITING on it keeps
+	// the pty slave open — a root that closes its descriptors and keeps
+	// running (DeadPaneWithARunningRootStopsTheRoot) would leave the pane
+	// undead forever.
+	program := "exec sh " + shellquote.Quote(script)
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, afPaneLaunch(program),
 		";", "set-option", "-w", "-t", exactTarget(name), "remain-on-exit", "on").Run())
 	require.NoError(t, exec.Command("tmux", panePidStampArgs(exactTarget(name))...).Run())
 	if hookOverride != nil {
@@ -85,6 +104,7 @@ func startHeldPaneWithHook(t *testing.T, name, command string, hookOverride []st
 		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead}").Output()
 		return err == nil && strings.TrimSpace(string(out)) == "1"
 	}, 5*time.Second, 20*time.Millisecond, "the pane never died")
+	return program
 }
 
 // probeHeldExit probes a held dead pane once and requires its exit status. One
@@ -129,9 +149,9 @@ func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
 	shrinkReapWaits(t)
 	name := fmt.Sprintf("af_test_dead_pane_%d", time.Now().UnixNano())
 	before := time.Now().Truncate(time.Second)
-	startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
+	program := startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
 
-	s := NewTmuxSessionFromSanitizedName(name, "sh")
+	s := NewTmuxSessionFromSanitizedName(name, program)
 	status, at := probeHeldExit(t, s, name)
 	require.Equal(t, 7, status)
 	require.False(t, at.Before(before), "death time %v predates the pane", at)
@@ -167,8 +187,8 @@ func TestProbePaneExitRecoversTheStatusOfEveryHeldExit(t *testing.T) {
 	const panes = 60
 	for i := range panes {
 		name := fmt.Sprintf("af_test_held_exit_%d_%d", time.Now().UnixNano(), i)
-		startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
-		status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, "sh"), name)
+		program := startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
+		status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, program), name)
 		require.Equal(t, 7, status, "pane %d", i)
 		require.NoError(t, exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run())
 	}
@@ -190,7 +210,7 @@ func TestCloseAndWaitForPaneExit_HeldDeadPaneReapsItsDetachedSurvivor(t *testing
 	childScript := filepath.Join(dir, "child.sh")
 	require.NoError(t, os.WriteFile(childScript, []byte(
 		"trap '' HUP\necho $$ > \"$1\"\nexec sleep 300 </dev/null >/dev/null 2>&1\n"), 0o600))
-	startHeldPane(t, name, fmt.Sprintf(
+	program := startHeldPane(t, name, fmt.Sprintf(
 		`sh -c 'sh %[1]s %[2]s & while [ ! -s %[2]s ]; do sleep 0.02; done; exit 3'`,
 		strconv.Quote(childScript), strconv.Quote(childFile)))
 
@@ -199,7 +219,7 @@ func TestCloseAndWaitForPaneExit_HeldDeadPaneReapsItsDetachedSurvivor(t *testing
 	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 	require.NotEqual(t, child.SID, childPID, "the fixture must keep the survivor in the dead root's session")
 
-	s := NewTmuxSessionFromSanitizedName(name, "sh")
+	s := NewTmuxSessionFromSanitizedName(name, program)
 	state, err := s.CloseAndWaitForPaneExit()
 	require.NoError(t, err)
 	require.Equal(t, PaneStateKnown, state)
@@ -225,7 +245,7 @@ func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing
 	name := fmt.Sprintf("af_test_dead_pane_eof_%d", time.Now().UnixNano())
 	// HUP is ignored before the terminal is closed: closing it is what makes tmux
 	// hang the pane up.
-	startHeldPane(t, name, `sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; exec sleep 300'`)
+	program := startHeldPane(t, name, `sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; exec sleep 300'`)
 
 	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
 		"#{pane_pid}|#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}").Output()
@@ -238,7 +258,7 @@ func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing
 	root := processIdentity(t, rootPID)
 	t.Cleanup(func() { _ = syscall.Kill(rootPID, syscall.SIGKILL) })
 
-	s := NewTmuxSessionFromSanitizedName(name, "sh")
+	s := NewTmuxSessionFromSanitizedName(name, program)
 	dead, _, _, _, known := s.ProbePaneExit()
 	require.True(t, known)
 	require.False(t, dead, "a pane whose root is still running has not finished")
@@ -249,11 +269,83 @@ func TestCloseAndWaitForPaneExit_DeadPaneWithARunningRootStopsTheRoot(t *testing
 	require.False(t, proctree.AliveSame(root), "the running root of a dead pane survived the teardown")
 }
 
+// tmux marks a pane dead when its pty hits EOF, and the kernel closes a dying
+// process's descriptors before the process becomes a zombie. A root that closes
+// its terminal and exits a moment later is therefore, for that moment, a dead
+// pane over a root that is neither collected nor a zombie; one probe must not
+// answer "alive" for it (#6439). The fixture stretches the moment to 300ms so it
+// is deterministic rather than a 1-in-60 race.
+func TestProbePaneExit_ARootThatIsExitingIsNotReportedAlive(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("a pane is held dead with its root running only on Linux ptys, not on %s", runtime.GOOS)
+	}
+	testguard.IsolateTmux(t)
+	prev := paneRootGrace
+	paneRootGrace = 5 * time.Second
+	t.Cleanup(func() { paneRootGrace = prev })
+	name := fmt.Sprintf("af_test_dead_pane_exiting_%d", time.Now().UnixNano())
+	program := startHeldPane(t, name, `sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; sleep 0.3; exit 7'`)
+
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
+		"#{pane_dead}|#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}").Output()
+	require.NoError(t, err)
+	require.Equal(t, "1|", strings.TrimSpace(string(out)),
+		"the fixture must hold a dead pane whose root is still running and uncollected")
+
+	status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, program), name)
+	require.Equal(t, 7, status)
+}
+
+// The probe's status fields and its liveness check are two reads. If tmux collects
+// the root between them, the check answers "gone" while the fields it just read
+// still had no status; the probe must read again rather than report a finished
+// command with an unknown status (#6439). The ordering is forced, not timed: the
+// root exits only when the liveness check releases it, and the check is held until
+// tmux has recorded the status, which is exactly "root collected after the format
+// read, before the check".
+func TestProbePaneExit_AStatusRecordedBetweenTheReadAndTheLivenessCheckIsNotLost(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("a pane is held dead with its root running only on Linux ptys, not on %s", runtime.GOOS)
+	}
+	testguard.IsolateTmux(t)
+	name := fmt.Sprintf("af_test_dead_pane_reap_order_%d", time.Now().UnixNano())
+	// The root closes its terminal (so tmux holds the pane dead) and then stays up
+	// until the injected liveness check lets it go: it cannot exit, and so cannot be
+	// collected, before the probe has taken its format read.
+	gate := filepath.Join(t.TempDir(), "exit")
+	program := startHeldPane(t, name, fmt.Sprintf(
+		`sh -c 'trap "" HUP; exec </dev/null >/dev/null 2>&1; while [ ! -f %s ]; do sleep 0.01; done; exit 7'`, gate))
+
+	var raced atomic.Bool
+	prev := paneRootGone
+	paneRootGone = func(pid int) bool {
+		// The first check is the one that follows the format read that saw no
+		// status. Let the root exit now, and hold the check until tmux has
+		// collected it and recorded 7.
+		if raced.CompareAndSwap(false, true) {
+			require.NoError(t, os.WriteFile(gate, nil, 0o600))
+			require.Eventually(t, func() bool {
+				out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead_status}").Output()
+				return err == nil && strings.TrimSpace(string(out)) == "7"
+			}, 5*time.Second, 5*time.Millisecond, "tmux never recorded the root's status")
+			return true
+		}
+		return prev(pid)
+	}
+	t.Cleanup(func() { paneRootGone = prev })
+
+	status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, program), name)
+	require.Equal(t, 7, status)
+	require.True(t, raced.Load(), "the fixture never reached the liveness check")
+}
+
 // shimStartCommand is what #{pane_start_command} answers for a pane af
-// launched through its exec shim. The fixture keeps one around only as the
-// recorded command string — freshness no longer reads launch markers out of
-// it, it just has to byte-match what the stamp pinned.
-const shimStartCommand = "/usr/bin/af " + sessionenv.ExecMarker + " sh 0 'sh -c true'"
+// launched through its exec shim: the sessionenv marker and the recorded
+// command as the wrapper's last word are what paneLaunchIsRecorded reads as
+// launch provenance — the fixture sessions run program "true", so that is the
+// command the string must end with — and as stampCmd it is what the stamp's
+// command pin (@af_pane_cmd) byte-matches against.
+const shimStartCommand = "/usr/bin/af " + sessionenv.ExecMarker + " sh 0 true"
 
 // paneState is the part of a dead pane's row the stamp's freshness is judged
 // against: the deaths counter the pane-died hook maintains, the pane's
@@ -297,6 +389,9 @@ func deadPaneExpand(panePID, stamp string, state paneState, status, signal, dead
 		"#{"+paneDeathsMarker+"}", state.deaths,
 		"#{pane_tty}", state.tty,
 		paneCommandMatchField, state.cmdMatch(),
+		// After paneCommandMatchField so the == token is consumed whole: the
+		// raw start command is the probe's last field.
+		"#{pane_start_command}", state.startCmd,
 	)
 }
 
@@ -618,9 +713,9 @@ func TestCloseAndWaitForPaneExit_DeathsHookLagOnRealTmux(t *testing.T) {
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
 	name := fmt.Sprintf("af_test_deaths_lag_%d", time.Now().UnixNano())
-	startHeldPaneWithHookLag(t, name, "sh -c 'exit 7'")
+	program := startHeldPaneWithHookLag(t, name, "sh -c 'exit 7'")
 
-	s := NewTmuxSessionFromSanitizedName(name, "sh")
+	s := NewTmuxSessionFromSanitizedName(name, program)
 	state, err := s.CloseAndWaitForPaneExit()
 	require.NoError(t, err)
 	require.Equal(t, PaneStateKnown, state)
@@ -669,8 +764,8 @@ func TestParsePaneRowStampedPid(t *testing.T) {
 		{"|1|71726000000|456:0:/dev/pts/0|1|/dev/pts/9|1", 0, true, true, "respawn"},       // pty moved
 		{"|1|71726000000|456:0:/dev/pts/0|0|/dev/pts/0|1", 0, true, true, "pane-died"},     // no death counted — hook still queued
 		{"|1|71726000000|456:0|1|/dev/pts/0|1", 0, true, true, "respawn"},                  // two-part stamp: no pty pin
-		{"|1|71726000000|456|1|/dev/pts/0|1", 0, true, true, "respawn"},                    // pre-proof bare-pid stamp
-		{"|1|71726000000|456", 0, true, true, "respawn"},                                   // no freshness fields at all
+		{"|1|71726000000|456|1|/dev/pts/0|1", 0, true, true, "predates"},                   // pre-proof bare-pid stamp
+		{"|1|71726000000|456", 0, true, true, "predates"},                                  // no freshness fields at all
 		{"|1|71726000000|:0:/dev/pts/0|1|/dev/pts/0|1", 0, true, true, "af sessions kill"}, // torn stamp names nobody — reads as absent
 		{"123|1|71726000000|456:0:/dev/pts/0|9|/dev/pts/9|0", 123, true, true, ""},         // populated pane_pid wins over any stamp
 		{"|1|71726000000|", 0, true, true, "af sessions kill"},

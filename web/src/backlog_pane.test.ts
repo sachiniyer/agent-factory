@@ -574,3 +574,75 @@ test("a reorder still in flight keeps the order and parents it made over a fresh
   assert.deepEqual(rowIds(pane), [1, 3, 2], "the move still shows");
   assert.match(row(pane, 1).textContent, /saved title/, "the fresh contents show through it");
 });
+
+test("an accepted note is not restored to the box when the read after it fails", async () => {
+  const pane = mount(host({ refresh: async () => false }));
+  pane.update(data({ "/a": view(item(1)) }), "/a", []);
+  pane.select(1);
+  const box = el(pane).querySelector('textarea[aria-label="Note"]')!;
+  box.value = "hello";
+  [...el(pane).querySelectorAll("button")].find((b) => b.textContent === "Add note")!.click();
+  await settle();
+  assert.equal(box.value, "", "the daemon has it; resending would duplicate it");
+  assert.equal(calls.filter((c) => c.method === "PostBacklogMessage").length, 1);
+});
+
+test("a queued save is acknowledged by a read of its own project, even after another project is selected", async () => {
+  const finish: (() => void)[] = [];
+  reply = (method) => method === "UpdateBacklogItem" ? new Promise((r) => { finish.push(() => r({})); }) : Promise.resolve({});
+  const roots: (string | undefined)[] = [];
+  const pane = mount(host({ refresh: async (root?: string) => { roots.push(root); return true; } }));
+  pane.update(data({ "/a": view(item(1, { title: "old" })), "/b": view(item(1)) }), "/a", []);
+  pane.select(1);
+  submitTitle(pane, "first");
+  submitTitle(pane, "second");              // queued behind the first
+  pane.update(data({ "/a": view(item(1, { title: "old" })), "/b": view(item(1)) }, 2), "/b", []);
+  finish[0]();
+  await settle();
+  finish[1]?.();
+  await settle();
+  assert.deepEqual(roots, ["/a", "/a"], "both confirmations read /a, the project the saves modified");
+  assert.deepEqual(updates().map((c) => c.body.repo_path), ["/a", "/a"]);
+});
+
+test("a dependency edit the daemon took but whose read failed stays shown and is the base of the next change", async () => {
+  const pane = mount(host({ refresh: async () => false }));
+  pane.update(data({ "/a": view(item(1, { waits_on: [2, 3] }), item(2), item(3)) }), "/a", []);
+  pane.select(1);
+  const remove = (n: number): void => {
+    el(pane).querySelector(`button[aria-label="Remove B-${n}"]`)!.click();
+  };
+  remove(2);
+  await settle();
+  remove(3);
+  await settle();
+  assert.deepEqual(updates().map((c) => c.body.waits_on), [[3], []], "B-2 is not restored by the stale list");
+});
+
+test("a rename the daemon took but whose read failed stays in the field until a snapshot carries it", async () => {
+  const pane = mount(host({ refresh: async () => false }));
+  pane.update(data({ "/a": view(item(1, { title: "old" })) }), "/a", []);
+  pane.select(1);
+  submitTitle(pane, "new");
+  await settle();
+  assert.equal(titleInput(pane).value, "new", "not reverted to the old title");
+  pane.update(data({ "/a": view(item(1, { title: "new" })) }, 2), "/a", []);
+  pane.update(data({ "/a": view(item(1, { title: "newer elsewhere" })) }, 3), "/a", []);
+  assert.equal(titleInput(pane).value, "newer elsewhere", "released once a snapshot carried it");
+});
+
+test("an optimistic move survives a newer snapshot whose read of its project failed", async () => {
+  const pane = mount(host({ started: () => 1 }));
+  pane.update(data({ "/a": view(item(1), item(2), item(3)) }), "/a", []);
+  key(row(pane, 3), "ArrowUp", { altKey: true });
+  await settle();
+  assert.deepEqual(rowIds(pane), [1, 3, 2]);
+  const failed = { ...data({ "/a": view(item(1), item(2), item(3)) }, 2), errors: new Map([["/a", "down"]]) };
+  pane.update(failed, "/a", []);
+  assert.deepEqual(rowIds(pane), [1, 3, 2], "the moved order stays, so the next move builds on it");
+  key(row(pane, 3), "ArrowUp", { altKey: true });
+  await settle();
+  assert.deepEqual(calls.filter((c) => c.method === "MoveBacklogItem").map((c) => c.body.before), [2, 1]);
+  pane.update(data({ "/a": view(item(3), item(1), item(2)) }, 3), "/a", []);
+  assert.deepEqual(rowIds(pane), [3, 1, 2], "a read that succeeded carries the real order");
+});

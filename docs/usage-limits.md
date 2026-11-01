@@ -151,10 +151,14 @@ The default has these properties:
 - **The pickers show it.** The TUI's `ctrl+o` field and the web's Account select
   preselect the project default and mark its row `project default`, so a scoped
   create is visible before you press Enter rather than discovered afterwards.
-- **A default `af` cannot honour refuses the create**, naming the key, the file
-  it is set in, and how to clear it. It never falls back to the ambient identity:
-  a session quietly running as someone else is the failure the whole feature
-  exists to prevent.
+- **A default naming an account that is not registered refuses the create**,
+  naming the key, the file it is set in, and how to clear it. It never silently
+  falls back to the ambient identity: a session quietly running as someone
+  else is the failure the whole feature exists to prevent. The one carve-out
+  is a target that cannot carry an account at all — a sandbox, hook or
+  unlisted SSH create drops a *default* account with a logged warning and runs
+  on the target's own credentials rather than refusing a preference nobody
+  typed (an explicit `--account` is still refused there).
 - **A project's always-on `root` agent is deliberately not scoped by it.** Its
   command comes from `[root_agent]` rather than an agent name, and a preference
   set about ordinary creates must not be able to stop a project's guaranteed
@@ -456,12 +460,18 @@ af sessions handoff fix-auth --account personal
 ```
 
 The session keeps its identity, worktree, branch tip, and stored prompt. For
-claude and codex it also keeps the conversation. Each account has its own
-provider home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so after stopping the
-outgoing agent af copies that conversation's file into the new account's home:
-the transcript for claude, the rollout for codex. The new account then resumes
-the same conversation id. The copy only ever adds to the new account's home;
-nothing in the previous account's home changes.
+claude and codex **on a local worktree** it also keeps the conversation. Each
+account has its own provider home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so
+after stopping the outgoing agent af copies that conversation's file into the
+new account's home: the transcript for claude, the rollout for codex. The new
+account then resumes the same conversation id. The copy only ever adds to the
+new account's home; nothing in the previous account's home changes.
+
+An off-box (listed-host ssh/sandbox) `--account` swap is different: af cannot
+reach the previous account's provider store on the host, so the new account
+always starts a **fresh conversation** with a notice saying the earlier
+messages are unavailable — and handing back starts fresh again, since nothing
+was carried either way.
 
 The copied transcript is kept in the new account's home, and from then on the
 provider replays that history under the new account, whose credentials send
@@ -561,7 +571,10 @@ blocked on:
 - **Off-box handoff depends on the sandbox's agent-server.** An ssh or sandbox
   session whose agent-server advertises `agent-swap` can be handed off in
   place — the sandbox swaps the agent in the same workspace and resolves the
-  new agent's program on its own host. An account-scoped sandbox session, and
+  new agent's program on its own host. An already account-scoped listed-host
+  ssh/sandbox session whose agent-server advertises `account-swap` can be handed
+  off in place for a same-agent `--account` swap (rotating its existing scope); a
+  cross-agent `--to` on an account-scoped sandbox session, and any handoff on
   docker or hook sessions, cannot be handed off yet.
 
 Handing off is **reversible**. Each agent's conversation history is stored per

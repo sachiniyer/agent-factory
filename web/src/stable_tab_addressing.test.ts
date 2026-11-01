@@ -554,6 +554,14 @@ test("webSandbox: a same-origin mirror frame gets NO allow-same-origin", () => {
   assert.ok(s.includes("allow-scripts"), s);
 });
 
+test("webSandbox: the mirror frame's flags are exactly the daemon's mirror CSP sandbox", () => {
+  // daemon/webtab_isolation.go mirrorSandboxCSP carries these same flags as a
+  // Content-Security-Policy on every mirrored web-tab response, so a page opened
+  // top-level from the mirror runs exactly as it does framed. Its Go twin,
+  // TestMirrorSandboxMatchesTheClientsFrameSandbox, pins the header to this literal.
+  assert.equal(webSandbox(false, false), "allow-scripts allow-forms allow-popups allow-modals");
+});
+
 test("webSandbox: a cross-origin per-tab preview frame may have a real origin", () => {
   const s = webSandbox(false, true);
   assert.ok(s.includes("allow-same-origin"), s);

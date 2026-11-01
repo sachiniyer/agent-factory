@@ -156,8 +156,21 @@ func sessionEnvFlags(sanitizedName, generation, instanceID string) []string {
 // between "this session claims no home" and "I could not ask", and doctor spends
 // the answer on whether a temp home may be rm -rf'd. Two implementations of a
 // distinction this sharp is how the first one drifts; there is now one.
+//
+// This ambient form resolves the tmux server from the caller's environment,
+// correct for a caller driving its own daemon's sessions. Doctor — which may
+// resolve a different server than the daemon — uses SessionHomeMarkerOnSocket
+// to pin the read to the recorded socket.
 func SessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
-	return sessionHomeMarker(cmdExec, sanitizedName)
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerHome, "")
+}
+
+// SessionHomeMarkerOnSocket is SessionHomeMarker pinned to a specific tmux server
+// socket via `tmux -S <socket> show-environment`, exported for `af doctor` so the
+// home attribution it reads comes from the server the daemon recorded, not the
+// one doctor's ambient environment reaches. An empty socket is the ambient form.
+func SessionHomeMarkerOnSocket(cmdExec cmd.Executor, sanitizedName, socket string) (home string, present bool, err error) {
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerHome, socket)
 }
 
 // SessionGenerationMarker reads a tmux session's AF_SESSION_GEN generation
@@ -170,7 +183,7 @@ func SessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string,
 // verification-to-track window: if the session is replaced between the marker
 // read and the track call, the generation will differ and adoption fails closed.
 func SessionGenerationMarker(cmdExec cmd.Executor, sanitizedName string) (generation string, present bool, err error) {
-	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerGeneration)
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerGeneration, "")
 }
 
 // SessionEnvVar reads a named variable from a tmux session's environment with
@@ -182,15 +195,20 @@ func SessionGenerationMarker(cmdExec cmd.Executor, sanitizedName string) (genera
 // Used by the legacy-pane migration check to read the agent's credential-root
 // variable (e.g. CODEX_HOME) and verify account identity before refusing.
 func SessionEnvVar(cmdExec cmd.Executor, sanitizedName, varName string) (value string, present bool, err error) {
-	return sessionEnvMarker(cmdExec, sanitizedName, varName)
+	return sessionEnvMarker(cmdExec, sanitizedName, varName, "")
 }
 
-// sessionHomeMarker reads the AF_HOME ancestry marker from a tmux session's
-// environment (stamped via `new-session -e` at creation). A false present value
-// means tmux answered and the session carries no marker — created by a pre-marker
-// build or by a tmux older than 3.2, which cannot set session environment at
-// creation. A non-nil error means tmux did not answer authoritatively, so the
-// caller must keep ownership UNKNOWN rather than treating the marker as absent.
+// sessionHomeMarker is the internal ambient form of SessionHomeMarker for
+// same-package callers (the teardown sweep) that drive their own daemon's
+// sessions and so resolve the right socket from their own environment.
+func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
+	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerHome, "")
+}
+
+// sessionEnvMarker binds the query, response parser, and absence classifier to
+// one marker name so readers cannot accidentally classify a different variable.
+// socket pins the show-environment reads to a specific tmux server (empty =
+// ambient); see SessionHomeMarkerOnSocket for why doctor passes a recorded one.
 //
 // Bounded by tmuxCommandTimeout (#2099): CleanupSessions calls this once per
 // discovered session, so an unbounded stall on any one of them wedges the whole
@@ -201,23 +219,19 @@ func SessionEnvVar(cmdExec cmd.Executor, sanitizedName, varName string) (value s
 // fails, an unfiltered query is used only to prove that the session answered and
 // the named variable was absent. If neither query answers, ownership remains
 // unknown and cleanup decides whether the exact session has since vanished.
-func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
-	return sessionEnvMarker(cmdExec, sanitizedName, EnvMarkerHome)
-}
-
-// sessionEnvMarker binds the query, response parser, and absence classifier to
-// one marker name so readers cannot accidentally classify a different variable.
-func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker string) (string, bool, error) {
-	return sessionEnvMarkerAt(cmdExec, exactTarget(sanitizedName), sanitizedName, marker)
+func sessionEnvMarker(cmdExec cmd.Executor, sanitizedName, marker, socket string) (string, bool, error) {
+	return sessionEnvMarkerAt(cmdExec, exactTarget(sanitizedName), sanitizedName, marker, socket)
 }
 
 // sessionEnvMarkerAt is sessionEnvMarker against an explicit tmux target: the
 // exact-name form for a name lookup, or a "$N" session id to read the
 // environment of one probed incarnation rather than whatever the name resolves
 // to by the time the command runs (#6258). sanitizedName only labels errors.
-func sessionEnvMarkerAt(cmdExec cmd.Executor, target, sanitizedName, marker string) (string, bool, error) {
+// socket pins the show-environment reads to a specific tmux server (empty =
+// ambient); see SessionHomeMarkerOnSocket for why doctor passes a recorded one.
+func sessionEnvMarkerAt(cmdExec cmd.Executor, target, sanitizedName, marker, socket string) (string, bool, error) {
 	ctx, cancel := tmuxTimeoutContext()
-	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", target, marker)
+	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, socketTmuxArgs(socket, "show-environment", "-t", target, marker)...)
 	markerTimedOut := ctx.Err() != nil
 	cancel()
 	if markerErr == nil {
@@ -246,7 +260,7 @@ func sessionEnvMarkerAt(cmdExec cmd.Executor, target, sanitizedName, marker stri
 	// session answered and the marker alone was absent. A generic targeted error
 	// never reaches this fallback, even if this second command would succeed.
 	allCtx, allCancel := tmuxTimeoutContext()
-	_, allErr := outputTmuxBoundedWith(allCtx, cmdExec, "show-environment", "-t", target)
+	_, allErr := outputTmuxBoundedWith(allCtx, cmdExec, socketTmuxArgs(socket, "show-environment", "-t", target)...)
 	allTimedOut := allCtx.Err() != nil
 	allCancel()
 	if allErr == nil {

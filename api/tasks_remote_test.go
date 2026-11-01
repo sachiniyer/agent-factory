@@ -235,7 +235,10 @@ func localTaskGuard(t *testing.T) {
 	}
 	daemonRemoveTask = func(string, task.ProjectExpectation) error { trip("daemon.RemoveTask"); return nil }
 	daemonRestartTask = func(string, task.ProjectExpectation) error { trip("daemon.RestartTask"); return nil }
-	daemonTriggerTask = func(string, task.ProjectExpectation) error { trip("daemon.TriggerTask"); return nil }
+	daemonTriggerTask = func(string, task.ProjectExpectation, task.Actor) error {
+		trip("daemon.TriggerTask")
+		return nil
+	}
 	daemonListTasksNoSpawn = func() ([]task.Task, error) { trip("daemon.ListTasksNoSpawn"); return nil, nil }
 
 	t.Cleanup(func() {

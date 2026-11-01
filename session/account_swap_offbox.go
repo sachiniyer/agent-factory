@@ -228,26 +228,30 @@ func (w *sandboxWorkspace) PrevAccountDir() string { return w.AccountDir() + acc
 // versions — the baseline the account's own later write-backs are judged against.
 // An existing staging directory is replaced, so a failed earlier attempt leaves
 // nothing behind to be mistaken for this one.
-func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessionenv.Account) (map[string]string, error) {
+func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessionenv.Account) (map[string]string, []string, error) {
 	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], accountScopeSeed(acct.Agent))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(versions) == 0 {
-		return nil, fmt.Errorf("account %q has no credential file to sync under %s (has it been logged in?)", acct.Name, acct.Dir)
+		return nil, nil, fmt.Errorf("account %q has no credential file to sync under %s (has it been logged in?)", acct.Name, acct.Dir)
 	}
 	dir := shellQuote(w.NextAccountDir())
 	script := "umask 077 && rm -rf " + dir + " && mkdir -p " + dir + " && tar -xf - -C " + dir
 	if out, err := w.shell.Run(timeout, script, bytes.NewReader(archive), true); err != nil {
-		return nil, fmt.Errorf("staging account %q on the host failed: %s: %w", acct.Name, strings.TrimSpace(string(out)), err)
+		return nil, nil, fmt.Errorf("staging account %q on the host failed: %s: %w", acct.Name, strings.TrimSpace(string(out)), err)
 	}
 	// The rotation replaces the whole live scope with this one, so the operator's
 	// selected agent config (model settings, MCP, instructions) is placed here too,
-	// before the agent restarts, as it was at provision.
-	if err := w.syncAgentConfigInto(timeout, w.NextAccountDir()); err != nil {
-		return nil, err
+	// before the agent restarts, as it was at provision. The upload can be tens of
+	// MiB (agentConfigMaxFileBytes is per file), so it gets the provision-scale
+	// budget the provision call site already passes — not the caller's 30-second
+	// control-step deadline, under which a valid config cannot cross a slow link.
+	skipped, err := w.syncAgentConfigInto(sshProvisionStepTimeout, w.NextAccountDir())
+	if err != nil {
+		return nil, nil, err
 	}
-	return versions, nil
+	return versions, skipped, nil
 }
 
 // discardAccountNext removes a staged scope that will not be used.
@@ -282,6 +286,11 @@ type OffBoxAccountSwap struct {
 	// removed from the host. The swap itself is complete; the credentials are
 	// removed with the session at the latest.
 	CleanupErr error
+	// AgentConfigSkipped carries one "agent:file: <reason>" entry per declared
+	// agent-config file the staging into the incoming scope refused (#6337).
+	// The swap still completes — a bare scope beats a failed handoff — but the
+	// row and the handoff warning both say so out loud.
+	AgentConfigSkipped []string
 }
 
 // OffBoxAccountHandoffApplies reports whether a manual account handoff of this
@@ -298,46 +307,52 @@ func (i *Instance) OffBoxAccountHandoffApplies() bool {
 
 // admitOffBoxAccountSwap proves every refusal that costs nothing, before anything
 // is staged or stopped. It returns the workspace and the incoming account bound
-// into the spec the launch checks run against.
-func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*sandboxWorkspace, sessionenv.Account, error) {
+// into the spec the launch checks run against, plus the sandbox_agent_config
+// snapshot admission resolved from the global config — handed back so the swap
+// half re-derives the operator's agent personalization from that snapshot instead
+// of re-opening the config (a second read could fail mid-swap, while the remote
+// CanSwapAccount call is in flight, and silently stage a bare scope: the very
+// personalization-loss bug this path exists to fix). sandbox_agent_config is
+// global-only, so the snapshot does not depend on the account and is safe to reuse.
+func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*sandboxWorkspace, sessionenv.Account, []string, error) {
 	w := p.account
 	if w == nil || w.spec.Account.Dir == "" {
-		return nil, sessionenv.Account{}, fmt.Errorf("session %q carries no synced account to hand off", i.Title)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q carries no synced account to hand off", i.Title)
 	}
 	if name = strings.TrimSpace(name); name == "" {
-		return nil, sessionenv.Account{}, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
 	}
 	if name == w.spec.Account.Name {
-		return nil, sessionenv.Account{}, fmt.Errorf("session %q already uses account %q", i.Title, name)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q already uses account %q", i.Title, name)
 	}
 	old := w.spec.Account
 	// The licence is the one that let the outgoing account in, re-asked of the
 	// incoming one: a listed host, and an agent whose credential files af knows.
 	next, err := selectAccountInNamespace(old.Agent, name)
 	if err != nil {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
 	}
 	if next.Agent != old.Agent {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: it is a %s account, and the session runs %s; a sandbox session keeps its agent when it changes account",
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: it is a %s account, and the session runs %s; a sandbox session keeps its agent when it changes account",
 			i.Title, name, next.Agent, old.Agent)
 	}
 	check := *w
 	check.spec.Account = next
 	if _, err := check.accountSyncApplies(); err != nil {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
 	}
 	// The same command proof the provision ran, with the incoming account: an
 	// attributed binary and no identity variable of the command's own.
 	rc, err := resolveRepoConfig(i.Path)
 	if err != nil {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: its program cannot be checked against the account: %w", i.Title, name, err)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: its program cannot be checked against the account: %w", i.Title, name, err)
 	}
 	spec := check.spec
 	if err := validateRemoteAccountProgram(rc, &spec); err != nil {
-		return nil, sessionenv.Account{}, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
 	}
 	next.TrustedExecutable, next.GeneratedArgs = spec.Account.TrustedExecutable, spec.Account.GeneratedArgs
-	return w, next, nil
+	return w, next, rc.SandboxAgentConfig, nil
 }
 
 // ValidateOffBoxAccountSwap is the admission half alone: every refusal that costs
@@ -349,7 +364,7 @@ func (i *Instance) ValidateOffBoxAccountSwap(name string) error {
 	}
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
-	_, _, err := i.admitOffBoxAccountSwap(p, name)
+	_, _, _, err := i.admitOffBoxAccountSwap(p, name)
 	return err
 }
 
@@ -380,7 +395,7 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	}
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
-	w, next, err := i.admitOffBoxAccountSwap(p, name)
+	w, next, agentConfigFiles, err := i.admitOffBoxAccountSwap(p, name)
 	if err != nil {
 		return OffBoxAccountSwap{}, err
 	}
@@ -398,12 +413,37 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	if !can {
 		return OffBoxAccountSwap{}, ErrAccountSwapUnsupported
 	}
+	// restoreAccountWorkspace rebuilds a reattached session's account workspace
+	// from the row alone (#5948), and the cleanup handle carries no repo config to
+	// re-derive the operator's sandbox_agent_config selection from — so
+	// spec.AgentConfigFiles stays empty for the session's whole life after a
+	// restart. An off-box swap would then stage the incoming account WITHOUT the
+	// operator's personalization (a bare agent) and the rotation would delete the
+	// outgoing scope that held the provision-time copy. Re-derive it here, from the
+	// snapshot admission just resolved (mirroring provision's pairing of
+	// AgentConfigFiles with AccountSyncHost in backend_ssh.go): sandbox_agent_config
+	// is global-only, so this re-reads nothing a repository could set, and
+	// AccountSyncHost — durable in the row — is the licence that provision set both
+	// under. Reusing the admission snapshot (rather than re-opening the config here)
+	// closes the race where a read failure between admission and the swap silently
+	// stages a bare scope and reproduces the bug. The restored gate leaves a
+	// freshly provisioned workspace's provision-time selection untouched — even
+	// an explicitly empty one, so enabling the global setting later never pushes
+	// new files onto an old host (Codex P2 on this PR).
+	if w.restored && len(w.spec.AgentConfigFiles) == 0 && strings.TrimSpace(w.spec.AccountSyncHost) != "" {
+		w.spec.AgentConfigFiles = append([]string(nil), agentConfigFiles...)
+	}
 	res := OffBoxAccountSwap{From: w.spec.Account.Name, To: next.Name}
-	versions, err := w.stageAccountNext(sshShortStepTimeout, next)
+	versions, skipped, err := w.stageAccountNext(sshShortStepTimeout, next)
 	if err != nil {
 		_ = w.discardAccountNext(sshShortStepTimeout)
 		return res, err
 	}
+	// Set before the host is asked to rotate: whichever way the remote call
+	// resolves, the staged scope is what the new account starts beside — so the
+	// skip list belongs to the result even when the response was lost (the
+	// reconciled arm below keeps res.AgentConfigSkipped populated).
+	res.AgentConfigSkipped = skipped
 	program, err := sw.SwapAccountInPlace()
 	if err != nil && swapOutcomeIndeterminate(err) {
 		// The call may have completed on the host with its response lost. What the
@@ -444,20 +484,23 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	w.spec.Account = next
 	w.syncedVersion = versions
 	p.spec.Account = next
-	i.recordOffBoxAccount(next.Name, next.Agent, automatic, program)
+	i.recordOffBoxAccount(next.Name, next.Agent, automatic, program, skipped)
 	return res, nil
 }
 
 // recordOffBoxAccount makes the swapped account the session's: the row, the
 // namespace it was selected in, and the runtime evidence of the relaunched agent.
 // The conversation is cleared — the new agent started a fresh one, and an id from
-// the old account's store names nothing in the new one.
-func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, program string) {
+// the old account's store names nothing in the new one. The incoming scope's
+// skip list replaces the row's: the rotation is the freshest evidence about
+// which declared files the live scope actually holds (#6337).
+func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, program string, agentConfigSkipped []string) {
 	i.mu.Lock()
 	i.Account = name
 	i.accountAgent = agent
 	i.accountAutoSelected = automatic
 	i.agentRuntimeGeneration++
+	i.agentConfigSkipped = append([]string(nil), agentConfigSkipped...)
 	if len(i.Tabs) > 0 {
 		i.setAgentConversationLocked(AgentConversationData{})
 	}

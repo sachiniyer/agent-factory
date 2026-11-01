@@ -4,6 +4,7 @@ package backlog
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -113,6 +114,9 @@ type RunRef struct {
 type Meter struct {
 	Offset int64   `json:"offset"`
 	Cost   float64 `json:"cost"`
+	// Last is the last message id counted, so a message whose lines straddle
+	// two reads is counted once.
+	Last string `json:"last,omitempty"`
 }
 
 type Message struct {
@@ -264,6 +268,9 @@ func (b *Backlog) clone() *Backlog {
 	for i, it := range b.Items {
 		it.WaitsOn = append([]int(nil), it.WaitsOn...)
 		it.Runs = append([]RunRef(nil), it.Runs...)
+		for r := range it.Runs {
+			it.Runs[r].Meter = maps.Clone(it.Runs[r].Meter)
+		}
 		it.Thread = append([]Message(nil), it.Thread...)
 		if it.Source != nil {
 			s := *it.Source

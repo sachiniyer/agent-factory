@@ -38,6 +38,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		ModelChange:              agentModelChangeForLiveness(i.agentModelChange, i.liveness),
 		ArchiveWarning:           i.archiveWarning,
 		CallbackUnavailable:      i.callbackUnavailable,
+		AgentConfigSkipped:       append([]string(nil), i.agentConfigSkipped...),
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
 		LostRestoreWait:          cloneLostRestoreWait(i.lostRestoreWait),
 		RebuildTeardownPending:   i.rebuildTeardownPending,
@@ -399,6 +400,13 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	return FromInstanceDataWithContext(data, nil)
+}
+
+// FromInstanceDataWithContext is FromInstanceData for a caller restoring many
+// sessions at once: rc shares the repo/config resolution of the batch so the
+// restores stop repeating it per session (#6446). A nil rc is FromInstanceData.
+func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instance, error) {
 	data = noteHostLayout(data.RestoreArchiveRollbackFence())
 	// ForStorage publishes an ordinary sandbox row's RuntimeCleanup under a
 	// projected RuntimeCleanupStateUnknown=true so a binary rolled back to the
@@ -512,6 +520,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
 		callbackUnavailable:      data.CallbackUnavailable,
+		agentConfigSkipped:       append([]string(nil), data.AgentConfigSkipped...),
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
 		lostRestoreWait:          lostRestoreWaitFromData(data.LostRestoreWait),
 		rebuildTeardownPending:   data.RebuildTeardownPending,
@@ -901,6 +910,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return instance, nil
 	}
 
+	if rc != nil {
+		instance.restoreCtx.Store(rc)
+		defer instance.restoreCtx.Store(nil)
+	}
 	if err := instance.Start(false); err != nil {
 		if retainsInertInstance(err) {
 			// A sibling probe or the live agent's in-place scope upgrade did not

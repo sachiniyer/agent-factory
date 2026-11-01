@@ -174,13 +174,15 @@ function canTrigger(t: TaskData): boolean {
   return t.enabled && !!t.cron_expr && t.cron_expr.trim() !== "" && !(t.watch_cmd && t.watch_cmd.trim() !== "");
 }
 
-/** The last-run line, or a dim placeholder before the first run. */
-function lastRunSummary(t: TaskData): string {
+/** The last-run line, or a dim placeholder before the first run. The time reads
+ *  like the next-run line beside it ("5m ago", or a local date once a day old),
+ *  never the daemon's raw RFC 3339 string with its nanoseconds. */
+export function lastRunSummary(t: TaskData, now: Date = new Date()): string {
   if (!t.last_run_at) {
     return "never run";
   }
   const status = t.last_run_status ? ` (${t.last_run_status})` : "";
-  return `last run ${t.last_run_at}${status}`;
+  return `last run ${formatTime(t.last_run_at, now)}${status}`;
 }
 
 /**

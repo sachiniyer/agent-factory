@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   type Backlog, type BacklogView, type Item, type ListOptions, type State,
   applyMove, canStartNow, dropMove, itemActions, keyboardMove, listRows, needsYouCount, needsYouLabel, neededBy, parseBacklogView, safeHttpUrl,
-  sessionItems, sources, topQueued,
+  sessionItems, sessionItemsSig, sources, topQueued,
 } from "./backlog_model.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
 
@@ -243,4 +243,11 @@ test("canStartNow offers Start now only where the daemon's start rule accepts it
   assert.equal(ok("working", "running"), false, "an active run is already working");
   assert.equal(ok("needs_you", "running"), false, "the answer is the next step");
   for (const state of ["draft", "queued", "waiting", "in_review", "stopped"] as const) assert.equal(ok(state), true, state);
+});
+
+test("a rebound project's chips are redrawn: the signature includes the root", () => {
+  const b = backlog(item(1, { runs: [{ session_id: "s1", title: "B-1 a", state: "started", prev_status: "queued", started_by: "user", started_at: "" }] }));
+  const at = (root: string): string => sessionItemsSig(sessionItems(new Map([[root, view(b)]])));
+  assert.notEqual(at("/old"), at("/new"));
+  assert.equal(at("/old"), at("/old"));
 });

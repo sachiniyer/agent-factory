@@ -13,6 +13,10 @@ import (
 
 // Instance is a running instance of claude code.
 type Instance struct {
+	// restoreCtx is the batch-shared repo/config resolution for the duration of a
+	// FromInstanceDataWithContext restore (#6446); nil otherwise.
+	restoreCtx atomic.Pointer[RestoreContext]
+
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):
 	// started, liveness/inFlightOp, Tabs (and the agent tab's tmux session),
@@ -319,6 +323,13 @@ type Instance struct {
 	// client-side projection. Persisted; surfaces render it under
 	// CallbackUnavailablePrefix. Mutex-protected; see callback_unavailable.go.
 	callbackUnavailable string
+	// agentConfigSkipped retains one "agent:file: <reason>" entry per declared
+	// sandbox_agent_config file the account-scope placement refused (#6337,
+	// #5571 W7.7). Persisted like callbackUnavailable and mirrored onto client
+	// projections by ReconcileAgentConfigSkipped; surfaces render the joined
+	// entries under AgentConfigSkippedPrefix. Mutex-protected; see
+	// agent_config_skipped.go.
+	agentConfigSkipped []string
 	// hostedRemotely marks an instance running INSIDE a sandbox, where the daemon
 	// holds the session as a remote workspace (guidance.go, #5571 W3.3).
 	hostedRemotely       bool

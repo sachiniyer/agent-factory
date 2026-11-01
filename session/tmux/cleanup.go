@@ -241,7 +241,7 @@ func probeSessionStrictOnce(cmdExec cmd.Executor, name string) (exists bool, kno
 	if ctx.Err() != nil {
 		return false, false, fmt.Errorf("%w: has-session %s after %s", ErrTmuxTimeout, name, tmuxCommandTimeout)
 	}
-	if tmuxProvedSessionAbsent(cmdExec, err, name) {
+	if tmuxProvedSessionAbsent(cmdExec, err, name, "") {
 		return false, true, nil
 	}
 	// Name what tmux actually said. An (*exec.ExitError).Error() is only "exit

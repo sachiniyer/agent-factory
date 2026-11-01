@@ -283,6 +283,80 @@ func TestFollowedLockReadsThroughThePinnedDirectory(t *testing.T) {
 	})
 }
 
+// TestFollowedLockReadsSiblingThroughThePinnedDirectory is the conversion's
+// read-half pin, the sibling analog of TestFollowedLockReadsThroughThePinnedDirectory
+// for the locked file itself. convertJSONToTOML reads the legacy config.json BESIDE
+// the config.toml it locks, so a path-based read re-resolves the home link at open
+// time — and a home moved away and back inside one operation could feed the
+// conversion another directory's config.json and land the result on the locked
+// file, the read half of #3697. readSibling opens through the fd this lock holds,
+// which a retarget cannot redirect.
+func TestFollowedLockReadsSiblingThroughThePinnedDirectory(t *testing.T) {
+	link, home, first, second := retargetableHome(t)
+	// retargetableHome seeds config.toml in both directories; give each a
+	// config.json sibling with distinguishable contents.
+	require.NoError(t, os.WriteFile(filepath.Join(first, ConfigFileName), []byte(`{"default_program":"from-A"}`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(second, ConfigFileName), []byte(`{"default_program":"from-B"}`), 0644))
+	jsonLink := filepath.Join(home, ConfigFileName)
+
+	require.NoError(t, withFollowedFileLock(link, func(target lockedTarget) error {
+		// Away: the home link now names B while the lock still covers A.
+		retargetHome(t, home, second)
+		data, err := target.readSibling(jsonLink)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), "from-A",
+			"the sibling read must come from the directory this lock covers")
+		assert.NotContains(t, string(data), "from-B",
+			"a moved link must not be able to feed the body another directory's config.json")
+		// Back, so the fd is left pointing where the link names it again.
+		retargetHome(t, home, first)
+		return nil
+	}))
+}
+
+// TestFollowedLockRenamesSiblingInsideThePinnedDirectory is the conversion's
+// rename-half pin, the sibling analog of TestFollowedLockPinsTheDirectoryItLocked
+// for the locked-file write. convertJSONToTOML moves the legacy config.json to
+// its .bak slot, and a path-based os.Rename resolved both ends through the home
+// link — so a home repointed after the config.toml write could land the move in
+// the retargeted directory, renaming its active config.json aside with no
+// config.toml to replace it. renameSibling renames within the fd this lock holds,
+// which cannot be redirected — the move lands in the locked directory whatever
+// the link does.
+func TestFollowedLockRenamesSiblingInsideThePinnedDirectory(t *testing.T) {
+	link, home, first, second := retargetableHome(t)
+	require.NoError(t, os.WriteFile(filepath.Join(first, ConfigFileName), []byte(`{"default_program":"from-A"}`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(second, ConfigFileName), []byte(`{"default_program":"from-B"}`), 0644))
+	// A pre-existing .bak in the retargeted directory must survive: the move must
+	// not follow the link there and clobber it.
+	require.NoError(t, os.WriteFile(filepath.Join(second, ConfigFileName+".bak"), []byte("do not lose me\n"), 0644))
+	jsonLink := filepath.Join(home, ConfigFileName)
+	bakLink := jsonLink + ".bak"
+
+	require.NoError(t, withFollowedFileLock(link, func(target lockedTarget) error {
+		// The link has moved away by the time the rename runs — the exact window a
+		// path-based os.Rename used to follow into the retargeted directory.
+		retargetHome(t, home, second)
+		return target.renameSibling(jsonLink, bakLink)
+	}))
+
+	// The move landed in the locked directory: A's config.json is gone, its .bak
+	// holds A's content.
+	assert.NoFileExists(t, filepath.Join(first, ConfigFileName),
+		"the locked directory's config.json was renamed — the move went through the pinned fd")
+	assert.Contains(t, readString(t, filepath.Join(first, ConfigFileName+".bak")), "from-A",
+		"the .bak beside the locked file holds the locked directory's config.json content")
+	// Nothing of the move reached the retargeted directory: B's active config.json
+	// and its precious .bak survive verbatim, and no config.json.bak of ours was
+	// created there.
+	assert.Equal(t, `{"default_program":"from-B"}`, readString(t, filepath.Join(second, ConfigFileName)),
+		"B's active config.json must survive untouched — the move never followed the link there")
+	assert.Equal(t, "do not lose me\n", readString(t, filepath.Join(second, ConfigFileName+".bak")),
+		"B's pre-existing .bak must survive — the move never wrote into the retargeted directory")
+	assert.Equal(t, []string{ConfigFileName, ConfigFileName + ".bak", TomlConfigFileName}, entryNames(t, second),
+		"nothing of the conversion's move-aside was left in the retargeted directory")
+}
+
 // TestMigrationBackupLandsInTheLockedDirectory is the third half of the same
 // principle, also from review: `af config migrate` writes a .bak beside the
 // config, and that write was still path-based.

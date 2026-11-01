@@ -13,7 +13,7 @@ import {
   type Backlog, type BacklogView, type DropZone, FILTERS, type Filter, type Item, type ListRow, type MoveTarget,
   applyMove, dropMove, formatID, itemByID, keyboardMove, listRows, overlayMove, sources, topQueued,
 } from "./backlog_model.js";
-import { ItemPanel, entryField, stateChip } from "./backlog_panel.js";
+import { ItemPanel, type WriteOutcome, entryField, stateChip } from "./backlog_panel.js";
 import { RunnerBar } from "./backlog_runner.js";
 import { closedGate, webReason } from "./backlog_usage.js";
 import { h } from "./dom.js";
@@ -124,7 +124,8 @@ export class BacklogPane {
       this.cursor = null;
       this.folded.clear();
     }
-    if (this.pending && data.generation > this.pending.gen) this.pending = null;
+    // A read of the project that failed kept its pre-move snapshot, which says nothing about the move.
+    if (this.pending && data.generation > this.pending.gen && !data.errors.has(this.pending.root)) this.pending = null;
     this.data = data;
     this.root = root;
     this.sessions = sessions;
@@ -274,26 +275,27 @@ export class BacklogPane {
       setRunner: (on: boolean) => this.mutate((t) => setSettings(this.root ?? "", { runner: on }, t)),
       setMaxRunning: (n: number) => this.mutate((t) => setSettings(this.root ?? "", { max_running: n }, t)),
       setOnDone: (onDone: string) => this.mutate((t) => setSettings(this.root ?? "", { on_done: onDone }, t)),
-      setBudget: (u: Parameters<typeof setBudget>[0]) => this.write((t) => setBudget(u, t)),
+      setBudget: (u: Parameters<typeof setBudget>[0]) => this.write(this.root ?? "", (t) => setBudget(u, t)),
       runNext: backlogRoutes.runBacklog ? () => this.runNext() : undefined,
       openItem: (id: number) => this.select(id),
     };
   }
 
   private mutate(run: (token: string) => Promise<unknown>): void {
-    if (this.root) this.write(run);
+    if (this.root) this.write(this.root, run);
   }
 
-  /** Settles true once the write and the refresh after it have landed, false when the write failed. */
-  private write(run: (token: string) => Promise<unknown>): Promise<boolean> {
+  /** `root` is the project the write modifies, bound by the caller: a save the serial queue starts
+   *  later must be acknowledged by a read of that project, not of whichever one is selected by then.
+   *  Settles "confirmed" once the write and a refresh that read the project have landed, "refused" when
+   *  the write failed, and "unconfirmed" when the daemon took it but the read after it failed (the
+   *  edit may be saved; the caller keeps what it shows until a snapshot says so). */
+  private write(root: string, run: (token: string) => Promise<unknown>): Promise<WriteOutcome> {
     const token = this.host.token();
-    if (token === null) return Promise.resolve(false);
-    const root = this.root ?? undefined;
-    // True only when the refresh after the write also read the project: an edit is
-    // acknowledged by a snapshot that carries it, not by a failed read that kept the old one.
-    return run(token).then(() => this.host.refresh(root), (e: unknown) => {
+    if (token === null) return Promise.resolve("refused");
+    return run(token).then(() => this.host.refresh(root).then((read): WriteOutcome => read ? "confirmed" : "unconfirmed"), (e: unknown) => {
       this.host.notify(errorText(e));
-      return this.host.refresh(root).then(() => false);
+      return this.host.refresh(root).then((): WriteOutcome => "refused");
     });
   }
 
@@ -544,19 +546,20 @@ export class BacklogPane {
   private panelActions(root: string) {
     const here = (): boolean => this.root === root;
     return {
-      update: (id: number, u: Parameters<typeof updateItem>[2]) => this.write((t) => updateItem(root, id, u, t)),
-      status: (id: number, s: Parameters<typeof setItemStatus>[2]) => this.write((t) => setItemStatus(root, id, s, t)),
+      update: (id: number, u: Parameters<typeof updateItem>[2]) => this.write(root, (t) => updateItem(root, id, u, t)),
+      status: (id: number, s: Parameters<typeof setItemStatus>[2]) => this.write(root, (t) => setItemStatus(root, id, s, t)),
       remove: (id: number) => {
         if (here()) this.selected = null;
-        this.write((t) => deleteItem(root, id, t));
+        this.write(root, (t) => deleteItem(root, id, t));
       },
       move: (id: number, to: MoveTarget) => {
         if (here()) this.move(id, to);
       },
-      note: (id: number, text: string) => this.write((t) => addNote(root, id, text, t)),
+      // A note is appended once the daemon accepts it, whether or not the read after it landed.
+      note: (id: number, text: string) => this.write(root, (t) => addNote(root, id, text, t)).then((o) => o !== "refused"),
       start: (id: number) => this.start(root, id),
       answer: (id: number, questionId: number, text: string) => this.answer(root, id, questionId, text),
-      addChild: (parent: number, title: string) => this.write((t) => addItem(root, { title, parent }, t)),
+      addChild: (parent: number, title: string) => this.write(root, (t) => addItem(root, { title, parent }, t)),
       select: (id: number) => this.select(id, root),
       close: () => {
         if (!here()) return;

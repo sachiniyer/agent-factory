@@ -171,6 +171,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	},
 	"limit_retry_interval":           func(a, b *config.Config) bool { return a.LimitRetryInterval != b.LimitRetryInterval },
 	"limit_patterns":                 func(a, b *config.Config) bool { return !reflect.DeepEqual(a.LimitPatterns, b.LimitPatterns) },
+	"backlog":                        func(a, b *config.Config) bool { return !reflect.DeepEqual(a.Backlog, b.Backlog) },
 	"global_agent_skills":            func(a, b *config.Config) bool { return a.GlobalAgentSkills != b.GlobalAgentSkills },
 	"docker.mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
 	"ssh.host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
@@ -187,6 +188,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"network.require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
 	"network.require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"network.cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
+	"network.allowed_hosts":          func(a, b *config.Config) bool { return !reflect.DeepEqual(a.AllowedHosts, b.AllowedHosts) },
 	// The #5137 opt-in flips the listener refusal posture, which reconcile
 	// evaluates on every apply — it can bind a refused listener or retire a
 	// serving one with no address change, so it applies live.

@@ -83,7 +83,7 @@ func testSessionMarkerRead(t *testing.T, marker string, read func(cmd.Executor, 
 func TestSessionEnvMarkerCrossProduct(t *testing.T) {
 	for _, marker := range []string{EnvMarkerSession, EnvMarkerHome, EnvMarkerGeneration} {
 		testSessionMarkerRead(t, marker, func(executor cmd.Executor, name string) (string, bool, error) {
-			return sessionEnvMarker(executor, name, marker)
+			return sessionEnvMarker(executor, name, marker, "")
 		})
 	}
 }

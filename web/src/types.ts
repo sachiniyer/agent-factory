@@ -205,6 +205,11 @@ export interface SessionData {
    *  "af callback unavailable:" prefix; absent means callback was delivered or
    *  the backend never injects one. */
   callback_unavailable?: string;
+  /** The declared sandbox_agent_config files af could not place in this
+   *  session's account scope, one "agent:file: <reason>" entry each (#6337).
+   *  Surfaces render the joined entries under the "af agent config skipped:"
+   *  prefix; absent means every declared file landed (or none applied). */
+  agent_config_skipped?: string[];
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;
@@ -341,7 +346,10 @@ export interface SnapshotResponse {
 	skipped_repos?: SkippedRepo[];
 	/** Archived rows in the request's repo scope, present only when the request set
 	 *  `lazy_archive` AND the daemon understands it (#6178). Its absence on such a
-	 *  request means the daemon predates the shape and `instances` is the whole list. */
+	 *  request means the daemon predates the shape and `instances` is the whole list.
+	 *  The web relies on this additive fallback by sending X-AF-Client-Version
+	 *  (web/src/api.ts af()), which routes the body through the daemon's tolerant
+	 *  decoder; a header-less client would instead get a 400 `unknown field`. */
 	archived_total?: number;
 	/** Those archived rows per worktree repo path (the key projects are grouped by). */
 	archived_by_project?: Record<string, number>;
@@ -541,7 +549,9 @@ export type EventType =
   | "task.removed"
   | "backlog.changed"
   | "backlog.spend"
-  | "backlog.runner";
+  | "backlog.runner"
+  | "proposal.changed"
+  | "proposal.push";
 
 /**
  * agentproto.Event (agentproto/message.go): one message on the /v1/events plane.

@@ -185,9 +185,9 @@ prints which target an invocation uses and why (never the token); `af target
 clear` forgets it. A saved file that is unreadable, malformed or readable by
 other users is refused rather than falling back to the local daemon.
 
-Flags take precedence over the environment. When `--daemon-url` (or
-`AF_DAEMON_URL`) is unset, `af` uses the local Unix socket exactly as before —
-the remote path is entirely opt-in.
+Flags take precedence over the environment. When no remote target is set,
+`af` uses the local Unix socket exactly as before — the remote path is
+entirely opt-in.
 
 ```bash
 # One-off command against a remote daemon
@@ -274,6 +274,12 @@ expose `network.listen_addr` to anything beyond loopback, put encryption in fron
 > `network.require_loopback_token = true`), while a **network-bound** af enforces the token
 > even for the proxy's loopback connection — so the proxy must forward the token.
 > A same-host proxy can never silently bypass the token on a network-bound listener.
+>
+> **A proxy that forwards the browser's `Host` needs that name allowed.** The daemon
+> answers only requests addressed to one of its own names, so add the proxy's public
+> name with `af config set network.allowed_hosts <name>` — `tailscale serve` and
+> Caddy forward the incoming `Host` by default. See [Host names the daemon answers
+> to](#host-names-the-daemon-answers-to).
 
 ### The web-tab preview cookie and `X-Forwarded-Proto`
 
@@ -581,6 +587,185 @@ After rotating, the **old token is dead**: a new connection presenting it gets a
 
 ---
 
+## Host names the daemon answers to
+
+**The guarantee:** every browser-facing listener the daemon serves answers a
+request only when its `Host` header names this daemon. Any other `Host` is
+refused before any route runs — the static web UI, every `/v1/...` route, and
+every WebSocket upgrade (the terminal stream and the events feed) alike.
+
+Why it matters: a browser decides "same origin" from the **name** in the URL,
+not from the address that name resolved to. Without this check, a web page whose
+own hostname was re-pointed at `127.0.0.1` after it loaded (DNS rebinding) would
+be same-origin with the tokenless loopback web UI, and could read every session
+and call every route, including the ones that create sessions and send prompts.
+A page cannot choose the `Host` its browser sends, so checking it closes that.
+
+These always work, on any port:
+
+- `localhost` and loopback IPs such as `127.0.0.1` and `[::1]`;
+- the host of the address the listener was bound from (`network.listen_addr`) —
+  for a wildcard bind such as `0.0.0.0:8443`, that is `http://0.0.0.0:8443` itself;
+- the IP address the client actually connected to — so a wildcard bind
+  (`0.0.0.0:8443`) reached as `http://192.168.1.5:8443` works with no entry;
+- a request with **no** `Host` header from this same machine (HTTP/1.0 tools;
+  browsers always send one).
+
+Anything else needs an entry in `network.allowed_hosts`. The usual case is a
+same-host reverse proxy that forwards the browser's `Host` unchanged:
+**`tailscale serve` does exactly that** (for a TCP backend it sets the proxied
+request's `Host` to the incoming one), so the daemon sees your
+`<machine>.<tailnet>.ts.net` name, and that name must be allowed. Caddy's
+`reverse_proxy` also forwards the incoming `Host` by default. nginx's
+`proxy_pass` sends its upstream address (`127.0.0.1:8443`) unless you set
+`proxy_set_header Host $http_host`, in which case add the public name too. (Use
+`$http_host`, not `$host`: `$host` drops the port, so a front door on a
+non-default port would be forwarded as the wrong one.) A proxy that
+rewrites `Host` passes this check, but the web UI's terminals and event stream
+also need the browser's name forwarded — see [behind a reverse
+proxy](#behind-a-reverse-proxy) below.
+
+```bash
+# On the daemon's machine — applies on the next request, no restart
+af config set network.allowed_hosts box.tailnet.ts.net
+```
+
+```toml
+# ~/.agent-factory/config.toml (global-only)
+[network]
+allowed_hosts = ["box.tailnet.ts.net"]
+```
+
+- An entry is a bare DNS name or IP literal — no scheme, path, or port — and
+  matches that host on any port, so one entry covers both the main UI
+  (`https://box.tailnet.ts.net`) and the per-session editor ports
+  (`https://box.tailnet.ts.net:9100`). Case and one trailing dot are ignored. There
+  are no wildcards.
+- `af config set` replaces the whole list (comma-separate several names) and
+  refuses a malformed entry, naming the spelling that works; a hand-edited
+  malformed entry is dropped at load with a warning, so it never admits anything.
+- A refused request gets **`421 Misdirected Request`** with a short plain-text body
+  naming the `Host` it refused and the exact line that would allow it. The daemon
+  logs one line per refused name (rate-limited), with the peer address and never
+  the request's path or body, and `af doctor` lists the names it has refused
+  recently.
+- If you see a refusal for a name you do **not** recognise, do not add it: that is
+  the check doing its job against a page that tried to reach af under its own
+  name.
+- A `*.localhost` **subdomain** is not allowed by default. Chromium and Firefox
+  resolve every `*.localhost` name to loopback themselves, but Safari before macOS
+  26 asks the ordinary macOS resolver, which falls through to the network's DNS
+  servers ([WebKit bug 160504](https://bugs.webkit.org/show_bug.cgi?id=160504)), so
+  a hostile network could point such a name at a page of its own and then rebind
+  it. Nothing in af needs one here; list it in `network.allowed_hosts` if you do.
+- The web-tab preview listener (`network.preview_listen_addr`) keeps its own,
+  stricter rule: it answers only the per-tab `af….localhost` names the web UI hands
+  out — each one a credential the daemon minted — and every other `Host` gets a
+  plain 404, so `network.allowed_hosts` does not apply there. The headless agent-server is not a browser surface; its token is
+  mandatory for every peer, and it has no `Host` rule.
+
+## Cross-site browser requests are refused
+
+**The guarantee:** a browser request from another site never reaches the
+daemon's API or its WebSocket streams over TCP, whatever `network.require_token`
+says. Non-browser clients (the `af` CLI and TUI, the in-sandbox `af`, scripts)
+are unaffected except for one rule: a request body must be sent as
+`Content-Type: application/json`.
+
+Why it matters: a browser sends some requests to any address without asking
+first — a form-encoded, multipart or `text/plain` POST, or one with no body — and
+a WebSocket handshake is not covered by CORS at all. The page that sends one
+cannot read the answer, but under the tokenless default the side effect would
+still happen: a session created with a prompt, a prompt sent to an agent, a
+session killed. The Host check above does not stop this, because such a request
+is addressed to a genuine `127.0.0.1`.
+
+Before any route runs, the daemon judges each request to `/v1/…` in this order:
+
+1. **An origin you listed** in `network.cors_allowed_origins` is admitted, exactly
+   as before (see [CORS](#cors-for-the-browser-web-client)).
+2. **Fetch metadata.** When the browser sends `Sec-Fetch-Site`, only
+   `same-origin` and `none` (a URL the user typed or bookmarked) are admitted.
+   `cross-site` is refused, and so is `same-site`: on this machine that means
+   another port of the same host — where an agent's dev server runs — and nothing
+   af serves needs it.
+3. **Origin**, for an older browser that sends no fetch metadata: an `Origin` that
+   is not the daemon's own (the same host name and port the request was addressed
+   to, and `https` when the request arrived over HTTPS) is refused, `null`
+   included.
+4. **Content type.** Every POST, PUT, PATCH and DELETE must send
+   `Content-Type: application/json`, even with no body. A form cannot, a JSON
+   request from another site needs a preflight the daemon grants only to the
+   origins in step 1, and a bare POST with no type at all is the one shape an old
+   browser can send without any other signal. (The headless agent-server also
+   accepts a body-less call with no `Content-Type`, which is what the daemon driving
+   it sends; its token is mandatory.)
+
+A refusal is `403` (steps 2–3) or `415` (step 4) with the daemon's usual error
+envelope, and the daemon logs it, rate-limited, without the body or the query.
+
+- **`curl` over TCP:** send JSON as JSON —
+  `curl --json '{}' …`, or `curl -H 'Content-Type: application/json' -d '{}' …`.
+  Plain `-d` sends a form and `-X POST` alone sends no type; both get `415`. The
+  Unix socket is unchanged, so the `curl --unix-socket … -d '{}'` examples in the
+  [HTTP API guide](http-api.md) keep working.
+- **Not covered, deliberately:** the web-tab and editor content under
+  `/v1/webtab/…`, and the preview listener. That content belongs to the app being
+  previewed — its sandboxed frame's own requests are cross-site by definition —
+  and it goes to that app's dev server or editor, never to af's API.
+
+### Behind a reverse proxy
+
+Some browser requests reach the daemon with no fetch metadata, and the daemon
+then judges them by `Origin` alone, so it must be able to see the name and port
+the browser used. That covers **every WebSocket** (Chromium sends no fetch
+metadata on a handshake), and so every terminal and the event stream. Behind a
+**plain-http** front door it covers **every request**, POSTs included: browsers
+send fetch metadata only to HTTPS and loopback origins. Over HTTPS, the web UI's
+ordinary requests are marked `same-origin` and need nothing more.
+
+- **A proxy that keeps `Host`** works as is. `tailscale serve` forwards
+  `Host: box.tailnet.ts.net` with `X-Forwarded-Proto: https`, and
+  `Origin: https://box.tailnet.ts.net` names the same host on the same (implied)
+  port 443. Caddy's `reverse_proxy` behaves the same way. Both need the name in
+  `network.allowed_hosts`, as above.
+- **A proxy that rewrites `Host`** must forward the browser's in
+  `X-Forwarded-Host`, port included, with `X-Forwarded-Proto`. The daemon honours
+  them only from a proxy on the same machine (a loopback connection), and only when
+  the forwarded name is one the daemon answers to, so list the public name in
+  `network.allowed_hosts` too:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8443;
+    proxy_http_version 1.1;                       # WebSockets need these three
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Forwarded-Host $http_host; # the name AND port the browser used
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Use `$http_host`, not `$host`: `$host` has no port. A forwarded name with no port
+never vouches for an `Origin` that names one, so a front door on a non-default port
+(`listen 8444 ssl`) forwarded as `$host` gets its own WebSockets refused rather
+than guessed at — and since the daemon cannot see the port the proxy dropped, a
+page served by another app on the same host's default port could pass for that
+front door. `X-Forwarded-Port` (`proxy_set_header X-Forwarded-Port $server_port;`)
+is also honoured, from the same loopback proxy, as the port of a port-less
+forwarded name, and closes that too.
+
+A proxy that rewrites `Host` and forwards nothing (nginx's bare `proxy_pass`)
+leaves such a request indistinguishable from a foreign page's, so it is refused
+with `403`, naming `X-Forwarded-Host`.
+
+The same holds for every **editor-origin port** (`network.editor_origin_ports`).
+af accepts an editor's WebSocket only from the editor's own page, judged exactly
+this way, so a front door for those ports either keeps `Host` or sends
+`X-Forwarded-Host $http_host`, not `$host`, in each port's server block. Otherwise
+the editor loads but never connects. An editor port answers a name in
+`network.allowed_hosts` on any port, so the one entry covers them all.
+
 ## CORS (for the browser web client)
 
 Browsers enforce CORS, so a web client served from a different origin than the
@@ -600,7 +785,9 @@ cors_allowed_origins = ["https://af.example.com"]
   **unaffected** by this key either way.
 - A CORS preflight (`OPTIONS`) carries no credentials and is answered before the
   token gate, so cross-origin discovery works; the actual request still needs a
-  valid token.
+  valid token. A preflight from an origin that is **not** listed is refused
+  outright, as is any other request from it (see [Cross-site browser
+  requests](#cross-site-browser-requests-are-refused)).
 
 If you front af with a reverse proxy, the browser's origin is the **proxy's**
 origin — allow-list that (an `https://` origin), and let the proxy reach af's
@@ -642,6 +829,16 @@ plaintext backend.
   `network.require_token = true` or opt in with
   `network.allow_unauthenticated_network`. See [the unauthenticated network
   listener](#the-unauthenticated-network-listener).
+- **The daemon answers only its own names.** A request whose `Host` is not
+  `localhost`, a loopback IP, the listener's own address, the address the client reached, or a
+  `network.allowed_hosts` entry is refused with `421` before any route runs, so a
+  DNS-rebinding page cannot reach the tokenless loopback API. Add a name only if you
+  reach af through it on purpose. See [Host names the daemon answers
+  to](#host-names-the-daemon-answers-to).
+- **No other site can drive the daemon from a browser.** Cross-site requests and
+  WebSocket handshakes are refused before any route runs, in every auth posture,
+  and request bodies must be JSON. See [Cross-site browser
+  requests](#cross-site-browser-requests-are-refused).
 - **Rotate on suspected exposure.** `af token rotate` invalidates the old token
   for new connections at once — no restart, no downtime for live sessions.
 

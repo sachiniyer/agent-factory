@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
 )
@@ -174,29 +176,98 @@ func (m *home) coldStartFromSnapshot() error {
 	return nil
 }
 
+// defaultSnapshotBuildWorkers bounds how many snapshot records are restored at once.
+// Each restore spawns a few tmux subprocesses (has-session, list-panes,
+// display-message), so serial builds made the launch — and a project switch —
+// cost grow with the number of sessions in the project (#6423); an unbounded
+// fan-out would instead flood tmux with a subprocess per session.
+const defaultSnapshotBuildWorkers = 16
+
 // materializeSnapshot builds each snapshot record into a live instance and adds
 // it to the projection. Split out of coldStartFromSnapshot so switchProject can
 // fetch a target project's snapshot up front — while the outgoing project is
 // still intact — and only materialize it once the fetch has succeeded (#1788).
 // A single unrestorable record is logged and skipped, never aborting the batch.
+//
+// The restores overlap (defaultSnapshotBuildWorkers at a time) but the store is fed on
+// this goroutine in snapshot order, so the sidebar order, the adopted-op
+// bookkeeping and the store's own single-writer contract are unchanged.
 func (m *home) materializeSnapshot(data []session.InstanceData) {
-	for _, d := range data {
-		if snapshotAwaitingWorktree(d) {
-			continue
-		}
-		inst, err := buildInstanceFromSnapshot(d)
-		if err != nil {
-			// The session's tmux/worktree may have been destroyed externally;
-			// log and skip rather than failing the whole launch.
-			log.WarningLog.Printf("skipping session %q from snapshot: %v", d.Title, err)
-			continue
-		}
+	workers := m.snapshotBuildWorkers
+	if workers <= 0 {
+		workers = defaultSnapshotBuildWorkers
+	}
+	if m.primeSessionSnapshot != nil {
+		// One `tmux list-panes -a` answers the existence, generation and pane-row
+		// probes of every restore in the batch (#6423); released when it is done.
+		defer m.primeSessionSnapshot()()
+	}
+	for _, inst := range buildSnapshotInstances(data, workers) {
 		// A row BUILT from a snapshot can already carry a daemon-owned op, and it is
 		// just as adopted as one mirrored onto an existing row — the cold-start
 		// variant of the same corpse (#3005).
 		m.adoptedOpsFor().note(inst, inst.GetInFlightOp())
 		m.store.AddInstance(inst)()
 	}
+}
+
+// primeTmuxSessionSnapshot lists every tmux pane once and primes the restore-time
+// probes with it. A failed listing (no tmux server, a remote target) primes
+// nothing, and every restore then asks tmux per session exactly as before.
+func primeTmuxSessionSnapshot() func() {
+	snap, err := tmux.CaptureSessionSnapshot()
+	if err != nil {
+		return func() {}
+	}
+	return tmux.PrimeSessionSnapshot(snap)
+}
+
+// buildSnapshotInstances restores the snapshot records with at most `workers`
+// builds in flight and returns the successes in snapshot order. Records still
+// awaiting their worktree are skipped, and a record that fails to build is logged
+// and dropped: the session's tmux/worktree may have been destroyed externally,
+// and that must not fail the whole launch.
+func buildSnapshotInstances(data []session.InstanceData, workers int) []*session.Instance {
+	build := buildInstanceFromSnapshot // read once: a test seam, swapped on another goroutine
+	// One context for the whole batch: every restore of a project shares a single
+	// repo/config resolution instead of repeating it per session (#6446).
+	rc := session.NewRestoreContext()
+	built := make([]*session.Instance, len(data))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	if workers > len(data) {
+		workers = len(data)
+	}
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				inst, err := build(data[i], rc)
+				if err != nil {
+					log.WarningLog.Printf("skipping session %q from snapshot: %v", data[i].Title, err)
+					continue
+				}
+				built[i] = inst
+			}
+		}()
+	}
+	for i, d := range data {
+		if snapshotAwaitingWorktree(d) {
+			continue
+		}
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	out := built[:0]
+	for _, inst := range built {
+		if inst != nil {
+			out = append(out, inst)
+		}
+	}
+	return out
 }
 
 // fetchColdStartSnapshot fetches the cold-start snapshot, tolerating a warming
@@ -597,7 +668,7 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 		log.InfoLog.Printf("deferring instance %q: create in flight, worktree not populated yet", d.Title)
 		return false
 	}
-	inst, err := buildInstanceFromSnapshot(d)
+	inst, err := buildInstanceFromSnapshot(d, nil)
 	if err != nil {
 		log.WarningLog.Printf("failed to build instance %q from snapshot: %v", d.Title, err)
 		return false
@@ -617,7 +688,7 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData, selectedTitle st
 	if snapshotAwaitingWorktree(d) {
 		return false
 	}
-	inst, err := buildInstanceFromSnapshot(d)
+	inst, err := buildInstanceFromSnapshot(d, nil)
 	if err != nil {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
 		return false
@@ -818,6 +889,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// stamps it while liveness stays Ready/Running, and it never flips a status
 	// on its own (#5571 W3.1).
 	if inst.ReconcileCallbackUnavailable(d.CallbackUnavailable) {
+		changed = true
+	}
+	// The skipped agent-config list is the same class again (#6337): a
+	// (re)provision or an account swap rewrites it while liveness stays
+	// Ready/Running, and a placement that lands every file clears it.
+	if inst.ReconcileAgentConfigSkipped(d.AgentConfigSkipped) {
 		changed = true
 	}
 	// Automatic restore can exhaust its attempts while liveness stays Lost. Mirror
