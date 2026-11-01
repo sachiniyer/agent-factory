@@ -6648,6 +6648,13 @@ function hasAttention(s) {
   const kind = rowKind(s);
   return kind === "ready" || kind === "working";
 }
+function otherAttentionCount(sessions, selectedId) {
+  return sessions.filter((s) => s.id !== selectedId && hasAttention(s)).length;
+}
+function attentionWords(count) {
+  if (count <= 0) return "";
+  return count === 1 ? "1 session needs attention" : `${count} sessions need attention`;
+}
 function attentionReason(s) {
   return hasAttention(s) ? (s.attention?.reason ?? "").trim() : "";
 }
@@ -6815,8 +6822,13 @@ function callbackUnavailableText(s) {
   const reason = s.callback_unavailable?.trim() ?? "";
   return reason === "" ? "" : CALLBACK_UNAVAILABLE_PREFIX + reason;
 }
+var AGENT_CONFIG_SKIPPED_PREFIX = "af agent config skipped: ";
+function agentConfigSkippedText(s) {
+  const entries = (s.agent_config_skipped ?? []).map((entry) => entry.trim()).filter((entry) => entry !== "");
+  return entries.length === 0 ? "" : AGENT_CONFIG_SKIPPED_PREFIX + entries.join("; ");
+}
 function sessionWarningText(s) {
-  return [archiveWarningText(s), callbackUnavailableText(s)].filter((t) => t !== "").join(" \xB7 ");
+  return [archiveWarningText(s), callbackUnavailableText(s), agentConfigSkippedText(s)].filter((t) => t !== "").join(" \xB7 ");
 }
 function rootRecreateNote(s) {
   switch (s.root_recreate_context) {
@@ -7029,8 +7041,13 @@ function isProjectReboundError(e) {
 function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
+var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
+var CLIENT_VERSION = "1d8629d270d1";
 async function af(method, body, token2, signal) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = {
+    "Content-Type": "application/json",
+    [CLIENT_VERSION_HEADER]: CLIENT_VERSION
+  };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }
@@ -7354,12 +7371,12 @@ async function fetchPreviewOrigin(sessionId, tabId, token2) {
 }
 async function fetchEditorPortOrigin(sessionId, token2) {
   const url = `/v1/editor-origin?session=${encodeURIComponent(sessionId)}`;
-  const headers = {};
+  const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }
   try {
-    const resp = await fetch(url, { method: "POST", headers, cache: "no-store" });
+    const resp = await fetch(url, { method: "POST", headers, body: "{}", cache: "no-store" });
     if (!resp.ok) {
       return null;
     }
@@ -7448,13 +7465,13 @@ function spawnConfigAssistant(token2) {
   return af("config-assistant", {}, token2);
 }
 async function reapConfigAssistant(token2) {
-  const headers = {};
+  const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
     headers.Authorization = `Bearer ${token2}`;
   }
   let resp;
   try {
-    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers });
+    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers, body: "{}" });
   } catch (e) {
     throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
   }
@@ -7818,6 +7835,17 @@ var TriangleAlert = [
   ["path", { d: "M12 17h.01" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/wifi-off.mjs
+var WifiOff = [
+  ["path", { d: "M12 20h.01" }],
+  ["path", { d: "M8.5 16.429a5 5 0 0 1 7 0" }],
+  ["path", { d: "M5 12.859a10 10 0 0 1 5.17-2.69" }],
+  ["path", { d: "M19 12.859a10 10 0 0 0-2.007-1.523" }],
+  ["path", { d: "M2 8.82a15 15 0 0 1 4.177-2.643" }],
+  ["path", { d: "M22 8.82a15 15 0 0 0-11.288-3.764" }],
+  ["path", { d: "m2 2 20 20" }]
+];
+
 // node_modules/lucide/dist/esm/icons/x.mjs
 var X = [
   ["path", { d: "M18 6 6 18" }],
@@ -7835,17 +7863,18 @@ var ICONS = {
   "chevron-down": ChevronDown,
   circle: Circle,
   "circle-dashed": CircleDashed,
+  "wifi-off": WifiOff,
   "circle-question": CircleQuestionMark,
   diamond: Diamond,
   ellipsis: Ellipsis,
   "external-link": ExternalLink,
+  "file-text": FileText,
   folder: Folder,
   "folder-git": FolderGit2,
-  "file-text": FileText,
   funnel: Funnel,
+  "loader-circle": LoaderCircle,
   "git-branch": GitBranch,
   link: Link,
-  "loader-circle": LoaderCircle,
   menu: Menu,
   "octagon-x": OctagonX,
   panels: PanelsTopLeft,
@@ -8045,7 +8074,8 @@ function terminalChrome(opts) {
   };
   const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
   const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
-  const newTabs = h("div", { class: "af-term-new-group" }, newTerminal, newVSCode);
+  const docsShortcuts2 = h("div", { class: "af-term-docs-group" });
+  const newTabs = h("div", { class: "af-term-new-group" }, docsShortcuts2, newTerminal, newVSCode);
   const title = h("span", { class: "af-term-title" });
   applyTerminalTitle(title, opts.title);
   const placement = h("span", { class: "af-term-placement" });
@@ -8077,7 +8107,7 @@ function terminalChrome(opts) {
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
   const attention = attentionChip(opts.clearAttention);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, tabUnavailable, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, docsShortcuts: docsShortcuts2, tabUnavailable, menu, dispose: menu.dispose };
 }
 function attentionChip(onDismiss) {
   const label = h("span", { class: "af-term-attention-label" }, "Attention");
@@ -10257,7 +10287,12 @@ var TerminalKeybar = class {
       this.bar.style.left = `${this.viewport?.offsetLeft ?? 0}px`;
       const width = this.viewport?.width ?? window.innerWidth;
       this.bar.style.width = `${width}px`;
-      this.bar.classList.toggle("af-keybar-narrow", width < 348);
+      const narrow = width < 348;
+      this.bar.classList.toggle("af-keybar-narrow", narrow);
+      for (const button2 of this.bar.querySelectorAll("button[aria-label='More keys']")) {
+        const text = narrow ? "More" : "More keys";
+        if (button2.textContent !== text) button2.textContent = text;
+      }
       this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
       const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
       this.host.style.maxHeight = `${height}px`;
@@ -11810,8 +11845,8 @@ var AttachTerminal = class {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay2 = Math.min(BACKOFF_BASE_MS * 2 ** this.retry, BACKOFF_MAX_MS);
+    this.cb.onStatus("reconnecting", Date.now() + delay2);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -12642,8 +12677,8 @@ var EventStream = class {
       return;
     }
     this.ws = null;
-    this.cb.onStatus("reconnecting");
     const delay2 = Math.min(BACKOFF_BASE_MS2 * 2 ** this.retry, BACKOFF_MAX_MS2);
+    this.cb.onStatus("reconnecting", Date.now() + delay2);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -13576,7 +13611,7 @@ function confirmDeleteTabModal(opts) {
     confirmClass: "af-danger",
     onCancel: opts.onCancel
   });
-  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
+  body.append(h("p", { class: "af-modal-text" }, opts.kind === TabKind.Web ? "This removes the web tab, not the service it displays. Hiding a pane leaves the tab available." : opts.kind === TabKind.Docs ? "This removes the Proposal tab. The proposal and its docs stay. Hiding a pane leaves the tab available." : "This removes the tab and requests cleanup of its runtime. Hiding a pane leaves the tab available."));
   asForm(handle.el.firstElementChild, opts.onConfirm);
   queueMicrotask(() => cancelBtn.focus());
   return handle;
@@ -14314,6 +14349,140 @@ function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
   return tab;
 }
 
+// src/docs_autosplit.ts
+var AGENT_TAB = 0;
+function placeNewDocsTabs(tree, tabIds, tabKinds, seen, key, narrow) {
+  let out = tree;
+  tabKinds.forEach((kind, tab) => {
+    const k = key(tabIds[tab] ?? "");
+    if (kind !== TabKind.Docs || seen.has(k)) {
+      return;
+    }
+    seen.add(k);
+    if (narrow || leaves(out).some((l) => tabKinds[l.tab] === TabKind.Web || tabKinds[l.tab] === TabKind.VSCode)) {
+      return;
+    }
+    out = placeDocs(out, tab, tabKinds);
+  });
+  return out;
+}
+function placeDocs(tree, docs, tabKinds) {
+  const panes = leaves(tree);
+  if (panes.some((l) => l.tab === docs)) {
+    return tree;
+  }
+  const docsPane = panes.find((l) => tabKinds[l.tab] === TabKind.Docs);
+  if (docsPane) {
+    return replaceTab(tree, docsPane.id, docs);
+  }
+  const target = panes.find((l) => l.tab === AGENT_TAB) ?? (tree.kind === "leaf" ? tree : null);
+  return target ? splitLeaf(tree, target.id, "right", docs) : tree;
+}
+function isProposalView(tree, tabKinds) {
+  return tree.kind === "split" && tree.dir === "row" && tree.a.kind === "leaf" && tree.a.tab === AGENT_TAB && tree.b.kind === "leaf" && tabKinds[tree.b.tab] === TabKind.Docs;
+}
+function showTab(tree, focusedId, tab, tabKinds, narrow, ratio) {
+  if (tabKinds[tab] === TabKind.Docs && !narrow && tab !== AGENT_TAB) {
+    if (isProposalView(tree, tabKinds) && tree.kind === "split" && tree.b.kind === "leaf" && tree.b.tab === tab) {
+      return { tree, focus: tree.b.id };
+    }
+    const shown = leaves(tree).find((l) => l.tab === AGENT_TAB);
+    const agent = shown ? { kind: "leaf", id: shown.id, tab: AGENT_TAB } : singleLeaf(AGENT_TAB);
+    const view = splitLeaf(agent, agent.id, "right", tab);
+    const sized = view.kind === "split" ? setRatio(view, view.id, ratio) : view;
+    return { tree: sized, focus: leaves(sized).find((l) => l.tab === tab)?.id ?? agent.id };
+  }
+  if (isProposalView(tree, tabKinds) && tree.kind === "split") {
+    const keep = tab === AGENT_TAB ? tree.a.id : focusedId;
+    return { tree: { kind: "leaf", id: keep, tab }, focus: keep };
+  }
+  const next = replaceTab(tree, focusedId, tab);
+  return { tree: next, focus: leaves(next).find((l) => l.tab === tab)?.id ?? focusedId };
+}
+function rebindTab(tree, focusedId, tab, tabKinds, narrow, ratio) {
+  if (leaves(tree).find((l) => l.id === focusedId)?.tab === tab) {
+    return { tree, focus: focusedId };
+  }
+  return showTab(tree, focusedId, tab, tabKinds, narrow, ratio);
+}
+
+// src/docs_tab.ts
+var docsModule = null;
+function loadDocsModule() {
+  if (!docsModule) {
+    const url = new URL("./lazy/docs-editor.js", import.meta.url).href;
+    docsModule = import(url).catch((e) => {
+      docsModule = null;
+      throw e;
+    });
+  }
+  return docsModule;
+}
+var listeners2 = /* @__PURE__ */ new Set();
+function publishProposalChange(change) {
+  for (const fn of listeners2) fn(change);
+}
+function subscribe(fn) {
+  listeners2.add(fn);
+  return () => listeners2.delete(fn);
+}
+var pushListeners = /* @__PURE__ */ new Set();
+function publishProposalPush(status) {
+  for (const fn of pushListeners) fn(status);
+}
+var resyncListeners = /* @__PURE__ */ new Set();
+function publishProposalResync() {
+  for (const fn of resyncListeners) fn();
+}
+function subscribeResync(fn) {
+  resyncListeners.add(fn);
+  return () => resyncListeners.delete(fn);
+}
+function subscribePush(fn) {
+  pushListeners.add(fn);
+  return () => pushListeners.delete(fn);
+}
+function mountDocsTab(host, opts) {
+  let disposed = false;
+  let pane = null;
+  const notice = (text, retry) => {
+    const box = document.createElement("div");
+    box.className = "af-docs-notice";
+    const p = document.createElement("p");
+    p.className = "af-docs-notice-text";
+    p.textContent = text;
+    box.append(p);
+    if (retry) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "af-ghost";
+      btn.textContent = "Retry";
+      btn.addEventListener("click", load);
+      box.append(btn);
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "af-docs";
+    wrap.append(box);
+    host.replaceChildren(wrap);
+  };
+  function load() {
+    notice("Loading editor\u2026", false);
+    loadDocsModule().then(
+      (mod) => {
+        if (!disposed) pane = new mod.DocsPane(host, { ...opts, subscribe, subscribePush, subscribeResync });
+      },
+      (e) => {
+        if (!disposed) notice(`Could not load the editor: ${errorText(e)}`, true);
+      }
+    );
+  }
+  load();
+  return () => {
+    disposed = true;
+    pane?.dispose();
+  };
+}
+
 // src/tabaddr.ts
 function iframeIsProxied(spec) {
   if (spec.kind === TabKind.VSCode) {
@@ -14439,6 +14608,8 @@ function tabIcon(kind) {
     case TabKind.Web:
     case TabKind.VSCode:
       return "panels";
+    case TabKind.Docs:
+      return "file-text";
     default:
       return "terminal";
   }
@@ -14454,7 +14625,7 @@ function tabLabel(tab) {
     case TabKind.VSCode:
       return tab.name && tab.name !== "vscode" ? tab.name : "VS Code";
     case TabKind.Docs:
-      return tab.name && tab.name !== "docs" ? tab.name : "Docs";
+      return tab.name && tab.name !== "docs" ? tab.name : "Proposal";
     default:
       return tab.name || "Tab";
   }
@@ -14468,6 +14639,9 @@ function isRenameableTab(kind) {
 
 // src/split.ts
 var EDGE_BAND = 0.3;
+function phoneWidth() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia("(max-width: 768px)").matches : false;
+}
 function el(tag, cls) {
   const node = document.createElement(tag);
   node.className = cls;
@@ -14566,9 +14740,10 @@ function probeFallbackMsg(health, host) {
   return health === "unreachable" ? `Could not reach the daemon to check ${host}.` : `No dev server is answering at ${host} yet.`;
 }
 var SplitView = class {
-  constructor(host, cb) {
+  constructor(host, cb, narrow = phoneWidth) {
     this.host = host;
     this.cb = cb;
+    this.narrow = narrow;
   }
   // Retained layout per session id (in-memory; a nice-to-have to persist across
   // reload is out of scope for v1). Keyed by the stable session id.
@@ -14659,6 +14834,12 @@ var SplitView = class {
   // ordinal later would ask the current roster about a past position and get the wrong
   // tab, so the id is captured at the same moment as the ordinal.
   lastFocusedTabId = "";
+  // Docs tabs already auto-split once this page load, keyed by session and tab
+  // identity, so a split the user closes is not put back.
+  docsPlaced = /* @__PURE__ */ new Set();
+  // The divider ratio of each session's proposal view, so the view comes back as
+  // the user left it.
+  proposalRatios = /* @__PURE__ */ new Map();
   /**
    * Shows `sessionId`'s layout, building/rebuilding terminals as needed. Called on
    * every selection/tab change: a NEW session rebuilds from its retained tree (or a
@@ -14694,7 +14875,7 @@ var SplitView = class {
       this.tabCount = tabCount;
       const before = this.tree;
       const settled = remapByIdentity(this.tree ?? singleLeaf(initialTab), prevIds, tabIds, nextSynth);
-      this.tree = validate(settled, tabCount);
+      this.tree = this.placeDocs(sessionId, validate(settled, tabCount), tabIds, tabKinds);
       this.retain(sessionId, this.tree, tabIds);
       const rebound = tabsRebound(prevIds, prevKinds, prevTargets, tabIds, tabKinds, tabTargets);
       const renamed = !sameTabs(prevNames, tabNames);
@@ -14709,7 +14890,12 @@ var SplitView = class {
     this.forgetFocusHistory();
     this.sessionId = sessionId;
     this.tabCount = tabCount;
-    this.tree = validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount);
+    this.tree = this.placeDocs(
+      sessionId,
+      validate(this.retainedTree(sessionId, tabIds, nextSynth) ?? singleLeaf(initialTab), tabCount),
+      tabIds,
+      tabKinds
+    );
     this.retain(sessionId, this.tree, tabIds);
     this.focusedId = leaves(this.tree)[0]?.id ?? null;
     this.reconcile();
@@ -14747,6 +14933,10 @@ var SplitView = class {
     }
     return remapByIdentity(rec.tree, rec.ids, tabIds, nextSynth);
   }
+  placeDocs(sessionId, tree, tabIds, tabKinds) {
+    const key = (identity) => `${sessionId}\0${identity}`;
+    return placeNewDocsTabs(tree, tabIds, tabKinds, this.docsPlaced, key, this.narrow());
+  }
   /** Retains `tree` for `sessionId` together with the identities it is bound against. */
   retain(sessionId, tree, ids) {
     this.trees.set(sessionId, { tree, ids });
@@ -14754,11 +14944,9 @@ var SplitView = class {
   /** Rebinds the FOCUSED pane to show `tab` (a 1-9 key or a tab-bar click on the
    *  focused pane). No-op without a focused pane. Does not steal DOM focus. */
   setFocusedTab(tab) {
-    if (!this.tree || !this.focusedId) {
-      return;
+    if (this.showTab(tab)) {
+      this.commit();
     }
-    this.tree = replaceTab(this.tree, this.focusedId, tab);
-    this.commit();
   }
   /** setFocusedTab for the post-await apply of an awaited tab mutation
    *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
@@ -14771,11 +14959,22 @@ var SplitView = class {
    *  overlapping awaited gestures by issue order, so a stale apply still refuses
    *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
   setFocusedTabAwaited(tab) {
-    if (!this.tree || !this.focusedId) {
-      return;
+    if (this.showTab(tab, true)) {
+      this.land();
     }
-    this.tree = replaceTab(this.tree, this.focusedId, tab);
-    this.land();
+  }
+  /** Applies docs_autosplit's showTab rule to the tree and focus; false without a
+   *  focused pane. */
+  showTab(tab, awaited = false) {
+    if (!this.tree || !this.focusedId) {
+      return false;
+    }
+    const ratio = this.sessionId && this.proposalRatios.get(this.sessionId) || 0.5;
+    const apply = awaited ? rebindTab : showTab;
+    const next = apply(this.tree, this.focusedId, tab, this.tabKinds, this.narrow(), ratio);
+    this.tree = next.tree;
+    this.focusedId = next.focus;
+    return true;
   }
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
@@ -14968,6 +15167,8 @@ var SplitView = class {
     const desired = leaves(this.tree);
     const wanted = new Set(desired.map((l) => l.id));
     const focusedDropped = this.focusedId !== null && !wanted.has(this.focusedId);
+    const heldPane = this.focusedId !== null && wanted.has(this.focusedId) ? this.panes.get(this.focusedId) : void 0;
+    const heldKeyboard = this.termHoldsFocus && !!heldPane?.term && heldPane.container.contains(document.activeElement);
     for (const [id, pane] of this.panes) {
       if (!wanted.has(id)) {
         pane.term?.dispose();
@@ -15003,7 +15204,28 @@ var SplitView = class {
       const realId = this.tabRealIds[leaf.tab] ?? "";
       const moved = pane.tab !== leaf.tab;
       const staleAddress = pane.identity !== identity || moved && paneAddressUsesOrdinal(spec ? spec.target : null, realId);
-      if (spec !== null) {
+      const docsSlug = this.docsSlugAt(leaf.tab);
+      if (docsSlug !== null) {
+        const docsIdentity = `docs:${docsSlug}`;
+        if (pane.term || pane.webUrl !== docsIdentity || pane.identity !== identity) {
+          if (this.focusedId === leaf.id) {
+            focusedRebuilt = true;
+          }
+          pane.term?.dispose();
+          pane.term = null;
+          pane.webDispose?.();
+          pane.host.replaceChildren();
+          pane.tab = leaf.tab;
+          pane.identity = identity;
+          pane.webUrl = docsIdentity;
+          pane.webArchived = this.archived;
+          pane.webDispose = mountDocsTab(pane.host, { sessionId: this.sessionId, slug: docsSlug, token: this.token });
+          pane.status = "open";
+          this.onPaneStatus(leaf.id, "open");
+        } else if (moved) {
+          pane.tab = leaf.tab;
+        }
+      } else if (spec !== null) {
         if (pane.term || pane.webUrl !== iframeIdentity(spec) || pane.iframeProxied !== ((this.tabRealIds[leaf.tab] ?? "") !== "" && iframeIsProxied(spec)) || staleAddress || pane.webArchived !== this.archived) {
           if (this.focusedId === leaf.id) {
             focusedRebuilt = true;
@@ -15036,7 +15258,7 @@ var SplitView = class {
           this.token,
           sessionStreamEndpoint(this.sessionId, realId, leaf.tab),
           {
-            onStatus: (s) => this.onPaneStatus(leaf.id, s),
+            onStatus: (s, retryAt) => this.onPaneStatus(leaf.id, s, retryAt),
             onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
             // Only the AGENT tab (#3025 review): an automated DeliverPrompt reaches
             // the session through its agent server, so a half-typed command in an
@@ -15057,6 +15279,9 @@ var SplitView = class {
     }
     this.applyFocusClass();
     this.reEngageFocusAfterRebuild(focusedRebuilt, focusedDropped);
+    if (heldKeyboard && !focusedRebuilt && !focusedDropped && heldPane && !heldPane.container.contains(document.activeElement)) {
+      this.refocus();
+    }
   }
   /** Re-attaches the keyboard after reconcile rebuilt the FOCUSED pane, or closed it
    *  and re-pointed focus at a survivor, correcting the desync where `store.focus`
@@ -15150,6 +15375,14 @@ var SplitView = class {
    *  A vscode tab deliberately carries NO target: its editor is a daemon-managed
    *  per-session code-server on an ephemeral port, so the only address is the
    *  daemon proxy path, which is derived from the session + tab, not stored. */
+  /** The proposal slug of the Docs tab at `idx`, or null for any other kind.
+   *  syncSplit passes a Docs tab's slug in the target list. */
+  docsSlugAt(idx) {
+    if (idx < 0 || idx >= this.tabIds.length || this.tabKinds[idx] !== TabKind.Docs) {
+      return null;
+    }
+    return this.tabTargets[idx] ?? "";
+  }
   iframeSpecAt(idx) {
     if (idx < 0 || idx >= this.tabIds.length) {
       return null;
@@ -15413,6 +15646,9 @@ var SplitView = class {
         document.body.classList.remove("af-resizing-col", "af-resizing-row");
         if (this.tree) {
           this.tree = setRatio(this.tree, node.id, node.ratio);
+          if (this.sessionId && this.tree.kind === "split" && isProposalView(this.tree, this.tabKinds)) {
+            this.proposalRatios.set(this.sessionId, this.tree.ratio);
+          }
           if (this.sessionId) {
             this.retain(this.sessionId, this.tree, this.tabIds);
           }
@@ -15607,7 +15843,7 @@ var SplitView = class {
     this.applyFocusClass();
     const pane = this.panes.get(leafId);
     if (pane) {
-      this.cb.onStatus(pane.status);
+      this.cb.onStatus(pane.status, pane.status === "reconnecting" ? pane.retryAt : void 0);
     }
     this.report();
   }
@@ -15648,14 +15884,15 @@ var SplitView = class {
     void pauseStatusPoll(sessionID, token2).catch(() => {
     });
   }
-  onPaneStatus(leafId, status) {
+  onPaneStatus(leafId, status, retryAt) {
     const pane = this.panes.get(leafId);
     if (pane) {
       pane.status = status;
+      pane.retryAt = status === "reconnecting" ? retryAt : void 0;
     }
     this.report();
     if (leafId === this.focusedId) {
-      this.cb.onStatus(status);
+      this.cb.onStatus(status, retryAt);
     }
   }
   onPaneFocus(leafId, focused) {
@@ -16656,12 +16893,12 @@ function triggerSummary(t) {
 function canTrigger(t) {
   return t.enabled && !!t.cron_expr && t.cron_expr.trim() !== "" && !(t.watch_cmd && t.watch_cmd.trim() !== "");
 }
-function lastRunSummary(t) {
+function lastRunSummary(t, now = /* @__PURE__ */ new Date()) {
   if (!t.last_run_at) {
     return "never run";
   }
   const status = t.last_run_status ? ` (${t.last_run_status})` : "";
-  return `last run ${t.last_run_at}${status}`;
+  return `last run ${formatTime(t.last_run_at, now)}${status}`;
 }
 function taskNeedsAttention(t) {
   return !!t.overdue || !!t.unschedulable || notArmed(t);
@@ -17565,6 +17802,40 @@ function hostSelection(touched, current, seed) {
   return touched ? current : seed;
 }
 
+// src/connection.ts
+var RECONNECT_GRACE_MS = 2e3;
+function connectionInput(state) {
+  return {
+    live: state.live,
+    liveRetryAt: state.liveRetryAt,
+    termStatus: state.selectedId === null ? "open" : state.termStatus,
+    termRetryAt: state.selectedId === null ? null : state.termRetryAt
+  };
+}
+function isDown(input) {
+  return input.live === "reconnecting" || input.termStatus === "reconnecting";
+}
+function nextRetryAt(input) {
+  const at = [];
+  if (input.live === "reconnecting" && typeof input.liveRetryAt === "number") at.push(input.liveRetryAt);
+  if (input.termStatus === "reconnecting" && typeof input.termRetryAt === "number") at.push(input.termRetryAt);
+  return at.length ? Math.min(...at) : null;
+}
+function connectionNotice(input, downSince, now) {
+  if (!isDown(input) || downSince === null || now - downSince < RECONNECT_GRACE_MS) return null;
+  const at = nextRetryAt(input);
+  const remaining = at === null ? null : Math.max(0, Math.ceil((at - now) / 1e3));
+  return { down: true, retryInS: remaining === 0 ? null : remaining };
+}
+function connectionWords(notice) {
+  const retry = notice.retryInS === null ? "" : `retry in ${notice.retryInS}s`;
+  return {
+    label: "Reconnecting\u2026",
+    retry,
+    full: retry ? `Reconnecting\u2026 ${retry}` : "Reconnecting\u2026"
+  };
+}
+
 // src/project-menu-focus.ts
 function replaceProjectMenuChildren(menu, children, fallback) {
   const active = menu.ownerDocument.activeElement;
@@ -17800,6 +18071,33 @@ function projectColorRow(current, label, onPick) {
   return row;
 }
 
+// src/docs_shortcut.ts
+function docsTabIndexes(tabs) {
+  const out = [];
+  tabs.forEach((tab, i) => {
+    if (tab.kind === TabKind.Docs) out.push(i);
+  });
+  return out;
+}
+function docsShortcuts(tabs, open) {
+  return docsTabIndexes(tabs).map((index) => {
+    const tab = tabs[index];
+    const name = `Open ${tabDisplayLabel(tab)}`;
+    const button2 = h(
+      "button",
+      { type: "button", class: "af-ghost af-term-action af-term-docs", title: name },
+      icon(tabIcon(tab.kind))
+    );
+    button2.setAttribute("aria-label", name);
+    button2.dataset.tabIndex = String(index);
+    button2.addEventListener("click", () => {
+      button2.blur();
+      open(index);
+    });
+    return button2;
+  });
+}
+
 // src/tabreorder.ts
 var PINNED_TABS = 1;
 function insertionIndexAt(centers, x) {
@@ -17815,6 +18113,24 @@ function reorderTargetIndex(from, insertion) {
   }
   const target = insertion > from ? insertion - 1 : insertion;
   return target === from ? null : target;
+}
+
+// src/tabscroll.ts
+function scrollDeltaToReveal(barLeft, barRight, tabLeft, tabRight) {
+  const slack = 1;
+  if (tabRight - tabLeft > barRight - barLeft) {
+    if (tabLeft <= barLeft + slack && tabRight >= barRight - slack) return 0;
+    return tabLeft - barLeft;
+  }
+  if (tabLeft < barLeft - slack) return tabLeft - barLeft;
+  if (tabRight > barRight + slack) return tabRight - barRight;
+  return 0;
+}
+function shouldRevealActive(previousKey, sessionId, activeIndex) {
+  return previousKey !== `${sessionId}:${activeIndex}`;
+}
+function activeRevealKey(sessionId, activeIndex) {
+  return `${sessionId}:${activeIndex}`;
 }
 
 // src/tabtouch.ts
@@ -17985,6 +18301,9 @@ function needsYouCount(views) {
 }
 function sources(b) {
   return [...new Set(b.items.map((it) => it.source?.proposal ?? "").filter(Boolean))];
+}
+function sessionItemsSig(items) {
+  return JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title, it.root]));
 }
 function sessionItems(views) {
   const out = /* @__PURE__ */ new Map();
@@ -18444,6 +18763,10 @@ async function addNote(root2, id, text, token2) {
 var SerialQueue = class {
   saving = false;
   queued = null;
+  /** True while a request is in flight or waiting: an older write could still land. */
+  busy() {
+    return this.saving || this.queued !== null;
+  }
   /** `run` may return a promise that settles true once the write AND the refresh after
    *  it have landed; a plain void return counts as settled at once. `done` hears that
    *  request's own outcome. */
@@ -18556,11 +18879,27 @@ var BodyEditor = class {
     else setDraft(this.draftKey, v);
   }
   disposed = false;
+  // Counts the item's edits, shared with every editor of it like the draft: a save's
+  // acknowledgement covers the edit it carried only if no edit has been made since,
+  // whatever text that edit left (typing A, B, A again is three edits, not none).
+  get rev() {
+    return this.draftKey === void 0 ? this.localRev : getDraft(`${this.draftKey}\0rev`) ?? 0;
+  }
+  set rev(v) {
+    if (this.draftKey === void 0) this.localRev = v;
+    else setDraft(`${this.draftKey}\0rev`, v);
+  }
+  localRev = 0;
   /** `save` may return a promise that settles true once the write AND the refresh
    *  after it have landed; a plain void return acknowledges at once. */
   queue;
-  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. */
+  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. Once
+   *  every write has settled and nothing is waiting to be saved, a stored body that is
+   *  exactly the draft releases it (a save whose confirming read failed is acknowledged
+   *  by a later one); while a write is in flight or the debounce is running, a matching
+   *  snapshot may be stale and proves nothing. */
   setText(text) {
+    if (this.draft !== null && this.draft === text && this.timer === null && !this.queue.busy()) this.draft = null;
     if (this.draft !== null || text === this.text) return;
     this.text = text;
     if (this.editor) {
@@ -18573,6 +18912,7 @@ var BodyEditor = class {
   changed(text) {
     this.text = text;
     this.draft = text;
+    this.rev++;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.flush(), SAVE_DELAY_MS);
   }
@@ -18581,8 +18921,9 @@ var BodyEditor = class {
     clearTimeout(this.timer);
     this.timer = null;
     const text = this.text;
+    const rev = this.rev;
     this.queue.submit(() => this.save(text), (ok) => {
-      if (ok && this.draft === text) this.draft = null;
+      if (ok && this.rev === rev && this.draft === text) this.draft = null;
     });
   }
   dispose() {
@@ -18686,6 +19027,13 @@ function waitsOnBlock(b, id, target) {
 function sameList(a, b) {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
+function outcomeSaver(done2, note) {
+  if (!done2) return;
+  return done2.then((o) => {
+    note(o);
+    return o === "confirmed";
+  });
+}
 var ACTION_STATUS = {
   queue: "queued",
   draft: "draft",
@@ -18732,14 +19080,20 @@ var ItemPanel = class {
     this.actions = actions2;
     this.titleKey = `${root2}\0${id}\0title`;
     this.waitsKey = `${root2}\0${id}\0waits`;
-    this.titles = new SerialSaver((title) => actions2.update(id, { title }), (title, ok) => {
+    let titleOutcome = "confirmed";
+    let waitsOutcome = "confirmed";
+    this.titles = new SerialSaver((title) => outcomeSaver(actions2.update(id, { title }), (o) => {
+      titleOutcome = o;
+    }), (title) => {
       if (this.titleDraft !== title) return;
-      this.titleDraft = null;
+      if (titleOutcome !== "unconfirmed") this.titleDraft = null;
       this.repaint();
     }, queueFor(`${root2}\0${id}\0title`));
-    this.waits = new SerialSaver((waits_on) => actions2.update(id, { waits_on }), (list, ok) => {
-      if (this.waitsDraft !== null && sameList(this.waitsDraft, list)) this.waitsDraft = null;
-      if (!ok) this.repaint();
+    this.waits = new SerialSaver((waits_on) => outcomeSaver(actions2.update(id, { waits_on }), (o) => {
+      waitsOutcome = o;
+    }), (list) => {
+      if (this.waitsDraft !== null && sameList(this.waitsDraft, list) && waitsOutcome !== "unconfirmed") this.waitsDraft = null;
+      this.repaint();
     }, queueFor(`${root2}\0${id}\0waits`));
     this.title = h("input", { type: "text", class: "af-backlog-title-input" });
     this.title.setAttribute("aria-label", "Title");
@@ -18756,7 +19110,8 @@ var ItemPanel = class {
     this.title.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) this.title.blur();
     });
-    this.body = new BodyEditor((text) => actions2.update(id, { body: text }), "Body", `${root2}\0${id}\0body`);
+    this.body = new BodyEditor((text) => outcomeSaver(actions2.update(id, { body: text }), () => {
+    }), "Body", `${root2}\0${id}\0body`);
     this.note = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: "Add a note\u2026" });
     this.note.setAttribute("aria-label", "Note");
     const addNote2 = button("Add note", () => {
@@ -18909,6 +19264,8 @@ ${this.note.value}` : text;
     const it = this.item();
     if (!it) return;
     this.lookUpMissing(it);
+    if (this.titleDraft !== null && this.titleDraft === it.title && !queueFor(this.titleKey).busy()) this.titleDraft = null;
+    if (this.waitsDraft !== null && sameList(this.waitsDraft, it.waits_on ?? []) && !queueFor(this.waitsKey).busy()) this.waitsDraft = null;
     if (document.activeElement !== this.title) this.title.value = this.titleDraft ?? it.title;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
@@ -19488,7 +19845,7 @@ var BacklogPane = class {
       this.cursor = null;
       this.folded.clear();
     }
-    if (this.pending && data.generation > this.pending.gen) this.pending = null;
+    if (this.pending && data.generation > this.pending.gen && !data.errors.has(this.pending.root)) this.pending = null;
     this.data = data;
     this.root = root2;
     this.sessions = sessions;
@@ -19632,22 +19989,25 @@ ${id}`;
       setRunner: (on) => this.mutate((t) => setSettings(this.root ?? "", { runner: on }, t)),
       setMaxRunning: (n) => this.mutate((t) => setSettings(this.root ?? "", { max_running: n }, t)),
       setOnDone: (onDone) => this.mutate((t) => setSettings(this.root ?? "", { on_done: onDone }, t)),
-      setBudget: (u) => this.write((t) => setBudget(u, t)),
+      setBudget: (u) => this.write(this.root ?? "", (t) => setBudget(u, t)),
       runNext: backlogRoutes.runBacklog ? () => this.runNext() : void 0,
       openItem: (id) => this.select(id)
     };
   }
   mutate(run) {
-    if (this.root) this.write(run);
+    if (this.root) this.write(this.root, run);
   }
-  /** Settles true once the write and the refresh after it have landed, false when the write failed. */
-  write(run) {
+  /** `root` is the project the write modifies, bound by the caller: a save the serial queue starts
+   *  later must be acknowledged by a read of that project, not of whichever one is selected by then.
+   *  Settles "confirmed" once the write and a refresh that read the project have landed, "refused" when
+   *  the write failed, and "unconfirmed" when the daemon took it but the read after it failed (the
+   *  edit may be saved; the caller keeps what it shows until a snapshot says so). */
+  write(root2, run) {
     const token2 = this.host.token();
-    if (token2 === null) return Promise.resolve(false);
-    const root2 = this.root ?? void 0;
-    return run(token2).then(() => this.host.refresh(root2), (e) => {
+    if (token2 === null) return Promise.resolve("refused");
+    return run(token2).then(() => this.host.refresh(root2).then((read) => read ? "confirmed" : "unconfirmed"), (e) => {
       this.host.notify(errorText(e));
-      return this.host.refresh(root2).then(() => false);
+      return this.host.refresh(root2).then(() => "refused");
     });
   }
   move(id, to) {
@@ -19910,19 +20270,20 @@ ${id}`;
   panelActions(root2) {
     const here = () => this.root === root2;
     return {
-      update: (id, u) => this.write((t) => updateItem(root2, id, u, t)),
-      status: (id, s) => this.write((t) => setItemStatus(root2, id, s, t)),
+      update: (id, u) => this.write(root2, (t) => updateItem(root2, id, u, t)),
+      status: (id, s) => this.write(root2, (t) => setItemStatus(root2, id, s, t)),
       remove: (id) => {
         if (here()) this.selected = null;
-        this.write((t) => deleteItem(root2, id, t));
+        this.write(root2, (t) => deleteItem(root2, id, t));
       },
       move: (id, to) => {
         if (here()) this.move(id, to);
       },
-      note: (id, text) => this.write((t) => addNote(root2, id, text, t)),
+      // A note is appended once the daemon accepts it, whether or not the read after it landed.
+      note: (id, text) => this.write(root2, (t) => addNote(root2, id, text, t)).then((o) => o !== "refused"),
       start: (id) => this.start(root2, id),
       answer: (id, questionId, text) => this.answer(root2, id, questionId, text),
-      addChild: (parent, title) => this.write((t) => addItem(root2, { title, parent }, t)),
+      addChild: (parent, title) => this.write(root2, (t) => addItem(root2, { title, parent }, t)),
       select: (id) => this.select(id, root2),
       close: () => {
         if (!here()) return;
@@ -20295,6 +20656,13 @@ var AppShell = class {
     this.projectMenu.setAttribute("aria-label", "Switch project");
     this.projectMenu.hidden = true;
     this.projectSwitchWrap = h("div", { class: "af-project-switch-wrap" }, this.projectSwitchBtn, this.projectMenu);
+    this.projectSwitchWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.projectMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.projectSwitchBtn.focus();
+    });
     document.addEventListener("click", (e) => {
       if (this.projectMenuOpen && !this.projectSwitchWrap.contains(e.target)) {
         this.closeProjectMenu();
@@ -20305,6 +20673,10 @@ var AppShell = class {
     this.navToggle.setAttribute("aria-controls", "af-rail");
     this.navToggle.setAttribute("aria-expanded", "false");
     this.navToggle.addEventListener("click", () => this.toggleNav());
+    this.navBadge = h("span", { class: "af-nav-badge" });
+    this.navBadge.setAttribute("aria-hidden", "true");
+    this.navBadge.hidden = true;
+    this.navToggle.append(this.navBadge);
     this.appControls = appbarControls([
       ...this.installEl ? [this.installEl] : []
     ], this.phone, () => {
@@ -20353,6 +20725,13 @@ var AppShell = class {
     this.filterMenu.setAttribute("aria-label", "Filter sessions");
     this.filterMenu.hidden = true;
     this.filterWrap = h("div", { class: "af-rail-filter-wrap" }, this.filterBtn, this.filterMenu);
+    this.filterWrap.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.filterMenuOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.closeFilterMenu();
+      this.filterBtn.focus();
+    });
     document.addEventListener("click", (e) => {
       if (this.filterMenuOpen && !this.filterWrap.contains(e.target)) {
         this.closeFilterMenu();
@@ -20365,10 +20744,24 @@ var AppShell = class {
       this.railCount,
       h("div", { class: "af-rail-head-actions" }, this.filterWrap, newBtn)
     );
+    this.connRetry = h("span", { class: "af-term-conn-retry" });
+    this.connNotice = h(
+      "div",
+      { class: "af-term-conn", role: "status" },
+      icon("wifi-off", "af-term-conn-glyph"),
+      h("span", { class: "af-term-conn-label" }, "Reconnecting\u2026"),
+      this.connRetry
+    );
+    this.connNotice.hidden = true;
+    this.railConn = h("div", { class: "af-rail-conn", role: "status" });
+    this.railConn.hidden = true;
+    this.railAttention = h("div", { class: "af-rail-attention" });
+    this.railAttention.setAttribute("role", "status");
+    this.railAttention.hidden = true;
     this.railList = h("ul", { class: "af-rail-list" });
     this.railList.setAttribute("role", "listbox");
     this.railList.setAttribute("aria-label", "Sessions");
-    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railList);
+    const rail = h("nav", { class: "af-rail", id: "af-rail" }, railHead, this.railConn, this.railAttention, this.railList);
     this.main = h("section", { class: "af-main" });
     this.navScrim = h("div", { class: "af-nav-scrim" });
     this.navScrim.setAttribute("aria-hidden", "true");
@@ -20562,6 +20955,8 @@ var AppShell = class {
   // A signature of everything the bar DRAWS (see tabBarSig): the bar is rebuilt only
   // when this changes, so an unrelated status snapshot never churns its DOM (#1737).
   lastTabBarSig = "";
+  /** The (session, active tab) whose strip position was last revealed (#6420). */
+  lastRevealedActive = null;
   // The insertion indicator for a reorder drag over the bar (#1813): a thin accent
   // rule drawn in the gap a drop would land in. It lives INSIDE the bar (which CSS
   // makes its containing block) and is re-appended after every rebuild, since
@@ -20579,6 +20974,13 @@ var AppShell = class {
   lastSessions = null;
   lastSelectedId = null;
   lastLive = null;
+  /** The "Reconnecting…" chip in the session header and its rail twin (#6430). */
+  connNotice;
+  connRetry;
+  railConn;
+  connState = null;
+  connDownSince = null;
+  connTimer = null;
   lastKb = null;
   lastError = null;
   // The last value written to document.title, so an unrelated update doesn't
@@ -20594,11 +20996,17 @@ var AppShell = class {
   idleAgeTimer;
   // Drawer state is local UI ephemera; closing it restores session-first chrome.
   navToggle;
+  /** Count pill on the drawer toggle, and the words line in the drawer (#6405). */
+  navBadge;
+  railAttention;
   navScrim;
   navOpen = false;
   /** Stop wall-clock-only rail work when logout replaces this shell. */
   dispose() {
     window.clearInterval(this.idleAgeTimer);
+    if (this.connTimer !== null) window.clearInterval(this.connTimer);
+    this.connTimer = null;
+    this.connState = null;
     if (this.initialRailFrame !== null) window.cancelAnimationFrame(this.initialRailFrame);
     this.pendingInitialRail = null;
     this.terminalChrome?.dispose();
@@ -20654,6 +21062,7 @@ var AppShell = class {
     const color = projectColor(state.registeredProjects, state.selectedProject);
     applyProjectColor(this.el, color, themeSurfaces);
     applyProjectFavicon(color, scopeToProject(state.sessions, state.selectedProject).some(hasAttention));
+    this.patchNavAttention(state);
     const selectedForPhone = selectedSession(state);
     const tabsForPhone = selectedForPhone ? sessionTabs(selectedForPhone) : null;
     const focusedForPhone = tabsForPhone ? tabsForPhone[state.activeTab] ?? tabsForPhone[0] : null;
@@ -20691,6 +21100,7 @@ var AppShell = class {
       this.lastLive = state.live;
       this.el.dataset.live = state.live;
     }
+    this.patchConnection(state);
     if (this.lastView !== state.view) {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
@@ -20713,7 +21123,7 @@ var AppShell = class {
     if (state.backlog && state.backlog !== this.lastBacklog) {
       this.lastBacklog = state.backlog;
       const items = sessionItems(state.backlog.views);
-      const sig = JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title]));
+      const sig = sessionItemsSig(items);
       if (sig !== this.sessionItemSig) {
         this.sessionItemSig = sig;
         this.sessionItemMap = items;
@@ -20851,7 +21261,8 @@ var AppShell = class {
         s.id === state.selectedId,
         this.pendingRestores?.has(s.id ?? "") === true,
         this.sessionItemMap.get(s.id ?? "")?.id ?? 0,
-        this.sessionItemMap.get(s.id ?? "")?.title ?? ""
+        this.sessionItemMap.get(s.id ?? "")?.title ?? "",
+        this.sessionItemMap.get(s.id ?? "")?.root ?? ""
       ]),
       (s, previous) => {
         const key = sessionKey(s);
@@ -21390,6 +21801,7 @@ var AppShell = class {
     return drop.landed;
   }
   toggleFilterMenu() {
+    if (!this.filterMenuOpen) this.closeProjectMenu();
     this.filterMenuOpen = !this.filterMenuOpen;
     this.filterMenu.hidden = !this.filterMenuOpen;
     this.filterBtn.setAttribute("aria-expanded", this.filterMenuOpen ? "true" : "false");
@@ -21413,6 +21825,7 @@ var AppShell = class {
     if (this.projectSwitchBtn.disabled) {
       return;
     }
+    this.closeFilterMenu();
     this.projectMenuOpen = true;
     this.projectMenu.hidden = false;
     this.projectSwitchBtn.setAttribute("aria-expanded", "true");
@@ -21509,6 +21922,7 @@ var AppShell = class {
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
     const head = chrome.head;
+    head.insertBefore(this.connNotice, chrome.attention.el);
     const warningText = sessionWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -21529,6 +21943,7 @@ var AppShell = class {
       ...Array.from(this.appControls.panel.children, (node) => [node, this.appControls.panel]),
       [chrome.tabs, this.appControls.panel],
       [chrome.newTabs, this.header],
+      [this.connNotice, this.header],
       [chrome.attention.el, this.header],
       [chrome.retry, this.appControls.panel],
       [chrome.menu.panel, this.appControls.panel]
@@ -21591,6 +22006,7 @@ var AppShell = class {
       const offered = offeredNewTabKinds(selected);
       chrome.newTerminal.hidden = !offered.includes("shell");
       chrome.newVSCode.hidden = !offered.includes("vscode");
+      chrome.docsShortcuts.replaceChildren(...docsShortcuts(tabs, (i) => this.openTab(i)));
       chrome.tabUnavailable.hidden = unavailable === null;
       chrome.tabUnavailable.textContent = unavailable ?? "";
       chrome.tabUnavailable.title = unavailable ?? "";
@@ -21603,6 +22019,16 @@ var AppShell = class {
       bar.append(this.tabInsert);
     }
     bar.scrollLeft = scrollLeft;
+    const sessionKey2 = selected.id ?? "";
+    if (shouldRevealActive(this.lastRevealedActive, sessionKey2, active)) {
+      this.lastRevealedActive = activeRevealKey(sessionKey2, active);
+      const btn = children[active];
+      if (btn) {
+        const b = bar.getBoundingClientRect();
+        const r = btn.getBoundingClientRect();
+        bar.scrollLeft += scrollDeltaToReveal(b.left, b.right, r.left, r.right);
+      }
+    }
     document.body.classList.remove("af-dragging-tab");
     this.dragFromIndex = null;
     this.lastTabBarSig = tabBarSig(state);
@@ -21920,6 +22346,52 @@ var AppShell = class {
       this.tabInsert.hidden = true;
     }
   }
+  /** The "Reconnecting…" state (#6430): drawn once a socket has been down for the
+   *  grace period (a blink of reconnect stays invisible), with the time of the next
+   *  attempt, and cleared on reconnect. Static glyph plus words, so reduced motion
+   *  needs no fallback. The 1s tick runs only while a drop is in progress. */
+  patchConnection(state) {
+    this.connState = state;
+    const down = isDown(connectionInput(state));
+    if (!down) {
+      this.connDownSince = null;
+    } else if (this.connDownSince === null) {
+      this.connDownSince = Date.now();
+    }
+    this.renderConnection();
+    if (down && this.connTimer === null) {
+      this.connTimer = window.setInterval(() => this.renderConnection(), 1e3);
+    } else if (!down && this.connTimer !== null) {
+      window.clearInterval(this.connTimer);
+      this.connTimer = null;
+    }
+  }
+  renderConnection() {
+    const state = this.connState;
+    const notice = state ? connectionNotice(connectionInput(state), this.connDownSince, Date.now()) : null;
+    const words = notice ? connectionWords(notice) : null;
+    this.connNotice.hidden = !words;
+    this.railConn.hidden = !words;
+    if (!words) return;
+    this.connRetry.textContent = words.retry ? ` ${words.retry.replace("retry in ", "")}` : "";
+    this.connNotice.setAttribute("aria-label", words.full);
+    this.connNotice.title = words.full;
+    if (this.railConn.textContent !== words.full) this.railConn.textContent = words.full;
+  }
+  /** Surface other sessions' attention requests without opening the drawer: a count
+   *  on the toggle, the state in words on the toggle's label and at the top of the
+   *  drawer (#6405). Words, not hover: a touch screen has no hover. */
+  patchNavAttention(state) {
+    const scoped = scopeToProject(state.sessions, state.selectedProject);
+    const count = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
+    const words = attentionWords(count);
+    this.navBadge.hidden = count === 0;
+    if (this.navBadge.textContent !== String(count)) this.navBadge.textContent = count ? String(count) : "";
+    this.navToggle.setAttribute("aria-label", words ? `Toggle sessions, ${words}` : "Toggle sessions");
+    this.navToggle.toggleAttribute("data-attention", count > 0);
+    this.railAttention.hidden = count === 0;
+    if (this.railAttention.textContent !== words) this.railAttention.textContent = words;
+  }
   patchMainHead(state) {
     const selected = selectedSession(state);
     if (!selected || !this.headTitle) {
@@ -22194,16 +22666,18 @@ function sessionRow(s, selected, openSession, buildActions, previous, itemChip) 
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
   const callbackWarning = callbackUnavailableText(s);
+  const agentConfigSkipped = agentConfigSkippedText(s);
   const inertReason = managed && !actionable ? `; ${inertRowReason(s)}` : "";
   const reason = attentionReason(s);
   row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}${reason ? `: ${reason}` : ""}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.dataset.idleTitleCallback = callbackWarning === "" ? "" : `; ${callbackWarning}`;
+  row.dataset.idleTitleAgentConfig = agentConfigSkipped === "" ? "" : `; ${agentConfigSkipped}`;
   row.dataset.idleTitleInert = inertReason;
   row.setAttribute(
     "title",
-    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${inertReason}`
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}${row.dataset.idleTitleCallback}${row.dataset.idleTitleAgentConfig}${inertReason}`
   );
   if (actionable) {
     row.onclick = () => openSession(s.id);
@@ -22226,7 +22700,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleInert ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleAgentConfig ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }
@@ -22244,7 +22718,7 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
       const reason = detail ? `; ${detail}` : "";
       row.setAttribute(
         "title",
-        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleInert ?? ""}`
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}${row.dataset.idleTitleCallback ?? ""}${row.dataset.idleTitleAgentConfig ?? ""}${row.dataset.idleTitleInert ?? ""}`
       );
     }
   }
@@ -22286,6 +22760,47 @@ function captureTabDeleteTarget(target) {
   const identity = tabIdentity(target);
   const legacy = tabRealId(target) === "";
   return (tabs) => tabs.findIndex((tab) => tabIdentity(tab) === identity && (!legacy || tab === target));
+}
+
+// src/proposal_api.ts
+function isRecord3(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function str(v) {
+  return typeof v === "string" ? v : "";
+}
+var PUSH_STATES = ["idle", "countdown", "waiting_agent", "held", "sent"];
+function parsePushStatus(d) {
+  if (!isRecord3(d) || typeof d.state !== "string" || !PUSH_STATES.includes(d.state)) {
+    return null;
+  }
+  const due = typeof d.due_in_ms === "number" && Number.isFinite(d.due_in_ms) ? Math.max(0, d.due_in_ms) : null;
+  return {
+    sessionId: str(d.session_id),
+    slug: str(d.slug),
+    mode: d.mode === "manual" ? "manual" : "auto",
+    state: d.state,
+    dueInMs: due,
+    unsent: typeof d.unsent === "number" && d.unsent > 0 ? d.unsent : 0
+  };
+}
+function parseProposalPush(ev) {
+  if (!isRecord3(ev) || ev.type !== "proposal.push") {
+    return null;
+  }
+  const status = parsePushStatus(ev.data);
+  return status && status.sessionId !== "" && status.slug !== "" ? status : null;
+}
+function parseProposalChange(ev) {
+  if (!isRecord3(ev) || ev.type !== "proposal.changed" || !isRecord3(ev.data)) {
+    return null;
+  }
+  const d = ev.data;
+  const slug = str(d.slug);
+  if (slug === "") {
+    return null;
+  }
+  return { repoId: str(d.repo_id), slug, doc: str(d.doc), commit: str(d.commit), author: str(d.author) };
 }
 
 // src/backlog_data.ts
@@ -22399,6 +22914,32 @@ var BacklogLoader = class {
   }
 };
 
+// src/viewport-insets.ts
+function viewportInsets(innerHeight, vv) {
+  const top = Math.max(0, vv.offsetTop);
+  const bottom = Math.max(0, innerHeight - (top + vv.height));
+  return { top: Math.round(top), bottom: Math.round(bottom) };
+}
+function trackViewportInsets(root2, win = window) {
+  const vv = win.visualViewport;
+  const apply = () => {
+    const { top, bottom } = vv ? viewportInsets(win.innerHeight, vv) : { top: 0, bottom: 0 };
+    root2.style.setProperty("--af-vv-top", `${top}px`);
+    root2.style.setProperty("--af-vv-bottom", `${bottom}px`);
+  };
+  apply();
+  if (!vv) return () => {
+  };
+  vv.addEventListener("resize", apply);
+  vv.addEventListener("scroll", apply);
+  win.addEventListener("resize", apply);
+  return () => {
+    vv.removeEventListener("resize", apply);
+    vv.removeEventListener("scroll", apply);
+    win.removeEventListener("resize", apply);
+  };
+}
+
 // src/index.ts
 var initialThemeChoice = bootStampTheme();
 registerServiceWorker();
@@ -22442,6 +22983,7 @@ var store = new Store({
   // state but archived — when nothing is stored.
   statusFilter: loadFilter()
 });
+var durableFilter = loadFilter();
 var token = null;
 var backlogLoader = new BacklogLoader({
   token: () => token,
@@ -22496,8 +23038,9 @@ var modal = null;
 var configAssistant = null;
 var accountLogin = null;
 var installAffordance = new InstallAffordance();
+trackViewportInsets(document.documentElement);
 var splitView = new SplitView(termHost, {
-  onStatus: (s) => store.set({ termStatus: s }),
+  onStatus: (s, retryAt) => store.set({ termStatus: s, termRetryAt: retryAt ?? null }),
   // Keep the nav-vs-terminal mode (#1693) in sync with real xterm focus across every
   // pane, so a click straight into a pane enters terminal mode (and clicking/tabbing
   // away from all panes returns to rail mode) without going through Enter/Escape.
@@ -22735,7 +23278,7 @@ function resolveRoute() {
     lookup = !session && route !== null && store.get().archive.lazy && store.get().archive.total > 0;
     if (session?.id) {
       if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
-      setStatusFilter(operatorKind(session), true);
+      store.set({ statusFilter: withKind(durableFilter, operatorKind(session), true) });
       openFromRail(session.id);
     } else if (lookup && route) {
       void resolveArchivedRoute(route.session, createSelectionIntent.snapshot());
@@ -22869,12 +23412,14 @@ function switchView(view) {
   }
 }
 function setStatusFilter(kind, on) {
-  const next = withKind(store.get().statusFilter, kind, on);
+  const next = withKind(durableFilter, kind, on);
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }
 function resetStatusFilter() {
   const next = defaultFilter();
+  durableFilter = next;
   persistFilter(next);
   store.set({ statusFilter: next });
 }
@@ -24352,7 +24897,7 @@ function syncSplit(state) {
   const runtimeSessionId = runtimeSelected ? selId : null;
   const tabIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabIdentity) : ["0:"];
   const tabRealIds = runtimeSelected ? sessionTabs(runtimeSelected).map(tabRealId) : [""];
-  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.url) : [];
+  const tabTargets = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind === TabKind.Docs ? t.proposal : t.url) : [];
   const tabKinds = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.kind) : [];
   const tabNames = runtimeSelected ? sessionTabs(runtimeSelected).map((t) => t.name) : [];
   const archived = runtimeSelected ? isArchived(runtimeSelected) : false;
@@ -24381,10 +24926,11 @@ function startStream(tok) {
       markArchiveDirty();
       requestResync();
       backlogLoader.request();
+      publishProposalResync();
     },
-    onStatus: (s) => {
+    onStatus: (s, retryAt) => {
       if (s !== "open") markArchiveDirty();
-      store.set({ live: s });
+      store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
     // authenticated resync: its 401 trips shouldForgetToken → disconnect().
@@ -24426,6 +24972,16 @@ function stopStream() {
   }
 }
 function onEvent(ev) {
+  if (ev.type === "proposal.changed") {
+    const change = parseProposalChange(ev);
+    if (change) publishProposalChange(change);
+    return;
+  }
+  if (ev.type === "proposal.push") {
+    const status = parseProposalPush(ev);
+    if (status) publishProposalPush(status);
+    return;
+  }
   const backlogAction = backlogEventAction(ev.type, ev.data?.id, runSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
   if (backlogAction === "spend") {
     backlogLoader.applySpend(ev.data);
@@ -24655,7 +25211,7 @@ function isNativeControl(el2) {
   if (!el2) {
     return false;
   }
-  return el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
+  return el2.isContentEditable || el2.tagName === "BUTTON" || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA" || el2.tagName === "SELECT" || el2.tagName === "A";
 }
 function onKeydown(e) {
   if (tabShortcutRepeat.swallow(e)) {
@@ -24668,7 +25224,7 @@ function onKeydown(e) {
     return;
   }
   const target = e.target;
-  const inTerminal = target ? termHost.contains(target) : false;
+  const inTerminal = target ? termHost.contains(target) && !target.isContentEditable : false;
   const isTerminalTextarea = inTerminal && target?.tagName === "TEXTAREA";
   if (!isTerminalTextarea && e.key !== "Escape" && isNativeControl(target)) {
     return;
@@ -24798,6 +25354,7 @@ lucide/dist/esm/icons/square.mjs:
 lucide/dist/esm/icons/terminal.mjs:
 lucide/dist/esm/icons/trash-2.mjs:
 lucide/dist/esm/icons/triangle-alert.mjs:
+lucide/dist/esm/icons/wifi-off.mjs:
 lucide/dist/esm/icons/x.mjs:
 lucide/dist/esm/lucide.mjs:
   (**
