@@ -313,7 +313,11 @@ var backlogAddCmd = &cobra.Command{
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
-			if self := inItemSession(); self != nil {
+			self, mErr := inItemSession()
+			if mErr != nil {
+				return nil, mErr
+			}
+			if self != nil {
 				if err := refuseItemSessionAddFlags(cmd); err != nil {
 					return nil, err
 				}
