@@ -21,7 +21,7 @@ func TestPushCredentialPlacementReadsTheRecordedRuntime(t *testing.T) {
 			backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s", HostName: "box1",
 				Config: config.SSHConfig{Host: "box1.example", User: "dev"}, CallbackRef: "ref-1"}},
 			want: PushPlacement{ListedHost: "box1", Destination: config.SSHConfig{Host: "box1.example", User: "dev"}, CallbackRef: "ref-1",
-				Machine: RuntimeMachine{Host: "box1.example", User: "dev"}}, ok: true,
+				Machine: RuntimeMachine{Host: "box1.example"}}, ok: true,
 		},
 		"repo [ssh] target": {
 			backend: &sshBackend{cleanup: &SSHRuntimeCleanupData{SessionDir: "/s"}},

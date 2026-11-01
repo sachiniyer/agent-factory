@@ -299,11 +299,6 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	// pre-reap returns (missing backend, bad kind, unresolvable account,
 	// runtime resolution failure, config/drift check) only this defer runs.
 	defer i.takeOnSandboxRetired()
-	// Code the operator did not place taints the machine it is re-provisioned
-	// onto, durably and before any of it runs there (#5571 W7.8).
-	if err := i.recordReprovisionPlacement(); err != nil {
-		return err
-	}
 	i.mu.RLock()
 	backend := i.backend
 	accountName := i.Account
@@ -417,6 +412,13 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	rt, err := ResolveRuntime(kind)
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
+	}
+	// Code the operator did not place taints the machine it is re-provisioned
+	// onto, durably and before any of it runs there (#5571 W7.8): after every
+	// check above that can refuse this re-provision with its own reason, and
+	// before the first step below that touches the remote.
+	if err := i.recordReprovisionPlacement(); err != nil {
+		return err
 	}
 	i.mu.RLock()
 	creds := i.sandboxCreds

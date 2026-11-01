@@ -131,7 +131,7 @@ type pushAsk struct {
 // meant to stop. A LAST liveness check follows, and only then is the answer
 // logged, so the audit line records what was actually sent.
 func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, error) {
-	origin, _, err := m.authorizePushCredential(ask)
+	origin, _, _, err := m.authorizePushCredential(ask)
 	if err != nil {
 		return "", err
 	}
@@ -142,7 +142,7 @@ func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, e
 	if err != nil {
 		return "", err
 	}
-	again, inst, err := m.authorizePushCredential(ask)
+	again, inst, machine, err := m.authorizePushCredential(ask)
 	if err != nil {
 		return "", err
 	}
@@ -152,7 +152,7 @@ func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, e
 		return "", sandboxRefusal(refusePushOtherRepo)
 	}
 	testHookPushBeforeFinalCheck()
-	if err := m.pushStillLive(ask, inst); err != nil {
+	if err := m.pushStillLive(ask, inst, machine); err != nil {
 		m.info().Printf("push credential: refused session %s for https://%s/%s at the final check: %v", ask.owner, origin.Host, origin.Path, err)
 		return "", err
 	}
@@ -165,55 +165,57 @@ func (m *Manager) pushCredentialFor(ctx context.Context, ask pushAsk) (string, e
 // blocking step, reading the daemon checkout's origin (a git run), comes FIRST;
 // every rule that can change runs after it, and the liveness of the row and of
 // the very credential presented runs LAST, after every lock and read the others
-// take.
-func (m *Manager) authorizePushCredential(ask pushAsk) (pushcred.Origin, *session.Instance, error) {
+// take. It also returns the machine identity it resolved, which the final check
+// re-reads the taint ledger for.
+func (m *Manager) authorizePushCredential(ask pushAsk) (pushcred.Origin, *session.Instance, session.MachineIdentity, error) {
+	none := session.MachineIdentity{}
 	inst, err := m.pushCredentialRow(ask.owner, nil)
 	if err != nil {
-		return pushcred.Origin{}, nil, err
+		return pushcred.Origin{}, nil, none, err
 	}
 	origin, originOK := instancePushOrigin(inst)
 	if _, err := m.pushCredentialRow(ask.owner, inst); err != nil {
-		return pushcred.Origin{}, nil, err
+		return pushcred.Origin{}, nil, none, err
 	}
 	if !inst.OperatorCreated() {
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushSandboxCreated)
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushSandboxCreated)
 	}
 	backend := instanceBackendType(inst)
 	if backend != "ssh" && backend != "sandbox" {
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushNotLicensed)
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushNotLicensed)
 	}
 	placement, ok := instancePushPlacement(inst)
 	if !ok || !placement.Licensed(m.Config(), backend) {
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushNotLicensed)
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushNotLicensed)
 	}
 	machine := placement.Machine.Identity()
 	if machine.Unproven != "" {
 		m.info().Printf("push credential: withheld from session %s: af can't establish which machine its host is, because %s", ask.owner, machine.Unproven)
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushHostUnproven)
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushHostUnproven)
 	}
-	if !m.pushCreds.taints.restored.Load() {
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushTaintsLoading)
+	if !m.pushTaintsRestored() {
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushTaintsLoading)
 	}
 	if taints := m.pushCreds.taintsFor(machine); len(taints) > 0 {
 		m.info().Printf("push credential: withheld from session %s: %s", ask.owner, taints[0])
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushHostTainted)
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushHostTainted)
 	}
 	if m.pushCreds.autoPushFenced(inst.ID, placement.CallbackRef) {
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushAutoPreserve)
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushAutoPreserve)
 	}
 	if !carriedByOwnForward(ask.carrier, placement.CallbackRef) {
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushWrongForward)
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushWrongForward)
 	}
 	if !originOK {
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushNoOrigin)
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushNoOrigin)
 	}
 	if !origin.Matches(ask.req.Protocol, ask.req.Host, ask.req.Path) {
-		return pushcred.Origin{}, nil, sandboxRefusal(refusePushOtherRepo)
+		return pushcred.Origin{}, nil, none, sandboxRefusal(refusePushOtherRepo)
 	}
-	if err := m.pushStillLive(ask, inst); err != nil {
-		return pushcred.Origin{}, nil, err
+	if err := m.pushStillLive(ask, inst, machine); err != nil {
+		return pushcred.Origin{}, nil, none, err
 	}
-	return origin, inst, nil
+	return origin, inst, machine, nil
 }
 
 // pushCredentialRow finds the owner's tracked row. want, when set, is the row an
@@ -229,10 +231,17 @@ func (m *Manager) pushCredentialRow(owner string, want *session.Instance) (*sess
 	return inst, nil
 }
 
-// pushStillLive is the last check of every pass: the row is still the one
-// authorized, still live, and the credential the request presented is still that
-// row's. It reads in-memory state only.
-func (m *Manager) pushStillLive(ask pushAsk, inst *session.Instance) error {
+// pushStillLive is the last check of every pass: the machine is still untainted
+// (the ledger read again, with the identity the pass resolved, so a taint a
+// placement recorded during any earlier step of this pass, the blocking carrier
+// lookup included, is seen; Codex P1 on #6433), then the row is still the one
+// authorized, still live, and the credential the request presented is still
+// that row's, all from memory, after the ledger read.
+func (m *Manager) pushStillLive(ask pushAsk, inst *session.Instance, machine session.MachineIdentity) error {
+	if taints := m.pushCreds.taintsFor(machine); len(taints) > 0 {
+		m.info().Printf("push credential: withheld from session %s at the final check: %s", ask.owner, taints[0])
+		return sandboxRefusal(refusePushHostTainted)
+	}
 	if _, err := m.pushCredentialRow(ask.owner, inst); err != nil {
 		return err
 	}

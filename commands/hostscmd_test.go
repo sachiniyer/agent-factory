@@ -342,7 +342,7 @@ func TestHostsAdd_PushCredentialsOptsInInTheSameWrite(t *testing.T) {
 }
 
 // Design steer on #6433: `af hosts reset-trust` is the operator's attestation,
-// for one host or --all, and prints what it reset.
+// for one host, one entry or --all, and prints what it reset.
 func TestHostsResetTrust(t *testing.T) {
 	f := &hostsFake{hosts: map[string]config.HostConfig{"build": {Host: "build.example"}}}
 	installHostsFake(t, f)
@@ -351,24 +351,30 @@ func TestHostsResetTrust(t *testing.T) {
 	hostsResetTrust = func(req daemon.ResetPushTrustRequest) (daemon.ResetPushTrustResponse, error) {
 		asked = append(asked, req)
 		return daemon.ResetPushTrustResponse{
-			Identity: session.MachineIdentity{Names: []string{"build.example"}, Addrs: []string{"198.51.100.7"}, User: "af-push"},
-			Cleared:  []daemon.PushTaintReport{{SessionID: "child-1", Title: "child", Why: "created by another session's af"}},
+			Identity: session.MachineIdentity{Names: []string{"build.example"}, Addrs: []string{"198.51.100.7"}},
+			Cleared:  []daemon.PushTaintReport{{ID: "3f9a1c0b2d4e", SessionID: "child-1", Title: "child", Why: "created by another session's af"}},
 		}, nil
 	}
-	t.Cleanup(func() { hostsResetTrust, hostsResetTrustAll = prev, false })
+	t.Cleanup(func() { hostsResetTrust, hostsResetTrustAll, hostsResetTrustEntry = prev, false, "" })
 
 	out, err := runHosts(t, hostsResetTrustCmd, "build")
 	require.NoError(t, err)
 	assert.Equal(t, []daemon.ResetPushTrustRequest{{Host: "build"}}, asked)
-	assert.Contains(t, out, "names build.example; addresses 198.51.100.7; user af-push")
-	assert.Contains(t, out, `cleared: session "child" (child-1)`)
+	assert.Contains(t, out, "names build.example; addresses 198.51.100.7")
+	assert.Contains(t, out, `cleared entry 3f9a1c0b2d4e: session "child" (child-1)`)
 
 	_, err = runHosts(t, hostsResetTrustCmd)
-	assert.Error(t, err, "neither a name nor --all")
+	assert.Error(t, err, "nothing named")
 	hostsResetTrustAll = true
 	_, err = runHosts(t, hostsResetTrustCmd, "build")
-	assert.Error(t, err, "both a name and --all")
+	assert.Error(t, err, "a name and --all")
 	_, err = runHosts(t, hostsResetTrustCmd)
 	require.NoError(t, err)
 	assert.Equal(t, daemon.ResetPushTrustRequest{All: true}, asked[len(asked)-1])
+
+	hostsResetTrustAll, hostsResetTrustEntry = false, "3f9a1c0b2d4e"
+	out, err = runHosts(t, hostsResetTrustCmd)
+	require.NoError(t, err)
+	assert.Equal(t, daemon.ResetPushTrustRequest{Entry: "3f9a1c0b2d4e"}, asked[len(asked)-1])
+	assert.Contains(t, out, "cleared entry 3f9a1c0b2d4e")
 }
