@@ -548,7 +548,7 @@ af backlog
 
 Add a draft item, or add and update many items from JSON
 
-Add one draft item, at the bottom of its parent by default. With --file, add or update many items at once from JSON: {"proposal": "<slug>", "items": [{"key", "title", "body", "parent", "waits_on", "program", "sequential"}]}. key is local to the file; parent and waits_on take a key or an item id. With proposal set, an item with the same proposal and key as an existing one is updated, not added again. The batch is all or nothing and prints each key's id.
+Add one draft item, at the bottom of its parent by default. With --file, add or update many items at once from JSON: {"proposal": "<slug>", "items": [{"key", "title", "body", "parent", "waits_on", "program", "sequential"}]}. key is local to the file; parent and waits_on take a key or an item id. With proposal set, an item with the same proposal and key as an existing one is updated, not added again. The batch is all or nothing and prints each key's id. From an item session, add takes only a title and --parent: the agent files work it found as a draft, and af notes on the new item's thread which item's agent added it.
 
 ```
 af backlog add <title> | add --file <path or -> [flags]
@@ -579,7 +579,7 @@ af backlog add <title> | add --file <path or -> [flags]
 
 Answer an item's open question
 
-Answer the item's oldest open question, or the one --question names. af adds the answer to the thread and sends it to the item's session, restoring the session first if it is archived, and waiting while a client is attached to it. If the session is gone, the answer stays in the thread.
+Answer the item's oldest open question, or the one --question names. af adds the answer to the thread and sends it to the item's session, restoring the session first if it is archived, and waiting while a client is attached to it. If the session is gone, af starts a new session for the item whose first prompt carries the previous agent's notes, the question and the answer; the question closes when that session starts. A done or dropped item must be reopened first.
 
 ```
 af backlog answer <id> [--question <n>] <text> [flags]

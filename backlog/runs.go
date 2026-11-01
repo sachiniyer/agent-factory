@@ -66,6 +66,12 @@ func (b *Backlog) BeginStart(id int, by string, facts Facts, now time.Time) (Sta
 		by = StartedByUser
 	}
 	run := RunRef{State: RunStarting, PrevStatus: it.Status, StartedBy: by, StartedAt: now}
+	// Any start carries every answer kept for a new run: the one an answer
+	// started, and a later "af backlog start" after that one failed, with the
+	// answers kept from earlier failed starts too.
+	for _, a := range it.KeptAnswers() {
+		run.Answers = append(run.Answers, a.ID)
+	}
 	it.Status = StatusRunning
 	it.resetLiveAnswers() // answers accepted under an earlier run belong to it, not this one
 	it.Runs = append(it.Runs, run)
@@ -135,9 +141,10 @@ func (b *Backlog) LatestSessions() map[string]int {
 }
 
 // FinishStart settles the starting run of id that began at startedAt: started
-// in sessionID, or, when startErr is set, failed with the status put back and
-// a note with the error.
-func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title string, startErr error, now time.Time) error {
+// in sessionID on branch, which closes the question of the kept answer the run
+// carries, or, when startErr is set, failed with the status put back and a
+// note with the error. A failed run leaves its kept answer kept.
+func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title, branch string, startErr error, now time.Time) error {
 	it, err := b.get(id)
 	if err != nil {
 		return err
@@ -162,7 +169,8 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title stri
 	}
 	it.UpdatedAt = now
 	if startErr == nil {
-		run.SessionID, run.Title, run.State = sessionID, title, RunStarted
+		run.SessionID, run.Title, run.Branch, run.State = sessionID, title, branch, RunStarted
+		it.answersSent(run.Answers)
 		return nil
 	}
 	run.State, run.EndedAt = RunFailed, now
@@ -172,8 +180,29 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title stri
 			it.Status = run.PrevStatus
 		}
 	}
-	_, err = b.AddNote(id, AuthorAF, "The session could not start: "+startErr.Error(), now)
+	note := "The session could not start: " + startErr.Error()
+	if kept := len(it.KeptAnswers()); kept == 1 {
+		note += fmt.Sprintf(". Your answer is kept: \"af backlog start %d\" sends it to a new session with the previous agent's notes", id)
+	} else if kept > 1 {
+		note += fmt.Sprintf(". Your answers are kept: \"af backlog start %d\" sends them to a new session with the previous agent's notes", id)
+	}
+	_, err = b.AddNote(id, AuthorAF, note, now)
 	return err
+}
+
+// answersSent closes the questions of the kept answers answerIDs: a session
+// started with them in its first prompt.
+func (it *Item) answersSent(answerIDs []int) {
+	for _, id := range answerIDs {
+		a := it.message(id)
+		if a == nil || a.Kind != KindAnswer || a.Delivery != DeliveryNewRun {
+			continue
+		}
+		a.Delivery = DeliveryDelivered
+		if q := it.message(a.Answers); q != nil && q.Kind == KindQuestion && q.Closed == "" {
+			q.Closed = ClosedAnswered
+		}
+	}
 }
 
 // AdoptStarting links the latest run of item id, which is still starting with no
@@ -181,7 +210,7 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title stri
 // (done, note, ask) before the daemon's own start record was committed. The
 // session's own item id and creation time are what vouch for it. It reports
 // whether it linked a run.
-func (b *Backlog) AdoptStarting(id int, sessionID, title string, createdAt, now time.Time) bool {
+func (b *Backlog) AdoptStarting(id int, sessionID, title, branch string, createdAt, now time.Time) bool {
 	it := b.Item(id)
 	if it == nil {
 		return false
@@ -190,7 +219,8 @@ func (b *Backlog) AdoptStarting(id int, sessionID, title string, createdAt, now 
 	if r == nil || r.State != RunStarting || r.SessionID != "" || createdAt.Before(r.StartedAt) {
 		return false
 	}
-	r.SessionID, r.Title, r.State = sessionID, title, RunStarted
+	r.SessionID, r.Title, r.Branch, r.State = sessionID, title, branch, RunStarted
+	it.answersSent(r.Answers)
 	it.UpdatedAt = now
 	return true
 }
@@ -199,6 +229,7 @@ func (b *Backlog) AdoptStarting(id int, sessionID, title string, createdAt, now 
 type ItemSession struct {
 	ID        string
 	Title     string
+	Branch    string
 	Item      int
 	CreatedAt time.Time
 }
@@ -237,9 +268,9 @@ func (b *Backlog) RecoverStarts(sessions []ItemSession, before, now time.Time) [
 			}
 			if match != nil {
 				taken[match.ID] = true
-				_ = b.FinishStart(it.ID, r.StartedAt, match.ID, match.Title, nil, now)
+				_ = b.FinishStart(it.ID, r.StartedAt, match.ID, match.Title, match.Branch, nil, now)
 			} else {
-				_ = b.FinishStart(it.ID, r.StartedAt, "", "", errors.New("af restarted before the session was created"), now)
+				_ = b.FinishStart(it.ID, r.StartedAt, "", "", "", errors.New("af restarted before the session was created"), now)
 			}
 			changed = append(changed, it.ID)
 		}

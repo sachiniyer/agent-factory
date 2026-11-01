@@ -30,7 +30,10 @@ func (backlogTestHost) AnswerTarget(_, _ string) backlog.AnswerTarget {
 	return backlog.TargetLive
 }
 func (backlogTestHost) DeliverAnswer(string, backlog.PendingAnswer) {}
-func (backlogTestHost) Gate(string) backlog.Gate                    { return backlog.Gate{} }
+func (backlogTestHost) StartAnswerRun(string, backlog.AnswerRunRequest) (backlog.Message, error) {
+	return backlog.Message{}, errors.New("the api tests start no answer runs")
+}
+func (backlogTestHost) Gate(string) backlog.Gate { return backlog.Gate{} }
 func (backlogTestHost) Usage() planusage.Usage {
 	at := backlogTestNow.Add(-90 * time.Second)
 	return planusage.Usage{Account: planusage.DefaultAccount, ReadingAt: &at,

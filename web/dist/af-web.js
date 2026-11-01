@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "b65e277323fd";
+var CLIENT_VERSION = "5c57708208ca";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18290,8 +18290,11 @@ function derivedOf(view, id) {
   return view.states[String(id)] ?? { state: "draft" };
 }
 function openQuestion(it) {
+  const last = it.runs?.[it.runs.length - 1];
+  if (last?.state === "starting" && last.answers?.length) return void 0;
   const thread = it.thread ?? [];
-  const answered = new Set(thread.filter((m) => m.kind === "answer" && m.answers).map((m) => m.answers));
+  const closes = (m) => m.kind === "answer" && !!m.answers && m.delivery !== "new_run" && m.delivery !== "superseded";
+  const answered = new Set(thread.filter(closes).map((m) => m.answers));
   return thread.find((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
 }
 function needsYouCount(views) {

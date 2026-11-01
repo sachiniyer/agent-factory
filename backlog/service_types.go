@@ -41,6 +41,10 @@ type AddRequest struct {
 	// Before and After place a single new item next to a sibling.
 	Before int `json:"before,omitempty"`
 	After  int `json:"after,omitempty"`
+	// SessionID is the item session whose agent adds work it found. Its add is
+	// one draft with a title and an optional parent, nothing else, and
+	// af notes on the new item's thread which item's agent added it.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type AddResponse struct {
