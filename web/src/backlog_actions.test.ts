@@ -75,15 +75,15 @@ function view(items: Item[], states: Record<number, string> = {}, runner: Partia
   };
 }
 
-const BUDGET: Budget = { share: 50, stop_at: 90, max_per_run: 10, usd_limit: 0, usd_spent: 0 };
+const BUDGET: Budget = { limit: 50, max_per_run: 10, usd_limit: 0, usd_spent: 0 };
 
 function usage(over: Partial<Usage> = {}): Usage {
   return {
     metering: false,
     account: "default",
     accounts: {},
-    five_hour: { plan: 41, backlog: 12, resets_at: iso("2000-01-03T14:00:00"), all_cost: 20 },
-    seven_day: { plan: 40, backlog: 18, resets_at: iso("2000-01-10T09:00:00"), all_cost: 200 },
+    five_hour: { plan: 41, resets_at: iso("2000-01-03T14:00:00"), all_cost: 20 },
+    seven_day: { plan: 40, resets_at: iso("2000-01-10T09:00:00"), all_cost: 200 },
     reading_at: iso("2000-01-03T09:58:00"),
     runs: {},
     run_window: {},
@@ -179,20 +179,20 @@ test("a closed budget gate asks once before a start by hand", async () => {
   const h = host();
   const pane = mount(h);
   const v = view([item(12), item(13)], { 12: "queued", 13: "queued" });
-  const used = usage({ seven_day: { plan: 60, backlog: 51, resets_at: iso("2000-01-10T09:00:00"), all_cost: 1 } });
+  const used = usage({ seven_day: { plan: 60, resets_at: iso("2000-01-10T09:00:00"), all_cost: 1 } });
   pane.update(data(v, 1, used), "/a", []);
   pane.select(12);
   h.answerConfirm = false;
   buttonNamed(el(pane), "Start now")!.click();
   await settle();
   assert.deepEqual(h.asked, [["Budget gate closed",
-    "The backlog used its 50% of the week. Start B-12 anyway? Its use still counts.", "Start anyway"]]);
+    "The plan is at 60% of the week, over the 50% limit. Start B-12 anyway? This run will use more.", "Start anyway"]]);
   assert.equal(sent("StartBacklogItem").length, 0);
   h.answerConfirm = true;
   buttonNamed(el(pane), "Start now")!.click();
   await settle();
   assert.equal(sent("StartBacklogItem").length, 1);
-  const more = usage({ seven_day: { plan: 64, backlog: 55, resets_at: iso("2000-01-10T09:00:00"), all_cost: 1 } });
+  const more = usage({ seven_day: { plan: 64, resets_at: iso("2000-01-10T09:00:00"), all_cost: 1 } });
   pane.update(data(v, 2, more), "/a", []);
   pane.select(13);
   buttonNamed(el(pane), "Start now")!.click();
@@ -270,7 +270,7 @@ test("Send to review shows only while af's own question is open", () => {
   assert.equal(buttonNamed(el(pane), "Send to review"), undefined);
 });
 
-test("the runner bar shows the tighter window, the share, your own use, and both windows on hover", () => {
+test("the runner bar shows the window closest to the limit, and both windows on hover", () => {
   const pane = mount(host());
   const v = view([item(1)], {}, { state: "running", used: 1, max: 2, reason: "" });
   v.backlog.settings.runner = true;
@@ -280,12 +280,12 @@ test("the runner bar shows the tighter window, the share, your own use, and both
   assert.equal(toggle.textContent, "Runner on");
   assert.equal(toggle.getAttribute("aria-checked"), "true");
   const plan = bar.querySelector(".af-backlog-plan")!;
-  assert.equal(plan.textContent, "Backlog 12% of 5-hour window  50% · You 29%");
-  assert.equal(plan.querySelector(".af-backlog-meter-fill")!.style.width, "24%");
+  assert.equal(plan.textContent, "Plan 41% of 5-hour window  limit 50%");
+  assert.equal(plan.querySelector(".af-backlog-meter-fill")!.style.width, "82%");
   mock.timers.tick(5 * 60_000);
   plan.dispatchEvent(new FakeEvent("pointerenter"));
-  assert.equal(plan.title, "5-hour · plan 41% · backlog 12% · resets 14:00\n" +
-    "Weekly · plan 40% · backlog 18% · resets Mon 09:00\nread 7 min ago · all projects");
+  assert.equal(plan.title, "5-hour · plan 41% of 50% limit · resets 14:00\n" +
+    "Weekly · plan 40% of 50% limit · resets Mon 09:00\nread 7 min ago · all projects");
   assert.equal(bar.querySelector('select[aria-label="Max running"]')!.value, "2");
   assert.deepEqual(bar.querySelector('select[aria-label="Max running"]')!.children.map((o) => o.textContent).slice(0, 3),
     ["1 of 1 working", "1 of 2 working", "1 of 3 working"]);
@@ -312,18 +312,18 @@ test("budget fields send one change each and refuse values out of range", async 
   const pane = mount(host());
   pane.update(data(view([item(1)])), "/a", []);
   const input = (label: string): FakeElement => el(pane).querySelector(`input[aria-label="${label}"]`)!;
-  assert.equal(input("Backlog share").value, "50");
-  input("Backlog share").value = "30";
-  input("Backlog share").dispatchEvent(new FakeEvent("change"));
-  input("Stop at plan %").value = "120";
-  input("Stop at plan %").dispatchEvent(new FakeEvent("change"));
-  assert.equal(input("Stop at plan %").value, "90");
+  assert.equal(input("Plan limit").value, "50");
+  input("Plan limit").value = "120";
+  input("Plan limit").dispatchEvent(new FakeEvent("change"));
+  assert.equal(input("Plan limit").value, "50");
+  input("Plan limit").value = "30";
+  input("Plan limit").dispatchEvent(new FakeEvent("change"));
   input("Cap per run").value = "10";
   input("Cap per run").dispatchEvent(new FakeEvent("change"));
   input("Dollar limit").value = "12.5";
   input("Dollar limit").dispatchEvent(new FakeEvent("change"));
   await settle();
-  assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ share: 30 }, { usd_limit: 12.5 }]);
+  assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ limit: 30 }, { usd_limit: 12.5 }]);
 });
 
 test("a budget field changed and changed back before the first write is read sends both, in order", async () => {
@@ -334,12 +334,12 @@ test("a budget field changed and changed back before the first write is read sen
     input(label).value = v;
     input(label).dispatchEvent(new FakeEvent("change"));
   };
-  edit("Backlog share", "30");
-  edit("Backlog share", "50"); // the budget shown is still the daemon's 50: this must not read as no change
-  edit("Backlog share", "50");
+  edit("Plan limit", "30");
+  edit("Plan limit", "50"); // the budget shown is still the daemon's 50: this must not read as no change
+  edit("Plan limit", "50");
   await settle();
-  assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ share: 30 }, { share: 50 }], "the last edit is the one saved");
-  assert.equal(input("Backlog share").value, "50");
+  assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ limit: 30 }, { limit: 50 }], "the last edit is the one saved");
+  assert.equal(input("Plan limit").value, "50");
 });
 
 test("an earlier write of a value does not retire the draft of a later write of the same value", async () => {
@@ -349,19 +349,19 @@ test("an earlier write of a value does not retire the draft of a later write of 
   const waiting: (() => void)[] = [];
   reply = (m) => (m === "SetBudget" ? new Promise((r) => waiting.push(() => r({}))) : Promise.resolve({}));
   for (const v of ["30", "40", "30"]) {
-    input("Backlog share").value = v;
-    input("Backlog share").dispatchEvent(new FakeEvent("change"));
+    input("Plan limit").value = v;
+    input("Plan limit").dispatchEvent(new FakeEvent("change"));
   }
   await settle();
   assert.equal(waiting.length, 1, "writes go out one at a time");
   waiting.shift()!();
   await settle();
-  assert.equal(input("Backlog share").value, "30", "the first reply retires the first edit only; the last 30 is still pending");
+  assert.equal(input("Plan limit").value, "30", "the first reply retires the first edit only; the last 30 is still pending");
   while (waiting.length > 0) {
     waiting.shift()!();
     await settle();
   }
-  assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ share: 30 }, { share: 40 }, { share: 30 }]);
+  assert.deepEqual(sent("SetBudget").map((c) => c.body), [{ limit: 30 }, { limit: 40 }, { limit: 30 }]);
 });
 
 test("a saved budget is applied from the SetBudget reply, not only from the read after it", async () => {
@@ -402,15 +402,15 @@ test("a paused runner says why and offers the main action ui.md names", () => {
   const paused = (gate: string, reason: string, items: Item[] = [item(1)]): void =>
     pane.update(data(view(items, {}, { state: gate === "no_reading" ? "waiting" : "stopped", gate, reason })), "/a", []);
   const bar = (): FakeElement => el(pane).querySelector(".af-backlog-head")!;
-  paused("share", "Backlog used its 50% of the week · resumes Mon 09:00");
+  paused("limit", "Plan at 52% of the 5-hour window (limit 50%) · resumes 14:00");
   assert.equal(bar().querySelector('[role="switch"]')!.textContent, "Runner paused");
   assert.ok(bar().querySelector(".af-backlog-runner-state")!.classList.contains("af-backlog-warn"));
-  assert.match(bar().textContent, /· Backlog used its 50% of the week · resumes Mon 09:00/);
-  buttonNamed(bar(), "Change share")!.click();
+  assert.match(bar().textContent, /· Plan at 52% of the 5-hour window \(limit 50%\) · resumes 14:00/);
+  buttonNamed(bar(), "Change limit")!.click();
   assert.equal(bar().querySelector("details.af-backlog-settings")!.open, true);
-  assert.equal(doc.activeElement, bar().querySelector('input[aria-label="Backlog share"]'));
-  paused("stop_at", "Plan at 91% of the 5-hour window (stop at 90%) · resumes 14:00");
-  assert.equal(buttonNamed(bar(), "Change share"), undefined);
+  assert.equal(doc.activeElement, bar().querySelector('input[aria-label="Plan limit"]'));
+  paused("usage_limit", "Usage limit until 14:00");
+  assert.equal(buttonNamed(bar(), "Change limit"), undefined);
   assert.equal(buttonNamed(bar(), "Run next")!.className, "af-ghost");
   paused("no_reading", "No plan usage seen yet · start an item by hand once to take a reading");
   assert.equal(bar().querySelector('[role="switch"]')!.textContent, "Runner waiting");
@@ -432,7 +432,7 @@ test("a run shows its use of the 5-hour window and its API cost", () => {
   assert.equal(use.textContent, "4.1% of the 5-hour window · $9.00 at API prices");
   assert.equal(use.title, "$2.00 in this 5-hour window");
   pane.update(data(view([item(1, { status: "running", runs: [run] })], { 1: "working" }), 2,
-    usage({ runs: { s1: 9 }, run_window: { s1: 2 }, five_hour: { plan: 0, backlog: 0, resets_at: null } })), "/a", [session("s1")]);
+    usage({ runs: { s1: 9 }, run_window: { s1: 2 }, five_hour: { plan: 0, resets_at: null } })), "/a", [session("s1")]);
   assert.equal(el(pane).querySelector(".af-backlog-run-use")!.textContent, "$9.00 at API prices");
 });
 
@@ -444,7 +444,7 @@ test("a second click while a start or a run is out does nothing", async () => {
   let release: () => void = () => {};
   h.confirm = () => new Promise((r) => { release = () => r(true); });
   pane.update(data(view([item(1, { status: "queued" })], { 1: "queued" }), 2,
-    usage({ seven_day: { plan: 60, backlog: 51, resets_at: iso("2000-01-10T09:00:00") } })), "/a", []);
+    usage({ seven_day: { plan: 60, resets_at: iso("2000-01-10T09:00:00") } })), "/a", []);
   const start = buttonNamed(el(pane), "Start now")!;
   start.click();
   start.click();
@@ -496,9 +496,9 @@ test("when Start now goes away its focus moves to the next action", async () => 
 
 test("the plan use opens its detail on tap, and daemon reasons lose their CLI hints", () => {
   const pane = mount(host());
-  pane.update(data(view([item(1)], {}, { state: "stopped", gate: "share", reason: 'Backlog share is 0% · raise it with "af backlog budget --share 50"' })), "/a", []);
+  pane.update(data(view([item(1)], {}, { state: "stopped", gate: "limit", reason: 'Plan limit is 0% · raise it with "af backlog budget --limit 50"' })), "/a", []);
   const bar = el(pane).querySelector(".af-backlog-head")!;
-  assert.match(bar.textContent, /· Backlog share is 0%/);
+  assert.match(bar.textContent, /· Plan limit is 0%/);
   assert.doesNotMatch(bar.textContent, /af backlog/);
   const plan = bar.querySelector("button.af-backlog-plan")!;
   const detail = bar.querySelector(".af-backlog-plan-detail")!;
@@ -506,8 +506,8 @@ test("the plan use opens its detail on tap, and daemon reasons lose their CLI hi
   plan.click();
   assert.equal(plan.getAttribute("aria-expanded"), "true");
   assert.deepEqual(detail.children.map((c) => c.textContent), [
-    "5-hour · plan 41% · backlog 12% · resets 14:00",
-    "Weekly · plan 40% · backlog 18% · resets Mon 09:00",
+    "5-hour · plan 41% of 50% limit · resets 14:00",
+    "Weekly · plan 40% of 50% limit · resets Mon 09:00",
     "read 2 min ago · all projects",
   ]);
   plan.click();

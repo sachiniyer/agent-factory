@@ -133,14 +133,13 @@ type SettingsResponse struct {
 type GetBudgetRequest struct{}
 
 type SetBudgetRequest struct {
-	Share     *float64 `json:"share,omitempty"`
-	StopAt    *float64 `json:"stop_at,omitempty"`
+	Limit     *float64 `json:"limit,omitempty"`
 	MaxPerRun *float64 `json:"max_per_run,omitempty"`
 	USDLimit  *float64 `json:"usd_limit,omitempty"`
 }
 
-// BudgetResponse is the budget with the plan windows: plan % and the part the
-// backlog used, per window.
+// BudgetResponse is the budget with the plan windows: plan % and reset time,
+// per window.
 type BudgetResponse struct {
 	Budget Budget `json:"budget"`
 	planusage.Usage

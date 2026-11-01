@@ -71,7 +71,7 @@ export interface Derived {
 export interface RunnerView {
   state: "off" | "idle" | "running" | "waiting" | "stopped" | string;
   reason?: string;
-  /** The closed gate when the runner is stopped or waiting: share, stop_at,
+  /** The closed gate when the runner is stopped or waiting: limit,
    *  usage_limit, no_reading, unmeterable, usd_limit, no_account, metering. */
   gate?: string;
   used: number;
@@ -84,11 +84,11 @@ export interface BacklogView {
   runner: RunnerView;
 }
 
-/** The global budget: percents of the Claude plan, and an optional dollar
- *  limit for accounts with no plan readings. */
+/** The global budget: the plan % under which the runner starts items, the
+ *  cap per run, and an optional dollar limit for accounts with no plan
+ *  readings. */
 export interface Budget {
-  share: number;
-  stop_at: number;
+  limit: number;
   max_per_run: number;
   usd_limit: number;
   usd_spent: number;

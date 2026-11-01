@@ -52,7 +52,7 @@ func TestGetBudgetMetersAndPublishesSpend(t *testing.T) {
 	data := env["data"].(map[string]any)
 	require.Nil(t, data["metering"])
 	require.Contains(t, data["accounts"], planusage.DefaultAccount)
-	require.Equal(t, float64(50), data["budget"].(map[string]any)["share"])
+	require.Equal(t, float64(50), data["budget"].(map[string]any)["limit"])
 	five := data["windows"].(map[string]any)["five_hour"].(map[string]any)
 	require.Equal(t, float64(30), five["plan"])
 	require.InDelta(t, 4.0, five["all_cost"], 1e-9)

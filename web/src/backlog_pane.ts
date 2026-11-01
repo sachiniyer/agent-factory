@@ -222,7 +222,7 @@ export class BacklogPane {
     const gate = closedGate(this.data?.budget ?? null, this.data?.usage ?? null, v.runner, Date.now());
     if (gate === null || this.confirmed.has(gate.key)) return true;
     const ok = await this.host.confirm("Budget gate closed",
-      `${gate.text} ${verb} ${formatID(id)} anyway? Its use still counts.`, `${verb} anyway`);
+      `${gate.text} ${verb} ${formatID(id)} anyway? This run will use more.`, `${verb} anyway`);
     if (ok) this.confirmed.add(gate.key);
     return ok;
   }

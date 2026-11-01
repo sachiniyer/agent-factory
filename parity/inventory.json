@@ -1917,7 +1917,7 @@
         "pointer": "api/backlog_status.go backlogRunnerCmd/backlogBudgetCmd, api/backlog_self.go backlogRunCmd → POST /v1/SetBacklogSettings, GetBudget, SetBudget, GetBacklog, RunBacklog (daemon/backlog.go, daemon/backlog_runner.go)"
       },
       "verdict": "deliberate",
-      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (share of the Claude plan, stop-at, cap per run, dollar limit); plan readings arrive in PR 6 and the runner loop, af backlog run and the backlog.runner event in PR 7. PR 3 shows a read-only runner bar on the web and PR 8 makes it editable: the switch, max running, plan use, and the ⋯ budget settings. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (the plan limit, cap per run, dollar limit; the limit replaced a share of the plan and a stop-at, whose hidden CLI flags are kept only to refuse with a pointer to --limit); plan readings arrive in PR 6 and the runner loop, af backlog run and the backlog.runner event in PR 7. PR 3 shows a read-only runner bar on the web and PR 8 makes it editable: the switch, max running, plan use, and the ⋯ budget settings. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     }
   ],
   "ledger": {
@@ -2295,6 +2295,7 @@
       "af backlog runner --on-done": "backlog.runner",
       "af backlog run --count": "backlog.runner",
       "af backlog budget --max-per-run": "backlog.runner",
+      "af backlog budget --limit": "backlog.runner",
       "af backlog budget --share": "backlog.runner",
       "af backlog budget --stop-at": "backlog.runner",
       "af backlog budget --usd-limit": "backlog.runner",

@@ -46,7 +46,7 @@ async function serve(page: Page): Promise<void> {
     return route.fulfill({ json: envelope(VIEWS[root]) });
   });
   await page.route("**/v1/GetBudget", route => route.fulfill({ json: envelope({
-    budget: { schema_version: 1, share: 30, stop_at: 80, max_per_run: 10, usd_limit: 0, usd_spent: 0 },
+    budget: { schema_version: 2, limit: 30, max_per_run: 10, usd_limit: 0, usd_spent: 0 },
   }) }));
 }
 
