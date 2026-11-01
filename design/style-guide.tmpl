@@ -54,10 +54,13 @@ following the visual viewport and safe-area insets. Ctrl, Alt, Esc, Tab, ^C,
 Paste and Arrows share the row. Arrows replaces it with More keys, ← ↑ ↓ →, and
 the A−/A+ terminal text size pair — display controls that send no input; More keys restores the
 primary row. At 360px, seven targets fit with 4px gaps and 8px horizontal insets;
-below 348px the keys narrow to a 40px floor so the row still fits a 320px phone,
-while the 44px height never changes. Hide the bar when ownership leaves the
-terminal or the viewport exceeds 768px. Refit the terminal so its last row
-remains above the bar.
+below 348px the bar keeps 44px targets by giving up spacing — 1px gaps, 2px
+insets and caption-size labels (the one exception to the body-type button
+rule), with More shown for More keys — so the row still fits a 320px phone.
+Under 320px (pinch-zoomed) the target is capped at the row's fair share so the
+row still fits rather than clipping Arrows. The 44px height never changes.
+Hide the bar when ownership leaves the terminal or the viewport exceeds
+768px. Refit the terminal so its last row remains above the bar.
 
 With the soft keyboard closed, the terminal element must occupy at least 85% of
 the visual viewport at 360, 390 and 430px. Browser assertions enforce this in both
