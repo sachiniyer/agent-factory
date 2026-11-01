@@ -176,7 +176,10 @@ func TestControlServer_AcceptLoopFatalErrorClosesListenerAndUnlinksSocket(t *tes
 
 	closeServer, err := startControlServer(nil, nil, nil, nil)
 	require.NoError(t, err, "startControlServer")
-	t.Cleanup(func() { _ = closeServer() })
+	t.Cleanup(func() {
+		_ = closeServer()
+		resetFatalAcceptErr() // don't leak the fatal error into a later runDaemon test
+	})
 
 	select {
 	case <-inj.closed:
@@ -236,12 +239,15 @@ func TestControlServer_AcceptLoopExitsOnListenerClosed(t *testing.T) {
 // TestControlServer_AcceptLoopFatalErrorPropagatesToShutdownPath pins the
 // contract that a fatal accept error does not leave the daemon process
 // "running" while its control plane is dead. The loop closes the listener AND
-// triggers the daemon shutdown path (the same shutdownCh the Shutdown RPC
-// closes) so the supervisor (systemd/launchd) restarts the daemon instead of
-// keeping a wedged-but-running process. Without this propagation, runDaemon's
-// main select would stay blocked after the socket is gone, and the next
-// client's dial-failure reclaim would spawn a second daemon alongside the
-// wedged one — the #718/#767 orphan class this PR exists to close.
+// records the error (via controlAcceptFatalErr) so runDaemon returns non-zero
+// and the supervisor (systemd/launchd) restarts the daemon instead of keeping a
+// wedged-but-running process. Without this propagation, runDaemon's main select
+// would stay blocked after the socket is gone, and the next client's
+// dial-failure reclaim would spawn a second daemon alongside the wedged one —
+// the #718/#767 orphan class this PR exists to close. The path still closes
+// shutdownCh so the graceful drain + save runs (state survives the restart);
+// only the exit code changes (non-zero), which is what the autostart restart
+// policy keys on.
 func TestControlServer_AcceptLoopFatalErrorPropagatesToShutdownPath(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
@@ -251,7 +257,10 @@ func TestControlServer_AcceptLoopFatalErrorPropagatesToShutdownPath(t *testing.T
 
 	closeServer, err := startControlServer(nil, nil, nil, shutdownCh)
 	require.NoError(t, err, "startControlServer")
-	t.Cleanup(func() { _ = closeServer() })
+	t.Cleanup(func() {
+		_ = closeServer()
+		resetFatalAcceptErr() // don't leak the fatal error into a later runDaemon test
+	})
 
 	select {
 	case <-inj.closed:
@@ -263,6 +272,15 @@ func TestControlServer_AcceptLoopFatalErrorPropagatesToShutdownPath(t *testing.T
 	case <-shutdownCh:
 	case <-time.After(3 * time.Second):
 		t.Fatal("fatal accept error did not propagate to the daemon shutdown path; runDaemon would stay blocked while the control plane is dead")
+	}
+
+	// The fatal error must be recorded so runDaemon returns non-zero and the
+	// supervisor restarts the daemon (Restart=on-failure / KeepAlive
+	// SuccessfulExit=false). A clean nil here is the bug this test pins.
+	if got := fatalAcceptShutdownErr(); got == nil {
+		t.Fatal("fatal accept error closed shutdownCh but did not record the error; runDaemon would exit zero and the supervisor would not restart the daemon")
+	} else if !errors.Is(got, fatalErr) {
+		t.Fatalf("fatalAcceptShutdownErr returned %v, want %v", got, fatalErr)
 	}
 
 	require.NoError(t, closeServer(), "closeServer errored or hung after the fatal-branch shutdown propagation")

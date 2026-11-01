@@ -408,6 +408,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	watchers.observeTargetLimit = manager.observeTaskTargetLimit
 
 	shutdownCh := make(chan struct{})
+	resetFatalAcceptErr() // clear any fatal error from a prior daemon in this process (tests)
 	closeControl, alreadyRunning, err := bindControlServerExclusive(manager, scheduler, watchers, shutdownCh)
 	if err != nil {
 		return fmt.Errorf("failed to start daemon control server: %w", err)
@@ -523,7 +524,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return nil
 	case <-shutdownCh:
 		log.InfoLog.Printf("received shutdown request via control socket during instance restore; exiting")
-		return nil
+		return fatalAcceptShutdownErr()
 	}
 	// Upgrade candidates deliberately park before the orphan sweep. Preserve the
 	// pre-existing probation contract: restored state is readable while every
@@ -543,7 +544,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 			return nil
 		case <-shutdownCh:
 			log.InfoLog.Printf("received shutdown request during upgrade probation; exiting")
-			return nil
+			return fatalAcceptShutdownErr()
 		}
 	}
 
@@ -648,8 +649,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	startUpdateDriver(manager, func() { upgradeExitOnce.Do(func() { close(upgradeExitCh) }) }, stopCh, wg)
 
 	// Block until a signal, a Shutdown RPC, or the home-deleted self-check
-	// ends the daemon (sigChan and shutdownCh were armed before the restore
-	// above).
+	// ends the daemon (channels armed before the restore above).
 	homeGone := false
 	select {
 	case sig := <-sigChan:
@@ -677,12 +677,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		// queue behind it past the SIGKILL grace, and a write taken while
 		// admitted writers can still commit is unsound (see drainDaemon), so
 		// nothing is written; drainDaemon logged what was left behind (#5846).
-		return nil
+		return fatalAcceptShutdownErr()
 	}
 	if err := manager.SaveInstancesForShutdown(); err != nil {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
-	return nil
+	return fatalAcceptShutdownErr()
 }
 
 // refreshDaemonInstances materializes the daemon's in-memory instance map from
