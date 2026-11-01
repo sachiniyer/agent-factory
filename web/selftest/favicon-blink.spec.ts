@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+import { quietSession } from "./quiet-session";
 
 // The needs-attention blink on the favicon (#6284 theme A), against the real
 // daemon the harness boots: while a session in the selected project asks for the
@@ -14,39 +14,9 @@ import { test, expect, type APIRequestContext, type Page } from "@playwright/tes
 // what clears an attention request (session/attention.go) — so under load it cleared
 // the request in the middle of the blink sample and the Dismiss click found nothing
 // to click (#6465). With no stray output possible, only the dismiss can clear it.
-const SESSION = "probe-quiet";
-const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
-
-test.beforeAll(() => {
-  const afBin = process.env.AF_BIN;
-  const mockRepo = process.env.AF_MOCK_REPO;
-  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
-  execFileSync(afBin as string, ["sessions", "create", "--repo", mockRepo as string, "--name", SESSION, "--program", "claude"], { stdio: "ignore" });
-});
-
-test.afterAll(() => {
-  if (!process.env.AF_BIN) return;
-  try {
-    execFileSync(process.env.AF_BIN, ["sessions", "kill", SESSION], { stdio: "ignore" });
-  } catch {
-    // already gone
-  }
-});
-
-async function target(request: APIRequestContext) {
-  const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
-  const session = snapshot.data.instances.find((s: { title: string }) => s.title === SESSION);
-  expect(session?.id, `seeded session ${SESSION}`).toBeTruthy();
-  return session.id as string;
-}
-
-// Attached and showing the agent's one and only output. The quiet agent emits
-// nothing further, so this is a real condition, not a settle wait.
-async function openSettled(page: Page, id: string) {
-  await page.goto(`/#/session/${encodeURIComponent(id)}`);
-  await expect(page.locator(".af-term-title")).toHaveText(SESSION);
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-}
+const quiet = quietSession("probe-quiet");
+const target = quiet.id;
+const openSettled = quiet.open;
 
 const iconHref = (page: Page) => page.evaluate(() => document.querySelector<HTMLLinkElement>('link[rel="icon"][type="image/svg+xml"]')?.getAttribute("href") ?? "");
 

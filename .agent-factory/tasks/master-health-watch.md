@@ -66,7 +66,12 @@ Check these four things, in order:
 4. STALE BRANCHES from merged PRs, and PRs whose branch was deleted underneath
    them.
    POST ONLY ON CHANGE (added 2026-10-03 by Captain Claude): before commenting on an
-   existing tracking issue (e.g. #4672), read your own last comment there. If the set
+   existing tracking issue (e.g. #4672), read your own last comment there — with the
+   whole history SLURPED, never a per-page --jq (that returns page 1's last comment,
+   weeks old: the 2026-11-01 13:4xZ census diffed against 10-13 by mistake):
+     gh api --paginate repos/sachiniyer/agent-factory/issues/4672/comments \
+       | jq -s 'add|map(select(.body|startswith("Master-health-watch census")))|sort_by(.created_at)|.[-1].body'
+   If the set
    you found is the same, post NOTHING; an unchanged sweep is silent. Comment only
    when a branch appeared, disappeared, or its classification changed, and say what
    changed. This applies to every recurring census in this prompt.

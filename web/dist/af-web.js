@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "ccd82cad8cbf";
+var CLIENT_VERSION = "12d72f76fbda";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -13552,6 +13552,39 @@ function removeTaskModal(name, onConfirm, onCancel) {
   asForm(handle.el.firstElementChild, onConfirm);
   return handle;
 }
+function askConfirm(opts, mount2, dismiss) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    const m = textConfirmModal({
+      ...opts,
+      onConfirm: () => {
+        settle(true);
+        dismiss(m);
+      },
+      onCancel: () => {
+        settle(false);
+        dismiss(m);
+      }
+    });
+    const close = m.close.bind(m);
+    m.close = () => {
+      settle(false);
+      close();
+    };
+    mount2(m);
+  });
+}
+function textConfirmModal(opts) {
+  const { handle, body } = modalChrome({ title: opts.title, confirmLabel: opts.confirmLabel, confirmClass: "af-primary", onCancel: opts.onCancel });
+  body.append(h("p", { class: "af-modal-text" }, opts.body));
+  asForm(handle.el.firstElementChild, opts.onConfirm);
+  return handle;
+}
 function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
   const { handle, body } = modalChrome({
     title: `Mark ${sessionTitle} delivered?`,
@@ -13869,11 +13902,11 @@ function defaultProject(sessions, tasks, registeredRoots = []) {
   if (summaries.length === 0) {
     return null;
   }
-  const valid = new Set(summaries.map((p) => p.root));
+  const valid2 = new Set(summaries.map((p) => p.root));
   let best = null;
   for (const s of sessions) {
     const root2 = s.worktree?.repo_path;
-    if (!root2 || isArchived(s) || !valid.has(root2)) {
+    if (!root2 || isArchived(s) || !valid2.has(root2)) {
       continue;
     }
     if (!best || (s.created_at ?? "") > (best.created_at ?? "")) {
@@ -13885,7 +13918,7 @@ function defaultProject(sessions, tasks, registeredRoots = []) {
   }
   let bestTask = null;
   for (const t of tasks) {
-    if (!t.project_path || !valid.has(t.project_path)) {
+    if (!t.project_path || !valid2.has(t.project_path)) {
       continue;
     }
     if (!bestTask || (t.created_at ?? "") > (bestTask.created_at ?? "")) {
@@ -13895,11 +13928,11 @@ function defaultProject(sessions, tasks, registeredRoots = []) {
   return bestTask?.project_path ?? summaries[0]?.root ?? null;
 }
 function reconcileProject(sessions, tasks, persisted, current, registeredRoots = []) {
-  const valid = validRoots(sessions, tasks, registeredRoots);
-  if (current && valid.has(current)) {
+  const valid2 = validRoots(sessions, tasks, registeredRoots);
+  if (current && valid2.has(current)) {
     return current;
   }
-  if (persisted && valid.has(persisted)) {
+  if (persisted && valid2.has(persisted)) {
     return persisted;
   }
   return defaultProject(sessions, tasks, registeredRoots);
@@ -18439,11 +18472,18 @@ function neededBy(b, id) {
 var ACTION_LABELS = {
   queue: "Queue",
   draft: "Back to draft",
+  start: "Start now",
+  review: "Send to review",
   done: "Mark done",
   drop: "Drop",
   reopen: "Reopen",
   delete: "Delete"
 };
+function canStartNow(b, it, derived) {
+  if (isParent(b, it.id)) return false;
+  if (it.status === "done" || it.status === "dropped") return false;
+  return derived.state !== "working" && derived.state !== "starting" && derived.state !== "needs_you";
+}
 function itemActions(b, it, derived) {
   if (isParent(b, it.id)) {
     const out2 = [];
@@ -18455,6 +18495,8 @@ function itemActions(b, it, derived) {
   const s = it.status;
   if (s === "draft" || s === "review") out.push("queue");
   if (s === "queued" || s === "review") out.push("draft");
+  if (canStartNow(b, it, derived)) out.push("start");
+  if (s === "running" && openQuestion(it)?.author === "af") out.push("review");
   if (s !== "done" && s !== "dropped") out.push("done", "drop");
   else out.push("reopen");
   if (s === "draft" && (it.runs ?? []).length === 0 && (it.thread ?? []).length === 0) out.push("delete");
@@ -18469,24 +18511,227 @@ function safeHttpUrl2(raw) {
     return null;
   }
 }
+function topQueued(view) {
+  return view.backlog.items.find((it) => derivedOf(view, it.id).state === "queued" && !isParent(view.backlog, it.id));
+}
 function needsYouLabel(n) {
   return n === 1 ? "1 needs you" : `${n} need you`;
+}
+
+// src/backlog_usage.ts
+var WINDOW_LABELS = {
+  five_hour: { bar: "5-hour window", gate: "the 5-hour window", hover: "5-hour" },
+  seven_day: { bar: "week", gate: "the week", hover: "Weekly" }
+};
+var WINDOWS = ["five_hour", "seven_day"];
+function isRecord2(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function numbers(v) {
+  const out = {};
+  if (isRecord2(v)) {
+    for (const [k, x] of Object.entries(v)) if (typeof x === "number") out[k] = x;
+  }
+  return out;
+}
+function strings(v) {
+  const out = {};
+  if (isRecord2(v)) {
+    for (const [k, x] of Object.entries(v)) if (typeof x === "string") out[k] = x;
+  }
+  return out;
+}
+function parseWindow(v) {
+  const w = isRecord2(v) ? v : {};
+  return {
+    plan: Number(w.plan) || 0,
+    backlog: Number(w.backlog) || 0,
+    resets_at: typeof w.resets_at === "string" ? w.resets_at : null,
+    all_cost: Number(w.all_cost) || 0
+  };
+}
+function parseUsage(d) {
+  const v = isRecord2(d) ? d : {};
+  const w = isRecord2(v.windows) ? v.windows : {};
+  const accounts = {};
+  if (isRecord2(v.accounts)) {
+    for (const [name, a] of Object.entries(v.accounts)) {
+      if (isRecord2(a) && isRecord2(a.windows)) accounts[name] = parseWindow(a.windows.five_hour);
+    }
+  }
+  return {
+    metering: v.metering === true,
+    account: typeof v.account === "string" ? v.account : "",
+    accounts,
+    five_hour: parseWindow(w.five_hour),
+    seven_day: parseWindow(w.seven_day),
+    reading_at: typeof v.reading_at === "string" ? v.reading_at : null,
+    runs: numbers(v.runs),
+    run_window: numbers(v.run_window),
+    unmeterable: strings(v.unmeterable)
+  };
+}
+function spendHasUnmeterable(ev) {
+  return isRecord2(ev) && "unmeterable" in ev;
+}
+function applySpend(prev, ev) {
+  if (!isRecord2(ev)) return prev;
+  return {
+    metering: false,
+    account: prev?.account ?? "",
+    accounts: prev?.accounts ?? {},
+    five_hour: parseWindow(ev.five_hour),
+    seven_day: parseWindow(ev.seven_day),
+    reading_at: typeof ev.reading_at === "string" ? ev.reading_at : null,
+    runs: numbers(ev.runs),
+    run_window: "run_window" in ev ? numbers(ev.run_window) : prev?.run_window ?? {},
+    unmeterable: spendHasUnmeterable(ev) ? strings(ev.unmeterable) : prev?.unmeterable ?? {}
+  };
+}
+function valid(w, now) {
+  return w.resets_at !== null && Date.parse(w.resets_at) > now;
+}
+function pct(v) {
+  return `${Number(v.toFixed(1))}%`;
+}
+function usd(v) {
+  return `$${v.toFixed(2)}`;
+}
+function tighterWindow(u, b, now) {
+  const ratio = (v, limit) => limit > 0 ? v / limit : Infinity;
+  let best = null;
+  let score = -Infinity;
+  for (const k of WINDOWS) {
+    const w = u[k];
+    if (!valid(w, now)) continue;
+    const s = Math.max(ratio(w.backlog, b.share), ratio(w.plan, b.stop_at));
+    if (s > score) {
+      best = k;
+      score = s;
+    }
+  }
+  return best;
+}
+function resetLabel(at, now) {
+  const d = new Date(at);
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (d.getTime() - now < 24 * 36e5) return hm;
+  return `${d.toLocaleDateString("en-US", { weekday: "short" })} ${hm}`;
+}
+function readingAge(at, now) {
+  if (!at) return "no reading yet";
+  const min = Math.floor(Math.max(0, now - Date.parse(at)) / 6e4);
+  if (min < 1) return "read just now";
+  if (min < 60) return `read ${min} min ago`;
+  const hours = Math.floor(min / 60);
+  return hours < 24 ? `read ${hours} h ago` : `read ${Math.floor(hours / 24)} d ago`;
+}
+function usageLines(u, now) {
+  const line = (k) => {
+    const w = u[k];
+    const label = WINDOW_LABELS[k].hover;
+    if (!valid(w, now)) return `${label} \xB7 no reading`;
+    return `${label} \xB7 plan ${pct(w.plan)} \xB7 backlog ${pct(w.backlog)} \xB7 resets ${resetLabel(w.resets_at, now)}`;
+  };
+  return [line("five_hour"), line("seven_day"), `${readingAge(u.reading_at, now)} \xB7 all projects`];
+}
+function usageHover(u, now) {
+  return usageLines(u, now).join("\n");
+}
+function runUse(sessionId, u, now, account = "") {
+  const name = account || "default";
+  const w = name !== u.account && u.accounts[name] ? u.accounts[name] : u.five_hour;
+  const cost = u.run_window[sessionId];
+  if (cost === void 0 || !valid(w, now) || !w.all_cost || w.all_cost <= 0) return null;
+  return Math.min(100, w.plan * cost / w.all_cost);
+}
+function closedGate(b, u, runner, now) {
+  if (b && b.share <= 0) return { key: "share:zero", text: "The backlog share is 0%." };
+  const daemonGate = runner !== null && runner.state !== "off";
+  if (b && u && !daemonGate) {
+    for (const k of WINDOWS) {
+      const w = u[k];
+      if (valid(w, now) && w.backlog >= b.share) {
+        return { key: `share:${k}:${w.resets_at}`, text: `The backlog used its ${pct(b.share)} of ${WINDOW_LABELS[k].gate}.` };
+      }
+    }
+    for (const k of WINDOWS) {
+      const w = u[k];
+      if (valid(w, now) && w.plan >= b.stop_at) {
+        return { key: `stop_at:${k}:${w.resets_at}`, text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[k].gate}.` };
+      }
+    }
+  }
+  if (b && b.usd_limit > 0 && b.usd_spent >= b.usd_limit) {
+    return { key: "usd_limit", text: `The backlog spent its ${usd(b.usd_limit)} dollar limit.` };
+  }
+  if (runner?.state === "stopped" && runner.reason) {
+    const text = `${webReason(runner.reason).replace(/\.$/, "")}.`;
+    if (runner.gate === "usage_limit" || runner.gate === "usd_limit") return { key: runner.gate, text };
+    if (runner.gate === "share" || runner.gate === "stop_at") return { key: `${runner.gate}:${runner.reason}`, text };
+  }
+  return null;
+}
+function webReason(reason) {
+  const out = reason.replace(/,?\s+or\s+[^;,·]*"af [^"]*"[^;,·]*/g, "").replace(/(?:[;,]\s*|\s·\s)?[^;,·]*"af [^"]*"[^;,·]*/g, "").trim();
+  return out || reason;
 }
 
 // src/backlog_api.ts
 async function getBacklog(root2, token2) {
   return parseBacklogView(await af("GetBacklog", { repo_path: root2 }, token2));
 }
-async function getBudget(token2) {
-  const resp = await af("GetBudget", {}, token2);
+function parseBudgetReply(resp) {
   const b = resp?.budget;
   return {
-    share: Number(b?.share) || 0,
-    stop_at: Number(b?.stop_at) || 0,
-    max_per_run: Number(b?.max_per_run) || 0,
-    usd_limit: Number(b?.usd_limit) || 0,
-    usd_spent: Number(b?.usd_spent) || 0
+    budget: {
+      share: Number(b?.share) || 0,
+      stop_at: Number(b?.stop_at) || 0,
+      max_per_run: Number(b?.max_per_run) || 0,
+      usd_limit: Number(b?.usd_limit) || 0,
+      usd_spent: Number(b?.usd_spent) || 0
+    },
+    usage: parseUsage(resp)
   };
+}
+async function getBudget(token2) {
+  return parseBudgetReply(await af("GetBudget", {}, token2));
+}
+async function setBudget(update, token2) {
+  return parseBudgetReply(await af("SetBudget", {
+    share: update.share,
+    stop_at: update.stop_at,
+    max_per_run: update.max_per_run,
+    usd_limit: update.usd_limit
+  }, token2));
+}
+async function setSettings(root2, update, token2) {
+  const resp = await af("SetBacklogSettings", {
+    repo_path: root2,
+    runner: update.runner,
+    max_running: update.max_running,
+    on_done: update.on_done
+  }, token2);
+  return resp.settings;
+}
+async function startItem(root2, id, token2) {
+  const resp = await af("StartBacklogItem", { repo_path: root2, id }, token2);
+  return resp.run;
+}
+var backlogRoutes = { runBacklog: true };
+async function runNext(root2, token2) {
+  const resp = await af("RunBacklog", { repo_path: root2, count: 1 }, token2);
+  return { started: Array.isArray(resp?.started) ? resp.started : [], reason: resp?.reason ?? "" };
+}
+async function answerQuestion(root2, id, questionId, text, token2) {
+  const resp = await af("PostBacklogMessage", {
+    repo_path: root2,
+    id,
+    kind: "answer",
+    text,
+    question_id: questionId
+  }, token2);
+  return resp.message;
 }
 async function addItem(root2, input, token2) {
   const resp = await af("AddBacklogItems", {
@@ -18806,6 +19051,7 @@ function outcomeSaver(done2, note) {
 var ACTION_STATUS = {
   queue: "queued",
   draft: "draft",
+  review: "review",
   done: "done",
   drop: "dropped",
   reopen: "draft"
@@ -18893,7 +19139,23 @@ ${this.note.value}` : text;
       }, () => {
       });
     });
-    this.head = h("div", { class: "af-backlog-panel-state" });
+    this.head = h("div", { class: "af-backlog-panel-state", tabIndex: -1 });
+    this.answer = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: `Answer ${formatID(id)}\u2026` });
+    this.answer.setAttribute("aria-label", "Answer");
+    this.sendAnswer = button("Send answer", () => this.submitAnswer(), "af-primary");
+    this.answer.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) {
+        e.preventDefault();
+        this.submitAnswer();
+      }
+    });
+    this.question = h(
+      "div",
+      { class: "af-backlog-question", role: "group", hidden: true },
+      h("div", { class: "af-backlog-question-text" }, icon("circle-question"), this.questionText),
+      h("div", { class: "af-backlog-note-row" }, this.answer, this.sendAnswer)
+    );
+    this.question.setAttribute("aria-label", "Open question");
     this.above = h("div", { class: "af-backlog-panel-rest" });
     this.below = h("div", { class: "af-backlog-panel-rest" });
     this.threadList = h("ol", { class: "af-backlog-thread" });
@@ -18913,6 +19175,7 @@ ${this.note.value}` : text;
       { class: "af-backlog-panel" },
       top,
       this.head,
+      this.question,
       this.above,
       section("Body", this.body.el),
       this.below,
@@ -18930,6 +19193,11 @@ ${this.note.value}` : text;
   body;
   note;
   head;
+  question;
+  questionText = h("span", {});
+  answer;
+  sendAnswer;
+  questionId = 0;
   above;
   below;
   threadList;
@@ -18939,6 +19207,7 @@ ${this.note.value}` : text;
   moveOpen = false;
   view = null;
   sessions = [];
+  usage = null;
   // Run sessions the rail did not hold, by id: asked for, answered, or unanswerable.
   lookups = /* @__PURE__ */ new Map();
   // The title the user submitted that no confirming response has covered yet: a
@@ -18987,14 +19256,25 @@ ${this.note.value}` : text;
   }
   /** Draws again from what the panel last rendered, for a change that arrives on its own (a lookup, a write's outcome). */
   repaint() {
-    if (this.view) this.render(this.view, this.sessions);
+    if (this.view) this.render(this.view, this.sessions, this.usage);
   }
   item() {
     return this.view ? itemByID(this.view.backlog, this.id) : void 0;
   }
-  render(view, sessions) {
+  submitAnswer() {
+    const text = this.answer.value.trim();
+    const qid = this.questionId;
+    if (!text || !qid || this.sendAnswer.disabled) return;
+    this.sendAnswer.disabled = true;
+    void this.actions.answer(this.id, qid, text).then((ok) => {
+      this.sendAnswer.disabled = false;
+      if (ok && this.questionId === qid && this.answer.value.trim() === text) this.answer.value = "";
+    });
+  }
+  render(view, sessions, usage = null) {
     this.view = view;
     this.sessions = sessions;
+    this.usage = usage;
     const it = this.item();
     if (!it) return;
     this.lookUpMissing(it);
@@ -19005,10 +19285,11 @@ ${this.note.value}` : text;
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
     const q = openQuestion(it);
-    const above = [];
-    if (q) above.push(h("div", { class: "af-backlog-question", role: "status" }, icon("circle-question"), h("span", {}, q.text)));
-    above.push(this.actionsRow(view, it));
-    this.above.replaceChildren(...above);
+    this.question.hidden = !q;
+    if ((q?.id ?? 0) !== this.questionId) this.answer.value = "";
+    this.questionId = q?.id ?? 0;
+    this.questionText.textContent = q ? q.author === "af" ? `af asks: ${q.text}` : q.text : "";
+    this.above.replaceChildren(this.actionsRow(view, it));
     const below = [this.waitsSection(view, it)];
     const children = this.childrenSection(view, it);
     if (children) below.push(children);
@@ -19029,7 +19310,9 @@ ${this.note.value}` : text;
     restore();
   }
   /** Keeps the focus, and a field's value, across a rebuild: the same control
-   *  is found again by its tag, label and text. */
+   *  is found again by its tag, label and text. An item action that went away,
+   *  such as Start now once the item starts, hands focus to the first action
+   *  left, else to the state chip. */
   keepField() {
     const active = document.activeElement;
     const box = [this.above, this.below].find((b) => active && b.contains(active));
@@ -19040,9 +19323,13 @@ ${this.note.value}` : text;
     const text = active.textContent;
     const field2 = tag === "INPUT" || tag === "SELECT";
     const value = field2 ? active.value : "";
+    const action = active.dataset.action;
     return () => {
-      const next = [...box.querySelectorAll(tag.toLowerCase())].find((el2) => el2.getAttribute("aria-label") === label && (field2 || el2.textContent === text));
-      if (!next) return;
+      const next = action ? this.above.querySelector(`[data-action="${action}"]`) : [...box.querySelectorAll(tag.toLowerCase())].find((el2) => el2.getAttribute("aria-label") === label && (field2 || el2.textContent === text));
+      if (!next) {
+        if (action) (this.above.querySelector("[data-action]") ?? this.head).focus({ preventScroll: true });
+        return;
+      }
       if (field2) next.value = value;
       next.focus({ preventScroll: true });
     };
@@ -19050,10 +19337,13 @@ ${this.note.value}` : text;
   actionsRow(view, it) {
     const row = h("div", { class: "af-backlog-actions" });
     for (const a of itemActions(view.backlog, it, derivedOf(view, it.id))) {
-      row.append(button(ACTION_LABELS[a], () => {
+      const b = button(ACTION_LABELS[a], () => {
         if (a === "delete") this.actions.remove(it.id);
+        else if (a === "start") this.actions.start(it.id);
         else this.actions.status(it.id, ACTION_STATUS[a]);
-      }, a === "queue" ? "af-primary" : "af-ghost"));
+      }, a === "queue" || a === "start" ? "af-primary" : "af-ghost");
+      b.dataset.action = a;
+      row.append(b);
     }
     row.append(this.moveMenu(view, it));
     return row;
@@ -19111,7 +19401,7 @@ ${this.note.value}` : text;
     }
     const add = button("Add", () => {
       this.pickerOpen = !this.pickerOpen;
-      this.render(view, this.sessions);
+      this.render(view, this.sessions, this.usage);
       this.el.querySelector(".af-backlog-picker input")?.focus();
     });
     add.classList.add("af-backlog-wait-add");
@@ -19163,7 +19453,7 @@ ${this.note.value}` : text;
       if (e.key === "Escape") {
         e.preventDefault();
         this.pickerOpen = false;
-        this.render(view, this.sessions);
+        this.render(view, this.sessions, this.usage);
         this.below.querySelector(".af-backlog-wait-add")?.focus();
       }
     });
@@ -19207,7 +19497,15 @@ ${this.note.value}` : text;
       const absent = asked === "pending" ? "Checking\u2026" : asked === "failed" ? "Unavailable" : "Gone";
       const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : absent;
       const by = run.started_by === "runner" ? "runner" : "you";
-      const meta = [`Started by ${by}`, formatTime(run.started_at), live].join(" \xB7 ");
+      const meta = h("div", { class: "af-backlog-reason" }, [`Started by ${by}`, formatTime(run.started_at), live].join(" \xB7 "));
+      const cost = run.session_id ? this.usage?.runs[run.session_id] : void 0;
+      if (cost !== void 0 && this.usage) {
+        const use = runUse(run.session_id, this.usage, Date.now(), s?.account);
+        const words = use === null ? [`${usd(cost)} at API prices`] : [`${pct(use)} of the 5-hour window`, `${usd(cost)} at API prices`];
+        const span = h("span", { class: "af-backlog-run-use" }, words.join(" \xB7 "));
+        span.title = use === null ? "No reading for the 5-hour window" : `${usd(this.usage.run_window[run.session_id] ?? 0)} in this 5-hour window`;
+        meta.append(" \xB7 ", span);
+      }
       const btns = h("div", { class: "af-backlog-run-actions" });
       if (s?.id) {
         const sid = s.id;
@@ -19223,7 +19521,7 @@ ${this.note.value}` : text;
           "div",
           { class: "af-backlog-run-main" },
           h("div", { class: "af-backlog-run-title" }, run.title || run.session_id),
-          h("div", { class: "af-backlog-reason" }, meta)
+          meta
         ),
         btns
       ));
@@ -19236,32 +19534,277 @@ ${this.note.value}` : text;
   }
 };
 
-// src/backlog_pane.ts
-var DRAG_TYPE = "application/x-af-backlog-item";
-var EMPTY_COPY = "No items yet \xB7 Add one below, or ask an agent to make items from a proposal.";
-function usd(v) {
-  return `$${v.toFixed(2)}`;
-}
+// src/backlog_runner.ts
+var MAX_RUNNING = 8;
 var RUNNER_STATES = {
   off: "Runner off",
   idle: "Runner on",
+  running: "Runner on",
   waiting: "Runner waiting",
   stopped: "Runner paused"
 };
-function runnerText(view, budget) {
+function runnerWords(view) {
   const r = view.runner;
-  const parts = [(r.reason ?? "").replace(/\.$/, ""), `${r.used} of ${r.max} working`];
-  if (budget) {
-    parts.push(`Backlog share ${budget.share}% \xB7 stop at plan ${budget.stop_at}%`);
-    if (budget.usd_limit > 0) parts.push(`${usd(budget.usd_spent)} of ${usd(budget.usd_limit)}`);
+  return {
+    state: RUNNER_STATES[r.state] ?? "Runner on",
+    reason: webReason(r.reason ?? "").replace(/\.$/, ""),
+    warn: r.state === "stopped" || r.state === "waiting"
+  };
+}
+function unmeterableItem(view, usage) {
+  const sessions = Object.keys(usage?.unmeterable ?? {});
+  for (const it of view.backlog.items) {
+    if ((it.runs ?? []).some((r) => sessions.includes(r.session_id))) return it.id;
   }
-  return { state: RUNNER_STATES[r.state] ?? "Runner on", warn: r.state === "stopped", parts: parts.filter(Boolean) };
+  const m = /\bB-(\d+)\b/.exec(view.runner.reason ?? "");
+  return m ? Number(m[1]) : null;
+}
+function mainAction(view, usage) {
+  if (view.runner.state !== "stopped" && view.runner.state !== "waiting") return null;
+  switch (view.runner.gate) {
+    case "share":
+      return { kind: "share" };
+    case "no_reading":
+      return { kind: "run" };
+    case "unmeterable": {
+      const id = unmeterableItem(view, usage);
+      return id === null ? null : { kind: "open", id };
+    }
+  }
+  return null;
+}
+var BUDGET_FIELDS = [
+  { key: "share", label: "Backlog share", unit: "% of each plan window", max: 100, step: 1 },
+  { key: "stop_at", label: "Stop at plan %", unit: "% of either window, any use", max: 100, step: 1 },
+  { key: "max_per_run", label: "Cap per run", unit: "% of the 5-hour window", max: 100, step: 1 },
+  { key: "usd_limit", label: "Dollar limit", unit: "$ per window at API prices \xB7 0 is off", max: 1e6, step: 0.01 }
+];
+var RunnerBar = class {
+  constructor(actions2, now = Date.now) {
+    this.actions = actions2;
+    this.now = now;
+    this.toggle = h(
+      "button",
+      { type: "button", class: "af-backlog-toggle" },
+      h("span", { class: "af-backlog-toggle-knob", ariaHidden: "true" }),
+      this.toggleLabel
+    );
+    this.toggle.setAttribute("role", "switch");
+    this.toggle.setAttribute("aria-label", "Runner");
+    this.toggle.addEventListener("click", () => {
+      if (this.view) actions2.setRunner(!this.view.backlog.settings.runner);
+    });
+    this.slots = h("select", { class: "af-backlog-slots" });
+    this.slots.setAttribute("aria-label", "Max running");
+    this.slots.addEventListener("change", () => actions2.setMaxRunning(Number(this.slots.value)));
+    const hover = () => {
+      if (this.usage) this.plan.title = usageHover(this.usage, this.now());
+    };
+    this.plan.addEventListener("pointerenter", hover);
+    this.plan.setAttribute("aria-expanded", "false");
+    this.plan.addEventListener("click", () => {
+      this.planDetail.hidden = !this.planDetail.hidden;
+      this.plan.setAttribute("aria-expanded", String(!this.planDetail.hidden));
+      this.fillDetail();
+    });
+    this.main = h("button", { type: "button", class: "af-primary", hidden: true });
+    this.main.addEventListener("click", () => this.runMain());
+    this.run = h("button", { type: "button", class: "af-ghost" }, "Run next");
+    this.run.hidden = actions2.runNext === void 0;
+    this.run.addEventListener("click", () => actions2.runNext?.());
+    this.onDone = h(
+      "select",
+      { class: "af-backlog-move-select" },
+      h("option", { value: "keep" }, "Keep session"),
+      h("option", { value: "archive" }, "Archive session")
+    );
+    this.onDone.setAttribute("aria-label", "When an item is done");
+    this.onDone.addEventListener("change", () => actions2.setOnDone(this.onDone.value));
+    this.menu = h("details", { class: "af-backlog-settings" }, this.menuSummary(), this.menuPanel());
+    this.el = h(
+      "div",
+      { class: "af-backlog-head" },
+      h("span", { class: "af-backlog-heading" }, "Backlog"),
+      h("div", { class: "af-backlog-runner" }, this.toggle, this.reason, this.slots, this.plan),
+      h("div", { class: "af-backlog-runner-actions" }, this.main, this.run, this.menu),
+      this.planDetail
+    );
+  }
+  el;
+  toggle;
+  toggleLabel = h("span", { class: "af-backlog-runner-state" });
+  reason = h("span", { class: "af-backlog-reason" });
+  slots;
+  plan = h("button", { type: "button", class: "af-backlog-plan" });
+  planDetail = h("div", { class: "af-backlog-plan-detail", hidden: true });
+  slotsKey = "";
+  main;
+  run;
+  menu;
+  inputs = /* @__PURE__ */ new Map();
+  onDone;
+  view = null;
+  budget = null;
+  // Budget values asked for and not yet acknowledged, by field, and the chain that sends them.
+  pendingBudget = /* @__PURE__ */ new Map();
+  budgetRev = 0;
+  budgetQueue = Promise.resolve();
+  usage = null;
+  action = null;
+  menuSummary() {
+    const s = h("summary", { class: "af-ghost af-backlog-more" }, "\u22EF");
+    s.setAttribute("aria-label", "Runner and budget settings");
+    return s;
+  }
+  menuPanel() {
+    const fields2 = BUDGET_FIELDS.map((f) => {
+      const input = h("input", { type: "number", class: "af-backlog-number", min: "0", max: String(f.max), step: String(f.step) });
+      input.setAttribute("aria-label", f.label);
+      input.addEventListener("change", () => {
+        const v = Number(input.value);
+        if (input.value.trim() === "" || !Number.isFinite(v) || v < 0 || v > f.max) {
+          this.fill();
+          return;
+        }
+        const current = this.pendingBudget.get(f.key)?.v ?? this.budget?.[f.key];
+        if (current === v) return;
+        const rev = ++this.budgetRev;
+        this.pendingBudget.set(f.key, { v, rev });
+        this.writeBudget(f.key, v, rev);
+      });
+      this.inputs.set(f.key, input);
+      return h(
+        "label",
+        { class: "af-backlog-setting" },
+        h("span", { class: "af-backlog-label" }, f.label),
+        input,
+        h("span", { class: "af-backlog-reason" }, f.unit)
+      );
+    });
+    return h(
+      "div",
+      { class: "af-backlog-settings-panel" },
+      h("p", { class: "af-backlog-reason" }, "Budget \xB7 all projects"),
+      ...fields2,
+      h("p", { class: "af-backlog-reason" }, "Runner \xB7 this project"),
+      h("label", { class: "af-backlog-setting" }, h("span", { class: "af-backlog-label" }, "When an item is done"), this.onDone)
+    );
+  }
+  /** Writes go out one at a time, in the order they were made, so the last edit of a field is the
+   *  one the daemon ends up with. */
+  writeBudget(key, v, rev) {
+    const done2 = () => {
+      if (this.pendingBudget.get(key)?.rev === rev) this.pendingBudget.delete(key);
+      this.fill();
+    };
+    this.budgetQueue = this.budgetQueue.then(() => this.actions.setBudget({ [key]: v })).then(done2, done2);
+  }
+  runMain() {
+    const a = this.action;
+    if (!a) return;
+    if (a.kind === "run") this.actions.runNext?.();
+    else if (a.kind === "open") this.actions.openItem(a.id);
+    else {
+      this.menu.open = true;
+      this.inputs.get("share")?.focus();
+    }
+  }
+  update(view, budget, usage, busy) {
+    this.view = view;
+    this.budget = budget;
+    this.usage = usage;
+    const words = runnerWords(view);
+    const on = view.backlog.settings.runner;
+    this.toggle.setAttribute("aria-checked", String(on));
+    this.toggle.classList.toggle("af-backlog-toggle-on", on);
+    this.toggleLabel.textContent = words.state;
+    this.toggleLabel.classList.toggle("af-backlog-warn", words.warn);
+    this.reason.textContent = words.reason ? `\xB7 ${words.reason}` : "";
+    this.fillSlots(view);
+    this.fillPlan();
+    this.action = mainAction(view, usage);
+    const a = this.action;
+    this.main.hidden = a === null || a.kind === "run";
+    this.main.textContent = a?.kind === "open" ? `Open ${formatID(a.id)}` : "Change share";
+    this.run.className = a?.kind === "run" ? "af-primary" : "af-ghost";
+    this.run.disabled = busy;
+    this.fill();
+  }
+  /** Rebuilds the options only when their words change: replacing them
+   *  closes a native select the user has open. */
+  fillSlots(view) {
+    const used = view.runner.used;
+    const max = Math.max(1, view.backlog.settings.max_running);
+    const key = `${used}/${max}`;
+    if (key === this.slotsKey) return;
+    this.slotsKey = key;
+    const top = Math.max(MAX_RUNNING, max);
+    const opts = [];
+    for (let n = 1; n <= top; n++) opts.push(h("option", { value: String(n) }, `${used} of ${n} working`));
+    this.slots.replaceChildren(...opts);
+    this.slots.value = String(max);
+  }
+  fillDetail() {
+    if (this.planDetail.hidden || !this.usage) return;
+    this.planDetail.replaceChildren(...usageLines(this.usage, this.now()).map((l) => h("div", {}, l)));
+  }
+  fillPlan() {
+    const u = this.usage;
+    const b = this.budget;
+    this.plan.hidden = !u || !b;
+    if (!u || !b) {
+      this.planDetail.hidden = true;
+      return;
+    }
+    this.plan.title = usageHover(u, this.now());
+    this.fillDetail();
+    if (u.metering) {
+      this.plan.replaceChildren("Reading plan usage\u2026");
+      return;
+    }
+    const k = tighterWindow(u, b, this.now());
+    if (k === null) {
+      this.plan.replaceChildren(b.usd_limit > 0 ? `Backlog limit ${usd(b.usd_limit)} per window` : `Backlog share ${pct(b.share)}`);
+      return;
+    }
+    const w = u[k];
+    const fill = h("span", { class: "af-backlog-meter-fill" });
+    fill.style.width = `${b.share > 0 ? Math.min(100, w.backlog / b.share * 100) : 100}%`;
+    const meter = h("span", { class: "af-backlog-meter", role: "img" }, fill);
+    meter.setAttribute("aria-label", `${pct(w.backlog)} of a ${pct(b.share)} share`);
+    this.plan.replaceChildren(
+      `Backlog ${pct(w.backlog)} of ${WINDOW_LABELS[k].bar} `,
+      meter,
+      ` ${pct(b.share)} \xB7 You ${pct(Math.max(0, w.plan - w.backlog))}`
+    );
+  }
+  fill() {
+    for (const [key, input] of this.inputs) {
+      const shown = this.pendingBudget.get(key)?.v ?? this.budget?.[key];
+      if (document.activeElement !== input && shown !== void 0) input.value = String(shown);
+    }
+    if (this.view && document.activeElement !== this.onDone) this.onDone.value = this.view.backlog.settings.on_done || "keep";
+  }
+};
+
+// src/backlog_pane.ts
+var DRAG_TYPE = "application/x-af-backlog-item";
+var EMPTY_COPY = "No items yet \xB7 Add one below, or ask an agent to make items from a proposal.";
+function stillStarting(it, derived, inFlight, sessions) {
+  if (inFlight) return true;
+  if (derived !== void 0 && derived !== "starting" && derived !== "working") return false;
+  const run = it?.runs?.at(-1);
+  if (!run || run.state === "failed") return false;
+  if (run.state === "starting") return true;
+  return run.session_id !== "" && !sessions.some((s) => s.id === run.session_id);
 }
 var BacklogPane = class {
   constructor(host) {
     this.host = host;
     this.el = h("section", { class: "af-backlog" });
     this.el.setAttribute("aria-label", "Backlog");
+    this.runner = new RunnerBar(this.runnerActions());
+    this.headSlot.append(this.runner.el);
     this.newItem = entryField("New item\u2026", "New item title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
     const listWrap = h(
       "div",
@@ -19302,7 +19845,16 @@ var BacklogPane = class {
   requested = /* @__PURE__ */ new Set();
   rowEls = /* @__PURE__ */ new Map();
   newItem;
-  headSlot = h("div", { class: "af-backlog-head" });
+  // Items started from this tab, by project and id: gen is the refresh that
+  // follows the start's reply, Infinity until it comes.
+  starts = /* @__PURE__ */ new Map();
+  running = false;
+  // Starts asked for and not yet answered by the daemon, so a second click
+  // while the confirm or the request is out does nothing.
+  asking = /* @__PURE__ */ new Set();
+  confirmed = /* @__PURE__ */ new Set();
+  runner;
+  headSlot = h("div", {});
   filterSlot = h("div", {});
   listSlot = h("div", {});
   emptySlot = h("div", {});
@@ -19312,7 +19864,7 @@ var BacklogPane = class {
       if (sessions === this.sessions) return;
       const before = this.runSig(this.sessions);
       this.sessions = sessions;
-      if (this.runSig(sessions) === before) return;
+      if (this.runSig(sessions) === before && this.starts.size === 0) return;
       this.render();
       return;
     }
@@ -19353,8 +19905,127 @@ var BacklogPane = class {
   }
   view() {
     const v = this.root ? this.data?.views.get(this.root) : void 0;
-    if (v && this.pending && this.pending.root === this.root) return { ...v, backlog: overlayMove(v.backlog, this.pending.backlog, this.pending.base) };
-    return v;
+    if (!v) return v;
+    let out = v;
+    if (this.pending && this.pending.root === this.root) out = { ...out, backlog: overlayMove(out.backlog, this.pending.backlog, this.pending.base) };
+    const starting = [...this.starts.values()].filter((s) => s.root === this.root);
+    if (starting.length > 0) {
+      const states = { ...out.states };
+      for (const s of starting) states[String(s.id)] = { state: "starting" };
+      out = { ...out, states };
+    }
+    return out;
+  }
+  /** Drops the starts that the daemon's data and the session list now show. */
+  pruneStarts() {
+    const gen = this.data?.generation ?? 0;
+    for (const [k, s] of this.starts) {
+      const it = this.data?.views.get(s.root)?.backlog.items.find((x) => x.id === s.id);
+      const derived = this.data?.views.get(s.root)?.states[String(s.id)]?.state;
+      if (!stillStarting(it, derived, gen <= s.gen, this.sessions)) this.starts.delete(k);
+    }
+  }
+  /** Asks once per closed budget gate, by gate and window, before a start
+   *  by hand. */
+  async gateOK(v, verb, id) {
+    const gate = closedGate(this.data?.budget ?? null, this.data?.usage ?? null, v.runner, Date.now());
+    if (gate === null || this.confirmed.has(gate.key)) return true;
+    const ok = await this.host.confirm(
+      "Budget gate closed",
+      `${gate.text} ${verb} ${formatID(id)} anyway? Its use still counts.`,
+      `${verb} anyway`
+    );
+    if (ok) this.confirmed.add(gate.key);
+    return ok;
+  }
+  markStarting(root2, id) {
+    const entry = { root: root2, id, gen: Infinity };
+    this.starts.set(`${root2}
+${id}`, entry);
+    return entry;
+  }
+  settle(root2, entries) {
+    for (const e of entries) e.gen = this.host.started();
+    return this.host.refresh();
+  }
+  start(root2, id) {
+    const v = this.root === root2 ? this.view() : void 0;
+    const key = `${root2}
+${id}`;
+    if (!v || this.asking.has(key)) return;
+    this.asking.add(key);
+    void this.gateOK(v, "Start", id).then((ok) => {
+      const token2 = this.host.token();
+      if (!ok || token2 === null) {
+        this.asking.delete(key);
+        return;
+      }
+      const entry = this.markStarting(root2, id);
+      this.render();
+      startItem(root2, id, token2).then(() => {
+        this.asking.delete(key);
+        return this.settle(root2, [entry]);
+      }, (e) => {
+        this.asking.delete(key);
+        this.starts.delete(key);
+        this.host.notify(errorText(e));
+        this.render();
+        void this.host.refresh();
+      });
+    });
+  }
+  runNext() {
+    const v = this.view();
+    const root2 = this.root;
+    if (!v || !root2 || this.running) return;
+    this.running = true;
+    this.render();
+    const top = topQueued(v);
+    void (top ? this.gateOK(v, "Start", top.id) : Promise.resolve(true)).then((ok) => {
+      const token2 = this.host.token();
+      if (!ok || token2 === null) {
+        this.running = false;
+        this.render();
+        return;
+      }
+      runNext(root2, token2).then((r) => {
+        this.running = false;
+        if (r.started.length === 0 && r.reason) {
+          const why = webReason(r.reason);
+          this.host.notify(why.charAt(0).toUpperCase() + why.slice(1));
+        }
+        return this.settle(root2, r.started.map((id) => this.markStarting(root2, id)));
+      }, (e) => {
+        this.running = false;
+        this.host.notify(errorText(e));
+        void this.host.refresh();
+      }).finally(() => this.render());
+    });
+  }
+  async answer(root2, id, questionId, text) {
+    const v = this.root === root2 ? this.view() : this.data?.views.get(root2);
+    if (v && !await this.gateOK(v, "Answer", id)) return false;
+    const token2 = this.host.token();
+    if (token2 === null) return false;
+    try {
+      await answerQuestion(root2, id, questionId, text, token2);
+      void this.host.refresh();
+      return true;
+    } catch (e) {
+      this.host.notify(errorText(e));
+      void this.host.refresh();
+      return false;
+    }
+  }
+  runnerActions() {
+    return {
+      setRunner: (on) => this.mutate((t) => setSettings(this.root ?? "", { runner: on }, t)),
+      setMaxRunning: (n) => this.mutate((t) => setSettings(this.root ?? "", { max_running: n }, t)),
+      setOnDone: (onDone) => this.mutate((t) => setSettings(this.root ?? "", { on_done: onDone }, t)),
+      setBudget: (u) => this.write(this.root ?? "", (t) => setBudget(u, t).then((r) => this.host.applyBudget?.(r))),
+      runNext: backlogRoutes.runBacklog ? () => this.runNext() : void 0,
+      openItem: (id) => this.select(id)
+    };
   }
   mutate(run) {
     if (this.root) this.write(this.root, run);
@@ -19400,6 +20071,7 @@ var BacklogPane = class {
     }));
   }
   render() {
+    this.pruneStarts();
     const v = this.view();
     const error = this.root ? this.data?.errors.get(this.root) : void 0;
     if (this.root === null || !v) {
@@ -19436,7 +20108,7 @@ var BacklogPane = class {
     list.setAttribute("aria-label", "Items");
     this.rowEls = /* @__PURE__ */ new Map();
     for (const row of rows) list.append(this.row(v, row));
-    this.headSlot.replaceChildren(...this.runnerBar(v).childNodes);
+    this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
     this.filterSlot.replaceChildren(this.filters(v));
     this.listSlot.replaceChildren(list);
     this.emptySlot.replaceChildren();
@@ -19448,7 +20120,7 @@ var BacklogPane = class {
         this.panel = new ItemPanel(this.root, this.selected, this.panelActions(this.root));
         this.main.append(this.panel.el);
       }
-      this.panel.render(v, this.sessions);
+      this.panel.render(v, this.sessions, this.data?.usage ?? null);
     } else {
       this.closePanel();
     }
@@ -19464,25 +20136,6 @@ var BacklogPane = class {
     this.panel?.dispose();
     this.panel?.el.remove();
     this.panel = null;
-  }
-  runnerBar(v) {
-    const r = runnerText(v, this.data?.budget ?? null);
-    const bar = h(
-      "div",
-      { class: "af-backlog-runner" },
-      h("span", { class: `af-backlog-runner-state${r.warn ? " af-backlog-warn" : ""}` }, r.state),
-      ...r.parts.flatMap((p) => [" \xB7 ", p])
-    );
-    const budget = this.data?.budget;
-    if (budget && budget.usd_limit > 0) {
-      const fill = h("span", { class: "af-backlog-meter-fill" });
-      fill.style.width = `${Math.min(100, budget.usd_spent / budget.usd_limit * 100)}%`;
-      const meter = h("span", { class: "af-backlog-meter", role: "img" }, fill);
-      meter.setAttribute("aria-label", `${usd(budget.usd_spent)} of ${usd(budget.usd_limit)} spent`);
-      bar.append(" ", meter);
-    }
-    if (budget) bar.title = `All projects \xB7 cap per run ${budget.max_per_run}% of the plan window`;
-    return h("div", {}, h("span", { class: "af-backlog-heading" }, "Backlog"), bar);
   }
   filters(v) {
     const row = h("div", { class: "af-backlog-filters", role: "group" });
@@ -19661,6 +20314,8 @@ var BacklogPane = class {
       },
       // A note is appended once the daemon accepts it, whether or not the read after it landed.
       note: (id, text) => this.write(root2, (t) => addNote(root2, id, text, t)).then((o) => o !== "refused"),
+      start: (id) => this.start(root2, id),
+      answer: (id, questionId, text) => this.answer(root2, id, questionId, text),
       addChild: (parent, title) => this.write(root2, (t) => addItem(root2, { title, parent }, t)),
       select: (id) => this.select(id, root2),
       close: () => {
@@ -20160,6 +20815,7 @@ var AppShell = class {
       started: () => 0,
       notify: () => {
       },
+      confirm: async () => false,
       openSession: () => {
       },
       archiveSession: () => {
@@ -22162,7 +22818,7 @@ function captureTabDeleteTarget(target) {
 }
 
 // src/proposal_api.ts
-function isRecord2(v) {
+function isRecord3(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 function str(v) {
@@ -22170,7 +22826,7 @@ function str(v) {
 }
 var PUSH_STATES = ["idle", "countdown", "waiting_agent", "held", "sent"];
 function parsePushStatus(d) {
-  if (!isRecord2(d) || typeof d.state !== "string" || !PUSH_STATES.includes(d.state)) {
+  if (!isRecord3(d) || typeof d.state !== "string" || !PUSH_STATES.includes(d.state)) {
     return null;
   }
   const due = typeof d.due_in_ms === "number" && Number.isFinite(d.due_in_ms) ? Math.max(0, d.due_in_ms) : null;
@@ -22184,14 +22840,14 @@ function parsePushStatus(d) {
   };
 }
 function parseProposalPush(ev) {
-  if (!isRecord2(ev) || ev.type !== "proposal.push") {
+  if (!isRecord3(ev) || ev.type !== "proposal.push") {
     return null;
   }
   const status = parsePushStatus(ev.data);
   return status && status.sessionId !== "" && status.slug !== "" ? status : null;
 }
 function parseProposalChange(ev) {
-  if (!isRecord2(ev) || ev.type !== "proposal.changed" || !isRecord2(ev.data)) {
+  if (!isRecord3(ev) || ev.type !== "proposal.changed" || !isRecord3(ev.data)) {
     return null;
   }
   const d = ev.data;
@@ -22203,7 +22859,7 @@ function parseProposalChange(ev) {
 }
 
 // src/backlog_data.ts
-var EMPTY_BACKLOG_DATA = { views: /* @__PURE__ */ new Map(), errors: /* @__PURE__ */ new Map(), budget: null, generation: 0 };
+var EMPTY_BACKLOG_DATA = { views: /* @__PURE__ */ new Map(), errors: /* @__PURE__ */ new Map(), budget: null, usage: null, generation: 0 };
 var DEBOUNCE_MS = 150;
 function runSessionIds(data) {
   const ids = /* @__PURE__ */ new Set();
@@ -22217,7 +22873,7 @@ function runSessionIds(data) {
 var SESSION_EVENTS = /* @__PURE__ */ new Set(["session.updated", "session.killed", "session.archived", "session.restored"]);
 function backlogEventAction(type, sessionId, runSessions) {
   if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
-  if (type === "backlog.spend") return "budget";
+  if (type === "backlog.spend") return "spend";
   if (SESSION_EVENTS.has(type) && sessionId && runSessions?.has(sessionId)) return "refresh";
   return null;
 }
@@ -22227,8 +22883,12 @@ var BacklogLoader = class {
   }
   generation = 0;
   timer = null;
-  budgetTimer = null;
   budgetGeneration = 0;
+  spendGeneration = 0;
+  accountsTimer = null;
+  // Whether a backlog.spend since the last GetBudget reply named the
+  // unmeterable runs; an older daemon's payload does not.
+  spendUnmeterable = false;
   /** The newest refresh started so far. */
   started() {
     return this.generation;
@@ -22251,6 +22911,7 @@ var BacklogLoader = class {
     if (token2 === null) return /* @__PURE__ */ new Map();
     const gen = ++this.generation;
     const budgetGen = ++this.budgetGeneration;
+    const spendGen = this.spendGeneration;
     const roots = [...new Set(this.opts.roots().filter(Boolean))];
     const [results, budget] = await Promise.all([
       Promise.all(roots.map((root2) => getBacklog(root2, token2).then((view) => ({ root: root2, view, error: "" })).catch((e) => ({ root: root2, view: null, error: errorText(e) })))),
@@ -22271,17 +22932,60 @@ var BacklogLoader = class {
         if (old) views.set(r.root, old);
       }
     }
-    this.opts.commit({ views, errors, budget: budgetGen === this.budgetGeneration ? budget ?? cur.budget : cur.budget, generation: gen });
+    const fresh = budgetGen === this.budgetGeneration ? budget : null;
+    let usage = cur.usage;
+    if (fresh && spendGen === this.spendGeneration) {
+      usage = fresh.usage;
+      this.spendUnmeterable = false;
+    } else if (fresh && cur.usage && !this.spendUnmeterable) {
+      usage = { ...cur.usage, unmeterable: fresh.usage.unmeterable };
+    }
+    this.opts.commit({ views, errors, budget: fresh?.budget ?? cur.budget, usage, generation: gen });
     return ok;
   }
-  /** Refetches only the budget, for backlog.spend. */
-  async refreshBudget() {
+  /** Takes the budget and plan use a SetBudget reply carries. A GetBudget still in flight was read
+   *  before the save, so its reply is dropped. */
+  applyBudget(reply) {
+    this.budgetGeneration++;
+    this.opts.commit({ ...this.opts.current(), budget: reply.budget, usage: reply.usage });
+  }
+  /** Applies a backlog.spend payload. A GetBudget still in flight was read
+   *  before it, so that reply's plan use is dropped. */
+  applySpend(ev) {
+    const cur = this.opts.current();
+    const usage = applySpend(cur.usage, ev);
+    if (usage === cur.usage) return;
+    this.spendGeneration++;
+    if (spendHasUnmeterable(ev)) this.spendUnmeterable = true;
+    this.opts.commit({ ...cur, usage });
+    this.requestAccounts();
+  }
+  /** A spend event carries the top-level windows but not which account they are for, nor the
+   *  other accounts' windows, and the account the daemon meters can change between events. So
+   *  each burst of events is followed by one budget-only read, whose account identity and
+   *  per-account windows replace the ones kept. */
+  requestAccounts() {
+    if (this.accountsTimer !== null) return;
+    this.accountsTimer = setTimeout(() => {
+      this.accountsTimer = null;
+      void this.refreshAccounts();
+    }, DEBOUNCE_MS);
+  }
+  async refreshAccounts() {
     const token2 = this.opts.token();
     if (token2 === null) return;
-    const gen = ++this.budgetGeneration;
-    const budget = await getBudget(token2).catch(() => null);
-    if (gen !== this.budgetGeneration || this.opts.token() !== token2 || !budget) return;
-    this.opts.commit({ ...this.opts.current(), budget });
+    const budgetGen = this.budgetGeneration;
+    const spendGen = this.spendGeneration;
+    const fresh = await getBudget(token2).catch(() => null);
+    if (!fresh || this.opts.token() !== token2 || budgetGen !== this.budgetGeneration) return;
+    const cur = this.opts.current();
+    let usage = fresh.usage;
+    if (spendGen !== this.spendGeneration && cur.usage) {
+      usage = { ...cur.usage, account: fresh.usage.account, accounts: fresh.usage.accounts };
+    } else {
+      this.spendUnmeterable = false;
+    }
+    this.opts.commit({ ...cur, budget: fresh.budget, usage });
   }
   /** Coalesces a burst of events into one refetch. */
   request() {
@@ -22291,20 +22995,14 @@ var BacklogLoader = class {
       void this.refresh();
     }, DEBOUNCE_MS);
   }
-  requestBudget() {
-    if (this.budgetTimer !== null) return;
-    this.budgetTimer = setTimeout(() => {
-      this.budgetTimer = null;
-      void this.refreshBudget();
-    }, DEBOUNCE_MS);
-  }
   reset() {
     this.generation++;
     this.budgetGeneration++;
+    this.spendGeneration++;
     if (this.timer !== null) clearTimeout(this.timer);
-    if (this.budgetTimer !== null) clearTimeout(this.budgetTimer);
     this.timer = null;
-    this.budgetTimer = null;
+    if (this.accountsTimer !== null) clearTimeout(this.accountsTimer);
+    this.accountsTimer = null;
   }
 };
 
@@ -23153,6 +23851,12 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
   } else {
     mountWith();
   }
+}
+function confirmBacklog(title, body, confirmLabel) {
+  return askConfirm({ title, body, confirmLabel }, (m) => openModal(m, true), (m) => {
+    if (modal === m) closeModal();
+    else m.close();
+  });
 }
 function openDeleteProject(root2, label) {
   openModal(
@@ -24236,6 +24940,7 @@ var actions = {
     token: () => token,
     refresh: (root2) => backlogLoader.refresh(root2),
     started: () => backlogLoader.started(),
+    applyBudget: (reply) => backlogLoader.applyBudget(reply),
     notify: (message) => showTransientNotice(message),
     openSession: openBacklogSession,
     archiveSession: (id) => {
@@ -24247,7 +24952,8 @@ var actions = {
       if (s && isActionableSession(s)) openConfirm("restore", s);
     },
     loadSessions: adoptSessionsById,
-    addProject: () => openAddProject()
+    addProject: () => openAddProject(),
+    confirm: confirmBacklog
   },
   notice: surfaceNotice,
   paneDropHintAt: (x, y) => splitView.showTabDropHintAt(x, y),
@@ -24370,8 +25076,8 @@ function onEvent(ev) {
     return;
   }
   const backlogAction = backlogEventAction(ev.type, ev.data?.id, runSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
-  if (backlogAction === "budget") {
-    backlogLoader.requestBudget();
+  if (backlogAction === "spend") {
+    backlogLoader.applySpend(ev.data);
     return;
   }
   if (backlogAction === "refresh") {

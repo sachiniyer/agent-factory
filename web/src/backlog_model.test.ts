@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   type Backlog, type BacklogView, type Item, type ListOptions, type State,
-  applyMove, dropMove, itemActions, keyboardMove, listRows, needsYouByRoot, needsYouCount, needsYouLabel, neededBy, openQuestion, parseBacklogView, safeHttpUrl,
-  sessionItems, sessionItemsSig, sources,
+  applyMove, canStartNow, dropMove, itemActions, keyboardMove, listRows, needsYouByRoot, needsYouCount, needsYouLabel, neededBy, openQuestion, parseBacklogView, safeHttpUrl,
+  sessionItems, sessionItemsSig, sources, topQueued,
 } from "./backlog_model.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
 
@@ -202,17 +202,33 @@ test("itemActions offers only the changes the daemon allows", () => {
     Object.assign(b.items.find((it) => it.id === id) as Item, over);
     return itemActions(b, b.items.find((it) => it.id === id) as Item, { state });
   };
-  assert.deepEqual(at(5, { status: "draft" }), ["queue", "done", "drop", "delete"]);
-  assert.deepEqual(at(5, { status: "queued" }, "queued"), ["draft", "done", "drop"]);
-  assert.deepEqual(at(5, { status: "review" }, "in_review"), ["queue", "draft", "done", "drop"]);
+  assert.deepEqual(at(5, { status: "draft" }), ["queue", "start", "done", "drop", "delete"]);
+  assert.deepEqual(at(5, { status: "queued" }, "queued"), ["draft", "start", "done", "drop"]);
+  assert.deepEqual(at(5, { status: "queued" }, "waiting"), ["draft", "start", "done", "drop"]);
+  assert.deepEqual(at(5, { status: "review" }, "in_review"), ["queue", "draft", "start", "done", "drop"]);
   assert.deepEqual(at(5, { status: "running" }, "working"), ["done", "drop"]);
-  assert.deepEqual(at(5, { status: "done" }, "done"), ["reopen"]);
+  assert.deepEqual(at(5, { status: "running" }, "starting"), ["done", "drop"]);
+  assert.deepEqual(at(5, { status: "running" }, "stopped"), ["start", "done", "drop"]);
+  const capQ = { id: 1, kind: "question", author: "af", text: "This run used 11%…", at: "" };
+  assert.deepEqual(at(5, { status: "running", thread: [capQ] }, "needs_you"), ["review", "done", "drop"]);
+  const agentQ = { ...capQ, author: "agent:s1" };
+  assert.deepEqual(at(5, { status: "running", thread: [agentQ] }, "needs_you"), ["done", "drop"]);
+  assert.deepEqual(at(5, { status: "done", thread: [] }, "done"), ["reopen"]);
+  assert.deepEqual(at(5, { status: "dropped", thread: [] }, "dropped"), ["reopen"]);
   assert.deepEqual(at(6, { status: "draft", thread: [{ id: 1, kind: "note", author: "user", text: "n", at: "" }] }),
-    ["queue", "done", "drop"]);
+    ["queue", "start", "done", "drop"]);
   assert.deepEqual(at(1, {}), ["queue", "drop"]);
   for (const id of [2, 4]) Object.assign(b.items.find((it) => it.id === id) as Item, { status: "queued" });
   assert.deepEqual(at(1, {}, "queued"), ["drop"]);
   assert.deepEqual(at(1, {}, "done"), []);
+});
+
+test("topQueued is the first queued leaf in tree order", () => {
+  const b = tree();
+  const v = view(b);
+  assert.equal(topQueued(v), undefined);
+  v.states = { 1: { state: "queued" }, 3: { state: "waiting" }, 4: { state: "queued" }, 5: { state: "queued" } };
+  assert.equal(topQueued(v)?.id, 4);
 });
 
 test("listRows source filter keeps a proposal's items", () => {
@@ -234,6 +250,19 @@ test("safeHttpUrl keeps http and https links only", () => {
 test("needsYouLabel agrees with its count", () => {
   assert.equal(needsYouLabel(1), "1 needs you");
   assert.equal(needsYouLabel(3), "3 need you");
+});
+
+test("canStartNow offers Start now only where the daemon's start rule accepts it", () => {
+  const b = tree();
+  const leaf = b.items.find((it) => it.id === 5) as Item;
+  const parent = b.items.find((it) => it.id === 1) as Item;
+  const ok = (state: State, status: Item["status"] = "queued"): boolean => canStartNow(b, { ...leaf, status }, { state });
+  assert.equal(canStartNow(b, parent, { state: "queued" }), false, "a parent runs through its children");
+  for (const status of ["done", "dropped"] as const) assert.equal(ok(status, status), false, `${status} must be reopened first`);
+  assert.equal(ok("starting", "running"), false, "already starting");
+  assert.equal(ok("working", "running"), false, "an active run is already working");
+  assert.equal(ok("needs_you", "running"), false, "the answer is the next step");
+  for (const state of ["draft", "queued", "waiting", "in_review", "stopped"] as const) assert.equal(ok(state), true, state);
 });
 
 test("a rebound project's chips are redrawn: the signature includes the root", () => {
