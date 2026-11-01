@@ -240,29 +240,6 @@ func skippedRepoReasonForReadError(err error) string {
 	return SkippedRepoReasonUnreadableInstancesJSON
 }
 
-// SkippedRepos returns the repos dropped at daemon startup due to a
-// corrupted/unreadable instances.json, or a file that parsed but whose rows
-// failed to load (#603), scoped to repoID (all repos when empty). It is the
-// wire surface the Snapshot RPC carries so a CLI list/get/whoami can refuse or
-// caveat rather than silently serving a partial list as complete (#730's
-// principle extended to the wire surface #1029 PR 2 introduced) — except a
-// fresh startup rows-failure, which is withheld (see startupRowsFailedRepos).
-//
-// Seeded from the most recent startup refresh and trimmed by the polling path
-// to drop repaired repos, but never gains a mid-life-corrupted one: a repo
-// that becomes corrupted mid-life keeps its prior in-memory rows via
-// re-hydration, so its sessions remain in the snapshot and it is correctly
-// NOT reported as skipped until the daemon restarts and re-runs startup. A
-// previously-skipped repo whose instances.json now parses falls out of the
-// set so list/get/whoami stop refusing the now-complete snapshot. See
-// daemon.go::refreshDaemonInstances and retainStillSkipped below for the skip
-// lifecycle.
-func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.skippedReposScopedLocked(repoID)
-}
-
 // seedStartupRowsFailedRepos records the repos whose instances.json PARSED at
 // daemon startup but whose rows failed to load (rows-failed-to-load). The
 // startup orphan sweep still arms from skippedRepos, but the Snapshot RPC
@@ -286,8 +263,7 @@ func (m *Manager) seedStartupRowsFailedRepos(skipped []SkippedRepo) {
 // skippedReposScopedLocked returns a defensive copy of m.skippedRepos scoped to
 // repoID (all repos when empty), with a fresh startup rows-failure withheld from
 // the wire (startupRowsFailedRepos). The caller MUST hold m.mu: it is the read
-// side shared by SkippedRepos (the public wrapper that locks for the standalone
-// read) and SnapshotWithSkipped (which calls it inside its own single lock
+// side used by SnapshotWithSkipped (which calls it inside its own single lock
 // acquisition so the instance pointers and the skip set are sampled from the
 // same manager generation).
 func (m *Manager) skippedReposScopedLocked(repoID string) []SkippedRepo {
@@ -344,8 +320,8 @@ func (m *Manager) skippedReposScopedLocked(repoID string) []SkippedRepo {
 // under the lock, exactly what Manager.Snapshot already did for the instance
 // half, extended here to read the skip set under the same acquisition.
 //
-// The single-lock read closes the race separate Snapshot and SkippedRepos
-// calls leave open: between Snapshot releasing m.mu and SkippedRepos
+// The single-lock read closes the race separate Snapshot and skip-set
+// reads leave open: between Snapshot releasing m.mu and a skip-set read
 // re-acquiring it, a polling refresh can repair a startup-skipped repo —
 // loading its now-parseable rows into m.instances and trimming the now-stale
 // skip set — so the response would carry the OLD, INCOMPLETE instance list
@@ -558,7 +534,7 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	// projection returned with this response.
 	operationClockMS := operationClockMilliseconds()
 	// Read instances AND the skip set in ONE acquisition of m.mu, not as
-	// separate Snapshot+SkippedRepos calls, so a polling refresh that repairs a
+	// separate Snapshot and skip-set reads, so a polling refresh that repairs a
 	// startup-skipped repo between the two cannot leave the response carrying
 	// the old, incomplete instance list with the new, cleared skip set — a
 	// 'sessions list' would then report the repaired repo as silently empty
