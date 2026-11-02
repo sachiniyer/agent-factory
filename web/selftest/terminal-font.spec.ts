@@ -7,22 +7,63 @@ import { decode, Op } from "../src/frame.js";
 // writes is what the FIRST resize of a reloaded page reports — no
 // paint-at-default-then-jump attach.
 
+/** Every stream is registered so afterEach can log its timeline — the #6639
+ *  instrumentation: green or red, the run shows when the config RPCs resolved
+ *  relative to each refit rather than reporting a bare cols diff. */
+const liveStreams: Array<{ timeline(): string }> = [];
+
 /** The outgoing frames of every terminal /stream socket — the wire witness for
  *  grid changes and input, so the assertions read what the PTY is told rather
- *  than what the page believes it rendered. */
+ *  than what the page believes it rendered.
+ *
+ *  Every frame and every config response is stamped on one clock (#6639): the
+ *  waits below key on the GRID a resize carries, never on a frame count — a
+ *  contested foreign-echo re-assert and a rows-only host refit also emit an
+ *  OpResize, on the same columns the unstepped pitch already produced, so a
+ *  bare ">N" can be satisfied (or an exact count overshot) by a frame that
+ *  never carried the stepped pitch. */
 function frameStream(page: Page) {
-  const frames: Array<ReturnType<typeof decode>> = [];
+  const t0 = Date.now();
+  const frames: Array<{ decoded: ReturnType<typeof decode>; at: number }> = [];
+  const config: Array<{ what: string; at: number }> = [];
   page.on("websocket", socket => {
     if (!new URL(socket.url()).pathname.endsWith("/stream")) return;
     socket.on("framesent", ({ payload }) => {
       if (typeof payload === "string") return;
-      frames.push(decode(payload));
+      frames.push({ decoded: decode(payload), at: Date.now() - t0 });
     });
   });
-  return {
-    resizes: () => frames.filter(f => f.op === Op.Resize).map(f => ({ rows: f.rows, cols: f.cols })),
-    inputs: () => frames.filter(f => f.op === Op.Input).map(f => Array.from(f.data)),
+  // The config half of the same timeline — the connect-time read's retries and
+  // a stepped pitch's save POST plus its echo refetch — ordered against the
+  // refit frames they cause, so a red run prints WHEN each side happened.
+  const noteConfig = (request: { url(): string; postDataJSON(): unknown }, status: string) => {
+    const path = new URL(request.url()).pathname;
+    if (path !== "/v1/GetConfig" && path !== "/v1/SetConfigValue") return;
+    let what = path.endsWith("GetConfig") ? "GetConfig" : "SetConfigValue";
+    try {
+      const body = request.postDataJSON() as { key?: string; value?: string } | null;
+      if (typeof body?.key === "string") what += ` ${body.key}=${body.value ?? ""}`;
+    } catch {
+      // A non-JSON body still names its route.
+    }
+    config.push({ what: `${what} ${status}`, at: Date.now() - t0 });
   };
+  page.on("response", resp => noteConfig(resp.request(), `→${resp.status()}`));
+  page.on("requestfailed", request => noteConfig(request, "failed"));
+  const resizes = () => frames.filter(f => f.decoded.op === Op.Resize)
+    .map(f => ({ rows: f.decoded.rows, cols: f.decoded.cols, at: f.at }));
+  const stream = {
+    resizes,
+    inputs: () => frames.filter(f => f.decoded.op === Op.Input).map(f => Array.from(f.decoded.data)),
+    /** The whole witness, ordered: "resize 80x24@180ms | GetConfig →500@1040ms | …" */
+    timeline: () => [
+      ...frames.filter(f => f.decoded.op === Op.Resize)
+        .map(f => ({ what: `resize ${f.decoded.cols}x${f.decoded.rows}`, at: f.at })),
+      ...config,
+    ].sort((a, b) => a.at - b.at).map(e => `${e.what}@${e.at}ms`).join(" | "),
+  };
+  liveStreams.push(stream);
+  return stream;
 }
 
 async function setFont(request: APIRequestContext, key: string, value: string): Promise<void> {
@@ -56,6 +97,9 @@ async function attachSession(page: Page, request: APIRequestContext): Promise<vo
 }
 
 test.afterEach(async ({ request }) => {
+  for (const stream of liveStreams.splice(0)) {
+    console.log(`#6639 wire timeline: ${stream.timeline()}`);
+  }
   // The fixture daemon's config is shared across specs — leave it on the
   // defaults so a later spec never inherits a stepped pitch.
   await request.post("/v1/SetConfigValue", { data: { key: "web.terminal_font_size_phone", value: "6.5" } });
@@ -100,8 +144,12 @@ test("#5500 desktop A+ refits into a smaller grid, persists, and survives a relo
   await expect(zoom).toBeVisible();
   const inputsBefore = stream.inputs().length;
   await zoom.click();
-  await expect.poll(() => stream.resizes().length,
-    { message: "A+ must refit the terminal into a coarser grid" }).toBeGreaterThan(1);
+  // Counting frames cannot witness this refit (#6639): a contested foreign-echo
+  // re-assert emits an OpResize on the PRE-step grid, satisfying ">1" while
+  // carrying the unstepped cols. Wait for the wire to carry a different grid —
+  // at a fixed host size only the pitch moves cols.
+  await expect.poll(() => stream.resizes().at(-1)?.cols,
+    { message: "A+ must refit the terminal into a coarser grid" }).not.toBe(initial.cols);
   const stepped = stream.resizes().at(-1)!;
   expect(stepped.cols).toBeLessThan(initial.cols);
   expect(stepped.rows).toBeLessThanOrEqual(initial.rows);
@@ -161,6 +209,7 @@ test("#5500 a config read landing behind a queued save must not stomp the steppe
   const zoom = page.locator(".af-term-head").first()
     .getByRole("button", { name: "Increase terminal text size", exact: true });
   const before = stream.resizes().length;
+  const preStepCols = stream.resizes().at(-1)!.cols;
 
   // First step (13→14): its save completes the POST, then its refetch parks at
   // the held route — the queue entry stays open around it.
@@ -172,8 +221,13 @@ test("#5500 a config read landing behind a queued save must not stomp the steppe
   // is still open, so the write queues behind it (or, on a build without the
   // guard, stalls at the held route). Either way the daemon still serves 14.
   await zoom.click();
-  await expect.poll(() => stream.resizes().length,
-    { message: "both steps must refit before the stale read is released" }).toBe(before + 2);
+  // Both stepped grids must reach the wire — a frame COUNT cannot prove that
+  // (#6639): a foreign-echo re-assert on a grid already sent would satisfy or
+  // overshoot "before + 2" without a second pitch ever being applied. The
+  // witness is two DISTINCT post-step column counts.
+  await expect.poll(() => new Set(stream.resizes().slice(before)
+      .filter(r => r.cols !== preStepCols).map(r => r.cols)).size,
+    { message: "both steps must refit before the stale read is released" }).toBe(2);
   await page.waitForTimeout(600); // the second debounce fires — its save is queued
   const resizesAfterSteps = stream.resizes().length;
 
@@ -221,14 +275,17 @@ test("#5500 a failed font save surfaces on the toast, not silently", async ({ pa
 
   const zoom = page.locator(".af-term-head").first()
     .getByRole("button", { name: "Increase terminal text size", exact: true });
-  const before = stream.resizes().length;
+  const settledCols = stream.resizes().at(-1)!.cols;
   await zoom.click();
 
   // The size still applies locally — display state is honest about what it is —
   // but the refusal reaches the user on the toast rather than landing on a
-  // config row nothing renders.
-  await expect.poll(() => stream.resizes().length,
-    { message: "the stepped size still applies locally while its save fails" }).toBe(before + 1);
+  // config row nothing renders. The wait keys on the stepped GRID, not a frame
+  // count (#6639): a same-grid re-assert can push the count past "before + 1"
+  // while the real refit is still queued — an exact-count check then waits out
+  // its whole timeout on a number that can never come back.
+  await expect.poll(() => stream.resizes().at(-1)?.cols,
+    { message: "the stepped size still applies locally while its save fails" }).not.toBe(settledCols);
   const toast = page.locator(".af-toast.af-toast-show");
   await expect(toast, "a refused font save must surface a visible error").toBeVisible();
   await expect(toast).toContainText("not saved");
@@ -275,9 +332,11 @@ test("#5500 a failed connect-time config read retries until the persisted pitch 
   // The landed read applies the persisted 15 through the normal commit: the
   // font controller refits and a corrective OpResize leaves on the coarser
   // grid — the same convergence an on-time read would have produced before
-  // the first attach.
-  await expect.poll(() => stream.resizes().length,
-    { message: "the retried read must refit the terminal onto the persisted pitch" }).toBeGreaterThan(1);
+  // the first attach. The wait keys on the new GRID (#6639): a contested
+  // foreign-echo re-assert emits an OpResize on the default grid, satisfying
+  // ">1" without the persisted pitch ever landing.
+  await expect.poll(() => stream.resizes().at(-1)?.cols,
+    { message: "the retried read must refit the terminal onto the persisted pitch" }).not.toBe(defaulted.cols);
   const landed = stream.resizes().at(-1)!;
   expect(landed.cols, "the landed read must apply the persisted 15px pitch").not.toEqual(defaulted.cols);
   // And the witness on the wire: two retries behind the failed connect read.
@@ -308,8 +367,11 @@ test("#5500 phone A+ steps the phone pitch, persists it, and leaves an armed mod
   await bar.getByRole("button", { name: "Arrows", exact: true }).click();
   const inputsBefore = stream.inputs().length;
   await bar.getByRole("button", { name: "Increase terminal text size", exact: true }).click();
-  await expect.poll(() => stream.resizes().length,
-    { message: "the phone A+ must refit the terminal into a coarser grid" }).toBeGreaterThan(1);
+  // Same witness as the desktop step (#6639): wait for the stepped GRID on the
+  // wire, not a second frame — a same-cols re-assert satisfies ">1" while the
+  // pitch never moved.
+  await expect.poll(() => stream.resizes().at(-1)?.cols,
+    { message: "the phone A+ must refit the terminal into a coarser grid" }).not.toBe(initial.cols);
   const stepped = stream.resizes().at(-1)!;
   expect(stepped.cols).toBeLessThan(initial.cols);
   expect(stream.inputs().length, "A+ must send no bytes to the PTY").toBe(inputsBefore);
