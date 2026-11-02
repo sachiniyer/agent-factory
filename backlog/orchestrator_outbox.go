@@ -16,12 +16,15 @@ const (
 	OrchRetryStep = time.Minute
 )
 
-// OrchDelivery is a group whose pending events af can deliver now.
+// OrchDelivery is a group whose pending events, or whose pending start
+// prompt, af can deliver now.
 type OrchDelivery struct {
 	Group     int
 	SessionID string
 	Program   string
-	Events    []OrchEvent
+	// Events are the pending events. None means the delivery carries only the
+	// start prompt that Unstarted asks for.
+	Events []OrchEvent
 	// Unstarted is the orchestrator's Unstarted: send the start prompt.
 	Unstarted string
 	// Replacing is a replacement af began for this session, if any.
@@ -65,14 +68,17 @@ func (b *Backlog) OrchEscalated(group int) bool {
 	return it != nil && it.OpenQuestion() != nil
 }
 
-// OrchDeliveries lists the groups whose pending events af delivers now: the
-// group is bound, has events, is not escalated, and its retry wait is over.
+// OrchDeliveries lists the groups af delivers to now: the group is bound, has
+// events or a session that has not had its start prompt (Unstarted), is not
+// escalated, and its retry wait is over. A start prompt is due without events:
+// a session the user started from the web whose first prompt never arrived has
+// none, and the group may queue none for a long time (Codex P2 on #6627).
 func (b *Backlog) OrchDeliveries(now time.Time) []OrchDelivery {
 	var out []OrchDelivery
 	for i := range b.Items {
 		it := &b.Items[i]
 		o := it.Orchestrator
-		if o == nil || len(o.Events) == 0 || b.OrchEscalated(it.ID) {
+		if o == nil || (len(o.Events) == 0 && o.Unstarted == "") || b.OrchEscalated(it.ID) {
 			continue
 		}
 		if n := len(o.Failures); n > 0 && now.Before(o.Failures[n-1].Add(time.Duration(n)*OrchRetryStep)) {
@@ -90,17 +96,19 @@ func (b *Backlog) OrchDeliveries(now time.Time) []OrchDelivery {
 }
 
 // BeginOrchDelivery marks group's pending events as in flight and returns
-// them, when they are due for delivery now. The delivery opens a new turn, so
-// a --stay from an earlier turn is dropped. changed is false when the backlog
-// already held that mark, so the caller need not write it.
+// them, when they are due for delivery now. A delivery with events opens a new
+// turn, so a --stay from an earlier turn is dropped; one that carries only the
+// start prompt opens none, so the --stay holds. changed is false when the
+// backlog already held that mark, so the caller need not write it.
 func (b *Backlog) BeginOrchDelivery(group int, now time.Time) (d OrchDelivery, ok, changed bool) {
 	for _, c := range b.OrchDeliveries(now) {
 		if c.Group != group {
 			continue
 		}
 		o := b.Item(group).Orchestrator
-		changed = o.Sending != len(c.Events) || o.Stay
-		o.Sending, o.Stay = len(c.Events), false
+		stay := o.Stay && len(c.Events) == 0
+		changed = o.Sending != len(c.Events) || o.Stay != stay
+		o.Sending, o.Stay = len(c.Events), stay
 		return c, true, changed
 	}
 	return OrchDelivery{}, false, false
@@ -181,7 +189,7 @@ func (b *Backlog) BeginOrchReplace(group int, sessionID, titleBase string, now t
 // OrchEscalationQuestion is the question af asks on a group when it cannot
 // reach the group's orchestrator.
 func OrchEscalationQuestion(title, reason string) string {
-	return fmt.Sprintf("af could not wake the effort session %q %d times in %d minutes (last: %s). Its events wait. Check the session, then answer here to try again.",
+	return fmt.Sprintf("af could not wake the effort session %q %d times in %d minutes (last: %s). Nothing is lost: af keeps what it has to send. Check the session, then answer here to try again.",
 		title, OrchMaxFailures, int(OrchFailureWindow/time.Minute), reason)
 }
 
@@ -235,19 +243,25 @@ func (b *Backlog) OrchEventsPrompt(group int, events []OrchEvent) string {
 }
 
 // OrchStartPrompt is the first prompt of a session that orchestrates group
-// without the earlier conversation: a replacement af started, or a restored
-// session whose agent conversation is gone. It carries the handoff and the
-// pending events. proposalDir is the group's proposal directory, or "".
-func (b *Backlog) OrchStartPrompt(group int, proposalDir string, replaced bool, events []OrchEvent) string {
+// without the earlier conversation, and why, an OrchUnstarted value: a
+// replacement af started (OrchUnstartedReplaced), a session the user started
+// for a group with none (OrchUnstartedNew), or a restored session whose agent
+// conversation is gone (OrchUnstartedRestarted, and any other value). It
+// carries the handoff and the pending events. proposalDir is the group's
+// proposal directory, or "".
+func (b *Backlog) OrchStartPrompt(group int, proposalDir, why string, events []OrchEvent) string {
 	it := b.Item(group)
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "You orchestrate backlog effort %s: %s\n", FormatID(group), it.Title)
 	if proposalDir != "" {
 		fmt.Fprintf(&sb, "It comes from the proposal in %s\n", proposalDir)
 	}
-	if replaced {
+	switch why {
+	case OrchUnstartedReplaced:
 		sb.WriteString("\nThe session that orchestrated it before is gone. af started this session to replace it and bound it to the group.\n")
-	} else {
+	case OrchUnstartedNew:
+		sb.WriteString("\nThe user started this session from the web to orchestrate the group, and af bound it to the group.\n")
+	default:
 		sb.WriteString("\nThis session restarted without its earlier conversation.\n")
 	}
 	sb.WriteString("\nYour job:\n")

@@ -8,15 +8,17 @@
 import { h } from "./dom.js";
 import { icon } from "./icon.js";
 import { BodyEditor } from "./backlog_body.js";
-import { type GroupChange, groupButtons, groupSections } from "./backlog_group_panel.js";
+import { type GroupChange, type OrchestratorActions, groupButtons, groupSections, orchestratorSection } from "./backlog_group_panel.js";
 import { answerEffect, answerEffectText, isGroup } from "./backlog_groups.js";
 import { QuestionBox } from "./backlog_inbox.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
 import type { ItemUpdate } from "./backlog_api.js";
 import {
   ACTION_LABELS, type BacklogView, type Item, type ItemAction, type MoveTarget, type RunRef, STATE_GLYPHS, STATE_LABELS, type Status,
-  childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, latestRun, neededBy, openQuestion, safeHttpUrl,
+  childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, latestRun, neededBy, orchestratorQuestion, safeHttpUrl,
+  userQuestions, withOrchestrator,
 } from "./backlog_model.js";
+import { WITH_EFFORT_SESSION } from "./backlog_effort.js";
 import type { PreviewCache } from "./backlog_preview.js";
 import { ROW_KIND_LABELS, isArchived, rowKind } from "./status.js";
 import { type Usage, pct, runUse, usd } from "./backlog_usage.js";
@@ -56,6 +58,7 @@ export interface PanelActions {
   /** Reads sessions the rail has not loaded (archived rows are paged in lazily) into the session list. Rejects when it cannot tell. */
   loadSessions(ids: string[]): Promise<void>;
   group(id: number, change: GroupChange): void;
+  orchestrator: OrchestratorActions;
 }
 
 const ACTION_STATUS: Record<Exclude<ItemAction, "delete" | "start">, Status> = {
@@ -273,8 +276,9 @@ export class ItemPanel {
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
-    const q = openQuestion(it);
-    this.question.set(q, q ? answerEffectText(answerEffect(it, sessions, (id) => this.lookups.get(id))) : "");
+    const q = userQuestions(view.backlog, it)[0] ?? orchestratorQuestion(view.backlog, it);
+    const effect = q ? answerEffectText(answerEffect(it, sessions, (id) => this.lookups.get(id))) : "";
+    this.question.set(q, q && withOrchestrator(view.backlog, it.id, q) ? `${WITH_EFFORT_SESSION} · ${effect}` : effect);
     const card = this.sessionCard(view, it);
     this.card.hidden = card.length === 0;
     this.card.replaceChildren(...card);
@@ -282,7 +286,11 @@ export class ItemPanel {
     const below: HTMLElement[] = [this.waitsSection(view, it)];
     const children = this.childrenSection(view, it);
     if (children) below.push(children);
-    if (isGroup(view.backlog, it)) below.push(...groupSections(view, it, this.actions.select));
+    if (isGroup(view.backlog, it)) {
+      const orch = orchestratorSection(view, it, this.actions.orchestrator);
+      if (orch) below.push(orch);
+      below.push(...groupSections(view, it, this.actions.select));
+    }
     if (it.source?.proposal) below.push(h("p", { class: "af-backlog-source" }, icon("file-text"), `From proposal ${it.source.proposal}`));
     this.below.replaceChildren(...below);
     this.threadList.replaceChildren(...(it.thread ?? []).map((m) => h("li", { class: `af-backlog-msg af-backlog-msg-${m.kind}` },

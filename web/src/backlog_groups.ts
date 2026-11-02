@@ -3,7 +3,7 @@
 
 import {
   type Backlog, type BacklogView, type Item, type Message, type State,
-  archivedBy, derivedOf, isAncestor, isParent, itemByID, latestRun, openQuestions,
+  archivedBy, derivedOf, isAncestor, isParent, itemByID, latestRun, userQuestions,
 } from "./backlog_model.js";
 import { isArchived, rowKind } from "./status.js";
 import { InFlightOp, type SessionData } from "./types.js";
@@ -17,15 +17,33 @@ export interface InboxEntry {
   question: Message;
 }
 
-/** Every open question of the project, oldest first, leaving out archived
- *  groups. An item that holds two open questions shows each. */
+/** Every open question of the project that is with the user, oldest first,
+ *  leaving out archived groups and questions that wait for a group's
+ *  orchestrator. An item that holds two open questions shows each. */
 export function inbox(view: BacklogView): InboxEntry[] {
   const out: InboxEntry[] = [];
   for (const item of view.backlog.items) {
     if (archivedBy(view.backlog, item.id)) continue;
-    for (const question of openQuestions(item)) out.push({ item, question });
+    for (const question of userQuestions(view.backlog, item)) out.push({ item, question });
   }
   const at = (e: InboxEntry): number => Date.parse(e.question.at) || 0;
+  return out.sort((a, b) => at(a) - at(b));
+}
+
+export interface InboxNote {
+  item: Item;
+  note: Message;
+}
+
+/** The notes the Inbox shows, such as an effort session's done note, oldest
+ *  first, leaving out archived groups. They need no action. */
+export function inboxNotes(view: BacklogView): InboxNote[] {
+  const out: InboxNote[] = [];
+  for (const item of view.backlog.items) {
+    if (archivedBy(view.backlog, item.id)) continue;
+    for (const note of item.thread ?? []) if (note.kind === "note" && note.inbox) out.push({ item, note });
+  }
+  const at = (e: InboxNote): number => Date.parse(e.note.at) || 0;
   return out.sort((a, b) => at(a) - at(b));
 }
 

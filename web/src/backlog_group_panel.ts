@@ -1,9 +1,11 @@
 // The group parts of the item panel (backlog-v2 proposal, ui.md "Item panel"):
-// Pause / Unpause and Archive / Unarchive, Dependencies and History.
+// Pause / Unpause and Archive / Unarchive, Dependencies and History, and the
+// Orchestrator row (effort orchestrator proposal, ui.md "Layout").
 
 import { h } from "./dom.js";
 import { type BacklogView, type Item, STATE_GLYPHS, STATE_LABELS, derivedOf, formatID } from "./backlog_model.js";
 import { groupDependencies, groupHistory } from "./backlog_groups.js";
+import { orchestratorOf, orchestratorStateText } from "./backlog_effort.js";
 import { formatTime } from "./time.js";
 
 export interface GroupChange {
@@ -42,6 +44,34 @@ function link(view: BacklogView, id: number, it: Item | undefined, select: (id: 
 
 function section(title: string, ...children: Node[]): HTMLElement {
   return h("section", { class: "af-backlog-section" }, h("h3", { class: "af-backlog-section-title" }, title), ...children);
+}
+
+export interface OrchestratorActions {
+  open(group: number): void;
+  unbind(group: number): void;
+  /** The Start effort session button, as the card header shows it. */
+  start(view: BacklogView, group: Item): HTMLButtonElement;
+}
+
+/** The group's effort session: its title, which opens it, its state, the
+ *  events waiting for it, and Unbind. A group with none offers Start effort
+ *  session, unless it is archived. */
+export function orchestratorSection(view: BacklogView, group: Item, actions: OrchestratorActions): HTMLElement | null {
+  const o = orchestratorOf(view, group.id);
+  if (!o) {
+    if (group.archived) return null;
+    return section("Orchestrator", h("div", { class: "af-backlog-dep af-backlog-orchestrator" },
+      h("span", { class: "af-backlog-reason" }, "No effort session"), actions.start(view, group)));
+  }
+  const open = h("button", { type: "button", class: "af-backlog-item-link" }, o.title || o.session_id);
+  open.setAttribute("aria-label", `Open effort session ${o.title || o.session_id}`);
+  open.addEventListener("click", () => actions.open(group.id));
+  const facts = [orchestratorStateText(o.state)];
+  if (o.pending > 0) facts.push(`${o.pending} pending event${o.pending === 1 ? "" : "s"}`);
+  const unbind = action("Unbind", "unbind-orchestrator", () => actions.unbind(group.id));
+  unbind.setAttribute("aria-label", "Unbind effort session");
+  return section("Orchestrator", h("div", { class: "af-backlog-dep af-backlog-orchestrator" }, open,
+    h("span", { class: "af-backlog-reason" }, facts.join(" · ")), unbind));
 }
 
 export function groupSections(view: BacklogView, group: Item, select: (id: number) => void): HTMLElement[] {

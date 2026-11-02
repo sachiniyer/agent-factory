@@ -684,6 +684,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/OpenBacklogOrchestrator",
+		Description: "Name the session to open for a group's orchestrator: an archived, lost or dead one is restored first, a killed or missing one is replaced by a new session bound in its place, and a group with none gets a new session bound to it. Returns the session's id and title, and change: restored, replaced, started, or empty when the session was live.",
+		requestType: reflect.TypeOf(OpenBacklogOrchestratorRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.OpenBacklogOrchestrator) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/GetBudget",
 		Description: "Read the global backlog budget: the limit, the total plan percent under which the runner starts items in both Claude plan windows, the cap per run, and the dollar limit for accounts with no plan readings, with each plan window's plan %, the backlog's part of it, the metered cost of everything in it (all_cost) and its reset time, per Claude account, and each item session's cost in total (runs) and within its account's current 5-hour window (run_window). Usage comes from the last metering pass; before the first one ends, metering is true.",
 		requestType: reflect.TypeOf(GetBudgetRequest{}),

@@ -32,9 +32,29 @@ export interface Message {
   then?: string;
   /** The asking agent's notes for a later run. */
   handoff?: string;
+  /** Where a question goes: "orchestrator", "user", or unset for the user. */
+  route?: string;
+  /** A note the Inbox shows, such as an effort session's done note. */
+  inbox?: boolean;
   at: string;
   /** An answer's way to the agent; "new_run" and "superseded" do not close its question. */
   delivery?: string;
+}
+
+/** The session that owns a group, as Item.orchestrator stores it. */
+export interface Orchestrator {
+  session_id: string;
+  title: string;
+  program?: string;
+  bound_at: string;
+}
+
+/** A group's orchestrator as GetBacklog's orchestrators map shows it: its
+ *  session state (live, archived, lost, dead, limited, gone) and how many
+ *  events wait for it. */
+export interface OrchestratorView extends Orchestrator {
+  state: string;
+  pending: number;
 }
 
 export interface Item {
@@ -52,6 +72,7 @@ export interface Item {
   archived?: boolean;
   runs?: RunRef[];
   thread?: Message[];
+  orchestrator?: Orchestrator | null;
   created_at: string;
   updated_at: string;
 }
@@ -88,6 +109,8 @@ export interface BacklogView {
   backlog: Backlog;
   states: Record<string, Derived>;
   runner: RunnerView;
+  /** Each orchestrated group's orchestrator, by group id. */
+  orchestrators?: Record<string, OrchestratorView>;
 }
 
 /** The global budget: the plan % under which the runner starts items, the
@@ -183,6 +206,7 @@ export function parseBacklogView(d: unknown): BacklogView {
     },
     states: isRecord(v.states) ? (v.states as Record<string, Derived>) : {},
     runner,
+    orchestrators: isRecord(v.orchestrators) ? (v.orchestrators as Record<string, OrchestratorView>) : {},
   };
 }
 
@@ -240,6 +264,36 @@ export function openQuestion(it: Item): Message | undefined {
   return openQuestions(it)[0];
 }
 
+/** The top-level item above id, or id itself. */
+export function rootOf(b: Backlog, id: number): number {
+  const seen = new Set<number>();
+  let it = itemByID(b, id);
+  while (it?.parent && !seen.has(it.id)) {
+    seen.add(it.id);
+    const up = itemByID(b, it.parent);
+    if (!up) break;
+    it = up;
+  }
+  return it?.id ?? id;
+}
+
+/** Whether question q of item id waits for its group's orchestrator, as the
+ *  daemon decides it (backlog/orchestrator_questions.go withOrchestrator): a
+ *  routed question in a group that lost its orchestrator is the user's. */
+export function withOrchestrator(b: Backlog, id: number, q: Message): boolean {
+  return q.route === "orchestrator" && !!itemByID(b, rootOf(b, id))?.orchestrator;
+}
+
+/** The item's open questions that are with the user, oldest first. */
+export function userQuestions(b: Backlog, it: Item): Message[] {
+  return openQuestions(it).filter((q) => !withOrchestrator(b, it.id, q));
+}
+
+/** The item's oldest open question that waits for its group's orchestrator. */
+export function orchestratorQuestion(b: Backlog, it: Item): Message | undefined {
+  return openQuestions(it).find((q) => withOrchestrator(b, it.id, q));
+}
+
 /** id itself or its nearest ancestor that is archived, or 0. */
 export function archivedBy(b: Backlog, id: number): number {
   const seen = new Set<number>();
@@ -250,13 +304,13 @@ export function archivedBy(b: Backlog, id: number): number {
   return 0;
 }
 
-/** Open questions across every given backlog, leaving out archived groups:
- *  the Inbox count. Parents roll a child's question up, so counting questions
- *  (not states) counts each once. */
+/** Open questions with the user across every given backlog, leaving out
+ *  archived groups: the Inbox count. Parents roll a child's question up, so
+ *  counting questions (not states) counts each once. */
 export function needsYouCount(views: Iterable<BacklogView>): number {
   let n = 0;
   for (const v of views) {
-    for (const it of v.backlog.items) if (!archivedBy(v.backlog, it.id)) n += openQuestions(it).length;
+    for (const it of v.backlog.items) if (!archivedBy(v.backlog, it.id)) n += userQuestions(v.backlog, it).length;
   }
   return n;
 }
@@ -353,7 +407,7 @@ export function listRows(view: BacklogView, opts: ListOptions): ListRow[] {
   const needsBelow = (id: number): number =>
     (kids.get(id) ?? []).reduce((n, c) => {
       const it = itemByID(b, c);
-      return n + (it && openQuestion(it) ? 1 : 0) + needsBelow(c);
+      return n + (it && userQuestions(b, it).length > 0 ? 1 : 0) + needsBelow(c);
     }, 0);
   const rows: ListRow[] = [];
   const walk = (parent: number, depth: number): void => {

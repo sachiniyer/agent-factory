@@ -168,7 +168,7 @@ import { captureTabDeleteTarget } from "./tab_delete_target.js";
 import { type AccountsResponse, type DaemonHealth, type HostEntry, type SessionData, type SkippedRepo, TabKind, type TaskData, type WireEvent } from "./types.js";
 import { publishProposalChange, publishProposalPush, publishProposalResync } from "./docs_tab.js";
 import { parseProposalChange, parseProposalPush } from "./proposal_api.js";
-import { BacklogLoader, EMPTY_BACKLOG_DATA, backlogEventAction, runSessionIds } from "./backlog_data.js";
+import { BacklogLoader, EMPTY_BACKLOG_DATA, backlogEventAction, backlogSessionIds } from "./backlog_data.js";
 import { trackViewportInsets } from "./viewport-insets.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
@@ -3752,7 +3752,7 @@ function onEvent(ev: WireEvent): void {
   // ListTasks refetch (the authoritative task projection). The session reducer
   // no-ops these, so run both: the reducer for session.* and the task refetch for
   // task.*.
-  const backlogAction = backlogEventAction(ev.type, ev.data?.id, runSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
+  const backlogAction = backlogEventAction(ev.type, ev.data?.id, backlogSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
   if (backlogAction === "spend") {
     backlogLoader.applySpend(ev.data);
     return;
