@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	xansi "github.com/charmbracelet/x/ansi"
@@ -408,6 +409,12 @@ pointing at one).`,
 			return jsonError(err)
 		}
 
+		// Trim the account flag so what is sent, what the daemon stores, and the
+		// skew check below all agree. A whitespace-only --account is "" (ambient),
+		// not a raw string the daemon's gates treat as absent while the record
+		// treats as present. Mirrors the Program normalization (#5123).
+		account := strings.TrimSpace(createAccountFlag)
+
 		inPlace := createHereFlag || createInPlaceFlag
 
 		var workspace, program string
@@ -429,7 +436,7 @@ pointing at one).`,
 			Title:    createTitle,
 			RepoPath: workspace,
 			Program:  program,
-			Account:  createAccountFlag,
+			Account:  account,
 			Prompt:   createPromptFlag,
 			InPlace:  inPlace,
 			Backend:  createBackendFlag,
@@ -451,13 +458,13 @@ pointing at one).`,
 		// BACK rather than what was sent. Reported as a failure, and it names the
 		// session, because one now exists that must be removed rather than used
 		// (#3075 review).
-		if createAccountFlag != "" && data.Account != createAccountFlag {
+		if account != "" && data.Account != account {
 			return jsonError(fmt.Errorf(
 				"session %q was created but the daemon did not apply account %q — it is running on the ambient "+
 					"identity, not that account. The running daemon predates account support; upgrade it "+
 					"(af daemon restart after an upgrade) and recreate. Remove the unscoped session with "+
 					"`%s`",
-				data.Title, createAccountFlag,
+				data.Title, account,
 				// Through the shellsuggest seam, not %s: a title may contain a space or a
 				// shell metacharacter (validation rejects only whitespace-only titles and
 				// control characters), so `af sessions kill my session` fails with "too many
@@ -949,13 +956,14 @@ func localCreateInputs(createTitle string, inPlace bool) (string, string, error)
 	// The shim lookup stays as the fail-closed final check, but it runs in the
 	// pane and deliberately prints only a generic message, so a typo'd account
 	// would otherwise fail after mutation with nothing naming the cause or the
-	// fix (#3051 review).
-	if createAccountFlag != "" {
+	// fix (#3051 review). Trim so a whitespace-only value is treated as absent
+	// here too, not silently by agentaccount.Selected's internal trim.
+	if account := strings.TrimSpace(createAccountFlag); account != "" {
 		home, herr := config.GetConfigDir()
 		if herr != nil {
 			return "", "", herr
 		}
-		if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag); aerr != nil {
+		if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), account); aerr != nil {
 			return "", "", aerr
 		}
 	}

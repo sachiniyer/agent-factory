@@ -547,6 +547,18 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
+	// Normalize the account name once, before any gate reads it. A
+	// whitespace-only value is trimmed to "" (ambient identity) and a non-empty
+	// value that cannot be a registered account name is refused — so the
+	// recorded Account is always a valid name or empty, never a raw whitespace
+	// string the gates treated as absent while the record treated as present.
+	// Mirrors the Program normalization (#5123).
+	normalizedAccount, accountNameErr := validateAccountName(opts.Account)
+	if accountNameErr != nil {
+		return nil, accountNameErr
+	}
+	opts.Account = normalizedAccount
+
 	// Resolve once, before any gate that depends on the effective backend. Keep a
 	// resolution error until the point where backendFactory used to report it so
 	// invalid config retains its established error precedence.

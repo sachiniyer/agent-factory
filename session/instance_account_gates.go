@@ -15,6 +15,32 @@ import (
 // Extracted from instance_factory.go to keep both files under the 1000-line
 // lint limit (#1145).
 
+// validateAccountName normalizes an account name at admission: a
+// whitespace-only value (e.g. `--account " "` or `--account "$VAR"` where $VAR
+// is whitespace) is trimmed to "" — no account, ambient identity — and a
+// non-empty value that cannot be a registered account name is refused.
+//
+// This is the single point that makes every reader of opts.Account agree on
+// the same identity. Before it, a whitespace-only value was treated as absent
+// by every TrimSpace gate (refuseOffBoxAccount, refuseUnsupportedAccountAgent,
+// the provisioning resolution) but as present by the record-keeping code,
+// which stored the raw string on the Instance — so the session ran (or failed)
+// with no account scoping while every display surface reported it as
+// account-scoped. That is the silent wrong-identity outcome the account
+// boundary exists to prevent. After it, the invariant holds: a stored non-empty
+// Account is always a ValidateName-valid name, and the session either ran
+// scoped or the create was refused. Mirrors the Program normalization (#5123).
+func validateAccountName(account string) (string, error) {
+	trimmed := strings.TrimSpace(account)
+	if trimmed == "" {
+		return "", nil
+	}
+	if err := agentaccount.ValidateName(trimmed); err != nil {
+		return "", fmt.Errorf("invalid account %q: %w", account, err)
+	}
+	return trimmed, nil
+}
+
 // refuseOffBoxAccount rejects an account-scoped session on a backend that cannot
 // carry the account. For ssh, sandbox and hook this is a DECISION, not a gap
 // (#3103) — see offBoxAccountRefusal for each backend's reason.
