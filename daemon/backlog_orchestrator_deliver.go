@@ -304,11 +304,14 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 	data, err := createBacklogSession(m, ctx, create)
 	delivered := d.Events
 	switch {
-	case err != nil && isMutationCommitted(err) && data.ID != "":
-		// The create kept a session whose startup it could not confirm (Codex P2
-		// on #6571): it may be running, so it is bound rather than replaced by a
-		// second one, unstarted so the next delivery sends the start prompt. A
-		// session that never came up fails those deliveries, and they escalate.
+	case err != nil && isMutationCommitted(err) && data.ID != "" && data.StartupStateUnknown:
+		// The create kept a session whose startup it could not confirm
+		// (keepUncertainCreate, Codex P2 on #6571): it may be running, so it is
+		// bound rather than replaced by a second one, unstarted so the next
+		// delivery sends the start prompt. A session that never came up fails
+		// those deliveries, and they escalate. The other committed creates return
+		// a kill tombstone the daemon is cleaning up (keepFailedCreate): those
+		// failed, below (Codex P2 on #6575).
 		m.warn().Printf("orchestrator replacement %q for %s: %v; binding it, since it may be running", data.Title, backlog.FormatID(d.Group), err)
 		delivered = nil
 	case err == nil && data.ID == "":

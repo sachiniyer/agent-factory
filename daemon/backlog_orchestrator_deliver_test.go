@@ -528,7 +528,7 @@ func TestOrchestratorReplacementWithAnUncertainCreateIsBound(t *testing.T) {
 		m.mu.Lock()
 		m.instances[daemonInstanceKey(repoID, "effort B-2 Effort")] = &session.Instance{ID: "n1", Title: "effort B-2 Effort", Program: "claude", CreatedAt: time.Now()}
 		m.mu.Unlock()
-		return session.InstanceData{ID: "n1", Title: "effort B-2 Effort"}, &mutationCommittedError{err: errors.New("its startup outcome could not be determined safely")}
+		return session.InstanceData{ID: "n1", Title: "effort B-2 Effort", StartupStateUnknown: true}, &mutationCommittedError{err: errors.New("its startup outcome could not be determined safely")}
 	}
 	t.Cleanup(func() { createBacklogSession = prev })
 	stubBacklogSend(t, m, repoID)
@@ -542,4 +542,29 @@ func TestOrchestratorReplacementWithAnUncertainCreateIsBound(t *testing.T) {
 
 	runOrchDelivery(t, m, repoID, time.Now())
 	require.Equal(t, 1, creates, "no second replacement")
+}
+
+// TestOrchestratorReplacementWhoseCreateKeptATombstoneIsAFailure: a create can
+// also commit a kill tombstone the daemon is cleaning up (keepFailedCreate,
+// after a failed start or an orphaned sandbox). Nothing of it runs, so it is
+// not bound: the replacement failed, and the next pass may start another
+// (Codex P2 on #6575, which this predicate shares).
+func TestOrchestratorReplacementWhoseCreateKeptATombstoneIsAFailure(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	m.mu.Lock()
+	delete(m.instances, daemonInstanceKey(repoID, "planner"))
+	m.mu.Unlock()
+	prev := createBacklogSession
+	createBacklogSession = func(*Manager, context.Context, CreateSessionRequest) (session.InstanceData, error) {
+		return session.InstanceData{ID: "n1", Title: "effort B-2 Effort"}, &mutationCommittedError{err: errors.New("its cleanup could not complete safely")}
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	runOrchDelivery(t, m, repoID, time.Now())
+
+	o := orchOf(t, repoID)
+	require.Equal(t, "o1", o.SessionID, "a tombstone is not bound as the orchestrator")
+	require.Len(t, o.Failures, 1)
+	require.Nil(t, o.Replacing, "the failed create clears the record, so a later pass may start another")
+	require.Len(t, o.Events, 1)
 }
