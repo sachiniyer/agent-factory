@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1dd7c19ba786";
+var CLIENT_VERSION = "6563ad70c84e";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -14225,7 +14225,11 @@ function minSubtreeSize(node, dir, leafMinPx, dividerPx) {
   }
   const a = minSubtreeSize(node.a, dir, leafMinPx, dividerPx);
   const b = minSubtreeSize(node.b, dir, leafMinPx, dividerPx);
-  return node.dir === dir ? a + dividerPx + b : Math.max(a, b);
+  if (node.dir !== dir) {
+    return Math.max(a, b);
+  }
+  const r = Math.min(Math.max(node.ratio, 0.01), 0.99);
+  return Math.max(a / r, b / (1 - r)) + dividerPx;
 }
 function leafSizes(root2, w, h2, dividerPx) {
   const out = /* @__PURE__ */ new Map();
