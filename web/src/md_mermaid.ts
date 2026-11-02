@@ -20,20 +20,56 @@ import type { EditorView } from "@codemirror/view";
 import { WidgetType } from "@codemirror/view";
 import { errorText } from "./api.js";
 
-/** What dist/lazy/mermaid.js (src/mermaid_chunk.ts) exports. */
+/** What dist/lazy/mermaid.js (src/mermaid_chunk.ts) puts on its frame's window. */
 interface MermaidChunk {
   renderMermaidDiagram(source: string, theme: Record<string, string>): Promise<string>;
 }
 
 let chunk: Promise<MermaidChunk> | null = null;
 
-/** Fetches the mermaid chunk once; a failed load is forgotten so a retry refetches. */
+// Renderers can make the browser fetch URLs the diagram names — label <img>
+// metadata, flowchart img nodes, font/url() CSS — before the svg string ever
+// reaches sanitizeSvg. So mermaid runs inside a srcdoc iframe whose own CSP
+// (stacked on the page's) denies every fetch: nothing but same-origin scripts
+// and inline styles is allowed in, images/fonts/connections are 'none' by
+// default-src. The only thing that leaves the frame is the svg string.
+const RENDER_FRAME_CSP =
+  "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; " +
+  "img-src 'none'; font-src 'none'; connect-src 'none'; media-src 'none'; " +
+  "object-src 'none'; frame-src 'none'; worker-src 'none'; child-src 'none'; " +
+  "manifest-src 'none'; base-uri 'none'; form-action 'none'";
+
+async function openRenderFrame(): Promise<MermaidChunk> {
+  const url = new URL("./mermaid.js", import.meta.url).href;
+  const frame = document.createElement("iframe");
+  frame.setAttribute("aria-hidden", "true");
+  frame.tabIndex = -1;
+  frame.style.cssText = "position:fixed;left:-200vw;top:-200vh;width:1px;height:1px;border:0";
+  frame.srcdoc =
+    `<!doctype html><meta charset="utf-8">` +
+    `<meta http-equiv="Content-Security-Policy" content="${RENDER_FRAME_CSP}">` +
+    `<script type="module" src="${url}"><\/script>`;
+  document.body.appendChild(frame);
+  const w = frame.contentWindow;
+  if (!w) {
+    frame.remove();
+    throw new Error("the mermaid render frame has no window");
+  }
+  // The chunk self-registers on the frame's window when its module executes;
+  // a load failure only ever shows as a timeout, so a retry rebuilds it all.
+  for (let i = 0; i < 400; i++) {
+    const api = (w as unknown as { __afMermaidChunk?: MermaidChunk }).__afMermaidChunk;
+    if (api) return api;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  frame.remove();
+  throw new Error("the mermaid chunk did not load in its render frame");
+}
+
+/** Owns the render frame once; a failed open is forgotten so a retry rebuilds. */
 function loadMermaidChunk(): Promise<MermaidChunk> {
   if (!chunk) {
-    // A computed specifier keeps esbuild from inlining the chunk here (same
-    // trick docs_tab.ts uses for this very bundle).
-    const url = new URL("./mermaid.js", import.meta.url).href;
-    chunk = (import(url) as Promise<MermaidChunk>).catch((e: unknown) => {
+    chunk = openRenderFrame().catch((e: unknown) => {
       chunk = null;
       throw e;
     });
@@ -148,38 +184,65 @@ const KEEP = new Set([
   "style", "image",
 ]);
 
-// CSS that reaches outside the SVG — a fetch (external url, @import) or an
-// injected rule (expression, binding, script schemes). url(#id) stays: it is
-// how markers, clipPaths and gradients reference each other inside the file.
-const EXTERNAL_CSS = /url\s*\(\s*['"]?\s*(?!#)|@import|@charset|@namespace|expression\s*\(|javascript:|vbscript:|-moz-binding|behavior\s*:/i;
+const SVG_NS = "http://www.w3.org/2000/svg";
 
-function scrub(el: Element): void {
+// A <style> block survives only when it holds nothing mermaid could not have
+// written itself: no url/image-set reference of any kind (#fragment refs live
+// in attributes, never in the style text), no backslash (u\72l escapes), no
+// comment opener (u/**/rl) — and no at-rule but the @keyframes mermaid ships
+// in every diagram, which the page styles pin to animation:none anyway. One
+// hit drops the whole block — a diagram's own CSS never needs any of them, so
+// one means the source was hostile, not stylish.
+const HOSTILE_STYLE =
+  /url|image-set|\\|\/\*|@(?!keyframes\b)|expression|javascript:|vbscript:|-moz-binding|behavior\s*:/i;
+
+// In an attribute value, image-set, backslash escapes, comment obfuscation
+// and the scriptable schemes are never legitimate. url() is checked per
+// occurrence instead — url(#...) is how markers, gradients and clips point at
+// each other inside the file, and any other argument means a fetch.
+const HOSTILE_ATTR_VALUE =
+  /image-set|\\|\/\*|expression\s*\(|javascript:|vbscript:|-moz-binding|behavior\s*:/i;
+
+const CSS_URL_ARG = /url\s*\(\s*['"]?\s*(.)/gi;
+
+/** True when a value holds a url() whose target is anything but #fragment —
+ *  a fetch the diagram chose. (A regex lookahead can't express this: the
+ *  whitespace/quote skip would backtrack and let url( match alone.) */
+function hasExternalCssUrl(value: string): boolean {
+  for (const m of value.matchAll(CSS_URL_ARG)) if (m[1] !== "#") return true;
+  return false;
+}
+
+export function scrub(el: Element): void {
   for (const child of [...el.children]) {
-    if (!KEEP.has(child.localName.toLowerCase())) {
+    const name = child.localName.toLowerCase();
+    // Only SVG-namespace elements on the keep list: a same-named element in
+    // another namespace (MathML, XHTML) never survives.
+    if (child.namespaceURI !== SVG_NS || !KEEP.has(name)) {
       child.remove();
       continue;
     }
-    if (child.localName.toLowerCase() === "style" && EXTERNAL_CSS.test(child.textContent ?? "")) {
-      // The whole block goes: a diagram's own CSS never needs an external
-      // reference, so one means the source was hostile, not stylish.
+    if (name === "style" && HOSTILE_STYLE.test(child.textContent ?? "")) {
       child.remove();
       continue;
     }
     scrub(child);
   }
   for (const attr of [...el.attributes]) {
-    const name = attr.name.toLowerCase();
+    // Attributes are matched by local name, so namespaced lookalikes
+    // (evil:href, evil:onclick) get the same treatment as the plain names.
+    const local = attr.localName.toLowerCase();
     const value = attr.value;
-    if (name.startsWith("on") || name === "srcdoc") {
+    if (local.startsWith("on") || local === "srcdoc") {
       el.removeAttribute(attr.name);
-    } else if (name === "href" || name === "xlink:href") {
+    } else if (local === "href") {
       // Internal fragment refs (#id) stay, and <image> keeps inline raster
       // data — a link out of the file does not. Only <image> may carry data:;
       // on <use> it can name a whole second document.
       const v = value.trim().toLowerCase();
       const ok = v.startsWith("#") || (el.localName.toLowerCase() === "image" && v.startsWith("data:image/"));
       if (!ok) el.removeAttribute(attr.name);
-    } else if (EXTERNAL_CSS.test(value)) {
+    } else if (HOSTILE_ATTR_VALUE.test(value) || hasExternalCssUrl(value)) {
       el.removeAttribute(attr.name);
     }
   }

@@ -2,7 +2,9 @@
 // live preview, the mermaid library arrives in its own lazy chunk that only a
 // document containing a block fetches, an invalid diagram reports inline next
 // to its source, and a hostile diagram — click callbacks, javascript: links,
-// HTML in labels — renders inert inside the daemon's control origin.
+// HTML in labels, CSS and metadata that name URLs — renders inert inside the
+// daemon's control origin and can never make the browser ask for what it names
+// (the render happens inside a srcdoc iframe whose CSP denies every fetch).
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -97,6 +99,19 @@ test("docs mermaid: an invalid diagram reports inline and keeps the document", a
   await expect(pane.locator(".cm-content"), "the document after the fence still renders").toContainText("Afterwards.");
 });
 
+// A request a diagram could have chosen: anything carrying a probe marker
+// (the fixtures name /af-mmd-probe/* paths that exist nowhere), anything on
+// the web-tab proxy path (which forwards to a session's dev server), or
+// anything off this origin at all. Same-origin counts — that is the point.
+function diagramChosenRequests(requests: string[], pageUrl: string): string[] {
+  const pageOrigin = new URL(pageUrl).origin;
+  return requests.filter((u) => {
+    const url = new URL(u);
+    return url.pathname.includes("/af-mmd-probe/") || url.pathname.startsWith("/v1/webtab/") ||
+      ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== pageOrigin);
+  });
+}
+
 test("docs mermaid: click callbacks, javascript: links and HTML labels render inert", async ({ page, request }) => {
   const dialogs: string[] = [];
   page.on("dialog", (d) => {
@@ -110,6 +125,7 @@ test("docs mermaid: click callbacks, javascript: links and HTML labels render in
   const hostile = `%%{init: {"themeVariables": {"fontFamily": "x; background: url(https://mmd.invalid/pixel.png);"}}}%%
 flowchart LR
   A["<img src=x onerror=globalThis.__pwned=1>"] --> B["<b>normal</b>"]
+  C@{ img: "/af-mmd-probe/node.png", label: "img", w: 40, h: 40, constraint: "off" }
   click A call alert(1)
   click B href "javascript:globalThis.__pwned=2"`;
   const pane = await openDocs(page, request, "mermaid-hostile-probe", "mermaid-hostile-plan", {
@@ -136,11 +152,41 @@ flowchart LR
   }
   expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
   expect(dialogs, "no dialog may come out of a diagram").toEqual([]);
-  const pageOrigin = new URL(page.url()).origin;
-  const external = requests.filter((u) => {
-    const url = new URL(u);
-    return (url.protocol === "http:" || url.protocol === "https:") && url.origin !== pageOrigin;
+  const chosen = diagramChosenRequests(requests, page.url());
+  expect(chosen, "a diagram may not make the browser ask for anything it names").toEqual([]);
+  await expect(pane.locator(".cm-content")).toContainText("End.");
+});
+
+test("docs mermaid: a render cannot make the browser ask for anything the diagram names", async ({ page, request }) => {
+  const requests: string[] = [];
+  page.on("request", (r) => requests.push(r.url()));
+  // Every fetch vector a diagram can name, each pointed at a marker path that
+  // exists nowhere: flowchart img node metadata, a top-level fontFamily via
+  // an init directive (lands in the host div's style attribute and the
+  // generated <style>), the same via yaml frontmatter, and an image-set()
+  // value with a bare-string URL — plus an external URL for good measure.
+  const probes = `%%{init: {"fontFamily": "x; background: url(/af-mmd-probe/font-directive.png);"}}}%%
+flowchart LR
+  P@{ img: "/af-mmd-probe/img-node.png", label: "img", w: 40, h: 40, constraint: "off" }
+  P --> Q["node"]`;
+  const frontmatter = `---
+config:
+  fontFamily: "x; background: image-set('/af-mmd-probe/imgset.png' 1x), url(https://mmd.invalid/f.png)"
+---
+flowchart LR
+  F1 --> F2`;
+  const pane = await openDocs(page, request, "mermaid-fetch-probe", "mermaid-fetch-plan", {
+    goals: `# Fetch probes\n\n${fence(probes)}\n\nMiddle.\n\n${fence(frontmatter)}\n\nEnd.\n`,
   });
-  expect(external, "a diagram may not reach outside this origin").toEqual([]);
+  const widgets = pane.locator(".cm-md-mermaid");
+  await expect(widgets.first().locator("svg")).toBeVisible({ timeout: 30_000 });
+  // Each widget either rendered an svg or reported inline; either way nothing
+  // may have fetched — the render frame's CSP denies every load the diagram
+  // names, same-origin included.
+  for (const w of await widgets.all()) {
+    await expect(w.locator("svg, .cm-md-mermaid-errtext").first()).toBeVisible();
+  }
+  const chosen = diagramChosenRequests(requests, page.url());
+  expect(chosen, "zero diagram-chosen requests, same-origin counted").toEqual([]);
   await expect(pane.locator(".cm-content")).toContainText("End.");
 });

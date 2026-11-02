@@ -99,10 +99,10 @@ under the `perf-baselines` artifact.
 | --- | ---: | ---: | ---: | ---: |
 | raw_bytes | 1377536.000 | 1377536.000–1377536.000 | 0.000 | 1446412.800 |
 | gzip_bytes | 315696.000 | 315696.000–315696.000 | 0.000 | 331480.800 |
-| lazy_raw_bytes | 376299.000 | 376299.000–376299.000 | 0.000 | 395113.950 |
-| lazy_gzip_bytes | 121970.000 | 121970.000–121970.000 | 0.000 | 128068.500 |
-| mermaid_raw_bytes | 5187539.000 | 5187539.000–5187539.000 | 0.000 | 5446915.950 |
-| mermaid_gzip_bytes | 1507006.000 | 1507006.000–1507006.000 | 0.000 | 1582356.300 |
+| lazy_raw_bytes | 377432.000 | 377432.000–377432.000 | 0.000 | 396303.600 |
+| lazy_gzip_bytes | 122809.000 | 122809.000–122809.000 | 0.000 | 128949.450 |
+| mermaid_raw_bytes | 5187694.000 | 5187694.000–5187694.000 | 0.000 | 5447078.700 |
+| mermaid_gzip_bytes | 1512569.000 | 1512569.000–1512569.000 | 0.000 | 1588197.450 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -141,17 +141,19 @@ The `mermaid_*` entries measure the whole committed `lazy/mermaid*` set —
 the payload the binary embeds — over `web/dist` with `bundleBytes` from
 `scripts/perf/check.mjs`, the function `report.mjs` calls; `lazy_*` keeps
 measuring only docs-editor.js. First render of a flowchart fetches the entry
-plus core plus the flowchart and dagre chunks (~1.1MB raw of the 5.19MB set);
-the rest stays unfetched. Committed values are deterministic, three identical
-samples, margin baseline x 0.05, same as the other byte budgets. Not recorded
-with `make perf-container`; the figures are byte-exact.
+plus core plus the flowchart and dagre chunks (~1.1MB raw of the 5.19MB set),
+inside a srcdoc iframe whose own CSP denies every fetch the diagram names
+(the security review's frame isolation, #6642 re-review); the rest stays
+unfetched. Committed values are deterministic, three identical samples, margin
+baseline x 0.05, same as the other byte budgets. Not recorded with
+`make perf-container`; the figures are byte-exact.
 
 The same refresh moves `raw_bytes` to 1,377,536 (master's committed dist at
 `ea1b463514` was already 1,376,749 — the recorded 1,364,595 predated it — and
 the new `.cm-md-mermaid` CSS adds 787), `gzip_bytes` to 315,696 (master 315,607
-+89), `lazy_raw_bytes` to 376,299 (master 371,254 +5,045 of widget, loader,
-sanitizer and theme code in the Docs bundle) and `lazy_gzip_bytes` to 121,970
-(120,175 +1,795). Every timing and layout-shift baseline is unchanged.
++89), `lazy_raw_bytes` to 377,432 (master 371,254 +6,178 of widget, frame
+loader, sanitizer and theme code in the Docs bundle) and `lazy_gzip_bytes` to
+122,809 (120,175 +2,634). Every timing and layout-shift baseline is unchanged.
 
 ### Lazy bundle provenance (proposal Docs tab)
 
