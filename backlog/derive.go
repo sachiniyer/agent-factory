@@ -51,7 +51,10 @@ type SessionFacts struct {
 	RunActive   bool
 	Lost        bool
 	AutoRestore bool
-	Reason      string
+	// StartupUnknown marks a session af kept because it could not confirm that
+	// its agent came up: it may be running, so the item does not start another.
+	StartupUnknown bool
+	Reason         string
 }
 
 // Facts looks up a session by id. A nil Facts means no session is known.
