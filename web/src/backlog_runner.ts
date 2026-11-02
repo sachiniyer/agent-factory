@@ -144,7 +144,6 @@ export class RunnerBar {
     this.onDone.addEventListener("change", () => actions.setOnDone(this.onDone.value));
     this.menu = h("details", { class: "af-backlog-settings" }, this.menuSummary(), this.menuPanel());
     this.el = h("div", { class: "af-backlog-head" },
-      h("span", { class: "af-backlog-heading" }, "Backlog"),
       h("div", { class: "af-backlog-runner" }, this.toggle, this.reason, this.slots, this.plan),
       h("div", { class: "af-backlog-runner-actions" }, this.main, this.run, this.menu), this.planDetail);
   }

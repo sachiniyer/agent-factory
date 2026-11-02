@@ -102,7 +102,10 @@ func TestBacklogOrchestrate(t *testing.T) {
 	if r.ID != 1 || r.Orchestrator == nil || r.Orchestrator.SessionID != "o1" || r.Orchestrator.Handoff != "next: B-2" {
 		t.Fatal(out)
 	}
-	if strings.Join(*methods, ",") != "SetBacklogOrchestrator" {
+	// The item-session guard reads the backlog first, because this session
+	// carries no BacklogItem chip (#6498). The binding and its handoff are
+	// then one RPC.
+	if strings.Join(*methods, ",") != "GetBacklog,SetBacklogOrchestrator" {
 		t.Fatal(*methods)
 	}
 
