@@ -26,13 +26,16 @@ export const EMPTY_BACKLOG_DATA: BacklogData = { views: new Map(), errors: new M
 
 const DEBOUNCE_MS = 150;
 
-/** The sessions that item runs point at: the ones whose lifecycle moves an item's
- *  derived state and the runner's slot count without any backlog write. */
-export function runSessionIds(data: BacklogData): Set<string> {
+/** The sessions whose lifecycle moves what the backlog shows without any backlog
+ *  write: the ones item runs point at (an item's derived state and the runner's
+ *  slot count), and each group's bound orchestrator (the Orchestrator row's state,
+ *  which GetBacklog reads from the session). */
+export function backlogSessionIds(data: BacklogData): Set<string> {
   const ids = new Set<string>();
   for (const view of data.views.values()) {
     for (const it of view.backlog.items) {
       for (const run of it.runs ?? []) if (run.session_id) ids.add(run.session_id);
+      if (it.orchestrator?.session_id) ids.add(it.orchestrator.session_id);
     }
   }
   return ids;
@@ -44,13 +47,13 @@ const SESSION_EVENTS: ReadonlySet<string> = new Set(["session.updated", "session
  *  read: a parent's derived state moves without being named, and an empty list is a
  *  project-level change, so every backlog.changed and backlog.runner frame is a full
  *  re-read. backlog.spend carries the plan use and is applied in place. A session event for a session an
- *  item run points at is a refresh too: killing, archiving or limiting it changes the
- *  item's state and the slot count with no backlog frame. Other sessions' events are
- *  not the backlog's business. */
-export function backlogEventAction(type: string, sessionId?: string, runSessions?: ReadonlySet<string>): "refresh" | "spend" | null {
+ *  item run or a group's orchestrator points at is a refresh too: killing, archiving
+ *  or limiting it changes the item's state, the slot count or the Orchestrator row
+ *  with no backlog frame. Other sessions' events are not the backlog's business. */
+export function backlogEventAction(type: string, sessionId?: string, backlogSessions?: ReadonlySet<string>): "refresh" | "spend" | null {
   if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
   if (type === "backlog.spend") return "spend";
-  if (SESSION_EVENTS.has(type) && sessionId && runSessions?.has(sessionId)) return "refresh";
+  if (SESSION_EVENTS.has(type) && sessionId && backlogSessions?.has(sessionId)) return "refresh";
   return null;
 }
 

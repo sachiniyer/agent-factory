@@ -5094,6 +5094,17 @@ textarea[class] {
   font-size: var(--af-type-caption);
   line-height: 1.5;
 }
+.af-backlog-effort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-space-1);
+}
+.af-backlog-orchestrator {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--af-space-1) var(--af-space-2);
+}
 .af-backlog-tag {
   font-size: var(--af-type-caption);
   font-weight: 600;
@@ -5132,6 +5143,15 @@ textarea[class] {
 }
 .af-backlog-inbox-card .af-backlog-question {
   margin-bottom: 0;
+}
+.af-backlog-inbox-note-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.af-backlog-inbox-note .af-backlog-row-pr {
+  align-items: center;
+  gap: var(--af-space-1);
+  margin-top: var(--af-space-1);
 }
 .af-backlog-inbox-head {
   display: flex;

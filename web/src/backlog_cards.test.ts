@@ -147,7 +147,7 @@ test("a group is a card: header, progress, rows with place and waits, and an add
   assert.deepEqual(c.querySelectorAll(".af-backlog-row").map((r) => Number(r.dataset.itemId)), [1, 3, 4, 5]);
   const head = c.querySelector(".af-backlog-group-head")!;
   assert.equal(Number(head.dataset.itemId), 1);
-  assert.match(head.textContent, /item 1B-1○Draft1 needs youPauseDetails/);
+  assert.match(head.textContent, /item 1B-1○Draft1 needs youStart effort sessionPauseDetails/);
   assert.equal(head.getAttribute("aria-describedby"), "af-backlog-progress-1");
   assert.equal(c.querySelector(".af-backlog-progress")!.id, "af-backlog-progress-1");
   assert.equal(c.querySelector(".af-backlog-progress")!.getAttribute("aria-hidden"), "true");

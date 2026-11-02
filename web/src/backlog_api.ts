@@ -144,3 +144,22 @@ export async function addNote(root: string, id: number, text: string, token: str
   const resp = await af<{ message: Message }>("PostBacklogMessage", { repo_path: root, id, kind: "note", text }, token);
   return resp.message;
 }
+
+export interface OpenedOrchestrator {
+  session_id: string;
+  title: string;
+  /** "restored", "replaced", "started", or "" when the session was live. */
+  change: string;
+}
+
+/** Names the group's effort session to open: af restores an archived one,
+ *  replaces a gone one, or starts and binds one when the group has none. */
+export async function openOrchestrator(root: string, id: number, token: string): Promise<OpenedOrchestrator> {
+  const resp = await af<{ session_id?: string; title?: string; change?: string }>("OpenBacklogOrchestrator", { repo_path: root, id }, token);
+  return { session_id: resp?.session_id ?? "", title: resp?.title ?? "", change: resp?.change ?? "" };
+}
+
+/** Unbinds the group's effort session; its open routed questions go to the Inbox. */
+export async function unbindOrchestrator(root: string, id: number, token: string): Promise<void> {
+  await af<unknown>("SetBacklogOrchestrator", { repo_path: root, id, clear: true }, token);
+}
