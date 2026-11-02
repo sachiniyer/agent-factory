@@ -927,3 +927,33 @@ func TestMeterPassKeepsAClearedRecordWhileItsMessagesAreUnpriced(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, b.Item(1).OrchCleared, "priced and classified: the record goes")
 }
+
+// A cleared orchestrator whose conversation lives under a custom config root,
+// no registered account's and not the daemon's own, still has that root
+// scanned on the pass that finishes it (Codex P2 on #6616).
+func TestMeterPassScansAClearedOrchestratorsCustomConfigRoot(t *testing.T) {
+	const repoID = "meter-orch-custom-root"
+	_, _, now, pass, five := orchMeterWorld(t, repoID)
+	custom := t.TempDir()
+	project := filepath.Join(custom, "projects", "-home-me-y")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	prev := orchestratorConversationOf
+	orchestratorConversationOf = func(inst *session.Instance) (string, string, []string, bool) {
+		return "conv-" + inst.ID, custom, []string{project}, true
+	}
+	t.Cleanup(func() { orchestratorConversationOf = prev })
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	orchMessage(t, conv, "m2", now.Add(30*time.Second))
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		_, err := b.ClearOrchestrator(1, now.Add(time.Minute))
+		return err
+	})
+	require.NoError(t, err)
+	pass(now.Add(2 * time.Minute))
+
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9, "m2, under the custom root, was scanned")
+	require.InDelta(t, 30.0, w["backlog"], 1e-9)
+}

@@ -565,6 +565,16 @@ func (m *Manager) meterPassLocked(now time.Time) {
 				for _, p := range planusage.ConversationPaths([]string{c.Main}) {
 					orchBacklog[o.repoID] = append(orchBacklog[o.repoID], planusage.BacklogPath{Path: p, Within: c.Spans})
 				}
+				// Its config root is scanned too: a custom CLAUDE_CONFIG_DIR that
+				// is no account's would otherwise not be (Codex P2 on #6616).
+				for _, f := range planusage.ConversationTranscripts([]string{c.Main}) {
+					if root := transcriptConfigRoot(f); root != "" {
+						account := accountOfRun(home, root)
+						if !containsDir(runConfigs[account], root) {
+							runConfigs[account] = append(runConfigs[account], root)
+						}
+					}
+				}
 			}
 			clearedRepos[o.repoID] = true
 			continue
