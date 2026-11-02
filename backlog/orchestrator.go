@@ -27,6 +27,10 @@ type Orchestrator struct {
 	// Handoff is the latest notes for a session that replaces this one.
 	Handoff string           `json:"handoff,omitempty"`
 	Meter   map[string]Meter `json:"meter,omitempty"`
+	// Conversations are the agent conversations the group's orchestrators had,
+	// each with the span in which it orchestrated: only its messages from that
+	// span are the group's, and backlog spend.
+	Conversations []OrchConversation `json:"conversations,omitempty"`
 	// Events is the outbox of events not yet delivered, oldest first, so a
 	// daemon restart can finish delivery.
 	Events []OrchEvent `json:"events,omitempty"`
@@ -70,12 +74,23 @@ type OrchEvent struct {
 	At      time.Time `json:"at"`
 }
 
+// OrchConversation is one agent conversation a group's orchestrator had: its
+// main transcript file, and the span in which it orchestrated, from its
+// session's bind until the group was bound to another session (zero while it
+// still orchestrates).
+type OrchConversation struct {
+	Main  string    `json:"main"`
+	From  time.Time `json:"from"`
+	Until time.Time `json:"until,omitzero"`
+}
+
 func (o *Orchestrator) clone() *Orchestrator {
 	if o == nil {
 		return nil
 	}
 	c := *o
 	c.Meter = maps.Clone(o.Meter)
+	c.Conversations = append([]OrchConversation(nil), o.Conversations...)
 	if o.Replacing != nil {
 		r := *o.Replacing
 		c.Replacing = &r
@@ -120,6 +135,16 @@ func (b *Backlog) BindOrchestrator(id int, o Orchestrator, now time.Time) error 
 	}
 	if prev := it.Orchestrator; prev != nil {
 		o.Handoff, o.Meter, o.Events = prev.Handoff, prev.Meter, prev.Events
+		o.Conversations = append([]OrchConversation(nil), prev.Conversations...)
+		if prev.SessionID != o.SessionID {
+			// The previous session stops orchestrating now: what it writes from
+			// here on is not the group's (it may go on working for the user).
+			for i := range o.Conversations {
+				if o.Conversations[i].Until.IsZero() {
+					o.Conversations[i].Until = now
+				}
+			}
+		}
 	}
 	o.Failures, o.Sending = nil, 0
 	it.closeAFQuestions(ClosedRebound)

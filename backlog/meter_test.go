@@ -161,34 +161,36 @@ func TestMeterOrchestratorCountsFromBind(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "projects", "-repo", "c1.jsonl")
 	early := strings.Replace(transcriptLine("m0", "claude-opus-5-5", 1_000_000), "10:00:00", "09:00:00", 1)
 	writeFile(t, f, early, transcriptLine("m1", "claude-opus-5-5", 1_000_000))
-	o := Orchestrator{SessionID: "o", BoundAt: time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)}
-	m := MeterOrchestrator(1, Where{}, o, []string{f}, map[string]int64{}, nil)
-	if !m.Changed || m.Unmeterable != "" || len(m.Entries) != 1 || math.Abs(m.Cost()-4) > 1e-9 {
+	o := Orchestrator{SessionID: "o", Conversations: []OrchConversation{{Main: f, From: time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)}}}
+	m := MeterOrchestrator(1, Where{}, o, map[string]int64{}, nil)
+	if !m.Changed || len(m.Entries) != 1 || math.Abs(m.Cost()-4) > 1e-9 {
 		t.Fatalf("%+v", m)
 	}
-	if m := MeterOrchestrator(1, Where{}, o, nil, nil, nil); m.Unmeterable != "" || m.Changed {
+	if m := MeterOrchestrator(1, Where{}, Orchestrator{SessionID: "o"}, nil, nil); m.Changed {
 		t.Fatalf("no conversation yet: %+v", m)
 	}
 }
 
-// A file the meter already holds is read on from its offset past the bind: a
-// replacement moves BoundAt later, and the end of the session it replaced was
-// written before that (Codex P2 on #6616).
-func TestMeterOrchestratorReadsAKnownFilePastALaterBind(t *testing.T) {
-	f := filepath.Join(t.TempDir(), "projects", "-repo", "c1.jsonl")
-	first := transcriptLine("m1", "claude-opus-5-5", 1_000_000)
-	writeFile(t, f, first)
-	o := Orchestrator{SessionID: "o", BoundAt: time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)}
-	m := MeterOrchestrator(1, Where{}, o, []string{f}, map[string]int64{}, nil)
-	if math.Abs(m.Cost()-4) > 1e-9 {
-		t.Fatalf("%+v", m)
+// Each conversation counts only its own span, its subagents included: a
+// subagent first seen after the group was bound to another session counts from
+// its conversation's bind, not the new one (Codex P2 on #6616), and what a
+// replaced session wrote after the replacement is not the group's.
+func TestMeterOrchestratorCountsEachConversationInItsSpan(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "projects", "-repo")
+	at := func(id, hhmm string) string {
+		return strings.Replace(transcriptLine(id, "claude-opus-5-5", 1_000_000), "10:00:00", hhmm+":00", 1)
 	}
-	// The session wrote one more message at 10:00, was killed, and a replacement
-	// was bound at 11:00.
-	writeFile(t, f, first, transcriptLine("m2", "claude-opus-5-5", 1_000_000))
-	o.Meter, o.BoundAt = m.Meter, time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)
-	again := MeterOrchestrator(1, Where{}, o, []string{f}, map[string]int64{}, nil)
-	if !again.Changed || len(again.Entries) != 1 || math.Abs(again.Cost()-8) > 1e-9 {
-		t.Fatalf("the killed session's last message was dropped: %+v", again)
+	old, cur := filepath.Join(dir, "c1.jsonl"), filepath.Join(dir, "c2.jsonl")
+	day := func(h, m int) time.Time { return time.Date(2026, 10, 20, h, m, 0, 0, time.UTC) }
+	writeFile(t, old, at("a1", "09:30"), at("a2", "11:00"))
+	writeFile(t, filepath.Join(dir, "c1", "subagents", "agent-x.jsonl"), at("a3", "10:00"))
+	writeFile(t, cur, at("b1", "11:00"))
+	o := Orchestrator{SessionID: "o2", BoundAt: day(10, 30), Conversations: []OrchConversation{
+		{Main: old, From: day(9, 0), Until: day(10, 30)}, {Main: cur, From: day(10, 30)}}}
+	m := MeterOrchestrator(1, Where{}, o, map[string]int64{}, nil)
+	// a1 and the subagent's a3 are c1's while it orchestrated, b1 is c2's; a2,
+	// written by c1's session after the replacement, is not the group's.
+	if len(m.Entries) != 3 || math.Abs(m.Cost()-12) > 1e-9 {
+		t.Fatalf("%+v", m)
 	}
 }

@@ -686,9 +686,9 @@ func TestMeterFindsOrchestrators(t *testing.T) {
 	home, err := config.GetConfigDir()
 	require.NoError(t, err)
 
-	_, orchs, complete := m.startedItemRuns(home)
+	_, orchs, unread := m.startedItemRuns(home)
 
-	require.True(t, complete)
+	require.Empty(t, unread)
 	require.Len(t, orchs, 1)
 	require.Equal(t, repoID, orchs[0].repoID)
 	require.Equal(t, 2, orchs[0].group)
@@ -763,4 +763,106 @@ func TestMeterPassFinishesAKilledOrchestratorsConversation(t *testing.T) {
 	five := env["data"].(map[string]any)["windows"].(map[string]any)["five_hour"].(map[string]any)
 	require.InDelta(t, 8.0, five["all_cost"], 1e-9)
 	require.InDelta(t, 30.0, five["backlog"], 1e-9, "and backlog spend: all of the window's metered cost")
+}
+
+// orchMeterWorld is a project with group B-1 bound to a live planner o1 whose
+// Claude conversation is conv-o1 in project, plan usage on and a 30% reading.
+// pass runs a meter pass at a time; five reads the 5-hour window.
+func orchMeterWorld(t *testing.T, repoID string) (m *Manager, project string, now time.Time, pass func(time.Time), five func() map[string]any) {
+	t.Helper()
+	cs, _ := newBacklogTestServer(t)
+	m = cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now = time.Now().UTC()
+	project = filepath.Join(claudeDir, "projects", "-home-me-x")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	reset := now.Add(2 * time.Hour).Truncate(time.Hour)
+	require.NoError(t, planusage.WriteReading(planusage.DefaultAccount, planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 30, ResetsAt: reset.Unix()}, ReadAt: now,
+	}))
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = append(b.Items, backlog.Item{ID: 1, Title: "Effort", Status: backlog.StatusDraft},
+			backlog.Item{ID: 2, Title: "step", Parent: 1, Status: backlog.StatusDraft})
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "o1", Title: "planner", Program: "claude"}, now.Add(-30*time.Minute))
+	})
+	require.NoError(t, err)
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{daemonInstanceKey(repoID, "planner"): {ID: "o1", Title: "planner", Program: "claude"}}
+	m.mu.Unlock()
+	prev := orchestratorConversationOf
+	orchestratorConversationOf = func(inst *session.Instance) (string, string, []string, bool) {
+		return "conv-" + inst.ID, claudeDir, []string{project}, true
+	}
+	t.Cleanup(func() { orchestratorConversationOf = prev })
+	pass = func(at time.Time) {
+		st := &m.backlog.meter
+		st.mu.Lock()
+		m.meterPassLocked(at)
+		st.mu.Unlock()
+	}
+	five = func() map[string]any {
+		code, env := postProposalRoute(t, cs, "GetBudget", GetBudgetRequest{})
+		require.Equal(t, http.StatusOK, code, env)
+		return env["data"].(map[string]any)["windows"].(map[string]any)["five_hour"].(map[string]any)
+	}
+	return m, project, now, pass, five
+}
+
+func orchMessage(t *testing.T, path, id string, at time.Time) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = fmt.Fprintf(f, `{"type":"assistant","timestamp":"%s","message":{"id":"%s","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}`+"\n", at.Format(time.RFC3339), id)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
+
+// A planner replaced with --replace stays live for the user's own work: what it
+// writes after the replacement is not the group's cost and not backlog spend
+// (Codex P2 on #6616).
+func TestMeterPassDoesNotChargeAReplacedOrchestratorsLaterWork(t *testing.T) {
+	const repoID = "meter-orch-replaced"
+	_, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "n1", Title: "planner 2", Program: "claude"}, now.Add(time.Minute))
+	})
+	require.NoError(t, err)
+	// o1 is still live, now working for the user.
+	orchMessage(t, conv, "m2", now.Add(2*time.Minute))
+	pass(now.Add(3 * time.Minute))
+
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.InDelta(t, 4.0, b.Item(1).Orchestrator.Cost(), 1e-9, "only m1, from while o1 orchestrated")
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 15.0, w["backlog"], 1e-9, "the backlog's part of the 30% plan is m1's half")
+}
+
+// A pass that cannot read the project's backlog still counts the orchestrator's
+// new messages as backlog spend, from the paths the last readable pass saw: a
+// message counted as the user's is never reclassified (Codex P2 on #6616).
+func TestMeterPassKeepsOrchestratorSpendWhenTheBacklogIsUnreadable(t *testing.T) {
+	const repoID = "meter-orch-unreadable"
+	_, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	path, err := backlog.BacklogPath(repoID)
+	require.NoError(t, err)
+	good, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o644))
+	orchMessage(t, conv, "m2", now.Add(time.Minute))
+	pass(now.Add(2 * time.Minute))
+	require.NoError(t, os.WriteFile(path, good, 0o644))
+
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 30.0, w["backlog"], 1e-9, "m2, scanned while the backlog was unreadable, is still the backlog's")
 }

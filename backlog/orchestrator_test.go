@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func orch(id string) Orchestrator {
@@ -461,5 +462,39 @@ func TestSetOrchestratorMeters(t *testing.T) {
 	}
 	if b.Item(1).Orchestrator.Cost() != 1.75 {
 		t.Fatal("a replacement lost the meter")
+	}
+}
+
+// Binding the group to another session ends the span of the conversations it
+// had; binding it back to the session whose conversation that was opens it again
+// from the new bind (Codex P2 on #6616).
+func TestRebindEndsAndReopensConversationSpans(t *testing.T) {
+	b := mk(t, Item{ID: 1, Title: "g"}, Item{ID: 2, Parent: 1})
+	if err := b.BindOrchestrator(1, orch("a"), t0); err != nil {
+		t.Fatal(err)
+	}
+	if !b.NoteOrchConversations(1, "a", []string{"/p/ca.jsonl"}) || b.NoteOrchConversations(1, "a", []string{"/p/ca.jsonl"}) {
+		t.Fatal("note")
+	}
+	if b.NoteOrchConversations(1, "x", []string{"/p/cx.jsonl"}) {
+		t.Fatal("a session that does not orchestrate the group noted a conversation")
+	}
+	later := t0.Add(time.Hour)
+	if err := b.BindOrchestrator(1, orch("b"), later); err != nil {
+		t.Fatal(err)
+	}
+	c := b.Item(1).Orchestrator.Conversations
+	if len(c) != 1 || !c[0].From.Equal(t0) || !c[0].Until.Equal(later) {
+		t.Fatalf("%+v", c)
+	}
+	back := later.Add(time.Hour)
+	if err := b.BindOrchestrator(1, orch("a"), back); err != nil {
+		t.Fatal(err)
+	}
+	if !b.NoteOrchConversations(1, "a", []string{"/p/ca.jsonl"}) {
+		t.Fatal("the conversation did not open again")
+	}
+	if c := b.Item(1).Orchestrator.Conversations; len(c) != 1 || !c[0].From.Equal(back) || !c[0].Until.IsZero() {
+		t.Fatalf("%+v", c)
 	}
 }

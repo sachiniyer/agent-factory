@@ -44,36 +44,34 @@ func MeterRun(id int, w Where, r RunRef, files []string, seen map[string]int64, 
 	return out
 }
 
-// MeterOrchestrator reads the transcripts of group's orchestrators from their
-// stored offsets, like MeterRun. A file read for the first time counts only
-// messages from after the bind: an orchestrator can be a session that worked
-// before it took the group. A file the meter already holds is read on from its
-// offset with no such bound: what follows was written after a pass saw it,
-// once its session was bound, and a later bind (a replacement) must not drop
-// the end of a session that was killed.
-func MeterOrchestrator(group int, w Where, o Orchestrator, files []string, seen map[string]int64, overrides map[string]planusage.Price) RunMeter {
-	var known, fresh []string
-	for _, f := range files {
-		if _, ok := o.Meter[f]; ok {
-			known = append(known, f)
-		} else {
-			fresh = append(fresh, f)
+// MeterOrchestrator reads the transcripts of group's orchestrator
+// conversations from their stored offsets, like MeterRun: each one's main file
+// and its subagents' files, counting only its messages from the span in which it
+// orchestrated. Before it, the session worked for the user; after it, the group
+// was bound to another session and this one may go on working for the user.
+func MeterOrchestrator(group int, w Where, o Orchestrator, seen map[string]int64, overrides map[string]planusage.Price) RunMeter {
+	out := RunMeter{Meter: maps.Clone(o.Meter)}
+	if out.Meter == nil {
+		out.Meter = map[string]Meter{}
+	}
+	for _, c := range o.Conversations {
+		files := planusage.ConversationTranscripts([]string{c.Main})
+		part := meterFiles(group, w, RunRef{Meter: out.Meter}, files,
+			planusage.ReadOptions{Overrides: overrides, Seen: seen, Since: c.From, Until: c.Until})
+		out.Meter = part.Meter
+		out.Changed = out.Changed || part.Changed
+		out.Entries = append(out.Entries, part.Entries...)
+		for f, e := range part.FileEntries {
+			if out.FileEntries == nil {
+				out.FileEntries = map[string][]planusage.Entry{}
+			}
+			out.FileEntries[f] = append(out.FileEntries[f], e...)
+		}
+		if out.Unmeterable == "" {
+			out.Unmeterable = part.Unmeterable
 		}
 	}
-	out := meterFiles(group, w, RunRef{Meter: o.Meter}, known, planusage.ReadOptions{Overrides: overrides, Seen: seen})
-	more := meterFiles(group, w, RunRef{Meter: out.Meter}, fresh, planusage.ReadOptions{Overrides: overrides, Seen: seen, Since: o.BoundAt})
-	more.Changed = more.Changed || out.Changed
-	more.Entries = append(out.Entries, more.Entries...)
-	for f, e := range out.FileEntries {
-		if more.FileEntries == nil {
-			more.FileEntries = map[string][]planusage.Entry{}
-		}
-		more.FileEntries[f] = append(e, more.FileEntries[f]...)
-	}
-	if more.Unmeterable == "" {
-		more.Unmeterable = out.Unmeterable
-	}
-	return more
+	return out
 }
 
 func meterFiles(id int, w Where, r RunRef, files []string, opts planusage.ReadOptions) RunMeter {

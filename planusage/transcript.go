@@ -61,9 +61,10 @@ type ReadOptions struct {
 	// dir on an account handoff; those copied messages consumed the source
 	// account's plan, so they must not count again here.
 	Foreign func(key string) bool
-	// Since, when set, reads past the messages from before it without
-	// counting them.
+	// Since and Until, when set, read past the messages from before Since and
+	// from Until on without counting them.
 	Since time.Time
+	Until time.Time
 }
 
 // ReadResult is what one read of a transcript found.
@@ -221,9 +222,9 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 		if at.IsZero() {
 			at = info.ModTime()
 		}
-		// Read past a message from before Since without counting it, before its
-		// price is looked up: one that is not counted cannot stop the read.
-		if !opts.Since.IsZero() && at.Before(opts.Since) {
+		// Read past a message outside [Since, Until) without counting it, before
+		// its price is looked up: one that is not counted cannot stop the read.
+		if (!opts.Since.IsZero() && at.Before(opts.Since)) || (!opts.Until.IsZero() && !at.Before(opts.Until)) {
 			res.Mark.Offset = next
 			continue
 		}
