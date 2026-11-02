@@ -2192,6 +2192,13 @@ body[data-project-color] [data-af-theme="dark"] {
   color: var(--af-accent);
 }
 
+/* Same [hidden] hazard as the open/reload guard above: `display: inline-flex`
+ * outranks the UA rule, so the withdrawn link still rendered on the no-URL and
+ * archived fallbacks (#6584). */
+.af-webpane-fallback-link[hidden] {
+  display: none;
+}
+
 /* The dead-dev-server state (#1813): the pane a developer sees most often, because a
  * tab created before its port answers is the NORMAL first state, not an error. So it
  * is styled exactly like its calm siblings — the same --af-text-2 the archived and
