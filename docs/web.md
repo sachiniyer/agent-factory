@@ -194,7 +194,7 @@ the current agent and continue with the replacement. A limit-blocked local
 session can offer both; see [usage limits](usage-limits.md).
 
 Open a rail row’s **…** menu for **Archive** and **Delete session**. Other actionable rows
-reveal the menu on hover or keyboard focus. Archive and Delete session each open a confirmation:
+reveal the menu on hover. Archive and Delete session each open a confirmation:
 
 - **Archive** tears down a local session's terminal and moves its worktree into
   the archive. Docker and remote-hook sessions push the branch to `origin` and
