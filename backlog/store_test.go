@@ -112,7 +112,7 @@ func writeRaw(t *testing.T, path, s string) {
 func TestRefusesNewerSchema(t *testing.T) {
 	home(t)
 	path, _ := BacklogPath(repoID)
-	newer := `{"schema_version": 3, "next_id": 5, "items": [], "future": true}`
+	newer := `{"schema_version": 4, "next_id": 5, "items": [], "future": true}`
 	writeRaw(t, path, newer)
 
 	var unsupported *config.UnsupportedSchemaVersionError
@@ -199,7 +199,7 @@ func TestV2FieldsOmittedWhenUnset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"paused", "archived", "then", "handoff"} {
+	for _, k := range []string{"paused", "archived", "then", "handoff", "orchestrator"} {
 		if strings.Contains(string(raw), `"`+k+`"`) {
 			t.Errorf("%s written when unset: %s", k, raw)
 		}
