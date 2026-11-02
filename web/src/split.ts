@@ -974,6 +974,32 @@ export class SplitView {
     walk(this.tree, this.builtRootEl);
   }
 
+  /** Keeps the ".af-split-narrow" notice in step with the fit on EVERY pass
+   *  (#6556): the hidden count can change while the visible tree does not (a
+   *  split opened into an already-narrow host, a hidden leaf closed), and a
+   *  refit never rebuilds — so the notice mounts, unmounts, and rewrites its
+   *  count here rather than inside the rebuild gate. The text write is guarded:
+   *  assigning textContent records a DOM mutation even when nothing changed. */
+  private syncNarrowNotice(fit: { hidden: string[] }): void {
+    if (!this.builtRootEl) {
+      return;
+    }
+    if (fit.hidden.length === 0) {
+      this.narrowEl?.remove();
+      return;
+    }
+    if (!this.narrowEl) {
+      this.narrowEl = el("div", "af-split-narrow");
+    }
+    const text = `${fit.hidden.length} pane${fit.hidden.length === 1 ? "" : "s"} hidden — too narrow; resize or close a pane`;
+    if (this.narrowEl.textContent !== text) {
+      this.narrowEl.textContent = text;
+    }
+    if (this.narrowEl.parentElement !== this.host) {
+      this.host.prepend(this.narrowEl);
+    }
+  }
+
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
    *  (re)creates terminals whose tab changed, rebuilds the split wrappers (reusing
    *  the persistent pane containers so surviving xterms are only reparented, never
@@ -1061,21 +1087,12 @@ export class SplitView {
     if (!sameLayout(this.tree, this.builtTree)) {
       const rootEl = this.buildNode(this.tree);
       rootEl.style.flex = "1 1 0";
-      if (fit.hidden.length > 0) {
-        // The deliberate half of the degradation: a degraded layout says so,
-        // naming the panes the window can no longer show.
-        if (!this.narrowEl) {
-          this.narrowEl = el("div", "af-split-narrow");
-        }
-        this.narrowEl.textContent = `${fit.hidden.length} pane${fit.hidden.length === 1 ? "" : "s"} hidden — too narrow; resize or close a pane`;
-        this.host.replaceChildren(this.narrowEl, rootEl);
-      } else {
-        this.host.replaceChildren(rootEl);
-      }
+      this.host.replaceChildren(rootEl);
       this.builtTree = this.tree;
       this.builtRootEl = rootEl;
     }
     this.syncFitHidden(fit);
+    this.syncNarrowNotice(fit);
 
     const multi = visible.length > 1;
     this.host.classList.toggle("af-split-multi", multi);

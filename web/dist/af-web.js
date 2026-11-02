@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "d3822ae572db";
+var CLIENT_VERSION = "9231d29d8221";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -15288,6 +15288,31 @@ var SplitView = class {
     };
     walk(this.tree, this.builtRootEl);
   }
+  /** Keeps the ".af-split-narrow" notice in step with the fit on EVERY pass
+   *  (#6556): the hidden count can change while the visible tree does not (a
+   *  split opened into an already-narrow host, a hidden leaf closed), and a
+   *  refit never rebuilds — so the notice mounts, unmounts, and rewrites its
+   *  count here rather than inside the rebuild gate. The text write is guarded:
+   *  assigning textContent records a DOM mutation even when nothing changed. */
+  syncNarrowNotice(fit) {
+    if (!this.builtRootEl) {
+      return;
+    }
+    if (fit.hidden.length === 0) {
+      this.narrowEl?.remove();
+      return;
+    }
+    if (!this.narrowEl) {
+      this.narrowEl = el("div", "af-split-narrow");
+    }
+    const text = `${fit.hidden.length} pane${fit.hidden.length === 1 ? "" : "s"} hidden \u2014 too narrow; resize or close a pane`;
+    if (this.narrowEl.textContent !== text) {
+      this.narrowEl.textContent = text;
+    }
+    if (this.narrowEl.parentElement !== this.host) {
+      this.host.prepend(this.narrowEl);
+    }
+  }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
    *  (re)creates terminals whose tab changed, rebuilds the split wrappers (reusing
    *  the persistent pane containers so surviving xterms are only reparented, never
@@ -15325,19 +15350,12 @@ var SplitView = class {
     if (!sameLayout(this.tree, this.builtTree)) {
       const rootEl = this.buildNode(this.tree);
       rootEl.style.flex = "1 1 0";
-      if (fit.hidden.length > 0) {
-        if (!this.narrowEl) {
-          this.narrowEl = el("div", "af-split-narrow");
-        }
-        this.narrowEl.textContent = `${fit.hidden.length} pane${fit.hidden.length === 1 ? "" : "s"} hidden \u2014 too narrow; resize or close a pane`;
-        this.host.replaceChildren(this.narrowEl, rootEl);
-      } else {
-        this.host.replaceChildren(rootEl);
-      }
+      this.host.replaceChildren(rootEl);
       this.builtTree = this.tree;
       this.builtRootEl = rootEl;
     }
     this.syncFitHidden(fit);
+    this.syncNarrowNotice(fit);
     const multi = visible.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
     let focusedRebuilt = false;
