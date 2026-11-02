@@ -141,9 +141,22 @@ var errNoChange = errors.New("backlog: nothing to change")
 func (s *Service) update(p *project, fn func(*Backlog) ([]int, error)) (*Backlog, error) {
 	var ids []int
 	b, err := Update(p.id, func(b *Backlog) error {
+		var prev *Backlog
+		if b.HasOrchestrator() {
+			prev = b.clone()
+		}
 		var err error
-		ids, err = fn(b)
-		return err
+		if ids, err = fn(b); err != nil {
+			return err
+		}
+		if prev != nil {
+			for _, g := range b.queueOrchChanges(prev, s.now()) {
+				if !slices.Contains(ids, g) {
+					ids = append(ids, g)
+				}
+			}
+		}
+		return nil
 	})
 	if errors.Is(err, errNoChange) {
 		return Load(p.id)
