@@ -967,6 +967,21 @@ export class SplitView {
       const hiddenA = walk(node.a, aEl);
       const hiddenB = walk(node.b, bEl);
       const hidden = hiddenA && hiddenB;
+      // A fully-hidden side drops out of flex with display:none — but the
+      // visible sibling must not keep its "ratio 1 0" basis: when the sum of
+      // a container's flex-grows is under 1 each item claims only grow × the
+      // free space rather than a normalized share, so a lone 0.5 would leave
+      // the pane visibly shrunk with half the wrap unallocated. Give the whole
+      // side to whichever child survived. Writes are guarded — assigning
+      // style.flex records a DOM mutation even when the value is unchanged.
+      const wantA = hiddenB ? "1 1 0" : `${node.ratio} 1 0`;
+      const wantB = hiddenA ? "1 1 0" : `${1 - node.ratio} 1 0`;
+      if (aEl.style.flex !== wantA) {
+        aEl.style.flex = wantA;
+      }
+      if (bEl.style.flex !== wantB) {
+        bEl.style.flex = wantB;
+      }
       el.classList.toggle("af-split-hidden", hidden);
       divider.classList.toggle("af-divider-hidden", hiddenA || hiddenB);
       return hidden;

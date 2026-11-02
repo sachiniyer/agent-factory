@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "9231d29d8221";
+var CLIENT_VERSION = "84d6e669f0f8";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -15282,6 +15282,14 @@ var SplitView = class {
       const hiddenA = walk(node.a, aEl);
       const hiddenB = walk(node.b, bEl);
       const hidden = hiddenA && hiddenB;
+      const wantA = hiddenB ? "1 1 0" : `${node.ratio} 1 0`;
+      const wantB = hiddenA ? "1 1 0" : `${1 - node.ratio} 1 0`;
+      if (aEl.style.flex !== wantA) {
+        aEl.style.flex = wantA;
+      }
+      if (bEl.style.flex !== wantB) {
+        bEl.style.flex = wantB;
+      }
       el2.classList.toggle("af-split-hidden", hidden);
       divider.classList.toggle("af-divider-hidden", hiddenA || hiddenB);
       return hidden;
