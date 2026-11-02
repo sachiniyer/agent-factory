@@ -147,6 +147,16 @@ func TestRunDaemonUpgradeProbationEndToEnd(t *testing.T) {
 	}
 }
 
+// tcpDisabledConfig is DefaultConfig with the TCP listener off. A test that runs
+// a daemon without exercising the network listener must never bind the shipped
+// 127.0.0.1:8443 default on a shared runner: a held port flakes the bind, and a
+// free one squats the real daemon's address for the test's lifetime (#6625).
+func tcpDisabledConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = ""
+	return cfg
+}
+
 func waitForDaemonPhase(t *testing.T, want DaemonPhase) PingResponse {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

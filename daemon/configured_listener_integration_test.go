@@ -29,12 +29,18 @@ import (
 // managerWithWebListeners builds a manager whose live config is cfg and wires its
 // webListeners so ApplyConfig's reconcile path runs the real bind/teardown. It
 // performs the initial reconcile so the boot-time bound state matches the boot
-// config. Unlike boundWebListeners (listener_reload_test.go) it does NOT require a
+// config, and seeds config.toml from the same cfg — ApplyConfig re-reads the
+// file, so a listener the test does not exercise must stay pinned (or disabled)
+// there too, or the materialized default resurrects 127.0.0.1:8443 mid-test
+// (#6625). Unlike boundWebListeners (listener_reload_test.go) it does NOT require a
 // bound control address, so a boot in the network.listen_addr="" opt-out state is
 // representable. Cleanup closes the listeners.
 func managerWithWebListeners(t *testing.T, cfg *config.Config) (*Manager, *webListeners) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NotEqual(t, "127.0.0.1:8443", cfg.ListenAddr,
+		"a daemon test never binds the shipped default port — pin an unexercised listener to 127.0.0.1:0 or disable it (#6625)")
+	require.NoError(t, config.SaveConfig(cfg))
 	m, err := NewManager(cfg)
 	require.NoError(t, err)
 	wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}), newPreviewMux(&controlServer{manager: m}))
@@ -133,9 +139,12 @@ func TestConfiguredListenerFieldsClearedAfterApplyConfigDisable(t *testing.T) {
 // TestPreviewConfiguredFieldsTrackApplyConfigRebind is the preview-listener twin
 // of the enable direction (network.preview_listen_addr, #1856). The configured
 // half is symmetric to the control listener and has the same bug; the same fix
-// re-syncs it on a successful preview rebind.
+// re-syncs it on a successful preview rebind. The control listener is not under
+// test: it stays disabled in the boot config AND on disk, so ApplyConfig can
+// never resurrect the shipped 127.0.0.1:8443 default on a shared runner (#6625).
 func TestPreviewConfiguredFieldsTrackApplyConfigRebind(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.ListenAddr = ""        // not under test — never the fixed default (#6625)
 	cfg.PreviewListenAddr = "" // disabled by default
 	m, _ := managerWithWebListeners(t, cfg)
 
@@ -151,13 +160,20 @@ func TestPreviewConfiguredFieldsTrackApplyConfigRebind(t *testing.T) {
 	require.True(t, snap.PreviewBound)
 	require.Equal(t, "127.0.0.1:0", snap.PreviewListenAddr)
 	require.NotEmpty(t, snap.PreviewBoundAddr)
+	require.False(t, snap.TCPConfigured,
+		"the control listener is not under test — ApplyConfig must not resurrect the fixed 127.0.0.1:8443 default")
+	require.False(t, snap.TCPBound)
+	require.Empty(t, snap.TCPListenAddr)
 }
 
 // TestPreviewConfiguredFieldsClearedAfterApplyConfigDisable is the preview-listener
 // twin of the disable direction. Disabling a configured preview listener must
-// clear the configured half, not leave it frozen at the boot-time value.
+// clear the configured half, not leave it frozen at the boot-time value. The
+// control listener is not under test and stays disabled in the boot config AND
+// on disk (#6625).
 func TestPreviewConfiguredFieldsClearedAfterApplyConfigDisable(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "" // not under test — never the fixed default (#6625)
 	cfg.PreviewListenAddr = "127.0.0.1:0"
 	m, _ := managerWithWebListeners(t, cfg)
 
@@ -173,6 +189,10 @@ func TestPreviewConfiguredFieldsClearedAfterApplyConfigDisable(t *testing.T) {
 	require.False(t, snap.PreviewBound)
 	require.Empty(t, snap.PreviewListenAddr)
 	require.Empty(t, snap.PreviewBoundAddr)
+	require.False(t, snap.TCPConfigured,
+		"the control listener is not under test — ApplyConfig must not resurrect the fixed 127.0.0.1:8443 default")
+	require.False(t, snap.TCPBound)
+	require.Empty(t, snap.TCPListenAddr)
 }
 
 // TestConfiguredFieldsUnchangedAfterUnexpectedListenerDeath pins the SCOPE of the

@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -41,7 +40,7 @@ func TestRunDaemonSweepsOrphanSandboxTunnelsBeforeReady(t *testing.T) {
 	// join needs its own multi-reader signal for "the goroutine finished".
 	runExited := make(chan struct{})
 	go func() {
-		runDone <- RunDaemon(config.DefaultConfig())
+		runDone <- RunDaemon(tcpDisabledConfig())
 		close(runExited)
 	}()
 	// Every goroutine this test starts is joined before it returns: an
@@ -122,7 +121,7 @@ func TestRunDaemonStopsSandboxTunnelsOnExit(t *testing.T) {
 	runDone := make(chan error, 1)
 	runExited := make(chan struct{})
 	go func() {
-		runDone <- RunDaemon(config.DefaultConfig())
+		runDone <- RunDaemon(tcpDisabledConfig())
 		close(runExited)
 	}()
 	// Same join rule as the sweep test above: the daemon goroutine must not

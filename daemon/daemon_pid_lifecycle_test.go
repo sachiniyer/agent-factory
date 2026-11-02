@@ -94,7 +94,7 @@ func TestRunDaemon_SymlinkedPIDFileFailsClosed(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte("1"), 0600))
 	require.NoError(t, os.Symlink(target, pidPath))
 
-	cfg := config.DefaultConfig()
+	cfg := tcpDisabledConfig()
 	cfg.DaemonPollInterval = 50
 	runDone := make(chan error, 1)
 	go func() {
@@ -457,7 +457,7 @@ func TestRunDaemon_PIDFileSurvivesUntilHomeLockRelease(t *testing.T) {
 		afterPID, afterOK = readPIDFilePID(t, pidPath)
 	}
 
-	cfg := config.DefaultConfig()
+	cfg := tcpDisabledConfig()
 	cfg.DaemonPollInterval = 50
 	runDone := make(chan error, 1)
 	go func() {
@@ -543,7 +543,7 @@ func TestRunDaemon_TeardownPreservesSuccessorPIDFile(t *testing.T) {
 		_ = os.WriteFile(pidPath, []byte(strconv.Itoa(successorPID)), 0600)
 	}
 
-	cfg := config.DefaultConfig()
+	cfg := tcpDisabledConfig()
 	cfg.DaemonPollInterval = 50
 	runDone := make(chan error, 1)
 	go func() {
