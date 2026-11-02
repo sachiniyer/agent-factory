@@ -957,3 +957,37 @@ func TestMeterPassScansAClearedOrchestratorsCustomConfigRoot(t *testing.T) {
 	require.InDelta(t, 8.0, w["all_cost"], 1e-9, "m2, under the custom root, was scanned")
 	require.InDelta(t, 30.0, w["backlog"], 1e-9)
 }
+
+// A cleared binding keeps its record while the scan cannot read one of its
+// transcripts: when the file is readable again, its last messages before the
+// clear are still backlog spend (Codex P2 on #6616).
+func TestMeterPassKeepsAClearedRecordWhileATranscriptIsUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whatever its mode")
+	}
+	const repoID = "meter-orch-unreadable-file"
+	_, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	orchMessage(t, conv, "m2", now.Add(30*time.Second))
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		_, err := b.ClearOrchestrator(1, now.Add(time.Minute))
+		return err
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(conv, 0))
+	pass(now.Add(2 * time.Minute))
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.NotNil(t, b.Item(1).OrchCleared, "the transcript could not be read: the record stays")
+
+	require.NoError(t, os.Chmod(conv, 0o644))
+	pass(now.Add(3 * time.Minute))
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 30.0, w["backlog"], 1e-9, "m2, read once the file was readable, is still the backlog's")
+	b, err = backlog.Load(repoID)
+	require.NoError(t, err)
+	require.Nil(t, b.Item(1).OrchCleared)
+}

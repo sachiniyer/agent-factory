@@ -364,15 +364,32 @@ func (m *Manager) startedItemRuns(home string) ([]itemRun, []orchRun, map[string
 	return out, orchs, unread
 }
 
-// unpricedIn is whether the account scan read past messages of c's transcripts
-// because their model had no price: a price added later makes it read them
-// again.
-func unpricedIn(state *planusage.MeterState, c backlog.OrchConversation) bool {
+// unconsumedIn is whether the account scan has not yet consumed one of c's
+// transcripts: it read past messages whose model had no price (a price added
+// later makes it read them again), or it has not read the file to its end, as
+// when the file could not be opened this pass (Codex P2s on #6616). A file
+// that does not exist holds nothing to read.
+func unconsumedIn(state *planusage.MeterState, c backlog.OrchConversation) bool {
 	for _, f := range planusage.ConversationTranscripts([]string{c.Main}) {
+		info, err := os.Stat(f)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return true
+		}
+		consumed := false
 		for _, a := range state.Accounts {
-			if a != nil && a.Files[f].Skipped != "" {
-				return true
+			if a == nil {
+				continue
 			}
+			if m, ok := a.Files[f]; ok && m.Skipped == "" && m.Offset >= info.Size() {
+				consumed = true
+				break
+			}
+		}
+		if !consumed {
+			return true
 		}
 	}
 	return false
@@ -728,7 +745,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 				b.NoteOrchConversations(n.group, n.sessionID, n.mains)
 			}
 			if clearedRepos[repoID] {
-				b.DropOrchCleared(now, func(c backlog.OrchConversation) bool { return unpricedIn(state, c) })
+				b.DropOrchCleared(now, func(c backlog.OrchConversation) bool { return unconsumedIn(state, c) })
 			}
 			return nil
 		}); err != nil {

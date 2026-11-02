@@ -215,10 +215,11 @@ func (b *Backlog) ClearOrchestrator(id int, now time.Time) (*Orchestrator, error
 }
 
 // DropOrchCleared removes the cleared bindings' records that a meter pass
-// started at passStart has scanned past, keeping one while pending says one of
-// its conversations still has messages the scan read past unpriced: a price
-// added later makes the scan read them again, and they must still be
-// classified (Codex P2 on #6616). It returns the items it changed.
+// started at passStart has scanned past, keeping one while pending says the
+// scan has not yet consumed one of its conversations: messages it read past
+// unpriced, which a price added later makes it read again, or a transcript it
+// could not read. Those must still be classified within the cleared spans
+// (Codex P2s on #6616). It returns the items it changed.
 func (b *Backlog) DropOrchCleared(passStart time.Time, pending func(OrchConversation) bool) []int {
 	var ids []int
 	for i := range b.Items {
