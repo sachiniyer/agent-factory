@@ -89,9 +89,22 @@ func (t *backlogTarget) selfItem() (string, *backlog.Item, error) {
 // cannot be resolved: the second return is that error, so a guarded mutation
 // that does not re-resolve a project before reaching the daemon (the global
 // budget command) cannot pass the guard as a non-item session.
+//
+// One earlier failure also fails closed: a "session row not found" from inside
+// an af_-named tmux session. resolveSelfSession already polled out the spawn
+// race there (#6586), so the miss that reaches this guard is a persistent
+// registration failure — the session may be an item session whose row never
+// landed, not a plain session. Outside an af_ name no row was ever coming, so
+// the same miss still reads as "not an item session".
 func inItemSession() (*session.InstanceData, error) {
 	s, err := backlogSelfSession()
-	if err != nil || s == nil {
+	if err != nil {
+		if errors.Is(err, errSelfNotFound) && insideAfTmuxSession() {
+			return nil, backlogUnresolvedSelfSessionErr(err)
+		}
+		return nil, nil
+	}
+	if s == nil {
 		return nil, nil
 	}
 	if s.BacklogItem != 0 {
@@ -230,6 +243,17 @@ func backlogUnresolvableSessionProjectErr(resolveErr error) error {
 // resolution failure rather than claiming an item session.
 func backlogUnresolvableFallbackProjectErr(resolveErr error) error {
 	return fmt.Errorf("cannot resolve the command target's project to check for an item session: %w; retry", resolveErr)
+}
+
+// backlogUnresolvedSelfSessionErr is the fail-closed refusal a guarded mutation
+// gets when this session's own row still has not registered after
+// resolveSelfSession's spawn-race retry inside an af_-named tmux session
+// (#6586). The miss is not proof the session is not an item session, so like
+// the other refusals it names the real cause rather than letting the mutation
+// through — and "retry" is honest here too, since a slow registration can
+// resolve on a later call.
+func backlogUnresolvedSelfSessionErr(err error) error {
+	return fmt.Errorf("cannot resolve this session to check for an item session: %w; retry", err)
 }
 
 // refuseFromItemSession stops an agent in an item session from running a
