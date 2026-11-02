@@ -55,14 +55,17 @@ test("#6560: an ancestor drag cannot sliver a skewed nested leaf", async ({ page
   // Wide enough that all three panes clear the floor: host ~1900px.
   await page.setViewportSize({ width: 2220, height: 800 });
 
+  // probe-a's tab roster is shared with the suite — count relative to it.
+  const tabs = page.locator(".af-tabbar .af-tab");
+  const base = await tabs.count();
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2);
-  await dragTabToPane(page, 1, 0, "right");
+  await expect(tabs).toHaveCount(base + 1);
+  await dragTabToPane(page, base, 0, "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(3);
-  // Drop the third tab on the RIGHT pane's right edge: [a | (b|c)].
-  await dragTabToPane(page, 2, 1, "right");
+  await expect(tabs).toHaveCount(base + 2);
+  // Drop my second new tab on the RIGHT pane's right edge: [a | (b|c)].
+  await dragTabToPane(page, base + 1, 1, "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(3);
   await expect(page.locator(".af-split-narrow")).toHaveCount(0);
 
