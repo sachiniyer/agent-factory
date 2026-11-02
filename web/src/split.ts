@@ -1010,7 +1010,7 @@ export class SplitView {
    *  count here rather than inside the rebuild gate. The text write is guarded:
    *  assigning textContent records a DOM mutation even when nothing changed. */
   private syncNarrowNotice(fit: { hidden: string[] }): void {
-    if (!this.builtRootEl) {
+    if (!this.host) {
       return;
     }
     if (fit.hidden.length === 0) {
@@ -1094,10 +1094,23 @@ export class SplitView {
     // stages) skips the fit and shows everything, as it always has.
     const hostW = this.host ? this.host.clientWidth : 0;
     const hostH = this.host ? this.host.clientHeight : 0;
-    const fit =
+    let fit =
       hostW > 0 && hostH > 0
         ? fitToSize(this.tree, hostW, hostH, this.focusedId)
         : { tree: this.tree, hidden: [] as string[] };
+    // The hidden-pane notice is a real flex row whose height the fit must pay
+    // for (#6561): mounted after the fact it shrinks every surviving pane
+    // below the floor the fit just verified. When a pass decides leaves must
+    // hide, mount/update the notice now — before the fit's result is applied —
+    // measure its rendered height, and refit against what remains. Everything
+    // stays inside this synchronous pass, so there is no paint and no flicker.
+    if (fit.hidden.length > 0) {
+      this.syncNarrowNotice(fit);
+      const noticeH = this.narrowEl?.offsetHeight ?? 0;
+      if (noticeH > 0 && noticeH < hostH) {
+        fit = fitToSize(this.tree, hostW, hostH - noticeH, this.focusedId);
+      }
+    }
     this.displayTree = fit.tree;
 
     // Rebuild the split wrappers, inserting the persistent containers. Containers now
