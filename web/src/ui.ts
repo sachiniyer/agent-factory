@@ -1223,6 +1223,9 @@ export class AppShell {
     this.viewTabs = tabs;
     this.viewNav = viewNav;
     tabs.get("backlog")?.append(this.backlogBadge);
+    tabs.get("backlog")?.addEventListener("click", () => {
+      if (!this.backlogBadge.hidden) this.backlogPane.showInbox();
+    });
 
     // The project switcher (redesign PR2): a button showing the current project and a
     // dropdown listing every project with counts. `margin-left:auto` (the wrap) pushes
@@ -1626,7 +1629,10 @@ export class AppShell {
         this.needsYouChanged = true;
       }
     }
-    setNeedsYouBadge(this.backlogBadge, state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0);
+    const questions = state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0;
+    setNeedsYouBadge(this.backlogBadge, questions);
+    const backlogTab = this.viewTabs.get("backlog");
+    if (backlogTab) backlogTab.title = questions > 0 ? `Backlog · ${questions === 1 ? "1 question" : `${questions} questions`} · Opens the inbox` : "";
     if (state.backlog) this.backlogPane.update(state.backlog, state.selectedProject, state.sessions);
 
     // The config pane mirrors the manifest. Global config is NOT project-scoped —

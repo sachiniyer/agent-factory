@@ -1855,15 +1855,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/backlog_group_panel.ts groupButtons (Pause, Unpause, Archive, Unarchive) and groupSections (Dependencies, History); web/src/backlog_pane.ts Show archived → web/src/backlog_api.ts updateItem paused/archived"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_groups.go backlogPauseCmd/backlogUnpauseCmd/backlogArchiveCmd/backlogUnarchiveCmd, api/backlog.go backlogListCmd --archived → POST /v1/UpdateBacklogItem paused/archived (daemon/backlog.go)"
       },
       "verdict": "deliberate",
-      "notes": "Backlog v2 PR 2 adds the CLI and the UpdateBacklogItem fields; the web group panel gains Pause, Unpause and Archive in backlog v2 PR 7. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "notes": "Backlog v2 PR 2 adds the CLI and the UpdateBacklogItem fields; backlog v2 PR 7 adds Pause and Unpause to the web item panel of a parent, Archive, Unarchive, Dependencies and History to a group, and a Show archived filter. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.sessions",
@@ -1892,14 +1892,14 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/backlog_panel.ts ItemPanel question box (Send answer) → web/src/backlog_api.ts answerQuestion"
+        "pointer": "web/src/backlog_inbox.ts QuestionBox (Send answer) in the item panel and the Inbox filter (InboxList) → web/src/backlog_api.ts answerQuestion"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_self.go backlogAskCmd (ask --self --then --handoff-file) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go); api/backlog_inbox.go backlogInboxCmd reads /v1/GetBacklog"
       },
       "verdict": "deliberate",
-      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; PR 8 adds the web answer box at the top of the item panel. Asking is agent-only (ask --self), so the web only answers. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; PR 8 adds the web answer box at the top of the item panel. Asking is agent-only (ask --self), so the web only answers. A question also sets the session's attention, which every surface already shows. Backlog v2 adds ask --then and --handoff-file (agent-only), af backlog inbox, and the web Inbox filter, built from /v1/GetBacklog: each open question as a card with its handoff and what an answer does. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.runner",
@@ -3156,12 +3156,6 @@
         },
         "program": {
           "ok": "Program choice matters only when an item starts a session; the web gains it with Start now in backlog PR 8."
-        },
-        "paused": {
-          "ok": "The web group panel gains Pause and Unpause in backlog v2 PR 7; the CLI has af backlog pause and unpause."
-        },
-        "archived": {
-          "ok": "The web group panel gains Archive in backlog v2 PR 7; the CLI has af backlog archive and unarchive."
         }
       },
       "MoveBacklogItem": {

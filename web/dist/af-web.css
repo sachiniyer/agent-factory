@@ -4752,6 +4752,59 @@ textarea[class] {
   font-size: var(--af-type-caption);
   line-height: 1.5;
 }
+.af-backlog-tag {
+  font-size: var(--af-type-caption);
+  font-weight: 600;
+  color: var(--af-ink-muted);
+  white-space: nowrap;
+}
+.af-backlog-handoff-wrap[hidden],
+.af-backlog-effect[hidden] {
+  display: none;
+}
+.af-backlog-handoff {
+  margin: var(--af-space-1) 0 0;
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  border-radius: var(--af-radius-control);
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-caption);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.af-backlog-effect {
+  margin: var(--af-space-1) 0;
+}
+.af-backlog-inbox-list,
+.af-backlog-deps,
+.af-backlog-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+}
+.af-backlog-inbox-list {
+  padding: var(--af-space-2) 0;
+}
+.af-backlog-inbox-card .af-backlog-question {
+  margin-bottom: 0;
+}
+.af-backlog-inbox-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--af-space-2);
+  padding-bottom: var(--af-space-1);
+}
+.af-backlog-dep,
+.af-backlog-dep-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--af-space-1);
+}
 
 /* src/tokens.css */
 [data-af-theme=light] {
