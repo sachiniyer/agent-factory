@@ -521,18 +521,37 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	// max_running slot and no cap per run.
 	orchUpdates := map[string]map[string]map[string]backlog.Meter{}
 	for _, o := range orchRuns {
-		if o.inst == nil {
+		// Every conversation the group's orchestrators have had: the live
+		// session's, listed as soon as a pass sees it so a kill before its first
+		// message is read still finds it, and every one the group's meter holds.
+		// A session killed or replaced since the last pass is so read to its end,
+		// and its last messages still count as backlog spend (Codex P2 on #6616).
+		mains := map[string]bool{}
+		if o.inst != nil {
+			if conv, configDir, dirs, ok := orchestratorConversationOf(o.inst); ok {
+				for _, f := range planusage.ConversationMains(dirs, conv) {
+					mains[f] = true
+				}
+				if configDir != "" {
+					account := planusage.AccountForConfigDir(home, configDir)
+					if !containsDir(runConfigs[account], configDir) {
+						runConfigs[account] = append(runConfigs[account], configDir)
+					}
+				}
+			}
+		}
+		for f := range o.orch.Meter {
+			mains[planusage.ConversationMain(f)] = true
+		}
+		if len(mains) == 0 {
 			continue
 		}
-		conv, configDir, dirs, ok := orchestratorConversationOf(o.inst)
-		if !ok {
-			continue
-		}
+		list := slices.Sorted(maps.Keys(mains))
 		sessionID := o.orch.SessionID
-		backlogDirs = append(backlogDirs, planusage.ConversationPaths(dirs, conv)...)
+		backlogDirs = append(backlogDirs, planusage.ConversationPaths(list)...)
 		metered[sessionID] = true
 		runSnaps[sessionID] = state.SnapshotRun(sessionID)
-		files := planusage.ConversationFiles(dirs, conv)
+		files := planusage.ConversationTranscripts(list)
 		rm := backlog.MeterOrchestrator(o.group, backlog.Where{}, o.orch, files, state.RunSeenFor(sessionID), overrides)
 		for _, f := range files {
 			if root := transcriptConfigRoot(f); root != "" {
@@ -540,12 +559,6 @@ func (m *Manager) meterPassLocked(now time.Time) {
 				if !containsDir(runConfigs[account], root) {
 					runConfigs[account] = append(runConfigs[account], root)
 				}
-			}
-		}
-		if configDir != "" {
-			account := planusage.AccountForConfigDir(home, configDir)
-			if !containsDir(runConfigs[account], configDir) {
-				runConfigs[account] = append(runConfigs[account], configDir)
 			}
 		}
 		if rm.Changed {

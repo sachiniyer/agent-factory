@@ -215,23 +215,37 @@ func TestMeterNeverFollowsASymlinkedTranscript(t *testing.T) {
 	}
 }
 
-func TestConversationFilesListsOnlyThatConversation(t *testing.T) {
+func TestConversationTranscriptsAndPathsTakeOnlyThatConversation(t *testing.T) {
 	project := filepath.Join(t.TempDir(), "projects", "-repo")
 	write(t, filepath.Join(project, "c1.jsonl"), user)
 	write(t, filepath.Join(project, "c1", "subagents", "agent-a.jsonl"), user)
 	write(t, filepath.Join(project, "c1", "tool-results", "x.jsonl"), user)
 	write(t, filepath.Join(project, "mine.jsonl"), user)
 	write(t, filepath.Join(project, "mine", "subagents", "agent-b.jsonl"), user)
-	want := []string{filepath.Join(project, "c1.jsonl"), filepath.Join(project, "c1", "subagents", "agent-a.jsonl")}
-	if got := ConversationFiles([]string{project}, "c1"); strings.Join(got, ",") != strings.Join(want, ",") {
+	main := filepath.Join(project, "c1.jsonl")
+	if got := ConversationMains([]string{project, ""}, "c1"); strings.Join(got, ",") != main {
 		t.Fatal(got)
 	}
 	for _, id := range []string{"", "..", "../mine", "*", "c?"} {
-		if got := ConversationFiles([]string{project}, id); got != nil {
+		if got := ConversationMains([]string{project}, id); got != nil {
 			t.Fatalf("%q: %v", id, got)
 		}
 	}
-	paths := ConversationPaths([]string{project}, "c1")
+	sub := filepath.Join(project, "c1", "subagents", "agent-a.jsonl")
+	if ConversationMain(sub) != main || ConversationMain(main) != main {
+		t.Fatalf("%s, %s", ConversationMain(sub), ConversationMain(main))
+	}
+	want := []string{main, sub}
+	if got := ConversationTranscripts([]string{main}); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatal(got)
+	}
+	// A conversation with no transcript yet is still listed, so a reader keeps
+	// its place from the start.
+	later := filepath.Join(project, "c2.jsonl")
+	if got := ConversationTranscripts([]string{later}); strings.Join(got, ",") != later {
+		t.Fatal(got)
+	}
+	paths := ConversationPaths([]string{main})
 	for _, f := range want {
 		if !underAny(f, paths) {
 			t.Fatalf("%s not under %v", f, paths)

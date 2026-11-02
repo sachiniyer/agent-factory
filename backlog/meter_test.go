@@ -170,3 +170,25 @@ func TestMeterOrchestratorCountsFromBind(t *testing.T) {
 		t.Fatalf("no conversation yet: %+v", m)
 	}
 }
+
+// A file the meter already holds is read on from its offset past the bind: a
+// replacement moves BoundAt later, and the end of the session it replaced was
+// written before that (Codex P2 on #6616).
+func TestMeterOrchestratorReadsAKnownFilePastALaterBind(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "projects", "-repo", "c1.jsonl")
+	first := transcriptLine("m1", "claude-opus-5-5", 1_000_000)
+	writeFile(t, f, first)
+	o := Orchestrator{SessionID: "o", BoundAt: time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)}
+	m := MeterOrchestrator(1, Where{}, o, []string{f}, map[string]int64{}, nil)
+	if math.Abs(m.Cost()-4) > 1e-9 {
+		t.Fatalf("%+v", m)
+	}
+	// The session wrote one more message at 10:00, was killed, and a replacement
+	// was bound at 11:00.
+	writeFile(t, f, first, transcriptLine("m2", "claude-opus-5-5", 1_000_000))
+	o.Meter, o.BoundAt = m.Meter, time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)
+	again := MeterOrchestrator(1, Where{}, o, []string{f}, map[string]int64{}, nil)
+	if !again.Changed || len(again.Entries) != 1 || math.Abs(again.Cost()-8) > 1e-9 {
+		t.Fatalf("the killed session's last message was dropped: %+v", again)
+	}
+}

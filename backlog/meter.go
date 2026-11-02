@@ -44,12 +44,36 @@ func MeterRun(id int, w Where, r RunRef, files []string, seen map[string]int64, 
 	return out
 }
 
-// MeterOrchestrator reads the transcripts of group's orchestrator from their
-// stored offsets, like MeterRun, and counts only messages from after the
-// session was bound: an orchestrator can be a session that worked before it
-// took the group.
+// MeterOrchestrator reads the transcripts of group's orchestrators from their
+// stored offsets, like MeterRun. A file read for the first time counts only
+// messages from after the bind: an orchestrator can be a session that worked
+// before it took the group. A file the meter already holds is read on from its
+// offset with no such bound: what follows was written after a pass saw it,
+// once its session was bound, and a later bind (a replacement) must not drop
+// the end of a session that was killed.
 func MeterOrchestrator(group int, w Where, o Orchestrator, files []string, seen map[string]int64, overrides map[string]planusage.Price) RunMeter {
-	return meterFiles(group, w, RunRef{Meter: o.Meter}, files, planusage.ReadOptions{Overrides: overrides, Seen: seen, Since: o.BoundAt})
+	var known, fresh []string
+	for _, f := range files {
+		if _, ok := o.Meter[f]; ok {
+			known = append(known, f)
+		} else {
+			fresh = append(fresh, f)
+		}
+	}
+	out := meterFiles(group, w, RunRef{Meter: o.Meter}, known, planusage.ReadOptions{Overrides: overrides, Seen: seen})
+	more := meterFiles(group, w, RunRef{Meter: out.Meter}, fresh, planusage.ReadOptions{Overrides: overrides, Seen: seen, Since: o.BoundAt})
+	more.Changed = more.Changed || out.Changed
+	more.Entries = append(out.Entries, more.Entries...)
+	for f, e := range out.FileEntries {
+		if more.FileEntries == nil {
+			more.FileEntries = map[string][]planusage.Entry{}
+		}
+		more.FileEntries[f] = append(e, more.FileEntries[f]...)
+	}
+	if more.Unmeterable == "" {
+		more.Unmeterable = out.Unmeterable
+	}
+	return more
 }
 
 func meterFiles(id int, w Where, r RunRef, files []string, opts planusage.ReadOptions) RunMeter {

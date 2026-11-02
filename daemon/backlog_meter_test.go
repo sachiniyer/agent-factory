@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -698,4 +699,68 @@ func TestMeterFindsOrchestrators(t *testing.T) {
 func TestOrchestratorWithoutAConversationIsNotMetered(t *testing.T) {
 	_, _, _, ok := orchestratorConversation(&session.Instance{ID: "o1", Title: "planner", Program: "claude"})
 	require.False(t, ok, "with no conversation id af cannot tell its transcript from others in the dir")
+}
+
+// An orchestrator killed before the next meter pass, and replaced, still has
+// its conversation read to its end: the group's meter holds the conversation
+// from the pass that saw the session live, before it wrote anything. Its last
+// messages count in the group's cost and as backlog spend (Codex P2 on #6616).
+func TestMeterPassFinishesAKilledOrchestratorsConversation(t *testing.T) {
+	cs, _ := newBacklogTestServer(t)
+	m := cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now := time.Now().UTC()
+	project := filepath.Join(claudeDir, "projects", "-home-me-x")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	reset := now.Add(2 * time.Hour).Truncate(time.Hour)
+	require.NoError(t, planusage.WriteReading(planusage.DefaultAccount, planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 30, ResetsAt: reset.Unix()}, ReadAt: now,
+	}))
+	const repoID = "meter-orch-killed"
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = append(b.Items, backlog.Item{ID: 1, Title: "Effort", Status: backlog.StatusDraft},
+			backlog.Item{ID: 2, Title: "step", Parent: 1, Status: backlog.StatusDraft})
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "o1", Title: "planner", Program: "claude"}, now.Add(-30*time.Minute))
+	})
+	require.NoError(t, err)
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{daemonInstanceKey(repoID, "planner"): {ID: "o1", Title: "planner", Program: "claude"}}
+	m.mu.Unlock()
+	prev := orchestratorConversationOf
+	orchestratorConversationOf = func(inst *session.Instance) (string, string, []string, bool) {
+		return "conv-" + inst.ID, claudeDir, []string{project}, true
+	}
+	t.Cleanup(func() { orchestratorConversationOf = prev })
+	pass := func(at time.Time) {
+		st := &m.backlog.meter
+		st.mu.Lock()
+		m.meterPassLocked(at)
+		st.mu.Unlock()
+	}
+	pass(now)
+
+	// The planner writes two messages, is killed, and a replacement is bound.
+	line := `{"type":"assistant","timestamp":"` + now.Format(time.RFC3339) +
+		`","message":{"id":"%s","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(project, "conv-o1.jsonl"),
+		[]byte(fmt.Sprintf(line, "m1")+fmt.Sprintf(line, "m2")), 0o644))
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{}
+	m.mu.Unlock()
+	_, err = backlog.Update(repoID, func(b *backlog.Backlog) error {
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "n1", Title: "effort B-1 Effort", Program: "claude"}, now.Add(time.Minute))
+	})
+	require.NoError(t, err)
+	pass(now.Add(2 * time.Minute))
+
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.InDelta(t, 8.0, b.Item(1).Orchestrator.Cost(), 1e-9, "the killed planner's last messages are the group's")
+	code, env := postProposalRoute(t, cs, "GetBudget", GetBudgetRequest{})
+	require.Equal(t, http.StatusOK, code, env)
+	five := env["data"].(map[string]any)["windows"].(map[string]any)["five_hour"].(map[string]any)
+	require.InDelta(t, 8.0, five["all_cost"], 1e-9)
+	require.InDelta(t, 30.0, five["backlog"], 1e-9, "and backlog spend: all of the window's metered cost")
 }

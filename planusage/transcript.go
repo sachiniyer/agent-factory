@@ -289,22 +289,43 @@ func TranscriptFiles(projectDirs []string) []string {
 	return out
 }
 
-// ConversationFiles lists the transcripts of one conversation in Claude
-// project directories: <dir>/<id>.jsonl and its subagents' files. An id that
-// is not a plain file name lists nothing.
-func ConversationFiles(projectDirs []string, id string) []string {
+// ConversationMains are the main transcript files a conversation id has in
+// Claude project directories: <dir>/<id>.jsonl for each, whether it exists yet
+// or not. An id that is not a plain file name has none.
+func ConversationMains(projectDirs []string, id string) []string {
 	if !conversationIDOK(id) {
 		return nil
 	}
 	var out []string
 	for _, dir := range projectDirs {
-		if dir == "" {
-			continue
+		if dir != "" {
+			out = append(out, filepath.Join(dir, id+".jsonl"))
 		}
-		matches, _ := filepath.Glob(filepath.Join(dir, id, "subagents", "*.jsonl"))
-		for _, m := range append([]string{filepath.Join(dir, id+".jsonl")}, matches...) {
-			if info, err := os.Stat(m); err == nil && info.Mode().IsRegular() {
-				out = append(out, m)
+	}
+	return out
+}
+
+// ConversationMain is the main transcript file of the conversation path
+// belongs to: path itself, or for a subagent's file
+// (<dir>/<id>/subagents/<name>.jsonl), <dir>/<id>.jsonl.
+func ConversationMain(path string) string {
+	if sub := filepath.Dir(path); filepath.Base(sub) == "subagents" {
+		return filepath.Dir(sub) + ".jsonl"
+	}
+	return path
+}
+
+// ConversationTranscripts are the transcript files of the conversations whose
+// main files are mains: each main file, listed whether it exists yet or not so
+// a reader keeps its place from the start, and its subagents' files that exist.
+func ConversationTranscripts(mains []string) []string {
+	var out []string
+	for _, m := range mains {
+		out = append(out, m)
+		subs, _ := filepath.Glob(filepath.Join(strings.TrimSuffix(m, ".jsonl"), "subagents", "*.jsonl"))
+		for _, f := range subs {
+			if info, err := os.Stat(f); err == nil && info.Mode().IsRegular() {
+				out = append(out, f)
 			}
 		}
 	}
@@ -312,19 +333,14 @@ func ConversationFiles(projectDirs []string, id string) []string {
 	return out
 }
 
-// ConversationPaths are the paths that hold one conversation's transcripts in
-// Claude project directories, for the backlog paths of a scan: each
-// conversation file and the directory of its subagents. Another session's
-// transcript in the same project directory is not under any of them.
-func ConversationPaths(projectDirs []string, id string) []string {
-	if !conversationIDOK(id) {
-		return nil
-	}
+// ConversationPaths are the paths that hold the conversations whose main files
+// are mains, for the backlog paths of a scan: each main file and the directory
+// of its subagents. Another session's transcript in the same project directory
+// is not under any of them.
+func ConversationPaths(mains []string) []string {
 	var out []string
-	for _, dir := range projectDirs {
-		if dir != "" {
-			out = append(out, filepath.Join(dir, id+".jsonl"), filepath.Join(dir, id))
-		}
+	for _, m := range mains {
+		out = append(out, m, strings.TrimSuffix(m, ".jsonl"))
 	}
 	return out
 }
