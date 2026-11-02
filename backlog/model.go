@@ -56,6 +56,10 @@ const (
 	ClosedSentToReview      = "sent to review"
 	ClosedDone              = "done"
 	ClosedDropped           = "dropped"
+	// ClosedRebound and ClosedUnbound close af's escalation question on a
+	// group when its orchestrator changes or is cleared.
+	ClosedRebound = "orchestrator rebound"
+	ClosedUnbound = "orchestrator unbound"
 
 	DeliveryPending   = "pending"
 	DeliveryDelivered = "delivered"

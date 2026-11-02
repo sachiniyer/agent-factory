@@ -30,6 +30,35 @@ type Orchestrator struct {
 	// Events is the outbox of events not yet delivered, oldest first, so a
 	// daemon restart can finish delivery.
 	Events []OrchEvent `json:"events,omitempty"`
+	// Failures holds when recent deliveries to the session failed, within
+	// OrchFailureWindow, oldest first.
+	Failures []time.Time `json:"failures,omitempty"`
+	// Sending is how many of the first Events a delivery in flight carries.
+	Sending int `json:"sending,omitempty"`
+	// Unstarted marks a session that has not had its start prompt (the
+	// instructions and the handoff), and why: OrchUnstartedReplaced for a
+	// replacement af started whose first prompt was proven not delivered, or
+	// that af adopted after a restart; OrchUnstartedRestarted for a session af
+	// restored without its agent conversation. Every delivery sends the start
+	// prompt while it is set, and only a confirmed one clears it.
+	Unstarted string `json:"unstarted,omitempty"`
+	// Replacing records a replacement af began to start for the gone session,
+	// written before the create, so a daemon that stops before binding it
+	// adopts that session instead of starting a second one.
+	Replacing *OrchReplacing `json:"replacing,omitempty"`
+}
+
+// Why an orchestrator has not had its start prompt (Orchestrator.Unstarted).
+const (
+	OrchUnstartedReplaced  = "replaced"
+	OrchUnstartedRestarted = "restarted"
+)
+
+// OrchReplacing is a replacement af began to start: its session's title base,
+// and the time af began, which the new session's creation is not before.
+type OrchReplacing struct {
+	TitleBase string    `json:"title_base"`
+	Since     time.Time `json:"since"`
 }
 
 // OrchEvent is one group event for the orchestrator. Item is the item it is
@@ -47,7 +76,12 @@ func (o *Orchestrator) clone() *Orchestrator {
 	}
 	c := *o
 	c.Meter = maps.Clone(o.Meter)
+	if o.Replacing != nil {
+		r := *o.Replacing
+		c.Replacing = &r
+	}
 	c.Events = append([]OrchEvent(nil), o.Events...)
+	c.Failures = append([]time.Time(nil), o.Failures...)
 	return &c
 }
 
@@ -87,6 +121,8 @@ func (b *Backlog) BindOrchestrator(id int, o Orchestrator, now time.Time) error 
 	if prev := it.Orchestrator; prev != nil {
 		o.Handoff, o.Meter, o.Events = prev.Handoff, prev.Meter, prev.Events
 	}
+	o.Failures, o.Sending = nil, 0
+	it.closeAFQuestions(ClosedRebound)
 	o.BoundAt = now
 	it.Orchestrator = &o
 	it.UpdatedAt = now
@@ -103,6 +139,7 @@ func (b *Backlog) ClearOrchestrator(id int, now time.Time) (*Orchestrator, error
 	prev := it.Orchestrator
 	if prev != nil {
 		it.Orchestrator = nil
+		it.closeAFQuestions(ClosedUnbound)
 		it.UpdatedAt = now
 	}
 	return prev, nil
