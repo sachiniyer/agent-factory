@@ -659,8 +659,11 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
     // the next daemon may not honour hosts_edit at all, and a stale `true`
     // would arm the send that writes an empty hosts table on it. `busy` goes
     // with it: an in-flight edit's finally is fenced off by the generation
-    // bump, so it would never lift the row's buttons itself.
-    hosts: { ...store.get().hosts, editable: null, busy: [] },
+    // bump, so it would never lift the row's buttons itself. So do the earned
+    // results: a verdict was probed against THIS connection's host table, and
+    // the rows index checks by name alone — a stale "ready" would sit beside a
+    // different destination the next daemon saved under the same name.
+    hosts: { ...store.get().hosts, editable: null, checks: {}, status: null, busy: [] },
   });
 }
 
@@ -2569,8 +2572,13 @@ function doHostCheck(name: string): void {
  *  Returns the response for the refusal message's version substitution, null
  *  when the read itself failed — refused either way. */
 async function hostsHealthNow(tok: string): Promise<DaemonHealth | null> {
+  const requestGeneration = connectionGeneration;
   const resp = await daemonHealth(tok);
-  if (resp?.config_hosts_edit !== true) {
+  if (
+    requestGeneration === connectionGeneration &&
+    token === tok &&
+    resp?.config_hosts_edit !== true
+  ) {
     store.set({ hosts: { ...store.get().hosts, editable: false } });
   }
   return resp;

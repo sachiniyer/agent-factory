@@ -320,11 +320,17 @@ export function renderHostsSection(
     section.append(h("p", { class: "af-hosts-empty" }, "No hosts saved."));
   }
 
-  // A status that belongs to no row (check-all, or a name that vanished) still
-  // says so at the foot rather than disappearing.
-  if (state.status !== null && state.status.name !== "") {
-    const stillThere = rows.some((r) => r.name === state.status!.name);
-    if (!stillThere) {
+  // A status that belongs to no row still says so at the foot rather than
+  // disappearing: a named one whose row vanished, or the add form's empty
+  // name — which a check-all failure also carries. The open form shows the
+  // empty name itself; a closed disclosure, a hidden one (the empty table),
+  // or no form at all (the capability gate) must not swallow it.
+  if (state.status !== null) {
+    const formShowsIt =
+      state.status.name === "" && state.editable === true && disclosure.open;
+    const orphaned =
+      state.status.name !== "" && !rows.some((r) => r.name === state.status!.name);
+    if (orphaned || (state.status.name === "" && !formShowsIt)) {
       section.append(statusBlock(state.status));
     }
   }

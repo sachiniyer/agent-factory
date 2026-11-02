@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "f995cd5e58ca";
+var CLIENT_VERSION = "5739f8817386";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8622,9 +8622,10 @@ function renderHostsSection(entries, state, actions2, disclosure = { open: false
   } else if (rows.length === 0) {
     section3.append(h("p", { class: "af-hosts-empty" }, "No hosts saved."));
   }
-  if (state.status !== null && state.status.name !== "") {
-    const stillThere = rows.some((r) => r.name === state.status.name);
-    if (!stillThere) {
+  if (state.status !== null) {
+    const formShowsIt = state.status.name === "" && state.editable === true && disclosure.open;
+    const orphaned = state.status.name !== "" && !rows.some((r) => r.name === state.status.name);
+    if (orphaned || state.status.name === "" && !formShowsIt) {
       section3.append(statusBlock(state.status));
     }
   }
@@ -25017,8 +25018,11 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
     // the next daemon may not honour hosts_edit at all, and a stale `true`
     // would arm the send that writes an empty hosts table on it. `busy` goes
     // with it: an in-flight edit's finally is fenced off by the generation
-    // bump, so it would never lift the row's buttons itself.
-    hosts: { ...store.get().hosts, editable: null, busy: [] }
+    // bump, so it would never lift the row's buttons itself. So do the earned
+    // results: a verdict was probed against THIS connection's host table, and
+    // the rows index checks by name alone — a stale "ready" would sit beside a
+    // different destination the next daemon saved under the same name.
+    hosts: { ...store.get().hosts, editable: null, checks: {}, status: null, busy: [] }
   });
 }
 function tabIdsOf(list, id) {
@@ -26186,8 +26190,9 @@ function doHostCheck(name) {
   });
 }
 async function hostsHealthNow(tok) {
+  const requestGeneration = connectionGeneration;
   const resp = await daemonHealth(tok);
-  if (resp?.config_hosts_edit !== true) {
+  if (requestGeneration === connectionGeneration && token === tok && resp?.config_hosts_edit !== true) {
     store.set({ hosts: { ...store.get().hosts, editable: false } });
   }
   return resp;
