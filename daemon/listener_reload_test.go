@@ -1048,12 +1048,24 @@ func TestWebListenerTwoWaySwapAppliesLive(t *testing.T) {
 	// path's coordinated release frees it first (allow, redirected to loopback
 	// so nothing depends on 127.0.0.2 being assignable).
 	webTarget := "127.0.0.2:" + port
+	previewTarget := "127.0.0.1:" + port
 	realBound := map[string]net.Addr{}
 	wl.listenTCP = func(network, address string) (net.Listener, error) {
-		if address == webTarget {
+		switch address {
+		case webTarget:
 			if probe, perr := net.Listen(network, previewRealAddr); perr == nil {
 				probe.Close()
 			} else {
+				return nil, fmt.Errorf("listen %s: %w", address, syscall.EADDRINUSE)
+			}
+		case previewTarget:
+			// The preview's target IS the control listener's bound address —
+			// the mutual conflict this test exists for. Deny it while the
+			// control listener still claims that address so the first attempt
+			// declines like the real bind did and both sides enter
+			// swapWebPreviewLocked; after the coordinated release has moved
+			// the control claim to 127.0.0.2:P, the bind lands.
+			if wl.webBoundAddr == address {
 				return nil, fmt.Errorf("listen %s: %w", address, syscall.EADDRINUSE)
 			}
 		}
@@ -1066,7 +1078,7 @@ func TestWebListenerTwoWaySwapAppliesLive(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = webTarget
-	next.PreviewListenAddr = "127.0.0.1:" + port // preview takes the control listener's home
+	next.PreviewListenAddr = previewTarget // preview takes the control listener's home
 	m.storeLivePosture(&next)
 
 	failed, rerr := wl.reconcile(&next)
