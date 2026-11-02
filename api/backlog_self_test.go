@@ -2,6 +2,9 @@ package api
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -302,5 +305,311 @@ func TestBacklogAddFromItemSession(t *testing.T) {
 	it := decodeOut[backlog.Item](t, out)
 	if it.Status != backlog.StatusDraft || len(it.Thread) != 1 || it.Thread[0].Text != "Added by the agent working on B-1." {
 		t.Fatalf("%+v", it)
+	}
+}
+
+// TestBacklogGuardRailsSurviveDroppedBacklogItem reproduces the version-skew bug
+// from #6337: an older daemon binary whose InstanceData lacks the BacklogItem
+// field rewrites the session record and silently drops the omitempty
+// `backlog_item` key (the daemon is the sole writer of instances.json). Once
+// dropped the field is never re-derived. The refusal rails must still fire,
+// resolving from the authoritative backlog link — the run records in
+// backlog.json (ItemForSession) — instead of the droppable persisted field,
+// mirroring selfItem. Without this, an agent inside an item session reaches the
+// daemon with no SessionID and SetItemStatus attributes its action to the human
+// user (open questions close, the runner can be enabled, plan mutates).
+func TestBacklogGuardRailsSurviveDroppedBacklogItem(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// Item 1 runs in session s1; the run record in backlog.json is the
+	// authoritative link. The session record has lost its BacklogItem field
+	// (an older daemon dropped the omitempty key on its next write).
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0})
+	*methods = nil
+	for _, args := range [][]string{
+		{"queue", "1"}, {"draft", "1"}, {"review", "1"}, {"reopen", "1"}, {"start", "1"}, {"done", "1"}, {"drop", "1"}, {"delete", "1"},
+		{"answer", "1", "yes"}, {"note", "1", "text"}, {"run"},
+		// Plan editing: an agent leaves a note instead (Codex P2 on #6294). It may
+		// add the work it found, as a draft with a title and --parent only
+		// (decision (3) on #6284).
+		{"add", "--file", "-"}, {"add", "x", "--waits-on", "1"}, {"add", "x", "--before", "1"}, {"add", "x", "--body", "b"},
+		{"add", "x", "--program", "claude"}, {"edit", "1", "--title", "x"}, {"move", "1", "--top"},
+	} {
+		if _, err := runBacklogCmd(t, args...); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"runner", "on"}, {"runner", "--max-running", "2"}, {"budget", "--limit", "40"}, {"budget", "--usd-limit", "5"}} {
+		if _, err := runBacklogCmd(t, args...); err == nil || err.Error() != `item sessions cannot change the runner or budget; ask the user with "af backlog ask --self"` {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	for _, m := range *methods {
+		if m != "GetBacklog" {
+			t.Fatalf("a refused command reached the daemon: %v", *methods)
+		}
+	}
+	for _, args := range [][]string{{"runner"}, {"budget"}, {"list"}, {"show", "1"}} {
+		if _, err := runBacklogCmd(t, args...); err != nil {
+			t.Errorf("%v refused: %v", args, err)
+		}
+	}
+}
+
+// TestBacklogGuardRailsCoverStillStartingRun verifies the fallback to the
+// record's BacklogItem during the run-still-starting window: the run record has
+// no SessionID until the daemon links it, so ItemForSession returns nil, and the
+// session chip is the only signal. The guard must still fire in this window.
+// Regression test for the #6337 fix, which made the rails consult ItemForSession
+// first: the field-only fallback path must remain for the starting window.
+func TestBacklogGuardRailsCoverStillStartingRun(t *testing.T) {
+	stubBacklogDaemon(t)
+	if _, err := runBacklogCmd(t, "add", "work"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := backlogProject()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backlog.Update(p.repoID, func(b *backlog.Backlog) error {
+		it := b.Item(1)
+		it.Status = backlog.StatusRunning
+		// A still-starting run with no SessionID: ItemForSession cannot find it.
+		it.Runs = []backlog.RunRef{{State: backlog.RunStarting, StartedAt: time.Now()}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The session chip carries the item id while the run is still starting.
+	backlogSelfSession = func() (*session.InstanceData, error) {
+		return &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 1}, nil
+	}
+	if _, err := runBacklogCmd(t, "done", "1"); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatalf("guard did not fire during the starting window: %v", err)
+	}
+}
+
+// TestBacklogGuardRailsSurviveRepoOverride reproduces the cross-project gap
+// raised on #6498: a confused agent inside an item session of project A that
+// points the command at another project B (--repo B) must still be refused.
+// The guard resolves item-session membership from the session's own project
+// (its worktree path), not the command target, so consulting B's backlog (which
+// has no run for this session) cannot disarm it once the session's BacklogItem
+// chip has been dropped.
+func TestBacklogGuardRailsSurviveRepoOverride(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// Project A is the session's own project; setupRepoForCmd set --repo to A.
+	aRoot := repoFlag
+	// A second project B is the command target.
+	bRoot := filepath.Join(t.TempDir(), "repo-b")
+	if err := os.MkdirAll(bRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", bRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init B: %v (%s)", err, out)
+	}
+	// Item 1 runs in session s1 in A; the session record has lost its BacklogItem
+	// chip (dropped by an older daemon) and carries its worktree path so the
+	// guard can resolve the session's own project.
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0, Path: aRoot})
+	prevRepo := repoFlag
+	repoFlag = bRoot
+	t.Cleanup(func() { repoFlag = prevRepo })
+	*methods = nil
+	if _, err := runBacklogCmd(t, "done", "1"); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatalf("done --repo B from an item session of A: %v", err)
+	}
+	for _, m := range *methods {
+		if m != "GetBacklog" {
+			t.Fatalf("a refused command reached the daemon: %v", *methods)
+		}
+	}
+}
+
+// TestBacklogGuardRailsFailClosedOnUnreadableBacklog pins the fail-closed
+// behavior raised on #6498: when the session's BacklogItem chip has been dropped
+// (the version-skew case this PR exists for) and the authoritative backlog read
+// itself fails (e.g. a transient backlog lock timeout), af cannot determine
+// whether the session runs a backlog item. A guarded mutation must not proceed
+// in that window — it must be refused with the real cause, not allowed through
+// as a non-item session. The refusal names the read failure (it does not claim
+// the session is an item session), so a plain session that hits the same
+// transient failure retries rather than sees a misleading "item sessions cannot
+// run" error. The chip-set path and the successful-read path are covered by the
+// tests above; this one isolates the read-failure path.
+func TestBacklogGuardRailsFailClosedOnUnreadableBacklog(t *testing.T) {
+	stubBacklogDaemon(t)
+	// Item 1 runs in session s1; the run record in backlog.json is the
+	// authoritative link. The session record has lost its BacklogItem field
+	// (an older daemon dropped the omitempty key on its next write), so the
+	// guard must consult the authoritative link.
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0})
+	// Make the authoritative backlog read fail (e.g. a backlog lock timeout):
+	// every GetBacklog call returns the read error, but other routes still work
+	// so the test isolates the guard's read failure from the mutation route.
+	const readErr = "backlog lock timeout"
+	prev := callBacklogRoute
+	callBacklogRoute = func(method string, req, resp any) error {
+		if method == "GetBacklog" {
+			return errors.New(readErr)
+		}
+		return prev(method, req, resp)
+	}
+	t.Cleanup(func() { callBacklogRoute = prev })
+	// A guarded mutation is refused with the real cause, not allowed through.
+	_, err := runBacklogCmd(t, "done", "1")
+	if err == nil || !strings.Contains(err.Error(), readErr) {
+		t.Fatalf("guard did not fail closed with the real cause: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cannot read this project's backlog to check for an item session") {
+		t.Fatalf("refusal does not name the real cause: %v", err)
+	}
+	if strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatalf("refusal misclaims an item session: %v", err)
+	}
+	// A runner/budget control is refused with the same real cause.
+	if _, err := runBacklogCmd(t, "runner", "on"); err == nil || !strings.Contains(err.Error(), readErr) {
+		t.Fatalf("runner on did not fail closed with the real cause: %v", err)
+	}
+}
+
+// TestBacklogGuardRailsFailClosedOnUnresolvableSessionProject pins the fail-closed
+// behavior for the cross-project gap raised on #6498: when the session's
+// BacklogItem chip has been dropped (the version-skew case) and the session's
+// recorded worktree cannot be resolved to a git repository (it was deleted,
+// moved, or is unreadable), af cannot determine the session's own project to
+// check its backlog for the run. The guard must fail closed rather than fall
+// back to the command target's project: a confused agent that points --repo at
+// another project would otherwise consult that project's backlog (which has no
+// run for this session) and let the mutation reach the daemon. The refusal
+// names the resolution failure (it does not claim an item session), so a plain
+// session retries rather than sees a misleading "item sessions cannot run"
+// error. The session's own project is resolved before any backlog read, so no
+// daemon call is made in this window.
+func TestBacklogGuardRailsFailClosedOnUnresolvableSessionProject(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// A second project B is the command target; the session's own project is A
+	// (set by setupRepoForCmd), but its recorded worktree path is gone.
+	bRoot := filepath.Join(t.TempDir(), "repo-b")
+	if err := os.MkdirAll(bRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", bRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init B: %v (%s)", err, out)
+	}
+	// Item 1 runs in session s1; the run record in backlog.json is the
+	// authoritative link. The session record has lost its BacklogItem field
+	// (an older daemon dropped the omitempty key on its next write) and its
+	// recorded worktree no longer resolves (deleted/moved/unreadable).
+	deletedWorktree := filepath.Join(t.TempDir(), "deleted-worktree")
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0, Path: deletedWorktree})
+	prevRepo := repoFlag
+	repoFlag = bRoot
+	t.Cleanup(func() { repoFlag = prevRepo })
+	*methods = nil
+	// A guarded mutation is refused with the real cause (the resolution
+	// failure), not allowed through and not misclaimed as an item session.
+	_, err := runBacklogCmd(t, "done", "1")
+	if err == nil {
+		t.Fatal("done --repo B with an unresolvable session project was allowed through")
+	}
+	if !strings.Contains(err.Error(), "cannot resolve this session's own project to check for an item session") {
+		t.Fatalf("refusal does not name the resolution failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatalf("refusal misclaims an item session: %v", err)
+	}
+	if !strings.Contains(err.Error(), deletedWorktree) {
+		t.Fatalf("refusal does not name the unresolvable path: %v", err)
+	}
+	// The guard fails before any backlog read, so no daemon call is made.
+	if len(*methods) != 0 {
+		t.Fatalf("a refused command reached the daemon: %v", *methods)
+	}
+	// A runner/budget control is refused with the same real cause.
+	if _, err := runBacklogCmd(t, "runner", "on"); err == nil ||
+		!strings.Contains(err.Error(), "cannot resolve this session's own project to check for an item session") {
+		t.Fatalf("runner on did not fail closed with the real cause: %v", err)
+	}
+}
+
+// TestBacklogGuardRailsFailClosedOnUnresolvableFallbackProject pins the
+// fail-closed behavior for the third gap raised on #6498: a dropped-chip item
+// session (BacklogItem: 0) with no recorded worktree path — the compatibility
+// case — has nothing to resolve as its own project, so the guard falls back to
+// the command target's project. When that fallback cannot be resolved either
+// (no --repo and the cwd is not a git repository), the guard must fail closed
+// rather than treat the session as a non-item session and let the mutation
+// through. The global budget command does not re-resolve a project before
+// reaching SetBudget, so failing open here would let an item-session agent
+// change the budget; the runner control runs the guard before its own project
+// lookup, so it is refused at the guard too. The refusal names the fallback
+// resolution failure (it does not claim an item session), and no daemon call
+// is made.
+func TestBacklogGuardRailsFailClosedOnUnresolvableFallbackProject(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// Item 1 runs in session s1; the chip was dropped (BacklogItem: 0) and the
+	// session has no recorded worktree path, so the guard falls back to the
+	// command target's project. withRunningItem set up the run under repo-a
+	// (repoFlag's value at setup); the command below retargets --repo at a path
+	// that is not a git repository, so backlogProject() cannot resolve it.
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0, Path: ""})
+	notARepo := filepath.Join(t.TempDir(), "not-a-repo")
+	if err := os.MkdirAll(notARepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	prevRepo := repoFlag
+	repoFlag = notARepo
+	t.Cleanup(func() { repoFlag = prevRepo })
+	*methods = nil
+	// A guarded budget control is refused with the real cause — the fallback
+	// project resolution failure — not allowed through to SetBudget.
+	if _, err := runBacklogCmd(t, "budget", "--limit", "40"); err == nil {
+		t.Fatal("budget --limit from a dropped-chip session with no fallback project was allowed through")
+	} else if !strings.Contains(err.Error(), "cannot resolve the command target's project to check for an item session") {
+		t.Fatalf("budget refusal does not name the fallback resolution failure: %v", err)
+	}
+	// A runner control is refused at the guard before its own project lookup.
+	if _, err := runBacklogCmd(t, "runner", "on"); err == nil {
+		t.Fatal("runner on from a dropped-chip session with no fallback project was allowed through")
+	} else if !strings.Contains(err.Error(), "cannot resolve the command target's project to check for an item session") {
+		t.Fatalf("runner refusal does not name the fallback resolution failure: %v", err)
+	}
+	for _, m := range *methods {
+		if m == "SetBudget" || m == "SetBacklogSettings" {
+			t.Fatalf("a refused control reached the daemon: %v", *methods)
+		}
+	}
+}
+
+// TestBacklogGuardRailsBindsSessionProjectResolution pins the bound raised on
+// #6498: the session's own-project resolution runs on every guarded backlog
+// mutation, so a worktree on a stale or unreachable mount must not block the
+// guard forever. The resolution runs under backlogGuardRepoProbeTimeout (a
+// bounded RepoFromPathContext); driving that deadline below git's response
+// time makes the probe unanswered, and an unanswered probe propagates through
+// the existing fail-closed error path rather than falling back to an unrelated
+// project. The refusal names the resolution failure (it does not claim an item
+// session), and no daemon call is made.
+func TestBacklogGuardRailsBindsSessionProjectResolution(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	// Item 1 runs in session s1; the chip was dropped (BacklogItem: 0) and the
+	// session's recorded worktree is repo-a (a real repository), so without a
+	// bound a healthy probe would resolve it and the guard would read the
+	// backlog. Driving the probe deadline below git's response time makes the
+	// probe unanswered instead.
+	aRoot := repoFlag
+	withRunningItem(t, &session.InstanceData{ID: "s1", Title: "B-1 work", BacklogItem: 0, Path: aRoot})
+	prev := backlogGuardRepoProbeTimeout
+	backlogGuardRepoProbeTimeout = time.Nanosecond
+	t.Cleanup(func() { backlogGuardRepoProbeTimeout = prev })
+	*methods = nil
+	if _, err := runBacklogCmd(t, "done", "1"); err == nil {
+		t.Fatal("done 1 with a wedged session-project probe was allowed through")
+	} else if !strings.Contains(err.Error(), "cannot resolve this session's own project to check for an item session") {
+		t.Fatalf("refusal does not name the resolution failure: %v", err)
+	}
+	// The probe never answered, so the guard fails before any backlog read.
+	if len(*methods) != 0 {
+		t.Fatalf("a refused command reached the daemon: %v", *methods)
 	}
 }

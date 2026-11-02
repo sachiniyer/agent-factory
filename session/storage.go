@@ -55,9 +55,15 @@ type InstanceData struct {
 	// omitempty + additive: records written before #1892 simply have no task_id
 	// and count against no limit (rollforward, mirroring the ID precedent above).
 	TaskID string `json:"task_id,omitempty"`
-	// BacklogItem is the backlog item this session was started for (backlog.json
-	// holds the authoritative link). omitempty: an older af drops it on its next
-	// write and loses only the client chip.
+	// BacklogItem is the backlog item this session was started for. backlog.json
+	// holds the authoritative link (its run records, ItemForSession); this field
+	// is a client-side chip used for the run-still-starting window before the
+	// daemon links the run, and as a fallback when the backlog can't be loaded.
+	// The item-session refusal rails (api/backlog_self.go) resolve from the
+	// authoritative link, so they survive this field being dropped; the run-active
+	// gate (instance_data.go) and the daemon's item-session map
+	// (daemon/backlog_sessions.go) still key on it, so it is kept set where the
+	// daemon writes it. omitempty: an older af drops it on its next write.
 	BacklogItem int    `json:"backlog_item,omitempty"`
 	Title       string `json:"title"`
 	Path        string `json:"path"`

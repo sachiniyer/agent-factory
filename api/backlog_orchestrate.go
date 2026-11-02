@@ -11,9 +11,14 @@ import (
 )
 
 // orchestratorSelf is the id of the session this command runs in, which must
-// not be an item session.
+// not be an item session. When af cannot tell whether it is one, the binding
+// fails closed with that error, like every other item-session guard.
 func orchestratorSelf() (string, error) {
-	if inItemSession() != nil {
+	self, err := inItemSession()
+	if err != nil {
+		return "", err
+	}
+	if self != nil {
 		return "", backlog.ErrOrchestrateFromItemSession
 	}
 	s, err := backlogSelfSession()
