@@ -46,9 +46,12 @@ test("#6563: a touch user can still close a pane when the fit shows only one", a
   await page.locator("#app[data-af-resync-settled]").waitFor();
   await page.setViewportSize({ width: 1280, height: 800 });
 
+  // probe-a's tab roster is shared with the suite — count relative to it.
+  const tabs = page.locator(".af-tabbar .af-tab");
+  const base = await tabs.count();
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2);
-  await dragTabToPane(page, 1, 0, "right");
+  await expect(tabs).toHaveCount(base + 1);
+  await dragTabToPane(page, base, 0, "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
 
   // Narrow until the fit can show only one pane — the retained layout still
@@ -58,7 +61,10 @@ test("#6563: a touch user can still close a pane when the fit shows only one", a
   await page.setViewportSize({ width: 390, height: 800 });
   await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
 
-  await page.getByRole("button", { name: "More session actions", exact: true }).click();
+  // On phone the term-head — and the "More session actions" trigger inside it
+  // — is display:none under af-session-first; the session menu panel is
+  // reparented into "More app controls", which is the touch route.
+  await page.getByRole("button", { name: "More app controls", exact: true, includeHidden: true }).click();
   const hideButton = page.locator(".af-phone-pane-close");
   await expect(hideButton, "the menu's Hide pane survives at one visible pane").toBeVisible();
   await hideButton.click();
@@ -67,5 +73,5 @@ test("#6563: a touch user can still close a pane when the fit shows only one", a
   // closed pane's tab is back to being a strip-only tab (still in the bar).
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
   await expect(page.locator(".af-split-narrow")).toHaveCount(0);
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2);
+  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(base + 1);
 });
