@@ -893,6 +893,9 @@ test("minSubtreeSize: the visible set prices out fit-hidden leaves (#6573)", () 
   // visible set each side asks only its one rendered leaf's floor.
   const tree = row("S1", row("S2", leaf("a"), leaf("b")), row("S3", leaf("c"), leaf("d")));
   const visible = new Set(["a", "c"]);
+  if (tree.kind !== "split") {
+    throw new Error("the fixture's root is a split");
+  }
   assert.equal(
     minSubtreeSize(tree.a, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, visible),
     PANE_MIN_WIDTH_PX,
