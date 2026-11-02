@@ -96,6 +96,13 @@ func ensureDedicatedServer(home string) error {
 	serverBootstrapMu.Lock()
 	defer serverBootstrapMu.Unlock()
 
+	// Latch the prior-generation verdict before this bootstrap can overwrite
+	// the residue it is read from: the wrapper below rewrites the
+	// server-death marker when its tmux exits, so a record written after a
+	// failed launch would otherwise read only this generation's own marker
+	// (#6610).
+	_ = priorDaemonGenerationEvidence(home)
+
 	if tmuxServerRunning() {
 		// Do not mutate a foreign or legacy server. Its ordinary exit-empty
 		// policy lets it retire after its last session, at which point a later

@@ -50,6 +50,9 @@ type Orchestrator struct {
 	// written before the create, so a daemon that stops before binding it
 	// adopts that session instead of starting a second one.
 	Replacing *OrchReplacing `json:"replacing,omitempty"`
+	// Stay keeps the session live when its current turn ends; the turn's end
+	// uses it up.
+	Stay bool `json:"stay,omitempty"`
 }
 
 // Why an orchestrator has not had its start prompt (Orchestrator.Unstarted).
@@ -223,7 +226,7 @@ func (b *Backlog) SetOrchestratorHandoff(sessionID, handoff string, now time.Tim
 	sessionID = strings.TrimSpace(sessionID)
 	id := b.OrchestratedBy(sessionID)
 	if sessionID == "" || id == 0 {
-		return 0, fmt.Errorf("session %q orchestrates no group; bind it with \"af backlog orchestrate <group> --self\"", sessionID)
+		return 0, errNotOrchestrator(sessionID)
 	}
 	handoff = strings.TrimSpace(handoff)
 	if n := len(handoff); n > MaxHandoffBytes {
@@ -233,6 +236,10 @@ func (b *Backlog) SetOrchestratorHandoff(sessionID, handoff string, now time.Tim
 	it.Orchestrator.Handoff = handoff
 	it.UpdatedAt = now
 	return id, nil
+}
+
+func errNotOrchestrator(sessionID string) error {
+	return fmt.Errorf("session %q orchestrates no group; bind it with \"af backlog orchestrate <group> --self\"", sessionID)
 }
 
 // rootOf returns the top-level item above id, or id itself.

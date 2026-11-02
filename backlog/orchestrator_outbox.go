@@ -90,16 +90,17 @@ func (b *Backlog) OrchDeliveries(now time.Time) []OrchDelivery {
 }
 
 // BeginOrchDelivery marks group's pending events as in flight and returns
-// them, when they are due for delivery now. changed is false when the
-// backlog already held that mark, so the caller need not write it.
+// them, when they are due for delivery now. The delivery opens a new turn, so
+// a --stay from an earlier turn is dropped. changed is false when the backlog
+// already held that mark, so the caller need not write it.
 func (b *Backlog) BeginOrchDelivery(group int, now time.Time) (d OrchDelivery, ok, changed bool) {
 	for _, c := range b.OrchDeliveries(now) {
 		if c.Group != group {
 			continue
 		}
 		o := b.Item(group).Orchestrator
-		changed = o.Sending != len(c.Events)
-		o.Sending = len(c.Events)
+		changed = o.Sending != len(c.Events) || o.Stay
+		o.Sending, o.Stay = len(c.Events), false
 		return c, true, changed
 	}
 	return OrchDelivery{}, false, false

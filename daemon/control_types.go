@@ -69,6 +69,9 @@ type CreateSessionRequest struct {
 	// daemon's own item start. `json:"-"` for the same reason as TaskID: an HTTP
 	// client must not tag a session as an item session.
 	BacklogItem int `json:"-"`
+	// OrchestratorTurn opens the first turn of a session af starts to
+	// orchestrate a group, so the turn's end can archive it.
+	OrchestratorTurn bool `json:"-"`
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch; kill/cleanup leaves the user's tree and branch

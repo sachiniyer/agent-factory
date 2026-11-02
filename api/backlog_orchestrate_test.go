@@ -116,7 +116,21 @@ func TestBacklogOrchestrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := decodeOut[backlog.OrchestratorResponse](t, out); r.Orchestrator.Handoff != "next: B-3" {
+	if r := decodeOut[backlog.OrchestratorResponse](t, out); r.Orchestrator.Handoff != "next: B-3" || r.Orchestrator.Stay {
+		t.Fatal(out)
+	}
+
+	if _, err := runBacklogCmd(t, "orchestrate", "--self", "--stay"); err == nil || err.Error() != backlog.ErrStayNoTurn.Error() {
+		t.Fatal(err)
+	}
+	info := backlogTestSessions["o1"]
+	info.TurnActive = true
+	backlogTestSessions["o1"] = info
+	out, err = runBacklogCmd(t, "orchestrate", "--self", "--stay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := decodeOut[backlog.OrchestratorResponse](t, out); r.ID != 1 || !r.Orchestrator.Stay || r.Orchestrator.Handoff != "next: B-3" {
 		t.Fatal(out)
 	}
 
@@ -135,10 +149,12 @@ func TestBacklogOrchestrate(t *testing.T) {
 		{[]string{"B-1"}, "needs one of --self or --clear"},
 		{[]string{"B-1", "--self", "--clear"}, "needs one of --self or --clear"},
 		{[]string{"--clear"}, "--clear needs the group's id"},
-		{[]string{"B-1", "--clear", "--handoff-file", notes}, "--handoff-file and --replace go with --self"},
-		{[]string{"B-1", "--clear", "--replace"}, "--handoff-file and --replace go with --self"},
+		{[]string{"B-1", "--clear", "--handoff-file", notes}, "--handoff-file, --replace and --stay go with --self"},
+		{[]string{"B-1", "--clear", "--replace"}, "--handoff-file, --replace and --stay go with --self"},
+		{[]string{"B-1", "--clear", "--stay"}, "--handoff-file, --replace and --stay go with --self"},
+		{[]string{"B-1", "--self", "--stay"}, "--stay takes no group"},
 		{[]string{"--self", "--replace", "--handoff-file", notes}, "--replace needs the group's id"},
-		{[]string{"--self"}, "needs a group id, or --handoff-file"},
+		{[]string{"--self"}, "needs a group id, --handoff-file to update this session's notes, or --stay"},
 		{[]string{"B-2", "--self"}, "B-2 is not a top-level parent"},
 	} {
 		if _, err := runBacklogCmd(t, append([]string{"orchestrate"}, c.args...)...); err == nil || !strings.Contains(err.Error(), c.want) {

@@ -12,7 +12,7 @@ func (h backlogHost) Session(repoID, sessionID string) (backlog.SessionInfo, boo
 		return backlog.SessionInfo{}, false
 	}
 	return backlog.SessionInfo{Title: s.instance.Title, Program: s.instance.Program, Item: s.instance.BacklogItem,
-		State: backlogSessionState(s.view)}, true
+		State: backlogSessionState(s.view), TurnActive: s.instance.BacklogItem == 0 && s.view.BacklogRunActive}, true
 }
 
 // projectSession finds any session of the project by id, read under one lock.

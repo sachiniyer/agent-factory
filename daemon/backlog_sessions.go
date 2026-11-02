@@ -109,14 +109,58 @@ func (m *Manager) backlogSlotsUsed(repoID string) int {
 // edge that ended it: the marker went true→false and the session settled
 // Ready. A teardown that clears the marker lands elsewhere and fires nothing.
 func (m *Manager) noteBacklogRunEnd(repoID string, instance *session.Instance, wasActive bool) {
-	if !wasActive || instance.BacklogItem == 0 || instance.BacklogRunActive() ||
+	if !wasActive || instance.BacklogRunActive() ||
 		instance.StartupStateUnknown() || instance.GetLiveness() != session.LiveReady {
 		return
 	}
 	sessionID, gen := instance.ID, instance.BacklogRunGeneration()
+	if instance.BacklogItem == 0 {
+		// A turn af started in a group's orchestrator (ArmOrchestratorTurn).
+		m.launchBackgroundMutation(func(stop <-chan struct{}) {
+			m.orchestratorTurnEnded(repoID, instance, gen, stop)
+		})
+		return
+	}
 	m.launchBackgroundMutation(func(stop <-chan struct{}) {
 		m.settleRunEnd(repoID, sessionID, gen, stop)
 	})
+}
+
+// orchestratorTurnEnded archives an orchestrator whose turn ended with nothing
+// left to send, unless it asked to stay for this turn, which the end uses up.
+// It is fenced like settleRunEnd: gen is the generation observed at the idle
+// edge, so a turn a delivery armed since is never ended by an old edge; and a
+// busy backlog is retried until it lands or stop closes.
+func (m *Manager) orchestratorTurnEnded(repoID string, inst *session.Instance, gen int, stop <-chan struct{}) {
+	sessionID := inst.ID
+	svc := m.backlogService()
+	var end backlog.OrchTurnEnd
+	err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
+		end = backlog.OrchTurnEnd{}
+		if inst.BacklogRunActive() || inst.BacklogRunGeneration() != gen {
+			return nil, errBacklogNoChange
+		}
+		end = b.OrchTurnEnded(sessionID, svc.Now())
+		if !end.Changed && !end.Archive {
+			// Kept live for events still pending, which may be the ones this turn
+			// was delivered while their bookkeeping is still being written, or the
+			// turn of a replacement not bound yet: noted under the backlog lock, so
+			// orchDelivered or the replacement's bind, whose write is ordered after
+			// this one, sees it and decides again (Codex P2s on #6614).
+			m.backlog.noteOrchTurnWaits(sessionID, gen)
+		}
+		if !end.Changed {
+			return nil, errBacklogNoChange
+		}
+		return []int{end.Group}, nil
+	})
+	if err != nil && !errors.Is(err, errBacklogNoChange) {
+		m.warn().Printf("orchestrator turn end for session %s: %v", sessionID, err)
+		return
+	}
+	if end.Archive {
+		m.archiveItemSession(repoID, sessionID, backlog.ArchiveOrchIdle)
+	}
 }
 
 // backlogRunEnded settles the end of whatever run the session has, with no
@@ -366,6 +410,8 @@ func (m *Manager) recoverBacklog(repoID string, stop <-chan struct{}) bool {
 	// session before it ran): finished now if it is still owed, else cleared (an
 	// answer on its way cancels an ask archive).
 	m.redriveOwedArchives(repoID, sessions, settled)
+	// An orchestrator's idle archive the earlier daemon filed and did not finish.
+	m.redriveOrchestratorArchives(repoID, b)
 	return true
 }
 

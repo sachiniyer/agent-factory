@@ -76,6 +76,9 @@ func (it *Item) archiveAsked() bool {
 // reason: the session is its item's latest run and the reason still holds.
 // An answer on its way to the session cancels an ask archive.
 func (b *Backlog) ArchiveOwed(sessionID, reason string) bool {
+	if reason == ArchiveOrchIdle {
+		return b.orchIdle(sessionID)
+	}
 	it := b.ItemForSession(sessionID)
 	if it == nil || it.lastRun().SessionID != sessionID {
 		return false
@@ -98,8 +101,10 @@ func KeptLiveNote(why string) string { return "Kept the session live: " + why + 
 // questions' then becomes wait, so a later run end or restart does not try
 // again. It returns the item id, or 0 when the archive is no longer owed (an
 // answer came first) and nothing changed.
+// An orchestrator kept live gets no note: the user is likely working in it,
+// and its next turn end tries again.
 func (b *Backlog) KeptLive(sessionID, reason, why string, now time.Time) (int, error) {
-	if !b.ArchiveOwed(sessionID, reason) {
+	if reason == ArchiveOrchIdle || !b.ArchiveOwed(sessionID, reason) {
 		return 0, nil
 	}
 	it := b.ItemForSession(sessionID)

@@ -238,3 +238,51 @@ func TestLastActivityAtCountsRuntimeReplacement(t *testing.T) {
 	inst.ClearIdleEvidence()
 	require.False(t, inst.LastActivityAt().Before(before))
 }
+
+func TestOrchestratorTurnEndsOnIdleEdgeAfterTurn(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "planner", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(Running)
+	require.False(t, inst.BacklogRunActive())
+
+	armedAt := time.Now().Add(-10 * time.Second)
+	require.True(t, inst.ArmOrchestratorTurn(armedAt))
+	require.True(t, inst.BacklogRunActive())
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.BacklogRunActive(), "an idle edge before the turn is held")
+
+	require.True(t, inst.RecordTaskRunTurn(armedAt.Add(2*time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.BacklogRunActive())
+	require.False(t, inst.BacklogRunEndedAt().IsZero())
+}
+
+func TestOrchestratorTurnArmedAtCreate(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "effort", Path: t.TempDir(), Program: "claude", OrchestratorTurn: true})
+	require.NoError(t, err)
+	require.True(t, inst.BacklogRunActive())
+	require.Zero(t, inst.LifecycleView().BacklogItem)
+}
+
+func TestOrchestratorTurnRefusedOnItemAndTaskSessions(t *testing.T) {
+	require.False(t, backlogRunSession(t).ArmOrchestratorTurn(time.Now()))
+	inst, err := NewInstance(InstanceOptions{Title: "task", Path: t.TempDir(), Program: "claude", TaskID: "t1"})
+	require.NoError(t, err)
+	require.False(t, inst.ArmOrchestratorTurn(time.Now()))
+}
+
+// An orchestrator is not an item session, but its idle archive is filed on it
+// before the teardown and must survive a restart so the daemon finishes it.
+func TestOrchestratorIdleArchiveSurvivesRoundTrip(t *testing.T) {
+	inst := &Instance{ID: "o1", Title: "planner"}
+	filed := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	inst.SetOwedArchive(OrchIdleArchive, filed)
+	data := inst.ToInstanceData()
+	data.BackendType = "docker"
+	require.Zero(t, data.BacklogItem)
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.Equal(t, &BacklogArchiveData{Reason: OrchIdleArchive, FiledAt: filed}, reloaded.OwedArchive())
+}

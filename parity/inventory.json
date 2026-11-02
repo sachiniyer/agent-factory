@@ -1935,7 +1935,7 @@
         "pointer": "api/backlog_orchestrate.go backlogOrchestrateCmd, api/backlog.go backlogAddCmd --orchestrate, backlogShowCmd orchestrator block → POST /v1/SetBacklogOrchestrator, SetBacklogOrchestratorHandoff, AddBacklogItems orchestrator, GetBacklog orchestrators (daemon/backlog_orchestrator.go)"
       },
       "verdict": "deliberate",
-      "notes": "Effort orchestrator PR 2 adds binding only: the routes, the CLI and the orchestrator block on GetBacklog. A binding is made by the agent of the session that orchestrates (whoami), so it starts on the CLI. Effort orchestrator PR 8 adds the web Effort session button and group panel row. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "notes": "Effort orchestrator PR 2 adds binding only: the routes, the CLI and the orchestrator block on GetBacklog. PR 6 adds --stay (SetBacklogOrchestratorHandoff stay), which keeps the orchestrator live after its turn instead of archiving it. A binding is made by the agent of the session that orchestrates (whoami), so it starts on the CLI. Effort orchestrator PR 8 adds the web Effort session button and group panel row. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.escalate",
@@ -2309,6 +2309,7 @@
       "af backlog orchestrate --self": "backlog.orchestrator",
       "af backlog orchestrate --clear": "backlog.orchestrator",
       "af backlog orchestrate --handoff-file": "backlog.orchestrator",
+      "af backlog orchestrate --stay": "backlog.orchestrator",
       "af backlog escalate --help": "meta.discovery",
       "af backlog escalate --note": "backlog.escalate",
       "af backlog inbox --help": "meta.discovery",

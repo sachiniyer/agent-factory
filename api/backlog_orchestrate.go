@@ -33,10 +33,11 @@ var (
 	backlogOrchestrateClear       bool
 	backlogOrchestrateHandoffFile string
 	backlogOrchestrateReplace     bool
+	backlogOrchestrateStay        bool
 )
 
 var backlogOrchestrateCmd = &cobra.Command{
-	Use:   "orchestrate <group> --self [--replace] | <group> --clear | --self --handoff-file <path|->",
+	Use:   "orchestrate <group> --self [--replace] | <group> --clear | --self [--handoff-file <path|->] [--stay]",
 	Short: "Bind this session as a group's orchestrator, or unbind it",
 	Long: "With a group and --self, bind the session this runs in as the orchestrator of the " +
 		"group, a top-level parent. A session orchestrates at most one group, and an item " +
@@ -44,7 +45,10 @@ var backlogOrchestrateCmd = &cobra.Command{
 		"--replace; the new session keeps its handoff notes. With --clear, unbind the group.\n\n" +
 		"--handoff-file stores notes for a session that replaces this one as orchestrator (at " +
 		"most 8 KB), read from a file or from stdin with -. Without a group it updates the notes " +
-		"of the group this session orchestrates.",
+		"of the group this session orchestrates.\n\n" +
+		"af archives the session after an af-delivered turn that ends with nothing pending, " +
+		"including after you detach; the next event restores it. --stay, run during that turn, " +
+		"keeps it live after the turn, once.",
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
@@ -55,15 +59,18 @@ var backlogOrchestrateCmd = &cobra.Command{
 				if len(args) != 1 {
 					return nil, errors.New("--clear needs the group's id")
 				}
-				if backlogOrchestrateHandoffFile != "" || backlogOrchestrateReplace {
-					return nil, errors.New("--handoff-file and --replace go with --self")
+				if backlogOrchestrateHandoffFile != "" || backlogOrchestrateReplace || backlogOrchestrateStay {
+					return nil, errors.New("--handoff-file, --replace and --stay go with --self")
 				}
 				if err := refuseFromItemSession("orchestrate"); err != nil {
 					return nil, err
 				}
 			}
-			if len(args) == 0 && backlogOrchestrateHandoffFile == "" {
-				return nil, errors.New("af backlog orchestrate --self needs a group id, or --handoff-file to update this session's notes")
+			if len(args) == 0 && backlogOrchestrateHandoffFile == "" && !backlogOrchestrateStay {
+				return nil, errors.New("af backlog orchestrate --self needs a group id, --handoff-file to update this session's notes, or --stay")
+			}
+			if len(args) == 1 && backlogOrchestrateStay {
+				return nil, errors.New("--stay takes no group; run \"af backlog orchestrate --self --stay\" from the orchestrator")
 			}
 			if len(args) == 0 && backlogOrchestrateReplace {
 				return nil, errors.New("--replace needs the group's id")
@@ -93,17 +100,17 @@ var backlogOrchestrateCmd = &cobra.Command{
 			if err != nil {
 				return nil, err
 			}
+			var notes *string
+			if backlogOrchestrateHandoffFile != "" {
+				notes = &handoff
+			}
 			if id != 0 {
-				var notes *string
-				if backlogOrchestrateHandoffFile != "" {
-					notes = &handoff
-				}
 				return setBacklogOrchestrator(daemon.SetBacklogOrchestratorRequest{RepoID: t.repoID, RepoPath: t.repoPath, ID: id,
 					SessionID: sessionID, Replace: backlogOrchestrateReplace, Handoff: notes})
 			}
 			var resp daemon.SetBacklogOrchestratorHandoffResponse
-			if err := callBacklogRoute("SetBacklogOrchestratorHandoff", daemon.SetBacklogOrchestratorHandoffRequest{
-				RepoID: t.repoID, RepoPath: t.repoPath, SessionID: sessionID, Handoff: handoff}, &resp); err != nil {
+			if err := callBacklogRoute("SetBacklogOrchestratorHandoff", daemon.SetBacklogOrchestratorHandoffRequest{RepoID: t.repoID,
+				RepoPath: t.repoPath, SessionID: sessionID, Handoff: notes, Stay: backlogOrchestrateStay}, &resp); err != nil {
 				return nil, err
 			}
 			return &resp, nil
@@ -160,6 +167,7 @@ func init() {
 	f.BoolVar(&backlogOrchestrateSelf, "self", false, "Bind the session this runs in")
 	f.BoolVar(&backlogOrchestrateClear, "clear", false, "Unbind the group's orchestrator")
 	f.BoolVar(&backlogOrchestrateReplace, "replace", false, "With --self, take the group over from the session that orchestrates it")
+	f.BoolVar(&backlogOrchestrateStay, "stay", false, "With --self, keep this session live after its current turn instead of archiving it")
 	f.StringVar(&backlogOrchestrateHandoffFile, "handoff-file", "", "With --self, a `path` to notes for a session that replaces this one, or - for stdin")
 	BacklogCmd.AddCommand(backlogOrchestrateCmd)
 }

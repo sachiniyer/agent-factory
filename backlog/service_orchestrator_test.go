@@ -202,7 +202,7 @@ func TestAddBatchOrchestrateCountsUnkeyedItems(t *testing.T) {
 func TestSetOrchestratorHandoff(t *testing.T) {
 	s, _ := orchService(t)
 	mustAdd(t, s, ItemInput{Key: "g", Title: "G"}, ItemInput{Key: "a", Title: "A", Parent: Ref{Key: "g"}})
-	if _, err := s.SetOrchestratorHandoff(SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: "x"}); err == nil ||
+	if _, err := s.SetOrchestratorHandoff(SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: ptr("x")}); err == nil ||
 		!strings.Contains(err.Error(), "orchestrates no group") {
 		t.Fatal(err)
 	}
@@ -210,10 +210,10 @@ func TestSetOrchestratorHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := s.SetOrchestratorHandoff(SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1",
-		Handoff: strings.Repeat("x", MaxHandoffBytes+1)}); err == nil || !strings.Contains(err.Error(), "limit is 8 KB") {
+		Handoff: ptr(strings.Repeat("x", MaxHandoffBytes+1))}); err == nil || !strings.Contains(err.Error(), "limit is 8 KB") {
 		t.Fatal(err)
 	}
-	out, err := s.SetOrchestratorHandoff(SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: "  notes\n"})
+	out, err := s.SetOrchestratorHandoff(SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: ptr("  notes\n")})
 	if err != nil || out.ID != 1 || out.Orchestrator.Handoff != "notes" {
 		t.Fatalf("%+v %v", out, err)
 	}
@@ -328,5 +328,34 @@ func TestAnswerOrchEscalationResumesDelivery(t *testing.T) {
 	b, _ = Load(repoID)
 	if b.OrchEscalated(1) || b.Item(1).Orchestrator.Failures != nil || len(b.OrchDeliveries(now)) != 1 {
 		t.Fatalf("delivery did not resume: %+v", b.Item(1).Orchestrator)
+	}
+}
+
+func TestSetOrchestratorStayKeepsTheHandoff(t *testing.T) {
+	s, h := orchService(t)
+	mustAdd(t, s, ItemInput{Key: "g", Title: "G"}, ItemInput{Key: "a", Title: "A", Parent: Ref{Key: "g"}})
+	if _, err := s.SetOrchestrator(SetOrchestratorRequest{RepoID: repoID, ID: 1, SessionID: "o1", Handoff: ptr("notes")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetOrchestratorHandoff(SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1"}); err == nil ||
+		err.Error() != "set handoff, stay, or both" {
+		t.Fatal(err)
+	}
+	if _, err := s.SetOrchestratorHandoff(SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: ptr("lost"), Stay: true}); !errors.Is(err, ErrStayNoTurn) {
+		t.Fatal(err)
+	}
+	if b, _ := Load(repoID); b.Item(1).Orchestrator.Stay || b.Item(1).Orchestrator.Handoff != "notes" {
+		t.Fatalf("a refused stay was written: %+v", b.Item(1).Orchestrator)
+	}
+	info := h.sessions["o1"]
+	info.TurnActive = true
+	h.sessions["o1"] = info
+	out, err := s.SetOrchestratorHandoff(SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Stay: true})
+	if err != nil || out.ID != 1 || !out.Orchestrator.Stay || out.Orchestrator.Handoff != "notes" {
+		t.Fatalf("%+v %v", out, err)
+	}
+	out, err = s.SetOrchestratorHandoff(SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: ptr(""), Stay: true})
+	if err != nil || !out.Orchestrator.Stay || out.Orchestrator.Handoff != "" {
+		t.Fatalf("%+v %v", out, err)
 	}
 }

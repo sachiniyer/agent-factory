@@ -272,3 +272,17 @@ func TestRebindClosesTheEscalation(t *testing.T) {
 		t.Fatalf("clear: %v, inbox %+v", err, b.Inbox())
 	}
 }
+
+func TestBeginOrchDeliveryDropsAnEarlierStay(t *testing.T) {
+	b := boundGroup(t)
+	if _, err := b.SetOrchestratorStay("o", t0); err != nil {
+		t.Fatal(err)
+	}
+	b.QueueOrchEvent(OrchEvent{Kind: EventReview, Item: 2}, t0)
+	if _, ok, changed := b.BeginOrchDelivery(1, t0); !ok || !changed {
+		t.Fatal(ok, changed)
+	}
+	if b.Item(1).Orchestrator.Stay {
+		t.Fatal("a new turn kept the stay of the turn before")
+	}
+}
