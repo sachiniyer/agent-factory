@@ -3,6 +3,7 @@ package proposal
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -493,9 +494,18 @@ func TestRulesExplainPushedEdits(t *testing.T) {
 
 func TestRulesBindTheProposalParentWhenAskedToManage(t *testing.T) {
 	r := Rules("p", "/x/p")
-	for _, want := range []string{"10. When the user asks you to manage, run, own or drive this proposal's items", `bind its parent item (key "p")`, `add --orchestrate to "af backlog add --file -"`, `"af backlog orchestrate <parent id> --self"`, "Add --replace to either command", "you are now the orchestrator", "the user queues items, and af's runner starts them", "Bind only on that ask."} {
+	for _, want := range []string{"10. When the user asks you to manage, run, own or drive this proposal's items", `add --orchestrate to "af backlog add --file -"`, `"af backlog orchestrate <parent id> --self"`, "Add --replace to either command", "you are now the orchestrator", "the user queues items, and af's runner starts them", "Bind only on that ask."} {
 		if !strings.Contains(r, want) {
 			t.Fatalf("rule 10 must say %s:\n%s", want, r)
 		}
+	}
+	// Rule 10 binds the parent rule 9 makes: the same key, or the agent looks
+	// for a parent that does not exist, or makes a second one (Codex P2 on #6629).
+	m := regexp.MustCompile(`Make one parent item for the proposal, with key "([^"]+)"`).FindStringSubmatch(r)
+	if m == nil {
+		t.Fatalf("rule 9 names no parent key:\n%s", r)
+	}
+	if want := `bind its parent item (key "` + m[1] + `")`; !strings.Contains(r, want) {
+		t.Fatalf("rule 10 must bind rule 9's parent, %s:\n%s", want, r)
 	}
 }
