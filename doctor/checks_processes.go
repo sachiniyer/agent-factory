@@ -313,6 +313,55 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			hasHome := homeStatus == proctree.EnvFound
 			switch {
 			case hasHome && filepath.IsAbs(home) && sameHome(home, ctx.opts.ConfigDir):
+				// A matching AF_HOME proves the SESSION was this home's —
+				// never that the process carrying it is. A second install
+				// launched inside one of this home's sessions inherits
+				// AF_SESSION/AF_HOME beside its own AGENT_FACTORY_HOME (and
+				// TMUX_TMPDIR), so its daemon, its tmux server and everything
+				// they spawn carry a matching marker while belonging to the
+				// other install — and the union listing cannot see that
+				// install's live sessions, so they read as verified orphans
+				// here (#6578). Ownership is established the way the daemon
+				// checks establish which home a daemon serves: the process's
+				// OWN environment, resolved in its own frame through
+				// daemonProcessHome — the HOME-derived default included, so a
+				// real same-home pane process (which declares no
+				// AGENT_FACTORY_HOME of its own) still resolves to this
+				// install — and, where its environment cannot answer, the
+				// home its ancestors declare. Only a positively different
+				// answer disqualifies; what the process's frame cannot
+				// resolve is reported, not killed.
+				ownership, foreignHome, foreignPID := ctx.markedProcessOwnership(p)
+				switch ownership {
+				case ownershipForeignEnv:
+					report.addAdvisoryFinding(Finding{
+						Check: "foreign-home-process",
+						Detail: fmt.Sprintf("%s marks dead session %s (home %s) but belongs to another "+
+							"agent-factory home (%s) — the matching marker was inherited from a "+
+							"session of this install, so it is reported, not killed; run "+
+							"`af doctor` with that home active",
+							describeProc(p), name, home, foreignHome),
+					})
+					continue
+				case ownershipForeignAncestor:
+					report.addAdvisoryFinding(Finding{
+						Check: "foreign-home-process",
+						Detail: fmt.Sprintf("%s marks dead session %s (home %s) but runs under "+
+							"pid %d, which declares another agent-factory home (%s) — the "+
+							"matching marker was inherited, so it is reported, not killed",
+							describeProc(p), name, home, foreignPID, foreignHome),
+					})
+					continue
+				case ownershipUnproven:
+					report.addAdvisoryFinding(Finding{
+						Check: "orphaned-process",
+						Detail: fmt.Sprintf("%s marks dead session %s (home %s) but its own "+
+							"environment establishes no agent-factory home — ownership is "+
+							"unproven, so it is reported, not killed",
+							describeProc(p), name, home),
+					})
+					continue
+				}
 				verdict, proofSocket := ctx.sessionDeathProof(p, name)
 				switch verdict {
 				case deathLiveElsewhere:
@@ -487,6 +536,103 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 		})
 	}
 	observations.report(report)
+}
+
+// ownershipVerdict is what doctor can prove about which install a marked
+// process belongs to, independent of its AF_HOME marker (#6578). The marker
+// proves the session was this home's; it never proves the process carrying it
+// is, because a session's environment is inherited by every process its
+// children spawn — including a second install launched from inside it.
+type ownershipVerdict int
+
+const (
+	// ownershipThisInstall is the only verdict that may arm a kill: the
+	// process's own environment resolves to this home and no ancestor
+	// declares a different one.
+	ownershipThisInstall ownershipVerdict = iota
+	// ownershipForeignEnv means the process's own environment resolves to a
+	// different install's home — its matching AF_HOME marker was inherited.
+	ownershipForeignEnv
+	// ownershipForeignAncestor means the process's own home is this
+	// install's (or is unresolvable) but an ancestor declares a different
+	// install's home — it runs under another install's tmux server, daemon
+	// or helper, which an env scrub cannot erase.
+	ownershipForeignAncestor
+	// ownershipUnproven means the process's own environment establishes no
+	// home at all: nothing names another install, but the marker alone is
+	// not proof of this one either.
+	ownershipUnproven
+)
+
+// markedProcessOwnership resolves which install a marked process belongs to,
+// independent of its inherited-able AF_HOME marker. The process's own home is
+// resolved by daemonProcessHome — the same rule checkForeignDaemons and the
+// leaked-daemon checks act on, computed in the process's own frame — then its
+// ancestor chain is consulted for the shapes its environment cannot answer (a
+// tmux server's descendants share its inherited markers even when their own
+// AGENT_FACTORY_HOME was never set or was scrubbed). Returns the verdict, the
+// foreign home where one was proven, and the pid that declared it (0 when the
+// process's own environment did).
+func (ctx *scanContext) markedProcessOwnership(p proctree.Process) (ownershipVerdict, string, int) {
+	ownHome, known := daemonProcessHome(p.PID)
+	if known && !sameHome(ownHome, ctx.opts.ConfigDir) {
+		return ownershipForeignEnv, ownHome, p.PID
+	}
+	if home, pid, foreign := ctx.foreignDeclaredAncestor(p); foreign {
+		return ownershipForeignAncestor, home, pid
+	}
+	if !known {
+		return ownershipUnproven, "", 0
+	}
+	return ownershipThisInstall, "", 0
+}
+
+// foreignDeclaredAncestor walks p's ancestor chain in the run's snapshot and
+// returns the first home an ancestor DECLARES through its own
+// AGENT_FACTORY_HOME that is not this install's — proof the process runs
+// under another install's tmux server, daemon or helper, even when its own
+// environment resolves to this home or cannot be attributed at all.
+//
+// Only an explicit declaration counts; the HOME-derived default that
+// daemonProcessHome applies to the candidate is deliberately not applied to
+// ancestors. A process that declares no agent-factory home is just some
+// process: applying the default up the tree would let a HOME=/root login
+// shell — or pid 1 in a container — read as "another install" and disarm the
+// arm for every descendant, the mirror image of the kill this walk exists to
+// prevent. An ancestor whose declared home cannot be resolved in its own
+// frame is likewise skipped: ancestry under-disqualifies what it cannot
+// prove, leaving the process's own environment as the gate.
+func (ctx *scanContext) foreignDeclaredAncestor(p proctree.Process) (string, int, bool) {
+	seen := map[int]bool{p.PID: true}
+	for pid, hops := p.PPID, 0; pid > 1 && hops < 128; hops++ {
+		if seen[pid] {
+			break
+		}
+		seen[pid] = true
+		a, ok := ctx.snap[pid]
+		if !ok {
+			break
+		}
+		if home, declared := declaredAgentFactoryHome(pid); declared && !sameHome(home, ctx.opts.ConfigDir) {
+			return home, pid, true
+		}
+		pid = a.PPID
+	}
+	return "", 0, false
+}
+
+// declaredAgentFactoryHome resolves the home a process DECLARES through its
+// own AGENT_FACTORY_HOME, in its own frame — the explicit half of
+// daemonProcessHome's rule, without the HOME-derived default (see
+// foreignDeclaredAncestor for why ancestors get no default).
+func declaredAgentFactoryHome(pid int) (string, bool) {
+	raw, found, err := daemonProcessEnvLookup(pid, "AGENT_FACTORY_HOME")
+	if err != nil || !found || raw == "" {
+		return "", false
+	}
+	homeDir, _, _ := daemonProcessEnvLookup(pid, "HOME")
+	cwd, _ := daemonProcessCwd(pid)
+	return resolveHomeIn(raw, homeDir, cwd)
 }
 
 // processLeakObservations keeps every unprovable state visible without mixing

@@ -459,6 +459,7 @@ func TestEscapedProcessOwnHomeStillReportedAsEscape(t *testing.T) {
 	ownEscapee := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: name,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 	// An escapee carrying the marker but no AF_HOME at all: unreadable home is
 	// not foreign home, so it stays on the genuine-escape path (the orphaned arm
@@ -521,6 +522,7 @@ func TestEscapedProcessSameHomeCaseInsensitiveNotForeign(t *testing.T) {
 	escapee := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: name,
 		tmux.EnvMarkerHome:    markerHome,
+		"AGENT_FACTORY_HOME":  ourHome,
 	})
 
 	report, err := Run(testOptionsWithHome(t, ourHome, true, escapee.PID))

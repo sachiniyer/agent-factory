@@ -159,6 +159,7 @@ func TestRecordedSocketPin_LiveSessionOnOtherServerNotKilledByFix(t *testing.T) 
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
@@ -232,6 +233,7 @@ func TestUnreadableServerRecord_DoesNotArmKillForAmbientAbsentSession(t *testing
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
@@ -295,6 +297,7 @@ func TestRecordedSocketPin_GenuineOrphanStillKilled(t *testing.T) {
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: deadName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, orphan.PID) // Fix: true
@@ -405,6 +408,7 @@ func TestMissingServerRecord_LiveDaemonDoesNotArmKill(t *testing.T) {
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, daemonProc.PID, victim.PID) // Fix: true
@@ -548,6 +552,7 @@ func TestMissingServerRecord_DeadDaemon_LiveOnOtherSocket_NotKilled(t *testing.T
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", sockA, serverAPID),
 	})
 
@@ -609,6 +614,7 @@ func TestMissingServerRecord_DeadDaemon_NoAmbientServer_NotKilled(t *testing.T) 
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", sockA, serverAPID),
 	})
 
@@ -665,6 +671,7 @@ func TestMissingServerRecord_DeadDaemon_ProcessWithoutTmuxEnv_NotKilled(t *testi
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
@@ -714,6 +721,7 @@ func TestMissingServerRecord_DeadDaemon_GenuineOrphanOnAmbientSocket_Killed(t *t
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: deadName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", tmux.DefaultSocketPath(), serverBPID),
 	})
 

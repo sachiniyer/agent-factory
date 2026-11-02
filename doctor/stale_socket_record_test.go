@@ -94,6 +94,7 @@ func TestStaleRecordedSocket_LiveOnUnrecordedSocket_NotKilled(t *testing.T) {
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", sockA, serverAPID),
 	})
 
@@ -144,6 +145,7 @@ func TestPriorRecordedSocket_SessionLiveOnEarlierGeneration_NotKilled(t *testing
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", sockA, serverAPID),
 	})
 
@@ -206,6 +208,7 @@ func TestPriorRecordedSocket_UnaccountableGeneration_BlindsRun(t *testing.T) {
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-genuine-orphan",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, daemonProc.PID, orphan.PID) // Fix: true
@@ -270,6 +273,7 @@ func TestRecordWrittenByOlderDaemonGeneration_RefusesKillWithoutTmuxEnv(t *testi
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-gone-session",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, daemonProc.PID, victim.PID) // Fix: true
@@ -318,6 +322,7 @@ func TestRecordWithoutDaemonBinding_LiveDaemon_RefusesKillWithoutTmuxEnv(t *test
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-gone-session",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, daemonProc.PID, victim.PID) // Fix: true
@@ -353,6 +358,7 @@ func TestRecordWithoutDaemonBinding_DeadDaemon_RefusesKillWithoutTmuxEnv(t *test
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-gone-session",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
@@ -400,6 +406,7 @@ func TestRecordWrittenByLiveDaemon_GenerationMatch_StillKills(t *testing.T) {
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: deadName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, daemonProc.PID, orphan.PID) // Fix: true
@@ -444,6 +451,7 @@ func TestTruncatedSocketHistory_RecordOnlyProof_RefusesKill(t *testing.T) {
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-maybe-evicted-session",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, daemonProc.PID, orphan.PID) // Fix: true
@@ -522,6 +530,7 @@ func TestProcessTmuxProof_ProvenGoneServerPid_Kills(t *testing.T) {
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-gone-server-session",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", wedged, 1<<30),
 	})
 
@@ -563,6 +572,7 @@ func TestProcessTmuxProof_ReplacedServerPid_Kills(t *testing.T) {
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-recycled-pid-session",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", sock, decoy.PID),
 	})
 
@@ -599,6 +609,7 @@ func TestProcessTmuxProof_CrossNamespace_SocketAbsent_RefusesKill(t *testing.T) 
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-cross-ns-session",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		// A pid absent from doctor's table — but the pane is in another
 		// namespace, so the number is not evidence either way.
 		"TMUX": fmt.Sprintf("%s,%d,0", sock, 1<<30),
@@ -646,6 +657,7 @@ func TestProcessTmuxProof_CrossNamespace_SessionListed_ReportsEscaped(t *testing
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", sock, 1<<30),
 	})
 
@@ -701,6 +713,7 @@ func TestProcessTmuxProof_LiveServer_SessionAbsentOnOwnSocket_Kills(t *testing.T
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-not-on-this-server",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", sock, serverPID),
 	})
 
@@ -735,6 +748,7 @@ func TestProcessTmuxProof_LiveServer_SessionListedOnOwnSocket_ReportsEscaped(t *
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", sock, serverPID),
 	})
 
@@ -777,6 +791,7 @@ func TestProcessTmuxProof_LiveServer_StrangerAnswersSocket_RefusesKill(t *testin
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-absent-per-stranger",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		// Names server A's pid against server B's socket — the shape a
 		// rebound socket path produces.
 		"TMUX": fmt.Sprintf("%s,%d,0", sockB, serverAPID),
@@ -819,6 +834,7 @@ func TestProcessTmuxProof_LiveServer_NoServerOnSocket_RefusesKill(t *testing.T) 
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-orphaned-server-session",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", unbound, serverAPID),
 	})
 
@@ -854,6 +870,7 @@ func TestProcessTmuxProof_LiveServer_SocketUnlistable_RefusesKill(t *testing.T) 
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-wedged-socket-session",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 		"TMUX":                fmt.Sprintf("%s,%d,0", wedged, serverAPID),
 	})
 

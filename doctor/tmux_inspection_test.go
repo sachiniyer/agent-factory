@@ -124,6 +124,7 @@ func TestUnreadableTmuxSessionListDoesNotArmKills(t *testing.T) {
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: name,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true

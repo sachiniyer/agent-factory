@@ -264,8 +264,9 @@ func TestOrphanedProcessDetectedAndFixed(t *testing.T) {
 	// nothing to do with the orphan this test is about. A real home is short.
 	home := testguard.SocketTempDir(t)
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
-		"AF_SESSION": "af_doctor-dead-session",
-		"AF_HOME":    home,
+		"AF_SESSION":         "af_doctor-dead-session",
+		"AF_HOME":            home,
+		"AGENT_FACTORY_HOME": home,
 		// A genuine orphan inherited its session's TMUX env from tmux; the
 		// socket it names matches doctor's ambient listing, so the record-
 		// absent kill arm corroborates the session's death on the ambient
@@ -483,6 +484,7 @@ func TestYoungProcessesExcludedFromEveryLeakPopulation(t *testing.T) {
 	orphaned := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-young-dead",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 	possible := spawnWithEnv(t, "sh", nil, map[string]string{
 		"TMUX": fmt.Sprintf("/tmp/af-doctor-young-dead-tmux,%d,0", 1<<30),
@@ -527,6 +529,7 @@ func TestUnknownProcessAgeIsReportedWithoutClaimingALeak(t *testing.T) {
 	candidate := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-age-unknown",
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 	opts := testOptionsWithHome(t, home, false, candidate.PID)
 	opts.snapshot = func() (map[int]proctree.Process, error) {
@@ -874,8 +877,9 @@ func TestOrphanSignalIdentityGuard(t *testing.T) {
 	// Socket-safe home: see TestOrphanedProcessDetectedAndFixed.
 	home := testguard.SocketTempDir(t)
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
-		"AF_SESSION": "af_doctor-recycle",
-		"AF_HOME":    home,
+		"AF_SESSION":         "af_doctor-recycle",
+		"AF_HOME":            home,
+		"AGENT_FACTORY_HOME": home,
 		// The orphan lived on doctor's ambient server, so the record-absent
 		// kill arm corroborates its death and arms the fix closure this test
 		// exercises the identity guard of.
