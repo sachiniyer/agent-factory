@@ -67,13 +67,16 @@ test("#6561: the notice's height is reserved before the fit", async ({ page, req
   // new pane under the last one. At this height the bottom pair slivers, so
   // the fit hides a leaf and the notice mounts — then the survivors must still
   // clear the floor in the space that remains. probe-a's tab roster is shared
-  // with the suite — count relative to it.
+  // with the suite — count relative to it. Four shells: the last-created stays
+  // SELECTED in the top pane (a new shell is always selected on create), so
+  // the three drags all move genuinely unshown tabs — dropping a shown tab on
+  // another pane trips the dedupe move, not a split.
   const tabs = page.locator(".af-tabbar .af-tab");
   const base = await tabs.count();
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 4; i++) {
     await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
   }
-  await expect(tabs).toHaveCount(base + 3);
+  await expect(tabs).toHaveCount(base + 4);
   await dragTabToPane(page, base, 0, "bottom");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
   await dragTabToPane(page, base + 1, 1, "bottom");
