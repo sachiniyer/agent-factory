@@ -61,7 +61,10 @@ test("#6563: a touch user can still close a pane when the fit shows only one", a
   await page.setViewportSize({ width: 390, height: 800 });
   await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
 
-  await page.getByRole("button", { name: "More session actions", exact: true }).click();
+  // On phone the term-head — and the "More session actions" trigger inside it
+  // — is display:none under af-session-first; the session menu panel is
+  // reparented into "More app controls", which is the touch route.
+  await page.getByRole("button", { name: "More app controls", exact: true, includeHidden: true }).click();
   const hideButton = page.locator(".af-phone-pane-close");
   await expect(hideButton, "the menu's Hide pane survives at one visible pane").toBeVisible();
   await hideButton.click();
