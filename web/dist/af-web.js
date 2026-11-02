@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1dd7c19ba786";
+var CLIENT_VERSION = "673c56808408";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -15314,7 +15314,7 @@ var SplitView = class {
    *  count here rather than inside the rebuild gate. The text write is guarded:
    *  assigning textContent records a DOM mutation even when nothing changed. */
   syncNarrowNotice(fit) {
-    if (!this.builtRootEl) {
+    if (!this.host) {
       return;
     }
     if (fit.hidden.length === 0) {
@@ -15363,7 +15363,14 @@ var SplitView = class {
     }
     const hostW = this.host ? this.host.clientWidth : 0;
     const hostH = this.host ? this.host.clientHeight : 0;
-    const fit = hostW > 0 && hostH > 0 ? fitToSize(this.tree, hostW, hostH, this.focusedId) : { tree: this.tree, hidden: [] };
+    let fit = hostW > 0 && hostH > 0 ? fitToSize(this.tree, hostW, hostH, this.focusedId) : { tree: this.tree, hidden: [] };
+    if (fit.hidden.length > 0) {
+      this.syncNarrowNotice(fit);
+      const noticeH = this.narrowEl?.offsetHeight ?? 0;
+      if (noticeH > 0 && noticeH < hostH) {
+        fit = fitToSize(this.tree, hostW, hostH - noticeH, this.focusedId);
+      }
+    }
     this.displayTree = fit.tree;
     if (!sameLayout(this.tree, this.builtTree)) {
       const rootEl = this.buildNode(this.tree);
