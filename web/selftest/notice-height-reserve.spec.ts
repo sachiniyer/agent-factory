@@ -75,8 +75,10 @@ test("#6561: the notice's height is reserved before the fit", async ({ page, req
   const base = await tabs.count();
   for (let i = 0; i < 4; i++) {
     await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
+    // Await each create: a second click while the prior CreateTab round-trip
+    // is still in flight is swallowed, leaving the roster one short.
+    await expect(tabs).toHaveCount(base + i + 1);
   }
-  await expect(tabs).toHaveCount(base + 4);
   await dragTabToPane(page, base, 0, "bottom");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
   await dragTabToPane(page, base + 1, 1, "bottom");
