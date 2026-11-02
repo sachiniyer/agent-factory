@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { seededTabs } from "./seeded-tabs.js";
 
 // #6563: once the fit hides every sibling, a retained multi-pane layout shows
 // one visible pane — and BOTH close routes vanished with it: the phone menu's
@@ -8,6 +9,8 @@ import { expect, test, type Page } from "@playwright/test";
 // Close availability must follow the RETAINED pane count, not the visible one.
 
 const sessionA = process.env.AF_WEB_SESSION_A ?? "probe-a";
+// probe-a's roster is shared with the suite — close what this test adds (#4217).
+const roster = seededTabs();
 
 /** Same shared-DataTransfer dispatch as split-min-width.spec.ts. */
 async function dragTabToPane(page: Page, tabIndex: number, paneIndex: number, edge: "left" | "right"): Promise<void> {
@@ -51,7 +54,7 @@ test("#6563: a touch user can still close a pane when the fit shows only one", a
   // in the pane while the FIRST is dragged — dragging a shown tab would hit
   // the dedupe/companion paths in applyTabDrop instead of a real split.
   const tabs = page.locator(".af-tabbar .af-tab");
-  const base = await tabs.count();
+  const base = await roster.enter(page);
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
   await expect(tabs).toHaveCount(base + 1);
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
