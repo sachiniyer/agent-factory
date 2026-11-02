@@ -63,10 +63,22 @@ const backlogSelfAskHint = "ask the user with \"af backlog ask --self\""
 // command that changes the backlog's plan. It stops a confused agent, not a
 // hostile one.
 func refuseFromItemSession(command string) error {
-	if inItemSession() == nil {
-		return nil
+	_, err := callerSession(command)
+	return err
+}
+
+// callerSession is the id of the af session this command runs in, or "" when
+// it runs outside one, from one whoami. An item session is refused as in
+// refuseFromItemSession.
+func callerSession(command string) (string, error) {
+	s, err := backlogSelfSession()
+	if err != nil || s == nil {
+		return "", nil
 	}
-	return fmt.Errorf("item sessions cannot run \"af backlog %s\"; %s", command, backlogSelfAskHint)
+	if s.BacklogItem != 0 {
+		return "", fmt.Errorf("item sessions cannot run \"af backlog %s\"; %s", command, backlogSelfAskHint)
+	}
+	return s.ID, nil
 }
 
 func refuseControlsFromItemSession() error {
@@ -149,7 +161,8 @@ var backlogDoneCmd = &cobra.Command{
 	Use:   "done <id> | done --self [--pr <url>]",
 	Short: "Mark an item done after review, or, from an item session, send it to review",
 	Long: "With an id, mark the item done. Items that wait on it can then start. Open questions " +
-		"on it close; its session stays.\n\n" +
+		"on it close; its session stays. When the session this runs in orchestrates the item's " +
+		"group, af adds a note to the user's Inbox.\n\n" +
 		"With --self, run from inside an item session: the agent's work is finished and the " +
 		"item goes to review for the user. --pr stores the pull request link.",
 	Args: cobra.MaximumNArgs(1),
@@ -176,7 +189,8 @@ var backlogDoneCmd = &cobra.Command{
 			if backlogDonePR != "" {
 				return nil, errors.New("--pr goes with --self")
 			}
-			if err := refuseFromItemSession("done <id>"); err != nil {
+			caller, err := callerSession("done <id>")
+			if err != nil {
 				return nil, err
 			}
 			id, err := backlog.ParseID(args[0])
@@ -184,7 +198,7 @@ var backlogDoneCmd = &cobra.Command{
 				return nil, err
 			}
 			return setBacklogStatus(daemon.SetBacklogItemStatusRequest{RepoID: t.repoID, RepoPath: t.repoPath,
-				ID: id, Status: backlog.StatusDone})
+				ID: id, Status: backlog.StatusDone, CallerSessionID: caller})
 		})
 	},
 }
@@ -252,8 +266,9 @@ var backlogAskCmd = &cobra.Command{
 	Use:   "ask --self <text> [--then wait|archive] [--handoff-file <path|->]",
 	Short: "From an item session, ask the user a question",
 	Long: "Run from inside an item session: add a question to the item's thread and set the " +
-		"session's attention to it. The item shows Needs you until the user answers. Stop " +
-		"working after you ask.\n\n" +
+		"session's attention to it. The item shows Needs you until the user answers. In a group " +
+		"with an orchestrator, the question goes to the effort session instead: it answers, or " +
+		"escalates it to the user. Stop working after you ask.\n\n" +
 		"--then says what happens to this session once you stop. archive, the default: af " +
 		"archives it, and the user's answer restores it, with this conversation, and arrives " +
 		"here. wait: the session stays live until the answer arrives. af archives only a session " +

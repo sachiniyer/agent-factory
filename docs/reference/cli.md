@@ -26,6 +26,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af backlog draft`](#af-backlog-draft) — Put a queued or in-review item back to draft
 - [`af backlog drop`](#af-backlog-drop) — Mark an item dropped
 - [`af backlog edit`](#af-backlog-edit) — Change an item's title, body, waits-on, program, or sequential flag
+- [`af backlog escalate`](#af-backlog-escalate) — Send an item's question from the effort session to the user
 - [`af backlog inbox`](#af-backlog-inbox) — Print the project's open questions, oldest first
 - [`af backlog list`](#af-backlog-list) — Print the backlog in order, as a tree, with each item's state
 - [`af backlog move`](#af-backlog-move) — Reorder an item; its children move with it
@@ -516,6 +517,7 @@ af backlog
 - [`af backlog draft`](#af-backlog-draft) — Put a queued or in-review item back to draft
 - [`af backlog drop`](#af-backlog-drop) — Mark an item dropped
 - [`af backlog edit`](#af-backlog-edit) — Change an item's title, body, waits-on, program, or sequential flag
+- [`af backlog escalate`](#af-backlog-escalate) — Send an item's question from the effort session to the user
 - [`af backlog inbox`](#af-backlog-inbox) — Print the project's open questions, oldest first
 - [`af backlog list`](#af-backlog-list) — Print the backlog in order, as a tree, with each item's state
 - [`af backlog move`](#af-backlog-move) — Reorder an item; its children move with it
@@ -629,7 +631,7 @@ af backlog archive <id>
 
 From an item session, ask the user a question
 
-Run from inside an item session: add a question to the item's thread and set the session's attention to it. The item shows Needs you until the user answers. Stop working after you ask.
+Run from inside an item session: add a question to the item's thread and set the session's attention to it. The item shows Needs you until the user answers. In a group with an orchestrator, the question goes to the effort session instead: it answers, or escalates it to the user. Stop working after you ask.
 
 --then says what happens to this session once you stop. archive, the default: af archives it, and the user's answer restores it, with this conversation, and arrives here. wait: the session stays live until the answer arrives. af archives only a session it can restore into its own conversation (today a Claude, Codex or Amp session with a recorded conversation id); any other stays live, as with wait. If it keeps the session live, or someone works in the session after you stop, af notes why on the item.
 
@@ -706,7 +708,7 @@ af backlog delete <id>
 
 Mark an item done after review, or, from an item session, send it to review
 
-With an id, mark the item done. Items that wait on it can then start. Open questions on it close; its session stays.
+With an id, mark the item done. Items that wait on it can then start. Open questions on it close; its session stays. When the session this runs in orchestrates the item's group, af adds a note to the user's Inbox.
 
 With --self, run from inside an item session: the agent's work is finished and the item goes to review for the user. --pr stores the pull request link.
 
@@ -797,11 +799,36 @@ af backlog edit <id> [flags]
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af backlog escalate
+
+Send an item's question from the effort session to the user
+
+Send the item's open question, which waits for its group's orchestrator, to the user: it shows in the Inbox and on the item session's attention. --note adds a note for the user to the item's thread. When the user answers, af tells the orchestrator. Item sessions cannot escalate.
+
+```
+af backlog escalate <id> [--note <text>] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--note` | `string` | A note for the user, added to the item's thread |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af backlog inbox
 
 Print the project's open questions, oldest first
 
-Print every open question on every item of the project, oldest first, with the agent's handoff notes when it left any. Items in archived groups are left out. Answer with "af backlog answer <id> <text>". With --json, print the questions as JSON in the {data,error} envelope.
+Print every open question on every item of the project, oldest first, with the agent's handoff notes when it left any, then the notes an effort session left when it marked an item done. Questions that wait for a group's effort session and items in archived groups are left out. Answer with "af backlog answer <id> <text>". With --json, print the questions as JSON in the {data,error} envelope.
 
 ```
 af backlog inbox

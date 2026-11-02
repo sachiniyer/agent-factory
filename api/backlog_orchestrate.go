@@ -114,7 +114,43 @@ func setBacklogOrchestrator(req daemon.SetBacklogOrchestratorRequest) (*backlog.
 	return &resp, nil
 }
 
+var backlogEscalateNote string
+
+var backlogEscalateCmd = &cobra.Command{
+	Use:   "escalate <id> [--note <text>]",
+	Short: "Send an item's question from the effort session to the user",
+	Long: "Send the item's open question, which waits for its group's orchestrator, to the user: " +
+		"it shows in the Inbox and on the item session's attention. --note adds a note for the " +
+		"user to the item's thread. When the user answers, af tells the orchestrator. Item " +
+		"sessions cannot escalate.",
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runBacklog(func() (any, error) {
+			caller, err := callerSession("escalate")
+			if err != nil {
+				return nil, err
+			}
+			id, err := backlog.ParseID(args[0])
+			if err != nil {
+				return nil, err
+			}
+			t, err := backlogProject()
+			if err != nil {
+				return nil, err
+			}
+			var resp daemon.EscalateBacklogQuestionResponse
+			if err := callBacklogRoute("EscalateBacklogQuestion", daemon.EscalateBacklogQuestionRequest{
+				RepoID: t.repoID, RepoPath: t.repoPath, ID: id, Note: backlogEscalateNote, CallerSessionID: caller}, &resp); err != nil {
+				return nil, err
+			}
+			return &resp, nil
+		})
+	},
+}
+
 func init() {
+	backlogEscalateCmd.Flags().StringVar(&backlogEscalateNote, "note", "", "A note for the user, added to the item's thread")
+	BacklogCmd.AddCommand(backlogEscalateCmd)
 	f := backlogOrchestrateCmd.Flags()
 	f.BoolVar(&backlogOrchestrateSelf, "self", false, "Bind the session this runs in")
 	f.BoolVar(&backlogOrchestrateClear, "clear", false, "Unbind the group's orchestrator")

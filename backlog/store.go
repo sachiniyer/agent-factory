@@ -18,7 +18,7 @@ const (
 	// BacklogSchemaVersion is the newest backlog.json this af reads. A save writes
 	// it only while some group has an orchestrator, and BacklogUnboundSchemaVersion
 	// otherwise (Backlog.savedSchemaVersion).
-	BacklogSchemaVersion        = 3
+	BacklogSchemaVersion        = 4
 	BacklogUnboundSchemaVersion = 2
 	BudgetSchemaVersion         = 2
 )
@@ -139,12 +139,17 @@ var backlogStore = store[Backlog]{
 	finish:   (*Backlog).normalize,
 	setStamp: func(b *Backlog, v int) { b.SchemaVersion = v },
 	stamp:    (*Backlog).savedSchemaVersion,
-	// Versions 2 and 3 only add fields (2: paused and archived on items, then
-	// and handoff on messages; 3: a group's orchestrator), so their migrators
-	// only stamp. A save writes 3 only while a group has an orchestrator, so an
-	// af that knows only version 2 refuses a file holding one rather than
-	// dropping it, and reads every other file as before.
-	migrate: map[int]config.SchemaMigrator{1: stampVersion(2), 2: stampVersion(3)},
+	// Versions 2 to 4 only add fields, so their migrators only stamp:
+	//   - 2: paused and archived on items, then and handoff on messages;
+	//   - 3: a group's orchestrator (af v1.0.342 writes it);
+	//   - 4: the orchestrator's delivery state, a run's stalled_at, a
+	//     question's route and a note's inbox flag (#6583). An af that writes
+	//     version 3 decodes a bound file into a struct without these fields, so
+	//     any write would drop them. Stamping 4 makes it refuse the file instead.
+	// A save writes the newest version only while a group has an orchestrator,
+	// so an older af refuses a file holding one rather than dropping its state,
+	// and reads every other file as before.
+	migrate: map[int]config.SchemaMigrator{1: stampVersion(2), 2: stampVersion(3), 3: stampVersion(4)},
 }
 
 var budgetStore = store[Budget]{

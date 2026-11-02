@@ -70,8 +70,10 @@ func (s *Service) ask(p *project, req PostMessageRequest) (*MessageResponse, err
 			return nil, err
 		}
 		msg = *m
-		qid, qtext := b.OpenQuestionRef(req.ID)
-		s.host.SetAttention(p.id, req.SessionID, qid, qtext)
+		// A question that waits for the group's orchestrator sets no attention.
+		if qid, qtext := b.AttentionRef(req.ID); qtext != "" {
+			s.host.SetAttention(p.id, req.SessionID, qid, qtext)
+		}
 		return []int{req.ID}, nil
 	})
 	if err != nil {
@@ -138,14 +140,11 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 		if out.SessionID != sessionID {
 			return nil, fmt.Errorf("%s changed while answering; retry", FormatID(req.ID))
 		}
-		// The next open question's id goes to the host for any target, so 0
-		// always means no question is left; only a live session mirrors its text.
-		next, nextID := "", 0
-		if out.Next != nil {
-			nextID = out.Next.ID
-			if target == TargetLive {
-				next = out.Next.Text
-			}
+		// The next question's id goes to the host for any target, so 0 always means
+		// none is left; only a live session mirrors the text of one with the user.
+		nextID, next := b.AttentionRef(req.ID)
+		if target != TargetLive {
+			next = ""
 		}
 		s.host.SetAttention(p.id, sessionID, nextID, next)
 		it := b.Item(req.ID)

@@ -223,11 +223,11 @@ func TestBoundOrchestratorRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o := b.Item(1).Orchestrator; o == nil || o.SessionID != "s" || b.Item(2).Orchestrator != nil || b.SchemaVersion != 3 {
+	if o := b.Item(1).Orchestrator; o == nil || o.SessionID != "s" || b.Item(2).Orchestrator != nil || b.SchemaVersion != BacklogSchemaVersion {
 		t.Fatalf("%s", raw)
 	}
-	if !strings.Contains(string(raw), `"schema_version": 3`) {
-		t.Fatalf("a bound save must write version 3, so an older af refuses it rather than drop the binding: %s", raw)
+	if !strings.Contains(string(raw), `"schema_version": 4`) {
+		t.Fatalf("a bound save must write version 4, so an older af refuses it rather than drop the binding: %s", raw)
 	}
 	if strings.Contains(string(raw), `"handoff"`) || strings.Contains(string(raw), `"events"`) || strings.Contains(string(raw), `"meter"`) {
 		t.Fatalf("empty fields written: %s", raw)
@@ -336,7 +336,7 @@ func TestOrchestratorJSONRoundTrip(t *testing.T) {
 }
 
 // TestClearingTheLastBindingWritesV2: the version follows the bindings both
-// ways. While any group is bound the file is version 3; clearing one of two
+// ways. While any group is bound the file is version 4; clearing one of two
 // keeps it there; clearing the last brings that save back to version 2, which
 // an older af reads again.
 func TestClearingTheLastBindingWritesV2(t *testing.T) {
@@ -370,16 +370,45 @@ func TestClearingTheLastBindingWritesV2(t *testing.T) {
 	}
 	update(func(b *Backlog) error { return b.BindOrchestrator(1, orch("s1"), t0) })
 	update(func(b *Backlog) error { return b.BindOrchestrator(3, orch("s3"), t0) })
-	if v := version(); v != 3 {
+	if v := version(); v != 4 {
 		t.Fatalf("bound: %v", v)
 	}
 	update(func(b *Backlog) error { _, err := b.ClearOrchestrator(1, t0); return err })
-	if v := version(); v != 3 {
+	if v := version(); v != 4 {
 		t.Fatalf("one binding left: %v", v)
 	}
 	update(func(b *Backlog) error { _, err := b.ClearOrchestrator(3, t0); return err })
 	if v := version(); v != 2 {
 		t.Fatalf("the last binding cleared: %v", v)
+	}
+}
+
+// TestLoadsBoundV3: a bound version 3 file, as af v1.0.342 writes it, loads
+// with its binding and events, and its next save writes version 4 (#6583).
+func TestLoadsBoundV3(t *testing.T) {
+	home(t)
+	path, _ := BacklogPath(repoID)
+	writeRaw(t, path, `{"schema_version": 3, "next_id": 3, "items": [
+		{"id": 1, "title": "group", "status": "draft",
+		 "orchestrator": {"session_id": "s", "title": "planner", "program": "claude", "bound_at": "2026-11-01T00:00:00Z",
+		   "events": [{"kind": "review", "item": 2, "at": "2026-11-01T00:00:00Z"}]}},
+		{"id": 2, "title": "child", "status": "review", "parent": 1}]}`)
+	b, err := Load(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := b.Item(1).Orchestrator
+	if b.SchemaVersion != BacklogSchemaVersion || o == nil || o.SessionID != "s" || len(o.Events) != 1 {
+		t.Fatalf("%+v %+v", b, o)
+	}
+	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), `"schema_version": 3`) {
+		t.Fatalf("a read rewrote the file: %s", raw)
+	}
+	if _, err := Update(repoID, func(*Backlog) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), `"schema_version": 4`) {
+		t.Fatalf("a bound v3 file saves as v4: %s", raw)
 	}
 }
 

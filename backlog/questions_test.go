@@ -394,8 +394,8 @@ func TestAnsweredInSessionTextClosesOnlyTheSeenQuestion(t *testing.T) {
 	if got := b.AnsweredInSessionText("s1", 0, "first?", nil, now); got != 1 {
 		t.Fatalf("got %d", got)
 	}
-	if b.OpenQuestionText(1) != "second?" {
-		t.Fatalf("the newer question must stay open, got %q", b.OpenQuestionText(1))
+	if _, text := b.AttentionRef(1); text != "second?" {
+		t.Fatalf("the newer question must stay open, got %q", text)
 	}
 }
 

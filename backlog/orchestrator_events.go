@@ -62,7 +62,10 @@ func (b *Backlog) queueOrchChanges(prev *Backlog, now time.Time) []int {
 			if strings.HasPrefix(m.Author, "agent:") && (was == nil || was.message(m.ID) == nil) {
 				queue(OrchEvent{Kind: EventQuestion, Item: it.ID, Message: m.ID})
 			}
-			if m.Route == RouteUser && (m.Closed == ClosedAnswered || m.Closed == ClosedAnsweredInSession) && was != nil && was.questionOpen(m.ID) {
+			if was == nil || !was.questionOpen(m.ID) {
+				continue
+			}
+			if m.Route == RouteUser && (m.Closed == ClosedAnswered || m.Closed == ClosedAnsweredInSession) {
 				queue(OrchEvent{Kind: EventEscalationAnswered, Item: it.ID, Message: m.ID})
 			}
 		}
