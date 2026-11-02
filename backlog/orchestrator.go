@@ -154,3 +154,32 @@ func (b *Backlog) savedSchemaVersion() int {
 	}
 	return BacklogUnboundSchemaVersion
 }
+
+// SetOrchestratorHandoff stores the notes for a session that replaces
+// sessionID as orchestrator, and returns the group it orchestrates.
+func (b *Backlog) SetOrchestratorHandoff(sessionID, handoff string, now time.Time) (int, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	id := b.OrchestratedBy(sessionID)
+	if sessionID == "" || id == 0 {
+		return 0, fmt.Errorf("session %q orchestrates no group; bind it with \"af backlog orchestrate <group> --self\"", sessionID)
+	}
+	handoff = strings.TrimSpace(handoff)
+	if n := len(handoff); n > MaxHandoffBytes {
+		return 0, fmt.Errorf("the handoff is %d bytes; the limit is 8 KB (%d bytes)", n, MaxHandoffBytes)
+	}
+	it := b.Item(id)
+	it.Orchestrator.Handoff = handoff
+	it.UpdatedAt = now
+	return id, nil
+}
+
+// rootOf returns the top-level item above id, or id itself.
+func (b *Backlog) rootOf(id int) int {
+	for {
+		it := b.Item(id)
+		if it == nil || it.Parent == 0 {
+			return id
+		}
+		id = it.Parent
+	}
+}

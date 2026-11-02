@@ -297,11 +297,17 @@ func (s *controlServer) AddBacklogItems(req AddBacklogItemsRequest, resp *AddBac
 	// An agent that files found work before its start was recorded adopts the
 	// run first, as its questions and notes do (Codex P2 on #6535).
 	s.manager.adoptStartingRun(req.RepoID, req.RepoPath, req.SessionID)
-	out, err := s.manager.backlogService().Add(req)
+	svc := s.manager.backlogService()
+	out, err := svc.Add(req)
 	if err != nil {
 		return err
 	}
 	*resp = *out
+	if out.Orchestrator != nil && out.Orchestrator.Change != "" {
+		if ref, err := svc.Resolve(req.RepoID, req.RepoPath); err == nil {
+			s.manager.publishOrchestratorChange(ref.ID, out.Orchestrator)
+		}
+	}
 	return nil
 }
 
