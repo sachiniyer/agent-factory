@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { seededTabs } from "./seeded-tabs.js";
 
 // #6560: dragging an ancestor divider can sliver nested leaves, because the
 // drag's subtree floor sums leaf minima but ignores the descendant split's own
@@ -9,6 +10,8 @@ import { expect, test, type Page } from "@playwright/test";
 const PANE_FLOOR_PX = 300;
 
 const sessionA = process.env.AF_WEB_SESSION_A ?? "probe-a";
+// probe-a's roster is shared with the suite — close what this test adds (#4217).
+const roster = seededTabs();
 
 async function dragTabToPane(page: Page, tabIndex: number, paneIndex: number, edge: "left" | "right"): Promise<void> {
   await page.evaluate(
@@ -62,7 +65,7 @@ test("#6560: an ancestor drag cannot sliver a skewed nested leaf", async ({ page
   // closing the old leaf) and onto its own pane routes through
   // companionTab's substitution, neither of which lands the named tab.
   const tabs = page.locator(".af-tabbar .af-tab");
-  const base = await tabs.count();
+  const base = await roster.enter(page);
   for (let i = 0; i < 3; i++) {
     await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
     await expect(tabs).toHaveCount(base + i + 1);
@@ -116,7 +119,7 @@ test("#6573: a divider beside fit-hidden leaves still drags — its floor prices
   // four drags all move genuinely unshown tabs (a shown tab's drop on another
   // pane dedupes into a move, never a split).
   const tabs = page.locator(".af-tabbar .af-tab");
-  const base = await tabs.count();
+  const base = await roster.enter(page);
   for (let i = 0; i < 5; i++) {
     await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
     await expect(tabs).toHaveCount(base + i + 1);
