@@ -532,6 +532,20 @@ func removeCopiedEntryWithRestore(
 			filepath.Join(path, entry.name),
 		)
 	}
+	if entry.directory != nil {
+		// The claim below renames the directory before unlinking it, and a
+		// platform that checks the renamed directory's own mode (macOS 15
+		// refuses the rename of one the owner cannot write — #6641) cannot move
+		// a directory a restrictive umask or a user's mode made unwritable.
+		// Entries reached through removeCopiedTree already carry owner write
+		// via ensureOwnerWritableDirectory; this covers a directory removed by
+		// name with no descriptor of its own. The name has just been verified
+		// to bind the node the caller intends, so granting access cannot widen
+		// a replacement.
+		if err := prepareDirectoryEntryRemoval(directory, entry.name); err != nil {
+			return err
+		}
+	}
 	claimedName, err := privateMoveName("delete")
 	if err != nil {
 		return err
