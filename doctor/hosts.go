@@ -72,6 +72,18 @@ func checkListedHosts(ctx *scanContext, report *Report, cfg *config.Config, heal
 			}
 			report.Pass(sectionRemote, name, detail)
 		}
+		reportPushCredentialBlockers(report, name, h.PushCredentialBlockers)
+	}
+	reportPushCredentialBlockers(report, "sandbox.ssh target", resp.SandboxPushCredentialBlockers)
+}
+
+// reportPushCredentialBlockers names each session that keeps a push-licensed
+// target from getting push credentials (#5571 W7.8): while it runs there, no
+// session on that machine is answered.
+func reportPushCredentialBlockers(report *Report, target string, blockers []string) {
+	for _, b := range blockers {
+		report.Warn(sectionRemote, target+" push credentials", "withheld: "+b,
+			"remove that session (`af sessions kill <id>`), then rerun `af doctor`", false)
 	}
 }
 

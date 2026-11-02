@@ -289,6 +289,14 @@ type Config struct {
 	// repo-settable value would let a cloned repository exfiltrate an arbitrary
 	// local path or install an arbitrary binary on every sandbox host.
 	SandboxBinary string `json:"sandbox_binary,omitempty" toml:"sandbox_binary,omitempty"`
+	// SandboxPushCredentials opts the free-form sandbox.ssh target into push
+	// credentials (#5571 W7.8), the counterpart of a listed host's
+	// push_credentials: a sandbox session can `git push` its origin and run `gh`
+	// as the operator, with the daemon box's own GitHub login fetched over the
+	// session's scoped af callback and never stored on the host. Off by default.
+	// Global-only, like sandbox.ssh: only the operator decides that a target af
+	// cannot list may receive their GitHub authority.
+	SandboxPushCredentials bool `json:"sandbox_push_credentials,omitempty" toml:"sandbox_push_credentials,omitempty"`
 	// MoveCmd is the operator-written script af runs on the daemon box when it
 	// moves a live local session to a sandbox (`af sessions move`, W7.9): JSON spec
 	// on stdin, AF_SSH / AF_SSH_DEST / AF_SSH_FULL in the environment. It is

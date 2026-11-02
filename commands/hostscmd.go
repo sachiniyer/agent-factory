@@ -40,6 +40,7 @@ var (
 	hostsAddHostKeyPosture    string
 	hostsAddDefault           bool
 	hostsAddNoCheck           bool
+	hostsAddPushCredentials   bool
 	hostsRemoveClearDefault   bool
 	hostsCheckProbe           = daemon.CheckHost
 	hostsConfigSet            = globalConfigSet
@@ -294,9 +295,16 @@ var hostsAddCmd = &cobra.Command{
 <ssh-destination> is [user@]host[:port] (an ssh:// URL works too), for example ubuntu@box1.tailnet.ts.net.
 The name is what 'af sessions create --host <name>' takes. The host is probed
 for git, tmux (3.2 or newer) and gh, and every missing tool is reported with
-its fix. The entry is kept either way; use --no-check to skip the probe.`,
+its fix. The entry is kept either way; use --no-check to skip the probe.
+
+--push-credentials opts the host into push credentials in the same write, so it
+is never listed without them: a listed host that is not opted in is one a
+sandbox may create sessions on. Opt in only a fresh, dedicated machine that
+runs nothing but your own af sessions (see "Push credentials" in
+docs/backends.md).`,
 	Example: `  af hosts add box1 ubuntu@box1.tailnet.ts.net
-  af hosts add gpu 10.0.0.7:2222 --identity-file /home/me/.ssh/gpu --default`,
+  af hosts add gpu 10.0.0.7:2222 --identity-file /home/me/.ssh/gpu --default
+  af hosts add build af-push@build.tailnet.ts.net --push-credentials`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := requireLocalTarget("af hosts add", "writes this machine's host list"); err != nil {
@@ -310,6 +318,7 @@ its fix. The entry is kept either way; use --no-check to skip the probe.`,
 		entry.IdentityFile = hostsAddIdentityFile
 		entry.WorkspaceRoot = hostsAddWorkspaceRoot
 		entry.HostKeyVerification = hostsAddHostKeyPosture
+		entry.PushCredentials = hostsAddPushCredentials
 		if err := config.ValidateHostEntry(name, entry); err != nil {
 			return hostsFailJSON(cmd, err)
 		}
@@ -413,6 +422,16 @@ func renderHostCheck(w io.Writer, r daemon.HostCheckResult, entry config.HostCon
 	for _, warn := range r.Warnings {
 		fmt.Fprintf(w, "    note: %s\n", warn)
 	}
+	renderPushCredentialBlockers(w, r.PushCredentialBlockers)
+}
+
+// renderPushCredentialBlockers names the sessions keeping a push-licensed host
+// from getting push credentials (#5571 W7.8). Not a readiness problem: the host
+// still runs sessions, so it changes no exit code.
+func renderPushCredentialBlockers(w io.Writer, blockers []string) {
+	for _, b := range blockers {
+		fmt.Fprintf(w, "    push credentials withheld: %s\n", b)
+	}
 }
 
 var hostsListCmd = &cobra.Command{
@@ -485,6 +504,10 @@ probed. Exits non-zero when a host is not ready or could not be reached.`,
 		}
 		hosts, _, _ := hostsLoad()
 		blocked, unreachable, incomplete := false, false, false
+		if !hostsJSONFlag && len(resp.SandboxPushCredentialBlockers) > 0 {
+			fmt.Fprintln(cmd.OutOrStdout(), "  sandbox.ssh target:")
+			renderPushCredentialBlockers(cmd.OutOrStdout(), resp.SandboxPushCredentialBlockers)
+		}
 		for _, r := range resp.Hosts {
 			if !hostsJSONFlag {
 				renderHostCheck(cmd.OutOrStdout(), r, hosts[r.Name])
@@ -552,6 +575,7 @@ func init() {
 	hostsAddCmd.Flags().StringVar(&hostsAddHostKeyPosture, "host-key-verification", "", "strict | accept-new | insecure (default: the global ssh.host_key_verification)")
 	hostsAddCmd.Flags().BoolVar(&hostsAddDefault, "default", false, "Make this the default host")
 	hostsAddCmd.Flags().BoolVar(&hostsAddNoCheck, "no-check", false, "Save the host without probing it")
+	hostsAddCmd.Flags().BoolVar(&hostsAddPushCredentials, "push-credentials", false, "Opt the host into push credentials in the same write (a dedicated machine only)")
 	hostsRemoveCmd.Flags().BoolVar(&hostsRemoveClearDefault, "clear-default", false, "Also clear default_host when it names this host")
 	hostsCmd.AddCommand(hostsAddCmd, hostsListCmd, hostsCheckCmd, hostsRemoveCmd)
 }

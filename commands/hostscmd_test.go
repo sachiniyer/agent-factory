@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 type hostsFake struct {
@@ -82,6 +83,7 @@ func installHostsFake(t *testing.T, f *hostsFake) {
 		hostsLoad, hostsConfigSet, hostsCheckProbe, hostsEditApply, hostsPosture = pl, ps, pc, pe, pp
 		hostsAddIdentityFile, hostsAddWorkspaceRoot, hostsAddHostKeyPosture = "", "", ""
 		hostsAddDefault, hostsAddNoCheck, hostsRemoveClearDefault, hostsJSONFlag = false, false, false, false
+		hostsAddPushCredentials = false
 	})
 }
 
@@ -304,4 +306,75 @@ func TestRenderHostCheck_UnknownArmMirrorsDoctor(t *testing.T) {
 	var out3 bytes.Buffer
 	renderHostCheck(&out3, daemon.HostCheckResult{Name: "box", Probed: true, Reachable: true, Complete: true}, config.HostConfig{Host: "box.example"})
 	assert.Contains(t, out3.String(), "box: ready (git, tmux and gh answered)")
+}
+
+// #5571 W7.8: `af hosts check` names each session that keeps a push-licensed
+// host (or the sandbox.ssh target) from getting push credentials, without
+// changing the exit code — the host still runs sessions.
+func TestHostsCheck_NamesPushCredentialBlockers(t *testing.T) {
+	f := &hostsFake{hosts: map[string]config.HostConfig{"a": {Host: "a.example", PushCredentials: true}}}
+	installHostsFake(t, f)
+	f.reply = daemon.CheckHostResponse{
+		Hosts: []daemon.HostCheckResult{{Name: "a", Probed: true, Reachable: true, Complete: true,
+			PushCredentialBlockers: []string{`session "child" (child-7) is created by another session's af`}}},
+		SandboxPushCredentialBlockers: []string{`session "legacy" (legacy-3) is of unknown provenance`},
+	}
+	out, err := runHosts(t, hostsCheckCmd)
+	require.NoError(t, err)
+	assert.Contains(t, out, `push credentials withheld: session "child" (child-7)`)
+	assert.Contains(t, out, "sandbox.ssh target:")
+	assert.Contains(t, out, `push credentials withheld: session "legacy" (legacy-3)`)
+}
+
+// Fourth review of #6433: --push-credentials lists and opts a host in with ONE
+// write, so it is never listed (and open to sandbox creates) without them.
+func TestHostsAdd_PushCredentialsOptsInInTheSameWrite(t *testing.T) {
+	f := &hostsFake{hosts: map[string]config.HostConfig{}}
+	installHostsFake(t, f)
+	hostsAddNoCheck, hostsAddPushCredentials = true, true
+	_, err := runHosts(t, hostsAddCmd, "build", "af-push@build.ts.net")
+	require.NoError(t, err)
+	require.Len(t, f.edits, 1, "one write")
+	require.NotNil(t, f.edits[0].Host)
+	assert.True(t, f.edits[0].Host.PushCredentials, "the add itself carries the opt-in")
+	assert.Equal(t, config.HostConfig{Host: "build.ts.net", User: "af-push", PushCredentials: true}, f.hosts["build"])
+	assert.Empty(t, f.sets, "no second write")
+}
+
+// Design steer on #6433: `af hosts reset-trust` is the operator's attestation,
+// for one host, one entry or --all, and prints what it reset.
+func TestHostsResetTrust(t *testing.T) {
+	f := &hostsFake{hosts: map[string]config.HostConfig{"build": {Host: "build.example"}}}
+	installHostsFake(t, f)
+	var asked []daemon.ResetPushTrustRequest
+	prev := hostsResetTrust
+	hostsResetTrust = func(req daemon.ResetPushTrustRequest) (daemon.ResetPushTrustResponse, error) {
+		asked = append(asked, req)
+		return daemon.ResetPushTrustResponse{
+			Identity: session.MachineIdentity{Names: []string{"build.example"}, Addrs: []string{"198.51.100.7"}},
+			Cleared:  []daemon.PushTaintReport{{ID: "3f9a1c0b2d4e", SessionID: "child-1", Title: "child", Why: "created by another session's af"}},
+		}, nil
+	}
+	t.Cleanup(func() { hostsResetTrust, hostsResetTrustAll, hostsResetTrustEntry = prev, false, "" })
+
+	out, err := runHosts(t, hostsResetTrustCmd, "build")
+	require.NoError(t, err)
+	assert.Equal(t, []daemon.ResetPushTrustRequest{{Host: "build"}}, asked)
+	assert.Contains(t, out, "names build.example; addresses 198.51.100.7")
+	assert.Contains(t, out, `cleared entry 3f9a1c0b2d4e: session "child" (child-1)`)
+
+	_, err = runHosts(t, hostsResetTrustCmd)
+	assert.Error(t, err, "nothing named")
+	hostsResetTrustAll = true
+	_, err = runHosts(t, hostsResetTrustCmd, "build")
+	assert.Error(t, err, "a name and --all")
+	_, err = runHosts(t, hostsResetTrustCmd)
+	require.NoError(t, err)
+	assert.Equal(t, daemon.ResetPushTrustRequest{All: true}, asked[len(asked)-1])
+
+	hostsResetTrustAll, hostsResetTrustEntry = false, "3f9a1c0b2d4e"
+	out, err = runHosts(t, hostsResetTrustCmd)
+	require.NoError(t, err)
+	assert.Equal(t, daemon.ResetPushTrustRequest{Entry: "3f9a1c0b2d4e"}, asked[len(asked)-1])
+	assert.Contains(t, out, "cleared entry 3f9a1c0b2d4e")
 }

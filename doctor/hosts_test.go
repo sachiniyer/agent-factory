@@ -107,3 +107,24 @@ func TestCheckListedHosts_IncompleteOrSkippedIsUnknownNeverReady(t *testing.T) {
 	assert.Equal(t, StatusPass, r.Checks[0].Status)
 	assert.Empty(t, r.Incomplete)
 }
+
+// #5571 W7.8: doctor names each session that keeps a push-licensed target from
+// getting push credentials.
+func TestCheckListedHostsNamesPushCredentialBlockers(t *testing.T) {
+	ctx := hostsCtx(func(daemon.CheckHostRequest) (daemon.CheckHostResponse, error) {
+		return daemon.CheckHostResponse{
+			Hosts: []daemon.HostCheckResult{{Name: "box", Probed: true, Reachable: true, Complete: true,
+				PushCredentialBlockers: []string{`session "child" (child-7) is created by another session's af`}}},
+			SandboxPushCredentialBlockers: []string{`session "legacy" (legacy-3) is of unknown provenance`},
+		}, nil
+	})
+	r := &Report{}
+	checkListedHosts(ctx, r, hostsCfg(), daemon.HealthStatus{})
+	out := render(r)
+	if !strings.Contains(out, `host box push credentials|withheld: session "child" (child-7)`) {
+		t.Fatalf("doctor did not name the listed host's blocker:\n%s", out)
+	}
+	if !strings.Contains(out, `sandbox.ssh target push credentials|withheld: session "legacy" (legacy-3)`) {
+		t.Fatalf("doctor did not name the sandbox target's blocker:\n%s", out)
+	}
+}

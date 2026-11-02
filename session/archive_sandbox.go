@@ -313,6 +313,7 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 		Host:                  i.Host,
 		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
 		Adopt:                 adopt,
+		OperatorCreated:       i.OperatorCreated(),
 	}
 	if adopt != nil {
 		// Nothing is cloned or fetched when adopting.
@@ -408,6 +409,13 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	rt, err := ResolveRuntime(kind)
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
+	}
+	// Code the operator did not place taints the machine it is re-provisioned
+	// onto, durably and before any of it runs there (#5571 W7.8): after every
+	// check above that can refuse this re-provision with its own reason, and
+	// before the first step below that touches the remote.
+	if err := i.recordReprovisionPlacement(); err != nil {
+		return err
 	}
 	i.mu.RLock()
 	creds := i.sandboxCreds
@@ -556,6 +564,7 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 		i.touchLocked()
 	}
 	i.mu.Unlock()
+	i.recordBoundPlacement()
 	return nil
 }
 

@@ -117,10 +117,11 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 		expectedToken: func() (string, error) { return "operator-token", nil },
 		sandboxTokens: &registry,
 	}
+	forwards := installOwnForwards(t, &registry)
 	request := func(path, token string) *http.Request {
 		r := mustRequest(t, http.MethodPost, path)
 		r.Header.Set("Authorization", "Bearer "+token)
-		return r
+		return forwards.carry(r) // through its owner's own forward
 	}
 
 	// A route the table admits is exercised here through a temporary entry too,

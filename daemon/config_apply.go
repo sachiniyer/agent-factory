@@ -177,6 +177,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"ssh.host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
 	"sandbox.ssh":                    func(a, b *config.Config) bool { return a.SandboxSSH != b.SandboxSSH },
 	"sandbox.binary":                 func(a, b *config.Config) bool { return a.SandboxBinary != b.SandboxBinary },
+	"sandbox.push_credentials":       func(a, b *config.Config) bool { return a.SandboxPushCredentials != b.SandboxPushCredentials },
 	"hosts":                          func(a, b *config.Config) bool { return !reflect.DeepEqual(a.Hosts, b.Hosts) },
 	"default_host":                   func(a, b *config.Config) bool { return a.DefaultHost != b.DefaultHost },
 	// Network listener keys — applied-live since #2480 PR2: the auth/CORS keys are

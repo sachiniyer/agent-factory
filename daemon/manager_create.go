@@ -195,6 +195,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		AccountSource:                  req.AccountSource,
 		ResumeConversation:             req.resumeConversation,
 		RestoreTabs:                    req.restoreTabs,
+		CreatedBySandbox:               req.createdBySandbox,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
 		BranchPrefix:                   &frozenBranchPrefix,
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),

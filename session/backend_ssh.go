@@ -270,6 +270,10 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// auto-detected daemon path, which this host's filesystem does not have.
 	// The agent-server resolves it on the host's login PATH (#5571).
 	program := remoteProgramForHost(cfg, spec.Program)
+	// W7.8: wire push credentials only on a listed host the operator opted in.
+	// hostName is final here — the pick, default_host, or an adoption's recorded
+	// host — and the CURRENT list decides, so a host removed since is not wired.
+	spec.PushCredentials = listedHostPushCredentials(cfg, hostName)
 	p := newSSHSandboxProvisioner(spec, sshCmd, afBin, program)
 	// sandbox.binary is the operator's daemon-local override for air-gapped or
 	// unbuilt hosts (#5571 W2.2) — global-only config, so it can never be

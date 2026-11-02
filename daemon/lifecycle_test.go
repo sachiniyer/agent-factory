@@ -243,7 +243,10 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// readiness verdicts it learned while unproven. A refusal here costs a retry
 	// once probation releases; the readiness cache is only advisory until then,
 	// and the supervisor's refresh timer stands down for the same window.
-	"CheckHost":            blockedDuringProbation,
+	"CheckHost": blockedDuringProbation,
+	// ResetPushTrust clears the operator's durable push-credential taints (#5571
+	// W7.8): a trust decision a rolled-back candidate must not have made.
+	"ResetPushTrust":       blockedDuringProbation,
 	"CreateTab":            blockedDuringProbation,
 	"DeleteProject":        blockedDuringProbation,
 	"DeliverPrompt":        blockedDuringProbation,

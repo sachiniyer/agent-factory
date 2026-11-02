@@ -94,6 +94,8 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		return ProvisionResult{}, fmt.Errorf("backend=sandbox: cannot locate the af binary to stream onto the sandbox: %w", err)
 	}
 
+	// W7.8: the free-form target gets push credentials only by its own opt-in.
+	spec.PushCredentials = cfg.SandboxPushCredentials
 	p := &sandboxProvisioner{
 		spec:   spec,
 		sshCmd: adoptedTransportOr(spec, strings.TrimSpace(cfg.SandboxSSH)),
@@ -277,6 +279,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 			return ProvisionResult{}, p.sandboxWriteErr(err)
 		}
 	}
+	// After the clone (or the adoption) and before anything can run in the
+	// workspace: the repo-local credential helper and the gh shim for push
+	// credentials (W7.8). Never fails the provision; see the function.
+	w.reconcilePushCredentials(sshShortStepTimeout, p.spec.Adopt != nil)
 	// The binary stage is platform-aware (#5571 W2.2): probe the host's uname,
 	// pick the af build it can actually run (sandbox.binary override / the
 	// daemon's own binary / a sha256-verified release artifact), install it

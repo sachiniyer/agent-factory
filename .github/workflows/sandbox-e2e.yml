@@ -28,6 +28,11 @@ on:
       - 'daemon/*sandbox*'
       - 'integration/sandbox_*'
       - 'integration/backend_ssh*'
+      - 'integration/testdata/fakeghe/**'
+      # W7.8 push credentials: the route, the host-side helper and gh shim.
+      - 'daemon/push_credential*'
+      - 'internal/pushcred/**'
+      - 'commands/pushcredcmd*'
       - '.github/workflows/sandbox-e2e.yml'
 
 permissions:
@@ -53,4 +58,4 @@ jobs:
           cache: true
 
       - name: Run the sandbox end-to-end
-        run: go test ./integration -run 'TestSandbox(Daemon|Disruptions)E2E' -v -count=1 -timeout 30m
+        run: go test ./integration -run 'TestSandbox(Daemon|Disruptions|PushCredentials)E2E' -v -count=1 -timeout 30m
