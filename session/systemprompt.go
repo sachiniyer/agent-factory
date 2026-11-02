@@ -35,7 +35,7 @@ import (
 // generated plugin artifacts must never carry a verbatim copy of the "you are
 // running inside af" opening, which is false for the audience that installed
 // them.
-const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageBacklogInside + "\n\n" + afUsageAttentionInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageBacklogInside + "\n\n" + afUsageOrchestratorInside + "\n\n" + afUsageAttentionInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
 
 // afUsageReferenceCallbackless replaces afUsageReference for an instance that
 // has NO af callback — a sandbox session whose credential could not be minted
@@ -174,12 +174,33 @@ const afBacklogSection = `Backlog (one project's work items in a strict order; i
 // (api) derives that list from the commands and pins this sentence to it.
 const afUsageBacklogInside = `Backlog items: when af started your session for a backlog item (your first prompt says "You are working on backlog item B-12"), report through that item, not only in your reply:
   af backlog done --self [--pr <url>]                  The work is finished; the item goes to the user for review. Pass --pr when you opened a pull request
-  af backlog ask --self <text>                         Ask the user a question on the item, then stop; when af can resume this conversation it archives this session, and the answer restores it and arrives here as a prompt; otherwise the session stays live
+  af backlog ask --self <text>                         Ask a question on the item, then stop: it goes to the group's orchestrator first if the group has one, which answers it or sends it to the user, and otherwise to the user; when af can resume this conversation it archives this session, and the answer restores it and arrives here as a prompt; otherwise the session stays live
   af backlog ask --self <text> --then wait             The same, but this session stays live until the answer arrives
   af backlog ask --self <text> --handoff-file <path or ->  The same, with notes (at most 8 KB) for whoever continues: a new session if this one is gone by the answer, or this one if it comes back without its conversation; the user sees them in af backlog inbox
   af backlog note --self <text>                        Add a note to the item's thread; nobody is notified
   af backlog add <title> [--parent <id>]               Add more work you found as a draft (under the item yours is part of: the "It is part of B-1" line of your first prompt); the user decides whether to queue it
 ` + AfBacklogItemSessionAddForm + ` ` + AfBacklogItemSessionRefusals + ` If you need one of them, ask with "af backlog ask --self". Do not create other af sessions from an item session.`
+
+// afUsageOrchestratorInside teaches a session to orchestrate a backlog group
+// (an "effort"). It is inside-only: binding and --self resolve the calling
+// session. Its event list is pinned to backlog's Event kinds by
+// TestOrchestratorUsageNamesEveryEventKind.
+const afUsageOrchestratorInside = `Effort orchestrator: a session can orchestrate one backlog group (a top-level item with children, an "effort"). Bind only when the user asks you to own or run the effort:
+  af backlog add --file <path or -> --orchestrate [--replace]  Add the batch and bind this session to its top-level parent; the batch must sit under one group
+  af backlog orchestrate <group> --self [--replace]     Bind this session to an existing group; --replace takes it over from the session that has it
+  af backlog orchestrate <group> --clear               Unbind; the questions waiting for you go to the user
+  af backlog orchestrate [<group>] --self --handoff-file <path or ->  Save notes (at most 8 KB) for a session that replaces you; with <group>, bind and save in one step
+  af backlog orchestrate --self --stay                 Keep this session live when the current turn ends, once; it works only during a turn af started
+  af backlog escalate <id> [--note <text>]             Send an item's question that came to you on to the user's Inbox
+One session orchestrates one group, and an item session cannot orchestrate.
+
+af wakes you with a prompt that starts "Events in effort B-1:" and lists the group's events; you do not need a monitor or a watch task:
+  question: an item's agent asked a question; it comes to you, not to the user. Read it with "af backlog show <id>", then answer with "af backlog answer <id> <text>", which reaches the item's session, or run "af backlog escalate <id>" when only the user can decide
+  review: an item went to review, or got a new PR while in review. Review its PR; if it is good, merge it and run "af backlog done <id>" (af adds a note to the user's Inbox). If it is not, send the changes to the item's session with "af sessions send-prompt <title> <prompt>" (the title is in its runs); af does not wake you when it pushes again, so run "af backlog orchestrate --self --stay" and check the PR yourself
+  stalled: an item's run sat idle 30 minutes with no done and no question, or its session stopped. Check it with "af backlog show <id>" and "af sessions preview <title>", then send it a prompt, restore it, or tell the user
+  finished: every item of the group is done or dropped; report to the user
+  escalation_answered: the user answered a question you escalated, in the Inbox or in the item's own session; continue from the answer
+When a turn af started ends with nothing pending, af archives this session if it can resume its conversation, once no one is attached; the next event restores it. Run "af backlog orchestrate --self --stay" during the turn to stay live. If this session is killed or missing when an event is due, af starts a new one with your handoff notes, so keep them current after each decision: what is merged, what waits, and why.`
 
 // AfBacklogItemSessionAddForm is the sentence of afUsageBacklogInside that names
 // the one form of add an item session may run (decision (3) on #6284). Exported

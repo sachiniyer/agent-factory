@@ -72,7 +72,7 @@ func TestGuidanceFollowsTheCapabilityProjection(t *testing.T) {
 			// taught their verbs or given the proposal skill.
 			hostStores := !tc.callbackUnavailable && tc.caps.Workspace == WorkspaceLocalWorktree
 			g := guidanceCapsFor(tc.callbackUnavailable, tc.caps)
-			for _, verb := range []string{"af proposal start", "af backlog list", "af backlog add --file", "af backlog done --self", "af backlog ask --self"} {
+			for _, verb := range []string{"af proposal start", "af backlog list", "af backlog add --file", "af backlog done --self", "af backlog ask --self", "af backlog orchestrate"} {
 				assert.Equal(t, hostStores, strings.Contains(ref, verb), "%s", verb)
 			}
 			assert.Equal(t, hostStores, len(pluginSkills(g)) > 0, "the proposal skill")

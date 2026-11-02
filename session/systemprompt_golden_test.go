@@ -164,9 +164,14 @@ func TestAfUsageReferenceJoints(t *testing.T) {
 			want: "af keeps them outside the worktree.\n\nBacklog items: when af started",
 		},
 		{
-			// backlog items + "\n\n" + attention: a blank line, a new paragraph.
-			name: "backlog items to attention",
-			want: "Do not create other af sessions from an item session.\n\nAsking for the user:",
+			// backlog items + "\n\n" + orchestrator: a blank line, a new paragraph.
+			name: "backlog items to orchestrator",
+			want: "Do not create other af sessions from an item session.\n\nEffort orchestrator: a session can",
+		},
+		{
+			// orchestrator + "\n\n" + attention: a blank line, a new paragraph.
+			name: "orchestrator to attention",
+			want: "what is merged, what waits, and why.\n\nAsking for the user:",
 		},
 		{
 			// attention + "\n\n" + outro: a blank line, a new paragraph.

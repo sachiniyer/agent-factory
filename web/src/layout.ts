@@ -83,6 +83,28 @@ export function leafCount(node: LayoutNode): number {
   return leaves(node).length;
 }
 
+/** Panes invisible because the layout is narrow: leaves the fit dropped, plus —
+ *  in the session-first band — every non-focused leaf, which the ≤768px CSS
+ *  hides outright. The union (not the sum), since a leaf can hide both ways
+ *  (#6589). Outside the band only the fit hides panes. */
+export function invisiblePaneCount(
+  fitHidden: readonly string[],
+  leafIds: readonly string[],
+  focusedId: string | null,
+  sessionFirstBand: boolean,
+): number {
+  if (!sessionFirstBand) {
+    return fitHidden.length;
+  }
+  const invisible = new Set(fitHidden);
+  for (const id of leafIds) {
+    if (id !== focusedId) {
+      invisible.add(id);
+    }
+  }
+  return invisible.size;
+}
+
 /** The leaf with the given id, or null. */
 export function findLeaf(node: LayoutNode, id: string): LeafNode | null {
   if (node.kind === "leaf") {

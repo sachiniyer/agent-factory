@@ -60,6 +60,11 @@ type MeterState struct {
 	// local session's worktree moves when it is archived, so the directory
 	// derived from the worktree later is not where the transcripts are.
 	RunDirs map[string][]string `json:"run_dirs,omitempty"`
+	// OrchBacklog holds, per project, the backlog paths of its orchestrators'
+	// conversations as the last pass that read the project's backlog saw them:
+	// a pass that cannot read it still classifies their messages as backlog
+	// spend, since a message counted as the user's is never reclassified.
+	OrchBacklog map[string][]BacklogPath `json:"orch_backlog,omitempty"`
 }
 
 // RememberRunDirs adds dirs to the session's remembered transcript directories
@@ -344,11 +349,30 @@ func (s *MeterState) account(name string) *AccountMeter {
 
 // Scan meters the transcripts of one account; see ScanAll.
 func (s *MeterState) Scan(account, configDir string, backlogDirs []string, overrides map[string]Price, now time.Time) bool {
-	return s.ScanAll(map[string][]string{account: {configDir}}, backlogDirs, overrides, now)
+	return s.ScanAll(map[string][]string{account: {configDir}}, BacklogDirs(backlogDirs), overrides, now)
+}
+
+// BacklogPath is a path whose transcripts count as backlog spend: a directory
+// of item-session transcripts, or an orchestrator conversation's main file or
+// subagent directory. Within, when set, holds the spans whose messages count:
+// a conversation is the backlog's only while it orchestrates.
+type BacklogPath struct {
+	Path   string `json:"path"`
+	Within []Span `json:"within,omitempty"`
+}
+
+// BacklogDirs is dirs as backlog paths with no time bound.
+func BacklogDirs(dirs []string) []BacklogPath {
+	out := make([]BacklogPath, 0, len(dirs))
+	for _, d := range dirs {
+		out = append(out, BacklogPath{Path: d})
+	}
+	return out
 }
 
 // ScanAll meters every Claude Code transcript under each account's config dirs.
-// A file under one of backlogDirs also counts as backlog cost. A file untouched
+// A message in a file that is one of backlog's paths, or under one, also counts
+// as backlog cost when it falls in that path's span. A file untouched
 // for longer than the weekly window is not read and keeps no mark, and a file
 // whose size and modification time match its mark is not opened.
 //
@@ -358,7 +382,7 @@ func (s *MeterState) Scan(account, configDir string, backlogDirs []string, overr
 // transcript is the one that consumed the source's plan. A file that skipped a
 // model with no price is read again from the start once that model has a price.
 // It returns whether anything changed.
-func (s *MeterState) ScanAll(sources map[string][]string, backlogDirs []string, overrides map[string]Price, now time.Time) bool {
+func (s *MeterState) ScanAll(sources map[string][]string, backlog []BacklogPath, overrides map[string]Price, now time.Time) bool {
 	type candidate struct {
 		account, path string
 		info          os.FileInfo
@@ -426,7 +450,7 @@ func (s *MeterState) ScanAll(sources map[string][]string, backlogDirs []string, 
 				a.Unpriced = append(a.Unpriced, m)
 			}
 		}
-		backlog := underAny(c.path, backlogDirs)
+		spans := backlogSpans(c.path, backlog)
 		for _, e := range res.Entries {
 			if now.Sub(e.At) > keepFor {
 				continue
@@ -434,7 +458,7 @@ func (s *MeterState) ScanAll(sources map[string][]string, backlogDirs []string, 
 			key := e.At.Truncate(BucketSpan).Unix()
 			b := a.Buckets[key]
 			b.All += e.Cost
-			if backlog {
+			if inSpans(e.At, spans) {
 				b.Backlog += e.Cost
 			}
 			a.Buckets[key] = b
@@ -479,9 +503,34 @@ func anyPriced(models string, overrides map[string]Price) bool {
 	return false
 }
 
-func underAny(path string, dirs []string) bool {
-	for _, d := range dirs {
-		if d != "" && strings.HasPrefix(path, filepath.Clean(d)+string(filepath.Separator)) {
+// underAny is whether path is one of paths, or under one of them.
+func underAny(path string, paths []string) bool {
+	for _, d := range paths {
+		if d == "" {
+			continue
+		}
+		if d = filepath.Clean(d); path == d || strings.HasPrefix(path, d+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// backlogSpans are the backlog paths path is, or is under.
+func backlogSpans(path string, backlog []BacklogPath) []BacklogPath {
+	var out []BacklogPath
+	for _, p := range backlog {
+		if underAny(path, []string{p.Path}) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// inSpans is whether a message at at is backlog spend under one of paths.
+func inSpans(at time.Time, paths []BacklogPath) bool {
+	for _, p := range paths {
+		if within(at, p.Within) {
 			return true
 		}
 	}

@@ -61,6 +61,33 @@ type ReadOptions struct {
 	// dir on an account handoff; those copied messages consumed the source
 	// account's plan, so they must not count again here.
 	Foreign func(key string) bool
+	// Within, when set, reads past the messages outside every one of its spans
+	// without counting them.
+	Within []Span
+}
+
+// Span is a stretch of time, from From until Until; a zero bound is open.
+type Span struct {
+	From  time.Time `json:"from,omitzero"`
+	Until time.Time `json:"until,omitzero"`
+}
+
+// Holds is whether at falls in the span.
+func (s Span) Holds(at time.Time) bool {
+	return (s.From.IsZero() || !at.Before(s.From)) && (s.Until.IsZero() || at.Before(s.Until))
+}
+
+// within is whether at falls in one of spans; with none, every time does.
+func within(at time.Time, spans []Span) bool {
+	if len(spans) == 0 {
+		return true
+	}
+	for _, s := range spans {
+		if s.Holds(at) {
+			return true
+		}
+	}
+	return false
 }
 
 // ReadResult is what one read of a transcript found.
@@ -214,6 +241,16 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 				continue
 			}
 		}
+		at := l.Timestamp
+		if at.IsZero() {
+			at = info.ModTime()
+		}
+		// Read past a message outside Within without counting it, before its
+		// price is looked up: one that is not counted cannot stop the read.
+		if !within(at, opts.Within) {
+			res.Mark.Offset = next
+			continue
+		}
 		pr, ok := priceForUsage(msg.Model, *msg.Usage, opts.Overrides)
 		if !ok {
 			if !opts.SkipUnpriced {
@@ -226,10 +263,6 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 			}
 			res.Mark.Offset = next
 			continue
-		}
-		at := l.Timestamp
-		if at.IsZero() {
-			at = info.ModTime()
 		}
 		res.Entries = append(res.Entries, Entry{At: at, Cost: msg.Usage.cost(pr)})
 		if key != "" {
@@ -278,6 +311,66 @@ func TranscriptFiles(projectDirs []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ConversationMains are the main transcript files a conversation id has in
+// Claude project directories: <dir>/<id>.jsonl for each, whether it exists yet
+// or not. An id that is not a plain file name has none.
+func ConversationMains(projectDirs []string, id string) []string {
+	if !conversationIDOK(id) {
+		return nil
+	}
+	var out []string
+	for _, dir := range projectDirs {
+		if dir != "" {
+			out = append(out, filepath.Join(dir, id+".jsonl"))
+		}
+	}
+	return out
+}
+
+// ConversationMain is the main transcript file of the conversation path
+// belongs to: path itself, or for a subagent's file
+// (<dir>/<id>/subagents/<name>.jsonl), <dir>/<id>.jsonl.
+func ConversationMain(path string) string {
+	if sub := filepath.Dir(path); filepath.Base(sub) == "subagents" {
+		return filepath.Dir(sub) + ".jsonl"
+	}
+	return path
+}
+
+// ConversationTranscripts are the transcript files of the conversations whose
+// main files are mains: each main file, listed whether it exists yet or not so
+// a reader keeps its place from the start, and its subagents' files that exist.
+func ConversationTranscripts(mains []string) []string {
+	var out []string
+	for _, m := range mains {
+		out = append(out, m)
+		subs, _ := filepath.Glob(filepath.Join(strings.TrimSuffix(m, ".jsonl"), "subagents", "*.jsonl"))
+		for _, f := range subs {
+			if info, err := os.Stat(f); err == nil && info.Mode().IsRegular() {
+				out = append(out, f)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ConversationPaths are the paths that hold the conversations whose main files
+// are mains, for the backlog paths of a scan: each main file and the directory
+// of its subagents. Another session's transcript in the same project directory
+// is not under any of them.
+func ConversationPaths(mains []string) []string {
+	var out []string
+	for _, m := range mains {
+		out = append(out, m, strings.TrimSuffix(m, ".jsonl"))
+	}
+	return out
+}
+
+func conversationIDOK(id string) bool {
+	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, `/\*?[`)
 }
 
 // PruneSeen drops the keys of messages older than the weekly window and a day.

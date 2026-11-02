@@ -37,13 +37,51 @@ func (m RunMeter) Cost() float64 { return RunRef{Meter: m.Meter}.Cost() }
 // once it has run for UnmeterableAfter. w names the item's project in the
 // reason, which the runner shows in every project.
 func MeterRun(id int, w Where, r RunRef, files []string, seen map[string]int64, overrides map[string]planusage.Price, now time.Time) RunMeter {
+	out := meterFiles(id, w, r, files, planusage.ReadOptions{Overrides: overrides, Seen: seen})
+	if len(files) == 0 && now.Sub(r.StartedAt) >= UnmeterableAfter {
+		out.Unmeterable = fmt.Sprintf("af cannot find the transcripts of the session of %s · %s", w.Item(id), w.Fix(id))
+	}
+	return out
+}
+
+// MeterOrchestrator reads the transcripts of group's orchestrator
+// conversations from their stored offsets, like MeterRun: each one's main file
+// and its subagents' files, counting only its messages from the spans in which
+// it orchestrated. Before it, the session worked for the user; after it, the group
+// was bound to another session and this one may go on working for the user.
+func MeterOrchestrator(group int, w Where, o Orchestrator, seen map[string]int64, overrides map[string]planusage.Price) RunMeter {
+	out := RunMeter{Meter: maps.Clone(o.Meter)}
+	if out.Meter == nil {
+		out.Meter = map[string]Meter{}
+	}
+	for _, c := range o.Conversations {
+		files := planusage.ConversationTranscripts([]string{c.Main})
+		part := meterFiles(group, w, RunRef{Meter: out.Meter}, files,
+			planusage.ReadOptions{Overrides: overrides, Seen: seen, Within: c.Spans})
+		out.Meter = part.Meter
+		out.Changed = out.Changed || part.Changed
+		out.Entries = append(out.Entries, part.Entries...)
+		for f, e := range part.FileEntries {
+			if out.FileEntries == nil {
+				out.FileEntries = map[string][]planusage.Entry{}
+			}
+			out.FileEntries[f] = append(out.FileEntries[f], e...)
+		}
+		if out.Unmeterable == "" {
+			out.Unmeterable = part.Unmeterable
+		}
+	}
+	return out
+}
+
+func meterFiles(id int, w Where, r RunRef, files []string, opts planusage.ReadOptions) RunMeter {
 	out := RunMeter{Meter: maps.Clone(r.Meter)}
 	if out.Meter == nil {
 		out.Meter = map[string]Meter{}
 	}
 	for _, f := range files {
 		old := out.Meter[f]
-		res, err := planusage.ReadTranscript(f, planusage.FileMark{Offset: old.Offset, Last: old.Last}, planusage.ReadOptions{Overrides: overrides, Seen: seen})
+		res, err := planusage.ReadTranscript(f, planusage.FileMark{Offset: old.Offset, Last: old.Last}, opts)
 		out.Entries = append(out.Entries, res.Entries...)
 		if len(res.Entries) > 0 {
 			if out.FileEntries == nil {
@@ -63,9 +101,6 @@ func MeterRun(id int, w Where, r RunRef, files []string, seen map[string]int64, 
 		case err != nil && out.Unmeterable == "" && res.Mark.Offset == old.Offset:
 			out.Unmeterable = fmt.Sprintf("af cannot read a transcript of the session of %s: %v", w.Item(id), err)
 		}
-	}
-	if len(files) == 0 && now.Sub(r.StartedAt) >= UnmeterableAfter {
-		out.Unmeterable = fmt.Sprintf("af cannot find the transcripts of the session of %s · %s", w.Item(id), w.Fix(id))
 	}
 	return out
 }

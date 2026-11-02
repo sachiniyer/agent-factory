@@ -136,7 +136,7 @@ func (g guidanceCaps) Reference() string {
 	if !g.HostStores {
 		// Each section is its own paragraph, so it goes with the blank line
 		// that separates it from the next one.
-		for _, section := range []string{afBacklogSection, afUsageProposalsInside, afUsageBacklogInside} {
+		for _, section := range []string{afBacklogSection, afUsageProposalsInside, afUsageBacklogInside, afUsageOrchestratorInside} {
 			out = strings.Replace(out, section+"\n\n", "", 1)
 		}
 	}

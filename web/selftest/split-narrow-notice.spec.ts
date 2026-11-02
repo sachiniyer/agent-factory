@@ -117,3 +117,53 @@ test("#6556: a hidden-count change with the same visible tree rewrites the notic
   await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
   await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(1);
 });
+
+test("#6589: the notice counts every pane invisible in the session-first band", async ({ page, request }) => {
+  const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const selected = snap.data.instances.find((s: { title: string }) => s.title === sessionA);
+  expect(selected?.id).toBeTruthy();
+  await page.goto(`/#/session/${encodeURIComponent(selected.id)}`);
+  await page.locator("#app[data-af-resync-settled]").waitFor();
+  await page.setViewportSize({ width: 1400, height: 800 });
+
+  // Three side-by-side panes (same choreography as the #6556 specs: the third
+  // shell stays selected — dragging it would move rather than split).
+  const base = await roster.enter(page);
+  await newShellTab(page);
+  await newShellTab(page);
+  await newShellTab(page);
+  await dragTabToPane(page, base, 0, "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
+  await dragTabToPane(page, base + 1, 1, "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(3);
+  await page.locator(".af-term-host .af-pane").nth(2).click();
+
+  // At ≤768px the session-first CSS hides every non-focused pane — a second
+  // hiding mechanism the notice never counted. Two panes are invisible here
+  // whether or not the fit also dropped one.
+  await page.setViewportSize({ width: 760, height: 800 });
+  await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
+  await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(1);
+  await expect(page.locator(".af-split-narrow")).toContainText("2 panes hidden");
+
+  // The bug's wrong-by-one row: 700px reports one fit-dropped leaf while a
+  // second leaf sits invisible beside it.
+  await page.setViewportSize({ width: 700, height: 800 });
+  await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(1);
+  await expect(page.locator(".af-split-narrow")).toContainText("2 panes hidden");
+
+  // Outside the band the count does not leak: at 1400px the rail leaves the
+  // host under the 968px three-pane floor, so the fit alone hides leaf2 and
+  // the notice counts exactly that one.
+  await page.setViewportSize({ width: 1400, height: 800 });
+  await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
+  await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(2);
+  await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
+
+  // And wide enough that nothing is invisible, the notice goes away. The
+  // nested split gives leaf2 a quarter of the host, so it takes ~1800px for
+  // that quarter to clear the 320px floor.
+  await page.setViewportSize({ width: 1800, height: 800 });
+  await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(3);
+  await expect(page.locator(".af-split-narrow")).toHaveCount(0);
+});
