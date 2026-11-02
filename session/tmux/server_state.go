@@ -148,7 +148,14 @@ func recordServerState(home string, st ServerState) {
 	serverStateMu.Lock()
 	defer serverStateMu.Unlock()
 	st.DaemonPID = os.Getpid()
-	if prev, ok, err := ReadServerState(home); err == nil && ok {
+	prev, ok, err := ReadServerState(home)
+	switch {
+	case err != nil:
+		// The previous record could not be read — the lineage's socket
+		// history is unrecoverable here, so admit incomplete coverage rather
+		// than write a record that claims none ever existed.
+		st.HistoryTruncated = true
+	case ok:
 		priors, truncated := priorSocketGenerations(prev, st.Socket)
 		st.PriorSockets = priors
 		st.HistoryTruncated = st.HistoryTruncated || prev.HistoryTruncated || truncated

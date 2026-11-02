@@ -342,6 +342,12 @@ type scanContext struct {
 	// (#6339). Sharing one memo means a process's corroboration reads the
 	// same per-socket view the union did.
 	socketSessions map[string]socketListing
+	// paneCaptures memoizes the run's per-(session,socket) pane-tree captures:
+	// every marked process on the same session shares one capture — a full
+	// process-table read plus a bounded tmux round-trip — instead of paying it
+	// per process (#6339). The error is held alongside the result for the same
+	// reason socketListing holds its own.
+	paneCaptures map[string]paneCapture
 	// daemons memoizes the run's daemon scan (see daemonProcs); daemonsScanned
 	// distinguishes "scanned, found none" from "not scanned yet".
 	daemons        []daemonProc

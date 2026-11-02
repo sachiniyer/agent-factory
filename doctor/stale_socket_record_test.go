@@ -502,24 +502,27 @@ func TestSameNamedSession_TwoSockets_BothHomesClaimed(t *testing.T) {
 		"the session copy on the current socket claims %s", claimedByCurrent)
 }
 
-// TestProcessTmuxSocketUnlistable_AbsentServerPid_RefusesKill pins the
-// corroboration rule for the per-process TMUX arm: the serverPID half of a
-// process's TMUX env value can only prove the named server dead when the pid
-// is present and no longer tmux's. A pid ABSENT from the snapshot — a live
-// server hidden by /proc read failures or a pid namespace looks identical —
-// is not death evidence, and when the socket the env value names cannot be
-// listed either, nothing is proven: report, never kill.
-func TestProcessTmuxSocketUnlistable_AbsentServerPid_RefusesKill(t *testing.T) {
+// The tmuxEnvDeathProof near-miss table. The kill arm fires only on the closed
+// list — (A) a verified-live stamped server answering its own socket with the
+// session absent, (B) the stamped server pid proven gone or replaced in this
+// pid namespace — so each test pins one boundary shape: the proofs that must
+// still kill, and the almost-proofs that must only ever report.
+
+// TestProcessTmuxProof_ProvenGoneServerPid_Kills: (B). The stamped server pid
+// is absent from the snapshot AND /proc answers definitively that no process
+// instance owns it — a same-namespace lookup, so "gone" is proven rather than
+// inferred — and the session died with its server even though the socket it
+// names cannot be listed. Killing the marked process is the proof's intended
+// outcome.
+func TestProcessTmuxProof_ProvenGoneServerPid_Kills(t *testing.T) {
 	testguard.IsolateTmux(t)
 	home := testguard.SocketTempDir(t)
 
 	wedged := testguard.SocketPath(t, "wedged")
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
-		tmux.EnvMarkerSession: "af_doctor-hidden-server-session",
+		tmux.EnvMarkerSession: "af_doctor-gone-server-session",
 		tmux.EnvMarkerHome:    home,
-		// The serverPID is absent from the snapshot — as a live server
-		// outside doctor's view would be — and its socket cannot be listed.
-		"TMUX": fmt.Sprintf("%s,%d,0", wedged, 1<<30),
+		"TMUX":                fmt.Sprintf("%s,%d,0", wedged, 1<<30),
 	})
 
 	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
@@ -527,7 +530,339 @@ func TestProcessTmuxSocketUnlistable_AbsentServerPid_RefusesKill(t *testing.T) {
 		RunFunc: func(*exec.Cmd) error { return nil },
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			args := c.Args
-			if len(args) > 3 && args[1] == "-S" && args[3] == "ls" && args[2] == wedged {
+			if len(args) > 3 && args[1] == "-S" && args[2] == wedged {
+				return nil, fmt.Errorf("server on %s is wedged", wedged)
+			}
+			return []byte(""), nil
+		},
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	findings := findByCheck(report, "orphaned-process")
+	require.Len(t, findings, 1)
+	require.NotEmpty(t, findings[0].FixAction,
+		"a stamped server pid proven gone in this namespace must arm the kill (B)")
+	require.Eventually(t, func() bool { return !alive(victim) }, 5*time.Second, 25*time.Millisecond,
+		"a process whose own TMUX env names a proven-dead server must still be killed")
+}
+
+// TestProcessTmuxProof_ReplacedServerPid_Kills: (B). The stamped server pid is
+// in the snapshot but verifiably names a live process that is not tmux — the
+// server's pid was recycled, the server is dead, and the session died with it.
+// "Present but non-tmux" is positive proof only inside doctor's own namespace,
+// which is exactly what the namespace check establishes.
+func TestProcessTmuxProof_ReplacedServerPid_Kills(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	// A live non-tmux process occupies the slot the env stamps as the server.
+	decoy := spawnWithEnv(t, "sh", nil, map[string]string{})
+	sock := testguard.SocketPath(t, "recycled")
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-recycled-pid-session",
+		tmux.EnvMarkerHome:    home,
+		"TMUX":                fmt.Sprintf("%s,%d,0", sock, decoy.PID),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, decoy.PID) // Fix: true
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc:    func(*exec.Cmd) error { return nil },
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte(""), nil },
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	findings := findByCheck(report, "orphaned-process")
+	require.Len(t, findings, 1)
+	require.NotEmpty(t, findings[0].FixAction,
+		"a stamped server pid verifiably held by a non-tmux process must arm the kill (B)")
+	require.Eventually(t, func() bool { return !alive(victim) }, 5*time.Second, 25*time.Millisecond,
+		"a process whose stamped server pid was recycled must still be killed")
+}
+
+// TestProcessTmuxProof_CrossNamespace_SocketAbsent_RefusesKill is the
+// near-miss the closed list exists for: the marked process lives in a
+// different pid namespace, so its stamped serverPID names a foreign
+// allocation domain — a number that may collide with, or be absent from,
+// doctor's table without meaning anything. With the pid shapes off the table,
+// the socket's "session absent" answer alone is NOT on the list: a socket path
+// can be rebound by a different server than the stamped one. Report, never
+// kill.
+func TestProcessTmuxProof_CrossNamespace_SocketAbsent_RefusesKill(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	sock := testguard.SocketPath(t, "foreign")
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-cross-ns-session",
+		tmux.EnvMarkerHome:    home,
+		// A pid absent from doctor's table — but the pane is in another
+		// namespace, so the number is not evidence either way.
+		"TMUX": fmt.Sprintf("%s,%d,0", sock, 1<<30),
+	})
+
+	// Stage the pane outside doctor's pid namespace: its stamped numbers
+	// refer to an allocation domain doctor cannot interpret.
+	orig := pidNamespaceIDOf
+	pidNamespaceIDOf = func(pid int) (string, error) {
+		if pid == victim.PID {
+			return "pidns:foreign", nil
+		}
+		return orig(pid)
+	}
+	t.Cleanup(func() { pidNamespaceIDOf = orig })
+
+	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc:    func(*exec.Cmd) error { return nil },
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte(""), nil },
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process on foreign-namespace evidence — a stamped pid "+
+			"doctor cannot interpret plus a socket's absent answer is not on the proof list (#6339)")
+	for _, f := range findByCheck(report, "orphaned-process") {
+		require.Empty(t, f.FixAction,
+			"cross-namespace evidence must never arm a kill: %s", f.Detail)
+		require.False(t, f.Fixed)
+	}
+}
+
+// TestProcessTmuxProof_CrossNamespace_SessionListed_ReportsEscaped: the
+// listing's positive half survives a failed namespace check — a session the
+// socket DOES list is a live session, classified escaped, never killed.
+func TestProcessTmuxProof_CrossNamespace_SessionListed_ReportsEscaped(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	sock := testguard.SocketPath(t, "foreign-live")
+	const liveName = "af_doctor-cross-ns-live"
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: liveName,
+		tmux.EnvMarkerHome:    home,
+		"TMUX":                fmt.Sprintf("%s,%d,0", sock, 1<<30),
+	})
+
+	orig := pidNamespaceIDOf
+	pidNamespaceIDOf = func(pid int) (string, error) {
+		if pid == victim.PID {
+			return "pidns:foreign", nil
+		}
+		return orig(pid)
+	}
+	t.Cleanup(func() { pidNamespaceIDOf = orig })
+
+	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			args := c.Args
+			if len(args) > 3 && args[1] == "-S" && args[2] == sock && args[3] == "ls" {
+				return []byte(liveName + "\n"), nil
+			}
+			return []byte(""), nil
+		},
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"a session the socket lists must report live even across namespaces")
+	require.NotEmpty(t, findByCheck(report, "escaped-process"),
+		"a cross-namespace socket listing the session classifies escaped, not orphaned")
+	for _, f := range findByCheck(report, "orphaned-process") {
+		require.Empty(t, f.FixAction)
+	}
+}
+
+// TestProcessTmuxProof_LiveServer_SessionAbsentOnOwnSocket_Kills: (A), the
+// positive direction — the stamped server is verified live in this namespace
+// and answers its own socket with the session absent: the listing came from
+// the very server the process lived on, so absent is death.
+func TestProcessTmuxProof_LiveServer_SessionAbsentOnOwnSocket_Kills(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	// A real server on an explicit socket, holding an unrelated anchor session.
+	sock := testguard.SocketPath(t, "own")
+	out, err := exec.Command("tmux", "-S", sock, "new-session", "-d", "-s",
+		"af_doctor-anchor", "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sock, "kill-server").Run() })
+	serverPID := tmuxServerPID(t, sock)
+
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-not-on-this-server",
+		tmux.EnvMarkerHome:    home,
+		"TMUX":                fmt.Sprintf("%s,%d,0", sock, serverPID),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, serverPID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	findings := findByCheck(report, "orphaned-process")
+	require.Len(t, findings, 1)
+	require.NotEmpty(t, findings[0].FixAction,
+		"a verified-live stamped server answering its own socket with the session absent must arm (A)")
+	require.Eventually(t, func() bool { return !alive(victim) }, 5*time.Second, 25*time.Millisecond,
+		"a process provably dead on its own server must still be killed")
+}
+
+// TestProcessTmuxProof_LiveServer_SessionListedOnOwnSocket_ReportsEscaped: (A)'s
+// live half — the verified server lists the session, so the process is escaped,
+// not orphaned.
+func TestProcessTmuxProof_LiveServer_SessionListedOnOwnSocket_ReportsEscaped(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	sock := testguard.SocketPath(t, "own-live")
+	const liveName = "af_doctor-listed-on-own-server"
+	out, err := exec.Command("tmux", "-S", sock, "new-session", "-d", "-s", liveName,
+		"-e", tmux.EnvMarkerSession+"="+liveName, "-e", tmux.EnvMarkerHome+"="+home,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sock, "kill-server").Run() })
+	serverPID := tmuxServerPID(t, sock)
+
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: liveName,
+		tmux.EnvMarkerHome:    home,
+		"TMUX":                fmt.Sprintf("%s,%d,0", sock, serverPID),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, serverPID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"a process of a session its own server lists must never be killed")
+	require.NotEmpty(t, findByCheck(report, "escaped-process"),
+		"a session listed on the stamped socket classifies escaped, not orphaned")
+}
+
+// TestProcessTmuxProof_LiveServer_StrangerAnswersSocket_RefusesKill is the
+// stolen-socket near-miss: the stamped server is verified live, but a
+// DIFFERENT server answers the socket path its env names — the path was
+// rebound while the stamped server lives on orphaned from it. The stranger's
+// "session absent" answer says nothing about the stamped server's sessions,
+// so the proof reports, never kills.
+func TestProcessTmuxProof_LiveServer_StrangerAnswersSocket_RefusesKill(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	// The stamped server — alive, verified — on its own socket.
+	sockA := testguard.SocketPath(t, "stamped")
+	out, err := exec.Command("tmux", "-S", sockA, "new-session", "-d", "-s",
+		"af_doctor-stamped-anchor", "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session A: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockA, "kill-server").Run() })
+	serverAPID := tmuxServerPID(t, sockA)
+
+	// A stranger server now answers the socket path the env names.
+	sockB := testguard.SocketPath(t, "rebound")
+	out, err = exec.Command("tmux", "-S", sockB, "new-session", "-d", "-s",
+		"af_doctor-stranger", "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session B: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockB, "kill-server").Run() })
+	serverBPID := tmuxServerPID(t, sockB)
+
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-absent-per-stranger",
+		tmux.EnvMarkerHome:    home,
+		// Names server A's pid against server B's socket — the shape a
+		// rebound socket path produces.
+		"TMUX": fmt.Sprintf("%s,%d,0", sockB, serverAPID),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, serverAPID, serverBPID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process on a stranger server's absent answer — the "+
+			"answering server must be the stamped one before absence proves death (#6339)")
+	for _, f := range findByCheck(report, "orphaned-process") {
+		require.Empty(t, f.FixAction,
+			"a listing answered by the wrong server must not arm a kill: %s", f.Detail)
+		require.False(t, f.Fixed)
+	}
+}
+
+// TestProcessTmuxProof_LiveServer_NoServerOnSocket_RefusesKill pins the
+// orphaned-server near-miss: the stamped server is verified live but nothing
+// answers the socket path its env names — the shape of a server whose socket
+// file was unlinked out from under it while its sessions stay alive. "No
+// server on the socket" is not "the stamped server is dead": report, never
+// kill.
+func TestProcessTmuxProof_LiveServer_NoServerOnSocket_RefusesKill(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	sockA := testguard.SocketPath(t, "stamped")
+	out, err := exec.Command("tmux", "-S", sockA, "new-session", "-d", "-s",
+		"af_doctor-stamped-anchor", "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockA, "kill-server").Run() })
+	serverAPID := tmuxServerPID(t, sockA)
+
+	// A socket path nothing is bound to — the env names a socket whose file
+	// a /tmp cleaner could have removed from under the live stamped server.
+	unbound := testguard.SocketPath(t, "unbound")
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-orphaned-server-session",
+		tmux.EnvMarkerHome:    home,
+		"TMUX":                fmt.Sprintf("%s,%d,0", unbound, serverAPID),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, serverAPID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process whose live stamped server does not answer the "+
+			"socket its env names — an orphaned server is alive, not dead (#6339)")
+	for _, f := range findByCheck(report, "orphaned-process") {
+		require.Empty(t, f.FixAction,
+			"a live stamped server whose socket answers nobody must not arm a kill: %s", f.Detail)
+		require.False(t, f.Fixed)
+	}
+}
+
+// TestProcessTmuxProof_LiveServer_SocketUnlistable_RefusesKill: the verified
+// stamped server's own socket cannot be read at all — no listing, no answerer
+// identity, no proof. Report, never kill.
+func TestProcessTmuxProof_LiveServer_SocketUnlistable_RefusesKill(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	sockA := testguard.SocketPath(t, "stamped")
+	out, err := exec.Command("tmux", "-S", sockA, "new-session", "-d", "-s",
+		"af_doctor-stamped-anchor", "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockA, "kill-server").Run() })
+	serverAPID := tmuxServerPID(t, sockA)
+
+	wedged := testguard.SocketPath(t, "wedged")
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-wedged-socket-session",
+		tmux.EnvMarkerHome:    home,
+		"TMUX":                fmt.Sprintf("%s,%d,0", wedged, serverAPID),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, serverAPID) // Fix: true
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			args := c.Args
+			if len(args) > 3 && args[1] == "-S" && args[2] == wedged {
 				return nil, fmt.Errorf("server on %s is wedged", wedged)
 			}
 			return []byte(""), nil
@@ -538,12 +873,11 @@ func TestProcessTmuxSocketUnlistable_AbsentServerPid_RefusesKill(t *testing.T) {
 	require.NoError(t, err)
 
 	require.True(t, alive(victim),
-		"`af doctor --fix` killed a process whose TMUX env named a server doctor could not "+
-			"reach and whose pid it could not observe — absence from the snapshot is not "+
-			"death evidence (#6339)")
+		"`af doctor --fix` killed a process whose stamped server's socket could not be "+
+			"listed — an unreadable socket is not a dead server (#6339)")
 	for _, f := range findByCheck(report, "orphaned-process") {
 		require.Empty(t, f.FixAction,
-			"an unobservable server pid plus an unlistable socket must not arm a kill: %s", f.Detail)
+			"an unlistable socket must not arm a kill: %s", f.Detail)
 		require.False(t, f.Fixed)
 	}
 }

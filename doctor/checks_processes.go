@@ -604,24 +604,3 @@ func tmuxServerDead(ctx *scanContext, tmuxEnv string) bool {
 	// environment value is dead, regardless of any stale or reused socket path.
 	return true
 }
-
-// tmuxServerReplaced reports whether the server pid a TMUX env value stamps is
-// still present in the run's snapshot but no longer belongs to tmux — the one
-// process-table identity check that proves the NAMED server dead: its pid was
-// recycled to another process. A pid absent from the snapshot is deliberately
-// NOT this verdict — /proc read failures and pid-namespace distance hide live
-// servers, so absence is unproven, not dead (#6339). The orphaned-process
-// kill arm uses this before trusting anything else the env value says; the
-// possible-orphan arm's report-only tmuxServerDead keeps the broader reading.
-func tmuxServerReplaced(ctx *scanContext, tmuxEnv string) bool {
-	parts := strings.Split(tmuxEnv, ",")
-	if len(parts) < 2 {
-		return false
-	}
-	serverPID, err := strconv.Atoi(parts[1])
-	if err != nil || serverPID <= 0 {
-		return false
-	}
-	server, alive := ctx.snap[serverPID]
-	return alive && !strings.HasPrefix(server.Comm, "tmux")
-}

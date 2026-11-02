@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,9 +28,39 @@ import (
 
 // socketListing is one socket's memoized `tmux ls` result — the error is held
 // alongside the names because a failed read is not an empty result.
+// serverPID is the answering server's pid — the identity of WHO answered, read
+// best-effort for the kill arm's answerer check (a socket path can outlive or
+// be rebound by a different server than the one a record or env stamps, so a
+// listing's "absent" answer is evidence only about the server that gave it).
+// Zero means no server answered or the identity could not be read; it is never
+// an error here because the union view does not need it — the proof arm treats
+// an unverifiable answerer as unproven.
 type socketListing struct {
-	names []string
-	err   error
+	names     []string
+	serverPID int
+	err       error
+}
+
+// socketProbe returns the run's memoized view of ONE tmux socket: the session
+// names it lists plus the pid of the server that answered. "" names doctor's
+// ambient server, exactly as it does for tmux.ListSessionNamesOnSocket.
+func (c *scanContext) socketProbe(socket string) socketListing {
+	if c.socketSessions == nil {
+		c.socketSessions = make(map[string]socketListing)
+	}
+	if l, seen := c.socketSessions[socket]; seen {
+		return l
+	}
+	l := socketListing{}
+	l.names, l.err = tmux.ListSessionNamesOnSocket(c.opts.Exec, socket)
+	if l.err == nil {
+		// Best-effort only: a failed identity read must never fail the listing
+		// — absence-of-proof is enough for the union view, and the proof arm
+		// reads 0 as "answerer unverifiable".
+		l.serverPID, _ = tmux.ServerPIDOnSocket(c.opts.Exec, socket)
+	}
+	c.socketSessions[socket] = l
+	return l
 }
 
 // sessionNamesOnSocket lists the session names on ONE tmux socket, memoized so
@@ -39,15 +68,8 @@ type socketListing struct {
 // each socket. "" names doctor's ambient server, exactly as it does for
 // tmux.ListSessionNamesOnSocket.
 func (c *scanContext) sessionNamesOnSocket(socket string) ([]string, error) {
-	if c.socketSessions == nil {
-		c.socketSessions = make(map[string]socketListing)
-	}
-	if l, seen := c.socketSessions[socket]; seen {
-		return l.names, l.err
-	}
-	names, err := tmux.ListSessionNamesOnSocket(c.opts.Exec, socket)
-	c.socketSessions[socket] = socketListing{names: names, err: err}
-	return names, err
+	l := c.socketProbe(socket)
+	return l.names, l.err
 }
 
 // liveTmuxSessionSockets returns the run's tmux session listing as a union
@@ -227,146 +249,6 @@ func (c *scanContext) recordedSocket() (string, recordedSocketKind) {
 	}
 }
 
-// sessionDeathVerdict is what doctor can prove about a marked process's
-// session once that session is absent from the union listing — the standard
-// the orphaned-process kill arm must meet before it arms a kill.
-type sessionDeathVerdict int
-
-const (
-	// deathProven: the session is dead on the server that hosted it AND every
-	// socket generation the daemon has used is accounted for — absence reads
-	// as death, so the kill arm may fire.
-	deathProven sessionDeathVerdict = iota
-	// deathUnproven: doctor cannot corroborate the session's death — the
-	// record could not be proven current, the socket hosting it could not be
-	// listed, or no evidence names the server it lived on. The process is
-	// reported, never killed.
-	deathUnproven
-	// deathLiveElsewhere: the session is absent from the union listing but
-	// live on the socket the process's own TMUX env names — verified by
-	// listing THAT socket and finding it there. socket carries where.
-	deathLiveElsewhere
-)
-
-// recordedServerCurrent reports whether the daemon's server-state record was
-// written by the daemon generation currently serving this home — the
-// precondition for trusting the record's socket set as complete (#6339).
-//
-// The record is stamped with its author's pid (ServerState.DaemonPID). When a
-// daemon IS serving this home, the stamped pid must be one of the live daemon
-// pids: a mismatch — or no stamp at all — means a previous generation left
-// the record behind, and a record a dead generation wrote may name a socket
-// the live daemon no longer uses. When NO daemon is live, a stamped record is
-// still the last word a daemon generation left — its socket set is the best
-// accounting there is, so it stands; an UNSTAMPED record predates generation
-// binding entirely and cannot be proven to account for every socket the
-// daemon ran, so it does not corroborate a kill on its own.
-func (c *scanContext) recordedServerCurrent() bool {
-	st, ok, err := c.recordedServer()
-	if err != nil || !ok {
-		return false
-	}
-	daemons := activeHomeDaemons(c)
-	if len(daemons) == 0 {
-		return st.DaemonPID != 0
-	}
-	for _, d := range daemons {
-		if st.DaemonPID == d.PID {
-			return true
-		}
-	}
-	return false
-}
-
-// sessionDeathProof decides whether the orphaned-process arm may treat a
-// marked process's session as DEAD — absent from the union listing — and arm
-// its kill. The union covers every socket the record names, but absence there
-// is still not proof by itself: the record may not be current (a restart that
-// adopted a server used to leave the previous generation's socket recorded,
-// #6339), and a live session hosted on a socket outside the record's set
-// reads exactly like a dead one here.
-//
-// So the proof asks the process itself first: tmux stamps every pane process
-// with TMUX="socketPath,serverPID,sessionIdx", naming the server its session
-// lived on, and lists THAT socket — a present name means the session is live
-// elsewhere (and routes to the escaped-process arm), an absent one proves
-// death on the very server the session lived on, and a failed listing proves
-// nothing. The serverPID half of the env value can only prove the named
-// server DEAD — a pid still present but no longer tmux's is a positively
-// recycled server — while an absent pid proves nothing: /proc read failures
-// and pid namespaces both hide live servers, so liveness never comes from the
-// snapshot alone. Only when the process carries no usable TMUX env does
-// the proof fall back to the record: it corroborates a kill only when the
-// record is current AND every socket it names — recorded plus prior
-// generations — listed the session absent, which is exactly what absence from
-// the union map means.
-func (c *scanContext) sessionDeathProof(p proctree.Process, name string) (sessionDeathVerdict, string) {
-	tmuxEnv, status := proctree.LookupEnv(p.PID, "TMUX")
-	if status == proctree.EnvFound && tmuxEnv != "" {
-		// Identity guard on the stamped server pid: a pid still present but
-		// no longer a tmux process has been recycled — the named server is
-		// positively dead and its session died with it. A pid ABSENT from the
-		// snapshot proves nothing: /proc read failures and pid-namespace
-		// distance both hide live servers, so that case still needs the
-		// socket's own answer below.
-		if tmuxServerReplaced(c, tmuxEnv) {
-			return deathProven, ""
-		}
-		// The process names the server its session lived on — corroborate
-		// against THAT socket rather than the process table: a snapshot
-		// missing the server pid is not proof of death (/proc read failures
-		// and pid-namespace distance both hide live servers), and a record
-		// can be stale. The socket's own answer is the evidence either way.
-		if procSocket, _, _ := strings.Cut(tmuxEnv, ","); strings.TrimSpace(procSocket) != "" {
-			procSocket = strings.TrimSpace(procSocket)
-			names, err := c.sessionNamesOnSocket(procSocket)
-			if err == nil {
-				if slices.Contains(names, name) {
-					return deathLiveElsewhere, procSocket
-				}
-				// The server answered and the session is absent: proven dead
-				// — the listing only completes against a live server, and a
-				// definitively dead one answers "no server running" as an
-				// authoritative empty (NoServerRunning).
-				return deathProven, ""
-			}
-			// The process names a server doctor cannot list: no fallback can
-			// substitute for a listing of the socket its session lived on —
-			// and a missing pid cannot substitute either.
-			return deathUnproven, ""
-		}
-	}
-	_, kind := c.recordedSocket()
-	if kind != recordedSocketPinned {
-		return deathUnproven, ""
-	}
-	if !c.recordedServerCurrent() {
-		return deathUnproven, ""
-	}
-	// The union listing succeeded — this arm only runs after it did — so it
-	// has already listed every socket the record names. A name still absent
-	// is absent from every socket generation the daemon has used.
-	live, err := c.tmuxSessions()
-	if err != nil {
-		return deathUnproven, ""
-	}
-	if sockets, found := live[name]; found {
-		return deathLiveElsewhere, sockets[0]
-	}
-	// A record whose socket history hit its cap has DROPPED a generation that
-	// may still host the session; absence from the sockets it retains is not
-	// complete coverage, so the union cannot corroborate a kill.
-	if st, ok, rerr := c.recordedServer(); rerr != nil || !ok || st.HistoryTruncated {
-		return deathUnproven, ""
-	}
-	return deathProven, ""
-}
-
-// sameSocket reports whether two tmux socket paths identify the same socket.
-// Compares by filesystem identity (os.SameFile) when both stat, so a symlinked
-// TMUX_TMPDIR — or macOS /var vs /private/var — does not split one socket into
-// two; falls back to a cleaned lexical comparison when either path cannot be
-// statted (a dead server leaves no socket file to stat, and the comparison
 // must still answer for it).
 func sameSocket(a, b string) bool {
 	if a == b {
@@ -389,8 +271,27 @@ func sameSocket(a, b string) bool {
 // to the orphaned-process kill arm for a process that simply belongs to a live
 // session on another socket — so the pane capture must be pinned whenever the
 // listing is.
+// paneCapture is one memoized captureSessionProcessTrees result — the tree is
+// held with its error for the same reason socketListing holds its own.
+type paneCapture struct {
+	procs []proctree.Process
+	err   error
+}
+
+// Memoized per (session, socket) for the run: every marked process on the same
+// session would otherwise re-read the whole process table and re-issue the
+// bounded pane capture — N marks costing N captures and N timeout budgets.
 func captureSessionProcessTrees(ctx *scanContext, name, socket string) ([]proctree.Process, error) {
-	return tmux.CaptureSessionProcessTreesOnSocket(ctx.opts.Exec, name, socket)
+	key := socket + "\x00" + name
+	if c, seen := ctx.paneCaptures[key]; seen {
+		return c.procs, c.err
+	}
+	procs, err := tmux.CaptureSessionProcessTreesOnSocket(ctx.opts.Exec, name, socket)
+	if ctx.paneCaptures == nil {
+		ctx.paneCaptures = make(map[string]paneCapture)
+	}
+	ctx.paneCaptures[key] = paneCapture{procs: procs, err: err}
+	return procs, err
 }
 
 // tmuxSessions returns the run's memoized session listing — live session name
