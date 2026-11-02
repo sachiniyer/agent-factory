@@ -105,10 +105,12 @@ type Item struct {
 	Thread    []Message `json:"thread,omitempty"`
 	// Paused stops the runner from starting the items under a parent; Archived
 	// hides a top-level group and its items from the list, and pauses it.
-	Paused    bool      `json:"paused,omitempty"`
-	Archived  bool      `json:"archived,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Paused   bool `json:"paused,omitempty"`
+	Archived bool `json:"archived,omitempty"`
+	// Orchestrator is set only on a top-level parent.
+	Orchestrator *Orchestrator `json:"orchestrator,omitempty"`
+	CreatedAt    time.Time     `json:"created_at"`
+	UpdatedAt    time.Time     `json:"updated_at"`
 }
 
 type Source struct {
@@ -345,6 +347,7 @@ func (b *Backlog) clone() *Backlog {
 			s := *it.Source
 			it.Source = &s
 		}
+		it.Orchestrator = it.Orchestrator.clone()
 		c.Items[i] = it
 	}
 	return &c
