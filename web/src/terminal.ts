@@ -922,7 +922,20 @@ export class AttachTerminal {
     // term.dispose() never calls the link handler's leave(), so drop a link
     // tooltip the pointer was resting on.
     this.container.removeAttribute("title");
-    this.term.dispose();
+    // xterm's Viewport queues work it never cancels — a setTimeout in its
+    // constructor and an rAF in reset() — and those callbacks reach
+    // syncScrollArea(), which reads a renderer that dispose() already tore
+    // down (xtermjs/xterm.js#5011). Draining a task and then a frame before
+    // disposing lets every callback queued ahead of ours fire while the
+    // renderer still exists, so no ordering can hand it a dead one (#6588).
+    // The fallback timer covers a parked page whose rAF is starved; a second
+    // dispose() is a no-op.
+    const term = this.term;
+    term.element?.remove();
+    window.setTimeout(() => {
+      window.requestAnimationFrame(() => term.dispose());
+      window.setTimeout(() => term.dispose(), 200);
+    }, 0);
   }
 
   private applicationOwnsMouse(): boolean {
