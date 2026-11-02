@@ -37,7 +37,7 @@ and is unit-tested in `scripts/release_scripts_test.go`.
 The [`auto-release.yml`](https://github.com/sachiniyer/agent-factory/blob/master/.github/workflows/auto-release.yml) workflow runs
 every 3 hours (and on manual dispatch). When `master` has new commits since
 the last release, it runs the release preflight (gofmt, vet, race tests,
-build), computes `v1.x.y-preview-z`, builds the four platform tarballs from
+build), computes `v1.x.y-preview-z`, builds the platform tarballs from
 the validated commit with the version stamped via
 `-ldflags "-X main.version=..."`, and publishes a GitHub **prerelease** —
 which creates the tag. The tag exists on origin only with its published
@@ -58,7 +58,7 @@ e.g. `1.1.0`. The maintainer chooses which digit to bump; the workflow
 validates the version (well-formed, untagged, strictly greater than the
 latest stable — see
 [`.github/scripts/validate-stable-version.sh`](https://github.com/sachiniyer/agent-factory/blob/master/.github/scripts/validate-stable-version.sh)),
-runs the same preflight, and builds all four artifacts **before mutating
+runs the same preflight, and builds all artifacts **before mutating
 anything**; only then does it commit and push the version bump to `main.go`
 and publish the release marked **latest** — creating the tag at the bump
 commit in the same call. A failed preflight or build therefore never leaves a
