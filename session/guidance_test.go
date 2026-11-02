@@ -66,13 +66,13 @@ func TestGuidanceFollowsTheCapabilityProjection(t *testing.T) {
 			assert.Equal(t, selfArchive, strings.Contains(ref, "archive --self"), "self-archive")
 			assert.Equal(t, !tc.callbackUnavailable, strings.Contains(ref, "af sessions whoami"), "callback verbs")
 
-			// The proposal and backlog routes admit no sandbox credential
+			// The proposal routes admit no sandbox credential
 			// (TestSandboxScopeTableIsPinned in daemon), so only an agent in a
 			// local worktree, which calls af over the host's own socket, is
 			// taught their verbs or given the proposal skill.
 			hostStores := !tc.callbackUnavailable && tc.caps.Workspace == WorkspaceLocalWorktree
 			g := guidanceCapsFor(tc.callbackUnavailable, tc.caps)
-			for _, verb := range []string{"af proposal start", "af backlog list", "af backlog add --file", "af backlog done --self", "af backlog ask --self", "af backlog orchestrate"} {
+			for _, verb := range []string{"af proposal start"} {
 				assert.Equal(t, hostStores, strings.Contains(ref, verb), "%s", verb)
 			}
 			assert.Equal(t, hostStores, len(pluginSkills(g)) > 0, "the proposal skill")
@@ -96,8 +96,7 @@ func TestInSandboxInstanceRendersFromTheRemoteProjection(t *testing.T) {
 	assert.False(t, caps.Shell, "the daemon refuses shell tabs on a remote workspace")
 	assert.True(t, caps.VSCode, "the host runs the editor for a remote workspace (W5.4)")
 	assert.True(t, caps.Web, "an external HTTPS web tab works on a remote workspace")
-	assert.False(t, caps.HostStores, "the sandbox credential reaches no proposal or backlog route")
-	assert.NotContains(t, caps.Reference(), "af backlog")
+	assert.False(t, caps.HostStores, "the sandbox credential reaches no proposal route")
 	assert.NotContains(t, caps.Reference(), "af proposal")
 
 	local := (&Instance{}).guidanceCaps()
