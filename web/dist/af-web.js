@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "742009d71519";
+var CLIENT_VERSION = "c51f19db69cd";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -24379,20 +24379,21 @@ function parseProposalChange(ev) {
 // src/backlog_data.ts
 var EMPTY_BACKLOG_DATA = { views: /* @__PURE__ */ new Map(), errors: /* @__PURE__ */ new Map(), budget: null, usage: null, generation: 0 };
 var DEBOUNCE_MS = 150;
-function runSessionIds(data) {
+function backlogSessionIds(data) {
   const ids = /* @__PURE__ */ new Set();
   for (const view of data.views.values()) {
     for (const it of view.backlog.items) {
       for (const run of it.runs ?? []) if (run.session_id) ids.add(run.session_id);
+      if (it.orchestrator?.session_id) ids.add(it.orchestrator.session_id);
     }
   }
   return ids;
 }
 var SESSION_EVENTS = /* @__PURE__ */ new Set(["session.updated", "session.killed", "session.archived", "session.restored"]);
-function backlogEventAction(type, sessionId, runSessions) {
+function backlogEventAction(type, sessionId, backlogSessions) {
   if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
   if (type === "backlog.spend") return "spend";
-  if (SESSION_EVENTS.has(type) && sessionId && runSessions?.has(sessionId)) return "refresh";
+  if (SESSION_EVENTS.has(type) && sessionId && backlogSessions?.has(sessionId)) return "refresh";
   return null;
 }
 var BacklogLoader = class {
@@ -26600,7 +26601,7 @@ function onEvent(ev) {
     if (status) publishProposalPush(status);
     return;
   }
-  const backlogAction = backlogEventAction(ev.type, ev.data?.id, runSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
+  const backlogAction = backlogEventAction(ev.type, ev.data?.id, backlogSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
   if (backlogAction === "spend") {
     backlogLoader.applySpend(ev.data);
     return;
