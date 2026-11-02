@@ -6,6 +6,9 @@ import { expect, test, type Page } from "@playwright/test";
 // new leaf but never says so, and the hidden COUNT can change while the
 // visible tree stays identical (a hidden leaf closes) leaving stale text.
 // The notice must track fit.hidden on every pass.
+//
+// probe-a's tab roster is shared with the whole suite — earlier specs leave
+// tabs behind — so every count here is taken relative to what the test finds.
 
 const sessionA = process.env.AF_WEB_SESSION_A ?? "probe-a";
 
@@ -38,9 +41,12 @@ async function dragTabToPane(page: Page, tabIndex: number, paneIndex: number, ed
   );
 }
 
-async function newShellTab(page: Page, want: number): Promise<void> {
+/** Clicks "new shell" and waits for the roster to grow by exactly one. */
+async function newShellTab(page: Page): Promise<void> {
+  const tabs = page.locator(".af-tabbar .af-tab");
+  const have = await tabs.count();
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(want);
+  await expect(tabs).toHaveCount(have + 1);
 }
 
 test("#6556: a split into an already-narrow host still names its hidden pane", async ({ page, request }) => {
@@ -55,8 +61,9 @@ test("#6556: a split into an already-narrow host still names its hidden pane", a
 
   // The split happens — the new leaf is hidden immediately — and the layout
   // must SAY one pane is hidden rather than silently rendering the old tree.
-  await newShellTab(page, 2);
-  await dragTabToPane(page, 1, 0, "right");
+  const base = await page.locator(".af-tabbar .af-tab").count();
+  await newShellTab(page);
+  await dragTabToPane(page, base, 0, "right");
   await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
   await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(1);
 });
@@ -70,24 +77,28 @@ test("#6556: a hidden-count change with the same visible tree rewrites the notic
   await page.setViewportSize({ width: 1400, height: 800 });
 
   // Three side-by-side panes, all fitting.
-  for (let want = 2; want <= 3; want++) {
-    await newShellTab(page, want);
-  }
-  await dragTabToPane(page, 1, 0, "right");
-  await dragTabToPane(page, 2, 1, "right");
-  await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(3);
+  const base = await page.locator(".af-tabbar .af-tab").count();
+  await newShellTab(page);
+  await newShellTab(page);
+  await dragTabToPane(page, base, 0, "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
+  await dragTabToPane(page, base + 1, 1, "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(3);
 
-  // Shrink until only one pane fits: two leaves hide, the notice says so.
+  // Pin focus on the LAST pane so the hidden set is deterministic: after the
+  // shrink the hidden leaves are exactly the two I did not focus — the
+  // original pane and the leaf bound to my first new shell (tab `base`).
+  await page.locator(".af-term-host .af-pane").nth(2).click();
   await page.setViewportSize({ width: 700, height: 800 });
   await expect(page.locator(".af-split-narrow")).toContainText("2 panes hidden");
   await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(1);
 
-  // Close one of the HIDDEN panes' tabs: focus sat on the newest leaf, so the
-  // hidden ones are Agent (index 0) and the first shell (index 1). Closing a
-  // hidden leaf's tab leaves the visible tree ({one leaf}) untouched, but the
-  // count must drop — a notice still reading "2 panes hidden" is the bug.
-  const hiddenTab = page.locator(".af-tabbar .af-tab").nth(1);
-  await hiddenTab.locator(".af-tab-close").click();
+  // Close one of the HIDDEN panes' tabs — the shell I added at index `base`,
+  // whose leaf is among the hidden pair. Closing it leaves the visible tree
+  // ({one leaf}) untouched, but the count must drop — a notice still reading
+  // "2 panes hidden" is the bug.
+  await page.locator(".af-tabbar .af-tab").nth(base).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
   await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
   await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(1);
 });
