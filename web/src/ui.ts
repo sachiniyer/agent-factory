@@ -77,7 +77,7 @@ import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js"
 import { docsShortcuts } from "./docs_shortcut.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
-import { activeRevealKey, scrollDeltaToReveal, shouldRevealActive } from "./tabscroll.js";
+import { activeRevealKey, scrollDeltaToReveal, shouldRevealActive, tabOverflowFlags } from "./tabscroll.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
 import { KeyedRows, orderChildren } from "./keyed-rows.js";
 import { sessionKey } from "./sessions.js";
@@ -1146,6 +1146,10 @@ export class AppShell {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   private tabBar: HTMLElement | null = null;
+  // Watches the strip's box so the overflow cue (#6408) resyncs on a resize that
+  // changes clientWidth without touching scrollLeft — a viewport change, a pane
+  // split, or the phone composition reparenting the bar into the controls panel.
+  private tabOverflowRO: ResizeObserver | null = null;
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -2607,6 +2611,11 @@ export class AppShell {
       this.deliverBtn = null;
       this.deliverVisible = false;
       this.tabBar = null;
+      // The old bar is gone too: stop watching its box for the overflow cue
+      // (#6408) — a detached element's observer is dead weight and its callback
+      // would resync a bar that no longer exists.
+      this.tabOverflowRO?.disconnect();
+      this.tabOverflowRO = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.afTheme;
@@ -2678,6 +2687,12 @@ export class AppShell {
     // Both drags above are HTML5 drag-and-drop, which a finger cannot start. Same
     // delegation again, giving a finger the same two capabilities (#2899).
     this.attachTabTouchDrag(tabBar);
+    // The strip already scrolls when it overflows; what it owed the user was the
+    // SIGNAL (#6408). Same stable-container binding again: the cue classes follow
+    // scroll position AND box width, so they resync on scroll, on render, and on
+    // any resize — a viewport change, a pane split, or the phone composition
+    // moving the bar between parents.
+    this.attachTabOverflow(tabBar);
 
     const head = chrome.head;
     head.insertBefore(this.connNotice, chrome.attention.el);
@@ -2816,6 +2831,10 @@ export class AppShell {
     // Record the signature this render represents, so update() skips a rebuild until
     // the bar's inputs actually change again.
     this.lastTabBarSig = tabBarSig(state);
+    // The rebuild changed which tabs exist (and possibly the scroll position the
+    // reveal set), so the edge cues are restated now — scroll/resize keep them
+    // honest between renders.
+    this.syncTabOverflow();
   }
 
   /** Wires the tab bar as a DRAG SOURCE via event DELEGATION on the (stable) bar
@@ -3069,6 +3088,39 @@ export class AppShell {
     // would cancel exactly the drag-to-split this exists to enable. Capture also
     // guarantees the pointerup lands here, so there is no state to leak.
     bar.addEventListener("pointercancel", release, { passive: true });
+  }
+
+  /** Binds the overflow cue (#6408) once per bar element: a scroll handler for
+   *  position changes and a ResizeObserver for box changes that move no
+   *  scrollbar — a viewport resize, a pane split, or the phone composition
+   *  reparenting the bar. Called from renderMain with the other one-time wiring;
+   *  renderMain rebuilds the chrome per selection, so the previous observer is
+   *  released before the new bar is watched. */
+  private attachTabOverflow(bar: HTMLElement): void {
+    bar.addEventListener("scroll", () => this.syncTabOverflow(), { passive: true });
+    this.tabOverflowRO?.disconnect();
+    this.tabOverflowRO = null;
+    if (typeof ResizeObserver === "function") {
+      this.tabOverflowRO = new ResizeObserver(() => this.syncTabOverflow());
+      this.tabOverflowRO.observe(bar);
+    }
+  }
+
+  /** Re-derives which strip edges still hide tabs and restates the cue classes.
+   *  Writes are guarded so an unchanged answer emits no DOM write — the same
+   *  steady-state-mutation rule the rail rove obeys (the perf gate counts them). */
+  private syncTabOverflow(): void {
+    const bar = this.tabBar;
+    if (!bar) {
+      return;
+    }
+    const { left, right } = tabOverflowFlags(bar.scrollLeft, bar.clientWidth, bar.scrollWidth);
+    if (bar.classList.contains("af-tabbar-more-left") !== left) {
+      bar.classList.toggle("af-tabbar-more-left", left);
+    }
+    if (bar.classList.contains("af-tabbar-more-right") !== right) {
+      bar.classList.toggle("af-tabbar-more-right", right);
+    }
   }
 
   /** Owns inline rename on the stable bar rather than on an individual button.

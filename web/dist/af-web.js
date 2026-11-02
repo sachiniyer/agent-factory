@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "04ad6812b6de";
+var CLIENT_VERSION = "1397aa9e6be2";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18243,6 +18243,13 @@ function scrollDeltaToReveal(barLeft, barRight, tabLeft, tabRight) {
   if (tabRight > barRight + slack) return tabRight - barRight;
   return 0;
 }
+function tabOverflowFlags(scrollLeft, clientWidth, scrollWidth) {
+  const slack = 1;
+  return {
+    left: scrollLeft > slack,
+    right: scrollLeft + clientWidth < scrollWidth - slack
+  };
+}
 function shouldRevealActive(previousKey, sessionId, activeIndex) {
   return previousKey !== `${sessionId}:${activeIndex}`;
 }
@@ -21802,6 +21809,10 @@ var AppShell = class {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   tabBar = null;
+  // Watches the strip's box so the overflow cue (#6408) resyncs on a resize that
+  // changes clientWidth without touching scrollLeft — a viewport change, a pane
+  // split, or the phone composition reparenting the bar into the controls panel.
+  tabOverflowRO = null;
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -22761,6 +22772,8 @@ var AppShell = class {
       this.deliverBtn = null;
       this.deliverVisible = false;
       this.tabBar = null;
+      this.tabOverflowRO?.disconnect();
+      this.tabOverflowRO = null;
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.afTheme;
       delete this.main.dataset.termStatus;
@@ -22826,6 +22839,7 @@ var AppShell = class {
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
+    this.attachTabOverflow(tabBar);
     const head = chrome.head;
     head.insertBefore(this.connNotice, chrome.attention.el);
     const warningText = sessionWarningText(selected);
@@ -22937,6 +22951,7 @@ var AppShell = class {
     document.body.classList.remove("af-dragging-tab");
     this.dragFromIndex = null;
     this.lastTabBarSig = tabBarSig(state);
+    this.syncTabOverflow();
   }
   /** Wires the tab bar as a DRAG SOURCE via event DELEGATION on the (stable) bar
    *  container. Binding once here — rather than per button in tabButton — means every
@@ -23115,6 +23130,37 @@ var AppShell = class {
       { passive: false }
     );
     bar.addEventListener("pointercancel", release, { passive: true });
+  }
+  /** Binds the overflow cue (#6408) once per bar element: a scroll handler for
+   *  position changes and a ResizeObserver for box changes that move no
+   *  scrollbar — a viewport resize, a pane split, or the phone composition
+   *  reparenting the bar. Called from renderMain with the other one-time wiring;
+   *  renderMain rebuilds the chrome per selection, so the previous observer is
+   *  released before the new bar is watched. */
+  attachTabOverflow(bar) {
+    bar.addEventListener("scroll", () => this.syncTabOverflow(), { passive: true });
+    this.tabOverflowRO?.disconnect();
+    this.tabOverflowRO = null;
+    if (typeof ResizeObserver === "function") {
+      this.tabOverflowRO = new ResizeObserver(() => this.syncTabOverflow());
+      this.tabOverflowRO.observe(bar);
+    }
+  }
+  /** Re-derives which strip edges still hide tabs and restates the cue classes.
+   *  Writes are guarded so an unchanged answer emits no DOM write — the same
+   *  steady-state-mutation rule the rail rove obeys (the perf gate counts them). */
+  syncTabOverflow() {
+    const bar = this.tabBar;
+    if (!bar) {
+      return;
+    }
+    const { left, right } = tabOverflowFlags(bar.scrollLeft, bar.clientWidth, bar.scrollWidth);
+    if (bar.classList.contains("af-tabbar-more-left") !== left) {
+      bar.classList.toggle("af-tabbar-more-left", left);
+    }
+    if (bar.classList.contains("af-tabbar-more-right") !== right) {
+      bar.classList.toggle("af-tabbar-more-right", right);
+    }
   }
   /** Owns inline rename on the stable bar rather than on an individual button.
    *  Activating an inactive tab rebuilds the buttons synchronously on the first
