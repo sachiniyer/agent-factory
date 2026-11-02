@@ -166,8 +166,11 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
   // the pane's ?tab_id= attach lands on). It writes the foreign grid and then
   // serves as the ordering probe: every resize the broker applies is broadcast
   // back to it, in broker order — the same probe trick the #6215 spec uses.
-  const staleRows = 24;
-  const staleCols = 80;
+  // The grid must differ from xterm's 24x80 default AND from the pane's own
+  // fit: a replay that matches the emulator's size is a no-op and primes
+  // nothing — that is why the real failure's 34 rows is the signature here.
+  const staleRows = 34;
+  const staleCols = 100;
   await page.evaluate(
     async ({ sessionId, staleRows, staleCols }) => {
       const w = window as unknown as {
@@ -241,33 +244,22 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
   // The claim must be on the wire before the peer answers — a repeat that
   // lands while the pane's armed fit is still pending would be followed by
   // that fit's own write either way and would prove nothing. The probe sees
-  // every broadcast in order, so a >60-row echo here is the pane's claim.
-  const after = await page.evaluate(async () => {
+  // every broadcast in order: it waits for the pane's >60-row claim echo and
+  // then, in the SAME round trip, writes the foreign grid once more — exactly
+  // the peer's first post-claim answer, and always inside the primed window.
+  // A >60-row echo after the repeat can only be the pane's reclaim write: on
+  // master the yield window reads this repeat of the replayed grid as an
+  // insistent writer and stands down — the activation loses to the grid it
+  // was meant to take, and no such echo ever comes.
+  await page.evaluate(async ({ staleRows, staleCols }) => {
     const w = window as unknown as {
-      __echoes: number[];
+      __probe: WebSocket;
       __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
     };
-    await w.__waitRows((r) => r > 60, 0, ">60-row");
-    return w.__echoes.length;
-  });
-  await page.evaluate(
-    ({ staleRows, staleCols }) => {
-      const w = window as unknown as { __probe: WebSocket };
-      w.__probe.send(new Uint8Array([0x02, staleRows >> 8, staleRows & 0xff, 0, staleCols]));
-    },
-    { staleRows, staleCols },
-  );
-
-  // The peer's FIRST answer to the claim. A >60-row echo after it can only be
-  // the pane's reclaim write: on master the yield window reads this repeat of
-  // the replayed grid as an insistent writer and stands down — the activation
-  // loses to the grid it was meant to take, and no such echo ever comes.
-  await page.evaluate(async ({ after }) => {
-    const w = window as unknown as {
-      __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
-    };
-    await w.__waitRows((r) => r > 60, after, ">60-row reclaim");
-  }, { after });
+    const at = await w.__waitRows((r) => r > 60, 0, ">60-row");
+    w.__probe.send(new Uint8Array([0x02, staleRows >> 8, staleRows & 0xff, 0, staleCols]));
+    await w.__waitRows((r) => r > 60, at + 1, ">60-row reclaim");
+  }, { staleRows, staleCols });
 
   // And the emulator agrees: the re-asserted fit took the grid back.
   await expect.poll(rows, { timeout: 8000 }).toBe(grown);
