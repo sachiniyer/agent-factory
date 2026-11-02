@@ -458,10 +458,9 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if err := validateCreateProgram(req.Program); err != nil {
 		return err
 	}
-	// A remote client sends the project path as typed; expand ~ against this
-	// daemon's home before anything resolves it.
-	// A still-relative path would resolve against the DAEMON's working directory
-	// and could silently pick a different checkout, so it is refused (#5743).
+	// A remote client sends the project path as typed; expand ~ against this daemon's
+	// home before anything resolves it. A still-relative path would resolve against
+	// the DAEMON's working directory and could silently pick a different checkout (#5743).
 	if strings.TrimSpace(req.RepoPath) != "" {
 		resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
 		if err != nil {
@@ -469,6 +468,7 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 		}
 		req.RepoPath = resolved
 	}
+	req.Account = strings.TrimSpace(req.Account) // mirror trimProgramEnumIfBare (#5123)
 	if req.ValidateFirst {
 		if err := validateCreateFirst(req); err != nil {
 			return err

@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"strings"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -26,12 +28,16 @@ func validateCreateFirst(req CreateSessionRequest) error {
 	if program == "" {
 		program = cfg.DefaultProgram
 	}
-	if req.Account != "" {
+	// Trim the account so a whitespace-only value is treated as "no account"
+	// here too, rather than reaching agentaccount.Selected — which trims
+	// internally and silently returns a zero Account for whitespace, skipping
+	// the validation a non-empty value must pass.
+	if account := strings.TrimSpace(req.Account); account != "" {
 		home, err := config.GetConfigDir()
 		if err != nil {
 			return err
 		}
-		if _, err := agentaccount.Selected(home, sessionenv.AgentForCommand(program), req.Account); err != nil {
+		if _, err := agentaccount.Selected(home, sessionenv.AgentForCommand(program), account); err != nil {
 			return err
 		}
 	}
