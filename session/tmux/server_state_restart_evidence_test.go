@@ -43,25 +43,50 @@ func writeRepoInstancesFile(t *testing.T, home, repoID, payload string) {
 	}
 }
 
-// writePendingCreateMarker plants one pending-create journal entry — the
-// durable record of a session create that may have stranded live without ever
-// committing an instance row (#6301).
-func writePendingCreateMarker(t *testing.T, home string) {
+// backdate ages a planted evidence file's mtime into a previous generation —
+// the file-level analogue of "written before this process started", which is
+// what separates an earlier generation's residue from this generation's own
+// work in flight.
+func backdate(t *testing.T, path string) {
+	t.Helper()
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatalf("backdate %s: %v", path, err)
+	}
+}
+
+// plantPendingCreateMarker writes one pending-create journal entry and
+// returns its path (#6301). Callers backdate it into residue when the test
+// stages an earlier generation; left alone it reads as this generation's own
+// in-flight create.
+func plantPendingCreateMarker(t *testing.T, home string) string {
 	t.Helper()
 	dir := filepath.Join(home, "pending-creates")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("create pending-creates dir: %v", err)
 	}
+	path := filepath.Join(dir, "9ce7d04f-6f0d-4e1a-9b0a-1c1e2d3f4a5b.json")
 	marker := `{"instance_id":"9ce7d04f-6f0d-4e1a-9b0a-1c1e2d3f4a5b","session_name":"af_x_stranded","program":"claude"}`
-	if err := os.WriteFile(filepath.Join(dir, "9ce7d04f-6f0d-4e1a-9b0a-1c1e2d3f4a5b.json"), []byte(marker), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(marker), 0o600); err != nil {
 		t.Fatalf("write pending-create marker: %v", err)
 	}
+	return path
 }
 
-// writeServerDeathMarker plants the tmux-server-death.json an af-owned
-// dedicated server's wrapper leaves when tmux exits (#5429).
-func writeServerDeathMarker(t *testing.T, home, socket string) {
+// writePendingCreateMarker plants a pending-create marker aged into a
+// previous generation — the durable residue of a session create that may
+// have stranded live without ever committing an instance row.
+func writePendingCreateMarker(t *testing.T, home string) {
 	t.Helper()
+	backdate(t, plantPendingCreateMarker(t, home))
+}
+
+// plantServerDeathMarker writes a tmux-server-death.json — the marker an
+// af-owned dedicated server's wrapper leaves when tmux exits (#5429) — and
+// returns its path.
+func plantServerDeathMarker(t *testing.T, home, socket string) string {
+	t.Helper()
+	path := filepath.Join(home, serverDeathFileName)
 	death := ServerDeath{
 		At:            time.Now().Add(-time.Hour),
 		Unit:          "agent-factory-tmux-server-prev",
@@ -69,9 +94,17 @@ func writeServerDeathMarker(t *testing.T, home, socket string) {
 		ExitCode:      1,
 		UptimeSeconds: 60,
 	}
-	if err := writeJSONFile(filepath.Join(home, serverDeathFileName), death); err != nil {
+	if err := writeJSONFile(path, death); err != nil {
 		t.Fatalf("write server-death marker: %v", err)
 	}
+	return path
+}
+
+// writeServerDeathMarker plants the death marker aged into a previous
+// generation.
+func writeServerDeathMarker(t *testing.T, home, socket string) {
+	t.Helper()
+	backdate(t, plantServerDeathMarker(t, home, socket))
 }
 
 // readBackTruncation reads the record and fails unless it was written with
@@ -162,9 +195,11 @@ func TestRecordServerState_RestartDeletedRecord_EvidenceSources(t *testing.T) {
 			writeRepoInstancesFile(t, home, "a1b2c3d4", "{not json")
 		}},
 		{"corrupt server-death marker", func(t *testing.T, home, _ string) {
-			if err := os.WriteFile(filepath.Join(home, serverDeathFileName), []byte("{not json"), 0o600); err != nil {
+			p := filepath.Join(home, serverDeathFileName)
+			if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			backdate(t, p)
 		}},
 	}
 	for _, tc := range cases {
@@ -223,6 +258,18 @@ func TestRecordServerState_RestartDeletedRecord_NoEvidence_WritesCompleteHistory
 			if err := os.MkdirAll(filepath.Join(home, "pending-creates"), 0o700); err != nil {
 				t.Fatal(err)
 			}
+		}},
+		// This generation's own in-flight create writes its marker before
+		// the first record (fallback mode journals before the server is
+		// ensured) — counting it would mark a fresh home truncated forever.
+		{"this generation's pending-create in flight", func(t *testing.T, home string) {
+			plantPendingCreateMarker(t, home)
+		}},
+		// A death marker this generation wrote — e.g. a dedicated-server
+		// bootstrap that crashed before its first record — held no sessions
+		// yet, so it is not evidence of a lost lineage.
+		{"this generation's server-death marker", func(t *testing.T, home string) {
+			plantServerDeathMarker(t, home, filepath.Join(t.TempDir(), "dead-bootstrap"))
 		}},
 	}
 	for _, tc := range cases {

@@ -243,6 +243,14 @@ func priorSocketGenerations(prev ServerState, current string) ([]string, bool) {
 	return out, truncated
 }
 
+// processStartedAt bounds "an earlier generation" for timestamped evidence:
+// a marker file whose mtime predates this process's start could only have
+// been written by a generation before this one, while a file written since
+// is this generation's own work in flight. Package init runs within
+// milliseconds of process start — far inside the window a generation
+// boundary matters at.
+var processStartedAt = time.Now()
+
 // priorDaemonGenerationEvidence reports whether the AF home persists proof
 // that an earlier daemon generation ran here — the residue a deleted
 // server-state record can no longer speak for (#6610). It is consulted only
@@ -266,14 +274,38 @@ func priorDaemonGenerationEvidence(home string) bool {
 	}
 	// pending-creates journals an in-flight session create (#6301): a marker
 	// left behind means a session may have stranded live without ever
-	// committing an instance row.
-	if markers, err := filepath.Glob(filepath.Join(home, "pending-creates", "*.json")); err != nil || len(markers) > 0 {
-		return true
+	// committing an instance row. Only a marker predating this process
+	// counts: this generation's own first create writes its marker before
+	// its first record — counting that would mark a genuinely fresh home
+	// truncated forever. ReadDir rather than Glob: the home path itself can
+	// contain glob metacharacters, and a listing failure must answer
+	// evidence, not silence.
+	markers, err := os.ReadDir(filepath.Join(home, "pending-creates"))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+	} else {
+		for _, e := range markers {
+			if e.IsDir() {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil || !info.ModTime().After(processStartedAt) {
+				return true
+			}
+		}
 	}
 	// The server-death marker is written only by an af-owned dedicated
-	// server's wrapper at exit (#5429) — its presence proves a server
-	// generation ran here even when nothing else does.
-	if _, err := os.Stat(filepath.Join(home, serverDeathFileName)); err == nil || !errors.Is(err, os.ErrNotExist) {
+	// server's wrapper at exit (#5429). One predating this process proves a
+	// server generation already ran; one written since is this generation's
+	// own bootstrap crash — that server held no sessions yet, so it is not
+	// evidence of a lost lineage.
+	if info, err := os.Stat(filepath.Join(home, serverDeathFileName)); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+	} else if !info.ModTime().After(processStartedAt) {
 		return true
 	}
 	return false
@@ -285,6 +317,13 @@ func priorDaemonGenerationEvidence(home string) bool {
 // cannot be read, and a file that exists but cannot be decoded, count as
 // evidence: af owns the path, so a shape this read cannot disprove is never
 // proof that no generation ran.
+//
+// Unlike the markers above, rows count unconditionally — not gated on
+// predating this process. A committed row can only exist after a
+// recordServerState write succeeded inside the create flow, so on a home
+// whose record never persisted this process could not have produced one;
+// the only same-generation shape that reaches here is "this generation's
+// own earlier record writes failed", which is itself a lost lineage.
 func priorGenerationInstanceRows(home string) bool {
 	instancesDir := filepath.Join(home, "instances")
 	entries, err := os.ReadDir(instancesDir)
