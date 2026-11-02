@@ -96,15 +96,23 @@ func (m *Manager) armUnverifiedSendWatch(key string, instance *session.Instance,
 	agent := instance.ResolvedAgent()
 	m.pausedMu.Lock()
 	defer m.pausedMu.Unlock()
+	// The task's run status carries its LATEST send's verdict, so a re-send
+	// supersedes every earlier pending watch for the task — on this session
+	// and on any other the task was retargeted away from. A superseded
+	// watch's banked evidence could only ever promote a verdict that is no
+	// longer its send's, and the verdict-write slack cannot tell two sends
+	// seconds apart (#6592 review).
+	for otherKey, otherByTask := range m.unverifiedSendWatches {
+		delete(otherByTask, taskID)
+		if len(otherByTask) == 0 {
+			delete(m.unverifiedSendWatches, otherKey)
+		}
+	}
 	byTask := m.unverifiedSendWatches[key]
 	if byTask == nil {
 		byTask = map[string]*unverifiedSendWatch{}
 		m.unverifiedSendWatches[key] = byTask
 	}
-	// The task's run status carries its LATEST send's verdict, so a re-send
-	// re-bounds the watch rather than stacking: only the newest unverified
-	// send's evidence may promote, and the replaced send's verdict is already
-	// off the record.
 	byTask[taskID] = &unverifiedSendWatch{
 		attemptedAt: attemptedAt,
 		expiresAt:   attemptedAt.Add(sendReverifyWindow),
@@ -166,7 +174,14 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 	}
 	m.pausedMu.Unlock()
 	for _, taskID := range retries {
-		if !m.promoteUnverifiedTaskSend(taskID, instance.Title, retryAt[taskID]) {
+		// A newer send for the task may have superseded this watch between
+		// the feed and now — promote only while this send's banked evidence
+		// is still the latest on the record (#6592 review).
+		m.pausedMu.Lock()
+		entry := m.unverifiedSendWatches[key][taskID]
+		still := entry != nil && entry.fired && entry.attemptedAt.Equal(retryAt[taskID])
+		m.pausedMu.Unlock()
+		if !still || !m.promoteUnverifiedTaskSend(taskID, instance.Title, retryAt[taskID]) {
 			continue
 		}
 		m.pausedMu.Lock()
