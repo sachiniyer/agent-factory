@@ -67,10 +67,11 @@ type ReadOptions struct {
 	// Within, when set, reads past the messages outside every one of its spans
 	// without counting them.
 	Within []Span
-	// Dups, when set, makes ReadTranscript report each priced message it reads
-	// past because Seen already holds its key, within Within, in
-	// ReadResult.Dups. The account scan uses them to move a message to backlog
-	// spend when its first copy scanned was not under a backlog path (#6618).
+	// Dups, when set, makes ReadTranscript report each message it reads past
+	// because Seen already holds its key, within Within, in ReadResult.Dups,
+	// with its key and time and no cost. The account scan uses them to move a
+	// message to backlog spend when its first copy scanned was not under a
+	// backlog path (#6618).
 	Dups bool
 }
 
@@ -109,7 +110,7 @@ type ReadResult struct {
 	// Bad is set when reading stopped at a line that could not be parsed.
 	Bad bool
 	// Dups lists the copies of already counted messages read past, when
-	// ReadOptions.Dups is set. They are not in Entries and not counted.
+	// ReadOptions.Dups is set: Key and At only. They are not counted.
 	Dups []Entry
 }
 
@@ -249,8 +250,8 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 					if at.IsZero() {
 						at = info.ModTime()
 					}
-					if pr, ok := priceForUsage(msg.Model, *msg.Usage, opts.Overrides); ok && within(at, opts.Within) {
-						res.Dups = append(res.Dups, Entry{Key: key, At: at, Cost: msg.Usage.cost(pr)})
+					if within(at, opts.Within) {
+						res.Dups = append(res.Dups, Entry{Key: key, At: at})
 					}
 				}
 				res.Mark.Offset = next
