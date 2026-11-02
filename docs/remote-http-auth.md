@@ -563,7 +563,7 @@ With `--daemon-url`, `AF_DAEMON_URL` or a saved target (`af target set`), every 
 
 | Verbs | With a remote target |
 |---|---|
-| `af` (the TUI), `sessions`, `tasks`, `projects`, `proposal`, `quota`, `daemon status`, global `config set` / `config unset` | **Follow the target.** They read and write that daemon over its API and never fall back to this machine. `af daemon status` reports the target's health route (version, phase, boot id), not this machine's sockets or autostart unit. |
+| `af` (the TUI), `sessions`, `tasks`, `projects`, `proposal`, `backlog`, `quota`, `daemon status`, global `config set` / `config unset` | **Follow the target.** They read and write that daemon over its API and never fall back to this machine. `af daemon status` reports the target's health route (version, phase, boot id), not this machine's sockets or autostart unit. |
 | `token show` / `token rotate`, `daemon restart` / `install` / `uninstall` / `adopt`, `doctor`, `reset`, `config get` / `list` / `validate` / `migrate`, `config set` / `unset --project`, `accounts`, `hosts` | **Refuse**, naming the daemon they declined to act on, because they read or change a file, process or unit that exists only on the machine they run on and no daemon API stands in for it. Run them on the daemon host (for example over ssh). |
 | `target`, `upgrade`, `bug-report`, `version`, `keys`, `debug`, `api`, `sessions whoami` | **Act on this client** by design: its binary, its saved target, its terminal or tmux pane, or this build's static catalogs. |
 
