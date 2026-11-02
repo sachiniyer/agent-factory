@@ -608,6 +608,120 @@ func TestOrchestratorAdoptsAReplacementWhoseLongTitleWasTruncated(t *testing.T) 
 	require.Nil(t, o.Replacing)
 }
 
+// pendingStartPrompt leaves B-2's orchestrator o1 with no events and its start
+// prompt pending, as a session the user started from the web whose first
+// prompt was proven not delivered is bound.
+func pendingStartPrompt(t *testing.T, m *Manager, repoID string) {
+	t.Helper()
+	svc := m.backlogService()
+	_, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+		b.Item(2).Orchestrator.Events = nil
+		return []int{2}, b.MarkOrchUnstarted(2, "o1", backlog.OrchUnstartedNew, svc.Now())
+	})
+	require.NoError(t, err)
+}
+
+// TestOrchestratorDeliverySendsAMissedFirstPromptWithoutEvents: a session the
+// user started from the web whose first prompt was proven not delivered is
+// bound with no events. The next pass sends it the start prompt anyway, and
+// opens no turn, so the end of its first turn does not archive the session the
+// user opened (Codex P2 on #6627).
+func TestOrchestratorDeliverySendsAMissedFirstPromptWithoutEvents(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	_, err := m.backlogService().SetOrchestrator(backlog.SetOrchestratorRequest{RepoID: repoID, ID: 2, Clear: true})
+	require.NoError(t, err)
+	prev := createBacklogSession
+	createBacklogSession = func(m *Manager, _ context.Context, _ CreateSessionRequest) (session.InstanceData, error) {
+		m.mu.Lock()
+		m.instances[daemonInstanceKey(repoID, "effort B-2 Effort")] = &session.Instance{ID: "n1", Title: "effort B-2 Effort", Program: "claude", CreatedAt: time.Now()}
+		m.mu.Unlock()
+		return session.InstanceData{ID: "n1", Title: "effort B-2 Effort", Program: "claude", LastPromptDeliveryStatus: session.PromptNotDelivered}, nil
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+	_, err = openOrch(m, repoID, 2)
+	require.NoError(t, err)
+	o := orchOf(t, repoID)
+	require.Equal(t, backlog.OrchUnstartedNew, o.Unstarted)
+	require.Empty(t, o.Events, "precondition: no event is queued to carry the start prompt")
+
+	sent := stubBacklogSend(t, m, repoID)
+	runOrchDelivery(t, m, repoID, time.Now())
+
+	require.Equal(t, 1, sent.count(), "the pending start prompt is sent without an event")
+	require.Equal(t, "n1", sent.reqs[0].ID)
+	require.Contains(t, sent.reqs[0].Prompt, "started this session from the web")
+	require.NotContains(t, sent.reqs[0].Prompt, "Events in")
+	require.Empty(t, orchOf(t, repoID).Unstarted, "a confirmed start prompt clears it")
+	s, ok := m.projectSession(repoID, "n1")
+	require.True(t, ok)
+	require.False(t, s.instance.BacklogRunActive(), "no turn: its end must not archive the session the user opened")
+
+	runOrchDelivery(t, m, repoID, time.Now())
+	require.Equal(t, 1, sent.count(), "nothing left to send")
+}
+
+// TestOrchestratorPendingStartPromptAloneNeitherRestoresNorReplaces: a start
+// prompt with no events goes to a live session only. One that must be
+// restored, or is gone, waits for the group's next event, which restores or
+// replaces it as it did before a start prompt could be due alone.
+func TestOrchestratorPendingStartPromptAloneNeitherRestoresNorReplaces(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	pendingStartPrompt(t, m, repoID)
+	sent := stubBacklogSend(t, m, repoID)
+	restored := stubOrchRestore(t)
+	creates := 0
+	prev := createBacklogSession
+	createBacklogSession = func(*Manager, context.Context, CreateSessionRequest) (session.InstanceData, error) {
+		creates++
+		return session.InstanceData{ID: "n1", Title: "effort B-2 Effort"}, nil
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	runOrchDelivery(t, m, repoID, time.Now())
+	require.Empty(t, *restored, "an archived session is not restored for a start prompt alone")
+	require.Zero(t, sent.count())
+
+	dropPlanner(m, repoID)
+	runOrchDelivery(t, m, repoID, time.Now())
+	require.Zero(t, creates, "a gone session is not replaced for a start prompt alone")
+	o := orchOf(t, repoID)
+	require.Equal(t, "o1", o.SessionID)
+	require.Equal(t, backlog.OrchUnstartedNew, o.Unstarted, "the start prompt stays pending")
+	require.Empty(t, o.Failures, "waiting is not a failure")
+
+	queueOrch(t, m, repoID, backlog.OrchEvent{Kind: backlog.EventReview, Item: 3})
+	runOrchDelivery(t, m, repoID, time.Now())
+	require.Equal(t, 1, creates, "the next event replaces it")
+	require.Equal(t, "n1", orchOf(t, repoID).SessionID)
+}
+
+// TestOrchestratorPendingStartPromptBacksOffThenEscalates: a start prompt sent
+// without events that fails counts toward escalation as an event delivery does.
+func TestOrchestratorPendingStartPromptBacksOffThenEscalates(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	pendingStartPrompt(t, m, repoID)
+	sent := stubBacklogSend(t, m, repoID)
+	sent.err = errors.New("pane gone")
+
+	now := time.Now()
+	runOrchDelivery(t, m, repoID, now)
+	require.Len(t, orchOf(t, repoID).Failures, 1)
+	runOrchDelivery(t, m, repoID, now)
+	require.Equal(t, 1, sent.count(), "no retry inside the back-off")
+
+	for i := 0; i < backlog.OrchMaxFailures-1; i++ {
+		now = now.Add(time.Duration(backlog.OrchMaxFailures) * backlog.OrchRetryStep)
+		runOrchDelivery(t, m, repoID, now)
+	}
+	require.Equal(t, backlog.OrchMaxFailures, sent.count())
+	g := loadItem(t, repoID, 2)
+	require.NotNil(t, g.OpenQuestion(), "the third failure asks the user")
+	require.Equal(t, backlog.OrchUnstartedNew, g.Orchestrator.Unstarted, "the start prompt stays pending")
+
+	runOrchDelivery(t, m, repoID, now.Add(time.Hour))
+	require.Equal(t, backlog.OrchMaxFailures, sent.count(), "no delivery while escalated")
+}
+
 func TestIsReplacementTitle(t *testing.T) {
 	long := strings.Repeat("y", 200)
 	bounded := git.BoundTitleForDisambiguation(long)

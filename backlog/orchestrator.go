@@ -48,7 +48,8 @@ type Orchestrator struct {
 	// restored without its agent conversation; OrchUnstartedNew for a session
 	// the user started for a group with none, whose first prompt was proven not
 	// delivered. Every delivery sends the start prompt while it is set, and
-	// only a confirmed one clears it.
+	// only a confirmed one clears it. It is due even with no events
+	// (OrchDeliveries).
 	Unstarted string `json:"unstarted,omitempty"`
 	// Replacing records a replacement af began to start for the gone session,
 	// written before the create, so a daemon that stops before binding it

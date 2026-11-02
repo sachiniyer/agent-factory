@@ -16,12 +16,15 @@ const (
 	OrchRetryStep = time.Minute
 )
 
-// OrchDelivery is a group whose pending events af can deliver now.
+// OrchDelivery is a group whose pending events, or whose pending start
+// prompt, af can deliver now.
 type OrchDelivery struct {
 	Group     int
 	SessionID string
 	Program   string
-	Events    []OrchEvent
+	// Events are the pending events. None means the delivery carries only the
+	// start prompt that Unstarted asks for.
+	Events []OrchEvent
 	// Unstarted is the orchestrator's Unstarted: send the start prompt.
 	Unstarted string
 	// Replacing is a replacement af began for this session, if any.
@@ -65,14 +68,17 @@ func (b *Backlog) OrchEscalated(group int) bool {
 	return it != nil && it.OpenQuestion() != nil
 }
 
-// OrchDeliveries lists the groups whose pending events af delivers now: the
-// group is bound, has events, is not escalated, and its retry wait is over.
+// OrchDeliveries lists the groups af delivers to now: the group is bound, has
+// events or a session that has not had its start prompt (Unstarted), is not
+// escalated, and its retry wait is over. A start prompt is due without events:
+// a session the user started from the web whose first prompt never arrived has
+// none, and the group may queue none for a long time (Codex P2 on #6627).
 func (b *Backlog) OrchDeliveries(now time.Time) []OrchDelivery {
 	var out []OrchDelivery
 	for i := range b.Items {
 		it := &b.Items[i]
 		o := it.Orchestrator
-		if o == nil || len(o.Events) == 0 || b.OrchEscalated(it.ID) {
+		if o == nil || (len(o.Events) == 0 && o.Unstarted == "") || b.OrchEscalated(it.ID) {
 			continue
 		}
 		if n := len(o.Failures); n > 0 && now.Before(o.Failures[n-1].Add(time.Duration(n)*OrchRetryStep)) {
@@ -90,17 +96,19 @@ func (b *Backlog) OrchDeliveries(now time.Time) []OrchDelivery {
 }
 
 // BeginOrchDelivery marks group's pending events as in flight and returns
-// them, when they are due for delivery now. The delivery opens a new turn, so
-// a --stay from an earlier turn is dropped. changed is false when the backlog
-// already held that mark, so the caller need not write it.
+// them, when they are due for delivery now. A delivery with events opens a new
+// turn, so a --stay from an earlier turn is dropped; one that carries only the
+// start prompt opens none, so the --stay holds. changed is false when the
+// backlog already held that mark, so the caller need not write it.
 func (b *Backlog) BeginOrchDelivery(group int, now time.Time) (d OrchDelivery, ok, changed bool) {
 	for _, c := range b.OrchDeliveries(now) {
 		if c.Group != group {
 			continue
 		}
 		o := b.Item(group).Orchestrator
-		changed = o.Sending != len(c.Events) || o.Stay
-		o.Sending, o.Stay = len(c.Events), false
+		stay := o.Stay && len(c.Events) == 0
+		changed = o.Sending != len(c.Events) || o.Stay != stay
+		o.Sending, o.Stay = len(c.Events), stay
 		return c, true, changed
 	}
 	return OrchDelivery{}, false, false

@@ -55,6 +55,50 @@ func TestOrchDeliveriesOnlyBoundGroupsWithEvents(t *testing.T) {
 	}
 }
 
+// TestOrchDeliveriesIncludeAPendingStartPrompt: a session that has not had its
+// start prompt is due a delivery with no events, such as one the user started
+// from the web whose first prompt never arrived, so it does not wait for an
+// event that may not come. The retry wait and the escalation hold it as they
+// hold events, and the confirmed delivery ends it (Codex P2 on #6627).
+func TestOrchDeliveriesIncludeAPendingStartPrompt(t *testing.T) {
+	b := boundGroup(t)
+	if err := b.MarkOrchUnstarted(1, "o", OrchUnstartedNew, t0); err != nil {
+		t.Fatal(err)
+	}
+	got := b.OrchDeliveries(t0)
+	if len(got) != 1 || got[0].Group != 1 || got[0].SessionID != "o" || got[0].Unstarted != OrchUnstartedNew || len(got[0].Events) != 0 {
+		t.Fatalf("a pending start prompt is not due: %+v", got)
+	}
+
+	b.OrchDeliveryFailed(1, "o", "x", t0)
+	if got := b.OrchDeliveries(t0.Add(OrchRetryStep - time.Second)); len(got) != 0 {
+		t.Fatal("retried inside the wait")
+	}
+	if got := b.OrchDeliveries(t0.Add(OrchRetryStep)); len(got) != 1 {
+		t.Fatal("no retry after the wait")
+	}
+	for range OrchMaxFailures - 1 {
+		b.OrchDeliveryFailed(1, "o", "x", t0.Add(OrchRetryStep))
+	}
+	if !b.OrchEscalated(1) || len(b.OrchDeliveries(t0.Add(time.Hour))) != 0 {
+		t.Fatal("a start prompt is delivered while escalated")
+	}
+	if b.Item(1).Orchestrator.Unstarted != OrchUnstartedNew {
+		t.Fatal("a failure dropped the pending start prompt")
+	}
+
+	b = boundGroup(t)
+	if err := b.MarkOrchUnstarted(1, "o", OrchUnstartedNew, t0); err != nil {
+		t.Fatal(err)
+	}
+	if !b.OrchDelivered(1, "o", nil, t0) || b.Item(1).Orchestrator.Unstarted != "" {
+		t.Fatalf("%+v", b.Item(1).Orchestrator)
+	}
+	if got := b.OrchDeliveries(t0); len(got) != 0 {
+		t.Fatalf("a delivered start prompt is due again: %+v", got)
+	}
+}
+
 func TestOrchDeliveredDropsOnlyWhatWasSent(t *testing.T) {
 	b := boundGroup(t)
 	b.QueueOrchEvent(OrchEvent{Kind: EventReview, Item: 2}, t0)
@@ -291,5 +335,25 @@ func TestBeginOrchDeliveryDropsAnEarlierStay(t *testing.T) {
 	}
 	if b.Item(1).Orchestrator.Stay {
 		t.Fatal("a new turn kept the stay of the turn before")
+	}
+}
+
+// TestBeginOrchDeliveryOfAStartPromptAloneKeepsTheStay: a delivery that
+// carries only the start prompt opens no turn, so it leaves the --stay of the
+// turn that is running for that turn's end.
+func TestBeginOrchDeliveryOfAStartPromptAloneKeepsTheStay(t *testing.T) {
+	b := boundGroup(t)
+	if _, err := b.SetOrchestratorStay("o", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.MarkOrchUnstarted(1, "o", OrchUnstartedRestarted, t0); err != nil {
+		t.Fatal(err)
+	}
+	d, ok, changed := b.BeginOrchDelivery(1, t0)
+	if !ok || changed || len(d.Events) != 0 || d.Unstarted != OrchUnstartedRestarted {
+		t.Fatalf("%+v %v %v", d, ok, changed)
+	}
+	if !b.Item(1).Orchestrator.Stay {
+		t.Fatal("a start prompt alone dropped the stay")
 	}
 }

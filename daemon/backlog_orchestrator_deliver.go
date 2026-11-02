@@ -37,14 +37,14 @@ func (m *Manager) orchestratorReady(repoID string) bool {
 }
 
 // deliverOrchestrators starts a delivery for each group of the project whose
-// orchestrator has events due.
+// orchestrator has events, or a start prompt it can take now, due.
 func (m *Manager) deliverOrchestrators(repoID string, b *backlog.Backlog, now time.Time) {
 	if !m.orchestratorReady(repoID) {
 		return
 	}
 	for _, d := range b.OrchDeliveries(now) {
 		group := d.Group
-		if !m.backlog.beginOrchestrate(repoID, group) {
+		if m.startPromptWaits(repoID, d) || !m.backlog.beginOrchestrate(repoID, group) {
 			continue
 		}
 		if !m.launchBackgroundMutation(func(stop <-chan struct{}) {
@@ -54,6 +54,19 @@ func (m *Manager) deliverOrchestrators(repoID string, b *backlog.Backlog, now ti
 			m.backlog.endOrchestrate(repoID, group)
 		}
 	}
+}
+
+// startPromptWaits is whether d carries only a start prompt, with no events,
+// for a session that cannot take it now: one that is gone, being killed, or
+// must be restored. A start prompt alone does not replace or restore a
+// session; the group's next event does, as it always has, and so does the user
+// opening the session from the web.
+func (m *Manager) startPromptWaits(repoID string, d backlog.OrchDelivery) bool {
+	if len(d.Events) > 0 {
+		return false
+	}
+	s, ok := m.projectSession(repoID, d.SessionID)
+	return !ok || s.view.UserKilled || s.view.InFlightOp == session.OpKilling || backlogNeedsRestore(s)
 }
 
 // beginOrchDelivery marks group's due events in flight and returns them.
@@ -86,9 +99,15 @@ func (m *Manager) beginOrchDelivery(repoID string, group int, now time.Time) (*b
 // whose end archives the session when nothing is left to send. A client attached, a usage
 // limit, or an archive that raced the send holds it for a later pass. Any
 // other failure counts toward escalation, unless the daemon is stopping.
+//
+// A delivery with no events carries only the start prompt of a session that
+// never had it, such as one the user started from the web whose first prompt
+// was proven not delivered (Codex P2 on #6627). It goes to a live session
+// only (startPromptWaits), and opens no turn: as the open path's own send, it
+// does not archive a session the user opened at the end of its first turn.
 func (m *Manager) deliverOrchestrator(stop <-chan struct{}, repoID string, group int, now time.Time) {
 	b, d, ok := m.beginOrchDelivery(repoID, group, now)
-	if !ok {
+	if !ok || m.startPromptWaits(repoID, d) {
 		return
 	}
 	s, ok := m.projectSession(repoID, d.SessionID)
@@ -139,7 +158,7 @@ func (m *Manager) deliverOrchestrator(stop <-chan struct{}, repoID string, group
 			return
 		}
 	}
-	err := m.sendOrchestratorPrompt(repoID, group, s.instance, prompt, true)
+	err := m.sendOrchestratorPrompt(repoID, group, s.instance, prompt, len(d.Events) > 0)
 	switch {
 	case err == nil:
 		m.orchDelivered(stop, repoID, d)
