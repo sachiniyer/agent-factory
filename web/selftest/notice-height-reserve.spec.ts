@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { seededTabs } from "./seeded-tabs.js";
 
 // #6561: the hidden-pane notice mounts as a real flex row AFTER the fit has
 // measured the full host height — so its own height is never part of the
@@ -9,6 +10,8 @@ import { expect, test, type Page } from "@playwright/test";
 const PANE_MIN_HEIGHT_PX = 80;
 
 const sessionA = process.env.AF_WEB_SESSION_A ?? "probe-a";
+// probe-a's roster is shared with the suite — close what this test adds (#4217).
+const roster = seededTabs();
 
 async function dragTabToPane(page: Page, tabIndex: number, paneIndex: number, edge: "top" | "bottom"): Promise<void> {
   await page.evaluate(
@@ -72,7 +75,7 @@ test("#6561: the notice's height is reserved before the fit", async ({ page, req
   // the three drags all move genuinely unshown tabs — dropping a shown tab on
   // another pane trips the dedupe move, not a split.
   const tabs = page.locator(".af-tabbar .af-tab");
-  const base = await tabs.count();
+  const base = await roster.enter(page);
   for (let i = 0; i < 4; i++) {
     await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
     // Await each create: a second click while the prior CreateTab round-trip
