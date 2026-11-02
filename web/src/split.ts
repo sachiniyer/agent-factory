@@ -1099,7 +1099,6 @@ export class SplitView {
         ? fitToSize(this.tree, hostW, hostH, this.focusedId)
         : { tree: this.tree, hidden: [] as string[] };
     this.displayTree = fit.tree;
-    const visible = leaves(fit.tree);
 
     // Rebuild the split wrappers, inserting the persistent containers. Containers now
     // in the live DOM have real dimensions for the FitAddon.
@@ -1123,7 +1122,11 @@ export class SplitView {
     this.syncFitHidden(fit);
     this.syncNarrowNotice(fit);
 
-    const multi = visible.length > 1;
+    // "Multi" follows the RETAINED layout, not the visible set (#6563): the
+    // pane heads carry the close button, and hiding them the moment the fit
+    // leaves one visible pane removes the only touch route to close a pane —
+    // the same gate the phone menu's "Hide pane" reads through paneCount.
+    const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
 
     // Whether the FOCUSED pane's terminal/iframe was torn down and rebuilt this
@@ -2310,7 +2313,11 @@ export class SplitView {
           .map((l) => l.tab)
       : [];
     const focusedTab = this.focusedId ? (findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0) : 0;
-    const paneCount = shownTabs.length;
+    // paneCount answers "how many panes EXIST", not "how many are on screen"
+    // (#6563): the fit may hide every sibling, and close affordances that gate
+    // on the visible count would vanish exactly when the layout still needs
+    // one — the retained leaf count is what closePane's availability follows.
+    const paneCount = this.tree ? leaves(this.tree).length : 0;
     const shownKey = `${shownTabs.join(",")}|${openTabs.join(",")}`;
     if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
       return;
