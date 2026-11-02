@@ -226,10 +226,11 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
   // Now the pane attaches (in-page hash navigation keeps the probe's socket).
   // Its subscribe replay delivers the foreign grid — the contested sighting
   // that primes the yield on master — before the pane's claim is on the wire.
+  // (No af-session-first assertion: that class is the phone layout; at this
+  // desktop viewport the open session reads as data-term-status="open".)
   await page.evaluate((sessionId) => {
     window.location.hash = `#/session/${encodeURIComponent(sessionId)}`;
   }, selected.id);
-  await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
   await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   const rows = () => page.locator(".af-term-host .xterm-rows > div").count();
   // The activation claims the host fit: the emulator renders the pane's own
