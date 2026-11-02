@@ -161,3 +161,46 @@ func TestRecoveryFinishesAnOrchestratorsOwedArchive(t *testing.T) {
 	require.Equal(t, []string{"o1"}, *archived)
 	require.Nil(t, inst.OwedArchive())
 }
+
+// A turn can end before its delivery's bookkeeping is written (orchDelivered
+// retrying a busy backlog): the turn end sees the events still being sent and
+// keeps the session live. Once the delivery is recorded, the decision is made
+// again, so the orchestrator is not left live with nothing pending (Codex P2
+// on #6614).
+func TestOrchestratorTurnEndedBeforeItsDeliveryIsRecordedArchivesAfter(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	inst := liveOrchestrator(t, m, repoID)
+	stubExactResume(t, true, "")
+	archived := stubBacklogArchive(t)
+	_, d, ok := m.beginOrchDelivery(repoID, 2, time.Now())
+	require.True(t, ok)
+	require.True(t, inst.ArmOrchestratorTurn(time.Now()))
+	gen := inst.BacklogRunGeneration()
+	idleItemSession(t, inst)
+
+	m.orchestratorTurnEnded(repoID, inst, gen, nil)
+	require.Empty(t, *archived, "the delivery is still being sent")
+
+	m.orchDelivered(nil, repoID, d)
+	require.Equal(t, []string{"o1"}, *archived)
+}
+
+// The revisit is fenced like the turn end: a newer turn that a delivery opened
+// before the first one was recorded ends on its own edge.
+func TestOrchestratorTurnRevisitFencedByANewerTurn(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	inst := liveOrchestrator(t, m, repoID)
+	stubExactResume(t, true, "")
+	archived := stubBacklogArchive(t)
+	_, d, ok := m.beginOrchDelivery(repoID, 2, time.Now())
+	require.True(t, ok)
+	require.True(t, inst.ArmOrchestratorTurn(time.Now()))
+	gen := inst.BacklogRunGeneration()
+	idleItemSession(t, inst)
+	m.orchestratorTurnEnded(repoID, inst, gen, nil)
+
+	require.True(t, inst.ArmOrchestratorTurn(time.Now()))
+	m.orchDelivered(nil, repoID, d)
+
+	require.Empty(t, *archived, "the revisit archived a session in a newer turn")
+}

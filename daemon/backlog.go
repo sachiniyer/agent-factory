@@ -55,6 +55,11 @@ type backlogState struct {
 	// orchestrating holds the groups with a delivery to their orchestrator in
 	// flight.
 	orchestrating map[string]bool
+	// orchTurnWaits holds, per orchestrator session id, the run generation of a
+	// turn that ended while its delivery's bookkeeping was still pending: the
+	// turn end kept the session live for events that the delivery then
+	// recorded as sent. orchDelivered revisits it (Codex P2 on #6614).
+	orchTurnWaits map[string]int
 	// scanned is set once recovery has listed the backlogs on disk; seen
 	// holds the projects it listed.
 	scanned bool
@@ -224,6 +229,23 @@ func (s *backlogState) takeDeferredArchive(sessionID string) (string, bool) {
 	reason, owed := s.deferredArchive[sessionID]
 	delete(s.deferredArchive, sessionID)
 	return reason, owed
+}
+
+func (s *backlogState) noteOrchTurnWaits(sessionID string, gen int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.orchTurnWaits == nil {
+		s.orchTurnWaits = map[string]int{}
+	}
+	s.orchTurnWaits[sessionID] = gen
+}
+
+func (s *backlogState) takeOrchTurnWaits(sessionID string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gen, ok := s.orchTurnWaits[sessionID]
+	delete(s.orchTurnWaits, sessionID)
+	return gen, ok
 }
 
 func (s *backlogState) beginRecovery() bool {

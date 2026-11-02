@@ -420,7 +420,27 @@ func (m *Manager) orchDelivered(stop <-chan struct{}, repoID string, d backlog.O
 		return []int{d.Group}, nil
 	}); err != nil && !errors.Is(err, errBacklogNoChange) {
 		m.warn().Printf("record orchestrator delivery on %s: %v", backlog.FormatID(d.Group), err)
+		return
 	}
+	m.revisitOrchTurnEnd(stop, repoID, d.SessionID)
+}
+
+// revisitOrchTurnEnd decides again on a turn of sessionID that ended while
+// this delivery's bookkeeping was pending, now that it is written: the turn end
+// saw the delivered events as unsent and kept the session live, and no later
+// idle edge comes to archive it (Codex P2 on #6614). Only that same turn, still
+// the latest and ended, is decided again: a turn a newer delivery opened ends
+// on its own edge. A turn that used up a --stay was never noted.
+func (m *Manager) revisitOrchTurnEnd(stop <-chan struct{}, repoID, sessionID string) {
+	gen, ok := m.backlog.takeOrchTurnWaits(sessionID)
+	if !ok {
+		return
+	}
+	s, ok := m.projectSession(repoID, sessionID)
+	if !ok || s.instance.BacklogRunActive() || s.instance.BacklogRunGeneration() != gen {
+		return
+	}
+	m.orchestratorTurnEnded(repoID, s.instance, gen, stop)
 }
 
 // orchDeliveryFailed records a failed delivery, unless the daemon is
