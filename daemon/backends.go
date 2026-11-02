@@ -106,8 +106,8 @@ type ListBackendsResponse struct {
 	// would freeze today's default into the request and ignore a later config change.
 	//
 	// EMPTY when the repo's `backend` key names something unrecognized, or its
-	// in-repo config cannot be resolved — there is no default to report then,
-	// because such a create does not fall back to local, it FAILS
+	// effective configuration cannot be resolved — there is no default to
+	// report then, because such a create does not fall back to local, it FAILS
 	// (session.resolveBackendKind: "misconfiguration should fail the create, not
 	// silently run local"). DefaultStatus/DefaultReason carry the misconfiguration.
 	Default string `json:"default"`

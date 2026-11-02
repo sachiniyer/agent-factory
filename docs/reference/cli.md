@@ -3091,8 +3091,8 @@ unchecked backend as available is a promise nobody verified.
 
 "default" is the backend a create with no --backend resolves to here. It is
 EMPTY when the project's 'backend' config key names something unrecognized, or
-its in-repo config cannot be resolved — such a create fails rather than quietly
-running local, and "default_reason" names the cause.
+its effective configuration cannot be resolved — such a create fails rather
+than quietly running local, and "default_reason" names the cause.
 
 The reasons are the same text a create prints when it refuses, because both come
 from the same precondition checks.
