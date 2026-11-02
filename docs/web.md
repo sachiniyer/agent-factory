@@ -323,8 +323,8 @@ shows each other project's count next to its name. An item that has a session ge
   agent asks a question, the item reads **Needs you**; type the answer in the panel and
   **Send answer**.
 - The bar at the top shows the runner (on or off, slots in use) and the budget. Its ⋯ menu
-  edits the budget share, the plan percent where the runner stops, the cap per run, the
-  dollar limit, and what happens to an item's session when the item is done.
+  edits the budget's plan limit, the cap per run, the dollar limit, and what happens to an
+  item's session when the item is done.
 
 The view re-reads the backlog on every change the daemon announces, when the event
 stream reconnects, and each time you open it, so edits made with `af backlog` or in
