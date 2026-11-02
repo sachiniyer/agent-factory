@@ -132,3 +132,69 @@ func TestSendConfirmation_ClocklessSeedMustBeAtTheAttemptInstant(t *testing.T) {
 		t.Fatal("an idle frame far older than the attempt cannot bound a clockless turn's start")
 	}
 }
+
+// #6590: the daemon keeps re-verifying a sent-unverified task send past the
+// bounded Confirm window, fed by the status poll's pane captures. A pane
+// already mid-turn at the send therefore still yields a bound watch — the
+// bounded Confirm stays ineligible (inside its window the running turn cannot
+// be attributed to this send), but the watch outlives it: the pre-existing
+// turn's own clock is older than the send and can never fire it, while a NEW
+// turn — the queued prompt the agent takes once the current turn ends —
+// satisfies the same evidence rule.
+func TestSendConfirmation_BusySeedKeepsReverifyWatch(t *testing.T) {
+	sentAt := time.Now()
+	pane := &scriptedPane{agent: "claude", frames: []string{turnRow("40s")}}
+	c := BeginSendConfirmation(context.Background(), pane)
+	c.BindAttempt(sentAt)
+	w := c.ReverifyWatch()
+	if w == nil {
+		t.Fatal("a busy pre-send pane must still yield the bound chrome watch for re-verification")
+	}
+	if c.Confirm(context.Background()) {
+		t.Fatal("the bounded Confirm must stay ineligible on a busy pre-send pane")
+	}
+	// The pre-existing turn keeps ticking: its own clock outdates the send, so
+	// it can never fire the watch.
+	for i, tick := range []string{"41s", "42s", "43s"} {
+		if w.Observe(turnRow(tick), sentAt.Add(time.Duration(i+1)*time.Second)) {
+			t.Fatal("a turn older than the send must never fire its re-verification watch")
+		}
+	}
+	// The turn ends and a new one begins — the queued draft's work. Its own
+	// clock fits inside the send's age, so the same evidence rule fires.
+	if w.Observe(idleComposer, sentAt.Add(4*time.Second)) {
+		t.Fatal("an idle frame is not evidence")
+	}
+	w.Observe(turnRow("1s"), sentAt.Add(5*time.Second))
+	if !w.Observe(turnRow("2s"), sentAt.Add(6*time.Second)) {
+		t.Fatal("a turn beginning after the send must fire the re-verification watch")
+	}
+}
+
+// A delivery whose prompt the agent never took is never promoted: the draft
+// stays staged, no turn begins, and the watch outlives its window without
+// firing.
+func TestSendConfirmation_NeverTakenNeverFires(t *testing.T) {
+	sentAt := time.Now()
+	pane := &scriptedPane{agent: "claude", frames: []string{idleComposer}}
+	c := BeginSendConfirmation(context.Background(), pane)
+	c.BindAttempt(sentAt)
+	w := c.ReverifyWatch()
+	if w == nil {
+		t.Fatal("a signatured agent's send must yield the bound watch")
+	}
+	for i := 0; i < 10; i++ {
+		if w.Observe(stagedChip, sentAt.Add(time.Duration(i+1)*time.Second)) {
+			t.Fatal("a staged draft that never submits must never promote")
+		}
+	}
+}
+
+// An agent with no in-turn signature has nothing the feed could prove — no
+// watch exists to feed.
+func TestSendConfirmation_UnsignaturedAgentHasNoReverifyWatch(t *testing.T) {
+	c := BeginSendConfirmation(context.Background(), &scriptedPane{agent: "aider", frames: []string{idleComposer}})
+	if c.ReverifyWatch() != nil {
+		t.Fatal("an unsignatured agent must not yield a re-verification watch")
+	}
+}

@@ -195,6 +195,10 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 		Prompt:     prompt,
 		TaskRepoID: t.RepoID,
 		TaskOrigin: true,
+		// Names this delivery's owning task so a sent-unverified verdict can arm
+		// the daemon's re-verification feed against this run's recorded status
+		// (#6590).
+		TaskID: t.ID,
 		// Re-checked at the daemon boundary on EVERY firing, and a missing target
 		// is never created (#5571 W3.5).
 		SandboxOwner: t.SandboxOwner,

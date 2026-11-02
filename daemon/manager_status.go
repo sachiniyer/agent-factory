@@ -394,6 +394,9 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		// else this tick writes, so a restart cannot reopen a closed window.
 		churnCheckpoint = true
 	}
+	// Pending task-send re-verifications feed on the same paused-path captures
+	// (#6590) — an attached target's poll is still the daemon's.
+	m.noteUnverifiedSendEvidence(key, instance, obs, capturedAt)
 	if obs.Baseline || obs.Updated || obs.HasPrompt {
 		// Updated/prompt proves the run remains active; a baseline cannot establish
 		// that it finished. Either way, the cap has no completion to learn this tick.
@@ -456,6 +459,7 @@ func (m *Manager) RefreshStatuses() {
 	m.sweepRemoteLossStates()
 	m.sweepPausedPollState()
 	m.sweepTaskRunTurnWatches()
+	m.sweepUnverifiedSendWatches()
 
 	// Worktree presence first, on its own bounded fan-out (#5102): it is a
 	// filesystem probe, not a tmux one, and running it inline here would let one
@@ -760,6 +764,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// window the observation already closed.
 		settlementCheckpoint = true
 	}
+	// The same capture feeds any task send still re-verifying its unverified
+	// verdict (#6590): its watch fires only on the send-bound turn evidence,
+	// and a fire promotes the task's recorded sent-unverified to sent.
+	m.noteUnverifiedSendEvidence(key, instance, obs, capturedAt)
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
 	// unanswerable probes, not "looks dead" observations.

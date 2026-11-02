@@ -601,6 +601,15 @@ type Manager struct {
 	// once the run ends or the row is gone. Guarded by pausedMu.
 	taskRunTurnWatches map[string]*taskRunTurnWatchEntry
 
+	// unverifiedSendWatches holds the re-verification watchers armed by task
+	// sends that landed sent-unverified (#6590): the poll's pane captures keep
+	// feeding the send's bound chrome watcher past the bounded Confirm window,
+	// and a turn the agent demonstrably began after that send promotes the
+	// task's recorded verdict to sent. Keyed by stableSessionKey then task ID;
+	// a task's watch re-bounds to its newest unverified send. Guarded by
+	// pausedMu.
+	unverifiedSendWatches map[string]map[string]*unverifiedSendWatch
+
 	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/
 	// task mutation the daemon owns publishes here, and GET /v1/events streams it
 	// to clients. On the Manager (not a controlServer) because both transports
@@ -857,6 +866,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		dischargeOwed:             make(map[string]dischargeRetryEntry),
 		remoteLossStates:          make(map[string]*remoteLossState),
 		taskRunTurnWatches:        make(map[string]*taskRunTurnWatchEntry),
+		unverifiedSendWatches:     make(map[string]map[string]*unverifiedSendWatch),
 		instanceOpLocks:           make(map[string]*sync.Mutex),
 		pausedPolls:               make(map[string]map[string]time.Time),
 		taskRunProbeDue:           make(map[string]time.Time),

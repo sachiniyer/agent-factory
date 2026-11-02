@@ -309,6 +309,7 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 		}
 		send := SendPromptRequest{
 			Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+			TaskID: req.TaskID,
 		}
 		var guard func(*session.Instance, string) error
 		if req.SandboxOwner != "" {
@@ -372,6 +373,7 @@ func (m *Manager) deliverPromptWithOutcome(req DeliverPromptRequest) (string, se
 			}
 			deliveryStatus, serr := m.SendPromptWithStatus(SendPromptRequest{
 				Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt, TaskOrigin: req.TaskOrigin,
+				TaskID: req.TaskID,
 			})
 			if serr != nil {
 				if errors.Is(serr, errTargetLimitReached) {
