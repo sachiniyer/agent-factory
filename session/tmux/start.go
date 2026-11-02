@@ -349,27 +349,42 @@ func (t *TmuxSession) start(workDir string) error {
 				return t.classifyLaunchError(commandErr, systemdScoped)
 			}
 		case <-timeout:
-			ptmx.Close()
-			// The deadline and the launch-exit channel can both be ready at the
-			// same select (Go chooses pseudo-randomly among ready cases), and the
-			// exit can also land after the deadline fires. A pending nonzero
-			// launch exit is the actionable cause — the same facts as the
-			// commandErr case above — so drain it non-blockingly and classify it
-			// the same way before falling back to the readiness-timeout path.
-			// Without this drain the exit is silently discarded (the deadline is
-			// already past, so no later iteration can read it), the operator is
-			// told a misleading "machine too busy / program exited instantly"
-			// readiness timeout, and LocalBackend deletes the fresh worktree on
-			// what is purely goroutine scheduling — the deletion flip the
+			// Snapshot commandDone BEFORE closing the PTY. ptmx.Close()
+			// hangs up the launch client's controlling terminal, which can
+			// cause cmd.Wait() to publish a shutdown-induced nonzero exit;
+			// if that wait goroutine wins the race with a receive AFTER the
+			// close, the code would treat the shutdown-induced status as the
+			// original launch failure and return before
+			// CloseAndWaitForPaneExit — potentially leaving a late-created
+			// session or pane running while reporting a misleading launch
+			// error. Draining before the close means only an exit that was
+			// ALREADY pending at the deadline (a genuine launch failure)
+			// takes this early-return path; a close-induced exit falls
+			// through to the readiness-timeout path below, which
+			// CloseAndWaitForPaneExit reconciles.
+			//
+			// The deadline and the launch-exit channel can both be ready at
+			// the same select (Go chooses pseudo-randomly among ready cases),
+			// and the exit can also land after the deadline fires. A pending
+			// nonzero launch exit is the actionable cause — the same facts
+			// as the commandErr case above — so drain it non-blockingly and
+			// classify it the same way before falling back to the
+			// readiness-timeout path. Without this drain the exit is
+			// silently discarded (the deadline is already past, so no later
+			// iteration can read it), the operator is told a misleading
+			// "machine too busy / program exited instantly" readiness
+			// timeout, and LocalBackend deletes the fresh worktree on what
+			// is purely goroutine scheduling — the deletion flip the
 			// commandErr case's invariant exists to prevent. The drain also
-			// preserves the socketFSProbe errno evidence the timeout arm alone
-			// skips, so a real resource verdict still rides the chain for the
-			// lost-restore environmental classifier (#5295 review).
+			// preserves the socketFSProbe errno evidence the timeout arm
+			// alone skips, so a real resource verdict still rides the chain
+			// for the lost-restore environmental classifier (#5295 review).
 			var lateCommandErr error
 			select {
 			case lateCommandErr = <-commandDone:
 			default:
 			}
+			ptmx.Close()
 			if lateCommandErr != nil {
 				return t.classifyLaunchError(lateCommandErr, systemdScoped)
 			}
