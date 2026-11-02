@@ -159,6 +159,24 @@ func recordServerState(home string, st ServerState) {
 		priors, truncated := priorSocketGenerations(prev, st.Socket)
 		st.PriorSockets = priors
 		st.HistoryTruncated = st.HistoryTruncated || prev.HistoryTruncated || truncated
+	case !ok && (lastServerState.Mode != "" || lastServerState.Socket != ""):
+		// The record file vanished under this live process — a state-dir
+		// cleanup, a lost file, or any path that removes it while the daemon
+		// keeps running. The lineage's socket history is unrecoverable from
+		// disk, but this process still holds its last written record in
+		// lastServerState: carry that forward (moving the last recorded
+		// socket into history when the daemon has moved on) rather than write
+		// a record that claims a complete, empty history and drops every
+		// socket generation the daemon has used (#6339). Without this arm the
+		// fall-through writes a falsely complete record stamped with the live
+		// daemon's pid, and doctor's record-only death proof reads a live
+		// session on a dropped prior socket as dead and SIGKILLs its
+		// processes. A genuinely fresh lineage (zero lastServerState) is a
+		// true first record with trivially complete history and falls through
+		// unchanged.
+		priors, truncated := priorSocketGenerations(lastServerState, st.Socket)
+		st.PriorSockets = priors
+		st.HistoryTruncated = st.HistoryTruncated || lastServerState.HistoryTruncated || truncated
 	}
 	if st.Mode == lastServerState.Mode && st.Unit == lastServerState.Unit &&
 		st.Socket == lastServerState.Socket && st.Reason == lastServerState.Reason &&

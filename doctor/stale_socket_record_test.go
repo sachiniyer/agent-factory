@@ -422,6 +422,84 @@ func TestRecordWrittenByLiveDaemon_GenerationMatch_StillKills(t *testing.T) {
 		"a genuine orphan whose record and prior sockets are all accounted for must still be killed")
 }
 
+// TestPriorSocketLiveSession_RecordOnlyProof_RefusesKill pins the record-only
+// death proof's prior-socket coverage for a process with no TMUX env to
+// corroborate against: the record names a prior socket that hosts a LIVE
+// session, so the union listing finds the session and the kill arm must refuse.
+// This is the end-to-end shape the daemon's deleted-record carry-forward
+// produces — the prior socket is accounted for in the record, so doctor lists
+// it and reads the session as live rather than reading its absence from the
+// current socket as death (#6339). The only difference between this fixture and
+// one that arms a SIGKILL is the prior_sockets entry the absent-file
+// fall-through used to drop.
+func TestPriorSocketLiveSession_RecordOnlyProof_RefusesKill(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	daemonProc := spawnWithEnv(t, "af", []string{"--daemon"}, nil)
+	stubDaemonProcessArgv(t, func(pid int) []string {
+		if pid == daemonProc.PID {
+			return []string{"af", "--daemon"}
+		}
+		return nil
+	})
+	stubProcessHomes(t, map[int]string{daemonProc.PID: home})
+
+	// A live tmux server on a prior socket generation, hosting a session
+	// with this home's markers — the production shape of a session left
+	// alive on a socket the daemon moved off.
+	sockPrior := testguard.SocketPath(t, "prior-live")
+	const liveName = "af_doctor-live-on-prior-record-only"
+	out, err := exec.Command("tmux", "-S", sockPrior, "new-session", "-d", "-s", liveName,
+		"-e", tmux.EnvMarkerSession+"="+liveName, "-e", tmux.EnvMarkerHome+"="+home,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session on prior socket: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockPrior, "kill-server").Run() })
+
+	// The current socket names a path no server ever took: its listing
+	// answers tmux's definitive no-server empty, so it is accounted for.
+	sockCurrent := testguard.SocketPath(t, "current-dead")
+
+	// The record names sockCurrent with prior_sockets=[sockPrior] — the
+	// shape the daemon writes after the fix carries the lineage forward
+	// from a deleted record file. daemon_pid matches the live daemon so
+	// the record is provably current.
+	writeServerStateJSON(t, home, fmt.Sprintf(
+		`{"mode":"dedicated","socket":%q,"unit":"agent-factory-tmux-server","at":%q,"daemon_pid":%d,"prior_sockets":[%q]}`,
+		sockCurrent, time.Now().Format(time.RFC3339), daemonProc.PID, sockPrior))
+
+	// A victim carrying the LIVE session's markers and this home, but NO
+	// TMUX env — the record-only proof shape. The record arm is the one
+	// the absent-file fall-through used to arm a kill on.
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: liveName,
+		tmux.EnvMarkerHome:    home,
+	})
+
+	opts := testOptionsWithHome(t, home, true, daemonProc.PID, victim.PID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process whose session is live on a prior recorded socket "+
+			"generation — a socket the daemon has used must be accounted for before absence "+
+			"proves death (#6339)")
+	for _, f := range findByCheck(report, "orphaned-process") {
+		require.Empty(t, f.FixAction,
+			"a session live on a prior recorded socket must not arm a record-only kill: %s", f.Detail)
+		require.False(t, f.Fixed, "a session live on a prior recorded socket must not be fixed: %s", f.Detail)
+	}
+	// The session reads LIVE through the prior-socket listing, so its
+	// marked process is classified as escaped (report-only) — the same
+	// classification a live session's out-of-pane process gets.
+	escaped := findByCheck(report, "escaped-process")
+	require.NotEmpty(t, escaped,
+		"a process of a session live on a prior socket must be reported as escaped, not orphaned")
+	for _, f := range escaped {
+		require.Empty(t, f.FixAction, "an escaped process of a live session is report-only")
+	}
+}
+
 // TestTruncatedSocketHistory_RecordOnlyProof_RefusesKill pins the bound's
 // other half: the record says its own history is incomplete. prior_sockets is
 // capped, and a socket generation evicted by the cap may still host the
