@@ -45,16 +45,21 @@ test("#6562: Alt+j onto a fit-hidden pane restores it WITH the keyboard", async 
   await page.locator("#app[data-af-resync-settled]").waitFor();
   await page.setViewportSize({ width: 1280, height: 800 });
 
+  // probe-a's tab roster is shared with the suite — count relative to it.
+  const tabs = page.locator(".af-tabbar .af-tab");
+  const base = await tabs.count();
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(2);
-  await dragTabToPane(page, 1, 0, "right");
+  await expect(tabs).toHaveCount(base + 1);
+  await dragTabToPane(page, base, 0, "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
 
   // Put the keyboard in the FIRST pane's terminal, then narrow until the
   // second leaf is the one hidden.
   await page.locator(".af-pane-host .xterm").first().click();
   await expect(page.locator(".af-pane-focused .xterm-helper-textarea")).toBeFocused();
-  await page.setViewportSize({ width: 700, height: 800 });
+  // 900px keeps the desktop rail (the <768 breakpoint would collapse it and
+  // give the host the full width again): ~580px of host fits one 320px pane.
+  await page.setViewportSize({ width: 900, height: 800 });
   await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
 
   // Alt+j cycles onto the hidden leaf: the refit un-hides it (highlight moves)
