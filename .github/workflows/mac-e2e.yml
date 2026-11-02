@@ -35,10 +35,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest is arm64; macos-15-intel is the Intel image GitHub still
-        # offers. ubuntu-24.04 is not a Mac: it runs the same script so a defect
-        # in the script itself shows up there for the price of a Linux minute.
-        os: [macos-latest, macos-15-intel, ubuntu-24.04]
+        # macos-15 is the arm64 image — pinned while GitHub migrates the
+        # floating arm64 label to macOS 26 and arm64 capacity is starved
+        # (#6631); revisit when the migration settles. macos-15-intel is the
+        # Intel image GitHub still offers. ubuntu-24.04 is not a Mac: it runs
+        # the same script so a defect in the script itself shows up there for
+        # the price of a Linux minute.
+        os: [macos-15, macos-15-intel, ubuntu-24.04]
     steps:
       - uses: actions/checkout@v6
 

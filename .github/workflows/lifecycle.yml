@@ -74,8 +74,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS leg: add `macos-latest` here once the macos-latest runner job
-        # lands (the ci-macos-runner work). Two helpers in
+        # macOS leg: add `macos-15` here once the arm64 runner job lands (the
+        # ci-macos-runner work). Two helpers in
         # scripts/lifecycle-lib.sh are Linux-only and must grow a Darwin branch
         # first — lc_daemon_version reads /proc/<pid>/exe, and lc_unit_main_pid
         # asks systemctl. On macOS the same scenario must cover the launchd
