@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,6 +178,18 @@ func recordServerState(home string, st ServerState) {
 		priors, truncated := priorSocketGenerations(lastServerState, st.Socket)
 		st.PriorSockets = priors
 		st.HistoryTruncated = st.HistoryTruncated || lastServerState.HistoryTruncated || truncated
+	case !ok && priorDaemonGenerationEvidence(home):
+		// The record file is gone and this process holds no lineage — the
+		// cross-restart residual of the arm above (#6610): a restarted daemon
+		// begins with a zeroed lastServerState, so a record deleted BETWEEN
+		// generations leaves it nothing to carry. The home still keeps the
+		// proof an earlier generation ran — committed session rows, pending
+		// creates, the server-death marker — so the lineage's socket history
+		// is unrecoverable and the record must admit that rather than write
+		// the complete, empty history doctor would spend on a kill. Ordered
+		// after the carry-forward: a live process's own lineage is the better
+		// source, so this asks only what the process cannot answer.
+		st.HistoryTruncated = true
 	}
 	if st.Mode == lastServerState.Mode && st.Unit == lastServerState.Unit &&
 		st.Socket == lastServerState.Socket && st.Reason == lastServerState.Reason &&
@@ -228,6 +241,97 @@ func priorSocketGenerations(prev ServerState, current string) ([]string, bool) {
 		truncated = true
 	}
 	return out, truncated
+}
+
+// priorDaemonGenerationEvidence reports whether the AF home persists proof
+// that an earlier daemon generation ran here — the residue a deleted
+// server-state record can no longer speak for (#6610). It is consulted only
+// when the record file is absent AND this process holds no in-memory
+// lineage, so a genuinely fresh home must answer false: every source below
+// is something only an af daemon generation could have created — nothing a
+// user, an install, or a non-daemon af process produces. Reads that fail
+// resolve toward evidence ("I could not tell" never resolves to "complete"),
+// the same direction the unreadable-record arm takes.
+//
+// Why these sources and not the alternatives: daemon.pid is rewritten by the
+// CURRENT daemon before it ever records the tmux state, so it only ever
+// names the writing generation; state.json is UI/config state with no
+// generation binding. Persisted instance rows carry a tmux session name but
+// no socket path, so they cannot say WHICH generation's socket a session
+// outlived — only that a generation existed whose lineage is now lost. That
+// is precisely the fact the truncated admission exists to record.
+func priorDaemonGenerationEvidence(home string) bool {
+	if priorGenerationInstanceRows(home) {
+		return true
+	}
+	// pending-creates journals an in-flight session create (#6301): a marker
+	// left behind means a session may have stranded live without ever
+	// committing an instance row.
+	if markers, err := filepath.Glob(filepath.Join(home, "pending-creates", "*.json")); err != nil || len(markers) > 0 {
+		return true
+	}
+	// The server-death marker is written only by an af-owned dedicated
+	// server's wrapper at exit (#5429) — its presence proves a server
+	// generation ran here even when nothing else does.
+	if _, err := os.Stat(filepath.Join(home, serverDeathFileName)); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	return false
+}
+
+// priorGenerationInstanceRows reports whether any repo's instances.json
+// under the home holds at least one committed session row — a session only
+// a live daemon generation could have created. An instances directory that
+// cannot be read, and a file that exists but cannot be decoded, count as
+// evidence: af owns the path, so a shape this read cannot disprove is never
+// proof that no generation ran.
+func priorGenerationInstanceRows(home string) bool {
+	instancesDir := filepath.Join(home, "instances")
+	entries, err := os.ReadDir(instancesDir)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(instancesDir, e.Name(), "instances.json"))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case err != nil:
+			return true
+		case instanceRowsPresent(data):
+			return true
+		}
+	}
+	return false
+}
+
+// instanceRowsPresent decodes one repo's instances.json for the row count
+// only. Two on-disk shapes count: the current
+// {"schema_version":N,"instances":[...]} envelope and the legacy array root
+// it wrapped (#3652). Anything that is not a decodable instance set counts
+// as evidence rather than as emptiness.
+func instanceRowsPresent(data []byte) bool {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if trimmed[0] == '[' {
+		var rows []json.RawMessage
+		if err := json.Unmarshal(trimmed, &rows); err != nil {
+			return true
+		}
+		return len(rows) > 0
+	}
+	var envelope struct {
+		Instances []json.RawMessage `json:"instances"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return true
+	}
+	return len(envelope.Instances) > 0
 }
 
 // RecordServerStateForTest invokes recordServerState so tests outside this
