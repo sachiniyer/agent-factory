@@ -859,18 +859,66 @@ test("leafSizes: splits divide along their axis, reserving the divider", () => {
   assert.equal(colSizes.get("a")?.w, 800);
 });
 
-test("minSubtreeSize: a subtree's floor covers every leaf inside it", () => {
+test("minSubtreeSize: a subtree's floor covers every leaf inside it at the CURRENT ratio", () => {
   const nested = row("S1", leaf("a"), row("S2", leaf("b"), leaf("c")));
-  // Along "row" the nested pair needs min+div+min; the root's floor is its
-  // children's sum, not just two leaf floors.
+  // Along "row" the nested pair's floor is max(min/r, min/(1-r)) + div — 644
+  // at the balanced ratio. The root must then cover leaf a in its own ratio
+  // share and the pair's 644 in the other share at ITS 0.5: the pair's demand
+  // (644/0.5) dominates, so the root's floor is 1292 — not the naive 968 a
+  // ratio-blind sum would claim. That larger number is what keeps an ancestor
+  // divider drag from shrinking the pair into a sliver (#6560).
   assert.equal(
     minSubtreeSize(nested, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX),
-    PANE_MIN_WIDTH_PX + PANE_DIVIDER_PX + (PANE_MIN_WIDTH_PX + PANE_DIVIDER_PX + PANE_MIN_WIDTH_PX),
+    (PANE_MIN_WIDTH_PX + PANE_DIVIDER_PX + PANE_MIN_WIDTH_PX) / 0.5 + PANE_DIVIDER_PX,
+  );
+  // A skewed split raises its own floor further: at ratio 0.25 the a-child
+  // only ever gets a quarter of the content span, so it needs min/0.25 before
+  // the sibling's min/0.75 is even the binding constraint.
+  const skewed = row("S3", leaf("d"), leaf("e"), 0.25);
+  assert.equal(
+    minSubtreeSize(skewed, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX),
+    PANE_MIN_WIDTH_PX / 0.25 + PANE_DIVIDER_PX,
   );
   // Across the row axis the children overlap, so the larger floor governs.
   assert.equal(
     minSubtreeSize(nested, "column", PANE_MIN_HEIGHT_PX, PANE_DIVIDER_PX),
     PANE_MIN_HEIGHT_PX,
+  );
+});
+
+test("minSubtreeSize: the visible set prices out fit-hidden leaves (#6573)", () => {
+  // The #6573 deadlock: [(a|b)|(c|d)] at ~700px fits down to a,c — but the
+  // divider's retained floors sum both leaves per side (644px each) against a
+  // 696px span, so the clamp inverts and the drag can never move. With the
+  // visible set each side asks only its one rendered leaf's floor.
+  const tree = row("S1", row("S2", leaf("a"), leaf("b")), row("S3", leaf("c"), leaf("d")));
+  const visible = new Set(["a", "c"]);
+  if (tree.kind !== "split") {
+    throw new Error("the fixture's root is a split");
+  }
+  assert.equal(
+    minSubtreeSize(tree.a, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, visible),
+    PANE_MIN_WIDTH_PX,
+  );
+  // A side whose leaves all hide contributes nothing — it takes no flex share
+  // and its divider hides with it, so the other side's floor alone governs.
+  const oneSided = row("S4", leaf("e"), leaf("f"));
+  assert.equal(
+    minSubtreeSize(oneSided, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, new Set(["e"])),
+    PANE_MIN_WIDTH_PX,
+  );
+  // And the skewed-ratio math still applies among the visible leaves: hiding
+  // the dominant child of a skewed pair drops the pair's demand to the
+  // survivor's floor, not min/0.25.
+  const skewed = row("S5", leaf("g"), leaf("h"), 0.25);
+  assert.equal(
+    minSubtreeSize(skewed, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, new Set(["h"])),
+    PANE_MIN_WIDTH_PX,
+  );
+  // Both visible: ratio-aware coexistence plus the divider, as without a set.
+  assert.equal(
+    minSubtreeSize(skewed, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, new Set(["g", "h"])),
+    PANE_MIN_WIDTH_PX / 0.25 + PANE_DIVIDER_PX,
   );
 });
 
