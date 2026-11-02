@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "c51f19db69cd";
+var CLIENT_VERSION = "6beb4ff01d18";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19200,18 +19200,23 @@ var EffortSessions = class {
   waitTimer = null;
   sessions = [];
   project = null;
-  /** The project the pane shows. Moving to another stops waiting. */
+  /** The selection generation: each open and each move to another project
+   *  starts a new one, and only the current one may open a session. */
+  selection = 0;
+  /** The project the pane shows. Moving to another supersedes every open in
+   *  flight and stops waiting. */
   showProject(root2) {
     if (root2 === this.project) return;
     this.project = root2;
+    this.selection++;
     this.stopWaiting();
   }
   sessionsChanged(sessions) {
     this.sessions = sessions;
-    const id = this.waiting;
-    if (id && sessions.some((s) => s.id === id)) {
+    const w = this.waiting;
+    if (w && w.selection === this.selection && sessions.some((s) => s.id === w.id)) {
       this.stopWaiting();
-      this.host.openSession(id);
+      this.host.openSession(w.id);
     }
   }
   stopWaiting() {
@@ -19219,9 +19224,9 @@ var EffortSessions = class {
     if (this.waitTimer !== null) clearTimeout(this.waitTimer);
     this.waitTimer = null;
   }
-  waitFor(id) {
+  waitFor(id, selection) {
     this.stopWaiting();
-    this.waiting = id;
+    this.waiting = { id, selection };
     this.waitTimer = setTimeout(() => this.stopWaiting(), WAIT_LISTED_MS);
   }
   button(root2, view, group) {
@@ -19247,14 +19252,15 @@ ${group.id}`);
 ${group}`;
     const token2 = this.host.token();
     if (token2 === null || this.busy.has(key)) return;
+    const selection = ++this.selection;
     this.stopWaiting();
     this.busy.set(key, effortProgress(view, group));
     this.rerender();
     try {
       const r = await openOrchestrator(root2, group, token2);
-      if (this.project !== root2) return;
+      if (selection !== this.selection || this.project !== root2) return;
       if (this.sessions.some((s) => s.id === r.session_id)) this.host.openSession(r.session_id);
-      else this.waitFor(r.session_id);
+      else this.waitFor(r.session_id, selection);
     } catch (e) {
       this.host.notify(errorText(e));
     } finally {

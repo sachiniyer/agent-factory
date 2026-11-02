@@ -63,30 +63,37 @@ export const WAIT_LISTED_MS = 30_000;
 
 /** Opens and unbinds groups' effort sessions. A session af just started may
  *  reach the session list after the reply; it opens once it is listed, within
- *  WAIT_LISTED_MS and while the user stays on the project. A reply that comes
- *  after the user moved to another project opens nothing. */
+ *  WAIT_LISTED_MS and while the user stays on the project. Only the latest
+ *  selection navigates: a reply, or a listing wait, that a newer open or a move
+ *  to another project superseded opens nothing, so opening effort A and then B
+ *  before A's reply comes never sends the user back to A. */
 export class EffortSessions {
   private readonly busy = new Map<string, string>();
-  private waiting: string | null = null;
+  private waiting: { id: string; selection: number } | null = null;
   private waitTimer: ReturnType<typeof setTimeout> | null = null;
   private sessions: readonly SessionData[] = [];
   private project: string | null = null;
+  /** The selection generation: each open and each move to another project
+   *  starts a new one, and only the current one may open a session. */
+  private selection = 0;
 
   constructor(private readonly host: EffortHost, private readonly rerender: () => void) {}
 
-  /** The project the pane shows. Moving to another stops waiting. */
+  /** The project the pane shows. Moving to another supersedes every open in
+   *  flight and stops waiting. */
   showProject(root: string | null): void {
     if (root === this.project) return;
     this.project = root;
+    this.selection++;
     this.stopWaiting();
   }
 
   sessionsChanged(sessions: readonly SessionData[]): void {
     this.sessions = sessions;
-    const id = this.waiting;
-    if (id && sessions.some((s) => s.id === id)) {
+    const w = this.waiting;
+    if (w && w.selection === this.selection && sessions.some((s) => s.id === w.id)) {
       this.stopWaiting();
-      this.host.openSession(id);
+      this.host.openSession(w.id);
     }
   }
 
@@ -96,9 +103,9 @@ export class EffortSessions {
     this.waitTimer = null;
   }
 
-  private waitFor(id: string): void {
+  private waitFor(id: string, selection: number): void {
     this.stopWaiting();
-    this.waiting = id;
+    this.waiting = { id, selection };
     this.waitTimer = setTimeout(() => this.stopWaiting(), WAIT_LISTED_MS);
   }
 
@@ -120,14 +127,15 @@ export class EffortSessions {
     const key = `${root}\n${group}`;
     const token = this.host.token();
     if (token === null || this.busy.has(key)) return;
+    const selection = ++this.selection;
     this.stopWaiting();
     this.busy.set(key, effortProgress(view, group));
     this.rerender();
     try {
       const r = await openOrchestrator(root, group, token);
-      if (this.project !== root) return;
+      if (selection !== this.selection || this.project !== root) return;
       if (this.sessions.some((s) => s.id === r.session_id)) this.host.openSession(r.session_id);
-      else this.waitFor(r.session_id);
+      else this.waitFor(r.session_id, selection);
     } catch (e) {
       this.host.notify(errorText(e));
     } finally {

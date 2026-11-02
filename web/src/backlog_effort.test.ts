@@ -268,6 +268,57 @@ test("a reply that comes after a move to another project opens nothing there", a
   assert.deepEqual(h.opened, []);
 });
 
+/** Two groups, B-1 and B-3, whose OpenBacklogOrchestrator replies wait until
+ *  the test releases them one by one: group g's names session "n<g>". */
+function twoGroupsHeld(h: ReturnType<typeof host>, listed: SessionData[]): { pane: BacklogPane; d: BacklogData; release(g: number): Promise<void> } {
+  const pane = mount(h);
+  const d = data(view([item(1), item(2, { parent: 1 }), item(3), item(4, { parent: 3 })]));
+  pane.update(d, "/a", listed);
+  const gates = new Map<number, () => void>();
+  (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body)) as { id: number };
+    calls.push({ method: url.replace("/v1/", ""), body });
+    await new Promise<void>((r) => gates.set(body.id, r));
+    return new Response(JSON.stringify({ data: { session_id: `n${body.id}`, title: `effort B-${body.id}`, change: "started" }, error: null }), { status: 200 });
+  };
+  return {
+    pane, d,
+    release: async (g: number) => {
+      gates.get(g)!();
+      await settle();
+    },
+  };
+}
+
+const effortFor = (pane: BacklogPane, id: number): FakeElement =>
+  el(pane).querySelectorAll(".af-backlog-effort").find((b) => b.getAttribute("aria-label")?.endsWith(`for B-${id}`))!;
+
+test("an older open's late reply does not take focus from the newer one", async () => {
+  const h = host();
+  const { pane, release } = twoGroupsHeld(h, [session("n1"), session("n3")]);
+  effortFor(pane, 1).click();
+  await settle();
+  effortFor(pane, 3).click();
+  await settle();
+  await release(3);
+  assert.deepEqual(h.opened, ["n3"]);
+  await release(1);
+  assert.deepEqual(h.opened, ["n3"], "B-1's reply came after the user opened B-3");
+});
+
+test("an older open's late reply does not replace the newer one's listing wait", async () => {
+  const h = host();
+  const { pane, d, release } = twoGroupsHeld(h, []);
+  effortFor(pane, 1).click();
+  await settle();
+  effortFor(pane, 3).click();
+  await settle();
+  await release(3);
+  await release(1);
+  pane.update(d, "/a", [session("n1"), session("n3")]);
+  assert.deepEqual(h.opened, ["n3"], "only the latest open waits for its session");
+});
+
 test("the group panel offers Start effort session to a keyboard user when the group has none", async () => {
   const pane = mount(host());
   pane.update(data(view([item(1), item(2, { parent: 1 })])), "/a", []);
