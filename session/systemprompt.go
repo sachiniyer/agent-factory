@@ -35,7 +35,7 @@ import (
 // generated plugin artifacts must never carry a verbatim copy of the "you are
 // running inside af" opening, which is false for the audience that installed
 // them.
-const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageBacklogInside + "\n\n" + afUsageOrchestratorInside + "\n\n" + afUsageAttentionInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageProposalsInside + "\n\n" + afUsageAttentionInside + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
 
 // afUsageReferenceCallbackless replaces afUsageReference for an instance that
 // has NO af callback — a sandbox session whose credential could not be minted
@@ -148,8 +148,6 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
   af tasks remove <id-or-name>
 Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, --target-session "" reverts to session-per-run, and --project-path moves the task to another project (--repo still scopes its current project). A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
 
-` + afBacklogSection + `
-
 Root-agent configuration (global unless --project <id-or-path> selects a personal project override):
   af config set root_agent <compact-json>             Merge the enabled/program profile as one table
   af config set root_agent.enabled <bool>             Enable or disable the singleton profile
@@ -158,61 +156,6 @@ Root-agent configuration is frozen at daemon start. An already-running root sess
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".`
 
-// afBacklogSection is the backlog part of afUsageBody, a constant of its own so
-// guidance can drop it where the backlog is unreachable (guidanceCaps.HostStores).
-// It teaches reading and adding drafts only: queueing and starting items are the
-// user's, so an agent outside an item session does them only when asked.
-const afBacklogSection = `Backlog (one project's work items in a strict order; ids are B-12 or 12; items you add are always drafts; do not queue or start items unless the user asks):
-  af backlog list [--all] [--state <s>]                Items in order, as a tree, with each one's state (--all includes done and dropped)
-  af backlog show <id>                                 One item: body, state and reason, waits-on, children, runs, and thread
-  af backlog add <title> [--body <text or ->] [--parent <id>] [--waits-on <id>,…]  Add one draft item
-  af backlog add --file <path or ->                    Add or update many items at once from JSON: {"proposal": "<slug>", "items": [{"key", "title", "body", "parent", "waits_on", "program", "sequential"}]}; every item needs a title; parent and waits_on take a key (a string) or an item id (a number, such as 12), and "12" or "B-12" as a string is read as a key; with "proposal" set, an item with the same proposal and key is updated, not added again`
-
-// afUsageBacklogInside is inside-only: --self resolves the calling session, so
-// it works only in a session af started for a backlog item. The refused list is
-// the one api/backlog_self.go enforces; TestItemSessionGuidanceNamesEveryRefusal
-// (api) derives that list from the commands and pins this sentence to it.
-const afUsageBacklogInside = `Backlog items: when af started your session for a backlog item (your first prompt says "You are working on backlog item B-12"), report through that item, not only in your reply:
-  af backlog done --self [--pr <url>]                  The work is finished; the item goes to the user for review. Pass --pr when you opened a pull request
-  af backlog ask --self <text>                         Ask a question on the item, then stop: it goes to the group's orchestrator first if the group has one, which answers it or sends it to the user, and otherwise to the user; when af can resume this conversation it archives this session, and the answer restores it and arrives here as a prompt; otherwise the session stays live
-  af backlog ask --self <text> --then wait             The same, but this session stays live until the answer arrives
-  af backlog ask --self <text> --handoff-file <path or ->  The same, with notes (at most 8 KB) for whoever continues: a new session if this one is gone by the answer, or this one if it comes back without its conversation; the user sees them in af backlog inbox
-  af backlog note --self <text>                        Add a note to the item's thread; nobody is notified
-  af backlog add <title> [--parent <id>]               Add more work you found as a draft (under the item yours is part of: the "It is part of B-1" line of your first prompt); the user decides whether to queue it
-` + AfBacklogItemSessionAddForm + ` ` + AfBacklogItemSessionRefusals + ` If you need one of them, ask with "af backlog ask --self". Do not create other af sessions from an item session.`
-
-// afUsageOrchestratorInside teaches a session to orchestrate a backlog group
-// (an "effort"). It is inside-only: binding and --self resolve the calling
-// session. Its event list is pinned to backlog's Event kinds by
-// TestOrchestratorUsageNamesEveryEventKind.
-const afUsageOrchestratorInside = `Effort orchestrator: a session can orchestrate one backlog group (a top-level item with children, an "effort"). Bind when the user asks you to own, run, manage or drive the effort, and only then:
-  af backlog add --file <path or -> --orchestrate [--replace]  Add the batch and bind this session to its top-level parent; the batch must sit under one group
-  af backlog orchestrate <group> --self [--replace]     Bind this session to an existing group; --replace takes it over from the session that has it
-  af backlog orchestrate <group> --clear               Unbind; the questions waiting for you go to the user
-  af backlog orchestrate [<group>] --self --handoff-file <path or ->  Save notes (at most 8 KB) for a session that replaces you; with <group>, bind and save in one step
-  af backlog orchestrate --self --stay                 Keep this session live when the current turn ends, once; it works only during a turn af started
-  af backlog escalate <id> [--note <text>]             Send an item's question that came to you on to the user's Inbox
-One session orchestrates one group, and an item session cannot orchestrate.
-
-af wakes you with a prompt that starts "Events in effort B-1:" and lists the group's events; you do not need a monitor or a watch task:
-  question: an item's agent asked a question; it comes to you, not to the user. Read it with "af backlog show <id>", then answer with "af backlog answer <id> <text>", which reaches the item's session, or run "af backlog escalate <id>" when only the user can decide
-  review: an item went to review, or its agent ran "af backlog done --self" again while it was in review. Review its PR; if it is good, merge it and run "af backlog done <id>" (af adds a note to the user's Inbox). If it is not, send the changes to the item's session with "af sessions send-prompt <title> <prompt>" (the title is in its runs), and ask it to run "af backlog done --self" again after it pushes; af then wakes you with a new review event
-  stalled: an item's run sat idle 30 minutes with no done and no question, or its session stopped. Check it with "af backlog show <id>" and "af sessions preview <title>", then send it a prompt, restore it, or tell the user
-  finished: every item of the group is done or dropped; report to the user
-  escalation_answered: the user answered a question you escalated, in the Inbox or in the item's own session; continue from the answer
-When a turn af started ends with nothing pending, af archives this session if it can resume its conversation, once no one is attached; the next event restores it. Run "af backlog orchestrate --self --stay" during the turn to stay live. If this session is killed or missing when an event is due, af starts a new one with your handoff notes, so keep them current after each decision: what is merged, what waits, and why.`
-
-// AfBacklogItemSessionAddForm is the sentence of afUsageBacklogInside that names
-// the one form of add an item session may run (decision (3) on #6284). Exported
-// so the api package, which enforces the form, can pin it to the flags it
-// allows.
-const AfBacklogItemSessionAddForm = `From an item session, add takes only a title and --parent; the item is always a draft, and af notes on its thread which item's agent added it.`
-
-// AfBacklogItemSessionRefusals is the sentence of afUsageBacklogInside that names
-// what an item session cannot run. It is exported only so the api package, which
-// owns those refusals, can pin it to them.
-const AfBacklogItemSessionRefusals = `From an item session af refuses these, which are the user's: edit, move, queue, draft, review, reopen, start, done <id>, drop, delete, note <id>, answer, escalate, run, pause, unpause, archive, unarchive, and changing the runner or budget.`
-
 // afUsageProposalsInside names only the entry points; the working rules are
 // printed by af proposal start and attach, so they can change without a
 // skill update. Proposal commands need a session, so plugins do not get it.
@@ -220,7 +163,7 @@ const afUsageProposalsInside = `Proposals: when the user asks to make a proposal
 
 // afSkillDescriptionInside is AfSkillDescription for an agent inside an af
 // session, where proposal commands work.
-const afSkillDescriptionInside = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, proposals, the backlog, and the daemon via the af CLI"
+const afSkillDescriptionInside = "Manage Agent Factory (af) sessions, tabs, scheduled tasks, proposals, and the daemon via the af CLI"
 
 // afProposalTrigger is the activation text for proposal requests. Agents load a
 // skill body only when the request matches its description, and "make a
