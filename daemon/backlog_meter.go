@@ -364,6 +364,20 @@ func (m *Manager) startedItemRuns(home string) ([]itemRun, []orchRun, map[string
 	return out, orchs, unread
 }
 
+// unpricedIn is whether the account scan read past messages of c's transcripts
+// because their model had no price: a price added later makes it read them
+// again.
+func unpricedIn(state *planusage.MeterState, c backlog.OrchConversation) bool {
+	for _, f := range planusage.ConversationTranscripts([]string{c.Main}) {
+		for _, a := range state.Accounts {
+			if a != nil && a.Files[f].Skipped != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // orchestratorConversationOf is orchestratorConversation; a package var so a
 // test can stand in for a Claude session's conversation and transcript dirs.
 var orchestratorConversationOf = orchestratorConversation
@@ -704,7 +718,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 				b.NoteOrchConversations(n.group, n.sessionID, n.mains)
 			}
 			if clearedRepos[repoID] {
-				b.DropOrchCleared(now)
+				b.DropOrchCleared(now, func(c backlog.OrchConversation) bool { return unpricedIn(state, c) })
 			}
 			return nil
 		}); err != nil {

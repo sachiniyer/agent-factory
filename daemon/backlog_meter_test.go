@@ -892,3 +892,38 @@ func TestMeterPassClassifiesAClearedOrchestratorsLastMessages(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, b.Item(1).OrchCleared, "the pass scanned past the clear and dropped its record")
 }
+
+// A cleared binding whose last message has a model with no price keeps its
+// record: the scan read that message past, and once a price is added it reads
+// it again and must still count it as backlog spend (Codex P2 on #6616).
+func TestMeterPassKeepsAClearedRecordWhileItsMessagesAreUnpriced(t *testing.T) {
+	const repoID = "meter-orch-unpriced"
+	m, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	f, err := os.OpenFile(conv, os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = fmt.Fprintf(f, `{"type":"assistant","timestamp":"%s","message":{"id":"m2","model":"claude-x-9","usage":{"input_tokens":1000000,"output_tokens":0}}}`+"\n", now.Add(30*time.Second).Format(time.RFC3339))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	_, err = backlog.Update(repoID, func(b *backlog.Backlog) error {
+		_, err := b.ClearOrchestrator(1, now.Add(time.Minute))
+		return err
+	})
+	require.NoError(t, err)
+	pass(now.Add(2 * time.Minute))
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.NotNil(t, b.Item(1).OrchCleared, "m2 is unpriced: the record stays")
+
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true,
+		Prices: map[string]config.ModelPrice{"claude-x-9": {Input: 4, Output: 4}}}}
+	pass(now.Add(3 * time.Minute))
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 30.0, w["backlog"], 1e-9, "m2, priced now, is still the backlog's")
+	b, err = backlog.Load(repoID)
+	require.NoError(t, err)
+	require.Nil(t, b.Item(1).OrchCleared, "priced and classified: the record goes")
+}

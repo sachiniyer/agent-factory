@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/sachiniyer/agent-factory/planusage"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -214,12 +215,15 @@ func (b *Backlog) ClearOrchestrator(id int, now time.Time) (*Orchestrator, error
 }
 
 // DropOrchCleared removes the cleared bindings' records that a meter pass
-// started at passStart has scanned past. It returns the items it changed.
-func (b *Backlog) DropOrchCleared(passStart time.Time) []int {
+// started at passStart has scanned past, keeping one while pending says one of
+// its conversations still has messages the scan read past unpriced: a price
+// added later makes the scan read them again, and they must still be
+// classified (Codex P2 on #6616). It returns the items it changed.
+func (b *Backlog) DropOrchCleared(passStart time.Time, pending func(OrchConversation) bool) []int {
 	var ids []int
 	for i := range b.Items {
 		it := &b.Items[i]
-		if it.OrchCleared != nil && it.OrchCleared.At.Before(passStart) {
+		if it.OrchCleared != nil && it.OrchCleared.At.Before(passStart) && !slices.ContainsFunc(it.OrchCleared.Conversations, pending) {
 			it.OrchCleared = nil
 			ids = append(ids, it.ID)
 		}

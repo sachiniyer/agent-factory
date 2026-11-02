@@ -518,10 +518,14 @@ func TestClearLeavesConversationsUntilAPassScansPastIt(t *testing.T) {
 		!cl.Conversations[0].Spans[0].Until.Equal(cleared) {
 		t.Fatalf("%+v", cl)
 	}
-	if got := b.DropOrchCleared(cleared); got != nil {
+	none := func(OrchConversation) bool { return false }
+	if got := b.DropOrchCleared(cleared, none); got != nil {
 		t.Fatalf("a pass that started at the clear dropped it: %v", got)
 	}
-	if got := b.DropOrchCleared(cleared.Add(time.Second)); len(got) != 1 || b.Item(1).OrchCleared != nil {
+	if got := b.DropOrchCleared(cleared.Add(time.Second), func(OrchConversation) bool { return true }); got != nil {
+		t.Fatalf("dropped with messages still unpriced: %v", got)
+	}
+	if got := b.DropOrchCleared(cleared.Add(time.Second), none); len(got) != 1 || b.Item(1).OrchCleared != nil {
 		t.Fatalf("%v %+v", got, b.Item(1).OrchCleared)
 	}
 }
