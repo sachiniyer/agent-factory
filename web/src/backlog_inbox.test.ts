@@ -152,6 +152,7 @@ test("the Inbox filter shows each question with its handoff, age and what an ans
   pane.update(data(v), "/a", [session("s2", { liveness: Liveness.Archived })]);
   const chip = buttonNamed(el(pane), "Inbox (2)")!;
   chip.click();
+  await settle(); // s1 is not on the page: the Inbox looks it up before it calls it gone
   assert.equal(buttonNamed(el(pane), "Inbox (2)")!.getAttribute("aria-pressed"), "true");
   assert.deepEqual(rowIDs(pane), []);
   const cards = el(pane).querySelectorAll(".af-backlog-inbox-card");
@@ -171,6 +172,86 @@ test("the Inbox filter shows each question with its handoff, age and what an ans
   assert.deepEqual(calls.at(-1), { method: "PostBacklogMessage",
     body: { repo_path: "/a", id: 2, kind: "answer", text: "yes", question_id: 1 } });
   assert.equal(answer.value, "");
+});
+
+test("Inbox cards belong to their project: the same item and question ids in another project get a fresh card (Codex P1 on #6548)", async () => {
+  const pane = mount();
+  const proj = (text: string): BacklogView =>
+    view([item(1, { status: "running", runs: [run("s1")], thread: [question(1, 5, { text })] })], { 1: "needs_you" });
+  const both: BacklogData = { views: new Map([["/a", proj("A: which db?")], ["/b", proj("B: which region?")]]), errors: new Map(), budget: null, usage: null, generation: 1 };
+  pane.update(both, "/a", []);
+  buttonNamed(el(pane), "Inbox (1)")!.click();
+  const cardA = el(pane).querySelector(".af-backlog-inbox-card")!;
+  assert.match(cardA.textContent, /A: which db\?/);
+  cardA.querySelector("textarea")!.value = "postgres";
+
+  pane.update({ ...both, generation: 2 }, "/b", []);
+  if (buttonNamed(el(pane), "Inbox (1)")!.getAttribute("aria-pressed") !== "true") buttonNamed(el(pane), "Inbox (1)")!.click();
+  const cardB = el(pane).querySelector(".af-backlog-inbox-card")!;
+  assert.match(cardB.textContent, /B: which region\?/);
+  assert.notEqual(cardB, cardA, "project /a's card is not reused for /b");
+  assert.equal(cardB.querySelector("textarea")!.value, "", "/a's draft does not appear under /b's question");
+
+  cardB.querySelector("textarea")!.value = "eu-west";
+  buttonNamed(cardB, "Send answer")!.click();
+  await settle();
+  assert.deepEqual(calls.at(-1), { method: "PostBacklogMessage",
+    body: { repo_path: "/b", id: 1, kind: "answer", text: "eu-west", question_id: 1 } });
+});
+
+test("a new question keeps the focus of the answer being typed (Codex P2 on #6548)", () => {
+  const pane = mount();
+  const one = [item(1, { status: "running", runs: [run("s1")], thread: [question(1, 9)] })];
+  pane.update(data(view(one, { 1: "needs_you" })), "/a", []);
+  buttonNamed(el(pane), "Inbox (1)")!.click();
+  const answer = el(pane).querySelector(".af-backlog-inbox-card textarea")!;
+  answer.focus();
+  answer.value = "half a th";
+  // Another agent asks, newer than the first question: the list gains a card after it.
+  const two = [...one, item(2, { status: "running", runs: [run("s2")], thread: [question(1, 1)] })];
+  pane.update(data(view(two, { 1: "needs_you", 2: "needs_you" })), "/a", []);
+  assert.equal(el(pane).querySelectorAll(".af-backlog-inbox-card").length, 2);
+  // Identity, not assert.equal: a failing equal would try to diff two whole fake DOM trees.
+  assert.ok(doc.activeElement === answer, "the answer box keeps focus, so typing still reaches it");
+  assert.equal(answer.value, "half a th");
+});
+
+test("an Inbox card asks for a session the page has not loaded before predicting a new run (Codex P2 on #6548)", async () => {
+  // A fresh page holds only live sessions: an archived one is absent until it is looked up.
+  const asked: string[][] = [];
+  let answer: () => void = () => {};
+  const h = { ...host(), loadSessions: (ids: string[]) => { asked.push(ids); return new Promise<void>((r) => { answer = r; }); } };
+  const pane = mount(h);
+  const v = view([item(1, { status: "running", runs: [run("s-arch")], thread: [question(1, 5)] })], { 1: "needs_you" });
+  pane.update(data(v), "/a", []);
+  buttonNamed(el(pane), "Inbox (1)")!.click();
+  const card = (): FakeElement => el(pane).querySelector(".af-backlog-inbox-card")!;
+  assert.deepEqual(asked, [["s-arch"]], "the Inbox asks the daemon for the absent session");
+  assert.match(card().textContent, /Checking the session…/);
+  assert.doesNotMatch(card().textContent, /Starts a new run/, "absence is not proof the session is gone");
+  // The lookup found it archived: the session store now holds it.
+  answer();
+  await settle();
+  pane.update(data(v), "/a", [session("s-arch", { liveness: Liveness.Archived })]);
+  assert.match(card().textContent, /Restores the session/);
+  assert.equal(asked.length, 1, "asked once");
+});
+
+test("an Inbox card predicts a new run once the lookup confirms the session is gone, and says so when it cannot tell", async () => {
+  const gone = mount({ ...host(), loadSessions: async () => {} });
+  const v = view([item(1, { status: "running", runs: [run("s-gone")], thread: [question(1, 5)] })], { 1: "needs_you" });
+  gone.update(data(v), "/a", []);
+  buttonNamed(el(gone), "Inbox (1)")!.click();
+  await settle();
+  assert.match(el(gone).querySelector(".af-backlog-inbox-card")!.textContent, /Starts a new run with the previous agent's notes/);
+  gone.el.remove();
+  const offline = mount({ ...host(), loadSessions: async () => { throw new Error("offline"); } });
+  offline.update(data(v), "/a", []);
+  buttonNamed(el(offline), "Inbox (1)")!.click();
+  await settle();
+  const text = el(offline).querySelector(".af-backlog-inbox-card")!.textContent;
+  assert.match(text, /Can't tell yet whether the session is there/);
+  assert.doesNotMatch(text, /Starts a new run/);
 });
 
 test("an empty inbox says so, and another filter leaves it", () => {
@@ -250,6 +331,21 @@ test("a child parent pauses but does not archive", () => {
   assert.ok(buttonNamed(panel, "Pause"));
   assert.equal(buttonNamed(panel, "Archive"), undefined);
   assert.doesNotMatch(panel.textContent, /Dependencies/);
+});
+
+test("an archived group whose last child is gone can still be unarchived (Codex P2 on #6548)", async () => {
+  const pane = mount();
+  // The daemon lets the last child be deleted or moved out, and lets a leaf be unarchived.
+  pane.update(data(view([item(1, { archived: true, paused: true })])), "/a", []);
+  buttonNamed(el(pane), "Show archived")!.click();
+  pane.select(1);
+  const panel = el(pane).querySelector(".af-backlog-panel")!;
+  const unarchive = buttonNamed(panel, "Unarchive");
+  assert.ok(unarchive, "Unarchive stays on an archived item that is no longer a parent");
+  assert.equal(buttonNamed(panel, "Pause"), undefined);
+  unarchive!.click();
+  await settle();
+  assert.deepEqual(calls.at(-1), { method: "UpdateBacklogItem", body: { repo_path: "/a", id: 1, archived: false } });
 });
 
 test("the panel's open question shows the handoff in full", () => {

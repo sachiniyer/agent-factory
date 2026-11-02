@@ -274,7 +274,7 @@ export class ItemPanel {
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
     const q = openQuestion(it);
-    this.question.set(q, q ? answerEffectText(answerEffect(it, sessions)) : "");
+    this.question.set(q, q ? answerEffectText(answerEffect(it, sessions, (id) => this.lookups.get(id))) : "");
     const card = this.sessionCard(view, it);
     this.card.hidden = card.length === 0;
     this.card.replaceChildren(...card);
@@ -334,7 +334,9 @@ export class ItemPanel {
       b.dataset.action = a;
       row.append(b);
     }
-    if (isParent(view.backlog, it.id)) row.append(...groupButtons(it, isGroup(view.backlog, it), this.actions.group));
+    // An archived item keeps Unarchive even once it is no longer a parent: the daemon lets its
+    // last child be deleted or moved out, and lets a leaf be unarchived (Codex P2 on #6548).
+    if (isParent(view.backlog, it.id) || it.archived) row.append(...groupButtons(it, isGroup(view.backlog, it), this.actions.group));
     row.append(this.moveMenu(view, it));
     return row;
   }

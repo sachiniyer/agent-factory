@@ -129,8 +129,9 @@ export class BacklogPane {
     });
     this.popover = new PreviewPopover(this.previews);
     this.inboxList = new InboxList({
-      answer: (id, qid, text) => this.answer(this.root ?? "", id, qid, text),
+      answer: (root, id, qid, text) => this.answer(root, id, qid, text),
       select: (id) => this.select(id),
+      loadSessions: (ids) => this.host.loadSessions(ids),
     });
     this.headSlot.append(this.runner.el);
     this.newItem = entryField("New item…", "New item title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
@@ -442,7 +443,7 @@ export class BacklogPane {
     this.emptySlot.replaceChildren();
     if (this.inboxOn) {
       this.popover.hide();
-      this.inboxList.render(v, this.sessions);
+      this.inboxList.render(this.root ?? "", v, this.sessions);
       if (this.listSlot.firstChild !== this.inboxList.el) this.listSlot.replaceChildren(this.inboxList.el);
     } else {
       this.listSlot.replaceChildren(list);

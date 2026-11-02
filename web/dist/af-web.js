@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "96713bca14da";
+var CLIENT_VERSION = "212d02cf8b41";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18805,10 +18805,15 @@ function inbox(view) {
   const at = (e) => Date.parse(e.question.at) || 0;
   return out.sort((a, b) => at(a) - at(b));
 }
-function answerEffect(it, sessions) {
+function answerEffect(it, sessions, lookup) {
   const run = latestRun(it);
   if (run?.state !== "started" || !run.session_id) return "new_run";
   const s = sessions.find((x) => x.id === run.session_id);
+  if (!s && lookup) {
+    const l = lookup(run.session_id);
+    if (l === "failed") return "unknown";
+    if (l !== "done") return "checking";
+  }
   if (!s || s.user_killed === true || (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Killing) return "new_run";
   if (isArchived(s)) return "restore";
   const kind = rowKind(s);
@@ -18820,6 +18825,10 @@ function answerEffectText(effect) {
       return "Restores the session";
     case "new_run":
       return "Starts a new run with the previous agent's notes";
+    case "checking":
+      return "Checking the session\u2026";
+    case "unknown":
+      return "Can't tell yet whether the session is there";
     default:
       return "Goes to the session";
   }
@@ -18973,12 +18982,17 @@ var InboxList = class {
   list = h("ul", { class: "af-backlog-inbox-list" });
   empty = h("p", { class: "af-backlog-empty" }, EMPTY_INBOX);
   cards = /* @__PURE__ */ new Map();
-  render(view, sessions) {
+  // Run sessions the page did not hold, by id: asked for, answered, or unanswerable.
+  lookups = /* @__PURE__ */ new Map();
+  last = null;
+  render(root2, view, sessions) {
+    this.last = [root2, view, sessions];
     const entries = inbox(view);
+    this.lookUpMissing(entries.map((e) => e.item), sessions);
     const next = /* @__PURE__ */ new Map();
     for (const { item, question } of entries) {
-      const key = `${item.id}:${question.id}`;
-      const card = this.cards.get(key) ?? this.card(item.id);
+      const key = `${root2}\0${item.id}:${question.id}`;
+      const card = this.cards.get(key) ?? this.card(root2, item.id);
       const label = `${formatID(item.id)} ${item.title}`;
       const age = `Asked ${formatTime(question.at)}`;
       if (card.head.dataset.sig !== `${label}
@@ -18989,18 +19003,42 @@ ${age}`;
         open.addEventListener("click", () => this.actions.select(item.id));
         card.head.replaceChildren(open, h("span", { class: "af-backlog-reason" }, age));
       }
-      card.box.set(question, answerEffectText(answerEffect(item, sessions)));
+      card.box.set(question, answerEffectText(answerEffect(item, sessions, (id) => this.lookups.get(id))));
       next.set(key, card);
     }
     this.cards = next;
     const want = [...next.values()].map((c) => c.li);
     const have = [...this.list.children];
-    if (want.length !== have.length || want.some((li, i) => li !== have[i])) this.list.replaceChildren(...want);
+    if (want.length !== have.length || want.some((li, i) => li !== have[i])) this.reorder(want);
     this.empty.hidden = want.length > 0;
   }
-  card(id) {
+  /** An absent run session is not proof it is gone: a page holds only live sessions
+   *  until it asks. Ask the daemon for each once, then draw again (Codex P2 on #6548). */
+  lookUpMissing(items, sessions) {
+    const missing = [...new Set(items.map((it) => it.runs?.at(-1)).filter((r) => r?.state === "started" && !!r.session_id).map((r) => r.session_id))].filter((id) => !this.lookups.has(id) && !sessions.some((s) => s.id === id));
+    if (missing.length === 0) return;
+    for (const id of missing) this.lookups.set(id, "pending");
+    const settle = (state) => {
+      for (const id of missing) this.lookups.set(id, state);
+      if (this.last) this.render(...this.last);
+    };
+    this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
+  }
+  /** Puts the cards in order. replaceChildren detaches every card, and a detached
+   *  answer box loses focus and its selection: a card that survives gets both back,
+   *  so a question arriving or leaving never takes the typing away (Codex P2 on #6548). */
+  reorder(want) {
+    const active = document.activeElement;
+    const keep = active && this.list.contains(active) && want.some((li) => li.contains(active)) ? active : null;
+    const sel = keep && typeof keep.selectionStart === "number" ? { start: keep.selectionStart, end: keep.selectionEnd ?? keep.selectionStart, dir: keep.selectionDirection ?? "none" } : null;
+    this.list.replaceChildren(...want);
+    if (!keep || document.activeElement === keep) return;
+    keep.focus({ preventScroll: true });
+    if (sel && typeof keep.setSelectionRange === "function") keep.setSelectionRange(sel.start, sel.end, sel.dir);
+  }
+  card(root2, id) {
     const head = h("div", { class: "af-backlog-inbox-head" });
-    const box = new QuestionBox(id, (qid, text) => this.actions.answer(id, qid, text));
+    const box = new QuestionBox(id, (qid, text) => this.actions.answer(root2, id, qid, text));
     const li = h("li", { class: "af-backlog-inbox-card" }, head, box.el);
     return { li, head, box };
   }
@@ -19509,7 +19547,7 @@ ${this.note.value}` : text;
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
     const q = openQuestion(it);
-    this.question.set(q, q ? answerEffectText(answerEffect(it, sessions)) : "");
+    this.question.set(q, q ? answerEffectText(answerEffect(it, sessions, (id) => this.lookups.get(id))) : "");
     const card = this.sessionCard(view, it);
     this.card.hidden = card.length === 0;
     this.card.replaceChildren(...card);
@@ -19571,7 +19609,7 @@ ${this.note.value}` : text;
       b.dataset.action = a;
       row.append(b);
     }
-    if (isParent(view.backlog, it.id)) row.append(...groupButtons(it, isGroup(view.backlog, it), this.actions.group));
+    if (isParent(view.backlog, it.id) || it.archived) row.append(...groupButtons(it, isGroup(view.backlog, it), this.actions.group));
     row.append(this.moveMenu(view, it));
     return row;
   }
@@ -20250,8 +20288,9 @@ var BacklogPane = class {
     });
     this.popover = new PreviewPopover(this.previews);
     this.inboxList = new InboxList({
-      answer: (id, qid, text) => this.answer(this.root ?? "", id, qid, text),
-      select: (id) => this.select(id)
+      answer: (root2, id, qid, text) => this.answer(root2, id, qid, text),
+      select: (id) => this.select(id),
+      loadSessions: (ids) => this.host.loadSessions(ids)
     });
     this.headSlot.append(this.runner.el);
     this.newItem = entryField("New item\u2026", "New item title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
@@ -20605,7 +20644,7 @@ ${id}`;
     this.emptySlot.replaceChildren();
     if (this.inboxOn) {
       this.popover.hide();
-      this.inboxList.render(v, this.sessions);
+      this.inboxList.render(this.root ?? "", v, this.sessions);
       if (this.listSlot.firstChild !== this.inboxList.el) this.listSlot.replaceChildren(this.inboxList.el);
     } else {
       this.listSlot.replaceChildren(list);
