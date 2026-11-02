@@ -545,3 +545,38 @@ func TestStartBacklogItemLinksASessionTheCreateKeptUncertain(t *testing.T) {
 		t.Fatalf("runs %+v", it.Runs)
 	}
 }
+
+// TestStartBacklogItemWhoseCreateKeptATombstoneFails: a create can also commit
+// a kill tombstone the daemon is cleaning up (keepFailedCreate, after a failed
+// start or an orphaned sandbox). Nothing of it runs, so the start failed: the
+// run is failed and the item goes back to its status, as for any failed create
+// (Codex P2 on #6575).
+func TestStartBacklogItemWhoseCreateKeptATombstoneFails(t *testing.T) {
+	m, repoID, repoPath := backlogTestManager(t)
+	prev := createBacklogSession
+	createBacklogSession = func(m *Manager, ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+		data, err := prev(m, ctx, req)
+		if err != nil {
+			return data, err
+		}
+		s, ok := m.itemSessions(repoID)[data.ID]
+		if !ok {
+			t.Fatalf("no item session %q", data.ID)
+		}
+		s.instance.MarkUserKilled()
+		return s.instance.ToInstanceData(), &mutationCommittedError{err: fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely", data.Title)}
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoPath: repoPath, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatal(err)
+	}
+	m.backgroundMutationWG.Wait()
+	it := loadItem(t, repoID, 1)
+	if len(it.Runs) != 1 || it.Runs[0].State != backlog.RunFailed || it.Status != backlog.StatusDraft {
+		t.Fatalf("a tombstone create is a failed start: %+v", it)
+	}
+	if n := it.Thread[len(it.Thread)-1]; !strings.Contains(n.Text, "could not start") || strings.Contains(n.Text, "may still be running") {
+		t.Fatalf("note %+v", n)
+	}
+}
