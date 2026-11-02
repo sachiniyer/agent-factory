@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { seededTabs } from "./seeded-tabs.js";
 
 // #6556: the ".af-split-narrow" notice was written inside the rebuild gate,
 // so it only ever described the fit at the moment the visible tree changed.
@@ -7,10 +8,11 @@ import { expect, test, type Page } from "@playwright/test";
 // visible tree stays identical (a hidden leaf closes) leaving stale text.
 // The notice must track fit.hidden on every pass.
 //
-// probe-a's tab roster is shared with the whole suite — earlier specs leave
-// tabs behind — so every count here is taken relative to what the test finds.
+// probe-a's tab roster is shared with the whole suite: counts are taken
+// relative to entry, and the helper closes whatever this test adds (#4217).
 
 const sessionA = process.env.AF_WEB_SESSION_A ?? "probe-a";
+const roster = seededTabs();
 
 /** Same shared-DataTransfer dispatch as split-min-width.spec.ts. */
 async function dragTabToPane(page: Page, tabIndex: number, paneIndex: number, edge: "left" | "right"): Promise<void> {
@@ -64,7 +66,7 @@ test("#6556: a split into an already-narrow host still names its hidden pane", a
   // Two shells: the second stays selected (the pane keeps showing it) while
   // the FIRST is dragged — an unshown tab, so the drop really splits rather
   // than routing through companionTab's self-drop substitution.
-  const base = await page.locator(".af-tabbar .af-tab").count();
+  const base = await roster.enter(page);
   await newShellTab(page);
   await newShellTab(page);
   await dragTabToPane(page, base, 0, "right");
@@ -86,7 +88,7 @@ test("#6556: a hidden-count change with the same visible tree rewrites the notic
   // onto a DIFFERENT pane would not split: the one-tab-one-pane dedupe moves
   // it and closes its old leaf (split.ts applyTabDrop → dedupeExcept), which
   // is exactly the no-leaf outcome an earlier draft of this test produced.
-  const base = await page.locator(".af-tabbar .af-tab").count();
+  const base = await roster.enter(page);
   await newShellTab(page);
   await newShellTab(page);
   await newShellTab(page);
