@@ -141,3 +141,16 @@ func (b *Backlog) normalizeOrchestrators() {
 		seen[it.Orchestrator.SessionID] = true
 	}
 }
+
+// savedSchemaVersion is the schema_version a save writes: the newest only
+// while some group has an orchestrator, so a backlog without one stays a
+// version 2 file that an older af reads and writes back with nothing lost.
+// Clearing the last binding brings the next save back to version 2.
+func (b *Backlog) savedSchemaVersion() int {
+	for i := range b.Items {
+		if b.Items[i].Orchestrator != nil {
+			return BacklogSchemaVersion
+		}
+	}
+	return BacklogUnboundSchemaVersion
+}

@@ -13,10 +13,14 @@ import (
 )
 
 const (
-	BacklogFileName      = "backlog.json"
-	BudgetFileName       = "budget.json"
-	BacklogSchemaVersion = 2
-	BudgetSchemaVersion  = 2
+	BacklogFileName = "backlog.json"
+	BudgetFileName  = "budget.json"
+	// BacklogSchemaVersion is the newest backlog.json this af reads. A save writes
+	// it only while some group has an orchestrator, and BacklogUnboundSchemaVersion
+	// otherwise (Backlog.savedSchemaVersion).
+	BacklogSchemaVersion        = 3
+	BacklogUnboundSchemaVersion = 2
+	BudgetSchemaVersion         = 2
 )
 
 // ErrBusy is returned when another writer held a store's lock too long. The
@@ -112,8 +116,15 @@ func UpdateBudget(fn func(*Budget) error) (*Budget, error) {
 }
 
 type store[T any] struct {
-	name     string
-	version  int
+	name string
+	// version is the newest schema version this binary reads, and what a save
+	// writes unless stamp says otherwise.
+	version int
+	// stamp, when set, is the version a save writes, from the data: the
+	// backlog writes its newest version only while it holds data an older af
+	// could not represent. Its version on disk changes only on a save, so a
+	// read migrates in memory and leaves the file alone.
+	stamp    func(*T) int
 	empty    func() *T
 	finish   func(*T) error
 	setStamp func(*T, int)
@@ -127,14 +138,13 @@ var backlogStore = store[Backlog]{
 	empty:    New,
 	finish:   (*Backlog).normalize,
 	setStamp: func(b *Backlog, v int) { b.SchemaVersion = v },
-	// Version 2 only adds fields (paused and archived on items, then and handoff
-	// on messages), so its migrator only stamps. The bump stops an older af from
-	// saving the file and dropping them. Item.Orchestrator needs no bump yet:
-	// nothing writes it, and an unset one is omitted, so an unbound file is a
-	// plain version 2 file. The slice that first writes a binding moves this to
-	// version 3 (stampVersion(3) from 2), so an older af refuses a file that
-	// holds one rather than dropping it.
-	migrate: map[int]config.SchemaMigrator{1: stampVersion(2)},
+	stamp:    (*Backlog).savedSchemaVersion,
+	// Versions 2 and 3 only add fields (2: paused and archived on items, then
+	// and handoff on messages; 3: a group's orchestrator), so their migrators
+	// only stamp. A save writes 3 only while a group has an orchestrator, so an
+	// af that knows only version 2 refuses a file holding one rather than
+	// dropping it, and reads every other file as before.
+	migrate: map[int]config.SchemaMigrator{1: stampVersion(2), 2: stampVersion(3)},
 }
 
 var budgetStore = store[Budget]{
@@ -263,6 +273,24 @@ func loadFile[T any](path string, s store[T]) (*T, error) {
 		}
 		return nil, err
 	}
+	if s.stamp != nil {
+		// The version on disk follows the data and changes only on a save:
+		// migrate in memory, and report the version a save would write.
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("%s: read: %w", s.name, err)
+		}
+		migrated, _, err := config.MigrateSchemaBytes(raw, s.plan(path))
+		if err != nil {
+			return nil, err
+		}
+		v, err := s.decode(migrated)
+		if err != nil {
+			return nil, err
+		}
+		s.setStamp(v, s.stamp(v))
+		return v, nil
+	}
 	raw, _, err := config.LoadAndMigrateSchemaFile(s.plan(path))
 	if err != nil {
 		return nil, wrapBusy(err)
@@ -297,10 +325,15 @@ func updateFile[T any](path string, s store[T], fn func(*T) error) (*T, error) {
 		if err := fn(v); err != nil {
 			return err
 		}
-		s.setStamp(v, s.version)
+		// finish first: it can drop data (an invalid binding) that decides the stamp.
 		if err := s.finish(v); err != nil {
 			return err
 		}
+		version := s.version
+		if s.stamp != nil {
+			version = s.stamp(v)
+		}
+		s.setStamp(v, version)
 		data, err := json.MarshalIndent(v, "", "  ")
 		if err != nil {
 			return err

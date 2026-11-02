@@ -165,23 +165,26 @@ func TestCloneCopiesOrchestrator(t *testing.T) {
 	}
 }
 
-// TestUnboundBacklogStaysV2 pins why this slice adds no schema bump: an
-// unbound file loads and saves as a plain version 2 file, which an af that
-// knows only version 2 reads and writes back without losing anything. The
-// slice that first writes a binding moves the schema to 3 and must assert the
-// bound file's version here.
+// TestUnboundBacklogStaysV2: the stamp follows the data. A file with no
+// orchestrator loads and saves as a plain version 2 file, which an af that
+// knows only version 2 reads and writes back without losing anything, and a
+// read never rewrites it.
 func TestUnboundBacklogStaysV2(t *testing.T) {
 	home(t)
 	path, _ := BacklogPath(repoID)
 	writeRaw(t, path, `{"schema_version": 2, "next_id": 3, "items": [
 		{"id": 1, "title": "group", "status": "draft", "paused": true},
 		{"id": 2, "title": "child", "status": "queued", "parent": 1}]}`)
+	before, _ := os.ReadFile(path)
 	b, err := Load(repoID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if b.SchemaVersion != 2 || !b.Item(1).Paused || b.Item(1).Orchestrator != nil || b.Item(2).Status != StatusQueued {
 		t.Fatalf("%+v", b)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatalf("a read rewrote the file: %s", after)
 	}
 	if _, err := Update(repoID, func(b *Backlog) error {
 		b.Item(2).Title = "child, renamed"
@@ -220,8 +223,11 @@ func TestBoundOrchestratorRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o := b.Item(1).Orchestrator; o == nil || o.SessionID != "s" || b.Item(2).Orchestrator != nil {
+	if o := b.Item(1).Orchestrator; o == nil || o.SessionID != "s" || b.Item(2).Orchestrator != nil || b.SchemaVersion != 3 {
 		t.Fatalf("%s", raw)
+	}
+	if !strings.Contains(string(raw), `"schema_version": 3`) {
+		t.Fatalf("a bound save must write version 3, so an older af refuses it rather than drop the binding: %s", raw)
 	}
 	if strings.Contains(string(raw), `"handoff"`) || strings.Contains(string(raw), `"events"`) || strings.Contains(string(raw), `"meter"`) {
 		t.Fatalf("empty fields written: %s", raw)
@@ -326,5 +332,77 @@ func TestOrchestratorJSONRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Item(1).Orchestrator, o) {
 		t.Fatalf("got %+v, want %+v", got.Item(1).Orchestrator, o)
+	}
+}
+
+// TestClearingTheLastBindingWritesV2: the version follows the bindings both
+// ways. While any group is bound the file is version 3; clearing one of two
+// keeps it there; clearing the last brings that save back to version 2, which
+// an older af reads again.
+func TestClearingTheLastBindingWritesV2(t *testing.T) {
+	home(t)
+	path, _ := BacklogPath(repoID)
+	version := func() float64 {
+		t.Helper()
+		raw, _ := os.ReadFile(path)
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			t.Fatal(err)
+		}
+		return obj["schema_version"].(float64)
+	}
+	update := func(fn func(*Backlog) error) {
+		t.Helper()
+		if _, err := Update(repoID, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	update(func(b *Backlog) error {
+		for _, n := range []NewItem{{Title: "g1"}, {Title: "c1", Parent: 1}, {Title: "g2"}, {Title: "c2", Parent: 3}} {
+			if _, err := b.Add(n, t0); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if v := version(); v != 2 {
+		t.Fatalf("unbound: %v", v)
+	}
+	update(func(b *Backlog) error { return b.BindOrchestrator(1, orch("s1"), t0) })
+	update(func(b *Backlog) error { return b.BindOrchestrator(3, orch("s3"), t0) })
+	if v := version(); v != 3 {
+		t.Fatalf("bound: %v", v)
+	}
+	update(func(b *Backlog) error { _, err := b.ClearOrchestrator(1, t0); return err })
+	if v := version(); v != 3 {
+		t.Fatalf("one binding left: %v", v)
+	}
+	update(func(b *Backlog) error { _, err := b.ClearOrchestrator(3, t0); return err })
+	if v := version(); v != 2 {
+		t.Fatalf("the last binding cleared: %v", v)
+	}
+}
+
+// TestLoadsV3: a version 3 file loads. A bound one keeps its binding; one with
+// no binding (the fork stamped every file v3) loads as unbound and its next
+// save writes version 2.
+func TestLoadsV3(t *testing.T) {
+	home(t)
+	path, _ := BacklogPath(repoID)
+	writeRaw(t, path, `{"schema_version": 3, "next_id": 3, "items": [
+		{"id": 1, "title": "group", "status": "draft"},
+		{"id": 2, "title": "child", "status": "draft", "parent": 1}]}`)
+	b, err := Load(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.SchemaVersion != 2 || b.Item(1).Orchestrator != nil {
+		t.Fatalf("%+v", b)
+	}
+	if _, err := Update(repoID, func(*Backlog) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), `"schema_version": 2`) {
+		t.Fatalf("an unbound v3 file saves as v2: %s", raw)
 	}
 }

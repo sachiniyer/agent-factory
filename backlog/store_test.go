@@ -82,7 +82,7 @@ func TestUpdateRoundTrip(t *testing.T) {
 	path, _ := BacklogPath(repoID)
 	raw, _ := os.ReadFile(path)
 	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil || m["schema_version"] != float64(BacklogSchemaVersion) {
+	if err := json.Unmarshal(raw, &m); err != nil || m["schema_version"] != float64(BacklogUnboundSchemaVersion) {
 		t.Fatalf("%s", raw)
 	}
 }
@@ -112,7 +112,7 @@ func writeRaw(t *testing.T, path, s string) {
 func TestRefusesNewerSchema(t *testing.T) {
 	home(t)
 	path, _ := BacklogPath(repoID)
-	newer := `{"schema_version": 3, "next_id": 5, "items": [], "future": true}`
+	newer := `{"schema_version": 4, "next_id": 5, "items": [], "future": true}`
 	writeRaw(t, path, newer)
 
 	var unsupported *config.UnsupportedSchemaVersionError
@@ -155,7 +155,7 @@ func TestMigratesFileWithoutVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.SchemaVersion != BacklogSchemaVersion || b.NextID != 4 || b.Item(3).Title != "hand" || b.Settings.MaxRunning != 1 {
+	if b.SchemaVersion != BacklogUnboundSchemaVersion || b.NextID != 4 || b.Item(3).Title != "hand" || b.Settings.MaxRunning != 1 {
 		t.Fatalf("%+v", b)
 	}
 }
@@ -178,7 +178,7 @@ func TestMigratesV1AndKeepsV2Fields(t *testing.T) {
 		t.Fatal(err)
 	}
 	g, c := b.Item(1), b.Item(2)
-	if b.SchemaVersion != BacklogSchemaVersion || !g.Paused || !g.Archived || c.Title != "child2" {
+	if b.SchemaVersion != BacklogUnboundSchemaVersion || !g.Paused || !g.Archived || c.Title != "child2" {
 		t.Fatalf("%+v", b)
 	}
 	if m := c.Thread[0]; m.Then != "archive" || m.Handoff != "notes" {
@@ -189,7 +189,7 @@ func TestMigratesV1AndKeepsV2Fields(t *testing.T) {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		t.Fatal(err)
 	}
-	if obj["schema_version"] != float64(BacklogSchemaVersion) {
+	if obj["schema_version"] != float64(BacklogUnboundSchemaVersion) {
 		t.Fatalf("not stamped: %s", raw)
 	}
 }
