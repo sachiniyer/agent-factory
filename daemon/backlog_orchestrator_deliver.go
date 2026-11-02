@@ -81,7 +81,8 @@ func (m *Manager) beginOrchDelivery(repoID string, group int, now time.Time) (*b
 // deliverOrchestrator sends group's pending events to its orchestrator in one
 // prompt. A live session gets the prompt; an archived, lost or dead one is
 // restored first; a killed or missing one is replaced by a new session whose
-// first prompt carries the handoff and the events. A client attached, a usage
+// first prompt carries the handoff and the events. The prompt opens a turn
+// whose end archives the session when nothing is left to send. A client attached, a usage
 // limit, or an archive that raced the send holds it for a later pass. Any
 // other failure counts toward escalation, unless the daemon is stopping.
 func (m *Manager) deliverOrchestrator(stop <-chan struct{}, repoID string, group int, now time.Time) {
@@ -170,15 +171,32 @@ func (m *Manager) sendOrchestratorPrompt(repoID string, group int, inst *session
 	if !m.orchestratorOwns(repoID, group, inst.ID) {
 		return errOrchNotOwner
 	}
+	// The prompt opens a turn on the session's run marker, so its idle edge ends
+	// the turn and archives an orchestrator with nothing left to send. Armed
+	// under the target lock just before the send, as sendBacklogAnswer arms an
+	// item run. A failed send closes the turn only when it opened it: a turn
+	// already running is not this send's to end.
+	wasActive := inst.BacklogRunActive()
+	armed := inst.ArmOrchestratorTurn(time.Now())
+	gen := inst.BacklogRunGeneration()
+	if armed {
+		m.persistAndPublishInstance(repoID, inst)
+	}
 	err := sendBacklogPrompt(m, SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID, Prompt: prompt, BacklogOrigin: true})
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, errBacklogDeliveryUncertain):
+		// It may have landed: the turn stays open, so its idle edge still ends it.
 		if ref, rerr := m.backlogService().Resolve(repoID, ""); rerr == nil {
 			m.noteBacklogUncertainDelivery(ref, group, err)
 		}
 		return nil
+	}
+	if armed && !wasActive {
+		m.disarmBacklogRunGen(repoID, inst, gen)
+	}
+	switch {
 	case errors.Is(err, errBacklogTargetLimited):
 		return errBacklogAnswerHeld
 	case errors.Is(err, errBacklogTargetTearingDown) || m.backlogTearingDown(repoID, inst):
@@ -277,6 +295,7 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 			}
 			m.publishEvent(agentproto.EventBacklogOrchestratorReplaced, backlog.OrchestratorEvent{RepoID: repoID, ID: d.Group,
 				SessionID: data.ID, Title: data.Title, Previous: d.SessionID})
+			m.revisitOrchTurnEnd(stop, repoID, data.ID)
 			return
 		}
 	}
@@ -290,6 +309,8 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 		Program:   d.Program,
 		Prompt:    b.OrchStartPrompt(d.Group, proposalDir(repoID, g), true, d.Events),
 		Backend:   string(session.BackendLocal),
+
+		OrchestratorTurn: true,
 	}
 	if err == nil {
 		// The host checks an item start runs (the agent is installed, tmux
@@ -364,6 +385,9 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 	}
 	m.publishEvent(agentproto.EventBacklogOrchestratorReplaced, backlog.OrchestratorEvent{RepoID: repoID, ID: d.Group,
 		SessionID: data.ID, Title: data.Title, Previous: d.SessionID})
+	// Its first turn may have ended before the bind, when it orchestrated no
+	// group yet (Codex P2 on #6614).
+	m.revisitOrchTurnEnd(stop, repoID, data.ID)
 }
 
 // bindReplacement binds next in place of d's session. A busy backlog is
@@ -400,7 +424,29 @@ func (m *Manager) orchDelivered(stop <-chan struct{}, repoID string, d backlog.O
 		return []int{d.Group}, nil
 	}); err != nil && !errors.Is(err, errBacklogNoChange) {
 		m.warn().Printf("record orchestrator delivery on %s: %v", backlog.FormatID(d.Group), err)
+		return
 	}
+	m.revisitOrchTurnEnd(stop, repoID, d.SessionID)
+}
+
+// revisitOrchTurnEnd decides again on a turn of sessionID that ended while
+// bookkeeping it depends on was pending, now that it is written: a delivery not
+// yet recorded (the turn end saw the delivered events as unsent), or a
+// replacement not yet bound (the turn end found the session orchestrating
+// nothing). Either way the turn end kept the session live, and no later idle
+// edge comes to archive it (Codex P2s on #6614). Only that same turn, still the
+// latest and ended, is decided again: a turn a newer delivery opened ends on
+// its own edge. A turn that used up a --stay was never noted.
+func (m *Manager) revisitOrchTurnEnd(stop <-chan struct{}, repoID, sessionID string) {
+	gen, ok := m.backlog.takeOrchTurnWaits(sessionID)
+	if !ok {
+		return
+	}
+	s, ok := m.projectSession(repoID, sessionID)
+	if !ok || s.instance.BacklogRunActive() || s.instance.BacklogRunGeneration() != gen {
+		return
+	}
+	m.orchestratorTurnEnded(repoID, s.instance, gen, stop)
 }
 
 // orchDeliveryFailed records a failed delivery, unless the daemon is

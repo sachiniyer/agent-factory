@@ -35,6 +35,9 @@ type InstanceOptions struct {
 	// BacklogItem marks the session as started for a backlog item, and opens its
 	// first backlog run.
 	BacklogItem int
+	// OrchestratorTurn opens a turn on a session af starts to orchestrate a
+	// group; see Instance.ArmOrchestratorTurn.
+	OrchestratorTurn bool
 	// SandboxCredentials mints and revokes the per-session credential a provisioned
 	// sandbox uses to call back into the daemon (#2999, #3068). An INTERFACE rather
 	// than a pair of values so it runs only for off-box kinds — session cannot
@@ -693,7 +696,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		// is never counted against a cap.
 		taskRunActive:         opts.TaskID != "",
 		BacklogItem:           opts.BacklogItem,
-		backlogRunActive:      opts.BacklogItem != 0,
+		backlogRunActive:      opts.BacklogItem != 0 || opts.OrchestratorTurn,
 		liveness:              LiveReady,
 		Path:                  absPath,
 		repoIdentityPath:      opts.RepoIdentityPath,

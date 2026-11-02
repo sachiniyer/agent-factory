@@ -108,10 +108,16 @@ func (i *Instance) ReconcileBacklogArchiveSnapshot(rec *BacklogArchiveData) bool
 	return true
 }
 
-// backlogArchiveFromData is the archive record of an item session's record;
-// any other session has none.
+// OrchIdleArchive is backlog.ArchiveOrchIdle, the one archive a session that
+// is not an item session owes: a group orchestrator's turn ended with nothing
+// left to send. session does not import backlog; a daemon test pins the two.
+const OrchIdleArchive = "orchestrator_idle"
+
+// backlogArchiveFromData is the archive record of a session's record: an item
+// session's, or a group orchestrator's idle archive, which a restart finishes.
+// Any other record on a session that is not an item session is dropped.
 func backlogArchiveFromData(data InstanceData) *BacklogArchiveData {
-	if data.BacklogArchive == nil || data.BacklogItem == 0 {
+	if data.BacklogArchive == nil || (data.BacklogItem == 0 && data.BacklogArchive.Reason != OrchIdleArchive) {
 		return nil
 	}
 	rec := *data.BacklogArchive
@@ -147,6 +153,27 @@ func (i *Instance) ArmBacklogRun(at time.Time) bool {
 	if i.BacklogItem == 0 || i.taskRunActive {
 		return false
 	}
+	i.armBacklogRunLocked(at)
+	return true
+}
+
+// ArmOrchestratorTurn opens a turn on an orchestrator session when af sends it
+// the group's events, so its idle edge ends the turn like a backlog run. The
+// marker is not persisted for a session that is not an item session: a turn
+// cut by a restart ends unobserved. It reports false for an item session or a
+// task session.
+func (i *Instance) ArmOrchestratorTurn(at time.Time) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.BacklogItem != 0 || i.TaskID != "" || i.taskRunActive {
+		return false
+	}
+	i.armBacklogRunLocked(at)
+	return true
+}
+
+// armBacklogRunLocked opens a run on the marker. Caller holds i.mu.
+func (i *Instance) armBacklogRunLocked(at time.Time) {
 	if !i.backlogRunActive {
 		// Kept so a rollback restores the previous run's completion evidence
 		// (the archive guard compares pane churn against it).
@@ -162,7 +189,6 @@ func (i *Instance) ArmBacklogRun(at time.Time) bool {
 	i.taskRunTurnGateHeld = true
 	i.stateEpoch++
 	i.touchLocked()
-	return true
 }
 
 // DisarmBacklogRun closes a backlog run whose prompt was not delivered.

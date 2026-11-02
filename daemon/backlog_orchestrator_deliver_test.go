@@ -133,7 +133,8 @@ func TestOrchestratorDeliveryRestoresAnArchivedSession(t *testing.T) {
 
 func TestOrchestratorDeliveryReplacesAGoneSession(t *testing.T) {
 	m, repoID := orchestratedGroup(t)
-	_, err := m.backlogService().SetOrchestratorHandoff(backlog.SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: "Merge B-3 next."})
+	handoff := "Merge B-3 next."
+	_, err := m.backlogService().SetOrchestratorHandoff(backlog.SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: &handoff})
 	require.NoError(t, err)
 	m.mu.Lock()
 	delete(m.instances, daemonInstanceKey(repoID, "planner"))
@@ -155,6 +156,7 @@ func TestOrchestratorDeliveryReplacesAGoneSession(t *testing.T) {
 	require.Equal(t, "effort B-2 Effort", create.TitleBase)
 	require.Equal(t, "claude", create.Program)
 	require.Zero(t, create.BacklogItem, "an orchestrator is not an item session")
+	require.True(t, create.OrchestratorTurn, "the first prompt opens a turn whose end can archive the session")
 	for _, want := range []string{"af started this session to replace it", "Merge B-3 next.", "B-3 Child: ready for review."} {
 		require.Contains(t, create.Prompt, want)
 	}
@@ -360,7 +362,8 @@ func TestOrchestratorReplacementRefusedByThePreflightIsAFailure(t *testing.T) {
 // (Codex P2 on #6571).
 func TestOrchestratorUnstartedReplacementGetsTheStartPromptNext(t *testing.T) {
 	m, repoID := orchestratedGroup(t)
-	_, err := m.backlogService().SetOrchestratorHandoff(backlog.SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: "Merge B-3 next."})
+	notes := "Merge B-3 next."
+	_, err := m.backlogService().SetOrchestratorHandoff(backlog.SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: &notes})
 	require.NoError(t, err)
 	m.mu.Lock()
 	delete(m.instances, daemonInstanceKey(repoID, "planner"))
