@@ -40,6 +40,12 @@ type AccountMeter struct {
 	// Seen holds the keys of the messages counted, so a message copied into
 	// another transcript counts once.
 	Seen map[string]int64 `json:"seen,omitempty"`
+	// SeenBacklog holds the keys in Seen whose cost is counted as backlog
+	// spend. A later copy of a key not in it, read under a backlog path within
+	// its spans, moves that message's cost to backlog spend: the copy scanned
+	// first need not be the backlog's own, as when a user forks a backlog
+	// conversation (#6618). Pruned with Seen.
+	SeenBacklog map[string]bool `json:"seen_backlog,omitempty"`
 	// Unpriced lists the models seen with no price; their messages are not
 	// counted.
 	Unpriced []string `json:"unpriced,omitempty"`
@@ -437,7 +443,7 @@ func (s *MeterState) ScanAll(sources map[string][]string, backlog []BacklogPath,
 			}
 			return false
 		}
-		res, err := ReadTranscript(c.path, mark, ReadOptions{Overrides: overrides, SkipBad: true, SkipUnpriced: true, Seen: a.Seen, Foreign: foreign})
+		res, err := ReadTranscript(c.path, mark, ReadOptions{Overrides: overrides, SkipBad: true, SkipUnpriced: true, Seen: a.Seen, Foreign: foreign, Dups: true})
 		if err != nil && res.Mark == mark {
 			continue
 		}
@@ -460,8 +466,14 @@ func (s *MeterState) ScanAll(sources map[string][]string, backlog []BacklogPath,
 			b.All += e.Cost
 			if inSpans(e.At, spans) {
 				b.Backlog += e.Cost
+				a.markBacklog(e.Key)
 			}
 			a.Buckets[key] = b
+		}
+		for _, d := range res.Dups {
+			if a.moveToBacklog(d, spans) {
+				changed = true
+			}
 		}
 		if res.Mark != a.Files[c.path] || !known {
 			a.Files[c.path] = res.Mark
@@ -486,8 +498,49 @@ func (s *MeterState) ScanAll(sources map[string][]string, backlog []BacklogPath,
 		if PruneSeen(a.Seen, now) {
 			changed = true
 		}
+		for k := range a.SeenBacklog {
+			if _, ok := a.Seen[k]; !ok {
+				delete(a.SeenBacklog, k)
+				changed = true
+			}
+		}
 	}
 	return changed
+}
+
+// markBacklog records that key's cost is counted as backlog spend.
+func (a *AccountMeter) markBacklog(key string) {
+	if key == "" {
+		return
+	}
+	if a.SeenBacklog == nil {
+		a.SeenBacklog = map[string]bool{}
+	}
+	a.SeenBacklog[key] = true
+}
+
+// moveToBacklog moves the cost of d, a copy of a message this account already
+// counted, to backlog spend when d is under a backlog path within its spans
+// and the message's counted copy was not: its first copy scanned was outside
+// the backlog's paths (#6618). The cost moves within the bucket the message
+// was counted in, and backlog spend never exceeds the bucket's total.
+func (a *AccountMeter) moveToBacklog(d Entry, spans []BacklogPath) bool {
+	if d.Key == "" || a.SeenBacklog[d.Key] || !inSpans(d.At, spans) {
+		return false
+	}
+	counted, ok := a.Seen[d.Key]
+	if !ok || counted == 0 {
+		return false
+	}
+	bk := time.Unix(counted, 0).Truncate(BucketSpan).Unix()
+	b, ok := a.Buckets[bk]
+	if !ok {
+		return false
+	}
+	b.Backlog = min(b.Backlog+d.Cost, b.All)
+	a.Buckets[bk] = b
+	a.markBacklog(d.Key)
+	return true
 }
 
 // anyPriced reports whether any of the comma-joined models now has a price.
