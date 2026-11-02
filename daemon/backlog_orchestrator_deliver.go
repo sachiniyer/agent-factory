@@ -81,7 +81,8 @@ func (m *Manager) beginOrchDelivery(repoID string, group int, now time.Time) (*b
 // deliverOrchestrator sends group's pending events to its orchestrator in one
 // prompt. A live session gets the prompt; an archived, lost or dead one is
 // restored first; a killed or missing one is replaced by a new session whose
-// first prompt carries the handoff and the events. A client attached, a usage
+// first prompt carries the handoff and the events. The prompt opens a turn
+// whose end archives the session when nothing is left to send. A client attached, a usage
 // limit, or an archive that raced the send holds it for a later pass. Any
 // other failure counts toward escalation, unless the daemon is stopping.
 func (m *Manager) deliverOrchestrator(stop <-chan struct{}, repoID string, group int, now time.Time) {
@@ -170,15 +171,32 @@ func (m *Manager) sendOrchestratorPrompt(repoID string, group int, inst *session
 	if !m.orchestratorOwns(repoID, group, inst.ID) {
 		return errOrchNotOwner
 	}
+	// The prompt opens a turn on the session's run marker, so its idle edge ends
+	// the turn and archives an orchestrator with nothing left to send. Armed
+	// under the target lock just before the send, as sendBacklogAnswer arms an
+	// item run. A failed send closes the turn only when it opened it: a turn
+	// already running is not this send's to end.
+	wasActive := inst.BacklogRunActive()
+	armed := inst.ArmOrchestratorTurn(time.Now())
+	gen := inst.BacklogRunGeneration()
+	if armed {
+		m.persistAndPublishInstance(repoID, inst)
+	}
 	err := sendBacklogPrompt(m, SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID, Prompt: prompt, BacklogOrigin: true})
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, errBacklogDeliveryUncertain):
+		// It may have landed: the turn stays open, so its idle edge still ends it.
 		if ref, rerr := m.backlogService().Resolve(repoID, ""); rerr == nil {
 			m.noteBacklogUncertainDelivery(ref, group, err)
 		}
 		return nil
+	}
+	if armed && !wasActive {
+		m.disarmBacklogRunGen(repoID, inst, gen)
+	}
+	switch {
 	case errors.Is(err, errBacklogTargetLimited):
 		return errBacklogAnswerHeld
 	case errors.Is(err, errBacklogTargetTearingDown) || m.backlogTearingDown(repoID, inst):
@@ -290,6 +308,8 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 		Program:   d.Program,
 		Prompt:    b.OrchStartPrompt(d.Group, proposalDir(repoID, g), true, d.Events),
 		Backend:   string(session.BackendLocal),
+
+		OrchestratorTurn: true,
 	}
 	if err == nil {
 		// The host checks an item start runs (the agent is installed, tmux

@@ -932,8 +932,10 @@ With a group and --self, bind the session this runs in as the orchestrator of th
 
 --handoff-file stores notes for a session that replaces this one as orchestrator (at most 8 KB), read from a file or from stdin with -. Without a group it updates the notes of the group this session orchestrates.
 
+af archives the session after an af-delivered turn that ends with nothing pending, including after you detach; the next event restores it. --stay, run during that turn, keeps it live after the turn, once.
+
 ```
-af backlog orchestrate <group> --self [--replace] | <group> --clear | --self --handoff-file <path|-> [flags]
+af backlog orchestrate <group> --self [--replace] | <group> --clear | --self [--handoff-file <path|->] [--stay] [flags]
 ```
 
 **Flags**
@@ -944,6 +946,7 @@ af backlog orchestrate <group> --self [--replace] | <group> --clear | --self --h
 | `--handoff-file` | `string` | With --self, a `path` to notes for a session that replaces this one, or - for stdin |
 | `--replace` |  | With --self, take the group over from the session that orchestrates it |
 | `--self` |  | Bind the session this runs in |
+| `--stay` |  | With --self, keep this session live after its current turn instead of archiving it |
 
 **Global flags**
 

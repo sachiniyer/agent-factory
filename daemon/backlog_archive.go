@@ -17,20 +17,23 @@ var backlogExactResume = func(inst *session.Instance) (bool, string) { return in
 // between the decision and the teardown: an answer came, or a new run started.
 var errArchiveNoLongerOwed = errors.New("the archive is no longer owed")
 
-// archiveItemSession archives an idle item session for reason while af still
+// archiveItemSession archives an idle backlog session for reason while af still
 // owes it: backlog.ArchiveDone (the user marked the item done and on_done is
-// archive) or backlog.ArchiveAsk (the run ended on questions asked with then
-// archive). The archive is filed on the session first, so a daemon that stops
-// before it finishes it on restart. While a client is attached, or the session
-// is not idle yet, it waits for a later poll of the session. When the session
-// changed since its run ended, it stays live and the item gets a note.
+// archive), backlog.ArchiveAsk (the run ended on questions asked with then
+// archive), or backlog.ArchiveOrchIdle (a group's orchestrator ended a turn af
+// started with nothing left to send). The archive is filed on the session
+// first, so a daemon that stops before it finishes it on restart. While a
+// client is attached, or the session is not idle yet, it waits for a later poll
+// of the session. When the session changed since its run or turn ended, it
+// stays live, and an item gets a note.
 func (m *Manager) archiveItemSession(repoID, sessionID, reason string) {
 	b, err := backlog.Load(repoID)
 	if err != nil {
 		m.warn().Printf("backlog archive (%s) of session %s: %v", reason, sessionID, err)
 		return
 	}
-	s, ok := m.itemSessions(repoID)[sessionID]
+	// Any session of the project: an orchestrator is not an item session.
+	s, ok := m.projectSession(repoID, sessionID)
 	if !ok {
 		return
 	}
@@ -51,11 +54,12 @@ func (m *Manager) archiveItemSession(repoID, sessionID, reason string) {
 		m.settleOwedArchive(repoID, inst)
 		return
 	}
-	// The answer to an archived session restores it, and af archives only a
-	// session it can restore into its own conversation; any other would come
-	// back as a fresh agent with none of its context. The check is the one
-	// every restore makes (Instance.ExactResume), so the two cannot drift.
-	if reason == backlog.ArchiveAsk {
+	// The answer to an archived session restores it, as the next event restores
+	// an archived orchestrator, and af archives only a session it can restore
+	// into its own conversation; any other would come back as a fresh agent with
+	// none of its context. The check is the one every restore makes
+	// (Instance.ExactResume), so the two cannot drift.
+	if reason == backlog.ArchiveAsk || reason == backlog.ArchiveOrchIdle {
 		if ok, why := backlogExactResume(inst); !ok {
 			m.keepItemSessionLive(repoID, inst, reason, fmt.Errorf("%s, so archived it would come back as a fresh agent", why))
 			return
@@ -225,9 +229,6 @@ func (m *Manager) settleOwedArchive(repoID string, inst *session.Instance) {
 // attached or the session was not idle, once the session is polled normally
 // again and idle.
 func (m *Manager) drainBacklogDeferredArchive(repoID string, instance *session.Instance) {
-	if instance.BacklogItem == 0 {
-		return
-	}
 	reason, ok := m.backlog.takeDeferredArchive(instance.ID)
 	if !ok {
 		return
@@ -268,6 +269,23 @@ func (m *Manager) redriveOwedArchives(repoID string, sessions map[string]itemSes
 		}
 		if owed := s.instance.OwedArchive(); owed != nil {
 			m.archiveItemSession(repoID, id, owed.Reason)
+		}
+	}
+}
+
+// redriveOrchestratorArchives finishes the idle archives of orchestrators an
+// earlier daemon filed and did not settle.
+func (m *Manager) redriveOrchestratorArchives(repoID string, b *backlog.Backlog) {
+	for _, it := range b.Items {
+		if it.Orchestrator == nil {
+			continue
+		}
+		s, ok := m.projectSession(repoID, it.Orchestrator.SessionID)
+		if !ok || s.instance.BacklogItem != 0 {
+			continue
+		}
+		if owed := s.instance.OwedArchive(); owed != nil {
+			m.archiveItemSession(repoID, s.instance.ID, owed.Reason)
 		}
 	}
 }
