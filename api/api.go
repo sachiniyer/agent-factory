@@ -430,9 +430,9 @@ func diskWhoami(tmuxName string) (*session.InstanceData, error) {
 		gaps = append(gaps, corruptedReposSuffix(corrupted))
 	}
 	if len(gaps) > 0 {
-		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, strings.Join(gaps, "; "))
+		return nil, fmt.Errorf("%w for tmux session %q; %s", errSelfNotFound, tmuxName, strings.Join(gaps, "; "))
 	}
-	return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
+	return nil, fmt.Errorf("%w for tmux session %q", errSelfNotFound, tmuxName)
 }
 
 func repoHasInstanceTitle(repoID, title string) (bool, error) {

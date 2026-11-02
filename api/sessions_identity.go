@@ -1,12 +1,16 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -58,3 +62,64 @@ var currentTmuxName = func() (string, error) {
 	}
 	return name, nil
 }
+
+// errSelfNotFound marks "the session row is not there" answers from
+// whoamiSession and diskWhoami. resolveSelfSession retries this miss inside an
+// af_-named tmux session, where a just-spawned program can beat its own row's
+// registration (#6586) — the marker is what tells that race apart from a real
+// absence and from a corruption-caveated one, which retries too: the skipped
+// repo may also be the write in flight.
+var errSelfNotFound = errors.New("no Agent Factory session found")
+
+// resolveSelfSession identifies the caller's own af session the same way
+// `af sessions whoami` does: match the current tmux session name against the
+// stored instances. Shared by the whoami command and `sessions archive --self`
+// so the two cannot drift.
+//
+// A sandbox credential is bound to its session (#5571 W3.2), so when the daemon
+// reports a bound caller that row is the answer: the narrowed projection a
+// sandbox receives withholds TmuxName, and matching on it would never find the
+// caller. Otherwise — operator credential, older daemon — the tmux path is
+// unchanged.
+func resolveSelfSession() (*session.InstanceData, error) {
+	if apiclient.HasDaemonToken() {
+		if row, ok, err := callerSessionFn(); err == nil && ok {
+			return &row, nil
+		}
+	}
+	tmuxName, err := currentTmuxName()
+	if err != nil {
+		return nil, err
+	}
+	// A tmux session only af names is an af session: the af_ prefix is af's own
+	// marker, so inside one a bare "row not found" is the spawn race — the pane
+	// execs the program while the session's registration is still landing
+	// (#6586). Poll for the bounded window registration needs rather than
+	// reporting a misleading absence — and rather than letting the item-session
+	// guardrails, which read this same result, fail open in the window. Outside
+	// an af_ name no row is coming, so the miss answers at once.
+	retry := strings.HasPrefix(tmuxName, tmux.TmuxPrefix)
+	for attempt := 0; ; attempt++ {
+		row, err := whoamiSession(tmuxName)
+		if err == nil || !errors.Is(err, errSelfNotFound) || !retry || attempt == selfResolveAttempts-1 {
+			return row, err
+		}
+		selfResolveSleep(selfResolvePoll)
+	}
+}
+
+// selfResolveAttempts × selfResolvePoll bound the registration-race window:
+// ~1.5s, comfortably over the measured gap (a --self command at program exec
+// misses; the row is scannable well before 1.5s) and short enough that a
+// genuinely absent af_-named session is not a hang. The sleep is a var so tests
+// run the loop without real waiting.
+const (
+	selfResolveAttempts = 10
+	selfResolvePoll     = 150 * time.Millisecond
+)
+
+var selfResolveSleep = time.Sleep
+
+// callerSessionFn resolves the credential-bound session; a var so tests can
+// substitute the daemon.
+var callerSessionFn = apiclient.CallerNoSpawn

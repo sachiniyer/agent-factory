@@ -223,9 +223,9 @@ func whoamiSession(tmuxName string) (*session.InstanceData, error) {
 		// a corrupted file may be hiding the matching session — mirroring
 		// diskWhoami's not-found-with-corruption behavior.
 		if len(skipped) > 0 {
-			return nil, fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, skippedReposSuffix(skipped))
+			return nil, fmt.Errorf("%w for tmux session %q; %s", errSelfNotFound, tmuxName, skippedReposSuffix(skipped))
 		}
-		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
+		return nil, fmt.Errorf("%w for tmux session %q", errSelfNotFound, tmuxName)
 	}
 	// Remote target: no local disk fallback; surface the daemon error (e.g. a 401
 	// from a bad token) instead of masking it with a same-machine disk scan (#1681).
@@ -234,33 +234,6 @@ func whoamiSession(tmuxName string) (*session.InstanceData, error) {
 	}
 	return diskWhoami(tmuxName)
 }
-
-// resolveSelfSession identifies the caller's own af session the same way
-// `af sessions whoami` does: match the current tmux session name against the
-// stored instances. Shared by the whoami command and `sessions archive --self`
-// so the two cannot drift.
-//
-// A sandbox credential is bound to its session (#5571 W3.2), so when the daemon
-// reports a bound caller that row is the answer: the narrowed projection a
-// sandbox receives withholds TmuxName, and matching on it would never find the
-// caller. Otherwise — operator credential, older daemon — the tmux path is
-// unchanged.
-func resolveSelfSession() (*session.InstanceData, error) {
-	if apiclient.HasDaemonToken() {
-		if row, ok, err := callerSessionFn(); err == nil && ok {
-			return &row, nil
-		}
-	}
-	tmuxName, err := currentTmuxName()
-	if err != nil {
-		return nil, err
-	}
-	return whoamiSession(tmuxName)
-}
-
-// callerSessionFn resolves the credential-bound session; a var so tests can
-// substitute the daemon.
-var callerSessionFn = apiclient.CallerNoSpawn
 
 var (
 	sessionsListAllFlag      bool
