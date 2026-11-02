@@ -783,16 +783,17 @@ type agentPreviewResponse struct {
 	// it was measured (0 and "unmeasured" differ, #3169).
 	LinesAbove      int  `json:"lines_above,omitempty"`
 	LinesAboveKnown bool `json:"lines_above_known,omitempty"`
-	// The grid answer: Grid is one line per pane row, the cursor is 0-based,
-	// Rows/Cols are the pane's measured size when HasSize.
-	HasGrid   bool   `json:"has_grid,omitempty"`
-	Grid      string `json:"grid,omitempty"`
-	HasCursor bool   `json:"has_cursor,omitempty"`
-	CursorRow int    `json:"cursor_row,omitempty"`
-	CursorCol int    `json:"cursor_col,omitempty"`
-	HasSize   bool   `json:"has_size,omitempty"`
-	Rows      uint16 `json:"rows,omitempty"`
-	Cols      uint16 `json:"cols,omitempty"`
+	// The grid answer: Grid is one line per pane row, 0-based cursor, measured size.
+	HasGrid       bool   `json:"has_grid,omitempty"`
+	Grid          string `json:"grid,omitempty"`
+	HasCursor     bool   `json:"has_cursor,omitempty"`
+	CursorRow     int    `json:"cursor_row,omitempty"`
+	CursorCol     int    `json:"cursor_col,omitempty"`
+	HasVisibility bool   `json:"has_visibility,omitempty"`
+	CursorVisible bool   `json:"cursor_visible,omitempty"`
+	HasSize       bool   `json:"has_size,omitempty"`
+	Rows          uint16 `json:"rows,omitempty"`
+	Cols          uint16 `json:"cols,omitempty"`
 }
 
 func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewResponse) error {
@@ -829,9 +830,8 @@ func (hs *headlessServer) Preview(req agentPreviewRequest, resp *agentPreviewRes
 		// back to it when HasGrid is absent.
 		return nil
 	}
-	resp.HasGrid, resp.Grid = true, string(pane.Screen)
-	resp.HasCursor, resp.CursorRow, resp.CursorCol = pane.HasCursor, pane.CursorRow, pane.CursorCol
-	resp.HasSize, resp.Rows, resp.Cols = pane.HasSize, pane.Rows, pane.Cols
+	resp.HasGrid, resp.Grid, resp.HasCursor, resp.CursorRow, resp.CursorCol, resp.HasVisibility, resp.CursorVisible, resp.HasSize, resp.Rows, resp.Cols =
+		true, string(pane.Screen), pane.HasCursor, pane.CursorRow, pane.CursorCol, pane.HasVisibility, pane.CursorVisible, pane.HasSize, pane.Rows, pane.Cols
 	if pane.HasModes {
 		resp.Modes, resp.HasModes = pane.Modes, true
 	}

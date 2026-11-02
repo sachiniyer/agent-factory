@@ -244,6 +244,117 @@ func TestTmuxSnapshotRepaintCursorRealTmux(t *testing.T) {
 	}
 }
 
+// TestTmuxSnapshotRepaintCursorVisibilityRealTmux is the end-to-end phantom-cursor
+// gate against a REAL tmux server: it drives the actual capture → ReadTerminalState
+// → buildRepaint → emulator path and asserts that a pane application that has hidden
+// its cursor (DECTCEM off, ?25l) produces a repaint that leaves a fresh emulator's
+// cursor hidden — not the default visible cursor the pre-fix repaint left.
+//
+// The bug: the snapshot/repaint path captured cursor position and ownership modes
+// (alternate-screen, mouse) but never cursor visibility, so a fresh subscriber's
+// emulator kept its default visible cursor even when the app explicitly hid it.
+// Apps that only emit ?25l on transitions (Claude's composer, Codex's pickers, vim
+// between operations) left a phantom cursor overlay indefinitely.
+func TestTmuxSnapshotRepaintCursorVisibilityRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skipf("tmux not available: %v", err)
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+
+	ts := tmux.NewTmuxSession("repaint-cursorvis", "bash --noprofile --norc -i")
+	if err := ts.Start(t.TempDir()); err != nil {
+		t.Fatalf("start tmux session: %v", err)
+	}
+	t.Cleanup(func() { _, _ = ts.Close() })
+
+	if err := ts.ResizeWindow(40, 8); err != nil {
+		t.Fatalf("resize window: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	// Hide the cursor and print a marker so the snapshot has content.
+	if err := ts.SendKeysCommand("printf 'HIDDEN CURSOR\\n\\033[?25l'"); err != nil {
+		t.Fatalf("send hide-cursor: %v", err)
+	}
+
+	ch := newTmuxClientlessChannel(ts)
+	var snap PaneSnapshot
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		s, err := ch.Snapshot()
+		if err == nil && s.HasVisibility && strings.Contains(string(s.Screen), "HIDDEN CURSOR") {
+			snap = s
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("snapshot never carried visibility/content: screen=%q hasVisibility=%v err=%v",
+				string(s.Screen), s.HasVisibility, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The snapshot must report the cursor as hidden — tmux's own cursor_flag.
+	if snap.CursorVisible {
+		t.Fatalf("snapshot CursorVisible = true, want false — the pane hid the cursor (?25l)")
+	}
+
+	// Feed the repaint into a fresh emulator and track DECTCEM transitions.
+	// The emulator starts with the cursor visible (the default); the repaint
+	// must emit ?25l to flip it to hidden.
+	const cols, rows = 40, 8
+	emu := vt.NewEmulator(cols, rows)
+	var gotVisible bool
+	emu.SetCallbacks(vt.Callbacks{
+		CursorVisibility: func(visible bool) { gotVisible = visible },
+	})
+	if _, err := emu.Write(buildRepaint(snap)); err != nil {
+		t.Fatalf("emulator write: %v", err)
+	}
+	if gotVisible {
+		t.Fatalf("post-repaint cursor visible = true, want false — the repaint must restore the pane's hidden cursor (?25l), not leave the default visible")
+	}
+
+	// Control: a pane with the cursor visible must produce a repaint that
+	// keeps the emulator cursor visible. The vt emulator starts with the
+	// cursor visible and its CursorVisibility callback fires only on state
+	// changes, so pre-hide the cursor before feeding the repaint — ?25h in
+	// the repaint must flip it back to visible. This proves the emulator
+	// tracks DECTCEM correctly the moment the snapshot path replays it.
+	if err := ts.SendKeysCommand("printf '\\033[?25h\\nVISIBLE CURSOR'"); err != nil {
+		t.Fatalf("send show-cursor: %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		s, err := ch.Snapshot()
+		if err == nil && s.HasVisibility && s.CursorVisible && strings.Contains(string(s.Screen), "VISIBLE CURSOR") {
+			snap = s
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("visible-cursor snapshot never appeared: screen=%q hasVisibility=%v visible=%v err=%v",
+				string(s.Screen), s.HasVisibility, s.CursorVisible, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	emu2 := vt.NewEmulator(cols, rows)
+	var gotVisible2 bool
+	emu2.SetCallbacks(vt.Callbacks{
+		CursorVisibility: func(visible bool) { gotVisible2 = visible },
+	})
+	// Pre-hide so the repaint's ?25h is a state change the callback observes.
+	if _, err := emu2.Write([]byte("\x1b[?25l")); err != nil {
+		t.Fatalf("pre-hide write: %v", err)
+	}
+	if _, err := emu2.Write(buildRepaint(snap)); err != nil {
+		t.Fatalf("emulator write (visible): %v", err)
+	}
+	if !gotVisible2 {
+		t.Fatalf("post-repaint cursor visible = false, want true — the repaint must keep the pane's visible cursor (?25h)")
+	}
+}
+
 // TestClientlessCaptureCloseWakesBlockedRead is the #1943 gate: tearing down the
 // clientless capture must wake a read loop that is parked inside a blocking
 // FIFO wait. Darwin's kqueue cannot poll FIFOs through Go's netpoller, and

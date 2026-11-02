@@ -12,7 +12,10 @@ func TestReadTerminalState(t *testing.T) {
 	dir := t.TempDir()
 	// A non-80x24 pane size — a custom `default-size` is exactly the shape the
 	// broker's repaint path must not assume away (#4480).
-	script := "#!/bin/sh\nprintf '7 11 1 1 0 1 0 0 1 200 60\\n'\n"
+	// 12 fields: cursor_y cursor_x alternate_on mouse_any mouse_standard
+	// mouse_button mouse_all mouse_utf8 mouse_sgr pane_width pane_height
+	// cursor_flag — the 12th is DECTCEM visibility.
+	script := "#!/bin/sh\nprintf '7 11 1 1 0 1 0 0 1 200 60 1\\n'\n"
 	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
@@ -34,5 +37,8 @@ func TestReadTerminalState(t *testing.T) {
 	}
 	if state.Modes.MouseStandard || state.Modes.MouseAll || state.Modes.MouseUTF8 {
 		t.Fatalf("modes = %+v, enabled a flag the snapshot reported off", state.Modes)
+	}
+	if !state.CursorVisible {
+		t.Fatalf("CursorVisible = false, want true — the 12th field (cursor_flag) must ride the capture")
 	}
 }

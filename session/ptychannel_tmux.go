@@ -245,6 +245,7 @@ func tmuxPaneSnapshot(ts *tmux.TmuxSession) (PaneSnapshot, error) {
 	if state, stateErr := ts.ReadTerminalState(); stateErr == nil {
 		snap.CursorRow, snap.CursorCol, snap.HasCursor = state.CursorRow, state.CursorCol, true
 		snap.Modes, snap.HasModes = state.Modes, true
+		snap.CursorVisible, snap.HasVisibility = state.CursorVisible, true
 		// The pane's measured dimensions — the only size a never-driven pane ever
 		// reports (#4480). Guard the uint16 narrowing so a pathological format
 		// answer degrades to "unmeasured" rather than wrapping.
@@ -253,7 +254,8 @@ func tmuxPaneSnapshot(ts *tmux.TmuxSession) (PaneSnapshot, error) {
 		}
 	} else if row, col, curErr := ts.CursorPosition(); curErr == nil {
 		// Preserve the cursor-only fallback for tmux versions/sources that cannot
-		// expose the mode formats.
+		// expose the mode formats. Visibility is unknown in this path — the
+		// repaint leaves the emulator's default cursor visibility untouched.
 		snap.CursorRow, snap.CursorCol, snap.HasCursor = row, col, true
 	}
 	if !dead {

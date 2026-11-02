@@ -97,8 +97,8 @@ func TestBoundedTmuxCommandsDoNotHang(t *testing.T) {
 func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 	dir := t.TempDir()
 	// display-message drives CursorPosition, which parses "row col"; every other
-	// command just needs a clean exit.
-	script := "#!/bin/sh\nif [ \"$1\" = \"display-message\" ]; then echo '3 7 0 0 0 0 0 0 0 80 24'; else echo 'pane line'; fi\n"
+	// command just needs a clean exit. The 12-field answer drives ReadTerminalState.
+	script := "#!/bin/sh\nif [ \"$1\" = \"display-message\" ]; then echo '3 7 0 0 0 0 0 0 0 80 24 1'; else echo 'pane line'; fi\n"
 	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
@@ -116,6 +116,9 @@ func TestBoundedTmuxCommandsSucceedWhenTmuxIsHealthy(t *testing.T) {
 	state, err := ts.ReadTerminalState()
 	if err != nil || state.CursorRow != 3 || state.CursorCol != 7 {
 		t.Fatalf("ReadTerminalState: got %+v err %v, want cursor (3,7)", state, err)
+	}
+	if !state.CursorVisible {
+		t.Fatalf("ReadTerminalState: CursorVisible = false, want true (12th field cursor_flag=1)")
 	}
 	if err := ts.EnablePipePane("dd of=/dev/null"); err != nil {
 		t.Fatalf("EnablePipePane: %v", err)
