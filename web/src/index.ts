@@ -46,6 +46,9 @@ import {
   isMutationOutcomeUncertain,
   looksLikeGitURL,
   isProjectReboundError,
+  checkHost,
+  daemonHealth,
+  editHosts,
   handoffSession,
   listBackends,
   listDirectory,
@@ -82,6 +85,7 @@ import {
   terminalFontSizesFromConfig,
 } from "./terminal-font.js";
 import { emptyAccountsState } from "./accounts.js";
+import { emptyHostsState, hostsEditRefusal, type HostAddDraft } from "./hosts.js";
 import { emptyQuotaState } from "./quota.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
@@ -161,7 +165,7 @@ import {
 } from "./ui.js";
 import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
-import { type AccountsResponse, type SessionData, type SkippedRepo, TabKind, type TaskData, type WireEvent } from "./types.js";
+import { type AccountsResponse, type DaemonHealth, type SessionData, type SkippedRepo, TabKind, type TaskData, type WireEvent } from "./types.js";
 import { publishProposalChange, publishProposalPush, publishProposalResync } from "./docs_tab.js";
 import { parseProposalChange, parseProposalPush } from "./proposal_api.js";
 import { BacklogLoader, EMPTY_BACKLOG_DATA, backlogEventAction, runSessionIds } from "./backlog_data.js";
@@ -185,6 +189,7 @@ const store = new Store<AppState>({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  hosts: emptyHostsState(),
   quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
@@ -650,6 +655,12 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
     mutationError: undefined,
     tasks: [],
     registeredProjects: [],
+    // The hosts-edit capability bit belongs to the connection just torn down —
+    // the next daemon may not honour hosts_edit at all, and a stale `true`
+    // would arm the send that writes an empty hosts table on it. `busy` goes
+    // with it: an in-flight edit's finally is fenced off by the generation
+    // bump, so it would never lift the row's buttons itself.
+    hosts: { ...store.get().hosts, editable: null, busy: [] },
   });
 }
 
@@ -895,6 +906,9 @@ function switchView(view: View): void {
     // And the usage report (#2983): a session parked at a limit since this tab
     // was opened is exactly the signal the section exists to show.
     refreshQuota();
+    // And the hosts-edit capability bit (#5571 W10.5): the Hosts section's
+    // mutating controls stay refused until it answers true.
+    refreshHostsCapability();
   }
 }
 
@@ -2462,6 +2476,246 @@ function refreshQuota(): void {
   quotaRefetcher.refresh();
 }
 
+/** The daemon's hosts-edit capability bit (#5571 W10.5), fenced like the other
+ *  config-view reads. The Hosts section REFUSES the add/remove send when the
+ *  bit is absent or unreadable — a daemon that predates
+ *  SetConfigValueRequest.hosts_edit tolerates the unknown field and would
+ *  write an empty `hosts` table in its place — so this read must land before
+ *  the section's mutating controls arm. daemonHealth resolves null on any
+ *  failure rather than throwing: an unreadable answer IS the refusal case,
+ *  so there is nothing for onError to add. */
+const hostsCapabilityRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: daemonHealth,
+  commit: (resp) => {
+    store.set({
+      hosts: {
+        ...store.get().hosts,
+        editable: resp === null ? null : resp.config_hosts_edit === true,
+      },
+    });
+  },
+});
+
+function refreshHostsCapability(): void {
+  hostsCapabilityRefetcher.refresh();
+}
+
+/** Records the outcome of a host action on the row that produced it; `name` ""
+ *  belongs to the add form, mirroring the accounts register convention. */
+function setHostStatus(name: string, message: string, error: boolean): void {
+  store.set({ hosts: { ...store.get().hosts, status: { name, message, error } } });
+}
+
+/** Marks one host mid-request so its row's buttons rest until it settles. */
+function setHostBusy(name: string, on: boolean): void {
+  const hosts = store.get().hosts;
+  const busy = on ? [...new Set([...hosts.busy, name])] : hosts.busy.filter((n) => n !== name);
+  store.set({ hosts: { ...hosts, busy } });
+}
+
+/** `af hosts check` — probes a host (or every saved one, `name` "") for git,
+ *  tmux and gh and lands each result on its row. The daemon's envelope error
+ *  (a refused or unreachable probe request, not a host verdict) lands on the
+ *  row as the status; a check-all with no saved hosts answers like the CLI's
+ *  empty list does. */
+function doHostCheck(name: string): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  const requestGeneration = connectionGeneration;
+  setHostBusy(name, true);
+  void checkHost(name, tok)
+    .then((resp) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        return;
+      }
+      const checks = { ...store.get().hosts.checks };
+      for (const r of resp.hosts ?? []) {
+        checks[r.name] = r;
+      }
+      if ((resp.hosts ?? []).length === 0) {
+        store.set({
+          hosts: {
+            ...store.get().hosts,
+            checks,
+            status: { name, message: "no hosts saved; add one below", error: false },
+          },
+        });
+        return;
+      }
+      store.set({ hosts: { ...store.get().hosts, checks } });
+    })
+    .catch((err: unknown) => {
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        return;
+      }
+      setHostStatus(name, errorText(err), true);
+    })
+    .finally(() => {
+      if (requestGeneration === connectionGeneration) {
+        setHostBusy(name, false);
+      }
+    });
+}
+
+/** The running daemon's health, read FRESH at send time — the same
+ *  Ping-before-send the daemon's own client does (daemon/config_save_client.go
+ *  EditGlobalHosts): an older daemon drops hosts_edit and writes an EMPTY
+ *  `hosts` value in its place, so the bit cached at view entry is only a UI
+ *  hint, never good enough to send on. A refusal also writes `editable: false`
+ *  back, so the section disarms itself rather than staying armed on a lie.
+ *  Returns the response for the refusal message's version substitution, null
+ *  when the read itself failed — refused either way. */
+async function hostsHealthNow(tok: string): Promise<DaemonHealth | null> {
+  const resp = await daemonHealth(tok);
+  if (resp?.config_hosts_edit !== true) {
+    store.set({ hosts: { ...store.get().hosts, editable: false } });
+  }
+  return resp;
+}
+
+/** `af hosts add` — one atomic hosts_edit through the daemon's config writer,
+ *  then the `default_host` write and the probe the CLI runs, in that order.
+ *
+ *  The send is refused unless a FRESH health read advertises config_hosts_edit
+ *  (hostsHealthNow — the cached bit only arms the form). The port is the one
+ *  field checked locally, and only because a non-number cannot cross the wire
+ *  as `port` at all — sending nothing for it would silently drop what was
+ *  typed. */
+function doHostAdd(draft: HostAddDraft): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  let port: number | undefined;
+  if (draft.port !== "") {
+    const n = Number(draft.port);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      setHostStatus("", "the port must be a number from 1 to 65535", true);
+      return;
+    }
+    port = n;
+  }
+  const requestGeneration = connectionGeneration;
+  const live = () => requestGeneration === connectionGeneration && token === tok;
+  // No busy mark: there is no row to disarm yet, and the check the save tails
+  // owns its own mark — clearing one here would lift the row's buttons while
+  // that probe is still running.
+  void (async () => {
+    try {
+      const health = await hostsHealthNow(tok);
+      if (!live()) {
+        return;
+      }
+      if (health?.config_hosts_edit !== true) {
+        setHostStatus("", hostsEditRefusal(health?.version), true);
+        return;
+      }
+      await editHosts(
+        {
+          op: "add",
+          name: draft.name,
+          host: {
+            host: draft.host,
+            user: draft.user === "" ? undefined : draft.user,
+            port,
+            identity_file: draft.identityFile === "" ? undefined : draft.identityFile,
+            workspace_root: draft.workspaceRoot === "" ? undefined : draft.workspaceRoot,
+            host_key_verification: draft.hostKeyVerification === "" ? undefined : draft.hostKeyVerification,
+            use_ssh_config: draft.useSSHConfig ? true : undefined,
+          },
+        },
+        tok,
+      );
+      if (!live()) {
+        // Stale connection: the write committed, so reconcile the current
+        // session's view like applyConfigValueNow does.
+        await refreshConfig();
+        return;
+      }
+      let madeDefault = false;
+      let defaultErr = "";
+      if (draft.makeDefault) {
+        try {
+          await setConfigValue("default_host", draft.name, tok);
+          madeDefault = true;
+        } catch (err) {
+          defaultErr = errorText(err);
+        }
+        if (!live()) {
+          await refreshConfig();
+          return;
+        }
+      }
+      const desc = [draft.user === "" ? "" : `${draft.user}@`, draft.host, port ? `:${port}` : ""].join("");
+      if (defaultErr !== "") {
+        setHostStatus("", `saved host ${draft.name} (${desc}), but could not make it the default: ${defaultErr}`, true);
+      } else {
+        setHostStatus("", `saved host ${draft.name} (${desc})${madeDefault ? " as the default" : ""}`, false);
+      }
+      // The probe rides AFTER the save status, exactly like the CLI: the entry
+      // is kept whatever the check says, and its verdict lands on the new row.
+      doHostCheck(draft.name);
+      await refreshConfig();
+    } catch (err) {
+      if (live()) {
+        setHostStatus("", errorText(err), true);
+      }
+    }
+  })();
+}
+
+/** `af hosts remove` — one atomic hosts_edit under the same fresh Ping gate
+ *  `af hosts remove` itself uses (hostsHealthNow). `clearDefault` is only ever
+ *  sent for the host that IS the default (the remove button names that case),
+ *  the same decision the CLI's --clear-default flag encodes. */
+function doHostRemove(name: string, clearDefault: boolean): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  const requestGeneration = connectionGeneration;
+  setHostBusy(name, true);
+  void (async () => {
+    try {
+      const health = await hostsHealthNow(tok);
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        return;
+      }
+      if (health?.config_hosts_edit !== true) {
+        setHostStatus(name, hostsEditRefusal(health?.version), true);
+        return;
+      }
+      await editHosts({ op: "remove", name, clear_default: clearDefault }, tok);
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        await refreshConfig();
+        return;
+      }
+      const checks = { ...store.get().hosts.checks };
+      delete checks[name];
+      store.set({
+        hosts: {
+          ...store.get().hosts,
+          checks,
+          status: { name, message: `removed host ${name}${clearDefault ? " (the default was cleared)" : ""}`, error: false },
+        },
+      });
+      await refreshConfig();
+    } catch (err) {
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        return;
+      }
+      setHostStatus(name, errorText(err), true);
+    } finally {
+      if (requestGeneration === connectionGeneration) {
+        setHostBusy(name, false);
+      }
+    }
+  })();
+}
+
 /** Records the outcome of an account action on the row that produced it. */
 function setAccountStatus(agent: string, name: string, message: string, error: boolean): void {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
@@ -3276,6 +3530,9 @@ const actions = {
   explainConfig: explainConfigValue,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,
+  hostCheck: doHostCheck,
+  hostAdd: doHostAdd,
+  hostRemove: doHostRemove,
   switchProject,
   setStatusFilter,
   resetStatusFilter,
@@ -3412,6 +3669,7 @@ function stopStream(): void {
   configRefetcher.invalidate();
   accountsRefetcher.invalidate();
   quotaRefetcher.invalidate();
+  hostsCapabilityRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

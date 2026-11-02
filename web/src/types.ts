@@ -644,6 +644,74 @@ export interface ConfigSetResponse {
   listener_addr?: string;
 }
 
+/** config.HostConfig (config/hosts.go) — one entry of the operator's global
+ *  `hosts` table: the ssh destination a session runs on when it picks this
+ *  host. `host` is required and never carries a user or port; those are the
+ *  sibling fields. Carried to and from the daemon in the `hosts` config value
+ *  and in a hosts_edit add. */
+export interface HostEntry {
+  host: string;
+  user?: string;
+  port?: number;
+  identity_file?: string;
+  workspace_root?: string;
+  host_key_verification?: string;
+  use_ssh_config?: boolean;
+}
+
+/** config.HostsEdit (config/hosts_edit.go) — one per-entry edit of the host
+ *  table, applied by the writer as a single read-modify-write under the config
+ *  file lock (#5855). Sent inside SetConfigValue's `hosts_edit`; only a daemon
+ *  advertising config_hosts_edit (GET /v1/health) may be sent it — an older one
+ *  tolerates the unknown field and would write an EMPTY hosts value in its
+ *  place. */
+export interface HostsEdit {
+  /** "add" or "remove". */
+  op: string;
+  /** The host's list name — what `--host <name>` takes. */
+  name: string;
+  /** The entry to add (op "add"). */
+  host?: HostEntry;
+  /** For a remove, also clears default_host when it names `name`, in the same
+   *  lock hold. Without it removing the default is refused. */
+  clear_default?: boolean;
+}
+
+/** daemon.HostCheckResult (daemon/checkhost.go) — one host's probe outcome from
+ *  CheckHost. `complete` true means git, tmux and gh each gave a recognised
+ *  answer; a reachable host with it false answered something af could not read,
+ *  so it is unknown, never ready (#5841). */
+export interface HostCheckResult {
+  name: string;
+  /** False when this host was skipped because another probe of it was already
+   *  running; `readiness` then carries the cached verdict. */
+  probed: boolean;
+  /** False when the probe could not run; `error` says why. */
+  reachable: boolean;
+  error?: string;
+  problems?: string[];
+  warnings?: string[];
+  complete: boolean;
+  /** The cached verdict after the probe: ready | blocked | stale | unprobed. */
+  readiness: string;
+}
+
+/** CheckHostResponse (daemon/checkhost.go). */
+export interface CheckHostResponse {
+  hosts: HostCheckResult[];
+}
+
+/** PingResponse's capability flags the web reads (daemon/control_types.go) via
+ *  GET /v1/health — af() is POST-only, so the health alias is fetched directly,
+ *  the same shape config-assistant's DELETE hand-rolls. */
+export interface DaemonHealth {
+  version?: string;
+  /** The daemon honors SetConfigValueRequest.hosts_edit. Absent (or unreadable)
+   *  means the hosts-edit send must be refused client-side: it would silently
+   *  write an empty `hosts` (daemon/control_types.go). */
+  config_hosts_edit?: boolean;
+}
+
 /** config.SourceRef (config/provenance.go) — the exact configuration location
  *  that supplied an effective scalar or composite leaf. */
 export interface SourceRef {
