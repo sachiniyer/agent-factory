@@ -82,7 +82,7 @@ instead of `[::]`, when browsing on this machine; keep the reported port. An
 empty `network.listen_addr` disables the web listener. See [Web client](docs/web.md)
 for configuration and remote access.
 
-The browser header offers **Sessions**, **Tasks** and **Config**, plus
+The browser header offers **Sessions**, **Backlog**, **Tasks** and **Config**, plus
 **Light · Dark · System** for appearance (System follows your OS). The selected
 terminal says **Keyboard** while it owns input; `ctrl+]` returns to navigation.
 After viewing the session in the browser, return to TUI navigation, press `a`
