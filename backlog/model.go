@@ -56,6 +56,10 @@ const (
 	ClosedSentToReview      = "sent to review"
 	ClosedDone              = "done"
 	ClosedDropped           = "dropped"
+	// ClosedRebound and ClosedUnbound close af's escalation question on a
+	// group when its orchestrator changes or is cleared.
+	ClosedRebound = "orchestrator rebound"
+	ClosedUnbound = "orchestrator unbound"
 
 	DeliveryPending   = "pending"
 	DeliveryDelivered = "delivered"
@@ -105,10 +109,12 @@ type Item struct {
 	Thread    []Message `json:"thread,omitempty"`
 	// Paused stops the runner from starting the items under a parent; Archived
 	// hides a top-level group and its items from the list, and pauses it.
-	Paused    bool      `json:"paused,omitempty"`
-	Archived  bool      `json:"archived,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Paused   bool `json:"paused,omitempty"`
+	Archived bool `json:"archived,omitempty"`
+	// Orchestrator is set only on a top-level parent.
+	Orchestrator *Orchestrator `json:"orchestrator,omitempty"`
+	CreatedAt    time.Time     `json:"created_at"`
+	UpdatedAt    time.Time     `json:"updated_at"`
 }
 
 type Source struct {
@@ -137,6 +143,9 @@ type RunRef struct {
 	// window's start, or when af last stopped the run at the cap.
 	CapReset int64   `json:"cap_reset,omitempty"`
 	CapBase  float64 `json:"cap_base,omitempty"`
+	// StalledAt is when af last told the group's orchestrator this run
+	// stalled; only work after it starts a new idle period.
+	StalledAt time.Time `json:"stalled_at,omitzero"`
 }
 
 type Meter struct {
@@ -172,6 +181,9 @@ type Message struct {
 	// schema v2 fields that later slices fill in (Refs #6284).
 	Then    string `json:"then,omitempty"`
 	Handoff string `json:"handoff,omitempty"`
+	// Route is where a question goes: RouteOrchestrator, RouteUser, or ""
+	// for the user.
+	Route string `json:"route,omitempty"`
 }
 
 type Settings struct {
@@ -345,6 +357,7 @@ func (b *Backlog) clone() *Backlog {
 			s := *it.Source
 			it.Source = &s
 		}
+		it.Orchestrator = it.Orchestrator.clone()
 		c.Items[i] = it
 	}
 	return &c

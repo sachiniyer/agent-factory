@@ -71,6 +71,12 @@ async function openBacklog(page: Page): Promise<void> {
   const tab = page.locator('.af-viewtab[data-view="backlog"]');
   if (!await tab.isVisible()) await page.getByRole("button", { name: "More app controls", exact: true }).click();
   await tab.click();
+  // The tab opens the Inbox while its badge shows, and the fixture has an open question on B-4.
+  const filters = page.getByRole("group", { name: "Filter items" });
+  await expect(filters.getByRole("button", { name: "Inbox (1)" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("list", { name: "Inbox" })).toBeVisible();
+  await filters.getByRole("button", { name: "All", exact: true }).click();
+  await expect(page.getByRole("list", { name: "Inbox" })).toBeHidden();
   await expect(page.locator(".af-backlog-row")).toHaveCount(5);
 }
 
@@ -93,9 +99,9 @@ test.describe("backlog view stills", () => {
     await expect(panel.locator(".af-backlog-body-input")).toBeVisible();
     await expect(panel.getByRole("button", { name: "Close item" })).toBeFocused();
     // The run's session is looked up before it is called Gone; the still waits for the answer.
-    await expect(panel.locator(".af-backlog-run")).not.toContainText("Checking…");
+    await expect(panel.locator(".af-backlog-card-head")).not.toContainText("Checking…");
     // The run's plan use arrives with the budget read, after the first paint.
-    await expect(panel.locator(".af-backlog-run")).toContainText("$1.20 at API prices");
+    await expect(panel.locator(".af-backlog-card-head")).toContainText("$1.20 at API prices");
     await still(page, info, "backlog-desktop.png");
     await page.keyboard.press("Escape");
     await expect(panel).toBeHidden();

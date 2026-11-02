@@ -55,7 +55,8 @@ func backlogSessionFacts(s itemSession, ok bool) backlog.SessionFacts {
 	case v.UserKilled || v.InFlightOp == session.OpKilling:
 		return backlog.SessionFacts{Reason: "session killed"}
 	case v.StartupStateUnknown:
-		return backlog.SessionFacts{Reason: "session did not start"}
+		// It may be running: af kept it because it could not tell (#6574).
+		return backlog.SessionFacts{StartupUnknown: true, Reason: "session startup unconfirmed"}
 	}
 	switch v.Liveness {
 	case session.LiveArchived:
@@ -291,8 +292,12 @@ func (m *Manager) recoverBacklogStarts(stop <-chan struct{}) {
 	}
 	m.mu.Unlock()
 	paths, _ := filepath.Glob(filepath.Join(home, "repos", "*", "backlog.json"))
-	for _, p := range paths {
-		repoID := filepath.Base(filepath.Dir(p))
+	repoIDs := make([]string, len(paths))
+	for i, p := range paths {
+		repoIDs[i] = filepath.Base(filepath.Dir(p))
+	}
+	m.backlog.noteRecoveryScan(repoIDs)
+	for _, repoID := range repoIDs {
 		if m.backlog.isRecovered(repoID) {
 			continue
 		}

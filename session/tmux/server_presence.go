@@ -299,6 +299,47 @@ func ListSessionNamesOnSocket(cmdExec cmd.Executor, socket string) ([]string, er
 	return listSessionField(cmdExec, "#{session_name}", socket)
 }
 
+// ServerPIDOnSocket returns the pid of the tmux server ANSWERING socket —
+// which process actually serves the path, as opposed to which process a record
+// or an environment stamp claims does. A socket path can outlive or be
+// rebound by a different server than the one that created it: a tmux server
+// orphaned from its socket file keeps running with its sessions alive, and a
+// later server can bind the freed path, so a listing's "absent" answer is
+// evidence only about the server that answered, never about the stamped one.
+// `af doctor` compares this pid against the server pid a process's TMUX env
+// stamps to learn whether the listing it got came from the server the process
+// actually lived on (#6339).
+//
+// `display-message -p '#{pid}'` is the query because it answers on a server
+// holding zero sessions (exit-empty off), where `ls` returns nothing at all.
+//
+// A socket with no server reports (0, nil): "nobody answered" is tmux's own
+// definitive answer through NoServerRunning — the same determinate-empty
+// classification the listing path relies on, including the SIGUSR1 probe that
+// gives an orphaned owner the chance to reclaim an unlinked socket before it
+// is called unclaimed. Any other failure is a read that did not happen, and
+// the error says so.
+func ServerPIDOnSocket(cmdExec cmd.Executor, socket string) (int, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, socketTmuxArgs(socket, "display-message", "-p", "#{pid}")...)
+	timedOut := ctx.Err() != nil
+	cancel()
+	if err != nil {
+		if timedOut {
+			return 0, fmt.Errorf("%w: tmux display-message after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		if NoServerRunning(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("could not query tmux server pid%s: %w", tmuxDiagnosticSuffix(err), err)
+	}
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(out)))
+	if convErr != nil || pid <= 0 {
+		return 0, fmt.Errorf("unparseable tmux server pid %q", strings.TrimSpace(string(out)))
+	}
+	return pid, nil
+}
+
 // listSessionIDs is the ListSessionNames contract for #{session_id}: the
 // generation probe's corroboration asks which IDS the server still knows,
 // and a name list cannot answer that.

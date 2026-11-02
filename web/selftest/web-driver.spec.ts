@@ -1680,22 +1680,20 @@ test("status semantics (#1766, #3220): action groups are legible and only the wo
   await p.mouse.move(0, 0);
   await expect(waitingActions).toHaveCSS("opacity", "0");
 
-  // Put focus on the preceding button in DOM order, then use a real Tab keystroke to
-  // enter this row. The opacity-zero action remains tabbable and :focus-within makes
-  // it visible as soon as focus arrives.
+  // #6409: the rail's quiet controls reveal on keyboard focus too, but the Tab
+  // order is bounded — only the SELECTED row and its actions button are stops.
+  // An unselected row's button leaves the order entirely.
   const keyboardTarget = row(p, "probe-needs-you").getByRole("button", { name: "Actions for probe-needs-you", exact: true });
-  await keyboardTarget.evaluate((target) => {
-    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button:not([disabled])')].filter((button) => button.getClientRects().length > 0);
-    const before = buttons[buttons.indexOf(target as HTMLButtonElement) - 1];
-    if (!before) {
-      throw new Error("archive action has no preceding tab stop");
-    }
-    before.focus();
-  });
+  await expect(keyboardTarget).toHaveJSProperty("tabIndex", -1);
+  const selectedRow = row(p, "probe-limit");
+  await selectedRow.focus();
+  await expect(selectedRow).toBeFocused();
+  await expect(selectedActions).toHaveCSS("opacity", "1");
+  const selectedTrigger = selectedRow.getByRole("button", { name: "Actions for probe-limit", exact: true });
   await p.keyboard.press("Tab");
-  await expect(keyboardTarget).toBeFocused();
-  await expect(waitingActions).toHaveCSS("opacity", "1");
-  await keyboardTarget.evaluate((el) => el.blur());
+  await expect(selectedTrigger).toBeFocused();
+  await expect(selectedActions).toHaveCSS("opacity", "1");
+  await selectedTrigger.evaluate((el) => el.blur());
   await row(p, "probe-needs-you").click();
   await expect(retry).toBeHidden();
 
@@ -11860,8 +11858,18 @@ test("#1813: renaming from the UI repaints the tab bar AND an open pane, live", 
   await row(page, SESSION_ORDER).click();
   // Put alpha in its own pane, so the rename has an open pane header to repaint —
   // the case reconcile() used to miss entirely (it set a pane's label only when the
-  // pane was created or rebound, and a rename does neither).
-  await dragTabToPane(page, "alpha", "right");
+  // pane was created or rebound, and a rename does neither). Reload first for a
+  // single-pane start (the retained trees are in-memory): under #6429's pane
+  // minimum, an inherited three-leaf layout can legitimately hide a leaf — and a
+  // drop onto a pane's own tab opens the COMPANION tab, not a copy, which is how
+  // a hidden beta sliver replaced the alpha pane this assertion reads.
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await assertRealRailFixture(page);
+  await row(page, SESSION_ORDER).click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await tabByLabel(page, "alpha").click();
+  await dragTabToPane(page, "Agent", "right");
   await expect(page.locator(".af-term-host .af-pane-label")).toContainText(["alpha"]);
 
   await renameTabViaUI(page, "alpha", "storefront");

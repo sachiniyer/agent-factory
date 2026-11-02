@@ -26,6 +26,9 @@ func (b *Backlog) Delete(id int) ([]int, error) {
 	if len(it.Runs) > 0 || len(it.Thread) > 0 {
 		return nil, fmt.Errorf("%s is a draft with runs or a thread; drop it instead", FormatID(id))
 	}
+	if p := b.Item(it.Parent); p != nil && p.Orchestrator != nil && len(b.Children(p.ID)) == 1 {
+		return nil, fmt.Errorf("%s is the last item in %s, which has an orchestrator; clear it first", FormatID(id), FormatID(p.ID))
+	}
 	i := b.index(id)
 	b.Items = append(b.Items[:i], b.Items[i+1:]...)
 	changed := []int{id}

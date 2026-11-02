@@ -77,7 +77,7 @@ import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js"
 import { docsShortcuts } from "./docs_shortcut.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
-import { activeRevealKey, scrollDeltaToReveal, shouldRevealActive } from "./tabscroll.js";
+import { activeRevealKey, scrollDeltaToReveal, shouldRevealActive, tabOverflowFlags } from "./tabscroll.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
 import { KeyedRows, orderChildren } from "./keyed-rows.js";
 import { sessionKey } from "./sessions.js";
@@ -86,7 +86,7 @@ import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES, currentMode, themeSurfaces } from "./theme.js";
 import { BacklogPane, type BacklogHost } from "./backlog_pane.js";
 import type { BacklogData } from "./backlog_data.js";
-import { type SessionItem, formatID, needsYouByRoot, needsYouLabel, sessionItems, sessionItemsSig } from "./backlog_model.js";
+import { STATE_LABELS, type SessionItem, formatID, needsYouByRoot, needsYouLabel, sessionItems, sessionItemsSig } from "./backlog_model.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   type ConfigEntry,
@@ -324,6 +324,11 @@ export interface AppState {
    *  reconnecting pane shows its placeholder, not the tab's content, so attention
    *  acknowledgement waits for the agent tab to land here. */
   openTabs: number[];
+  /** how many panes the selected session's RETAINED layout holds — distinct
+   *  from shownTabs' length, which the fit can shrink to one while extra
+   *  leaves stay hidden (#6563): close affordances gate on this so a touch
+   *  user can still collapse a pane the layout is only hiding. */
+  paneCount: number;
   /** an actionable message shown as a transient toast when a tab op (create/close)
    *  or a task op (toggle/trigger/remove) fails, or null when there is none. These
    *  ops have no modal to surface an error in (unlike create/kill/archive), so the
@@ -1146,6 +1151,10 @@ export class AppShell {
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
   private tabBar: HTMLElement | null = null;
+  // Watches the strip's box so the overflow cue (#6408) resyncs on a resize that
+  // changes clientWidth without touching scrollLeft — a viewport change, a pane
+  // split, or the phone composition reparenting the bar into the controls panel.
+  private tabOverflowRO: ResizeObserver | null = null;
   // The tab identities (kind:name) drawn in the bar at its last render, stamped into a
   // dragged tab's payload by the delegated dragstart so a drop can detect a mid-drag
   // tab-set change and cancel (see split.ts). Kept live by renderTabBar.
@@ -1223,6 +1232,9 @@ export class AppShell {
     this.viewTabs = tabs;
     this.viewNav = viewNav;
     tabs.get("backlog")?.append(this.backlogBadge);
+    tabs.get("backlog")?.addEventListener("click", () => {
+      if (!this.backlogBadge.hidden) this.backlogPane.showInbox();
+    });
 
     // The project switcher (redesign PR2): a button showing the current project and a
     // dropdown listing every project with counts. `margin-left:auto` (the wrap) pushes
@@ -1626,7 +1638,10 @@ export class AppShell {
         this.needsYouChanged = true;
       }
     }
-    setNeedsYouBadge(this.backlogBadge, state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0);
+    const questions = state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0;
+    setNeedsYouBadge(this.backlogBadge, questions);
+    const backlogTab = this.viewTabs.get("backlog");
+    if (backlogTab) backlogTab.title = questions > 0 ? `Backlog · ${questions === 1 ? "1 question" : `${questions} questions`} · Opens the inbox` : "";
     if (state.backlog) this.backlogPane.update(state.backlog, state.selectedProject, state.sessions);
 
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
@@ -1811,12 +1826,20 @@ export class AppShell {
       this.renderFilterMenu(state, scoped);
     }
     const activeBefore = document.activeElement as HTMLElement | null;
+    // The row that owns the rail's DOM focus, captured BEFORE the rebuild:
+    // losing the selection strips a focused row's tabindex mid-reconcile,
+    // which blurs it and drops document.activeElement to body, so after the
+    // rebuild only this knows the rail was holding focus at all (#6409).
+    const activeRowBefore = activeBefore && this.railList.contains(activeBefore)
+      ? activeBefore.closest<HTMLElement>(".af-row")
+      : null;
     let restoreChangedFocus: (() => void) | undefined;
     const reopened: Array<ReturnType<typeof actionsDisclosure>> = [];
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [], sessionKey,
       s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true,
-        this.sessionItemMap.get(s.id ?? "")?.id ?? 0, this.sessionItemMap.get(s.id ?? "")?.title ?? "", this.sessionItemMap.get(s.id ?? "")?.root ?? ""]),
+        this.sessionItemMap.get(s.id ?? "")?.id ?? 0, this.sessionItemMap.get(s.id ?? "")?.title ?? "", this.sessionItemMap.get(s.id ?? "")?.root ?? "",
+        this.sessionItemMap.get(s.id ?? "")?.state ?? ""]),
       (s, previous) => {
         const key = sessionKey(s);
         const oldMenu = this.railMenus.get(key);
@@ -1894,6 +1917,57 @@ export class AppShell {
     if (!restoreChangedFocus && activeBefore && this.railList.contains(activeBefore) && document.activeElement !== activeBefore) {
       activeBefore.focus({ preventScroll: true });
     }
+    // With nothing selected nothing owns the roving stop, so the first real
+    // row carries it — the listbox never vanishes from the Tab order (#6409).
+    // Every row is normalized here, not only at build time: a reused element
+    // keeps whatever tabindex it last had, so a stale fallback would otherwise
+    // sit in the order beside the newly selected row's own stop. Unselected
+    // rows carry NO tabindex, not -1 — a plain click on an unfocusable li moves
+    // no DOM focus, which is what keeps a forced click on a creating
+    // placeholder from landing there either.
+    const railRows = this.railList.querySelectorAll<HTMLElement>(".af-row");
+    let hasStop = false;
+    for (const railRow of railRows) {
+      const isSelected = railRow.classList.contains("af-row-selected");
+      // Write only on a real change: this pass runs on EVERY snapshot, and a
+      // redundant setAttribute/tabIndex= still counts as a DOM write on an
+      // unchanged row (web-perf's rail audit asserts unchanged rows get none).
+      if (isSelected) {
+        if (railRow.getAttribute("tabindex") !== "0") railRow.setAttribute("tabindex", "0");
+      } else if (railRow.hasAttribute("tabindex")) {
+        railRow.removeAttribute("tabindex");
+      }
+      hasStop ||= isSelected;
+      // In-row controls rove with the row (#6409): the selected row's actions
+      // trigger and backlog chip are stops; other rows' leave the order. The
+      // carve-out mirrors rowActions — a row that can never be selected (the
+      // aria-disabled it carries: kill-only rows, the creating placeholder)
+      // keeps its controls tabbable because they are its only keyboard route.
+      const reachable = isSelected || railRow.getAttribute("aria-disabled") === "true";
+      for (const ctrl of railRow.querySelectorAll<HTMLElement>(".af-row-actions .af-term-more, .af-backlog-session-chip")) {
+        const wanted = reachable ? 0 : -1;
+        if (ctrl.tabIndex !== wanted) ctrl.tabIndex = wanted;
+      }
+    }
+    if (!hasStop) {
+      const fallback = [...railRows].find((railRow) => !railRow.classList.contains("af-row-creating"));
+      if (fallback && fallback.getAttribute("tabindex") !== "0") {
+        fallback.setAttribute("tabindex", "0");
+      }
+    }
+    // DOM focus follows the j/k selection: without this the ring strands on the
+    // row that lost the selection while Enter attaches the new one. Dead spots
+    // only, though — a restore above may have placed focus on a control inside
+    // a row (an open menu must keep its place across snapshots), so the ring
+    // moves only when it landed on body or on the deselected li itself.
+    if (activeRowBefore && !activeRowBefore.classList.contains("af-row-selected")) {
+      const after = document.activeElement as HTMLElement | null;
+      const afterRow = after && this.railList.contains(after) ? after.closest<HTMLElement>(".af-row") : null;
+      const deadSpot = !afterRow || (after === afterRow && !afterRow.classList.contains("af-row-selected"));
+      if (deadSpot) {
+        this.railList.querySelector<HTMLElement>(".af-row-selected")?.focus();
+      }
+    }
     const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : undefined;
     this.lifecycleBtn = selectedMenu?.panel.querySelector<HTMLElement>(".af-rail-lifecycle") ?? null;
     this.lifecycleAction = selectedSession(state)?.lifecycle_action ?? null;
@@ -1922,6 +1996,12 @@ export class AppShell {
     const menu = actionsDisclosure(`Actions for ${session.title}`);
     menu.el.dataset.sessionId = session.id;
     this.railMenus.set(sessionKey(session), menu);
+    // Only the selected row's actions button sits in the Tab order (#6409); a
+    // keyboard user reaches another row's menu by moving the selection to it.
+    // A managed row that can NEVER be selected — a kill-only row such as a
+    // startup-unknown session, which j/k skips because it cannot open a pane —
+    // keeps its stop, or its Delete would have no keyboard route at all.
+    menu.trigger.tabIndex = selected || !isOpenableSession(session) ? 0 : -1;
     menu.trigger.replaceChildren("…");
     menu.trigger.addEventListener("click", () => {
       if (!menu.panel.hidden) placeMenu(menu.trigger, menu.panel);
@@ -2418,13 +2498,13 @@ export class AppShell {
     else this.terminalChrome?.menu.dismiss();
   }
 
-  /** The B-12 chip of an item session; a click opens the item in the Backlog view. */
+  /** The "B-12 · Working" chip of an item session; a click opens the item in the Backlog view. */
   private itemChip(sessionId: string): HTMLElement | undefined {
     const item = this.sessionItemMap.get(sessionId);
     if (!item) return undefined;
     const chip = h("button", { type: "button", class: "af-backlog-session-chip", title: `Open ${formatID(item.id)} ${item.title}` },
-      formatID(item.id));
-    chip.setAttribute("aria-label", `Open item ${formatID(item.id)}`);
+      `${formatID(item.id)} · ${STATE_LABELS[item.state]}`);
+    chip.setAttribute("aria-label", `Open item ${formatID(item.id)} · ${STATE_LABELS[item.state]}`);
     chip.addEventListener("click", (e) => {
       e.stopPropagation();
       this.actions.switchProject(item.root);
@@ -2536,6 +2616,11 @@ export class AppShell {
       this.deliverBtn = null;
       this.deliverVisible = false;
       this.tabBar = null;
+      // The old bar is gone too: stop watching its box for the overflow cue
+      // (#6408) — a detached element's observer is dead weight and its callback
+      // would resync a bar that no longer exists.
+      this.tabOverflowRO?.disconnect();
+      this.tabOverflowRO = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.afTheme;
@@ -2607,6 +2692,12 @@ export class AppShell {
     // Both drags above are HTML5 drag-and-drop, which a finger cannot start. Same
     // delegation again, giving a finger the same two capabilities (#2899).
     this.attachTabTouchDrag(tabBar);
+    // The strip already scrolls when it overflows; what it owed the user was the
+    // SIGNAL (#6408). Same stable-container binding again: the cue classes follow
+    // scroll position AND box width, so they resync on scroll, on render, and on
+    // any resize — a viewport change, a pane split, or the phone composition
+    // moving the bar between parents.
+    this.attachTabOverflow(tabBar);
 
     const head = chrome.head;
     head.insertBefore(this.connNotice, chrome.attention.el);
@@ -2745,6 +2836,10 @@ export class AppShell {
     // Record the signature this render represents, so update() skips a rebuild until
     // the bar's inputs actually change again.
     this.lastTabBarSig = tabBarSig(state);
+    // The rebuild changed which tabs exist (and possibly the scroll position the
+    // reveal set), so the edge cues are restated now — scroll/resize keep them
+    // honest between renders.
+    this.syncTabOverflow();
   }
 
   /** Wires the tab bar as a DRAG SOURCE via event DELEGATION on the (stable) bar
@@ -3000,6 +3095,39 @@ export class AppShell {
     bar.addEventListener("pointercancel", release, { passive: true });
   }
 
+  /** Binds the overflow cue (#6408) once per bar element: a scroll handler for
+   *  position changes and a ResizeObserver for box changes that move no
+   *  scrollbar — a viewport resize, a pane split, or the phone composition
+   *  reparenting the bar. Called from renderMain with the other one-time wiring;
+   *  renderMain rebuilds the chrome per selection, so the previous observer is
+   *  released before the new bar is watched. */
+  private attachTabOverflow(bar: HTMLElement): void {
+    bar.addEventListener("scroll", () => this.syncTabOverflow(), { passive: true });
+    this.tabOverflowRO?.disconnect();
+    this.tabOverflowRO = null;
+    if (typeof ResizeObserver === "function") {
+      this.tabOverflowRO = new ResizeObserver(() => this.syncTabOverflow());
+      this.tabOverflowRO.observe(bar);
+    }
+  }
+
+  /** Re-derives which strip edges still hide tabs and restates the cue classes.
+   *  Writes are guarded so an unchanged answer emits no DOM write — the same
+   *  steady-state-mutation rule the rail rove obeys (the perf gate counts them). */
+  private syncTabOverflow(): void {
+    const bar = this.tabBar;
+    if (!bar) {
+      return;
+    }
+    const { left, right } = tabOverflowFlags(bar.scrollLeft, bar.clientWidth, bar.scrollWidth);
+    if (bar.classList.contains("af-tabbar-more-left") !== left) {
+      bar.classList.toggle("af-tabbar-more-left", left);
+    }
+    if (bar.classList.contains("af-tabbar-more-right") !== right) {
+      bar.classList.toggle("af-tabbar-more-right", right);
+    }
+  }
+
   /** Owns inline rename on the stable bar rather than on an individual button.
    *  Activating an inactive tab rebuilds the buttons synchronously on the first
    *  click of a double-click. Depending on geometry, Chromium may then target the
@@ -3221,7 +3349,7 @@ export class AppShell {
     applyTerminalTitle(this.headTitle, selected.title);
     if (this.terminalChrome) applyTerminalPlacement(this.terminalChrome.placement, placementDetail(selected), selected.placement?.kind === "remote");
     if (this.terminalChrome) {
-      this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
+      this.terminalChrome.closePane.hidden = state.paneCount < 2;
     }
     this.attentionChip?.patch(hasAttention(selected), attentionReason(selected));
     const warningText = sessionWarningText(selected);
@@ -3740,6 +3868,16 @@ export function sessionRow(
   }
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
+  // The rail pays a bounded Tab cost however many rows it holds (#6409): the
+  // selected row is the one listbox stop, with its in-row controls next. An
+  // unselected row carries NO tabindex, not -1 — it must stay as unfocusable
+  // as a plain li was, or a click would move DOM focus onto it (and a forced
+  // click on a creating placeholder would focus a row that cannot open).
+  if (selected) {
+    row.setAttribute("tabindex", "0");
+  } else {
+    row.removeAttribute("tabindex");
+  }
   const modelChange = s.model_change
     ? `; model changed from ${s.model_change.before} to ${s.model_change.after}`
     : "";

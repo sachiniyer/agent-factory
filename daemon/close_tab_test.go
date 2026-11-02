@@ -570,22 +570,28 @@ func TestCloseTab_SerializedWithInFlightKillDoesNotCloseStaleTab(t *testing.T) {
 		done <- result{name: name, err: err}
 	}()
 
+	var held string // failure observed while the teardown op-lock is held; reported after its release
 	select {
 	case <-killStarted:
 		releaseOnce.Do(func() { close(releaseKill) })
-		t.Fatal("CloseTab reached tmux kill-session while the teardown op-lock was held")
+		held = "CloseTab reached tmux kill-session while the teardown op-lock was held"
 	case res := <-done:
-		t.Fatalf("CloseTab returned while the teardown op-lock was held: name=%q err=%v", res.name, res.err)
+		held = fmt.Sprintf("CloseTab returned while the teardown op-lock was held: name=%q err=%v", res.name, res.err)
 	case <-time.After(150 * time.Millisecond):
 	}
-	if !isAlive(processTmuxName) {
-		t.Fatalf("CloseTab closed process tmux %q while teardown op-lock was held", processTmuxName)
-	}
+	alive := isAlive(processTmuxName)
 
 	manager.mu.Lock()
 	delete(manager.instances, key)
 	manager.mu.Unlock()
 	opLock.Unlock()
+
+	if held != "" {
+		t.Fatal(held)
+	}
+	if !alive {
+		t.Fatalf("CloseTab closed process tmux %q while teardown op-lock was held", processTmuxName)
+	}
 
 	res := <-done
 	if res.err == nil {

@@ -57,6 +57,11 @@ func (b *Backlog) BeginStart(id int, by string, facts Facts, now time.Time) (Sta
 			return StartPlan{}, fmt.Errorf("%s is already working in session %q", FormatID(id), last.Title)
 		case last.State == RunStarted && facts(last.SessionID).Live:
 			return StartPlan{Continue: last.SessionID}, nil
+		case last.State == RunStarted && facts(last.SessionID).StartupUnknown:
+			// A second session beside one that may be running would put two agents
+			// on the item (#6574): the user inspects it first.
+			return StartPlan{}, fmt.Errorf("%s's session %q may still be running: af could not confirm that it started — check it with af sessions preview %q, and kill it with af sessions kill %q to start %s again",
+				FormatID(id), last.Title, last.Title, last.Title, FormatID(id))
 		}
 	}
 	if err := CheckStatusChange(StatusChange{ID: id, From: it.Status, To: StatusRunning, By: ActorAF}); err != nil {
@@ -185,6 +190,43 @@ func (b *Backlog) FinishStart(id int, startedAt time.Time, sessionID, title, bra
 		note += fmt.Sprintf(". Your answer is kept: \"af backlog start %d\" sends it to a new session with the previous agent's notes", id)
 	} else if kept > 1 {
 		note += fmt.Sprintf(". Your answers are kept: \"af backlog start %d\" sends them to a new session with the previous agent's notes", id)
+	}
+	_, err = b.AddNote(id, AuthorAF, note, now)
+	return err
+}
+
+// FinishUncertainStart settles the starting run of id that began at startedAt
+// on sessionID, a session af kept because it could not confirm that its agent
+// came up (startErr says why). The session may be running, so the run is linked
+// to it rather than failed: a failed run would let the item start a second
+// agent beside it (#6574). A note says how to inspect it, and BeginStart
+// refuses another start while its startup stays unknown. The kept answers the
+// run carries stay kept, since af cannot tell whether the session got its first
+// prompt: the session that starts next sends them.
+func (b *Backlog) FinishUncertainStart(id int, startedAt time.Time, sessionID, title, branch string, startErr error, now time.Time) error {
+	it, err := b.get(id)
+	if err != nil {
+		return err
+	}
+	var run *RunRef
+	for i := range it.Runs {
+		// Starting, or already linked to this session by AdoptStarting (the agent
+		// reported before this ran).
+		if r := &it.Runs[i]; r.StartedAt.Equal(startedAt) && (r.State == RunStarting || (r.State == RunStarted && r.SessionID == sessionID)) {
+			run = r
+		}
+	}
+	if run == nil {
+		return fmt.Errorf("%s has no starting run from %s", FormatID(id), startedAt.Format(time.RFC3339))
+	}
+	run.SessionID, run.Title, run.Branch, run.State = sessionID, title, branch, RunStarted
+	it.UpdatedAt = now
+	note := fmt.Sprintf("af could not confirm that session %q started: %v. It may still be running, so this run stays linked to it, and %s does not start another session while it is unconfirmed: check it with af sessions preview %q, and kill it with af sessions kill %q to start over",
+		title, startErr, FormatID(id), title, title)
+	if kept := len(it.KeptAnswers()); kept == 1 {
+		note += ". Your answer is kept for the session that starts next"
+	} else if kept > 1 {
+		note += ". Your answers are kept for the session that starts next"
 	}
 	_, err = b.AddNote(id, AuthorAF, note, now)
 	return err

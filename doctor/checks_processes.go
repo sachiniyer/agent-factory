@@ -74,13 +74,9 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	// session would read as dead and every one of its processes as a verified
 	// orphan. Silent for the same reason as the branch above — checkTmuxInspection
 	// already reported the blindness as a FAIL (#2874).
-	names, listErr := ctx.tmuxSessions()
+	live, listErr := ctx.tmuxSessions()
 	if listErr != nil {
 		return
-	}
-	live := map[string]bool{}
-	for _, name := range names {
-		live[name] = true
 	}
 
 	marked := map[string][]proctree.Process{}
@@ -115,39 +111,59 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	for _, name := range sortedKeys(marked) {
 		procs := marked[name]
 		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
-		sessionLive := live[name]
+		liveSockets, sessionLive := live[name]
 		if sessionLive {
-			// The pane tree comes from the EVIDENCE-BEARING capture. The
-			// best-effort SessionProcessTrees returns nil on any list-panes
-			// failure, and reading that nil as a proven-empty tree is the
-			// defect this arm exists to avoid: with inSession empty, every
-			// marked process for this live session would render as an
+			// The pane tree comes from the EVIDENCE-BEARING capture — on EVERY
+			// socket the name lives on, because names derive from repo path
+			// and title, not AF home: a same-named session on another server
+			// is a different session, and a member of that other copy compared
+			// against only the first socket's tree would misclassify as
+			// escaped. The best-effort SessionProcessTrees returns nil on any
+			// list-panes failure, and reading that nil as a proven-empty tree
+			// is the defect this arm exists to avoid: with inSession empty,
+			// every marked process for this live session would render as an
 			// escaped-process finding the check has no evidence for, because
 			// the read that would prove membership never returned. A read that
 			// cannot answer is reported once as blindness below (via
 			// observations.blindSessions) rather than classified either way.
-			tree, paneErr := captureSessionProcessTrees(ctx, name)
-			// Build the captured-PID set from whatever the partial tree
-			// returned (may be non-empty even when paneErr != nil, e.g. one
-			// pane vanished between list-panes and the process snapshot while
-			// other panes' descendants were captured successfully).
+			var tree []proctree.Process
+			var failedSockets int
+			liveOnAnySocket := false
+			for _, sock := range liveSockets {
+				sub, paneErr := captureSessionProcessTrees(ctx, name, sock)
+				tree = append(tree, sub...)
+				switch {
+				case paneErr == nil:
+					liveOnAnySocket = true
+				case errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture):
+					// This copy conclusively exited. The name can still be
+					// live on another socket: not blindness, and by itself
+					// not proof of death.
+				default:
+					failedSockets++
+				}
+			}
+			// Build the captured-PID set from whatever the partial trees
+			// returned (may be non-empty even for a socket that errored, e.g.
+			// one pane vanished between list-panes and the process snapshot
+			// while other panes' descendants were captured successfully).
 			capturedPIDs := map[int]bool{}
 			for _, p := range tree {
 				capturedPIDs[p.PID] = true
 			}
-			if paneErr != nil {
-				// A session that vanished between the memoized listing and the
-				// pane capture is conclusively gone: route its surviving
-				// candidates through the dead-session (orphaned-process)
-				// classification below, just like a session that was never in
-				// the live list. The vanished sentinel is not a blindness event
-				// because the absence is authoritative, not a failed read.
-				if errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture) {
-					sessionLive = false
-				} else {
+			if !liveOnAnySocket && failedSockets == 0 {
+				// The session vanished on EVERY socket it was listed on —
+				// conclusively gone: route its surviving candidates through
+				// the dead-session (orphaned-process) classification below,
+				// just like a session that was never in the live list. The
+				// vanished sentinel is not a blindness event because the
+				// absence is authoritative, not a failed read.
+				sessionLive = false
+			} else {
+				if failedSockets > 0 {
 					// Revalidate candidates before declaring blindness: if every
 					// marked process for this session already exited (normal churn),
-					// or is already verified by the partial tree, there is nothing
+					// or is already verified by the partial trees, there is nothing
 					// left to be blind about and no row is needed.
 					var anyBlind bool
 					for _, p := range procs {
@@ -282,46 +298,135 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			// another agent-factory home" and leave it unfixed.
 			//
 			// A kill ALSO requires a corroborated session listing: the dead
-			// session this arm infers must be dead on the server the daemon
-			// ACTUALLY hosts sessions on, not on the one doctor's own
-			// $TMUX/$TMUX_TMPDIR happens to resolve. Without the pin a live
-			// session on a different tmux server is absent from the ambient
-			// listing and reads as a dead one here, arming killFix for a
-			// process whose session is still alive. The listing is pinned to
-			// the daemon's recorded socket in listTmuxSessions; an UNCONFIRMED
-			// record (present but unreadable, or naming no socket) means the
-			// listing could not be pinned and stays ambient, so this arm
-			// refuses the kill and reports instead. The record-ABSENT state
-			// (no record AND no live daemon) is corroborated PER PROCESS: the
-			// marked process's own TMUX env names the socket its session lived
-			// on, so the ambient listing corroborates death only when that
-			// socket matches the ambient one — the same "a successful listing
-			// of the wrong server is not evidence of death" rule the
-			// failed-listing guard above enforces for one that did not answer.
+			// session this arm infers must be dead on the server that ACTUALLY
+			// hosted it, and every socket generation the daemon has used must
+			// be accounted for — absence from the union listing is evidence of
+			// death only under both. sessionDeathProof asks the process's own
+			// TMUX env for the server its session lived on (a live answer there
+			// reroutes to the escaped classification), and falls back to the
+			// record only when the record can be proven current — the daemon
+			// generation that stamped it still serves this home, or a stamped
+			// record is the last word a dead daemon left (#6339). Anything else
+			// is reported, not killed: a live session on a socket the record
+			// does not account for looks exactly like a dead one here.
 			home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
 			hasHome := homeStatus == proctree.EnvFound
 			switch {
 			case hasHome && filepath.IsAbs(home) && sameHome(home, ctx.opts.ConfigDir):
-				if !ctx.sessionDeathCorroborated(p) {
+				// A matching AF_HOME proves the SESSION was this home's —
+				// never that the process carrying it is. A second install
+				// launched inside one of this home's sessions inherits
+				// AF_SESSION/AF_HOME beside its own AGENT_FACTORY_HOME (and
+				// TMUX_TMPDIR), so its daemon, its tmux server and everything
+				// they spawn carry a matching marker while belonging to the
+				// other install — and the union listing cannot see that
+				// install's live sessions, so they read as verified orphans
+				// here (#6578). Ownership is established the way the daemon
+				// checks establish which home a daemon serves: the process's
+				// OWN environment, resolved in its own frame through
+				// daemonProcessHome — the HOME-derived default included, so a
+				// real same-home pane process (which declares no
+				// AGENT_FACTORY_HOME of its own) still resolves to this
+				// install — and, where its environment cannot answer, the
+				// home its ancestors declare. Only a positively different
+				// answer disqualifies; what the process's frame cannot
+				// resolve is reported, not killed.
+				ownership, foreignHome, foreignPID := ctx.markedProcessOwnership(p)
+				switch ownership {
+				case ownershipForeignEnv:
+					report.addAdvisoryFinding(Finding{
+						Check: "foreign-home-process",
+						Detail: fmt.Sprintf("%s marks dead session %s (home %s) but belongs to another "+
+							"agent-factory home (%s) — the matching marker was inherited from a "+
+							"session of this install, so it is reported, not killed; run "+
+							"`af doctor` with that home active",
+							describeProc(p), name, home, foreignHome),
+					})
+					continue
+				case ownershipForeignAncestor:
+					report.addAdvisoryFinding(Finding{
+						Check: "foreign-home-process",
+						Detail: fmt.Sprintf("%s marks dead session %s (home %s) but runs under "+
+							"pid %d, which declares another agent-factory home (%s) — the "+
+							"matching marker was inherited, so it is reported, not killed",
+							describeProc(p), name, home, foreignPID, foreignHome),
+					})
+					continue
+				case ownershipUnproven:
 					report.addAdvisoryFinding(Finding{
 						Check: "orphaned-process",
-						Detail: fmt.Sprintf("%s marks session %s (home %s) but the daemon's tmux "+
-							"server record is absent or could not be pinned to a socket, and the "+
-							"ambient listing cannot be tied to the socket the process's session "+
-							"lived on — so doctor cannot corroborate the session's death on the "+
-							"server that hosts it, and a live session on a different tmux server "+
-							"would look the same here; it is reported, not killed",
+						Detail: fmt.Sprintf("%s marks dead session %s (home %s) but its own "+
+							"environment establishes no agent-factory home — ownership is "+
+							"unproven, so it is reported, not killed",
 							describeProc(p), name, home),
 					})
 					continue
 				}
-				report.addActionableFinding(Finding{
-					Check: "orphaned-process",
-					Detail: fmt.Sprintf("%s was spawned by dead session %s (home %s)",
-						describeProc(p), name, home),
-					FixAction: fmt.Sprintf("kill pid %d", p.PID),
-					fix:       killFix(ctx, p),
-				})
+				verdict, proofSocket := ctx.sessionDeathProof(p, name)
+				switch verdict {
+				case deathLiveElsewhere:
+					// The session is absent from the union listing but live on
+					// the socket p's own TMUX env names — the stale-record or
+					// adopted-server shape #6339 pins. Classify it the way the
+					// live arm would: inside the pane tree, silent; outside it,
+					// escaped (report-only — never armed). A capture that
+					// cannot answer is neither — a read that cannot answer is
+					// not evidence.
+					tree, paneErr := captureSessionProcessTrees(ctx, name, proofSocket)
+					switch {
+					case errors.Is(paneErr, tmux.ErrSessionVanishedBeforeCapture):
+						// The session vanished between listing and capture —
+						// the proof's live answer is already stale. Leave the
+						// process for the next run rather than classify on a
+						// racing world.
+						continue
+					case paneErr != nil:
+						report.addAdvisoryFinding(Finding{
+							Check: "orphaned-process",
+							Detail: fmt.Sprintf("%s marks session %s (home %s), which is live on "+
+								"tmux socket %s, but its pane tree could not be read (%v) — "+
+								"it is reported, not killed", describeProc(p), name, home, proofSocket, paneErr),
+						})
+						continue
+					}
+					inTree := false
+					for _, tp := range tree {
+						if tp.PID == p.PID {
+							inTree = true
+							break
+						}
+					}
+					if inTree {
+						continue
+					}
+					report.addAdvisoryFinding(Finding{
+						Check: "escaped-process",
+						Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
+							"(left alone while the session is alive)", describeProc(p), name),
+					})
+					continue
+				case deathProven:
+					report.addActionableFinding(Finding{
+						Check: "orphaned-process",
+						Detail: fmt.Sprintf("%s was spawned by dead session %s (home %s)",
+							describeProc(p), name, home),
+						FixAction: fmt.Sprintf("kill pid %d", p.PID),
+						fix:       killFix(ctx, p),
+					})
+					continue
+				default:
+					report.addAdvisoryFinding(Finding{
+						Check: "orphaned-process",
+						Detail: fmt.Sprintf("%s marks session %s (home %s) but doctor cannot "+
+							"corroborate the session's death on the server that hosts it — the "+
+							"daemon's tmux server record is absent, cannot be pinned to a socket, "+
+							"or cannot be proven current, and a live session on a socket the "+
+							"record does not account for would look the same here; it is "+
+							"reported, not killed",
+							describeProc(p), name, home),
+					})
+					continue
+				}
 			case hasHome && filepath.IsAbs(home):
 				report.addAdvisoryFinding(Finding{
 					Check: "orphaned-process",
@@ -431,6 +536,103 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 		})
 	}
 	observations.report(report)
+}
+
+// ownershipVerdict is what doctor can prove about which install a marked
+// process belongs to, independent of its AF_HOME marker (#6578). The marker
+// proves the session was this home's; it never proves the process carrying it
+// is, because a session's environment is inherited by every process its
+// children spawn — including a second install launched from inside it.
+type ownershipVerdict int
+
+const (
+	// ownershipThisInstall is the only verdict that may arm a kill: the
+	// process's own environment resolves to this home and no ancestor
+	// declares a different one.
+	ownershipThisInstall ownershipVerdict = iota
+	// ownershipForeignEnv means the process's own environment resolves to a
+	// different install's home — its matching AF_HOME marker was inherited.
+	ownershipForeignEnv
+	// ownershipForeignAncestor means the process's own home is this
+	// install's (or is unresolvable) but an ancestor declares a different
+	// install's home — it runs under another install's tmux server, daemon
+	// or helper, which an env scrub cannot erase.
+	ownershipForeignAncestor
+	// ownershipUnproven means the process's own environment establishes no
+	// home at all: nothing names another install, but the marker alone is
+	// not proof of this one either.
+	ownershipUnproven
+)
+
+// markedProcessOwnership resolves which install a marked process belongs to,
+// independent of its inherited-able AF_HOME marker. The process's own home is
+// resolved by daemonProcessHome — the same rule checkForeignDaemons and the
+// leaked-daemon checks act on, computed in the process's own frame — then its
+// ancestor chain is consulted for the shapes its environment cannot answer (a
+// tmux server's descendants share its inherited markers even when their own
+// AGENT_FACTORY_HOME was never set or was scrubbed). Returns the verdict, the
+// foreign home where one was proven, and the pid that declared it (0 when the
+// process's own environment did).
+func (ctx *scanContext) markedProcessOwnership(p proctree.Process) (ownershipVerdict, string, int) {
+	ownHome, known := daemonProcessHome(p.PID)
+	if known && !sameHome(ownHome, ctx.opts.ConfigDir) {
+		return ownershipForeignEnv, ownHome, p.PID
+	}
+	if home, pid, foreign := ctx.foreignDeclaredAncestor(p); foreign {
+		return ownershipForeignAncestor, home, pid
+	}
+	if !known {
+		return ownershipUnproven, "", 0
+	}
+	return ownershipThisInstall, "", 0
+}
+
+// foreignDeclaredAncestor walks p's ancestor chain in the run's snapshot and
+// returns the first home an ancestor DECLARES through its own
+// AGENT_FACTORY_HOME that is not this install's — proof the process runs
+// under another install's tmux server, daemon or helper, even when its own
+// environment resolves to this home or cannot be attributed at all.
+//
+// Only an explicit declaration counts; the HOME-derived default that
+// daemonProcessHome applies to the candidate is deliberately not applied to
+// ancestors. A process that declares no agent-factory home is just some
+// process: applying the default up the tree would let a HOME=/root login
+// shell — or pid 1 in a container — read as "another install" and disarm the
+// arm for every descendant, the mirror image of the kill this walk exists to
+// prevent. An ancestor whose declared home cannot be resolved in its own
+// frame is likewise skipped: ancestry under-disqualifies what it cannot
+// prove, leaving the process's own environment as the gate.
+func (ctx *scanContext) foreignDeclaredAncestor(p proctree.Process) (string, int, bool) {
+	seen := map[int]bool{p.PID: true}
+	for pid, hops := p.PPID, 0; pid > 1 && hops < 128; hops++ {
+		if seen[pid] {
+			break
+		}
+		seen[pid] = true
+		a, ok := ctx.snap[pid]
+		if !ok {
+			break
+		}
+		if home, declared := declaredAgentFactoryHome(pid); declared && !sameHome(home, ctx.opts.ConfigDir) {
+			return home, pid, true
+		}
+		pid = a.PPID
+	}
+	return "", 0, false
+}
+
+// declaredAgentFactoryHome resolves the home a process DECLARES through its
+// own AGENT_FACTORY_HOME, in its own frame — the explicit half of
+// daemonProcessHome's rule, without the HOME-derived default (see
+// foreignDeclaredAncestor for why ancestors get no default).
+func declaredAgentFactoryHome(pid int) (string, bool) {
+	raw, found, err := daemonProcessEnvLookup(pid, "AGENT_FACTORY_HOME")
+	if err != nil || !found || raw == "" {
+		return "", false
+	}
+	homeDir, _, _ := daemonProcessEnvLookup(pid, "HOME")
+	cwd, _ := daemonProcessCwd(pid)
+	return resolveHomeIn(raw, homeDir, cwd)
 }
 
 // processLeakObservations keeps every unprovable state visible without mixing

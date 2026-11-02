@@ -307,6 +307,15 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		gw := i.gitWorktree
 		i.mu.RUnlock()
 
+		// Give the create's observer the exact worktree path BEFORE it can
+		// exist on disk (#6259): a daemon task fire binds this into its durable
+		// marker here, so a crash between `worktree add` and the record commit
+		// leaves a leftover whose path the marker already proves. External
+		// trees are attached, never created — there is nothing to bind.
+		if hook := i.beforeWorktreeCreate; hook != nil && !gw.IsExternalWorktree() {
+			hook(gw.GetWorktreePath())
+		}
+
 		// Setup git worktree first
 		if err := gw.Setup(); err != nil {
 			setupErr = fmt.Errorf("failed to setup git worktree: %w", err)

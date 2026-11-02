@@ -406,6 +406,7 @@ func (i *Instance) ClearIdleEvidence() bool {
 	i.lastPromptAttemptAt = time.Time{}
 	i.lastPromptDeliveryStatus = ""
 	i.lastPaneChurnAt = time.Time{}
+	i.runtimeReplacedAt = time.Now()
 	// The task-run boundary and turn observation are pane-relative evidence of
 	// the RETIRED runtime: a replacement pane owns neither the send it did not
 	// make nor the chrome it did not show, so the delivery window does not

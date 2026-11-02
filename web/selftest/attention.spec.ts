@@ -140,17 +140,28 @@ test("reduced motion stills the blink and keeps the dot a ring", async ({ page, 
   await quiet.open(page, id);
   await raise(request, id, "Look at this");
   const dot = page.locator(".af-rail-list .af-row .af-dot-attention").first();
-  const bell = page.locator(".af-term-attention-bell");
   await expect(dot).toBeVisible();
-  const animation = (locator: typeof dot) => locator.evaluate((el) => getComputedStyle(el).animationName);
+  // One evaluate for the whole read (#4217): locator.evaluate resolves the
+  // element THEN evaluates — a row rebuild in between hands getComputedStyle a
+  // detached node, which answers "" forever. Querying inside the page makes the
+  // read atomic, and polling rides out the rebuild window like #6509's badge.
+  const anim = () =>
+    page.evaluate(() => {
+      const d = document.querySelector(".af-rail-list .af-row .af-dot-attention");
+      const b = document.querySelector(".af-term-attention-bell");
+      return {
+        dot: d ? getComputedStyle(d).animationName : null,
+        bell: b ? getComputedStyle(b).animationName : null,
+        ring: d ? getComputedStyle(d.querySelector(".af-icon") ?? d).outlineStyle : null,
+      };
+    });
 
   await page.emulateMedia({ reducedMotion: "no-preference" });
-  expect(await animation(dot)).toBe("af-attention-blink");
-  expect(await animation(bell)).toBe("af-attention-blink");
+  await expect.poll(async () => (await anim()).dot).toBe("af-attention-blink");
+  await expect.poll(async () => (await anim()).bell).toBe("af-attention-blink");
 
   await page.emulateMedia({ reducedMotion: "reduce" });
-  expect(await animation(dot), "the rail dot holds still").toBe("none");
-  expect(await animation(bell), "the chip bell holds still").toBe("none");
-  const ring = await dot.locator(".af-icon").evaluate((el) => getComputedStyle(el).outlineStyle);
-  expect(ring, "a static ring keeps attention distinct from working").toBe("solid");
+  await expect.poll(async () => (await anim()).dot, { message: "the rail dot holds still" }).toBe("none");
+  await expect.poll(async () => (await anim()).bell, { message: "the chip bell holds still" }).toBe("none");
+  expect((await anim()).ring, "a static ring keeps attention distinct from working").toBe("solid");
 });

@@ -243,8 +243,9 @@ func TestHeadlessTabClose_ByIDAndStaleIDIs404(t *testing.T) {
 	rec := headlessPost(t, hs, "/v1/agent/tab-close", `{"id":"daemon-sh-1"}`)
 	require.Equal(t, http.StatusOK, rec.Code)
 	tabs.mu.Lock()
-	assert.Equal(t, []string{"daemon-sh-1"}, tabs.closed, "the close names the stable id, never an ordinal")
+	closed := tabs.closed
 	tabs.mu.Unlock()
+	assert.Equal(t, []string{"daemon-sh-1"}, closed, "the close names the stable id, never an ordinal")
 
 	// Empty id fails validation.
 	rec = headlessPost(t, hs, "/v1/agent/tab-close", `{"id":""}`)
@@ -340,9 +341,10 @@ func TestHeadlessPreview_TabIDRoutesToPreviewByID(t *testing.T) {
 	rec := headlessPost(t, hs, "/v1/agent/preview", `{"tab_id":"daemon-sh-1","tab":0,"full":false}`)
 	require.Equal(t, http.StatusOK, rec.Code)
 	as.mu.Lock()
-	assert.Equal(t, []string{"daemon-sh-1"}, as.previewedIDs,
-		"a tab_id preview must bind the id-native surface, not the ordinal")
+	previewedIDs := as.previewedIDs
 	as.mu.Unlock()
+	assert.Equal(t, []string{"daemon-sh-1"}, previewedIDs,
+		"a tab_id preview must bind the id-native surface, not the ordinal")
 
 	// A stale id answers 404 + tab_gone through the same shared mapping.
 	as.mu.Lock()
@@ -377,9 +379,10 @@ func TestHeadlessStream_TabIDBindsIDNative(t *testing.T) {
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
 	as.mu.Lock()
-	require.Equal(t, []string{"daemon-sh-1"}, as.subscribedIDs,
-		"the stream must bind SubscribeTab by stable id, never the ordinal Subscribe")
+	subscribedIDs := as.subscribedIDs
 	as.mu.Unlock()
+	require.Equal(t, []string{"daemon-sh-1"}, subscribedIDs,
+		"the stream must bind SubscribeTab by stable id, never the ordinal Subscribe")
 
 	// Input written on the id-addressed socket reaches the same id.
 	require.NoError(t, agentproto.WriteFrame(ctx, conn, agentproto.InputFrame([]byte("x"))))
@@ -413,13 +416,15 @@ func TestHeadlessStream_TabIDBindsIDNative(t *testing.T) {
 	defer func() { _ = ordConn.Close(websocket.StatusNormalClosure, "") }()
 
 	as.mu.Lock()
+	subscribedIDs = as.subscribedIDs
+	ordSubs := as.fakeHeadlessAgentServer.subs
+	as.mu.Unlock()
 	// Both id-addressed dials recorded on SubscribeTab (the stale one binds
 	// before its refusal); the ordinal dial must add NOTHING there — it belongs
 	// to the ordinal Subscribe alone.
-	assert.Equal(t, []string{"daemon-sh-1", "never-minted"}, as.subscribedIDs,
+	assert.Equal(t, []string{"daemon-sh-1", "never-minted"}, subscribedIDs,
 		"the ordinal arm must never touch the id-native plane")
-	assert.Len(t, as.fakeHeadlessAgentServer.subs, 1, "the ordinal arm binds the ordinal Subscribe")
-	as.mu.Unlock()
+	assert.Len(t, ordSubs, 1, "the ordinal arm binds the ordinal Subscribe")
 }
 
 // TestHeadlessStream_TabIDStaleRefusedBeforeUpgrade pins the subscribe-order

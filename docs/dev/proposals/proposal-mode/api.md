@@ -50,6 +50,26 @@ path filled in:
 6. Do not change a `> [!decision]` callout without asking the user.
 7. To add a doc, run `af proposal add-doc`.
 8. If you lose track of the proposal, run `af proposal attach`.
+9. When the user asks you to make backlog items from the proposal, or to
+   update them, write them in one batch with `af backlog add --file -` and
+   JSON on stdin: `{"proposal": "<slug>", "items": [...]}`. Every item needs
+   a `title` and a `key`. Make one parent item for the proposal, with key
+   `proposal` and `sequential`: true, and one child per row of the PR stack
+   in steps.md, in stack order, with `parent`: `proposal` and a key
+   `pr-<name>` that names the PR in a few lowercase-dashed words, such as
+   `pr-item-store`, never its row number. Give each child a body with what
+   the PR does and the proposal path, `<path>`. Every item is a draft: do not
+   queue, start, drop or delete items. To update, first read this proposal's
+   items with `af backlog list --all --json` and reuse each item's source
+   key for the PR it stands for, even if its row moved or was renamed: an
+   item with the same proposal and key is updated, not added again. A batch
+   does not reorder items that already exist and adds new ones last, so after
+   it compare the order of the children in `af backlog list` with the stack
+   and fix it with `af backlog move <id> --before <id>` or `--after <id>`.
+   The parent is sequential, so its children run in that order; use
+   `waits_on` only for a dependency the order does not give. Then tell the
+   user the item ids it printed, and name any existing item of this proposal
+   that no longer matches a row.
 
 ### changes output
 

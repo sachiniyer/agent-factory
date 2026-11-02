@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -473,44 +474,67 @@ func TestKillDeadRootDoesNotDeleteSelfHealedRoot(t *testing.T) {
 		_, kerr := manager.KillSession(KillSessionRequest{Title: session.RootSessionTitle, RepoID: repo.ID})
 		killDone <- kerr
 	}()
-	waitUntil(t, 5*time.Second, "KillSession to resolve root-A and wait on the op lock", func() bool {
+
+	// Nothing fatal may run while the op lock is held: Goexit would skip the
+	// unlock and the parked kill would deadlock the test. Run the self-heal
+	// steps, collect the outcome, release, then check.
+	var (
+		healErr   error
+		rootBData session.InstanceData
+		rootB     *session.Instance
+	)
+	killing := false
+	for deadline := time.Now().Add(5 * time.Second); !killing && time.Now().Before(deadline); {
 		manager.mu.Lock()
-		defer manager.mu.Unlock()
-		_, killing := manager.killsInFlight[key]
-		return killing
-	})
+		_, killing = manager.killsInFlight[key]
+		manager.mu.Unlock()
+		if !killing {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if !killing {
+		healErr = fmt.Errorf("KillSession did not resolve root-A and wait on the op lock")
+	} else {
+		storage, serr := session.NewStorage(config.LoadState(), repo.ID)
+		switch {
+		case serr != nil:
+			healErr = fmt.Errorf("NewStorage: %w", serr)
+		default:
+			var deleted bool
+			deleted, serr = storage.DeleteInstanceByStableID(session.RootSessionTitle, rootA.ID)
+			if serr != nil || !deleted {
+				healErr = fmt.Errorf("delete root-A during self-heal: deleted=%v err=%w", deleted, serr)
+			}
+		}
+		if healErr == nil {
+			manager.mu.Lock()
+			delete(manager.instances, key)
+			manager.mu.Unlock()
 
-	storage, err := session.NewStorage(config.LoadState(), repo.ID)
-	if err != nil {
-		t.Fatalf("NewStorage: %v", err)
+			rootBData, healErr = manager.CreateSession(context.Background(), CreateSessionRequest{
+				Title:         session.RootSessionTitle,
+				RepoPath:      repo.Root,
+				Program:       "claude",
+				InPlace:       true,
+				allowReserved: true,
+			})
+			if healErr != nil {
+				healErr = fmt.Errorf("self-heal create root-B: %w", healErr)
+			}
+		}
+		if healErr == nil {
+			manager.mu.Lock()
+			rootB = manager.instances[key]
+			manager.mu.Unlock()
+		}
 	}
-	deleted, err := storage.DeleteInstanceByStableID(session.RootSessionTitle, rootA.ID)
-	if err != nil || !deleted {
-		t.Fatalf("delete root-A during self-heal: deleted=%v err=%v", deleted, err)
-	}
-	manager.mu.Lock()
-	delete(manager.instances, key)
-	manager.mu.Unlock()
-
-	rootBData, err := manager.CreateSession(context.Background(), CreateSessionRequest{
-		Title:         session.RootSessionTitle,
-		RepoPath:      repo.Root,
-		Program:       "claude",
-		InPlace:       true,
-		allowReserved: true,
-	})
-	if err != nil {
-		t.Fatalf("self-heal create root-B: %v", err)
-	}
-	if rootBData.ID == "" || rootBData.ID == rootA.ID {
-		t.Fatalf("root-B must have a fresh stable ID, rootA=%q rootB=%q", rootA.ID, rootBData.ID)
-	}
-	rootB := findRootInstance(t, manager, repoPath)
-	if rootB == nil || rootB.ID != rootBData.ID {
-		t.Fatalf("root-B not registered after self-heal: got %+v want ID %q", rootB, rootBData.ID)
-	}
-
 	opLock.Unlock()
+
+	require.NoError(t, healErr)
+	require.NotEmpty(t, rootBData.ID)
+	require.NotEqual(t, rootA.ID, rootBData.ID, "root-B must have a fresh stable ID")
+	require.NotNil(t, rootB, "root-B not registered after self-heal")
+	require.Equal(t, rootBData.ID, rootB.ID, "root-B not registered after self-heal")
 	select {
 	case err := <-killDone:
 		if err != nil {
@@ -571,23 +595,31 @@ func TestEnsureRootAgentsBusyReapSkipDoesNotCreateOrBackoff(t *testing.T) {
 	opLock.Lock()
 
 	manager.ensureRootAgentsAndWait()
-	if len(*seen) != 1 {
-		t.Fatalf("busy reap skip must not create another root, got %d creates", len(*seen))
+	creates := len(*seen)
+	manager.mu.Lock()
+	got := manager.instances[key]
+	st := manager.rootEnsureStates[repoPath]
+	var failures int
+	var next time.Time
+	if st != nil {
+		failures, next = st.consecutiveFailures, st.nextAttempt
 	}
-	if got := findRootInstance(t, manager, repoPath); got != rootA {
+	manager.mu.Unlock()
+
+	opLock.Unlock()
+
+	if creates != 1 {
+		t.Fatalf("busy reap skip must not create another root, got %d creates", creates)
+	}
+	if got != rootA {
 		t.Fatalf("busy reap skip must leave root-A in place, got %+v want %+v", got, rootA)
 	}
-	manager.mu.Lock()
-	st := manager.rootEnsureStates[repoPath]
-	manager.mu.Unlock()
 	if st == nil {
 		t.Fatal("expected root ensure state")
 	}
-	if st.consecutiveFailures != 0 || !st.nextAttempt.IsZero() {
-		t.Fatalf("busy reap skip must not record an ensure failure/backoff: failures=%d next=%v", st.consecutiveFailures, st.nextAttempt)
+	if failures != 0 || !next.IsZero() {
+		t.Fatalf("busy reap skip must not record an ensure failure/backoff: failures=%d next=%v", failures, next)
 	}
-
-	opLock.Unlock()
 	manager.ensureRootAgentsAndWait()
 	if len(*seen) != 2 {
 		t.Fatalf("next tick after lock release must heal immediately, got %d creates", len(*seen))

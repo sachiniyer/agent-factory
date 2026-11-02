@@ -179,8 +179,8 @@ func (m *Manager) runBacklogPass(now time.Time) {
 	}
 }
 
-// runBacklogProject is one pass for one project: stop runs over the cap per
-// run, then, with the runner on and its gates open, start queued items into
+// runBacklogProject is one pass for one project: note stalled runs and deliver
+// orchestrator events, stop runs over the cap per run, then, with the runner on and its gates open, start queued items into
 // the free slots.
 func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 	b, err := backlog.Load(repoID)
@@ -188,6 +188,8 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 		m.warnBacklogUnreadable("backlog runner", repoID, err)
 		return
 	}
+	b = m.noteOrchStalls(repoID, b, now)
+	m.deliverOrchestrators(repoID, b, now)
 	budget, err := backlog.LoadBudget()
 	if err != nil {
 		m.warn().Printf("backlog runner: %v", err)
@@ -211,6 +213,13 @@ func (m *Manager) runBacklogProject(repoID string, now time.Time) {
 			gate, account := m.backlogGate(repoID, *budget, usage, now)
 			in.Gate = gate
 			in.Limit = rs.startLimit(func(p *backlog.StartPacer) int { return p.Limit(usageFor(usage, account), now) })
+			if !gate.Open() {
+				// The view says stopped only when no queued item's account is open;
+				// selectStarts below makes the real per-account choice.
+				if g := m.viewGate(repoID, b, states, *budget, usage, now, gate); g.Open() {
+					in.Gate, in.Limit = g, -1
+				}
+			}
 		}
 		p := b.PlanRunner(in)
 		p.Start = m.selectStarts(repoID, b, states, p, *budget, usage, now)

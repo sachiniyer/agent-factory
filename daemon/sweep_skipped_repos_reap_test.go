@@ -101,8 +101,9 @@ func TestSweepStartupOrphanContainers_ArmsWithoutRunningWhenSkippedReposEmpty(t 
 
 	assert.Equal(t, 0, rec.count(), "the startup step must not run the Docker pass before readiness")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed, "the sweep must be armed to run after readiness")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed, "the sweep must be armed to run after readiness")
 
 	runDeferredOrphanSweepIfReady(m)
 
@@ -159,8 +160,9 @@ func TestSweepStartupOrphanContainers_DefersWhenSkippedReposNonEmpty(t *testing.
 
 	assert.Equal(t, 0, rec.count(), "the sweep must NOT run when a repo is skipped — its live containers cannot be distinguished from genuine orphans")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed, "the deferral flag must be armed so the poll loop retries")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed, "the deferral flag must be armed so the poll loop retries")
 }
 
 // TestSweepStartupOrphanContainers_DefersForMultipleSkippedRepos verifies the
@@ -180,8 +182,9 @@ func TestSweepStartupOrphanContainers_DefersForMultipleSkippedRepos(t *testing.T
 
 	assert.Equal(t, 0, rec.count(), "the sweep must defer for any non-empty skip set")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed)
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed)
 }
 
 // TestSweepStartupOrphanContainers_DoesNotArmWhenHomeUnresolvable preserves the
@@ -203,8 +206,9 @@ func TestSweepStartupOrphanContainers_DoesNotArmWhenHomeUnresolvable(t *testing.
 
 	assert.Equal(t, 0, rec.count())
 	m.mu.Lock()
-	assert.False(t, m.deferredOrphanSweepArmed, "an unresolvable home is not an incomplete-view deferral; the flag must stay clear")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.False(t, sweepArmed, "an unresolvable home is not an incomplete-view deferral; the flag must stay clear")
 }
 
 // --- runDeferredOrphanSweepIfReady: the poll-side recovery ---
@@ -223,8 +227,9 @@ func TestRunDeferredOrphanSweep_NoOpWhenNotArmed(t *testing.T) {
 
 	assert.Equal(t, 0, rec.count(), "no deferral armed → no sweep")
 	m.mu.Lock()
-	assert.False(t, m.deferredOrphanSweepArmed)
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.False(t, sweepArmed)
 }
 
 // TestRunDeferredOrphanSweep_StaysDeferredWhenSkipSetStillNonEmpty: the deferral
@@ -243,8 +248,9 @@ func TestRunDeferredOrphanSweep_StaysDeferredWhenSkipSetStillNonEmpty(t *testing
 
 	assert.Equal(t, 0, rec.count(), "skip set still non-empty → sweep stays deferred")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed, "the flag must stay armed for the next poll")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed, "the flag must stay armed for the next poll")
 }
 
 // TestRunDeferredOrphanSweep_RunsWhenArmedAndSkipSetDrained: the deferral was
@@ -264,8 +270,9 @@ func TestRunDeferredOrphanSweep_RunsWhenArmedAndSkipSetDrained(t *testing.T) {
 
 	assert.Equal(t, 1, rec.count(), "skip set drained → the deferred sweep runs")
 	m.mu.Lock()
-	assert.False(t, m.deferredOrphanSweepArmed, "the flag is cleared so the sweep runs exactly once")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.False(t, sweepArmed, "the flag is cleared so the sweep runs exactly once")
 
 	call, ok := rec.lastCall()
 	require.True(t, ok)
@@ -329,8 +336,9 @@ func TestSweepStartup_SkippedRepoLiveContainerIsSpared_EndToEnd(t *testing.T) {
 	assert.Equal(t, 0, rec.count(),
 		"the sweep must NOT have run: a skipped repo's live containers cannot be distinguished from genuine orphans")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed, "the deferral flag is armed for the poll loop")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed, "the deferral flag is armed for the poll loop")
 }
 
 // TestDeferredSweep_RunsAfterRepair_EndToEnd exercises the self-healing half:
@@ -365,11 +373,14 @@ func TestDeferredSweep_RunsAfterRepair_EndToEnd(t *testing.T) {
 	require.NoError(t, config.SaveRepoInstances("corrupt-r", repairedJSON))
 
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked(), "a polling refresh of a repaired repo must not error")
-	require.Empty(t, m.skippedRepos, "the repaired repo drops out of the skip set")
-	require.NotNil(t, m.instances[daemonInstanceKey("corrupt-r", "repaired")],
-		"the repaired session re-materializes in m.instances")
+	refreshErr := m.refreshLocked()
+	skipped := m.skippedRepos
+	repaired := m.instances[daemonInstanceKey("corrupt-r", "repaired")]
 	m.mu.Unlock()
+	require.NoError(t, refreshErr, "a polling refresh of a repaired repo must not error")
+	require.Empty(t, skipped, "the repaired repo drops out of the skip set")
+	require.NotNil(t, repaired,
+		"the repaired session re-materializes in m.instances")
 
 	// The deferred-sweep check now runs the destructive pass — with a complete
 	// view. The repaired session's slug is in the protected set, so its container
@@ -383,8 +394,9 @@ func TestDeferredSweep_RunsAfterRepair_EndToEnd(t *testing.T) {
 	assert.True(t, call.slugs[session.Slugify("ok")], "the healthy session's slug is still protected")
 
 	m.mu.Lock()
-	assert.False(t, m.deferredOrphanSweepArmed, "the deferral flag is cleared after the sweep runs")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.False(t, sweepArmed, "the deferral flag is cleared after the sweep runs")
 }
 
 // TestDeferredSweep_StaysDeferredAcrossPollsWhileStillCorrupted_EndToEnd pins
@@ -409,34 +421,41 @@ func TestDeferredSweep_StaysDeferredAcrossPollsWhileStillCorrupted_EndToEnd(t *t
 	sweepStartupOrphanContainers(m)
 	require.Equal(t, 0, rec.count(), "startup sweep defers")
 	m.mu.Lock()
-	require.True(t, m.deferredOrphanSweepArmed)
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	require.True(t, sweepArmed)
 
 	// First poll: file still corrupted → skip set stays non-empty → sweep stays deferred.
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(m.skippedRepos),
-		"a still-corrupted repo stays in the skip set")
+	refreshErr := m.refreshLocked()
+	skipped := skippedRepoIDs(m.skippedRepos)
 	m.mu.Unlock()
+	require.NoError(t, refreshErr)
+	require.Equal(t, []string{"corrupt-r"}, skipped,
+		"a still-corrupted repo stays in the skip set")
 	runDeferredOrphanSweepIfReady(m)
 	require.Equal(t, 0, rec.count(), "still-corrupted → sweep stays deferred")
 	m.mu.Lock()
-	require.True(t, m.deferredOrphanSweepArmed, "flag stays armed across the poll")
+	sweepArmed2 := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	require.True(t, sweepArmed2, "flag stays armed across the poll")
 
 	// Second poll: repair the file → skip set drains → deferred sweep runs.
 	repairedJSON, err := json.Marshal([]session.InstanceData{{Title: "repaired"}})
 	require.NoError(t, err)
 	require.NoError(t, config.SaveRepoInstances("corrupt-r", repairedJSON))
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.Empty(t, m.skippedRepos, "repair drains the skip set")
+	refreshErr2 := m.refreshLocked()
+	skipped2 := m.skippedRepos
 	m.mu.Unlock()
+	require.NoError(t, refreshErr2)
+	require.Empty(t, skipped2, "repair drains the skip set")
 	runDeferredOrphanSweepIfReady(m)
 	require.Equal(t, 1, rec.count(), "repair → deferred sweep runs")
 	m.mu.Lock()
-	require.False(t, m.deferredOrphanSweepArmed, "flag cleared after the sweep")
+	sweepArmed3 := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	require.False(t, sweepArmed3, "flag cleared after the sweep")
 }
 
 // assertErr is a tiny sentinel error for stubs that need a non-nil error.
@@ -494,8 +513,9 @@ func TestLaunchDeferredOrphanSweep_RunsOnWorkerWithoutBlockingLauncher(t *testin
 
 	// The worker is in flight and holding createSweepMu.
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepInFlight, "the in-flight flag is set while the worker runs")
+	sweepInFlight := m.deferredOrphanSweepInFlight
 	m.mu.Unlock()
+	assert.True(t, sweepInFlight, "the in-flight flag is set while the worker runs")
 
 	close(release)
 
@@ -503,8 +523,9 @@ func TestLaunchDeferredOrphanSweep_RunsOnWorkerWithoutBlockingLauncher(t *testin
 	// rather than polling the in-flight flag.
 	wg.Wait()
 	m.mu.Lock()
-	assert.False(t, m.deferredOrphanSweepInFlight, "the in-flight flag must clear once the worker exits")
+	sweepInFlight2 := m.deferredOrphanSweepInFlight
 	m.mu.Unlock()
+	assert.False(t, sweepInFlight2, "the in-flight flag must clear once the worker exits")
 
 	assert.Equal(t, 1, rec.count(), "the deferred sweep ran exactly once on the worker")
 }
@@ -537,8 +558,9 @@ func TestLaunchDeferredOrphanSweep_DoesNotLaunchSecondWorkerWhileOneInFlight(t *
 	close(release)
 	wg.Wait()
 	m.mu.Lock()
-	require.False(t, m.deferredOrphanSweepInFlight, "the in-flight flag clears after the worker exits")
+	sweepInFlight := m.deferredOrphanSweepInFlight
 	m.mu.Unlock()
+	require.False(t, sweepInFlight, "the in-flight flag clears after the worker exits")
 
 	// After the worker exits the flag is cleared, but the deferral flag was
 	// consumed (armed cleared at commit), so a subsequent launch is still a no-op.
@@ -612,8 +634,9 @@ func TestLaunchDeferredOrphanSweep_WorkerIsJoinedByShutdownWaitGroup(t *testing.
 	}
 
 	m.mu.Lock()
-	assert.False(t, m.deferredOrphanSweepInFlight, "the in-flight flag cleared after the worker joined")
+	sweepInFlight := m.deferredOrphanSweepInFlight
 	m.mu.Unlock()
+	assert.False(t, sweepInFlight, "the in-flight flag cleared after the worker joined")
 }
 
 // TestLaunchDeferredOrphanSweep_WorkerSkipsSweepWhenShutdownAlreadyRequested
@@ -640,8 +663,9 @@ func TestLaunchDeferredOrphanSweep_WorkerSkipsSweepWhenShutdownAlreadyRequested(
 	wg.Wait()
 	assert.Equal(t, 0, rec.count(), "the sweep must not run when shutdown was requested before it began")
 	m.mu.Lock()
-	assert.False(t, m.deferredOrphanSweepInFlight, "the in-flight flag cleared without running the sweep")
+	sweepInFlight := m.deferredOrphanSweepInFlight
 	m.mu.Unlock()
+	assert.False(t, sweepInFlight, "the in-flight flag cleared without running the sweep")
 }
 
 // --- Startup parses-but-unloadable rows: the destructive-sweep hole (#4998) ---
@@ -665,8 +689,9 @@ func TestSweepStartupOrphanContainers_DefersWhenSkippedReposIncludeRowsFailedToL
 
 	assert.Equal(t, 0, rec.count(), "the sweep must NOT run when a rows-failed repo is skipped — its live containers cannot be distinguished from genuine orphans")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed, "the deferral flag must be armed so the poll loop retries")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed, "the deferral flag must be armed so the poll loop retries")
 }
 
 // TestRunDeferredOrphanSweep_StaysDeferredWhenRowsFailedSkipSetStillNonEmpty
@@ -687,8 +712,9 @@ func TestRunDeferredOrphanSweep_StaysDeferredWhenRowsFailedSkipSetStillNonEmpty(
 
 	assert.Equal(t, 0, rec.count(), "a rows-failed skip set still non-empty keeps the sweep deferred")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed, "the flag stays armed for the next poll")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed, "the flag stays armed for the next poll")
 }
 
 // TestSweepStartup_ParsesButUnloadableRepoDefersSweep_EndToEnd is the headline
@@ -738,8 +764,9 @@ func TestSweepStartup_ParsesButUnloadableRepoDefersSweep_EndToEnd(t *testing.T) 
 	assert.Equal(t, 0, rec.count(),
 		"the sweep must NOT run: a parses-but-unloadable repo's live containers cannot be distinguished from genuine orphans")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed, "the deferral flag is armed for the poll loop")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed, "the deferral flag is armed for the poll loop")
 }
 
 // TestSweepStartup_PartialRowFailureAtStartupDefersSweep_EndToEnd pins the
@@ -775,8 +802,9 @@ func TestSweepStartup_PartialRowFailureAtStartupDefersSweep_EndToEnd(t *testing.
 	assert.Equal(t, 0, rec.count(),
 		"the sweep must defer for a partial loss too: the failing row's container cannot be distinguished from a genuine orphan")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed)
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed)
 }
 
 // TestDeferredSweep_RunsAfterUnloadableRowsRepair_EndToEnd exercises the
@@ -811,11 +839,14 @@ func TestDeferredSweep_RunsAfterUnloadableRowsRepair_EndToEnd(t *testing.T) {
 	// refresh: the row re-materializes and the repo drops out of the skip set.
 	stubFromInstanceForRefresh(t)
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked(), "a polling refresh that re-materializes the row must not error")
-	require.Empty(t, m.skippedRepos, "the repaired repo drops out of the skip set")
-	require.NotNil(t, m.instances[daemonInstanceKey("stuck-r", "stuck")],
-		"the previously-unloadable session re-materializes in m.instances")
+	refreshErr := m.refreshLocked()
+	skipped := m.skippedRepos
+	stuck := m.instances[daemonInstanceKey("stuck-r", "stuck")]
 	m.mu.Unlock()
+	require.NoError(t, refreshErr, "a polling refresh that re-materializes the row must not error")
+	require.Empty(t, skipped, "the repaired repo drops out of the skip set")
+	require.NotNil(t, stuck,
+		"the previously-unloadable session re-materializes in m.instances")
 
 	// The deferred-sweep check now runs the destructive pass with a complete
 	// protected set: the re-materialized session's slug is protected.
@@ -828,8 +859,9 @@ func TestDeferredSweep_RunsAfterUnloadableRowsRepair_EndToEnd(t *testing.T) {
 	assert.True(t, call.slugs[session.Slugify("ok")], "the healthy session's slug is still protected")
 
 	m.mu.Lock()
-	assert.False(t, m.deferredOrphanSweepArmed, "the deferral flag is cleared after the sweep runs")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.False(t, sweepArmed, "the deferral flag is cleared after the sweep runs")
 }
 
 // TestDeferredSweep_StaysDeferredAcrossPollsWhileRowsStillUnloadable_EndToEnd
@@ -858,32 +890,39 @@ func TestDeferredSweep_StaysDeferredAcrossPollsWhileRowsStillUnloadable_EndToEnd
 	sweepStartupOrphanContainers(m)
 	require.Equal(t, 0, rec.count(), "startup sweep defers")
 	m.mu.Lock()
-	require.True(t, m.deferredOrphanSweepArmed)
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	require.True(t, sweepArmed)
 
 	// First poll: the row still fails -> skip set stays non-empty -> sweep stays deferred.
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.Equal(t, []string{"stuck-r"}, skippedRepoIDs(m.skippedRepos),
-		"a still-unloadable repo stays in the skip set")
+	refreshErr := m.refreshLocked()
+	skipped := skippedRepoIDs(m.skippedRepos)
 	m.mu.Unlock()
+	require.NoError(t, refreshErr)
+	require.Equal(t, []string{"stuck-r"}, skipped,
+		"a still-unloadable repo stays in the skip set")
 	runDeferredOrphanSweepIfReady(m)
 	require.Equal(t, 0, rec.count(), "still-unloadable -> sweep stays deferred")
 	m.mu.Lock()
-	require.True(t, m.deferredOrphanSweepArmed, "flag stays armed across the poll")
+	sweepArmed2 := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	require.True(t, sweepArmed2, "flag stays armed across the poll")
 
 	// Second poll: restore the materializer -> row re-materializes -> skip set drains -> deferred sweep runs.
 	stubFromInstanceForRefresh(t)
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.Empty(t, m.skippedRepos, "repair drains the skip set")
+	refreshErr2 := m.refreshLocked()
+	skipped2 := m.skippedRepos
 	m.mu.Unlock()
+	require.NoError(t, refreshErr2)
+	require.Empty(t, skipped2, "repair drains the skip set")
 	runDeferredOrphanSweepIfReady(m)
 	require.Equal(t, 1, rec.count(), "repair -> deferred sweep runs")
 	m.mu.Lock()
-	require.False(t, m.deferredOrphanSweepArmed, "flag cleared after the sweep")
+	sweepArmed3 := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	require.False(t, sweepArmed3, "flag cleared after the sweep")
 }
 
 // TestDeferredSweep_PartialRowFailureDrainsAfterRepair_EndToEnd is the
@@ -918,35 +957,42 @@ func TestDeferredSweep_PartialRowFailureDrainsAfterRepair_EndToEnd(t *testing.T)
 
 	// Startup: one row loads, one fails -> partial loss seeds the skip set.
 	m.mu.Lock()
-	require.Equal(t, []SkippedRepo{{RepoID: "partial-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
-		m.skippedRepos, "a 1-of-2 partial loss seeds the startup skip set")
-	require.NotNil(t, m.instances[daemonInstanceKey("partial-r", "loads")],
-		"the loadable row materializes at startup")
-	require.Nil(t, m.instances[daemonInstanceKey("partial-r", "stuck")],
-		"the unloadable row does not")
+	skipped := m.skippedRepos
+	loadsInst := m.instances[daemonInstanceKey("partial-r", "loads")]
+	stuckInst := m.instances[daemonInstanceKey("partial-r", "stuck")]
 	m.mu.Unlock()
+	require.Equal(t, []SkippedRepo{{RepoID: "partial-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
+		skipped, "a 1-of-2 partial loss seeds the startup skip set")
+	require.NotNil(t, loadsInst,
+		"the loadable row materializes at startup")
+	require.Nil(t, stuckInst,
+		"the unloadable row does not")
 
 	// The startup sweep defers: the failing row's container's slug is absent
 	// from the protected set.
 	sweepStartupOrphanContainers(m)
 	require.Equal(t, 0, rec.count(), "the sweep must defer for a partial loss")
 	m.mu.Lock()
-	require.True(t, m.deferredOrphanSweepArmed, "the deferral flag is armed")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	require.True(t, sweepArmed, "the deferral flag is armed")
 
 	// A first poll where the row is still unloadable: the loadable row is
 	// re-hydrated from the prior in-memory map (without incrementing
 	// materialized) and the failing row still fails, so the skip set stays.
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.Equal(t, []string{"partial-r"}, skippedRepoIDs(m.skippedRepos),
-		"a still-unloadable partial repo stays skipped")
+	refreshErr := m.refreshLocked()
+	skippedIDs := skippedRepoIDs(m.skippedRepos)
 	m.mu.Unlock()
+	require.NoError(t, refreshErr)
+	require.Equal(t, []string{"partial-r"}, skippedIDs,
+		"a still-unloadable partial repo stays skipped")
 	runDeferredOrphanSweepIfReady(m)
 	require.Equal(t, 0, rec.count(), "still-unloadable -> sweep stays deferred")
 	m.mu.Lock()
-	require.True(t, m.deferredOrphanSweepArmed, "flag stays armed")
+	sweepArmed2 := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	require.True(t, sweepArmed2, "flag stays armed")
 
 	// Repair: restore the materializer so "stuck" loads again. The loadable
 	// row "loads" is re-hydrated from the prior in-memory map and the
@@ -957,13 +1003,17 @@ func TestDeferredSweep_PartialRowFailureDrainsAfterRepair_EndToEnd(t *testing.T)
 	// 1 < 2, so the repo was stuck skipped forever.
 	stubFromInstanceForRefresh(t)
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked(), "a polling refresh that re-materializes both rows must not error")
-	require.Empty(t, m.skippedRepos, "a fully-repaired partial repo drains the skip set")
-	require.NotNil(t, m.instances[daemonInstanceKey("partial-r", "loads")],
-		"the loadable row is still present")
-	require.NotNil(t, m.instances[daemonInstanceKey("partial-r", "stuck")],
-		"the previously-unloadable row re-materializes")
+	refreshErr2 := m.refreshLocked()
+	skipped2 := m.skippedRepos
+	loadsInst2 := m.instances[daemonInstanceKey("partial-r", "loads")]
+	stuckInst2 := m.instances[daemonInstanceKey("partial-r", "stuck")]
 	m.mu.Unlock()
+	require.NoError(t, refreshErr2, "a polling refresh that re-materializes both rows must not error")
+	require.Empty(t, skipped2, "a fully-repaired partial repo drains the skip set")
+	require.NotNil(t, loadsInst2,
+		"the loadable row is still present")
+	require.NotNil(t, stuckInst2,
+		"the previously-unloadable row re-materializes")
 
 	// The deferred sweep now runs with both rows' slugs in the protected set.
 	runDeferredOrphanSweepIfReady(m)
@@ -975,8 +1025,9 @@ func TestDeferredSweep_PartialRowFailureDrainsAfterRepair_EndToEnd(t *testing.T)
 	assert.True(t, call.slugs[session.Slugify("stuck")], "the repaired row's slug is protected")
 
 	m.mu.Lock()
-	require.False(t, m.deferredOrphanSweepArmed, "the deferral flag is cleared after the sweep runs")
+	sweepArmed3 := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	require.False(t, sweepArmed3, "the deferral flag is cleared after the sweep runs")
 
 	// The wire surface stops refusing now that the skip set has drained: the
 	// Snapshot RPC returns the full row set with no SkippedRepos, so list/get/
@@ -1033,6 +1084,7 @@ func TestSweepStartup_LegacyIDPersistenceFailureSeedsSkipSetAndDefers(t *testing
 	assert.Equal(t, 0, rec.count(),
 		"the sweep must defer: the legacy row's container cannot be distinguished from a genuine orphan")
 	m.mu.Lock()
-	assert.True(t, m.deferredOrphanSweepArmed, "the deferral flag is armed")
+	sweepArmed := m.deferredOrphanSweepArmed
 	m.mu.Unlock()
+	assert.True(t, sweepArmed, "the deferral flag is armed")
 }

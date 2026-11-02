@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activeRevealKey, scrollDeltaToReveal, shouldRevealActive } from "./tabscroll.js";
+import { activeRevealKey, scrollDeltaToReveal, shouldRevealActive, tabOverflowFlags } from "./tabscroll.js";
 
 // The bar spans x 422–879 in the play-test that found #6420.
 test("a tab already inside the bar needs no scroll", () => {
@@ -33,6 +33,18 @@ test("a tab wider than the bar that already fills the viewport is left alone (#6
   assert.equal(scrollDeltaToReveal(626, 768, 500, 900), 0, "spans both edges");
   assert.equal(scrollDeltaToReveal(626, 768, 518, 767.6), 0, "sub-pixel short of the end is still filling it");
   assert.equal(scrollDeltaToReveal(626, 768, 700, 950), 700 - 626, "starts inside the bar: align the label");
+});
+
+test("overflow flags mark exactly the edges that still hide content (#6408)", () => {
+  // A ~600px strip showing 15 tabs: only the right edge hides tabs at first.
+  assert.deepEqual(tabOverflowFlags(0, 600, 1400), { left: false, right: true });
+  assert.deepEqual(tabOverflowFlags(300, 600, 1400), { left: true, right: true });
+  assert.deepEqual(tabOverflowFlags(800, 600, 1400), { left: true, right: false }, "scrolled to the end");
+  // Everything fits: no cue at all — the flag must not cry wolf.
+  assert.deepEqual(tabOverflowFlags(0, 1400, 1400), { left: false, right: false });
+  // Sub-pixel scroll geometry must not flicker the cue at the exact ends.
+  assert.deepEqual(tabOverflowFlags(0.4, 600, 1400), { left: false, right: true });
+  assert.deepEqual(tabOverflowFlags(799.6, 600, 1400), { left: true, right: false });
 });
 
 test("reveal fires on a new active tab or session, never on a plain re-render", () => {

@@ -313,7 +313,14 @@ type scanContext struct {
 	// selfAncestors holds our own PID and every ancestor — never proposed
 	// for a kill, no matter what markers they carry.
 	selfAncestors map[int]bool
-	// The run's ONE tmux session listing, memoized by tmuxSessions.
+	// The run's ONE tmux session listing, memoized by tmuxSessions — a union
+	// map from each live session name to every socket it was listed on, covering
+	// the daemon's recorded socket PLUS every prior socket generation the
+	// record names (#6339). A restart can move the daemon to a new socket
+	// while its previous server and sessions stay alive on the old one, so a
+	// name's absence is evidence of death only once EVERY socket the daemon
+	// has recorded has been listed; one unlistable prior generation makes the
+	// whole run blind.
 	//
 	// tmuxErr non-nil means BLIND, not "no sessions are live" — the same
 	// distinction snap/snapErr carry for the process table, and for the same
@@ -325,18 +332,22 @@ type scanContext struct {
 	// Memoized rather than re-listed per check so one run cannot see two
 	// different worlds — a check that disagrees with the row reporting the
 	// listing is worse than either answer alone.
-	tmuxNames   []string
+	tmuxLive    map[string][]string
 	tmuxErr     error
 	tmuxScanned bool
-	// The run's ONE AMBIENT tmux session listing, memoized by
-	// ambientTmuxSessions. Distinct from tmuxNames: the pinned listing is the
-	// one a name's absence corroborates a kill against, while this one only
-	// feeds the rm -rf home guards through unionLiveTmuxHomes — a stale home's
-	// live session can sit on a socket other than the recorded one, and the
-	// union can only over-preserve a home, never over-remove one.
-	tmuxAmbientNames   []string
-	tmuxAmbientErr     error
-	tmuxAmbientScanned bool
+	// socketSessions memoizes the run's per-socket tmux listings: the union
+	// build fills it for the recorded and prior sockets, the ambient listing
+	// the rm -rf home guards union in is socket "", and the orphaned-process
+	// kill arm adds the socket each marked process's own TMUX env names
+	// (#6339). Sharing one memo means a process's corroboration reads the
+	// same per-socket view the union did.
+	socketSessions map[string]socketListing
+	// paneCaptures memoizes the run's per-(session,socket) pane-tree captures:
+	// every marked process on the same session shares one capture — a full
+	// process-table read plus a bounded tmux round-trip — instead of paying it
+	// per process (#6339). The error is held alongside the result for the same
+	// reason socketListing holds its own.
+	paneCaptures map[string]paneCapture
 	// daemons memoizes the run's daemon scan (see daemonProcs); daemonsScanned
 	// distinguishes "scanned, found none" from "not scanned yet".
 	daemons        []daemonProc
@@ -516,6 +527,7 @@ func Run(opts Options) (*Report, error) {
 	// Before every check that reads the session list, so its silence is
 	// explained before it is read rather than after.
 	checkTmuxInspection(ctx, report)
+	checkTmuxRecordCurrency(ctx, report)
 	checkOrphanedProcesses(ctx, report)
 	checkRunawayChildren(ctx, report)
 	checkLeakedTmuxSessions(ctx, report)

@@ -227,3 +227,14 @@ func TestReconcileBacklogArchiveSnapshot(t *testing.T) {
 	require.True(t, inst.ReconcileBacklogArchiveSnapshot(nil))
 	require.False(t, inst.ReconcileBacklogArchiveSnapshot(nil))
 }
+
+func TestLastActivityAtCountsRuntimeReplacement(t *testing.T) {
+	inst := &Instance{}
+	churn := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	inst.lastPaneChurnAt = churn
+	require.Equal(t, churn, inst.LastActivityAt())
+
+	before := time.Now()
+	inst.ClearIdleEvidence()
+	require.False(t, inst.LastActivityAt().Before(before))
+}

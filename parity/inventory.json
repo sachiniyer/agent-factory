@@ -1075,7 +1075,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/terminal.ts (xterm renders the live stream)"
+        "pointer": "web/src/terminal.ts (xterm renders the live stream); web/src/backlog_preview.ts previewSession (backlog chip hover and session card)"
       },
       "cli": {
         "status": "yes",
@@ -1855,15 +1855,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/backlog_group_panel.ts groupButtons (Pause, Unpause, Archive, Unarchive) and groupSections (Dependencies, History); web/src/backlog_pane.ts Show archived → web/src/backlog_api.ts updateItem paused/archived"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_groups.go backlogPauseCmd/backlogUnpauseCmd/backlogArchiveCmd/backlogUnarchiveCmd, api/backlog.go backlogListCmd --archived → POST /v1/UpdateBacklogItem paused/archived (daemon/backlog.go)"
       },
       "verdict": "deliberate",
-      "notes": "Backlog v2 PR 2 adds the CLI and the UpdateBacklogItem fields; the web group panel gains Pause, Unpause and Archive in backlog v2 PR 7. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "notes": "Backlog v2 PR 2 adds the CLI and the UpdateBacklogItem fields; backlog v2 PR 7 adds Pause and Unpause to the web item panel of a parent, Archive, Unarchive, Dependencies and History to a group, and a Show archived filter. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.sessions",
@@ -1892,14 +1892,14 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/backlog_panel.ts ItemPanel question box (Send answer) → web/src/backlog_api.ts answerQuestion"
+        "pointer": "web/src/backlog_inbox.ts QuestionBox (Send answer) in the item panel and the Inbox filter (InboxList) → web/src/backlog_api.ts answerQuestion"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_self.go backlogAskCmd (ask --self --then --handoff-file) and backlogAnswerCmd → POST /v1/PostBacklogMessage kind question and answer (backlog/service_messages.go, daemon/backlog_questions.go); api/backlog_inbox.go backlogInboxCmd reads /v1/GetBacklog"
       },
       "verdict": "deliberate",
-      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; PR 8 adds the web answer box at the top of the item panel. Asking is agent-only (ask --self), so the web only answers. A question also sets the session's attention, which every surface already shows. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; PR 8 adds the web answer box at the top of the item panel. Asking is agent-only (ask --self), so the web only answers. A question also sets the session's attention, which every surface already shows. Backlog v2 adds ask --then and --handoff-file (agent-only), af backlog inbox, and the web Inbox filter, built from /v1/GetBacklog: each open question as a card with its handoff and what an answer does. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.runner",
@@ -1918,6 +1918,24 @@
       },
       "verdict": "deliberate",
       "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (the plan limit, cap per run, dollar limit; the limit replaced a share of the plan and a stop-at, whose hidden CLI flags are kept only to refuse with a pointer to --limit); plan readings arrive in PR 6 and the runner loop, af backlog run and the backlog.runner event in PR 7. PR 3 shows a read-only runner bar on the web and PR 8 makes it editable: the switch, max running, plan use, and the ⋯ budget settings. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
+      "id": "backlog.orchestrator",
+      "title": "Bind a session as a backlog group's orchestrator",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_orchestrate.go backlogOrchestrateCmd, api/backlog.go backlogAddCmd --orchestrate, backlogShowCmd orchestrator block → POST /v1/SetBacklogOrchestrator, SetBacklogOrchestratorHandoff, AddBacklogItems orchestrator, GetBacklog orchestrators (daemon/backlog_orchestrator.go)"
+      },
+      "verdict": "deliberate",
+      "notes": "Effort orchestrator PR 2 adds binding only: the routes, the CLI and the orchestrator block on GetBacklog. A binding is made by the agent of the session that orchestrates (whoami), so it starts on the CLI. Effort orchestrator PR 8 adds the web Effort session button and group panel row. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     }
   ],
   "ledger": {
@@ -1933,6 +1951,7 @@
       "af backlog add": "backlog.items",
       "af backlog edit": "backlog.items",
       "af backlog move": "backlog.items",
+      "af backlog orchestrate": "backlog.orchestrator",
       "af backlog delete": "backlog.items",
       "af backlog note": "backlog.items",
       "af backlog ask": "backlog.questions",
@@ -2059,6 +2078,8 @@
       "POST /v1/GetBudget": "backlog.runner",
       "POST /v1/SetBudget": "backlog.runner",
       "POST /v1/RunBacklog": "backlog.runner",
+      "POST /v1/SetBacklogOrchestrator": "backlog.orchestrator",
+      "POST /v1/SetBacklogOrchestratorHandoff": "backlog.orchestrator",
       "GET /v1/health": "-",
       "POST /v1/AddProposalDoc": "proposal.docs",
       "POST /v1/RemoveProposalDoc": "proposal.docs",
@@ -2178,6 +2199,7 @@
     },
     "web_rpcs": {
       "GetBacklog": "backlog.items",
+      "PreviewSession": "session.preview",
       "AddBacklogItems": "backlog.items",
       "UpdateBacklogItem": "backlog.items",
       "MoveBacklogItem": "backlog.items",
@@ -2260,6 +2282,13 @@
       "af backlog ask --self": "backlog.questions",
       "af backlog ask --handoff-file": "backlog.questions",
       "af backlog ask --then": "backlog.questions",
+      "af backlog add --orchestrate": "backlog.orchestrator",
+      "af backlog add --replace": "backlog.orchestrator",
+      "af backlog orchestrate --replace": "backlog.orchestrator",
+      "af backlog orchestrate --help": "meta.discovery",
+      "af backlog orchestrate --self": "backlog.orchestrator",
+      "af backlog orchestrate --clear": "backlog.orchestrator",
+      "af backlog orchestrate --handoff-file": "backlog.orchestrator",
       "af backlog inbox --help": "meta.discovery",
       "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
@@ -3133,6 +3162,12 @@
         }
       },
       "AddBacklogItems": {
+        "orchestrator": {
+          "ok": "An orchestrator is the agent of the session that calls af backlog add --file --orchestrate; the web adds single drafts and has no session of its own to bind."
+        },
+        "replace_orchestrator": {
+          "ok": "It goes with orchestrator, which the web never sets: only af backlog add --file --orchestrate --replace takes a group over."
+        },
         "before": {
           "ok": "The New item row and Add child append at the bottom; the user then places the item by drag, Alt+arrows or Move…."
         },
@@ -3155,12 +3190,6 @@
         },
         "program": {
           "ok": "Program choice matters only when an item starts a session; the web gains it with Start now in backlog PR 8."
-        },
-        "paused": {
-          "ok": "The web group panel gains Pause and Unpause in backlog v2 PR 7; the CLI has af backlog pause and unpause."
-        },
-        "archived": {
-          "ok": "The web group panel gains Archive in backlog v2 PR 7; the CLI has af backlog archive and unarchive."
         }
       },
       "MoveBacklogItem": {

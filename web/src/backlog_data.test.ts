@@ -273,3 +273,16 @@ test("a saved budget's reply is committed and a GetBudget read before it is drop
 test("Run next is on: the daemon serves RunBacklog", () => {
   assert.equal(backlogRoutes.runBacklog, true);
 });
+
+test("a refresh cut off by a reset resolves without waiting", async () => {
+  const l = loader();
+  let done = false;
+  void l.refresh().then(() => { done = true; });
+  await settle();
+  l.reset();
+  answer("GetBacklog", backlogOf("old"));
+  answer("GetBudget", budgetOf(1));
+  await settle();
+  assert.equal(done, true);
+  assert.equal(commits, 0);
+});

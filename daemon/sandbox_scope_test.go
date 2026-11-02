@@ -499,8 +499,9 @@ func TestSandboxTaskDeliveryNeverCreatesItsTarget(t *testing.T) {
 	assert.Contains(t, err.Error(), scopeRefusal)
 	assert.NotContains(t, err.Error(), "not found", "a missing target answers like an out-of-scope one")
 	f.mgr.mu.Lock()
-	assert.Equal(t, before, len(f.mgr.instances))
+	afterCount := len(f.mgr.instances)
 	f.mgr.mu.Unlock()
+	assert.Equal(t, before, afterCount)
 }
 
 // A sandbox-created task with no target would spawn a session on the daemon

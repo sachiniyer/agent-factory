@@ -7,6 +7,7 @@ import { resetSerialState } from "./backlog_serial.js";
 import type { BacklogData } from "./backlog_data.js";
 import type { BacklogView, Item } from "./backlog_model.js";
 import { BacklogPane, type BacklogHost } from "./backlog_pane.js";
+import { Liveness } from "./types.js";
 
 interface Call {
   method: string;
@@ -222,7 +223,8 @@ test("a failed body save keeps the edit instead of reverting to the stored body"
 function runItem(sessionID: string): Item {
   return item(1, { runs: [{ session_id: sessionID, state: "active", started_by: "user", started_at: "", title: "run" }] as never });
 }
-const runLine = (pane: BacklogPane): string => el(pane).querySelector(".af-backlog-run")?.textContent ?? "";
+// The latest run is the panel's session card.
+const runLine = (pane: BacklogPane): string => el(pane).querySelector(".af-backlog-card")?.textContent ?? "";
 
 test("a run session the rail has not loaded is looked up before it is called Gone", async () => {
   const asked: string[][] = [];
@@ -248,7 +250,7 @@ test("a run session that was adopted into the list gets Open and is not asked ab
   pane.select(1);
   await settle();
   pane.update(data({ "/a": view(runItem("s-arch")) }, 2), "/a",
-    [{ id: "s-arch", title: "t", liveness: "archived" } as never]);
+    [{ id: "s-arch", title: "t", liveness: Liveness.Archived } as never]);
   assert.match(runLine(pane), /Open/);
   assert.doesNotMatch(runLine(pane), /Gone/);
   assert.equal(asked.length, 1);

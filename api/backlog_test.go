@@ -34,6 +34,14 @@ func (backlogTestHost) StartAnswerRun(string, backlog.AnswerRunRequest) (backlog
 	return backlog.Message{}, errors.New("the api tests start no answer runs")
 }
 func (backlogTestHost) Gate(string) backlog.Gate { return backlog.Gate{} }
+
+// backlogTestSessions are the sessions backlogTestHost knows, by id.
+var backlogTestSessions = map[string]backlog.SessionInfo{}
+
+func (backlogTestHost) Session(_, sessionID string) (backlog.SessionInfo, bool) {
+	info, ok := backlogTestSessions[sessionID]
+	return info, ok
+}
 func (backlogTestHost) Usage() planusage.Usage {
 	at := backlogTestNow.Add(-90 * time.Second)
 	return planusage.Usage{Account: planusage.DefaultAccount, ReadingAt: &at,
@@ -57,14 +65,16 @@ func stubBacklogDaemon(t *testing.T) *[]string {
 	svc := backlog.NewService(backlogTestHost{})
 	empty := func(err error) (any, error) { return backlog.Empty{}, err }
 	routes := map[string]func([]byte) (any, error){
-		"GetBacklog":           backlogRoute(svc.Get),
-		"AddBacklogItems":      backlogRoute(svc.Add),
-		"UpdateBacklogItem":    backlogRoute(svc.UpdateItem),
-		"SetBacklogItemStatus": backlogRoute(svc.SetItemStatus),
-		"PostBacklogMessage":   backlogRoute(svc.PostMessage),
-		"SetBacklogSettings":   backlogRoute(svc.SetSettings),
-		"GetBudget":            backlogRoute(svc.GetBudget),
-		"SetBudget":            backlogRoute(svc.SetBudget),
+		"GetBacklog":                    backlogRoute(svc.Get),
+		"AddBacklogItems":               backlogRoute(svc.Add),
+		"UpdateBacklogItem":             backlogRoute(svc.UpdateItem),
+		"SetBacklogItemStatus":          backlogRoute(svc.SetItemStatus),
+		"PostBacklogMessage":            backlogRoute(svc.PostMessage),
+		"SetBacklogSettings":            backlogRoute(svc.SetSettings),
+		"SetBacklogOrchestrator":        backlogRoute(svc.SetOrchestrator),
+		"SetBacklogOrchestratorHandoff": backlogRoute(svc.SetOrchestratorHandoff),
+		"GetBudget":                     backlogRoute(svc.GetBudget),
+		"SetBudget":                     backlogRoute(svc.SetBudget),
 		"MoveBacklogItem": backlogRoute(func(r daemon.MoveBacklogItemRequest) (any, error) {
 			return empty(svc.Move(r))
 		}),

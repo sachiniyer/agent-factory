@@ -31,6 +31,9 @@ type fakeReapTmux struct {
 	// unreadable makes every show-environment fail with an error that is not
 	// "unknown variable".
 	unreadable bool
+	// absent makes `tmux ls` report no sessions at all — the leftover under test
+	// has no live runtime (a worktree-only leftover, #6259).
+	absent bool
 	// flipIncarnation, when non-empty, is answered in place of the fixed
 	// identity by every "#{session_id} #{pid} #{session_created}" probe AFTER
 	// the first — the server being replaced between the resolve and the
@@ -53,6 +56,11 @@ func installFakeReapTmux(t *testing.T, sanitized string, spec fakeReapTmux) (log
 	if spec.unreadable {
 		envGuard = `echo "protocol version mismatch" >&2; exit 1`
 	}
+	lsAnswer := `echo '` + sanitized + `'`
+	if spec.absent {
+		lsAnswer = `:`
+	}
+	listPanesAnswer := `:`
 	resolveBranch := `echo '$7 4242 1700000000'`
 	if spec.flipIncarnation != "" {
 		resolveBranch = `if [ -f '` + dir + `/resolved.flag' ]; then echo '` + spec.flipIncarnation + `'; else echo '$7 4242 1700000000'; fi
@@ -61,7 +69,7 @@ func installFakeReapTmux(t *testing.T, sanitized string, spec fakeReapTmux) (log
 	script := `#!/bin/sh
 echo "$*" >> '` + logPath + `'
 case "$1" in
-ls) echo '` + sanitized + `' ;;
+ls) ` + lsAnswer + ` ;;
 display-message)
   for last; do :; done
   case "$last" in
@@ -69,6 +77,8 @@ display-message)
     '#{pid} #{session_created}') echo '4242 1700000000' ;;
     *) exit 1 ;;
   esac ;;
+list-panes)
+  ` + listPanesAnswer + ` ;;
 show-environment)
   ` + envGuard + `
   if [ -z "$4" ]; then exit 0; fi

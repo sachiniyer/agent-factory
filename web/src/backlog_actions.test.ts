@@ -49,7 +49,8 @@ beforeEach(() => {
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: NOW });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await settle();
   backlogRoutes.runBacklog = true;
   mock.timers.reset();
   dom.restore();
@@ -392,7 +393,8 @@ test("an optimistic Starting is dropped when the daemon, read after the reply, s
   const killed = view([item(1, { status: "running", runs: [run] })], { 1: "stopped" });
   pane.update(data(killed, 3), "/a", []);
   assert.doesNotMatch(chip(pane, 1), /Starting/);
-  assert.notEqual(buttonNamed(el(pane), "Start now"), undefined, "Start now is offered again without a reload");
+  // An item with a run is started again from its session card.
+  assert.notEqual(buttonNamed(el(pane).querySelector(".af-backlog-card")!, "Start again"), undefined, "Start again is offered without a reload");
 });
 
 test("a paused runner says why and offers the main action ui.md names", () => {

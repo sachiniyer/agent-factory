@@ -8,12 +8,18 @@ import assert from "node:assert/strict";
 
 import {
   closeLeaf,
+  fitToSize,
   focusSuccessorAfterDrop,
   companionTab,
   findLeaf,
   type LayoutNode,
   leafCount,
+  leafSizes,
   leaves,
+  minSubtreeSize,
+  PANE_DIVIDER_PX,
+  PANE_MIN_HEIGHT_PX,
+  PANE_MIN_WIDTH_PX,
   remapByIdentity,
   replaceTab,
   resetIds,
@@ -825,3 +831,156 @@ for (const closedFirst of [true, false]) {
     assert.ok(ls.some((x) => x.id === "Lagent"));
   });
 }
+
+// --- Pane minimums (#6429) -----------------------------------------------------
+//
+// The web port of the TUI's pane floor (ui/layout/grid.go PaneMinWidth=40): the
+// fit hides whatever cannot keep the floor rather than letting flex render
+// slivers, and split.ts reports the hidden count through .af-split-narrow.
+
+const leaf = (id: string, tab = 0): LayoutNode => ({ kind: "leaf", id, tab }) as LayoutNode;
+const row = (id: string, a: LayoutNode, b: LayoutNode, ratio = 0.5): LayoutNode =>
+  ({ kind: "split", id, dir: "row", ratio, a, b }) as LayoutNode;
+const col = (id: string, a: LayoutNode, b: LayoutNode, ratio = 0.5): LayoutNode =>
+  ({ kind: "split", id, dir: "column", ratio, a, b }) as LayoutNode;
+
+test("leafSizes: splits divide along their axis, reserving the divider", () => {
+  const tree = row("S", leaf("a"), leaf("b"), 0.5);
+  const sizes = leafSizes(tree, 1008, 600, PANE_DIVIDER_PX);
+  // (1008 - 4) / 2 each; height passes through a row split untouched.
+  assert.equal(sizes.get("a")?.w, 502);
+  assert.equal(sizes.get("b")?.w, 502);
+  assert.equal(sizes.get("a")?.h, 600);
+
+  const stacked = col("S", leaf("a"), leaf("b"), 0.25);
+  const colSizes = leafSizes(stacked, 800, 404, PANE_DIVIDER_PX);
+  assert.equal(colSizes.get("a")?.h, 100); // (404 - 4) * 0.25
+  assert.equal(colSizes.get("b")?.h, 300);
+  assert.equal(colSizes.get("a")?.w, 800);
+});
+
+test("minSubtreeSize: a subtree's floor covers every leaf inside it at the CURRENT ratio", () => {
+  const nested = row("S1", leaf("a"), row("S2", leaf("b"), leaf("c")));
+  // Along "row" the nested pair's floor is max(min/r, min/(1-r)) + div — 644
+  // at the balanced ratio. The root must then cover leaf a in its own ratio
+  // share and the pair's 644 in the other share at ITS 0.5: the pair's demand
+  // (644/0.5) dominates, so the root's floor is 1292 — not the naive 968 a
+  // ratio-blind sum would claim. That larger number is what keeps an ancestor
+  // divider drag from shrinking the pair into a sliver (#6560).
+  assert.equal(
+    minSubtreeSize(nested, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX),
+    (PANE_MIN_WIDTH_PX + PANE_DIVIDER_PX + PANE_MIN_WIDTH_PX) / 0.5 + PANE_DIVIDER_PX,
+  );
+  // A skewed split raises its own floor further: at ratio 0.25 the a-child
+  // only ever gets a quarter of the content span, so it needs min/0.25 before
+  // the sibling's min/0.75 is even the binding constraint.
+  const skewed = row("S3", leaf("d"), leaf("e"), 0.25);
+  assert.equal(
+    minSubtreeSize(skewed, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX),
+    PANE_MIN_WIDTH_PX / 0.25 + PANE_DIVIDER_PX,
+  );
+  // Across the row axis the children overlap, so the larger floor governs.
+  assert.equal(
+    minSubtreeSize(nested, "column", PANE_MIN_HEIGHT_PX, PANE_DIVIDER_PX),
+    PANE_MIN_HEIGHT_PX,
+  );
+});
+
+test("minSubtreeSize: the visible set prices out fit-hidden leaves (#6573)", () => {
+  // The #6573 deadlock: [(a|b)|(c|d)] at ~700px fits down to a,c — but the
+  // divider's retained floors sum both leaves per side (644px each) against a
+  // 696px span, so the clamp inverts and the drag can never move. With the
+  // visible set each side asks only its one rendered leaf's floor.
+  const tree = row("S1", row("S2", leaf("a"), leaf("b")), row("S3", leaf("c"), leaf("d")));
+  const visible = new Set(["a", "c"]);
+  if (tree.kind !== "split") {
+    throw new Error("the fixture's root is a split");
+  }
+  assert.equal(
+    minSubtreeSize(tree.a, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, visible),
+    PANE_MIN_WIDTH_PX,
+  );
+  // A side whose leaves all hide contributes nothing — it takes no flex share
+  // and its divider hides with it, so the other side's floor alone governs.
+  const oneSided = row("S4", leaf("e"), leaf("f"));
+  assert.equal(
+    minSubtreeSize(oneSided, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, new Set(["e"])),
+    PANE_MIN_WIDTH_PX,
+  );
+  // And the skewed-ratio math still applies among the visible leaves: hiding
+  // the dominant child of a skewed pair drops the pair's demand to the
+  // survivor's floor, not min/0.25.
+  const skewed = row("S5", leaf("g"), leaf("h"), 0.25);
+  assert.equal(
+    minSubtreeSize(skewed, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, new Set(["h"])),
+    PANE_MIN_WIDTH_PX,
+  );
+  // Both visible: ratio-aware coexistence plus the divider, as without a set.
+  assert.equal(
+    minSubtreeSize(skewed, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, new Set(["g", "h"])),
+    PANE_MIN_WIDTH_PX / 0.25 + PANE_DIVIDER_PX,
+  );
+});
+
+test("fitToSize: leaves under the floor drop out, rightmost violator first", () => {
+  // Four equal row panes into 700px of host: each would get ~174px — under the
+  // floor. d goes first; then c fills the freed right half at 348px (healthy)
+  // while a,b remain 174px slivers, so b goes next — keeping a,c is the
+  // minimal-hide outcome (hiding c instead would cost the same count and fix
+  // nothing extra).
+  const tree = row("S1", row("S2", leaf("a"), leaf("b")), row("S3", leaf("c"), leaf("d")));
+  const { tree: fit, hidden } = fitToSize(tree, 700, 600, null);
+  assert.deepEqual(leaves(fit).map((l) => l.id), ["a", "c"]);
+  assert.deepEqual([...hidden].sort(), ["b", "d"]);
+});
+
+test("fitToSize: the protected (focused) leaf hides last", () => {
+  const tree = row("S1", row("S2", leaf("a"), leaf("b")), row("S3", leaf("c"), leaf("d")));
+  const { tree: fit, hidden } = fitToSize(tree, 700, 600, "c");
+  const kept = leaves(fit).map((l) => l.id);
+  assert.ok(kept.includes("c"), "the focused pane is never the one that disappears");
+  assert.equal(kept.length, 2);
+  assert.equal(hidden.length, 2);
+});
+
+test("fitToSize: a single pane is exempt — it always shows", () => {
+  const tree = leaf("only");
+  const { tree: fit, hidden } = fitToSize(tree, 100, 50, "only");
+  assert.equal(fit, tree);
+  assert.deepEqual(hidden, []);
+});
+
+test("fitToSize: a violating leaf drops before a healthy one pays for it", () => {
+  // 0.15/0.85 into 800px: a is 120px (a sliver), b is 676px — dropping the
+  // sliver restores the floor; b must not be hidden to save a.
+  const tree = row("S", leaf("a"), leaf("b"), 0.15);
+  const { tree: fit, hidden } = fitToSize(tree, 800, 600, null);
+  assert.deepEqual(leaves(fit).map((l) => l.id), ["b"]);
+  assert.deepEqual(hidden, ["a"]);
+});
+
+test("fitToSize: a healthy leaf CAN hide when the protected one needs the space", () => {
+  // a is the focused 120px sliver; dropping a cannot help (it IS protected),
+  // so the healthy b is the one that goes — the TUI hides unfocused panes to
+  // keep the user's attention on screen.
+  const tree = row("S", leaf("a"), leaf("b"), 0.15);
+  const { tree: fit, hidden } = fitToSize(tree, 800, 600, "a");
+  assert.deepEqual(leaves(fit).map((l) => l.id), ["a"]);
+  assert.deepEqual(hidden, ["b"]);
+});
+
+test("fitToSize: column splits fit on the height floor", () => {
+  // Three stacked panes into 200px: a,b get 49px and c gets 98px — a,b are the
+  // slivers, so b (the bottom-most violator) goes and a,c split the height.
+  const tree = col("S1", col("S2", leaf("a"), leaf("b")), leaf("c"));
+  const { tree: fit, hidden } = fitToSize(tree, 800, 200, null);
+  assert.deepEqual(leaves(fit).map((l) => l.id), ["a", "c"]);
+  assert.deepEqual(hidden, ["b"]);
+});
+
+test("fitToSize: when every leaf clears the floor nothing is hidden", () => {
+  const tree = row("S", leaf("a"), leaf("b"));
+  const { tree: fit, hidden } = fitToSize(tree, 1200, 600, null);
+  assert.equal(fit, tree);
+  assert.deepEqual(hidden, []);
+});

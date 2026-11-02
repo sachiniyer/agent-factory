@@ -268,12 +268,16 @@ export class FakeElement extends FakeNode {
     if (!this.disabled) this.dispatchEvent(new FakeEvent("click"));
   }
   focus(): void {
-    if (this.doc.activeElement === this) return;
+    const prev = this.doc.activeElement;
+    if (prev === this) return;
     this.doc.activeElement = this;
+    if (prev !== this.doc.body) prev.dispatchEvent(new FakeEvent("blur", {}, false));
     this.dispatchEvent(new FakeEvent("focus", {}, false));
   }
   blur(): void {
-    if (this.doc.activeElement === this) this.doc.activeElement = this.doc.body;
+    if (this.doc.activeElement !== this) return;
+    this.doc.activeElement = this.doc.body;
+    this.dispatchEvent(new FakeEvent("blur", {}, false));
   }
   getBoundingClientRect(): { top: number; height: number; left: number; width: number } {
     return { top: 0, height: 20, left: 0, width: 200 };

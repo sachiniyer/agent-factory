@@ -31,6 +31,12 @@ type testHost struct {
 	// answerRuns are the StartAnswerRun requests; answerRunErr fails them.
 	answerRuns   []AnswerRunRequest
 	answerRunErr error
+	sessions     map[string]SessionInfo
+}
+
+func (h *testHost) Session(_, sessionID string) (SessionInfo, bool) {
+	info, ok := h.sessions[sessionID]
+	return info, ok
 }
 
 func (h *testHost) StartAnswerRun(_ string, req AnswerRunRequest) (Message, error) {

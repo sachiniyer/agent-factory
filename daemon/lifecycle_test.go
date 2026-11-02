@@ -362,18 +362,20 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"SendProposalChanges": blockedDuringProbation,
 	// Backlog reads answer during probation; every write waits like the other
 	// mutations.
-	"GetBacklog":           allowedDuringProbation,
-	"GetBudget":            allowedDuringProbation,
-	"AddBacklogItems":      blockedDuringProbation,
-	"UpdateBacklogItem":    blockedDuringProbation,
-	"MoveBacklogItem":      blockedDuringProbation,
-	"SetBacklogItemStatus": blockedDuringProbation,
-	"DeleteBacklogItem":    blockedDuringProbation,
-	"PostBacklogMessage":   blockedDuringProbation,
-	"SetBacklogSettings":   blockedDuringProbation,
-	"SetBudget":            blockedDuringProbation,
-	"StartBacklogItem":     blockedDuringProbation,
-	"RunBacklog":           blockedDuringProbation,
+	"GetBacklog":                    allowedDuringProbation,
+	"GetBudget":                     allowedDuringProbation,
+	"AddBacklogItems":               blockedDuringProbation,
+	"UpdateBacklogItem":             blockedDuringProbation,
+	"MoveBacklogItem":               blockedDuringProbation,
+	"SetBacklogItemStatus":          blockedDuringProbation,
+	"DeleteBacklogItem":             blockedDuringProbation,
+	"PostBacklogMessage":            blockedDuringProbation,
+	"SetBacklogSettings":            blockedDuringProbation,
+	"SetBacklogOrchestrator":        blockedDuringProbation,
+	"SetBacklogOrchestratorHandoff": blockedDuringProbation,
+	"SetBudget":                     blockedDuringProbation,
+	"StartBacklogItem":              blockedDuringProbation,
+	"RunBacklog":                    blockedDuringProbation,
 }
 
 func TestControlServerProbationAdmissionLedger(t *testing.T) {

@@ -93,13 +93,11 @@ func TestBoundedRelocationCleanupInspection_TimedOutProbeFencesRetry(t *testing.
 	useRelocationIdentityTimeoutForTest(t, 25*time.Millisecond)
 	started := make(chan struct{})
 	release := make(chan struct{})
-	workerFinished := make(chan struct{}, 2)
 	var starts atomic.Int32
 	var firstBlock atomic.Bool
 	firstBlock.Store(true)
 	inspect := func(string) (cleanupPathInspection, error) {
 		starts.Add(1)
-		defer func() { workerFinished <- struct{}{} }()
 		if firstBlock.CompareAndSwap(true, false) {
 			close(started)
 			<-release
@@ -132,12 +130,23 @@ func TestBoundedRelocationCleanupInspection_TimedOutProbeFencesRetry(t *testing.
 	}
 	if got := starts.Load(); got != 1 {
 		close(release)
-		<-workerFinished
 		t.Fatalf("inspection deadline spawned %d workers, want one process fence (#6267)", got)
 	}
+	// The fence's release point is the WORKER's cleanup, not inspect's
+	// return: the worker deletes the flight from byPath and only then closes
+	// flight.done (worktree_repo_gone_authorization.go). Synchronize on that
+	// channel — a retry that merely saw inspect return can still meet the
+	// published, timed-out flight (#6564).
+	cleanupInspectionFlights.Lock()
+	fence := cleanupInspectionFlights.byPath[path]
+	cleanupInspectionFlights.Unlock()
+	if fence == nil {
+		close(release)
+		t.Fatal("the timed-out inspection left no published flight to release")
+	}
 	close(release)
-	<-workerFinished
-	// Once the abandoned worker exits, the fence releases: a retry probes the
+	<-fence.done
+	// Once the abandoned worker's fence is unpublished, a retry probes the
 	// path again rather than latching a permanent refusal.
 	if _, err := boundedRelocationCleanupInspection(path, inspect); err != nil {
 		t.Fatalf("retry after the stuck worker exited must probe afresh: %v", err)

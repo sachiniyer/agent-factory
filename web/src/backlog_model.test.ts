@@ -115,7 +115,7 @@ test("sessionItems maps run session ids to items", () => {
     { session_id: "", title: "B-7 a", state: "starting", prev_status: "queued", started_by: "user", started_at: "" },
   ] }));
   const m = sessionItems(new Map([["/repo", view(b)]]));
-  assert.deepEqual([...m.entries()], [["s1", { root: "/repo", id: 7, title: "item 7" }]]);
+  assert.deepEqual([...m.entries()], [["s1", { root: "/repo", id: 7, title: "item 7", state: "draft" }]]);
 });
 
 test("keyboardMove steps among siblings and nests", () => {

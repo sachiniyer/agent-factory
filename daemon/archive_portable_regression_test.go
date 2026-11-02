@@ -118,8 +118,9 @@ func TestArchivePortableOwnerReadDeadline(t *testing.T) {
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		require.ErrorContains(t, err, "filesystem is responsive")
 		m.mu.Lock()
-		require.Empty(t, m.reservedArchiveDestinations)
+		reserved := m.reservedArchiveDestinations
 		m.mu.Unlock()
+		require.Empty(t, reserved)
 	case <-time.After(4 * time.Second):
 		require.NoError(t, pipe.Close())
 		<-done

@@ -28,6 +28,10 @@ export interface Message {
   text: string;
   answers?: number;
   closed?: string;
+  /** What the asking session does after a question: "wait" or "archive". */
+  then?: string;
+  /** The asking agent's notes for a later run. */
+  handoff?: string;
   at: string;
   /** An answer's way to the agent; "new_run" and "superseded" do not close its question. */
   delivery?: string;
@@ -44,6 +48,8 @@ export interface Item {
   program?: string;
   source?: { proposal: string; key: string } | null;
   pr?: string;
+  paused?: boolean;
+  archived?: boolean;
   runs?: RunRef[];
   thread?: Message[];
   created_at: string;
@@ -216,25 +222,42 @@ export function derivedOf(view: BacklogView, id: number): Derived {
   return view.states[String(id)] ?? { state: "draft" };
 }
 
-/** The item's oldest question that no answer names and that is not closed. */
-export function openQuestion(it: Item): Message | undefined {
-  // An answer to a gone session starts a new run that carries it: while that
-  // run starts, the item does not need the user (backlog.Item.AnswerStarting).
+/** The item's questions that no answer closes and that are not closed, oldest
+ *  first. An answer to a gone session starts a new run that carries it: while
+ *  that run starts, the item does not need the user (backlog.Item.AnswerStarting). */
+export function openQuestions(it: Item): Message[] {
   const last = it.runs?.[it.runs.length - 1];
-  if (last?.state === "starting" && last.answers?.length) return undefined;
+  if (last?.state === "starting" && last.answers?.length) return [];
   const thread = it.thread ?? [];
   // An answer kept for a new run, or one a later answer replaced, leaves its
   // question open until a run starts with it (backlog.Message.closesQuestion).
   const closes = (m: Message) => m.kind === "answer" && !!m.answers && m.delivery !== "new_run" && m.delivery !== "superseded";
   const answered = new Set(thread.filter(closes).map((m) => m.answers));
-  return thread.find((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
+  return thread.filter((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
 }
 
-/** Items with an open question, across every given backlog. Parents roll a
- *  child's question up, so counting questions (not states) counts each once. */
+export function openQuestion(it: Item): Message | undefined {
+  return openQuestions(it)[0];
+}
+
+/** id itself or its nearest ancestor that is archived, or 0. */
+export function archivedBy(b: Backlog, id: number): number {
+  const seen = new Set<number>();
+  for (let it = itemByID(b, id); it && !seen.has(it.id); it = it.parent ? itemByID(b, it.parent) : undefined) {
+    if (it.archived) return it.id;
+    seen.add(it.id);
+  }
+  return 0;
+}
+
+/** Open questions across every given backlog, leaving out archived groups:
+ *  the Inbox count. Parents roll a child's question up, so counting questions
+ *  (not states) counts each once. */
 export function needsYouCount(views: Iterable<BacklogView>): number {
   let n = 0;
-  for (const v of views) n += v.backlog.items.filter((it) => openQuestion(it)).length;
+  for (const v of views) {
+    for (const it of v.backlog.items) if (!archivedBy(v.backlog, it.id)) n += openQuestions(it).length;
+  }
   return n;
 }
 
@@ -252,6 +275,7 @@ export interface SessionItem {
   root: string;
   id: number;
   title: string;
+  state: State;
 }
 
 /** The proposals the backlog's items came from, in first-seen order. */
@@ -262,7 +286,7 @@ export function sources(b: Backlog): string[] {
 /** What a rail chip draws and navigates by: a change in any part redraws it. The project
  *  root is part of it, since a rebound project keeps its items' ids and titles. */
 export function sessionItemsSig(items: ReadonlyMap<string, SessionItem>): string {
-  return JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title, it.root]));
+  return JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title, it.root, it.state]));
 }
 
 /** Maps each item session id to its item, from the items' run refs. A session
@@ -272,7 +296,7 @@ export function sessionItems(views: ReadonlyMap<string, BacklogView>): Map<strin
   for (const [root, v] of views) {
     for (const it of v.backlog.items) {
       for (const run of it.runs ?? []) {
-        if (run.session_id) out.set(run.session_id, { root, id: it.id, title: it.title });
+        if (run.session_id) out.set(run.session_id, { root, id: it.id, title: it.title, state: derivedOf(v, it.id).state });
       }
     }
   }
@@ -295,6 +319,8 @@ export interface ListOptions {
   folded: ReadonlySet<number>;
   /** Only items made from this proposal. */
   source?: string | null;
+  /** Archived groups and their items too. */
+  showArchived?: boolean;
 }
 
 function closedState(s: State): boolean {
@@ -336,6 +362,7 @@ export function listRows(view: BacklogView, opts: ListOptions): ListRow[] {
       if (!item) continue;
       const derived = derivedOf(view, id);
       if (!opts.showDone && closedState(derived.state)) continue;
+      if (!opts.showArchived && item.archived) continue;
       if (!matches(id)) continue;
       const hasKids = (kids.get(id) ?? []).length > 0;
       const folded = hasKids && opts.folded.has(id);
@@ -465,6 +492,26 @@ export function overlayMove(fresh: Backlog, moved: Backlog, base: Backlog): Back
 /** Items that wait on id. */
 export function neededBy(b: Backlog, id: number): Item[] {
   return b.items.filter((it) => (it.waits_on ?? []).includes(id));
+}
+
+/** Open items that wait on id: the row's "blocks n". Open by derived state, the
+ *  one listRows hides closed rows by: a parent whose children all finished
+ *  derives done while its stored status can still read running. */
+export function blocking(view: BacklogView, id: number): Item[] {
+  return neededBy(view.backlog, id).filter((it) => !closedState(derivedOf(view, it.id).state));
+}
+
+/** The items id waits on and the items that wait on it. */
+export function relatedIDs(b: Backlog, id: number): Set<number> {
+  const out = new Set<number>((itemByID(b, id)?.waits_on ?? []).filter((w) => itemByID(b, w)));
+  for (const it of neededBy(b, id)) out.add(it.id);
+  out.delete(id);
+  return out;
+}
+
+/** The newest run: the one the state chip links to and the session card shows. */
+export function latestRun(it: Item): RunRef | undefined {
+  return it.runs?.at(-1);
 }
 
 export type ItemAction = "queue" | "draft" | "start" | "review" | "done" | "drop" | "reopen" | "delete";

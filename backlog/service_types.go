@@ -14,6 +14,8 @@ type View struct {
 	Backlog *Backlog        `json:"backlog"`
 	States  map[int]Derived `json:"states"`
 	Runner  RunnerView      `json:"runner"`
+	// Orchestrators holds each orchestrated group's orchestrator by group id.
+	Orchestrators map[int]OrchestratorView `json:"orchestrators,omitempty"`
 }
 
 const (
@@ -45,11 +47,17 @@ type AddRequest struct {
 	// one draft with a title and an optional parent, nothing else, and
 	// af notes on the new item's thread which item's agent added it.
 	SessionID string `json:"session_id,omitempty"`
+	// Orchestrator binds this session to the one group the batch is under.
+	Orchestrator string `json:"orchestrator,omitempty"`
+	// ReplaceOrchestrator lets Orchestrator take the group over from another
+	// session.
+	ReplaceOrchestrator bool `json:"replace_orchestrator,omitempty"`
 }
 
 type AddResponse struct {
-	IDs   map[string]int `json:"ids"`
-	Items []Item         `json:"items"`
+	IDs          map[string]int        `json:"ids"`
+	Items        []Item                `json:"items"`
+	Orchestrator *OrchestratorResponse `json:"orchestrator,omitempty"`
 }
 
 type UpdateItemRequest struct {

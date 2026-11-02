@@ -591,13 +591,17 @@ func TestPruneApply_TakesLocksInTheCreatesOrder(t *testing.T) {
 	admission := manager.worktreeAdmissionLockForRepo(repoID)
 	got := make(chan struct{})
 	go func() { admission.Lock(); close(got) }()
+	deadlocked := false
 	select {
 	case <-got:
+		admission.Unlock()
 	case <-time.After(5 * time.Second):
+		deadlocked = true
+	}
+	start.Unlock()
+	if deadlocked {
 		t.Fatal("deadlock: prune holds worktree admission while waiting for the start lock")
 	}
-	admission.Unlock()
-	start.Unlock()
 
 	select {
 	case resp := <-pruned:
@@ -843,15 +847,19 @@ func TestPruneApply_DoesNotFormALockCycleWithRestoreOrder(t *testing.T) {
 
 	deadline := time.After(15 * time.Second)
 	var resp PruneSessionsResponse
-	for got := 0; got < 2; got++ {
+	deadlocked := false
+	for got := 0; got < 2 && !deadlocked; got++ {
 		select {
 		case resp = <-pruned:
 		case <-persisted:
 		case <-deadline:
-			t.Fatal("deadlock: prune and a restore-order holder wait on each other")
+			deadlocked = true
 		}
 	}
 	admission.Unlock()
+	if deadlocked {
+		t.Fatal("deadlock: prune and a restore-order holder wait on each other")
+	}
 	assert.Len(t, resp.Pruned, 1, "skipped=%+v incomplete=%+v", resp.Skipped, resp.Incomplete)
 }
 

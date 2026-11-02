@@ -594,7 +594,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/GetBacklog",
-		Description: "Read a project's backlog in tree order, with each item's derived state and reason and the runner's state and slots.",
+		Description: "Read a project's backlog in tree order, with each item's derived state and reason, the runner's state and slots, and a top-level orchestrators map by group id: each orchestrator's session, title, session state and pending event count.",
 		requestType: reflect.TypeOf(GetBacklogRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetBacklog) },
 	},
@@ -660,6 +660,20 @@ var httpRoutes = []HTTPRoute{
 		Description: "Change a project's runner switch, max running, or what happens to an item's session when the item is done.",
 		requestType: reflect.TypeOf(SetBacklogSettingsRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetBacklogSettings) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SetBacklogOrchestrator",
+		Description: "Bind a session as the orchestrator of a top-level parent, or with clear unbind it; an item session cannot orchestrate, and a session orchestrates at most one group. Returns the orchestrator with its session state and pending event count.",
+		requestType: reflect.TypeOf(SetBacklogOrchestratorRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetBacklogOrchestrator) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SetBacklogOrchestratorHandoff",
+		Description: "Store notes (at most 8 KB) for a session that replaces the orchestrator, on the group the session orchestrates.",
+		requestType: reflect.TypeOf(SetBacklogOrchestratorHandoffRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetBacklogOrchestratorHandoff) },
 	},
 	{
 		Method:      http.MethodPost,
