@@ -886,6 +886,39 @@ test("minSubtreeSize: a subtree's floor covers every leaf inside it at the CURRE
   );
 });
 
+test("minSubtreeSize: the visible set prices out fit-hidden leaves (#6573)", () => {
+  // The #6573 deadlock: [(a|b)|(c|d)] at ~700px fits down to a,c — but the
+  // divider's retained floors sum both leaves per side (644px each) against a
+  // 696px span, so the clamp inverts and the drag can never move. With the
+  // visible set each side asks only its one rendered leaf's floor.
+  const tree = row("S1", row("S2", leaf("a"), leaf("b")), row("S3", leaf("c"), leaf("d")));
+  const visible = new Set(["a", "c"]);
+  assert.equal(
+    minSubtreeSize(tree.a, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, visible),
+    PANE_MIN_WIDTH_PX,
+  );
+  // A side whose leaves all hide contributes nothing — it takes no flex share
+  // and its divider hides with it, so the other side's floor alone governs.
+  const oneSided = row("S4", leaf("e"), leaf("f"));
+  assert.equal(
+    minSubtreeSize(oneSided, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, new Set(["e"])),
+    PANE_MIN_WIDTH_PX,
+  );
+  // And the skewed-ratio math still applies among the visible leaves: hiding
+  // the dominant child of a skewed pair drops the pair's demand to the
+  // survivor's floor, not min/0.25.
+  const skewed = row("S5", leaf("g"), leaf("h"), 0.25);
+  assert.equal(
+    minSubtreeSize(skewed, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, new Set(["h"])),
+    PANE_MIN_WIDTH_PX,
+  );
+  // Both visible: ratio-aware coexistence plus the divider, as without a set.
+  assert.equal(
+    minSubtreeSize(skewed, "row", PANE_MIN_WIDTH_PX, PANE_DIVIDER_PX, new Set(["g", "h"])),
+    PANE_MIN_WIDTH_PX / 0.25 + PANE_DIVIDER_PX,
+  );
+});
+
 test("fitToSize: leaves under the floor drop out, rightmost violator first", () => {
   // Four equal row panes into 700px of host: each would get ~174px — under the
   // floor. d goes first; then c fills the freed right half at 348px (healthy)
