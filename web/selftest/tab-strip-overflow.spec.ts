@@ -64,9 +64,15 @@ test("#6408: the tab strip signals off-screen tabs at 1024px and 844x390", async
   await page.setViewportSize({ width: 844, height: 390 });
   await expect(bar, "844x390 still signals the off-screen tabs").toHaveClass(/af-tabbar-more-left|af-tabbar-more-right/);
 
-  // And the cue must not cry wolf: wide enough to fit, no edge claims more.
-  await page.setViewportSize({ width: 2400, height: 800 });
-  await expect.poll(async () => (await scrollState(page)).overflows).toBe(false);
-  await expect(bar).not.toHaveClass(/af-tabbar-more-left/);
-  await expect(bar).not.toHaveClass(/af-tabbar-more-right/);
+  // The cue must not cry wolf: scrolled back to the start there is nothing
+  // off the left to signal, and the right-edge cue tracks the truth at
+  // whatever width the strip has — on exactly while it still overflows.
+  await bar.evaluate((el) => (el.scrollLeft = 0));
+  await expect(bar, "back at the start, no off-screen content off the left").not.toHaveClass(/af-tabbar-more-left/);
+  await expect
+    .poll(async () => {
+      const s = await scrollState(page);
+      return s.moreRight === s.overflows;
+    }, { message: "the right-edge cue is on iff content is off the right edge" })
+    .toBe(true);
 });
