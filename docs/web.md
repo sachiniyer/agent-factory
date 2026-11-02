@@ -305,8 +305,14 @@ The tab shows how many of the selected project's items need you; the project swi
 shows each other project's count next to its name. An item that has a session gets its
 `B-12` chip in the Sessions rail; click the chip to open the item.
 
-- **New item…** adds a draft at the bottom; **Add child…** in an item's panel adds one
-  under it. Drag a row, or press `Alt+↑` · `Alt+↓`, to reorder it. **Move…** in the
+- Each group (a top-level item with children) is a card. The card header shows the
+  group's progress ("2 of 5 done · 1 working · 1 need you"), **Pause** or **Unpause**,
+  and **Details**. Each row in a card shows its place in the group (`#3`) and the items
+  it waits on. Selecting a row outlines, with a dashed border, the items it waits on and
+  the items that wait on it. Top-level items with no children stay plain rows.
+- **New group…** at the top adds a top-level draft at the bottom; a card's **Add item…**
+  adds a draft to that group, and **Add child…** in an item's panel adds one under the
+  item. Drag a row, or press `Alt+↑` · `Alt+↓`, to reorder it. **Move…** in the
   panel sends an item to the top or bottom, above another item, or into a parent.
 - The filter buttons narrow the list by state; **Show done** adds finished items.
 - An item's panel holds its actions (Queue, Back to draft, Mark done, Drop, Reopen, Delete),

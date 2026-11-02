@@ -6651,9 +6651,9 @@ function hasAttention(s) {
 function otherAttentionCount(sessions, selectedId) {
   return sessions.filter((s) => s.id !== selectedId && hasAttention(s)).length;
 }
-function attentionWords(count) {
-  if (count <= 0) return "";
-  return count === 1 ? "1 session needs attention" : `${count} sessions need attention`;
+function attentionWords(count2) {
+  if (count2 <= 0) return "";
+  return count2 === 1 ? "1 session needs attention" : `${count2} sessions need attention`;
 }
 function attentionReason(s) {
   return hasAttention(s) ? (s.attention?.reason ?? "").trim() : "";
@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "2abe2c513bbd";
+var CLIENT_VERSION = "c2b2b6839136";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -10506,8 +10506,8 @@ var MidLineHold = class {
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
     if (lastCommit >= 0) {
       this.releasedByIdleBound = false;
-      const tail = data.slice(lastCommit + 1);
-      if (!startsADraft(tail)) {
+      const tail2 = data.slice(lastCommit + 1);
+      if (!startsADraft(tail2)) {
         this.uncommitted = false;
         return "none";
       }
@@ -13373,10 +13373,10 @@ function confirmModal(opts) {
   body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
   const card = handle.el.firstElementChild;
   if (opts.immediateRestore) {
-    const progress = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session\u2026");
-    body.append(progress);
+    const progress2 = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session\u2026");
+    body.append(progress2);
     card.tabIndex = -1;
-    card.setAttribute("aria-describedby", progress.id);
+    card.setAttribute("aria-describedby", progress2.id);
     let isBusy = false;
     card.addEventListener("keydown", (event) => {
       if (isBusy && event.key === "Tab") {
@@ -13391,7 +13391,7 @@ function confirmModal(opts) {
       if (busy && card.isConnected) card.focus();
       setBusy(busy);
       card.setAttribute("aria-busy", String(busy));
-      progress.textContent = busy ? "Restoring session\u2026" : "";
+      progress2.textContent = busy ? "Restoring session\u2026" : "";
       confirmBtn.textContent = busy ? "Restoring\u2026" : "Retry restore";
     };
     const setError = handle.setError;
@@ -13849,13 +13849,13 @@ function projectSummaries(sessions, tasks, registeredRoots = []) {
   return [...roots].sort().map((root2) => {
     const rows = byRoot.get(root2) ?? [];
     const live = rows.filter((s) => !isArchived(s));
-    const working = live.filter((s) => isWorking(s)).length;
+    const working2 = live.filter((s) => isWorking(s)).length;
     return {
       root: root2,
       name: projectName(root2),
       path: root2,
       liveCount: live.length,
-      workingCount: working,
+      workingCount: working2,
       totalCount: rows.length,
       taskCount: taskCounts.get(root2) ?? 0
     };
@@ -19127,6 +19127,105 @@ function groupSections(view, group, select) {
   return [section("Dependencies", depList), section("History", history2)];
 }
 
+// src/backlog_cards.ts
+function segments(rows) {
+  const out = [];
+  for (const row of rows) {
+    const last = out.at(-1);
+    if (row.depth === 0 && row.parent) out.push({ kind: "group", head: row, rows: [] });
+    else if (row.depth > 0 && last?.kind === "group") last.rows.push(row);
+    else if (last?.kind === "loose") last.rows.push(row);
+    else out.push({ kind: "loose", rows: [row] });
+  }
+  return out;
+}
+function positions(rows) {
+  return new Map(rows.map((r, i) => [r.item.id, i + 1]));
+}
+var working = (s) => s === "working" || s === "starting";
+function count(view, items) {
+  const c = { done: 0, total: 0, working: 0, needsYou: 0 };
+  for (const it of items) {
+    const s = derivedOf(view, it.id).state;
+    if (s === "dropped") continue;
+    c.total++;
+    if (s === "done") c.done++;
+    if (working(s)) c.working++;
+    if (s === "needs_you") c.needsYou++;
+  }
+  return c;
+}
+function groupCounts(view, group) {
+  const b = view.backlog;
+  return count(view, b.items.filter((it) => isAncestor(b, group, it.id) && !isParent(b, it.id)));
+}
+var plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
+function tail(c) {
+  return [...c.working > 0 ? [`${c.working} working`] : [], ...c.needsYou > 0 ? [needsYouLabel(c.needsYou)] : []];
+}
+function progressText(c) {
+  return [`${c.done} of ${c.total} done`, ...tail(c)].join(" \xB7 ");
+}
+function overview(view) {
+  const b = view.backlog;
+  const live = b.items.filter((it) => !archivedBy(b, it.id));
+  const groups = live.filter((it) => !it.parent && isParent(b, it.id)).length;
+  const c = count(view, live.filter((it) => !isParent(b, it.id)));
+  return [plural(groups, "group"), plural(c.total, "item"), ...tail(c)].join(" \xB7 ");
+}
+function waitsInGroup(view, it, pos) {
+  const out = { open: 0, dropped: 0, after: [] };
+  for (const w of it.waits_on ?? []) {
+    if (!itemByID(view.backlog, w)) continue;
+    const s = derivedOf(view, w).state;
+    if (s !== "done") out.open++;
+    if (s === "dropped") out.dropped++;
+    const p = pos.get(w);
+    if (p !== void 0) out.after.push({ pos: p, dropped: s === "dropped" });
+  }
+  out.after.sort((x, y) => x.pos - y.pos);
+  return out;
+}
+function metaLine(view, it, pos) {
+  const { open, dropped, after } = waitsInGroup(view, it, pos);
+  const parts = [h("span", { class: "af-backlog-id" }, formatID(it.id))];
+  if (after.length > 0) {
+    parts.push(h("span", { ariaHidden: "true" }, "\xB7"), h("span", {}, "after"), ...after.map((a) => a.dropped ? h("span", { class: "af-backlog-pos-chip af-backlog-pos-dropped" }, `#${a.pos} dropped`) : h("span", { class: "af-backlog-pos-chip" }, `#${a.pos}`)));
+  }
+  if (open > 0) {
+    const text = `waiting on ${plural(open, "item")}${dropped > 0 ? ` (${dropped} dropped)` : ""}`;
+    parts.push(h("span", { ariaHidden: "true" }, "\xB7"), h("span", { class: dropped > 0 ? "af-backlog-warn" : "" }, text));
+  }
+  return h("span", { class: "af-backlog-meta" }, ...parts);
+}
+function presentational(el2) {
+  el2.setAttribute("role", "none");
+  return el2;
+}
+function progress(c, id) {
+  const pct2 = c.total === 0 ? 0 : Math.round(c.done / c.total * 100);
+  const fill = h("span", { class: "af-backlog-progress-fill" });
+  fill.style.width = `${pct2}%`;
+  return hiddenLine(h(
+    "li",
+    { class: "af-backlog-progress", id },
+    h("span", { class: "af-backlog-progress-bar" }, fill),
+    h("span", { class: "af-backlog-reason" }, progressText(c))
+  ));
+}
+function hiddenLine(el2) {
+  el2.setAttribute("aria-hidden", "true");
+  return presentational(el2);
+}
+function pausedNotice(id) {
+  return hiddenLine(h(
+    "li",
+    { class: "af-backlog-notice", id },
+    h("span", { ariaHidden: "true" }, PAUSED_GLYPH),
+    " Paused \u2014 the runner starts nothing in this group until you unpause it."
+  ));
+}
+
 // src/backlog_inbox.ts
 var EMPTY_INBOX = "No questions";
 var QuestionBox = class {
@@ -20324,7 +20423,6 @@ var RunnerBar = class {
     this.el = h(
       "div",
       { class: "af-backlog-head" },
-      h("span", { class: "af-backlog-heading" }, "Backlog"),
       h("div", { class: "af-backlog-runner" }, this.toggle, this.reason, this.slots, this.plan),
       h("div", { class: "af-backlog-runner-actions" }, this.main, this.run, this.menu),
       this.planDetail
@@ -20486,7 +20584,19 @@ var RunnerBar = class {
 
 // src/backlog_pane.ts
 var DRAG_TYPE = "application/x-af-backlog-item";
-var EMPTY_COPY = "No items yet \xB7 Add one below, or ask an agent to make items from a proposal.";
+var EMPTY_COPY = "No items yet \xB7 Name a group above, or ask an agent to make items from a proposal.";
+function placeChildren(parent, want) {
+  let cur = parent.firstChild;
+  for (const el2 of want) {
+    if (cur === el2) cur = cur.nextSibling;
+    else parent.insertBefore(el2, cur);
+  }
+  while (cur) {
+    const next = cur.nextSibling;
+    cur.remove();
+    cur = next;
+  }
+}
 function stillStarting(it, derived, inFlight, sessions) {
   if (inFlight) return true;
   if (derived !== void 0 && derived !== "starting" && derived !== "working") return false;
@@ -20511,16 +20621,14 @@ var BacklogPane = class {
       select: (id) => this.select(id),
       loadSessions: (ids) => this.host.loadSessions(ids)
     });
-    this.headSlot.append(this.runner.el);
-    this.newItem = entryField("New item\u2026", "New item title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
-    const listWrap = h(
+    this.newGroup = entryField("New group\u2026", "New group title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
+    this.headSlot.append(h(
       "div",
-      { class: "af-backlog-listwrap" },
-      this.filterSlot,
-      this.listSlot,
-      this.emptySlot,
-      h("div", { class: "af-backlog-new" }, icon("plus"), this.newItem)
-    );
+      { class: "af-backlog-top" },
+      h("div", { class: "af-backlog-titles" }, h("h2", { class: "af-backlog-heading" }, "Backlog"), this.overviewEl),
+      h("div", { class: "af-backlog-new af-backlog-new-group" }, icon("plus"), this.newGroup)
+    ), this.runner.el);
+    const listWrap = h("div", { class: "af-backlog-listwrap" }, this.filterSlot, this.listSlot, this.emptySlot);
     this.main = h("div", { class: "af-backlog-main" }, listWrap);
     const endDrag = () => {
       this.dragId = null;
@@ -20565,7 +20673,10 @@ var BacklogPane = class {
   want = null;
   requested = /* @__PURE__ */ new Set();
   rowEls = /* @__PURE__ */ new Map();
-  newItem;
+  newGroup;
+  overviewEl = h("p", { class: "af-backlog-overview" });
+  cards = /* @__PURE__ */ new Map();
+  listEl = h("div", { class: "af-backlog-list" });
   // Items started from this tab, by project and id: gen is the refresh that
   // follows the start's reply, Infinity until it comes.
   starts = /* @__PURE__ */ new Map();
@@ -20605,6 +20716,7 @@ var BacklogPane = class {
       this.inboxOn = false;
       this.cursor = null;
       this.folded.clear();
+      this.cards.clear();
     }
     if (this.pending && data.generation > this.pending.gen && !data.errors.has(this.pending.root)) this.pending = null;
     this.data = data;
@@ -20854,10 +20966,12 @@ ${id}`;
     const rows = this.inboxOn ? [] : listRows(v, this.listOptions());
     const shown = (id) => id !== null && rows.some((r) => r.item.id === id);
     this.cursor = [this.focusId, this.cursor, this.selected].find(shown) ?? rows[0]?.item.id ?? null;
-    const list = h("ul", { class: "af-backlog-list", role: "tree" });
-    list.setAttribute("aria-label", "Items");
+    const active = document.activeElement;
+    const typing = active?.tagName === "INPUT" && this.listEl.contains(active) ? active : null;
     this.rowEls = /* @__PURE__ */ new Map();
-    for (const row of rows) list.append(this.row(v, row));
+    for (const id of this.cards.keys()) if (!rows.some((r) => r.item.id === id && r.depth === 0)) this.cards.delete(id);
+    placeChildren(this.listEl, segments(rows).map((seg) => seg.kind === "group" ? this.card(v, seg.head, seg.rows) : this.loose(v, seg.rows)));
+    this.overviewEl.textContent = overview(v);
     this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
     this.filterSlot.replaceChildren(this.filters(v));
     this.emptySlot.replaceChildren();
@@ -20866,8 +20980,8 @@ ${id}`;
       this.inboxList.render(this.root ?? "", v, this.sessions);
       if (this.listSlot.firstChild !== this.inboxList.el) this.listSlot.replaceChildren(this.inboxList.el);
     } else {
-      this.listSlot.replaceChildren(list);
-      this.popover.rebind(list);
+      if (this.listSlot.firstChild !== this.listEl) this.listSlot.replaceChildren(this.listEl);
+      this.popover.rebind(this.listEl);
     }
     if (!this.inboxOn && v.backlog.items.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, EMPTY_COPY));
     else if (!this.inboxOn && rows.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, "No items match this filter"));
@@ -20883,7 +20997,9 @@ ${id}`;
     }
     this.el.classList.toggle("af-backlog-has-panel", this.selected !== null);
     if (this.focusPanel && this.panel) this.panel.focus();
-    else if (this.focusId !== null) {
+    else if (typing && this.focusId === null) {
+      if (typing.isConnected && document.activeElement !== typing) typing.focus();
+    } else if (this.focusId !== null) {
       (this.rowEls.get(this.focusId) ?? (this.cursor !== null ? this.rowEls.get(this.cursor) : void 0))?.focus({ preventScroll: true });
     }
     this.focusPanel = false;
@@ -20891,14 +21007,16 @@ ${id}`;
     this.popover.settle();
     this.applyHighlight();
   }
-  /** Lights up the items the hovered or focused row waits on and those that
-   *  wait on it, and the rows a pinned "Blocks n" picked; the rest dim. */
+  /** Lights up the items the hovered, focused or selected row waits on and
+   *  those that wait on it, and the rows a pinned "Blocks n" picked. The rest
+   *  dim, except for a selection alone. */
   applyHighlight() {
     const v = this.view();
     if (!v) return;
     const active = document.activeElement?.closest?.(".af-backlog-row");
     const focused = active && this.listSlot.contains(active) ? Number(active.dataset.itemId) : null;
-    const hot = this.hoverId ?? focused;
+    const pointed = this.hoverId ?? focused;
+    const hot = pointed ?? this.selected;
     const related = hot !== null ? relatedIDs(v.backlog, hot) : /* @__PURE__ */ new Set();
     const picked = new Set(this.pinned !== null ? blocking(v, this.pinned).map((it) => it.id) : []);
     for (const [id, el2] of this.rowEls) {
@@ -20906,7 +21024,7 @@ ${id}`;
       el2.classList.toggle("af-backlog-row-related", related.has(id));
       el2.classList.toggle("af-backlog-row-picked", picked.has(id) || picked.size > 0 && id === this.pinned);
     }
-    this.listSlot.classList.toggle("af-backlog-dim", related.size > 0 || picked.size > 0);
+    this.listSlot.classList.toggle("af-backlog-dim", pointed !== null && related.size > 0 || picked.size > 0);
   }
   closePanel() {
     this.panel?.dispose();
@@ -20950,7 +21068,43 @@ ${id}`;
     }
     return row;
   }
-  row(v, row) {
+  /** A run of top-level items with no children: a tree of plain rows. */
+  loose(v, rows) {
+    const ul = h("ul", { class: "af-backlog-tree" }, ...rows.map((r) => this.row(v, r)));
+    ul.setAttribute("role", "tree");
+    ul.setAttribute("aria-label", "Items");
+    return ul;
+  }
+  /** A group as a card: a tree of its header row, progress, a paused notice
+   *  and its rows, then an "Add item…" row outside the tree while it is open. */
+  card(v, head, rows) {
+    const g = head.item;
+    let c = this.cards.get(g.id);
+    if (!c) {
+      const root2 = this.root ?? "";
+      const input = entryField(
+        "Add item\u2026",
+        `Add item to ${formatID(g.id)}`,
+        (title) => this.write(root2, (t) => addItem(root2, { title, parent: g.id }, t))
+      );
+      const tree = h("ul", { class: "af-backlog-group-list" });
+      tree.setAttribute("role", "tree");
+      const add = h("div", { class: "af-backlog-new af-backlog-group-add" }, icon("plus"), input);
+      c = { el: h("div", { class: "af-backlog-group" }, tree, add), tree, add };
+      this.cards.set(g.id, c);
+    }
+    c.el.classList.toggle("af-backlog-group-paused", g.paused === true);
+    c.tree.setAttribute("aria-label", g.title);
+    const pos = positions(rows);
+    const lines = [progress(groupCounts(v, g.id), `af-backlog-progress-${g.id}`)];
+    if (g.paused && !g.archived) lines.push(pausedNotice(`af-backlog-paused-${g.id}`));
+    const headEl = this.row(v, head, { pos, head: true });
+    headEl.setAttribute("aria-describedby", lines.map((l) => l.id).join(" "));
+    c.tree.replaceChildren(headEl, ...lines, ...rows.map((r) => this.row(v, r, { pos })));
+    c.add.hidden = head.folded || g.archived === true;
+    return c.el;
+  }
+  row(v, row, spot) {
     const it = row.item;
     const li = h("li", {
       class: `af-backlog-row${it.id === this.selected ? " af-backlog-row-selected" : ""}`,
@@ -20959,7 +21113,7 @@ ${id}`;
     });
     this.rowEls.set(it.id, li);
     li.dataset.itemId = String(it.id);
-    li.style.paddingLeft = `calc(var(--af-space-2) + var(--af-space-4) * ${row.depth})`;
+    li.style.paddingLeft = `calc(var(--af-space-2) + var(--af-space-4) * ${spot && !spot.head ? row.depth - 1 : row.depth})`;
     li.setAttribute("role", "treeitem");
     li.setAttribute("aria-level", String(row.depth + 1));
     li.setAttribute("aria-selected", String(it.id === this.selected));
@@ -20971,15 +21125,7 @@ ${id}`;
       e.stopPropagation();
       this.toggleFold(it.id, !this.folded.has(it.id));
     });
-    li.append(
-      handle,
-      fold,
-      h("span", { class: "af-backlog-id" }, formatID(it.id)),
-      h("span", { class: "af-backlog-row-title" }, it.title),
-      this.rowChip(v, it, row.reason, li),
-      ...this.groupTags(it),
-      ...this.rowTail(v, it)
-    );
+    li.append(handle, fold, ...this.rowBody(v, row, li, spot));
     const keys = [[".af-backlog-chip-link", "o"], [".af-backlog-blocks", "b"], [".af-backlog-row-pr", "p"]].filter(([sel]) => li.querySelector(sel)).map(([, k]) => k);
     if (keys.length > 0) li.setAttribute("aria-keyshortcuts", keys.join(" "));
     li.addEventListener("click", () => this.select(it.id));
@@ -21000,6 +21146,55 @@ ${id}`;
     li.addEventListener("keydown", (e) => this.rowKey(e, v, row, li));
     this.wireDrag(li, v.backlog, it.id);
     return li;
+  }
+  rowBody(v, row, li, spot) {
+    const it = row.item;
+    const title = h("span", { class: "af-backlog-row-title" }, it.title);
+    if (spot?.head) {
+      li.classList.add("af-backlog-group-head");
+      const n = groupCounts(v, it.id).needsYou;
+      const tags = n > 0 ? [h("span", { class: "af-backlog-tag af-backlog-state-needs_you" }, needsYouLabel(n))] : [];
+      return [
+        title,
+        h("span", { class: "af-backlog-id" }, formatID(it.id)),
+        h(
+          "span",
+          { class: "af-backlog-group-end" },
+          this.rowChip(v, it, derivedOf(v, it.id).reason ?? "", li),
+          ...tags,
+          ...this.groupTags(it),
+          ...this.rowTail(v, it),
+          ...this.headActions(it)
+        )
+      ];
+    }
+    const tail2 = [this.rowChip(v, it, row.reason, li), ...this.groupTags(it), ...this.rowTail(v, it)];
+    if (!spot) return [h("span", { class: "af-backlog-id" }, formatID(it.id)), title, ...tail2];
+    li.classList.add("af-backlog-group-row");
+    return [
+      h("span", { class: "af-backlog-pos" }, `#${spot.pos.get(it.id) ?? ""}`),
+      h("span", { class: "af-backlog-row-main" }, title, metaLine(v, it, spot.pos)),
+      h("span", { class: "af-backlog-group-end" }, ...tail2)
+    ];
+  }
+  /** Pause or Unpause, or Unarchive, and the group panel. Archive stays in the
+   *  panel. */
+  headActions(it) {
+    const root2 = this.root ?? "";
+    const out = groupButtons(
+      it,
+      false,
+      (id, c) => this.write(root2, (t) => updateItem(root2, id, c, t))
+    );
+    const open = h("button", { type: "button", class: "af-ghost" }, "Details");
+    open.setAttribute("aria-label", `Open ${formatID(it.id)}`);
+    open.addEventListener("click", () => this.select(it.id));
+    out.push(open);
+    for (const b of out) {
+      b.tabIndex = -1;
+      b.addEventListener("click", (e) => e.stopPropagation());
+    }
+    return out;
   }
   /** The state chip, as a link to the latest run's session when that session
    *  is in the session list. Hovering it, or focusing its row, previews it. */
@@ -22215,8 +22410,8 @@ var AppShell = class {
   renderRail(state) {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
     const visible = visibleRailSessions(state);
-    const count = String(visible.length);
-    if (this.railCount.textContent !== count) this.railCount.textContent = count;
+    const count2 = String(visible.length);
+    if (this.railCount.textContent !== count2) this.railCount.textContent = count2;
     const filterSignature = JSON.stringify([railKindCounts(state.archive, state.selectedProject, scoped), state.statusFilter]);
     if (filterSignature !== this.lastFilterSignature) {
       this.lastFilterSignature = filterSignature;
@@ -22583,7 +22778,7 @@ var AppShell = class {
   /** One state's checkbox in the filter menu: a check when shown, the state's label
    *  (the row's own words — status.ts OPERATOR_KIND_LABELS), and how many sessions in this
    *  project are in it. Clicking toggles just that state and leaves the menu open. */
-  filterItem(kind, on, count) {
+  filterItem(kind, on, count2) {
     const check = h("span", { class: "af-filter-check" }, ...on ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
     const item = h(
@@ -22591,7 +22786,7 @@ var AppShell = class {
       { type: "button", class: `af-filter-item${on ? " af-filter-item-on" : ""}` },
       check,
       h("span", { class: "af-filter-item-label" }, filterLabel(kind)),
-      h("span", { class: "af-filter-item-count" }, String(count))
+      h("span", { class: "af-filter-item-count" }, String(count2))
     );
     item.dataset.kind = kind;
     item.setAttribute("role", "checkbox");
@@ -23429,13 +23624,13 @@ var AppShell = class {
    *  drawer (#6405). Words, not hover: a touch screen has no hover. */
   patchNavAttention(state) {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
-    const count = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
-    const words = attentionWords(count);
-    this.navBadge.hidden = count === 0;
-    if (this.navBadge.textContent !== String(count)) this.navBadge.textContent = count ? String(count) : "";
+    const count2 = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
+    const words = attentionWords(count2);
+    this.navBadge.hidden = count2 === 0;
+    if (this.navBadge.textContent !== String(count2)) this.navBadge.textContent = count2 ? String(count2) : "";
     this.navToggle.setAttribute("aria-label", words ? `Toggle sessions, ${words}` : "Toggle sessions");
-    this.navToggle.toggleAttribute("data-attention", count > 0);
-    this.railAttention.hidden = count === 0;
+    this.navToggle.toggleAttribute("data-attention", count2 > 0);
+    this.railAttention.hidden = count2 === 0;
     if (this.railAttention.textContent !== words) this.railAttention.textContent = words;
   }
   patchMainHead(state) {
