@@ -90,6 +90,21 @@ export interface HostStatus {
   message: string;
   /** True when `message` is a refusal. */
   error: boolean;
+  /** True when a Check produced this, so a later successful check retires it.
+   *  Add/remove outcomes carry no flag: a probe's success does not resolve a
+   *  write refusal. */
+  check?: boolean;
+}
+
+/** One cached probe outcome plus the entry it measured. The pair is what makes
+ *  the cache honest: a verdict belongs to the destination it probed, not to the
+ *  name it sits under — an edit to the raw `hosts` row (or a hand-edit the next
+ *  refresh picks up) retires it by changing the entry. */
+export interface HostCheck {
+  /** The saved entry at request time; undefined when the host left the table
+   *  before the answer landed. */
+  entry: HostEntry | undefined;
+  result: HostCheckResult;
 }
 
 /** Everything the section renders. */
@@ -100,10 +115,12 @@ export interface HostsState {
    *  mutating controls — the send itself re-reads health fresh, the same
    *  Ping-before-send the CLI's EditGlobalHosts does. */
   editable: boolean | null;
-  /** Probe results this view asked for, by host name. Empty until a check runs:
-   *  the section shows nothing cached rather than claiming freshness it did not
-   *  just earn. */
-  checks: Record<string, HostCheckResult>;
+  /** Probe results this view asked for, by host name — each held beside the
+   *  entry it probed, so a config change retires the verdict rather than
+   *  leaving an old answer beside a new destination. Empty until a check
+   *  runs: the section shows nothing cached rather than claiming freshness it
+   *  did not just earn. */
+  checks: Record<string, HostCheck>;
   /** The last add/remove/check outcome for its row. */
   status: HostStatus | null;
   /** Names with a mutation or a probe in flight; their rows' buttons rest. */
@@ -178,6 +195,25 @@ export function describeHost(entry: HostEntry): string {
   if (entry.user) s = `${entry.user}@${s}`;
   if (entry.port) s = `${s}:${entry.port}`;
   return s;
+}
+
+/** Whether two saved entries are the same probing target, field by field. A
+ *  verdict recorded against one entry renders only while the row's saved
+ *  entry still equals it: change the destination under a checked name and the
+ *  old verdict is retired, not displayed. */
+export function sameHostEntry(a: HostEntry | undefined, b: HostEntry): boolean {
+  if (a === undefined) {
+    return false;
+  }
+  return (
+    a.host === b.host &&
+    (a.user ?? "") === (b.user ?? "") &&
+    (a.port ?? 0) === (b.port ?? 0) &&
+    (a.identity_file ?? "") === (b.identity_file ?? "") &&
+    (a.workspace_root ?? "") === (b.workspace_root ?? "") &&
+    (a.host_key_verification ?? "") === (b.host_key_verification ?? "") &&
+    (a.use_ssh_config ?? false) === (b.use_ssh_config ?? false)
+  );
 }
 
 /** Whether a probed host answered recognisably with no blocking problem —
@@ -384,8 +420,8 @@ function renderHostRow(
   el.append(buttons);
 
   const check = state.checks[row.name];
-  if (check !== undefined) {
-    el.append(h("div", { class: "af-hosts-check-lines" }, ...hostCheckLines(check).map((line) => h("div", {}, line))));
+  if (check !== undefined && sameHostEntry(check.entry, row.entry)) {
+    el.append(h("div", { class: "af-hosts-check-lines" }, ...hostCheckLines(check.result).map((line) => h("div", {}, line))));
   }
   if (state.status !== null && state.status.name === row.name) {
     el.append(statusBlock(state.status));

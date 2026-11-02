@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 
 import { installFakeDom, type FakeElement } from "./backlog_fakedom.js";
 import { renderHostsSection, type HostActions, type HostStatus, type HostsState } from "./hosts.js";
-import type { ConfigEntry } from "./types.js";
+import type { ConfigEntry, HostCheckResult } from "./types.js";
 
 let dom: ReturnType<typeof installFakeDom>;
 
@@ -113,4 +113,48 @@ test("a vanished row's status still renders at the foot", () => {
   const shown = sectionLevelStatus(section);
   assert.equal(shown.length, 1);
   assert.equal(shown[0].textContent, orphan.message);
+});
+
+// A verdict belongs to the destination it probed, not to the name it sits
+// under: an edit to the raw `hosts` row (or a hand-edit the next refresh
+// picks up) must retire it rather than display an old answer beside a new
+// destination. The stored `entry` snapshot is what the render compares.
+test("a verdict renders only while the saved entry is the one that was probed", () => {
+  const verdict: HostCheckResult = { name: "box1", probed: true, reachable: true, complete: true, readiness: "ready" };
+  const probedEntry = { host: "box1.tailnet.ts.net", user: "ubuntu" };
+  const checkLines = (section: FakeElement) => section.querySelectorAll(".af-hosts-check-lines");
+
+  // Unchanged entry: the verdict renders on the row.
+  let section = renderHostsSection(
+    entries,
+    state({ checks: { box1: { entry: { ...probedEntry }, result: verdict } } }),
+    actions,
+    { open: false },
+  ) as unknown as FakeElement;
+  assert.equal(checkLines(section).length, 1);
+  assert.ok(
+    checkLines(section)[0].textContent.includes("ready"),
+    "the verdict the probe earned shows on the row",
+  );
+
+  // The raw `hosts` row now points the same name somewhere else: the verdict
+  // retires rather than claiming a destination it never measured is ready.
+  const edited = [hostsEntry('{"box1":{"host":"gpu.tailnet.ts.net","user":"ubuntu"}}')];
+  section = renderHostsSection(
+    edited,
+    state({ checks: { box1: { entry: probedEntry, result: verdict } } }),
+    actions,
+    { open: false },
+  ) as unknown as FakeElement;
+  assert.equal(checkLines(section).length, 0, "an entry change retires the verdict");
+
+  // A verdict for a host that left the table before the answer landed
+  // (entry undefined) must never render either.
+  section = renderHostsSection(
+    entries,
+    state({ checks: { box1: { entry: undefined, result: verdict } } }),
+    actions,
+    { open: false },
+  ) as unknown as FakeElement;
+  assert.equal(checkLines(section).length, 0, "an entry-less verdict stays hidden");
 });

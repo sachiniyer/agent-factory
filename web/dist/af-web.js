@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "5739f8817386";
+var CLIENT_VERSION = "dd542493da6a";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8527,6 +8527,12 @@ function describeHost(entry) {
   if (entry.port) s = `${s}:${entry.port}`;
   return s;
 }
+function sameHostEntry(a, b) {
+  if (a === void 0) {
+    return false;
+  }
+  return a.host === b.host && (a.user ?? "") === (b.user ?? "") && (a.port ?? 0) === (b.port ?? 0) && (a.identity_file ?? "") === (b.identity_file ?? "") && (a.workspace_root ?? "") === (b.workspace_root ?? "") && (a.host_key_verification ?? "") === (b.host_key_verification ?? "") && (a.use_ssh_config ?? false) === (b.use_ssh_config ?? false);
+}
 function hostCheckLines(r) {
   const out = [];
   if (!r.probed) {
@@ -8664,8 +8670,8 @@ function renderHostRow(row, state, actions2, isBusy) {
   }
   el2.append(buttons);
   const check = state.checks[row.name];
-  if (check !== void 0) {
-    el2.append(h("div", { class: "af-hosts-check-lines" }, ...hostCheckLines(check).map((line) => h("div", {}, line))));
+  if (check !== void 0 && sameHostEntry(check.entry, row.entry)) {
+    el2.append(h("div", { class: "af-hosts-check-lines" }, ...hostCheckLines(check.result).map((line) => h("div", {}, line))));
   }
   if (state.status !== null && state.status.name === row.name) {
     el2.append(statusBlock(state.status));
@@ -26144,8 +26150,8 @@ var hostsCapabilityRefetcher = createFencedRefetcher({
 function refreshHostsCapability() {
   hostsCapabilityRefetcher.refresh();
 }
-function setHostStatus(name, message, error) {
-  store.set({ hosts: { ...store.get().hosts, status: { name, message, error } } });
+function setHostStatus(name, message, error, check = false) {
+  store.set({ hosts: { ...store.get().hosts, status: { name, message, error, check } } });
 }
 function setHostBusy(name, on) {
   const hosts = store.get().hosts;
@@ -26158,31 +26164,45 @@ function doHostCheck(name) {
     return;
   }
   const requestGeneration = connectionGeneration;
+  const probed = {};
+  for (const row of hostRows(store.get().config).rows) {
+    probed[row.name] = row.entry;
+  }
   setHostBusy(name, true);
   void checkHost(name, tok).then((resp) => {
     if (requestGeneration !== connectionGeneration || token !== tok) {
       return;
     }
-    const checks = { ...store.get().hosts.checks };
+    const hosts = store.get().hosts;
+    const checks = { ...hosts.checks };
     for (const r of resp.hosts ?? []) {
-      checks[r.name] = r;
+      checks[r.name] = { entry: probed[r.name], result: r };
     }
     if ((resp.hosts ?? []).length === 0) {
       store.set({
         hosts: {
-          ...store.get().hosts,
+          ...hosts,
           checks,
-          status: { name, message: "no hosts saved; add one below", error: false }
+          status: { name, message: "no hosts saved; add one below", error: false, check: true }
         }
       });
       return;
     }
-    store.set({ hosts: { ...store.get().hosts, checks } });
+    store.set({
+      hosts: {
+        ...hosts,
+        checks,
+        // A retry that answered retires the error the failed try left — this
+        // host's, or any check error when every host was just reprobed. An
+        // add or remove refusal is not a check outcome; it stays.
+        status: hosts.status?.check === true && hosts.status.error && (name === "" || hosts.status.name === name) ? null : hosts.status
+      }
+    });
   }).catch((err) => {
     if (requestGeneration !== connectionGeneration || token !== tok) {
       return;
     }
-    setHostStatus(name, errorText(err), true);
+    setHostStatus(name, errorText(err), true, true);
   }).finally(() => {
     if (requestGeneration === connectionGeneration) {
       setHostBusy(name, false);
@@ -26263,8 +26283,8 @@ function doHostAdd(draft) {
       } else {
         setHostStatus("", `saved host ${draft.name} (${desc})${madeDefault ? " as the default" : ""}`, false);
       }
-      doHostCheck(draft.name);
       await refreshConfig();
+      doHostCheck(draft.name);
     } catch (err) {
       if (live()) {
         setHostStatus("", errorText(err), true);

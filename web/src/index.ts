@@ -85,7 +85,7 @@ import {
   terminalFontSizesFromConfig,
 } from "./terminal-font.js";
 import { emptyAccountsState } from "./accounts.js";
-import { emptyHostsState, hostsEditRefusal, type HostAddDraft } from "./hosts.js";
+import { emptyHostsState, hostRows, hostsEditRefusal, type HostAddDraft } from "./hosts.js";
 import { emptyQuotaState } from "./quota.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
@@ -165,7 +165,7 @@ import {
 } from "./ui.js";
 import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
-import { type AccountsResponse, type DaemonHealth, type SessionData, type SkippedRepo, TabKind, type TaskData, type WireEvent } from "./types.js";
+import { type AccountsResponse, type DaemonHealth, type HostEntry, type SessionData, type SkippedRepo, TabKind, type TaskData, type WireEvent } from "./types.js";
 import { publishProposalChange, publishProposalPush, publishProposalResync } from "./docs_tab.js";
 import { parseProposalChange, parseProposalPush } from "./proposal_api.js";
 import { BacklogLoader, EMPTY_BACKLOG_DATA, backlogEventAction, runSessionIds } from "./backlog_data.js";
@@ -2506,8 +2506,8 @@ function refreshHostsCapability(): void {
 
 /** Records the outcome of a host action on the row that produced it; `name` ""
  *  belongs to the add form, mirroring the accounts register convention. */
-function setHostStatus(name: string, message: string, error: boolean): void {
-  store.set({ hosts: { ...store.get().hosts, status: { name, message, error } } });
+function setHostStatus(name: string, message: string, error: boolean, check = false): void {
+  store.set({ hosts: { ...store.get().hosts, status: { name, message, error, check } } });
 }
 
 /** Marks one host mid-request so its row's buttons rest until it settles. */
@@ -2528,33 +2528,57 @@ function doHostCheck(name: string): void {
     return;
   }
   const requestGeneration = connectionGeneration;
+  // The table the probe is being asked against, captured now: a verdict
+  // belongs to the entry it measured, not to the name it sits under, so the
+  // row shows it only while the saved entry still equals this snapshot. An
+  // edit between request and answer — or one the next refresh picks up —
+  // retires it rather than leaving an old verdict beside a new destination.
+  const probed: Record<string, HostEntry> = {};
+  for (const row of hostRows(store.get().config).rows) {
+    probed[row.name] = row.entry;
+  }
   setHostBusy(name, true);
   void checkHost(name, tok)
     .then((resp) => {
       if (requestGeneration !== connectionGeneration || token !== tok) {
         return;
       }
-      const checks = { ...store.get().hosts.checks };
+      const hosts = store.get().hosts;
+      const checks = { ...hosts.checks };
       for (const r of resp.hosts ?? []) {
-        checks[r.name] = r;
+        checks[r.name] = { entry: probed[r.name], result: r };
       }
       if ((resp.hosts ?? []).length === 0) {
         store.set({
           hosts: {
-            ...store.get().hosts,
+            ...hosts,
             checks,
-            status: { name, message: "no hosts saved; add one below", error: false },
+            status: { name, message: "no hosts saved; add one below", error: false, check: true },
           },
         });
         return;
       }
-      store.set({ hosts: { ...store.get().hosts, checks } });
+      store.set({
+        hosts: {
+          ...hosts,
+          checks,
+          // A retry that answered retires the error the failed try left — this
+          // host's, or any check error when every host was just reprobed. An
+          // add or remove refusal is not a check outcome; it stays.
+          status:
+            hosts.status?.check === true &&
+            hosts.status.error &&
+            (name === "" || hosts.status.name === name)
+              ? null
+              : hosts.status,
+        },
+      });
     })
     .catch((err: unknown) => {
       if (requestGeneration !== connectionGeneration || token !== tok) {
         return;
       }
-      setHostStatus(name, errorText(err), true);
+      setHostStatus(name, errorText(err), true, true);
     })
     .finally(() => {
       if (requestGeneration === connectionGeneration) {
@@ -2665,8 +2689,10 @@ function doHostAdd(draft: HostAddDraft): void {
       }
       // The probe rides AFTER the save status, exactly like the CLI: the entry
       // is kept whatever the check says, and its verdict lands on the new row.
-      doHostCheck(draft.name);
+      // Refetch first — doHostCheck snapshots the table it probes against, and
+      // the just-written entry must be in it or the verdict can never show.
       await refreshConfig();
+      doHostCheck(draft.name);
     } catch (err) {
       if (live()) {
         setHostStatus("", errorText(err), true);

@@ -15,6 +15,15 @@
 //     generation+token fence its callers apply after it returns: a health
 //     read sent before a disconnect and answered after the reconnect would
 //     otherwise disarm a capable new connection.
+//
+// And two the re-review found on the fixed head:
+//
+//  3. doHostCheck must record the entry each verdict was probed against, so
+//     a config edit under the same name retires the verdict rather than
+//     displaying it beside a destination it never measured.
+//  4. A successful retry must retire the check error its failed try left —
+//     same name, or every check error after a check-all — without touching an
+//     add/remove refusal that is not a check outcome.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -54,7 +63,12 @@ function stage(names: string[]): {
   const setCalls: SetCall[] = [];
   let hosts: HostsSnapshot = {
     editable: true,
-    checks: { box1: { name: "box1", probed: true, reachable: true, complete: true, readiness: "ready" } },
+    checks: {
+      box1: {
+        entry: { host: "box1.tailnet.ts.net", user: "ubuntu" },
+        result: { name: "box1", probed: true, reachable: true, complete: true, readiness: "ready" },
+      },
+    },
     status: { name: "box1", message: "ready (git, tmux and gh answered)", error: false },
     busy: ["box1"],
   };
@@ -66,7 +80,7 @@ function stage(names: string[]): {
     closeOverlays() {},
     clearToken() {},
     store: {
-      get: () => ({ authRequired: false, phase: "app", hosts }),
+      get: () => ({ authRequired: false, phase: "app", hosts, config: [] }),
       set(patch: SetCall) {
         setCalls.push(patch);
         if (patch.hosts !== undefined) hosts = patch.hosts;
@@ -96,6 +110,29 @@ function gate<T>(): { promise: Promise<T>; resolve(v: T): void } {
   const promise = new Promise<T>((r) => { resolve = r; });
   return { promise, resolve };
 }
+
+/** One macrotask — flushes the microtask chain a voided checkHost promise
+ *  leaves behind (the sandbox has no timers; the outer realm's do). */
+function tick(): Promise<void> {
+  return new Promise((r) => setImmediate(r));
+}
+
+/** doHostCheck's collaborators as the shell would wire them: hostRows reads
+ *  the last-known table (doHostCheck snapshots it at request time), checkHost
+ *  is the POST, errorText the message extractor. */
+function stageCheck(table: { name: string; entry: unknown }[]): {
+  s: ReturnType<typeof stage>;
+  doHostCheck(name: string): void;
+} {
+  const s = stage(["doHostCheck", "setHostBusy", "setHostStatus"]);
+  s.context.hostRows = () => ({ rows: table.map((r) => ({ name: r.name, entry: r.entry, isDefault: false })), defaultName: "", parseError: "" });
+  s.context.errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  const doHostCheck = s.context.doHostCheck as (name: string) => void;
+  return { s, doHostCheck };
+}
+
+const readyVerdict = { name: "box1", probed: true, reachable: true, complete: true, readiness: "ready" };
+const box1Entry = { host: "box1.tailnet.ts.net", user: "ubuntu" };
 
 test("disconnect retires the hosts checks and status the old connection earned", () => {
   const s = stage(["disconnect"]);
@@ -165,4 +202,77 @@ test("a health answer arriving after disconnect and same-token reconnect is stil
     true,
     "a same-token reconnect is still a new generation; the stale answer must not disarm it",
   );
+});
+
+test("a landed verdict is stored with the entry it was probed against", async () => {
+  const { s, doHostCheck } = stageCheck([{ name: "box1", entry: box1Entry }]);
+  s.context.checkHost = async () => ({ hosts: [readyVerdict] });
+  const store = s.context.store as { set(p: { hosts: HostsSnapshot }): void };
+  store.set({ hosts: { editable: true, checks: {}, status: null, busy: [] } });
+
+  doHostCheck("box1");
+  await tick();
+
+  const check = s.hostsNow().checks.box1 as { entry: unknown; result: unknown };
+  assert.ok(check !== undefined, "the verdict lands under the host's name");
+  assert.deepEqual(
+    check.entry,
+    box1Entry,
+    "it carries the entry snapshot from request time — the render retires it when the saved entry changes",
+  );
+});
+
+test("a successful retry retires the check error its failed try left", async () => {
+  const { s, doHostCheck } = stageCheck([{ name: "box1", entry: box1Entry }]);
+  const store = s.context.store as { set(p: { hosts: HostsSnapshot }): void };
+  const seed = (status: unknown) =>
+    store.set({ hosts: { editable: true, checks: {}, status: status as HostsSnapshot["status"], busy: [] } });
+
+  // First try fails: the row keeps the request-level error…
+  s.context.checkHost = async () => { throw new Error("POST /v1/CheckHost: daemon went away"); };
+  doHostCheck("box1");
+  await tick();
+  const failed = s.hostsNow().status;
+  assert.equal(failed?.name, "box1");
+  assert.equal(failed?.error, true);
+  assert.equal((failed as { check?: boolean } | null)?.check, true, "check outcomes are marked so a retry can retire exactly them");
+
+  // …then the retry answers: the old error goes with the verdict arriving.
+  s.context.checkHost = async () => ({ hosts: [readyVerdict] });
+  seed({ name: "box1", message: "POST /v1/CheckHost: daemon went away", error: true, check: true });
+  doHostCheck("box1");
+  await tick();
+  assert.equal(s.hostsNow().status, null, "a successful retry retires the error its failed try left");
+});
+
+test("a check-all success retires every check error; a per-host success keeps others'", async () => {
+  const { s, doHostCheck } = stageCheck([
+    { name: "box1", entry: box1Entry },
+    { name: "box2", entry: { host: "box2.tailnet.ts.net" } },
+  ]);
+  s.context.checkHost = async (name: string) => ({ hosts: [{ ...readyVerdict, name: name === "" ? "box1" : name }] });
+  const store = s.context.store as { set(p: { hosts: HostsSnapshot }): void };
+  const seed = (status: unknown) =>
+    store.set({ hosts: { editable: true, checks: {}, status: status as HostsSnapshot["status"], busy: [] } });
+
+  // Check-all supersedes every per-host verdict — its success clears box2's
+  // old check error too.
+  seed({ name: "box2", message: "POST /v1/CheckHost: refused", error: true, check: true });
+  doHostCheck("");
+  await tick();
+  assert.equal(s.hostsNow().status, null, "check-all's success retires every check error");
+
+  // A single-host success leaves another host's check error where it is — it
+  // was never retried.
+  seed({ name: "box2", message: "POST /v1/CheckHost: refused", error: true, check: true });
+  doHostCheck("box1");
+  await tick();
+  assert.equal(s.hostsNow().status?.name, "box2", "box1's retry does not clear box2's check error");
+
+  // And neither clears an add/remove refusal: a probe's success does not
+  // resolve a write refusal — the flag is what scopes the retirement.
+  seed({ name: "", message: "the running daemon cannot apply a host-list edit", error: true });
+  doHostCheck("");
+  await tick();
+  assert.equal(s.hostsNow().status?.message, "the running daemon cannot apply a host-list edit");
 });
