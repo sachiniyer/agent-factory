@@ -613,3 +613,38 @@ func TestBacklogGuardRailsBindsSessionProjectResolution(t *testing.T) {
 		t.Fatalf("a refused command reached the daemon: %v", *methods)
 	}
 }
+
+// A "session row not found" that survives resolveSelfSession's spawn-race retry
+// inside an af_-named tmux session is a persistent registration miss, not proof
+// the session is not an item session (#6586): the guarded mutations must fail
+// closed. Outside an af_ name the same miss still reads as "not an item
+// session" — a plain tmux session runs the mutation as the user.
+func TestItemSessionGuardFailsClosedOnPersistentSelfMiss(t *testing.T) {
+	methods := stubBacklogDaemon(t)
+	if _, err := runBacklogCmd(t, "add", "work"); err != nil {
+		t.Fatal(err)
+	}
+	prevTmux := currentTmuxName
+	t.Cleanup(func() { currentTmuxName = prevTmux })
+	backlogSelfSession = func() (*session.InstanceData, error) { return nil, errSelfNotFound }
+	currentTmuxName = func() (string, error) { return "af_orphan", nil }
+	*methods = nil
+	for _, args := range [][]string{{"queue", "1"}, {"runner", "on"}} {
+		if _, err := runBacklogCmd(t, args...); err == nil ||
+			!strings.Contains(err.Error(), "cannot resolve this session to check for an item session") {
+			t.Fatalf("af backlog %v: a persistent self-miss inside af_ must refuse; got %v", args, err)
+		}
+	}
+	if len(*methods) != 0 {
+		t.Fatalf("a refused command reached the daemon: %v", *methods)
+	}
+	// Outside an af_ session the identical miss is not an item session: the
+	// mutations run as the user.
+	currentTmuxName = func() (string, error) { return "main", nil }
+	if _, err := runBacklogCmd(t, "queue", "1"); err != nil {
+		t.Fatalf("queue outside af_: %v", err)
+	}
+	if _, err := runBacklogCmd(t, "runner", "on"); err != nil {
+		t.Fatalf("runner outside af_: %v", err)
+	}
+}
