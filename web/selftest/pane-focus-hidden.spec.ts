@@ -46,10 +46,15 @@ test("#6562: Alt+j onto a fit-hidden pane restores it WITH the keyboard", async 
   await page.setViewportSize({ width: 1280, height: 800 });
 
   // probe-a's tab roster is shared with the suite — count relative to it.
+  // Two shells: a new shell is SELECTED on create, so the second stays shown
+  // in the pane while the FIRST is dragged — dragging a shown tab would hit
+  // the dedupe/companion paths in applyTabDrop instead of a real split.
   const tabs = page.locator(".af-tabbar .af-tab");
   const base = await tabs.count();
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
   await expect(tabs).toHaveCount(base + 1);
+  await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
+  await expect(tabs).toHaveCount(base + 2);
   await dragTabToPane(page, base, 0, "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
 
