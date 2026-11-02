@@ -56,14 +56,19 @@ test("#6560: an ancestor drag cannot sliver a skewed nested leaf", async ({ page
   await page.setViewportSize({ width: 2220, height: 800 });
 
   // probe-a's tab roster is shared with the suite — count relative to it.
+  // Three shells: a new shell is SELECTED on create, so the last one stays
+  // shown in the left pane while the first two are dragged — dragging a
+  // shown tab onto another pane trips the one-tab-one-pane dedupe (it MOVES,
+  // closing the old leaf) and onto its own pane routes through
+  // companionTab's substitution, neither of which lands the named tab.
   const tabs = page.locator(".af-tabbar .af-tab");
   const base = await tabs.count();
-  await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
-  await expect(tabs).toHaveCount(base + 1);
+  for (let i = 0; i < 3; i++) {
+    await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
+  }
+  await expect(tabs).toHaveCount(base + 3);
   await dragTabToPane(page, base, 0, "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
-  await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
-  await expect(tabs).toHaveCount(base + 2);
   // Drop my second new tab on the RIGHT pane's right edge: [a | (b|c)].
   await dragTabToPane(page, base + 1, 1, "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(3);
