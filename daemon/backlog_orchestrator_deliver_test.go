@@ -352,3 +352,125 @@ func TestOrchestratorReplacementRefusedByThePreflightIsAFailure(t *testing.T) {
 	require.Len(t, o.Failures, 1)
 	require.Len(t, o.Events, 1)
 }
+
+// TestOrchestratorUnstartedReplacementGetsTheStartPromptNext: a replacement
+// whose first prompt never arrived is bound unstarted, and the next delivery
+// sends it the start prompt with the handoff and the events, not bare events
+// (Codex P2 on #6571).
+func TestOrchestratorUnstartedReplacementGetsTheStartPromptNext(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	_, err := m.backlogService().SetOrchestratorHandoff(backlog.SetOrchestratorHandoffRequest{RepoID: repoID, SessionID: "o1", Handoff: "Merge B-3 next."})
+	require.NoError(t, err)
+	m.mu.Lock()
+	delete(m.instances, daemonInstanceKey(repoID, "planner"))
+	m.mu.Unlock()
+	prev := createBacklogSession
+	createBacklogSession = func(m *Manager, _ context.Context, _ CreateSessionRequest) (session.InstanceData, error) {
+		m.mu.Lock()
+		m.instances[daemonInstanceKey(repoID, "effort B-2 Effort")] = &session.Instance{ID: "n1", Title: "effort B-2 Effort", Program: "claude", CreatedAt: time.Now()}
+		m.mu.Unlock()
+		return session.InstanceData{ID: "n1", Title: "effort B-2 Effort", LastPromptDeliveryStatus: session.PromptNotDelivered}, nil
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	runOrchDelivery(t, m, repoID, time.Now())
+	o := orchOf(t, repoID)
+	require.Equal(t, "n1", o.SessionID)
+	require.True(t, o.Unstarted)
+	require.Len(t, o.Events, 1)
+
+	sent := stubBacklogSend(t, m, repoID)
+	runOrchDelivery(t, m, repoID, time.Now())
+	require.Equal(t, 1, sent.count())
+	for _, want := range []string{"af started this session to replace it", "Merge B-3 next.", "B-3 Child: ready for review."} {
+		require.Contains(t, sent.reqs[0].Prompt, want)
+	}
+	o = orchOf(t, repoID)
+	require.False(t, o.Unstarted, "a confirmed start prompt clears it")
+	require.Empty(t, o.Events)
+}
+
+// TestOrchestratorDeliveryAckRetriesABusyBacklog: the acknowledgment of a sent
+// prompt goes through the retrying write, so a busy backlog does not leave the
+// delivered events to be sent again (Codex P2 on #6571).
+func TestOrchestratorDeliveryAckRetriesABusyBacklog(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	sent := stubBacklogSend(t, m, repoID)
+	prevApply, prevBackoff := applyBacklog, finishStartBackoff
+	calls := 0
+	applyBacklog = func(svc *backlog.Service, ref backlog.ProjectRef, fn func(*backlog.Backlog) ([]int, error)) (*backlog.Backlog, error) {
+		calls++
+		if calls == 1 {
+			return nil, backlog.ErrBusy
+		}
+		return prevApply(svc, ref, fn)
+	}
+	finishStartBackoff = time.Millisecond
+	t.Cleanup(func() { applyBacklog, finishStartBackoff = prevApply, prevBackoff })
+
+	runOrchDelivery(t, m, repoID, time.Now())
+
+	require.Equal(t, 1, sent.count())
+	require.GreaterOrEqual(t, calls, 2, "the busy acknowledgment was retried")
+	require.Empty(t, orchOf(t, repoID).Events, "the delivered events are dropped, not left to be sent again")
+}
+
+// TestOrchestratorAdoptsAReplacementStartedBeforeARestart: af records a
+// replacement before it creates it. A pass that finds that record and the
+// session it started, unbound, binds it instead of starting a second
+// (Codex P2 on #6571).
+func TestOrchestratorAdoptsAReplacementStartedBeforeARestart(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	svc := m.backlogService()
+	since := time.Now().Add(-time.Minute)
+	_, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+		return []int{2}, b.BeginOrchReplace(2, "o1", "effort B-2 Effort", since)
+	})
+	require.NoError(t, err)
+	m.mu.Lock()
+	delete(m.instances, daemonInstanceKey(repoID, "planner"))
+	m.instances[daemonInstanceKey(repoID, "effort B-2 Effort")] = &session.Instance{ID: "n1", Title: "effort B-2 Effort", Program: "claude", CreatedAt: since.Add(time.Second)}
+	m.mu.Unlock()
+	prev := createBacklogSession
+	createBacklogSession = func(*Manager, context.Context, CreateSessionRequest) (session.InstanceData, error) {
+		t.Error("a second replacement was started")
+		return session.InstanceData{ID: "n2"}, nil
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	runOrchDelivery(t, m, repoID, time.Now())
+
+	o := orchOf(t, repoID)
+	require.Equal(t, "n1", o.SessionID, "the replacement started before the restart is bound")
+	require.Nil(t, o.Replacing)
+	require.True(t, o.Unstarted, "it may not have had its start prompt")
+	require.Len(t, o.Events, 1)
+}
+
+// TestOrchestratorDeliveryAbandonedWhenTheGroupIsReboundMidDelivery: a rebind
+// while af restores the old session abandons the send. The old session is not
+// woken, the events stay for the new orchestrator, and nothing is counted
+// (Codex P2 on #6571).
+func TestOrchestratorDeliveryAbandonedWhenTheGroupIsReboundMidDelivery(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	sent := stubBacklogSend(t, m, repoID)
+	m.mu.Lock()
+	m.instances[daemonInstanceKey(repoID, "other")] = &session.Instance{ID: "o2", Title: "other", Program: "claude"}
+	m.mu.Unlock()
+	prevNeeds, prevRestore := backlogNeedsRestore, restoreBacklogSession
+	backlogNeedsRestore = func(s itemSession) bool { return s.instance.ID == "o1" }
+	restoreBacklogSession = func(m *Manager, req RestoreSessionRequest) (session.InstanceData, error) {
+		_, err := m.backlogService().SetOrchestrator(backlog.SetOrchestratorRequest{RepoID: repoID, ID: 2, SessionID: "o2", Replace: true})
+		require.NoError(t, err)
+		return session.InstanceData{ID: req.ID}, nil
+	}
+	t.Cleanup(func() { backlogNeedsRestore, restoreBacklogSession = prevNeeds, prevRestore })
+
+	runOrchDelivery(t, m, repoID, time.Now())
+
+	require.Zero(t, sent.count(), "the session the group was rebound away from is not woken")
+	o := orchOf(t, repoID)
+	require.Equal(t, "o2", o.SessionID)
+	require.Len(t, o.Events, 1, "the events stay for the new orchestrator")
+	require.Empty(t, o.Failures)
+}

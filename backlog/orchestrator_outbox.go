@@ -22,6 +22,10 @@ type OrchDelivery struct {
 	SessionID string
 	Program   string
 	Events    []OrchEvent
+	// Unstarted is the orchestrator's Unstarted: send the start prompt.
+	Unstarted bool
+	// Replacing is a replacement af began for this session, if any.
+	Replacing *OrchReplacing
 }
 
 func (e OrchEvent) same(o OrchEvent) bool {
@@ -74,8 +78,13 @@ func (b *Backlog) OrchDeliveries(now time.Time) []OrchDelivery {
 		if n := len(o.Failures); n > 0 && now.Before(o.Failures[n-1].Add(time.Duration(n)*OrchRetryStep)) {
 			continue
 		}
-		out = append(out, OrchDelivery{Group: it.ID, SessionID: o.SessionID, Program: o.Program,
-			Events: append([]OrchEvent(nil), o.Events...)})
+		d := OrchDelivery{Group: it.ID, SessionID: o.SessionID, Program: o.Program,
+			Events: append([]OrchEvent(nil), o.Events...), Unstarted: o.Unstarted}
+		if o.Replacing != nil {
+			r := *o.Replacing
+			d.Replacing = &r
+		}
+		out = append(out, d)
 	}
 	return out
 }
@@ -133,9 +142,23 @@ func (b *Backlog) OrchDelivered(group int, sessionID string, delivered []OrchEve
 		return false
 	}
 	o.dropEvents(delivered)
-	o.Failures, o.Sending = nil, 0
+	o.Failures, o.Sending, o.Unstarted = nil, 0, false
 	b.Item(group).UpdatedAt = now
 	return true
+}
+
+// BeginOrchReplace records, before af creates it, a replacement named
+// titleBase for group's gone sessionID. It refuses when the group's
+// orchestrator is no longer sessionID: a rebind or a clear since the delivery
+// began abandons the replacement.
+func (b *Backlog) BeginOrchReplace(group int, sessionID, titleBase string, now time.Time) error {
+	o := b.orchestratorOf(group, sessionID)
+	if o == nil {
+		return fmt.Errorf("the orchestrator of %s changed while af replaced session %q", FormatID(group), sessionID)
+	}
+	o.Replacing = &OrchReplacing{TitleBase: titleBase, Since: now}
+	b.Item(group).UpdatedAt = now
+	return nil
 }
 
 // OrchEscalationQuestion is the question af asks on a group when it cannot
@@ -161,7 +184,7 @@ func (b *Backlog) OrchDeliveryFailed(group int, sessionID, reason string, now ti
 			kept = append(kept, f)
 		}
 	}
-	o.Failures, o.Sending = append(kept, now), 0
+	o.Failures, o.Sending, o.Replacing = append(kept, now), 0, nil
 	it.UpdatedAt = now
 	if len(o.Failures) < OrchMaxFailures {
 		return false

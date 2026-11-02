@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -91,13 +92,23 @@ func (m *Manager) deliverOrchestrator(stop <-chan struct{}, repoID string, group
 		m.replaceOrchestrator(stop, repoID, b, d)
 		return
 	}
+	dir := proposalDir(repoID, b.Item(group))
 	prompt := b.OrchEventsPrompt(group, d.Events)
+	if d.Unstarted {
+		// A replacement that never had its start prompt (Codex P2 on #6571): send
+		// it now, with the instructions, the handoff and the events.
+		prompt = b.OrchStartPrompt(group, dir, true, d.Events)
+	}
 	if backlogNeedsRestore(s) {
+		// A session the user unbound since the delivery began is not revived.
+		if !m.orchestratorOwns(repoID, group, d.SessionID) {
+			return
+		}
 		// Asked before the restore, by the check the restore makes: a session that
 		// comes back without its agent conversation gets the start prompt, with
 		// the handoff, instead of bare events.
 		if exact, _ := backlogExactResume(s.instance); !exact {
-			prompt = b.OrchStartPrompt(group, proposalDir(repoID, b.Item(group)), false, d.Events)
+			prompt = b.OrchStartPrompt(group, dir, d.Unstarted, d.Events)
 		}
 		restored, err := restoreBacklogSession(m, RestoreSessionRequest{ID: d.SessionID, RepoID: repoID})
 		if err != nil {
@@ -113,7 +124,10 @@ func (m *Manager) deliverOrchestrator(stop <-chan struct{}, repoID string, group
 	err := m.sendOrchestratorPrompt(repoID, group, s.instance, prompt)
 	switch {
 	case err == nil:
-		m.orchDelivered(repoID, d)
+		m.orchDelivered(stop, repoID, d)
+	case errors.Is(err, errOrchNotOwner):
+		// The group was rebound or cleared while af restored or waited: the events
+		// stay for whoever orchestrates it now, and nothing is counted.
 	case errors.Is(err, errBacklogAnswerHeld), errors.Is(err, errBacklogAnswerTornDown), m.orchSendRacedArchive(repoID, d.SessionID, err):
 	default:
 		m.orchDeliveryFailed(stop, repoID, d, err.Error())
@@ -135,6 +149,11 @@ func (m *Manager) sendOrchestratorPrompt(repoID string, group int, inst *session
 	if m.backlogTearingDown(repoID, inst) {
 		return errBacklogAnswerTornDown
 	}
+	// Checked last, under the target lock, just before the submission: a rebind
+	// or a clear since the delivery began abandons it (Codex P2 on #6571).
+	if !m.orchestratorOwns(repoID, group, inst.ID) {
+		return errOrchNotOwner
+	}
 	err := sendBacklogPrompt(m, SendPromptRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID, Prompt: prompt, BacklogOrigin: true})
 	switch {
 	case err == nil:
@@ -150,6 +169,49 @@ func (m *Manager) sendOrchestratorPrompt(repoID string, group int, inst *session
 		return errBacklogAnswerTornDown
 	}
 	return err
+}
+
+// errOrchNotOwner marks a delivery whose session no longer orchestrates the group.
+var errOrchNotOwner = errors.New("the session no longer orchestrates the group")
+
+// orchestratorOwns is whether sessionID still orchestrates group, read from
+// the backlog file, which every rebind and clear writes.
+func (m *Manager) orchestratorOwns(repoID string, group int, sessionID string) bool {
+	b, err := backlog.Load(repoID)
+	if err != nil {
+		return false
+	}
+	it := b.Item(group)
+	return it != nil && it.Orchestrator != nil && it.Orchestrator.SessionID == sessionID
+}
+
+// adoptableReplacement is the session af started as group's replacement before
+// a restart could bind it (r, recorded before the create): a session of the
+// project whose title starts with r's title base, created since r began, that
+// is not an item session, not being killed, and orchestrates nothing. The
+// newest wins.
+func (m *Manager) adoptableReplacement(repoID string, b *backlog.Backlog, r *backlog.OrchReplacing) (session.InstanceData, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var best *session.Instance
+	for key, inst := range m.instances {
+		if inst == nil || inst.BacklogItem != 0 || !strings.HasPrefix(inst.Title, r.TitleBase) || inst.CreatedAt.Before(r.Since) {
+			continue
+		}
+		if rid, _ := splitDaemonInstanceKey(key); rid != repoID {
+			continue
+		}
+		if v := inst.LifecycleView(); v.UserKilled || v.InFlightOp == session.OpKilling || b.OrchestratedBy(inst.ID) != 0 {
+			continue
+		}
+		if best == nil || inst.CreatedAt.After(best.CreatedAt) {
+			best = inst
+		}
+	}
+	if best == nil {
+		return session.InstanceData{}, false
+	}
+	return session.InstanceData{ID: best.ID, Title: best.Title}, true
 }
 
 // orchSendRacedArchive is whether a failed send met an archive of the
@@ -170,6 +232,21 @@ func orchestratorTitleBase(g *backlog.Item) string { return "effort " + backlog.
 // program, and binds it in place of the session that is gone.
 func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *backlog.Backlog, d backlog.OrchDelivery) {
 	g := b.Item(d.Group)
+	if d.Replacing != nil {
+		if data, ok := m.adoptableReplacement(repoID, b, d.Replacing); ok {
+			// The daemon stopped after starting a replacement and before binding it
+			// (Codex P2 on #6571): bind that session rather than start a second. It
+			// may not have had its start prompt, so the next delivery sends it.
+			next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: d.Program, Unstarted: true}
+			if err := m.bindReplacement(stop, repoID, d, next, nil); err != nil {
+				m.warn().Printf("adopt replacement orchestrator %q for %s: %v", data.Title, backlog.FormatID(d.Group), err)
+				return
+			}
+			m.publishEvent(agentproto.EventBacklogOrchestratorReplaced, backlog.OrchestratorEvent{RepoID: repoID, ID: d.Group,
+				SessionID: data.ID, Title: data.Title, Previous: d.SessionID})
+			return
+		}
+	}
 	root, err := backlogStartRoot(repoID, "")
 	if err == nil && d.Program != "" {
 		err = validateCreateProgram(d.Program)
@@ -189,6 +266,16 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 	}
 	if err != nil {
 		m.orchDeliveryFailed(stop, repoID, d, "af could not start a replacement session: "+err.Error())
+		return
+	}
+	// Recorded before the create, so a daemon that stops before the binding
+	// adopts this session on its next pass. It refuses when the group was
+	// rebound or cleared since the delivery began, which abandons the replacement.
+	svc := m.backlogService()
+	if err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
+		return []int{d.Group}, b.BeginOrchReplace(d.Group, d.SessionID, create.TitleBase, svc.Now())
+	}); err != nil {
+		m.warn().Printf("orchestrator replacement for %s: %v", backlog.FormatID(d.Group), err)
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -215,7 +302,7 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 		// next pass sends to the now-live session.
 		delivered = nil
 	}
-	next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: d.Program}
+	next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: d.Program, Unstarted: delivered == nil}
 	if err := m.bindReplacement(stop, repoID, d, next, delivered); err != nil {
 		m.warn().Printf("bind replacement orchestrator %q to %s: %v", data.Title, backlog.FormatID(d.Group), err)
 		if errors.Is(err, backlog.ErrBusy) {
@@ -255,9 +342,12 @@ func (m *Manager) bindReplacement(stop <-chan struct{}, repoID string, d backlog
 	}
 }
 
-func (m *Manager) orchDelivered(repoID string, d backlog.OrchDelivery) {
+// orchDelivered records a confirmed delivery. A busy backlog is retried, so
+// events the session already has are not sent again (Codex P2 on #6571), as
+// an answer's delivery is.
+func (m *Manager) orchDelivered(stop <-chan struct{}, repoID string, d backlog.OrchDelivery) {
 	svc := m.backlogService()
-	if _, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+	if err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
 		if !b.OrchDelivered(d.Group, d.SessionID, d.Events, svc.Now()) {
 			return nil, errBacklogNoChange
 		}
@@ -276,7 +366,7 @@ func (m *Manager) orchDeliveryFailed(stop <-chan struct{}, repoID string, d back
 	default:
 	}
 	svc := m.backlogService()
-	if _, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+	if err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
 		b.OrchDeliveryFailed(d.Group, d.SessionID, reason, svc.Now())
 		return []int{d.Group}, nil
 	}); err != nil {
