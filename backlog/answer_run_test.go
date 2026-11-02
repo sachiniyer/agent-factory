@@ -307,3 +307,47 @@ func TestAnAnswerRunCarriesEveryKeptAnswer(t *testing.T) {
 		}
 	}
 }
+
+// A start whose create kept a session it could not confirm links the run to
+// that session instead of failing it, says how to inspect it, keeps the answer
+// the run carries for the session that starts next, and refuses a second start
+// while the session's startup is unknown (#6574).
+func TestFinishUncertainStartLinksTheRunAndRefusesASecondStart(t *testing.T) {
+	now := time.Now()
+	b := goneAsker(t, now)
+	out, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.FinishUncertainStart(2, out.Plan.Run.StartedAt, "s2", "B-2 A", "af/b-2-a-2", errors.New("its startup outcome could not be determined safely"), now); err != nil {
+		t.Fatal(err)
+	}
+	it := b.Item(2)
+	if r := it.lastRun(); r.State != RunStarted || r.SessionID != "s2" || r.Title != "B-2 A" || r.Branch != "af/b-2-a-2" {
+		t.Fatalf("run %+v", r)
+	}
+	if it.Status != StatusRunning {
+		t.Fatalf("status %s", it.Status)
+	}
+	note := it.Thread[len(it.Thread)-1]
+	for _, want := range []string{`session "B-2 A" started: its startup outcome`, "may still be running", `af sessions kill "B-2 A"`, "Your answer is kept"} {
+		if note.Author != AuthorAF || !strings.Contains(note.Text, want) {
+			t.Fatalf("note lacks %q: %+v", want, note)
+		}
+	}
+	if len(it.KeptAnswers()) != 1 || it.OpenQuestion() == nil {
+		t.Fatal("af cannot tell whether the session got the answer, so it stays kept")
+	}
+
+	unknown := stubFacts(map[string]SessionFacts{"s2": {StartupUnknown: true, Reason: "session startup unconfirmed"}})
+	if _, err := b.BeginStart(2, StartedByUser, unknown, now); err == nil || !strings.Contains(err.Error(), `session "B-2 A" may still be running`) {
+		t.Fatalf("second start: %v", err)
+	}
+	if len(it.Runs) != 2 {
+		t.Fatalf("a refused start added a run: %+v", it.Runs)
+	}
+	killed := stubFacts(map[string]SessionFacts{"s2": {Reason: "session killed"}})
+	if plan, err := b.BeginStart(2, StartedByUser, killed, now); err != nil || len(plan.Run.Answers) != 1 {
+		t.Fatalf("once the session is killed the item starts again with the kept answer: %+v %v", plan, err)
+	}
+}

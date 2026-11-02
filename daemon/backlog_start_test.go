@@ -488,3 +488,60 @@ func TestBacklogTestManagerJoinsItsBackgroundMutations(t *testing.T) {
 		t.Fatal("the subtest returned with its background mutation still in flight")
 	}
 }
+
+// TestStartBacklogItemLinksASessionTheCreateKeptUncertain: a create that kept
+// a session whose startup it could not confirm returns it with a committed
+// error (keepUncertainCreate). That session may be running, so the run is
+// linked to it with a note, not failed, and a second start creates nothing
+// (#6574).
+func TestStartBacklogItemLinksASessionTheCreateKeptUncertain(t *testing.T) {
+	m, repoID, repoPath := backlogTestManager(t)
+	creates := 0
+	prev := createBacklogSession
+	createBacklogSession = func(m *Manager, ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+		creates++
+		data, err := prev(m, ctx, req)
+		if err != nil {
+			return data, err
+		}
+		s, ok := m.itemSessions(repoID)[data.ID]
+		if !ok {
+			t.Fatalf("no item session %q", data.ID)
+		}
+		s.instance.MarkStartupStateUnknown()
+		return s.instance.ToInstanceData(), &mutationCommittedError{err: fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely", data.Title)}
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	if _, err := m.StartBacklogItem(backlog.StartRequest{RepoPath: repoPath, ID: 1}, backlog.StartedByUser); err != nil {
+		t.Fatal(err)
+	}
+	m.backgroundMutationWG.Wait()
+	it := loadItem(t, repoID, 1)
+	if len(it.Runs) != 1 || it.Runs[0].State != backlog.RunStarted || it.Runs[0].SessionID == "" || it.Status != backlog.StatusRunning {
+		t.Fatalf("the run is not linked to the kept session: %+v", it)
+	}
+	if _, ok := m.itemSessions(repoID)[it.Runs[0].SessionID]; !ok {
+		t.Fatalf("run linked to %q, which is not the kept session", it.Runs[0].SessionID)
+	}
+	if n := it.Thread[len(it.Thread)-1]; !strings.Contains(n.Text, "could not confirm that session") || !strings.Contains(n.Text, "af sessions kill") {
+		t.Fatalf("note %+v", n)
+	}
+	if got := m.backlogSlotsUsed(repoID); got != 0 {
+		t.Fatalf("slots used %d: an unconfirmed session holds no slot", got)
+	}
+
+	// RepoPath, as the first start, so that without the refusal this start would
+	// reach the create.
+	_, err := m.StartBacklogItem(backlog.StartRequest{RepoPath: repoPath, ID: 1}, backlog.StartedByUser)
+	m.backgroundMutationWG.Wait()
+	if err == nil || !strings.Contains(err.Error(), "may still be running") {
+		t.Errorf("second start: %v", err)
+	}
+	if creates != 1 {
+		t.Fatalf("creates %d: a second start created another session beside the kept one", creates)
+	}
+	if it := loadItem(t, repoID, 1); len(it.Runs) != 1 {
+		t.Fatalf("runs %+v", it.Runs)
+	}
+}

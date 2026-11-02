@@ -240,10 +240,17 @@ func (m *Manager) finishBacklogStart(ref backlog.ProjectRef, id int, startedAt t
 	if createErr == nil && data.ID == "" {
 		createErr = errors.New("the daemon created no session")
 	}
+	// A committed error with a session is a create that kept a session whose
+	// startup it could not confirm (keepUncertainCreate): it may be running, so
+	// the run is linked to it, not failed (#6574).
+	uncertain := createErr != nil && isMutationCommitted(createErr) && data.ID != ""
 	svc := m.backlogService()
 	delay := finishStartBackoff
 	for {
 		_, err := svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
+			if uncertain {
+				return []int{id}, b.FinishUncertainStart(id, startedAt, data.ID, data.Title, data.Branch, createErr, svc.Now())
+			}
 			return []int{id}, b.FinishStart(id, startedAt, data.ID, data.Title, data.Branch, createErr, svc.Now())
 		})
 		if err == nil {
