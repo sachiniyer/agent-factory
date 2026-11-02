@@ -65,8 +65,8 @@ test("#6560: an ancestor drag cannot sliver a skewed nested leaf", async ({ page
   const base = await tabs.count();
   for (let i = 0; i < 3; i++) {
     await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
+    await expect(tabs).toHaveCount(base + i + 1);
   }
-  await expect(tabs).toHaveCount(base + 3);
   await dragTabToPane(page, base, 0, "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
   // Drop my second new tab on the RIGHT pane's right edge: [a | (b|c)].
@@ -119,8 +119,8 @@ test("#6573: a divider beside fit-hidden leaves still drags — its floor prices
   const base = await tabs.count();
   for (let i = 0; i < 5; i++) {
     await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
+    await expect(tabs).toHaveCount(base + i + 1);
   }
-  await expect(tabs).toHaveCount(base + 5);
   await dragTabToPane(page, base, 0, "right"); // [d | a]
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
   await dragTabToPane(page, base + 1, 0, "left"); // [(b|d) | a]
