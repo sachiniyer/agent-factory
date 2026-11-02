@@ -1169,6 +1169,7 @@ func TestMoveDirCrossDevice_InitialStagingOpenFailureCleansCreatedName(t *testin
 	syscall.Umask(originalUmask)
 
 	require.Error(t, err)
+	t.Logf("moveDirCrossDevice error: %v", err)
 	entries, readErr := os.ReadDir(destinationParent)
 	require.NoError(t, readErr)
 	assert.Empty(t, entries, "failed initial staging open must remove the created private name")
