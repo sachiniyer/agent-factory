@@ -105,10 +105,11 @@ type ListBackendsResponse struct {
 	// send NO backend to get it, not this value echoed back: sending it explicitly
 	// would freeze today's default into the request and ignore a later config change.
 	//
-	// EMPTY when the repo's `backend` key names something unrecognized — there is no
-	// default to report then, because such a create does not fall back to local, it
-	// FAILS (session.resolveBackendKind: "misconfiguration should fail the create,
-	// not silently run local"). DefaultStatus/DefaultReason carry the misconfiguration.
+	// EMPTY when the repo's `backend` key names something unrecognized, or its
+	// in-repo config cannot be resolved — there is no default to report then,
+	// because such a create does not fall back to local, it FAILS
+	// (session.resolveBackendKind: "misconfiguration should fail the create, not
+	// silently run local"). DefaultStatus/DefaultReason carry the misconfiguration.
 	Default string `json:"default"`
 	// DefaultStatus is the checked answer for the repo-default choice itself, so a
 	// client can block a default it knows will fail instead of discovering it at
