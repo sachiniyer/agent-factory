@@ -92,6 +92,9 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 	if it == nil {
 		return nil, p.named(&NotFoundError{ID: req.ID})
 	}
+	if b.IsParent(req.ID) {
+		return s.answerGroup(p, req)
+	}
 	sessionID, target := "", TargetGone
 	if last := it.lastRun(); last != nil {
 		if last.State == RunStarting {
@@ -154,5 +157,26 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 		return nil, err
 	}
 	s.host.DeliverAnswer(p.id, pending)
+	return &MessageResponse{Message: out.Answer}, nil
+}
+
+// answerGroup answers a question af asked on a group. A group has no session
+// to deliver to: the answer closes the question, and an orchestrator's failed
+// deliveries are forgotten, so af tries to wake it again.
+func (s *Service) answerGroup(p *project, req PostMessageRequest) (*MessageResponse, error) {
+	var out Answered
+	_, err := s.update(p, func(b *Backlog) ([]int, error) {
+		var err error
+		if out, err = b.AnswerInThread(req.ID, req.QuestionID, req.Text, s.now()); err != nil {
+			return nil, err
+		}
+		if o := b.Item(req.ID).Orchestrator; o != nil {
+			o.Failures = nil
+		}
+		return []int{req.ID}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return &MessageResponse{Message: out.Answer}, nil
 }

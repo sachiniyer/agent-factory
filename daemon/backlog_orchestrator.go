@@ -7,26 +7,27 @@ import (
 )
 
 func (h backlogHost) Session(repoID, sessionID string) (backlog.SessionInfo, bool) {
-	h.m.mu.Lock()
-	var inst *session.Instance
-	for key, i := range h.m.instances {
-		if i == nil || i.ID != sessionID {
+	s, ok := h.m.projectSession(repoID, sessionID)
+	if !ok {
+		return backlog.SessionInfo{}, false
+	}
+	return backlog.SessionInfo{Title: s.instance.Title, Program: s.instance.Program, Item: s.instance.BacklogItem,
+		State: backlogSessionState(s.view)}, true
+}
+
+// projectSession finds any session of the project by id, read under one lock.
+func (m *Manager) projectSession(repoID, sessionID string) (itemSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, inst := range m.instances {
+		if inst == nil || inst.ID != sessionID {
 			continue
 		}
 		if rid, _ := splitDaemonInstanceKey(key); rid == repoID {
-			inst = i
-			break
+			return itemSession{instance: inst, view: inst.LifecycleView()}, true
 		}
 	}
-	if inst == nil {
-		h.m.mu.Unlock()
-		return backlog.SessionInfo{}, false
-	}
-	info := backlog.SessionInfo{Title: inst.Title, Program: inst.Program, Item: inst.BacklogItem}
-	v := inst.LifecycleView()
-	h.m.mu.Unlock()
-	info.State = backlogSessionState(v)
-	return info, true
+	return itemSession{}, false
 }
 
 func backlogSessionState(v session.LifecycleView) string {

@@ -296,3 +296,37 @@ func TestClearOrchestratorRules(t *testing.T) {
 		t.Fatal("clear with replace accepted")
 	}
 }
+
+func TestAnswerOrchEscalationResumesDelivery(t *testing.T) {
+	s, _ := orchService(t)
+	mustAdd(t, s, ItemInput{Key: "g", Title: "G"}, ItemInput{Key: "a", Title: "A", Parent: Ref{Key: "g"}})
+	if _, err := s.SetOrchestrator(SetOrchestratorRequest{RepoID: repoID, ID: 1, SessionID: "o1"}); err != nil {
+		t.Fatal(err)
+	}
+	now := s.now()
+	if _, err := s.Apply(ProjectRef{ID: repoID}, func(b *Backlog) ([]int, error) {
+		b.QueueOrchEvent(OrchEvent{Kind: EventReview, Item: 2}, now)
+		for range OrchMaxFailures {
+			b.OrchDeliveryFailed(1, "o1", "no tmux", now)
+		}
+		return []int{1}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := Load(repoID)
+	if !b.OrchEscalated(1) {
+		t.Fatal("not escalated")
+	}
+
+	out, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: KindAnswer, Text: "restarted tmux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Message.Delivery != "" {
+		t.Fatalf("a group answer is delivered: %+v", out.Message)
+	}
+	b, _ = Load(repoID)
+	if b.OrchEscalated(1) || b.Item(1).Orchestrator.Failures != nil || len(b.OrchDeliveries(now)) != 1 {
+		t.Fatalf("delivery did not resume: %+v", b.Item(1).Orchestrator)
+	}
+}
