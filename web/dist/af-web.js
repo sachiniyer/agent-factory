@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "980fd17e07ab";
+var CLIENT_VERSION = "70eb7132f2f9";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -11131,10 +11131,14 @@ var AttachTerminal = class {
   // an authoritative echo that matches is a no-op.
   lastRows = 0;
   lastCols = 0;
-  // The foreign authoritative grid this pane last re-contested, and when. A
-  // repeat of the same foreign grid inside FOREIGN_ECHO_YIELD_MS is an
-  // insistent writer and wins unchallenged; anything else gets one reclaim.
-  contestedEcho = null;
+  // When this pane last re-contested each foreign authoritative grid. A repeat
+  // of the same foreign grid inside FOREIGN_ECHO_YIELD_MS is an insistent
+  // writer and wins unchallenged; anything else gets one reclaim. The history
+  // is per-grid, not last-only: alternating peers (three visible clients
+  // fitting the shared PTY to different hosts) would otherwise overwrite each
+  // other's contest record and reclaim every echo — an indefinite resize
+  // ping-pong. Entries older than the window are pruned on each use.
+  contestedEchoes = /* @__PURE__ */ new Map();
   // A peer resize can temporarily collapse this client's scrollback (for example,
   // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
   // not a one-time distance from the bottom: output can keep arriving while this
@@ -12180,9 +12184,15 @@ var AttachTerminal = class {
       }
       if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
         const now = Date.now();
-        const contested = this.contestedEcho;
-        if (contested == null || contested.rows !== rows || contested.cols !== cols || now - contested.at >= FOREIGN_ECHO_YIELD_MS) {
-          this.contestedEcho = { rows, cols, at: now };
+        const key = `${rows}x${cols}`;
+        const last = this.contestedEchoes.get(key);
+        if (last === void 0 || now - last >= FOREIGN_ECHO_YIELD_MS) {
+          for (const [k, at] of this.contestedEchoes) {
+            if (now - at >= FOREIGN_ECHO_YIELD_MS) {
+              this.contestedEchoes.delete(k);
+            }
+          }
+          this.contestedEchoes.set(key, now);
           this.scheduleVisibleFit();
         }
       }

@@ -20,6 +20,7 @@ function stage() {
   const terminal = Object.assign(Object.create(AttachTerminal.prototype), {
     container: host, term, fit, stopped: false, initialConnectStarted: false,
     pendingViewport: null, lastRows: 0, lastCols: 0, parked: false,
+    contestedEchoes: new Map<string, number>(),
     visibleFitFrame: null, visibleFitTimer: null, visibleFitAttempts: 0, resizeTimer: null,
     // The real sendResize runs so its dedupe and hidden-page write guard are
     // exercised; only the socket write is stubbed.
@@ -626,6 +627,32 @@ test("the same foreign grid after the yield window is a fresh contest — one st
     assert.deepEqual([term.rows, term.cols], [40, 120]);
   } finally {
     Date.now = priorNow;
+    win.restore();
+  }
+});
+
+test("alternating foreign grids cannot bypass the yield window — contest history is per-grid", async () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls } = stageEchoed();
+    // Three visible clients fitting the same PTY to different hosts: a
+    // last-only contest record is overwritten by each intervening grid, so
+    // every echoed grid looks new and every echo earns a reclaim — an
+    // indefinite resize ping-pong (Codex P2 on #6628).
+    echo(24, 80);
+    win.runFrame();
+    await Promise.resolve();
+    echo(30, 90);
+    win.runFrame();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "each new foreign grid gets one reclaim");
+    // A repeat of EITHER grid inside its own window is the same insistent
+    // writer — it wins unchallenged, whichever order the echoes arrive in.
+    echo(24, 80);
+    echo(30, 90);
+    assert.deepEqual([term.rows, term.cols], [30, 90], "the emulator still follows the authoritative echo");
+    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "no further reclaims leave the wire");
+  } finally {
     win.restore();
   }
 });
