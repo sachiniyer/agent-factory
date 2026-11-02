@@ -176,35 +176,6 @@ func signalProcessChecked(proc proctree.Process) error {
 	return nil
 }
 
-// signalAndWait sends SIGTERM to pid, polls for exit up to
-// sigtermFallbackGrace, and escalates to SIGKILL if it has not exited.
-func signalAndWait(pid int) error {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("FindProcess: %w", err)
-	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		if errIsProcessGone(err) {
-			return nil
-		}
-		return fmt.Errorf("SIGTERM: %w", err)
-	}
-
-	deadline := time.Now().Add(sigtermFallbackGrace)
-	for time.Now().Before(deadline) {
-		if !pidLooksAlive(pid) {
-			return nil
-		}
-		time.Sleep(sigtermFallbackPoll)
-	}
-
-	log.WarningLog.Printf("sigterm fallback: pid %d did not exit within %s; escalating to SIGKILL", pid, sigtermFallbackGrace)
-	if err := proc.Signal(syscall.SIGKILL); err != nil && !errIsProcessGone(err) {
-		return fmt.Errorf("SIGKILL: %w", err)
-	}
-	return nil
-}
-
 // errIsProcessGone reports whether err from Signal indicates the target is
 // already gone. POSIX returns ESRCH; os.Process surfaces this as "os: process
 // already finished".
