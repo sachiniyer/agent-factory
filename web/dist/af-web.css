@@ -2933,6 +2933,120 @@ body[data-project-color] [data-af-theme=dark] {
   color: var(--af-dead);
   line-height: 1.5;
 }
+.af-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-3) var(--af-space-4);
+  border-top: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+}
+.af-hosts-head {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+}
+.af-hosts-title {
+  font-size: var(--af-type-body);
+  font-weight: 600;
+  color: var(--af-ink);
+}
+.af-hosts-check-all {
+  margin-left: auto;
+}
+.af-hosts-note,
+.af-hosts-empty {
+  margin: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.5;
+}
+.af-hosts-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+}
+.af-hosts-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2) 0;
+}
+.af-hosts-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+  min-width: 0;
+}
+.af-hosts-name {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-body);
+  color: var(--af-ink);
+}
+.af-hosts-desc {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  overflow-wrap: anywhere;
+}
+.af-hosts-default {
+  font-size: var(--af-type-caption);
+  font-weight: 600;
+  color: var(--af-ready);
+}
+.af-hosts-verbs {
+  display: flex;
+  gap: var(--af-space-2);
+  align-items: center;
+}
+.af-hosts-check-lines {
+  grid-column: 1 / -1;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.5;
+  padding-left: var(--af-space-3);
+}
+.af-hosts-echo,
+.af-hosts-error,
+.af-hosts-notice {
+  grid-column: 1 / -1;
+  font-size: var(--af-type-caption);
+  padding: var(--af-space-1) 0;
+  line-height: 1.5;
+}
+.af-hosts-echo {
+  color: var(--af-ink);
+}
+.af-hosts-error {
+  color: var(--af-dead);
+}
+.af-hosts-notice {
+  color: var(--af-ink);
+  background: var(--af-surface-raised);
+  border-radius: var(--af-radius-control);
+  padding: var(--af-space-1) var(--af-space-2);
+}
+.af-hosts-addform {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--af-space-2);
+}
+.af-hosts-addrow {
+  display: flex;
+  justify-content: flex-end;
+}
+.af-host-disclosure {
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-dialog);
+}
+.af-host-disclosure[open] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2);
+}
+.af-host-disclosure [hidden] {
+  display: none;
+}
 .af-assistant-note {
   margin: 0 0 var(--af-space-2);
   font-size: var(--af-type-caption);
@@ -3107,23 +3221,27 @@ summary:focus-visible {
 .af-config-head,
 .af-config-tier,
 .af-accounts-head,
-.af-quota-head {
+.af-quota-head,
+.af-hosts-head {
   border: 0;
 }
 .af-config-body,
 .af-accounts,
-.af-quota {
+.af-quota,
+.af-hosts {
   padding: var(--af-space-3);
 }
 .af-accounts,
-.af-quota {
+.af-quota,
+.af-hosts {
   margin-top: var(--af-space-4);
   border: 0;
 }
 .af-config-title,
 .af-accounts-title,
 .af-tasks-title,
-.af-quota-title {
+.af-quota-title,
+.af-hosts-title {
   font-size: var(--af-type-heading);
 }
 .af-config-desc,
@@ -3132,12 +3250,15 @@ summary:focus-visible {
 .af-accounts-note,
 .af-accounts-name,
 .af-quota-note,
-.af-quota-agent {
+.af-quota-agent,
+.af-hosts-note,
+.af-hosts-name {
   color: var(--af-ink);
   font-size: var(--af-type-body);
 }
 .af-config-path,
-.af-accounts-dir {
+.af-accounts-dir,
+.af-hosts-desc {
   color: var(--af-ink-muted);
   font-size: var(--af-type-caption);
   white-space: normal;
@@ -3166,6 +3287,7 @@ summary:focus-visible {
 .af-config-notice,
 .af-config-echo,
 .af-accounts-error,
+.af-hosts-error,
 .af-login-note {
   font-size: var(--af-type-body);
 }
@@ -3175,7 +3297,8 @@ summary:focus-visible {
 .af-config-list {
   padding: var(--af-space-3);
 }
-.af-accounts-row {
+.af-accounts-row,
+.af-hosts-row {
   border: 0;
 }
 .af-defaults-account {
@@ -3202,12 +3325,18 @@ textarea[class] {
 .af-accounts-echo,
 .af-accounts-error,
 .af-accounts-notice,
-.af-assistant-note {
+.af-assistant-note,
+.af-hosts-empty,
+.af-hosts-echo,
+.af-hosts-error,
+.af-hosts-notice,
+.af-hosts-check-lines {
   font-size: var(--af-type-body);
   color: var(--af-ink);
 }
 .af-dirpicker-error,
-.af-accounts-error {
+.af-accounts-error,
+.af-hosts-error {
   color: var(--af-dead);
 }
 .af-config-tier-name {

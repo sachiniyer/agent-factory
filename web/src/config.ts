@@ -38,6 +38,13 @@ import {
   emptyQuotaState,
   renderQuotaSection,
 } from "./quota.js";
+import {
+  HOST_INPUT_ATTR,
+  type HostActions,
+  type HostsState,
+  emptyHostsState,
+  renderHostsSection,
+} from "./hosts.js";
 import { h } from "./dom.js";
 import type {
   ConfigEntry,
@@ -80,6 +87,11 @@ export interface ConfigActions {
    *  host, not a settable key, and routing them through the config writer would
    *  be the category error #3385 asks this surface to avoid. */
   accounts: AccountActions;
+  /** The Hosts section's verbs (#5571 W10.5). The add/remove pair DOES go
+   *  through SetConfigValue — through its hosts_edit arm, the same atomic
+   *  per-entry edit `af hosts` rides — so they are not routed through `save`,
+   *  which serializes whole-value writes and could not express them. */
+  hosts: HostActions;
   setTheme: (choice: ThemeChoice) => void;
   disconnect: () => void;
 }
@@ -319,11 +331,18 @@ export class ConfigPane {
 
   private entries: ConfigEntry[] = [];
   private registration = { open: false, agent: "" };
+  /** The Hosts section's add-form disclosure state (#5571 W10.5). */
+  private hostDisclosure = { open: false };
   private path = "";
   private status: ConfigStatus | null = null;
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   private accounts: AccountsState = emptyAccountsState();
+  /** The Hosts section's data (#5571 W10.5): the daemon's hosts-edit capability
+   *  bit, this view's probe results, and the last mutation's outcome. It
+   *  manages config keys (`hosts`, `default_host`) but is not itself a key, so
+   *  it rides beside `accounts` rather than inside `entries`. */
+  private hosts: HostsState = emptyHostsState();
   /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
    *  Accounts. Same "not config" rule: see quota.ts. */
   private quota: QuotaState = emptyQuotaState();
@@ -357,6 +376,7 @@ export class ConfigPane {
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
   private lastAccounts: AccountsState | null = null;
+  private lastHosts: HostsState | null = null;
   private lastQuota: QuotaState | null = null;
   private lastTheme: ThemeChoice | null = null;
 
@@ -374,9 +394,10 @@ export class ConfigPane {
     accounts: AccountsState,
     quota: QuotaState,
     theme: ThemeChoice = this.theme,
+    hosts: HostsState = this.hosts,
   ): void {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts
-      && this.lastQuota === quota && this.lastTheme === theme) {
+      && this.lastQuota === quota && this.lastTheme === theme && this.lastHosts === hosts) {
       return;
     }
     // Captured before `lastStatus`/`lastEntries` are overwritten below: the
@@ -396,6 +417,7 @@ export class ConfigPane {
     this.lastAccounts = accounts;
     this.lastQuota = quota;
     this.lastTheme = theme;
+    this.lastHosts = hosts;
     this.theme = theme;
     // Retired web appearance keys from older daemons are never editable here.
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
@@ -403,6 +425,7 @@ export class ConfigPane {
     this.status = status;
     this.accounts = accounts;
     this.quota = quota;
+    this.hosts = hosts;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -554,6 +577,34 @@ export class ConfigPane {
         && active.classList.contains("af-accounts-add")
         ? active.closest(".af-accounts-register")?.querySelector<HTMLInputElement>(`input[${ACCOUNT_INPUT_ATTR}]`)?.getAttribute(ACCOUNT_INPUT_ATTR) ?? null
         : null;
+    // The Hosts section's fields (#5571 W10.5) get the same treatment: the add
+    // form holds a half-typed draft a refresh must not eat, and its buttons'
+    // own actions rebuild the pane while they still hold focus. Drafts are
+    // keyed by HOST_INPUT_ATTR; buttons by their class + row's data-host so a
+    // multi-host roster restores the right one — and the add-form's submit by
+    // its class alone (its draft's identity lives in the fields, not the
+    // button).
+    const hostDrafts = this.readHostDrafts();
+    const focusedHostField =
+      active instanceof HTMLInputElement || active instanceof HTMLSelectElement
+        ? active.getAttribute(HOST_INPUT_ATTR)
+        : null;
+    const hostCaret = focusedHostField !== null && active instanceof HTMLInputElement
+      && (active.type === "text" || active.type === "number")
+      ? { start: active.selectionStart, end: active.selectionEnd }
+      : null;
+    const hostSummaryFocused = active === this.el.querySelector(".af-host-disclosure summary");
+    const focusedHostButton =
+      active instanceof HTMLButtonElement
+        && (active.classList.contains("af-hosts-check")
+          || active.classList.contains("af-hosts-remove")
+          || active.classList.contains("af-hosts-add")
+          || active.classList.contains("af-hosts-check-all"))
+        ? {
+          cls: ["af-hosts-check", "af-hosts-remove", "af-hosts-add", "af-hosts-check-all"].find((c) => active.classList.contains(c))!,
+          host: active.closest("[data-host]")?.getAttribute("data-host") ?? null,
+        }
+        : null;
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
@@ -575,6 +626,7 @@ export class ConfigPane {
     // reader this change exists for, and a plain focus() would yank them back to the
     // field the moment a save or an external refresh landed.
     this.restoreAccountDrafts(accountDrafts);
+    this.restoreHostDrafts(hostDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
@@ -658,6 +710,26 @@ export class ConfigPane {
         ?.closest(".af-accounts-register")
         ?.querySelector<HTMLElement>(".af-accounts-add")
         ?.focus({ preventScroll: true });
+    } else if (hostSummaryFocused) {
+      this.el.querySelector<HTMLElement>(".af-host-disclosure summary")?.focus({ preventScroll: true });
+    } else if (focusedHostField !== null) {
+      const field = this.hostInput(focusedHostField);
+      field?.focus({ preventScroll: true });
+      if (field instanceof HTMLInputElement && hostCaret?.start != null
+        && (field.type === "text" || field.type === "number")) {
+        field.setSelectionRange(hostCaret.start, hostCaret.end ?? hostCaret.start);
+      }
+    } else if (focusedHostButton !== null) {
+      // The row-keyed rung: check-all and the add-form's submit have no
+      // data-host row, so they restore by class alone; a row's Check/Remove
+      // restores within its own `data-host` so the rebuilt button is the one
+      // the user pressed, not the first match.
+      const scope = focusedHostButton.host !== null
+        ? `[data-host="${CSS.escape(focusedHostButton.host)}"] `
+        : "";
+      this.el
+        .querySelector<HTMLElement>(`${scope}button.${focusedHostButton.cls}`)
+        ?.focus({ preventScroll: true });
     }
   }
 
@@ -688,6 +760,41 @@ export class ConfigPane {
   private accountInput(agent: string): HTMLInputElement | null {
     return this.el.querySelector<HTMLInputElement>(
       `input[${ACCOUNT_INPUT_ATTR}="${CSS.escape(agent)}"]`,
+    );
+  }
+
+  /** Every add-form field's current value, keyed by HOST_INPUT_ATTR. Checkboxes
+   *  record their checked flag rather than a value; selects record the chosen
+   *  option. Skipping EMPTY text fields would lose a deliberate blank, so they
+   *  are recorded unconditionally — the restore re-applies "" harmlessly. */
+  private readHostDrafts(): Map<string, { value: string; checked: boolean }> {
+    const drafts = new Map<string, { value: string; checked: boolean }>();
+    for (const field of this.el.querySelectorAll<HTMLInputElement | HTMLSelectElement>(`[${HOST_INPUT_ATTR}]`)) {
+      const key = field.getAttribute(HOST_INPUT_ATTR);
+      if (key === null) continue;
+      const checked = field instanceof HTMLInputElement && field.type === "checkbox" ? field.checked : false;
+      drafts.set(key, { value: field.value, checked });
+    }
+    return drafts;
+  }
+
+  /** Puts them back on the freshly rendered fields. A field that is gone — the
+   *  capability gate closed the form mid-draft — simply drops its draft. */
+  private restoreHostDrafts(drafts: Map<string, { value: string; checked: boolean }>): void {
+    for (const [key, draft] of drafts) {
+      const field = this.hostInput(key);
+      if (field === null) continue;
+      if (field instanceof HTMLInputElement && field.type === "checkbox") {
+        field.checked = draft.checked;
+      } else {
+        field.value = draft.value;
+      }
+    }
+  }
+
+  private hostInput(key: string): HTMLInputElement | HTMLSelectElement | null {
+    return this.el.querySelector<HTMLInputElement | HTMLSelectElement>(
+      `[${HOST_INPUT_ATTR}="${CSS.escape(key)}"]`,
     );
   }
 
@@ -759,11 +866,15 @@ export class ConfigPane {
               "No settings available. Try Configure with assistant.",
             ),
           ];
-    // Accounts LAST, then Usage (#2983): the config keys are what this view is
-    // for, and daemon-reported sections above them would push them below the fold.
+    // Hosts sits between the config list and the non-config sections: it
+    // manages the `hosts`/`default_host` keys, so it is closer in kind to the
+    // list than to Accounts. Accounts LAST, then Usage (#2983): the config
+    // keys are what this view is for, and daemon-reported sections above them
+    // would push them below the fold.
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
+      renderHostsSection(this.entries, this.hosts, this.actions.hosts, this.hostDisclosure),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
       renderQuotaSection(this.quota),
     );
