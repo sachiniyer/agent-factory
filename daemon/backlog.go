@@ -52,6 +52,13 @@ type backlogState struct {
 	// newerSchemaWarned holds the projects whose backlog.json a newer af wrote
 	// and whose refusal is already logged (warnBacklogUnreadable).
 	newerSchemaWarned sync.Map
+	// orchestrating holds the groups with a delivery to their orchestrator in
+	// flight.
+	orchestrating map[string]bool
+	// scanned is set once recovery has listed the backlogs on disk; seen
+	// holds the projects it listed.
+	scanned bool
+	seen    map[string]bool
 	// recovered, recovering and recoveryDone track restart recovery.
 	recovered    map[string]bool
 	recovering   bool
@@ -182,6 +189,26 @@ func (s *backlogState) askedOf(sessionID string) seenQuestion {
 	return seenQuestion{}
 }
 
+// beginOrchestrate claims the group's delivery; false when one is in flight.
+func (s *backlogState) beginOrchestrate(repoID string, group int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.orchestrating[continueKey(repoID, group)] {
+		return false
+	}
+	if s.orchestrating == nil {
+		s.orchestrating = map[string]bool{}
+	}
+	s.orchestrating[continueKey(repoID, group)] = true
+	return true
+}
+
+func (s *backlogState) endOrchestrate(repoID string, group int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.orchestrating, continueKey(repoID, group))
+}
+
 func (s *backlogState) deferArchive(sessionID, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,6 +247,28 @@ func (s *backlogState) isRecovered(repoID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.recovered[repoID]
+}
+
+// noteRecoveryScan records the projects a recovery pass found on disk.
+func (s *backlogState) noteRecoveryScan(repoIDs []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = map[string]bool{}
+	}
+	for _, id := range repoIDs {
+		s.seen[id] = true
+	}
+	s.scanned = true
+}
+
+// recoveryCovers is whether restart recovery has nothing left to settle for
+// the project: it recovered it, or the project's backlog was not on disk
+// when recovery looked, so no earlier daemon left anything in it.
+func (s *backlogState) recoveryCovers(repoID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recovered[repoID] || (s.scanned && !s.seen[repoID])
 }
 
 func (s *backlogState) markRecovered(repoID string) {

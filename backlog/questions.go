@@ -160,6 +160,17 @@ type Answered struct {
 // replaced is kept on the answer for AnswerFailed. On error b is unchanged.
 // An answer whose session is gone goes through BeginAnswerRun instead.
 func (b *Backlog) Answer(id, questionID int, text string, now time.Time) (Answered, error) {
+	return b.answer(id, questionID, text, true, now)
+}
+
+// AnswerInThread records the user's answer and closes its question without a
+// delivery: for a question af asked on a group, which has no session to take an
+// answer. The item's status is left as it was.
+func (b *Backlog) AnswerInThread(id, questionID int, text string, now time.Time) (Answered, error) {
+	return b.answer(id, questionID, text, false, now)
+}
+
+func (b *Backlog) answer(id, questionID int, text string, deliver bool, now time.Time) (Answered, error) {
 	it, err := b.get(id)
 	if err != nil {
 		return Answered{}, err
@@ -174,7 +185,7 @@ func (b *Backlog) Answer(id, questionID int, text string, now time.Time) (Answer
 	}
 	q.Closed = ClosedAnswered
 	answer := Message{Kind: KindAnswer, Author: AuthorUser, Text: text, Answers: q.ID}
-	if it.Status.Open() {
+	if deliver && it.Status.Open() {
 		// The status to give back if delivery fails is the one before the OLDEST
 		// pending answer: a second answer accepted while the first is pending would
 		// otherwise save "running" (what the first set) and never get the item back
