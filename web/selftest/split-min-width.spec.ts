@@ -44,11 +44,17 @@ async function dragTabToPane(page: Page, tabIndex: number, paneIndex: number, ed
   );
 }
 
-/** The rendered width of every .af-pane on screen, narrowest first. */
+/** The rendered width of every VISIBLE .af-pane on screen, narrowest first —
+ *  hidden panes stay mounted under display:none (#6555) and would read 0. */
 async function paneWidths(page: Page): Promise<number[]> {
   const widths = await page
     .locator(".af-term-host .af-pane")
-    .evaluateAll((panes) => panes.map((p) => Math.round(p.getBoundingClientRect().width)).sort((a, b) => a - b));
+    .evaluateAll((panes) =>
+      panes
+        .filter((p) => p.getClientRects().length > 0)
+        .map((p) => Math.round(p.getBoundingClientRect().width))
+        .sort((a, b) => a - b),
+    );
   return widths;
 }
 
@@ -98,7 +104,7 @@ test("#6429: no pane renders under the floor; overflow degrades visibly, not to 
   // The drag path enforces the same floor: pull the divider as far toward
   // the left edge as the pointer can reach. The clamp must stop at the
   // minimum, not at the old 10% sliver.
-  const divider = page.locator(".af-term-host .af-divider").first();
+  const divider = page.locator(".af-term-host .af-divider:visible").first();
   const box = await divider.boundingBox();
   expect(box, "a visible split still has a divider to drag").toBeTruthy();
   const host = page.locator(".af-term-host");

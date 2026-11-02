@@ -411,6 +411,11 @@ export class SplitView {
   // deliberate half of the degradation. Created lazily on the first hide.
   private narrowEl: HTMLElement | null = null;
 
+  // The root element the current DOM was built from — the element buildNode
+  // returned for this.tree's root. syncFitHidden walks it in parallel with the
+  // tree to hide/show nodes in place (#6555).
+  private builtRootEl: HTMLElement | null = null;
+
   // One ResizeObserver-detected host resize is one refit, however many entries
   // the observer batches.
   private refitQueued = false;
@@ -911,6 +916,7 @@ export class SplitView {
     // The DOM is gone, so the next reconcile must build it whatever the tree says.
     this.builtTree = null;
     this.displayTree = null;
+    this.builtRootEl = null;
   }
 
   /** Coalesces ResizeObserver entries into at most one refit per frame: the
@@ -931,6 +937,41 @@ export class SplitView {
     } else {
       setTimeout(run, 0);
     }
+  }
+
+  /** Applies the fit's hide/show state to the BUILT DOM in place (#6555). The
+   *  wrappers always mirror the full retained tree, so a leaf the fit dropped is
+   *  still mounted — it just gets display:none, and a split whose every leaf is
+   *  hidden collapses whole, divider included. Nothing is detached or reparented:
+   *  re-inserting an <iframe> would destroy its browsing context, so Web/VS Code
+   *  panes keep their document across any number of refits. The DOM children of a
+   *  split wrap are exactly [a, divider, b] — the shape buildNode appends — so the
+   *  walk mirrors the tree node-for-node. */
+  private syncFitHidden(fit: { tree: LayoutNode; hidden: string[] }): void {
+    if (!this.tree || !this.builtRootEl) {
+      return;
+    }
+    const hiddenIds = new Set(fit.hidden);
+    const walk = (node: LayoutNode, el: HTMLElement): boolean => {
+      if (node.kind === "leaf") {
+        const hidden = hiddenIds.has(node.id);
+        el.classList.toggle("af-pane-hidden", hidden);
+        return hidden;
+      }
+      const aEl = el.children[0] as HTMLElement | undefined;
+      const divider = el.children[1] as HTMLElement | undefined;
+      const bEl = el.children[2] as HTMLElement | undefined;
+      if (!aEl || !divider || !bEl) {
+        return false;
+      }
+      const hiddenA = walk(node.a, aEl);
+      const hiddenB = walk(node.b, bEl);
+      const hidden = hiddenA && hiddenB;
+      el.classList.toggle("af-split-hidden", hidden);
+      divider.classList.toggle("af-divider-hidden", hiddenA || hiddenB);
+      return hidden;
+    };
+    walk(this.tree, this.builtRootEl);
   }
 
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
@@ -1012,8 +1053,13 @@ export class SplitView {
     // screen would detach every live pane and silently rewind its xterm viewport to
     // the top, killing wheel-scroll on a session.updated that touched nothing this
     // pane shows (a tab created in another window, #1812/#1815) — see builtTree.
-    if (!sameLayout(fit.tree, this.builtTree)) {
-      const rootEl = this.buildNode(fit.tree);
+    // The DOM mirrors the full retained tree, never the fit's display tree (#6555):
+    // a mere resize crossing the hidden/visible threshold must not reparent pane
+    // containers at all — re-inserting an <iframe> destroys its browsing context,
+    // reloading Web/VS Code panes and losing their state. Hide/restore is applied
+    // as CSS on the live tree by syncFitHidden below.
+    if (!sameLayout(this.tree, this.builtTree)) {
+      const rootEl = this.buildNode(this.tree);
       rootEl.style.flex = "1 1 0";
       if (fit.hidden.length > 0) {
         // The deliberate half of the degradation: a degraded layout says so,
@@ -1026,8 +1072,10 @@ export class SplitView {
       } else {
         this.host.replaceChildren(rootEl);
       }
-      this.builtTree = fit.tree;
+      this.builtTree = this.tree;
+      this.builtRootEl = rootEl;
     }
+    this.syncFitHidden(fit);
 
     const multi = visible.length > 1;
     this.host.classList.toggle("af-split-multi", multi);

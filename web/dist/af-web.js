@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1397aa9e6be2";
+var CLIENT_VERSION = "d3822ae572db";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -14870,6 +14870,10 @@ var SplitView = class {
   // The ".af-split-narrow" notice shown while the fit hides panes — the visible,
   // deliberate half of the degradation. Created lazily on the first hide.
   narrowEl = null;
+  // The root element the current DOM was built from — the element buildNode
+  // returned for this.tree's root. syncFitHidden walks it in parallel with the
+  // tree to hide/show nodes in place (#6555).
+  builtRootEl = null;
   // One ResizeObserver-detected host resize is one refit, however many entries
   // the observer batches.
   refitQueued = false;
@@ -15229,6 +15233,7 @@ var SplitView = class {
     this.termHoldsFocus = false;
     this.builtTree = null;
     this.displayTree = null;
+    this.builtRootEl = null;
   }
   /** Coalesces ResizeObserver entries into at most one refit per frame: the
    *  report follows so a resize that hid or restored panes updates the strip's
@@ -15248,6 +15253,40 @@ var SplitView = class {
     } else {
       setTimeout(run, 0);
     }
+  }
+  /** Applies the fit's hide/show state to the BUILT DOM in place (#6555). The
+   *  wrappers always mirror the full retained tree, so a leaf the fit dropped is
+   *  still mounted — it just gets display:none, and a split whose every leaf is
+   *  hidden collapses whole, divider included. Nothing is detached or reparented:
+   *  re-inserting an <iframe> would destroy its browsing context, so Web/VS Code
+   *  panes keep their document across any number of refits. The DOM children of a
+   *  split wrap are exactly [a, divider, b] — the shape buildNode appends — so the
+   *  walk mirrors the tree node-for-node. */
+  syncFitHidden(fit) {
+    if (!this.tree || !this.builtRootEl) {
+      return;
+    }
+    const hiddenIds = new Set(fit.hidden);
+    const walk = (node, el2) => {
+      if (node.kind === "leaf") {
+        const hidden2 = hiddenIds.has(node.id);
+        el2.classList.toggle("af-pane-hidden", hidden2);
+        return hidden2;
+      }
+      const aEl = el2.children[0];
+      const divider = el2.children[1];
+      const bEl = el2.children[2];
+      if (!aEl || !divider || !bEl) {
+        return false;
+      }
+      const hiddenA = walk(node.a, aEl);
+      const hiddenB = walk(node.b, bEl);
+      const hidden = hiddenA && hiddenB;
+      el2.classList.toggle("af-split-hidden", hidden);
+      divider.classList.toggle("af-divider-hidden", hiddenA || hiddenB);
+      return hidden;
+    };
+    walk(this.tree, this.builtRootEl);
   }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
    *  (re)creates terminals whose tab changed, rebuilds the split wrappers (reusing
@@ -15283,8 +15322,8 @@ var SplitView = class {
     const fit = hostW > 0 && hostH > 0 ? fitToSize(this.tree, hostW, hostH, this.focusedId) : { tree: this.tree, hidden: [] };
     this.displayTree = fit.tree;
     const visible = leaves(fit.tree);
-    if (!sameLayout(fit.tree, this.builtTree)) {
-      const rootEl = this.buildNode(fit.tree);
+    if (!sameLayout(this.tree, this.builtTree)) {
+      const rootEl = this.buildNode(this.tree);
       rootEl.style.flex = "1 1 0";
       if (fit.hidden.length > 0) {
         if (!this.narrowEl) {
@@ -15295,8 +15334,10 @@ var SplitView = class {
       } else {
         this.host.replaceChildren(rootEl);
       }
-      this.builtTree = fit.tree;
+      this.builtTree = this.tree;
+      this.builtRootEl = rootEl;
     }
+    this.syncFitHidden(fit);
     const multi = visible.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
     let focusedRebuilt = false;

@@ -1924,6 +1924,17 @@ body[data-project-color] [data-af-theme="dark"] {
   text-align: center;
 }
 
+/* The in-place half of the pane-minimum degradation (#6555): a leaf the fit
+ * dropped — or a split whose every leaf it dropped — stays mounted (detaching
+ * an <iframe> would destroy its browsing context and lose Web/VS Code state)
+ * but leaves flex layout entirely, so the visible siblings fill the space.
+ * !important so a pane's own display:flex cannot win. */
+.af-pane-hidden,
+.af-split-hidden,
+.af-divider-hidden {
+  display: none !important;
+}
+
 /* The drag handle between two split children. A thin hit target with a hover accent;
  * dragging it resizes the split (split.ts persists the ratio). */
 .af-divider {
