@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"strconv"
@@ -246,7 +247,7 @@ func (m *Manager) adoptableReplacement(repoID string, b *backlog.Backlog, r *bac
 	if best == nil {
 		return session.InstanceData{}, false
 	}
-	return session.InstanceData{ID: best.ID, Title: best.Title}, true
+	return session.InstanceData{ID: best.ID, Title: best.Title, Program: best.Program}, true
 }
 
 // isReplacementTitle is whether title is one CreateSession gives a session it
@@ -289,7 +290,7 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 			// The daemon stopped after starting a replacement and before binding it
 			// (Codex P2 on #6571): bind that session rather than start a second. It
 			// may not have had its start prompt, so the next delivery sends it.
-			next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: d.Program, Unstarted: backlog.OrchUnstartedReplaced}
+			next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: cmp.Or(data.Program, d.Program), Unstarted: backlog.OrchUnstartedReplaced}
 			if err := m.bindReplacement(stop, repoID, d, next, nil); err != nil {
 				m.warn().Printf("adopt replacement orchestrator %q for %s: %v", data.Title, backlog.FormatID(d.Group), err)
 				return
@@ -367,7 +368,9 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 		// next pass sends to the now-live session.
 		delivered = nil
 	}
-	next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: d.Program}
+	// The program the create resolved, so a binding with none records the agent
+	// that runs (Codex P2 on #6627).
+	next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: cmp.Or(data.Program, d.Program)}
 	if delivered == nil {
 		next.Unstarted = backlog.OrchUnstartedReplaced
 	}

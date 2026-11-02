@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -154,7 +155,7 @@ func (m *Manager) startOrchestrator(stop <-chan struct{}, ref backlog.ProjectRef
 		kind, program = backlog.OrchUnstartedReplaced, prev.Program
 		if prev.Replacing != nil {
 			if data, ok := m.adoptableReplacement(ref.ID, b, prev.Replacing); ok {
-				next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: program, Unstarted: backlog.OrchUnstartedReplaced}
+				next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: cmp.Or(data.Program, program), Unstarted: backlog.OrchUnstartedReplaced}
 				return m.bindOpenedOrchestrator(stop, ref.ID, group, prev, next, false)
 			}
 		}
@@ -194,7 +195,11 @@ func (m *Manager) startOrchestrator(stop <-chan struct{}, ref backlog.ProjectRef
 		}
 	}()
 	data, err := createBacklogSession(m, ctx, create)
-	next := backlog.Orchestrator{Program: program}
+	// Bound with the program the create resolved, as a bind of an existing
+	// session records that session's: a group with no program of its own would
+	// otherwise record none, and a later replacement would start whatever the
+	// default is by then (Codex P2 on #6627).
+	next := backlog.Orchestrator{Program: cmp.Or(data.Program, program)}
 	switch {
 	case err != nil && isMutationCommitted(err) && data.ID != "" && data.StartupStateUnknown:
 		// The create kept a session whose startup it could not confirm: it may be

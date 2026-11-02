@@ -203,6 +203,34 @@ func TestOpenOrchestratorStartsOneForAnUnboundGroup(t *testing.T) {
 	require.Equal(t, agentproto.EventBacklogOrchestratorBound, evs[0].Type)
 }
 
+// TestOpenOrchestratorBindsTheProgramTheCreateResolved: a group with no
+// program of its own starts its session with the default agent, and the
+// binding records the agent the create resolved, not none, so a later
+// replacement starts the same agent whatever the default is by then (Codex P2
+// on #6627).
+func TestOpenOrchestratorBindsTheProgramTheCreateResolved(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	_, err := m.backlogService().SetOrchestrator(backlog.SetOrchestratorRequest{RepoID: repoID, ID: 2, Clear: true})
+	require.NoError(t, err)
+	require.Empty(t, loadItem(t, repoID, 2).Program, "precondition: the group names no program")
+	var creates []CreateSessionRequest
+	prev := createBacklogSession
+	createBacklogSession = func(_ *Manager, _ context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+		creates = append(creates, req)
+		return session.InstanceData{ID: "n1", Title: "effort B-2 Effort", Program: "codex"}, nil
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	out, err := openOrch(m, repoID, 2)
+	require.NoError(t, err)
+	require.Equal(t, backlog.OrchOpenStarted, out.Change)
+	require.Len(t, creates, 1)
+	require.Empty(t, creates[0].Program, "the create picks the default")
+	o := orchOf(t, repoID)
+	require.Equal(t, "n1", o.SessionID)
+	require.Equal(t, "codex", o.Program, "the binding records the agent that runs")
+}
+
 // TestOpenOrchestratorBindsANewSessionWhoseFirstPromptFailedUnstarted: a new
 // session whose first prompt was proven not delivered is bound, marked
 // unstarted with its own kind, so a delivery sends it the start prompt.
