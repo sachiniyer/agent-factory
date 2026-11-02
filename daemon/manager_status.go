@@ -618,7 +618,11 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// observeTaskRunWhilePaused for why it can end a run but never conclude
 		// death, and taskRunPollBackstop for why this is not a return to per-tick
 		// probing.
-		if instance.TaskRunObservable(nowFunc()) && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
+		// A pending task-send re-verification earns the same bounded probe: an
+		// attached pane's unobserved turn would otherwise expire the watch
+		// unanswered even though the queued draft was answered under it
+		// (#6592 review).
+		if (instance.TaskRunObservable(nowFunc()) || m.unverifiedSendWatchPending(stableSessionKey(repoID, instance))) && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
 			m.observeTaskRunWhilePaused(repoID, key, instance)
 			return
 		}
