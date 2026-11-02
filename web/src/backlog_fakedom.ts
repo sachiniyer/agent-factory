@@ -244,6 +244,12 @@ export class FakeElement extends FakeNode {
     node.parentNode = this;
     this.childNodes.splice(this.childNodes.indexOf(ref), 0, node);
   }
+  prepend(...nodes: (FakeNode | string)[]): void {
+    const ref = this.childNodes[0] ?? null;
+    for (const n of nodes) {
+      this.insertBefore(typeof n === "string" ? new FakeText(this.doc, n) : n, ref);
+    }
+  }
   replaceChildren(...nodes: (FakeNode | string)[]): void {
     for (const c of [...this.childNodes]) this.removeChild(c);
     this.append(...nodes);

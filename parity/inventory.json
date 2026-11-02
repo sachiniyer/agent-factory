@@ -389,8 +389,8 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/hosts.ts renderHostsSection (the config view's Hosts section) -> web/src/index.ts doHostAdd/doHostRemove -> api.ts editHosts (POST /v1/SetConfigValue hosts_edit -> config.EditGlobalHosts, the same atomic per-entry write `af hosts` rides, #5855) and doHostCheck -> POST /v1/CheckHost; add/remove are refused unless Ping's config_hosts_edit bit landed (GET /v1/health)"
       },
       "cli": {
         "status": "yes",
@@ -398,7 +398,7 @@
       },
       "verdict": "real-gap",
       "issue": "#5571",
-      "notes": "W10.5 of the sandbox-parity epic. The CLI half landed first. The web and TUI equivalents (an add-host form that writes the same entry and shows the same CheckHost result) are the remaining half, tracked on #5571's W10.5 plan comment; when they land, flip those cells to yes. Connectivity stays the operator's: af opens no tunnel and edits no ssh config."
+      "notes": "W10.5 of the sandbox-parity epic. The CLI half landed first; the web half is the config view's Hosts section — the same hosts_edit write (never a second whole-table writer), the same CheckHost probe, and the same renderHostCheck verdict copy, with add/remove refused on a daemon too old to answer config_hosts_edit rather than risk an empty-`hosts` write. The remaining half is the TUI equivalent, still tracked on #5571's W10.5 plan comment; its verdict stays real-gap until then. Connectivity stays the operator's: af opens no tunnel and edits no ssh config."
     },
     {
       "id": "host.check",
@@ -408,8 +408,8 @@
         "pointer": ""
       },
       "web": {
-        "status": "n/a",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/hosts.ts renderHostsSection Check/Check all -> web/src/index.ts doHostCheck -> api.ts checkHost (POST /v1/CheckHost); hostCheckLines renders the same verdict arms as commands/hostscmd.go renderHostCheck"
       },
       "cli": {
         "status": "yes",
@@ -417,7 +417,7 @@
       },
       "verdict": "deliberate",
       "issue": "#5571",
-      "notes": "W2.3 of the sandbox-parity epic. A diagnostic, like install.doctor: the TUI and web pickers do not run it, they READ its result (HostOption.readiness/note on ListBackends), which the daemon refreshes on a ~10 minute jittered timer and on `af doctor`. The RPC refuses a name outside the global host list before anything is dialed, and stays out of the sandbox credential scope (sandboxAllowed is false): a probe dials the operator's hosts."
+      "notes": "W2.3 of the sandbox-parity epic. A diagnostic, like install.doctor. The web runs it as part of host management (#5571 W10.5): the config view's Hosts section probes a saved host — or every one — after add and on demand, and shows the verdict under the row. The TUI analogue stays n/a by the same reasoning as before: its host surface is the create picker, which READS the readiness its answer updates (HostOption.readiness/note on ListBackends) refreshed on the daemon's ~10 minute jittered timer and on `af doctor`. The RPC refuses a name outside the global host list before anything is dialed, and stays out of the sandbox credential scope (sandboxAllowed is false): a probe dials the operator's hosts."
     },
     {
       "id": "install.doctor",
@@ -2266,6 +2266,7 @@
       "ReorderTab": "session.tab.reorder",
       "RestoreSession": "session.restore",
       "ResumeFromLimit": "session.limit-retry",
+      "CheckHost": "host.check",
       "SetConfigValue": "config.write",
       "Snapshot": "session.list",
       "SuggestSessionName": "-",
@@ -3302,41 +3303,26 @@
         }
       },
       "SetConfigValue": {
-        "hosts_edit": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-        },
-        "hosts_edit.clear_default": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-        },
-        "hosts_edit.host": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-        },
-        "hosts_edit.name": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-        },
-        "hosts_edit.op": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-        },
         "hosts_edit.host.host": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.user": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.port": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.identity_file": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.workspace_root": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.host_key_verification": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.use_ssh_config": {
-          "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
+          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         }
       },
       "ListAccounts": {

@@ -31,9 +31,12 @@ import type {
   OnCompleteOption,
   AccountLoginResponse,
   AccountsResponse,
+  CheckHostResponse,
   ConfigResponse,
   ConfigSetResponse,
+  DaemonHealth,
   ExplainConfigResponse,
+  HostsEdit,
   QuotaReportResponse,
   RegisterAccountResponse,
   ProjectExpectation,
@@ -1487,6 +1490,52 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
  *  form shows it verbatim rather than substituting its own wording. */
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
   return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
+}
+
+/** The atomic per-entry host-table write `af hosts add|remove` rides on —
+ *  SetConfigValue's `hosts_edit` arm (config.HostsEdit), one read-modify-write
+ *  under the daemon's config file lock (#5855). The caller must have gated on
+ *  daemonHealth().config_hosts_edit first: a daemon that does not advertise it
+ *  tolerates the unknown field and writes an EMPTY `hosts` value in its place
+ *  (daemon/control_types.go). Throws ApiError carrying the writer's message on
+ *  a rejected edit — the form shows it verbatim rather than validating a copy
+ *  of the name/destination rules itself. */
+export async function editHosts(edit: HostsEdit, token: string): Promise<ConfigSetResponse> {
+  return af<ConfigSetResponse>(
+    "SetConfigValue",
+    { key: "hosts", hosts_edit: edit },
+    token,
+  );
+}
+
+/** POST /v1/CheckHost — `af hosts check`. `name` "" probes every configured
+ *  host, the same as the flagless CLI form. The probe itself is daemon-side;
+ *  each row's probed/reachable/error fields carry the outcome rather than an
+ *  envelope error. */
+export async function checkHost(name: string, token: string): Promise<CheckHostResponse> {
+  return af<CheckHostResponse>("CheckHost", { host: name }, token);
+}
+
+/** GET /v1/health — the capability gate for hosts_edit. af() is POST-only, so
+ *  the Ping alias is fetched directly, the way config-assistant's DELETE is
+ *  hand-rolled above. A refusal or an unreadable body resolves to `null`, which
+ *  the hosts section treats exactly like an absent flag: the edit send is
+ *  refused rather than risk the empty-`hosts` write. */
+export async function daemonHealth(token: string): Promise<DaemonHealth | null> {
+  const headers: Record<string, string> = {
+    [CLIENT_VERSION_HEADER]: CLIENT_VERSION,
+  };
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  try {
+    const resp = await fetch("/v1/health", { headers });
+    if (!resp.ok) return null;
+    const env = (await resp.json()) as Envelope<DaemonHealth>;
+    return env?.data ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** ExplainConfig (#4803): the same `config.ResolvedValue` `af config get

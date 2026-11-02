@@ -3786,6 +3786,153 @@ body[data-project-color] [data-af-theme="dark"] {
   line-height: 1.5;
 }
 
+/* The Hosts section (#5571 W10.5): the `af hosts` workflow beside the config
+ * list. Its rows describe saved ssh destinations rather than controls, so it
+ * takes the accounts section's shape — own heading, name + detail, ghost
+ * verbs — with the probe verdict lines a row unfolds under itself. */
+.af-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-3) var(--af-space-4);
+  border-top: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+}
+
+.af-hosts-head {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+}
+
+.af-hosts-title {
+  font-size: var(--af-type-body);
+  font-weight: 600;
+  color: var(--af-ink);
+}
+
+.af-hosts-check-all {
+  margin-left: auto;
+}
+
+.af-hosts-note,
+.af-hosts-empty {
+  margin: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.5;
+}
+
+.af-hosts-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+}
+
+.af-hosts-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2) 0;
+}
+
+.af-hosts-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+  min-width: 0;
+}
+
+.af-hosts-name {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-body);
+  color: var(--af-ink);
+}
+
+/* The destination, wrap-able like the account dir: a half-shown
+ * user@host:port is not one you can act on. */
+.af-hosts-desc {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.af-hosts-default {
+  font-size: var(--af-type-caption);
+  font-weight: 600;
+  color: var(--af-ready);
+}
+
+.af-hosts-verbs {
+  display: flex;
+  gap: var(--af-space-2);
+  align-items: center;
+}
+
+/* The probe verdict lines a row unfolds under itself — the web spelling of
+ * renderHostCheck's output, indented under the row like the CLI's. */
+.af-hosts-check-lines {
+  grid-column: 1 / -1;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.5;
+  padding-left: var(--af-space-3);
+}
+
+.af-hosts-echo,
+.af-hosts-error,
+.af-hosts-notice {
+  grid-column: 1 / -1;
+  font-size: var(--af-type-caption);
+  padding: var(--af-space-1) 0;
+  line-height: 1.5;
+}
+
+.af-hosts-echo {
+  color: var(--af-ink);
+}
+
+.af-hosts-error {
+  color: var(--af-dead);
+}
+
+/* Not an error: the capability gate's "edits are refused here" notice — the
+ * same treatment the accounts registration-only notice gets. */
+.af-hosts-notice {
+  color: var(--af-ink);
+  background: var(--af-surface-raised);
+  border-radius: var(--af-radius-control);
+  padding: var(--af-space-1) var(--af-space-2);
+}
+
+/* The add form is a grid of labelled fields inside the disclosure. */
+.af-hosts-addform {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--af-space-2);
+}
+
+.af-hosts-addrow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.af-host-disclosure {
+  border: calc(var(--af-space-1) / 4) solid var(--af-border);
+  border-radius: var(--af-radius-dialog);
+}
+
+.af-host-disclosure[open] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2);
+}
+
+.af-host-disclosure [hidden] {
+  display: none;
+}
+
 /* The login overlay's explanation of what af is running, above the pane. */
 .af-assistant-note {
   margin: 0 0 var(--af-space-2);
@@ -3844,32 +3991,33 @@ summary:focus-visible { outline: calc(var(--af-space-1) / 2) solid var(--af-acce
 .af-row-actions .af-rail-action { width: 100%; justify-content: flex-start; padding: var(--af-space-2); }
 .af-row-actions .af-term-more { min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)); }
 .af-view-count { padding: 0; border: 0; border-radius: 0; background: transparent; }
-.af-tasks-head, .af-config-head, .af-config-tier, .af-accounts-head, .af-quota-head { border: 0; }
-.af-config-body, .af-accounts, .af-quota { padding: var(--af-space-3); }
-.af-accounts, .af-quota { margin-top: var(--af-space-4); border: 0; }
-.af-config-title, .af-accounts-title, .af-tasks-title, .af-quota-title { font-size: var(--af-type-heading); }
-.af-config-desc, .af-config-key, .af-config-value, .af-accounts-note, .af-accounts-name, .af-quota-note, .af-quota-agent { color: var(--af-ink); font-size: var(--af-type-body); }
-.af-config-path, .af-accounts-dir { color: var(--af-ink-muted); font-size: var(--af-type-caption); white-space: normal; overflow-wrap: anywhere; }
+.af-tasks-head, .af-config-head, .af-config-tier, .af-accounts-head, .af-quota-head, .af-hosts-head { border: 0; }
+.af-config-body, .af-accounts, .af-quota, .af-hosts { padding: var(--af-space-3); }
+.af-accounts, .af-quota, .af-hosts { margin-top: var(--af-space-4); border: 0; }
+.af-config-title, .af-accounts-title, .af-tasks-title, .af-quota-title, .af-hosts-title { font-size: var(--af-type-heading); }
+.af-config-desc, .af-config-key, .af-config-value, .af-accounts-note, .af-accounts-name, .af-quota-note, .af-quota-agent, .af-hosts-note, .af-hosts-name { color: var(--af-ink); font-size: var(--af-type-body); }
+.af-config-path, .af-accounts-dir, .af-hosts-desc { color: var(--af-ink-muted); font-size: var(--af-type-caption); white-space: normal; overflow-wrap: anywhere; }
 .af-empty-title { font-size: var(--af-type-display); }
 .af-empty-hint { color: var(--af-ink); margin-bottom: var(--af-space-4); }
 
 .af-modal-backdrop { background: transparent; isolation: isolate; }
 .af-modal-backdrop::before { content: ""; position: fixed; inset: 0; background: var(--af-surface); opacity: 0.66; z-index: -1; }
 
-.af-config-purpose, .af-config-notice, .af-config-echo, .af-accounts-error, .af-login-note { font-size: var(--af-type-body); }
+.af-config-purpose, .af-config-notice, .af-config-echo, .af-accounts-error, .af-hosts-error, .af-login-note { font-size: var(--af-type-body); }
 .af-config-purpose { color: var(--af-ink); }
 .af-config-list { padding: var(--af-space-3); }
-.af-accounts-row { border: 0; }
+.af-accounts-row, .af-hosts-row { border: 0; }
 
 .af-defaults-account { display: flex; flex-direction: column; gap: var(--af-space-2); }
 
 button[class], input[class], select[class], textarea[class] { font-size: var(--af-type-body); }
 .af-field-label, .af-copy-hint, .af-dirpicker-error, .af-dirpicker-empty, .af-dirpicker-note,
 .af-assistant-status, .af-accounts-empty, .af-accounts-agent, .af-accounts-state-on,
-.af-accounts-state-off, .af-accounts-echo, .af-accounts-error, .af-accounts-notice, .af-assistant-note {
+.af-accounts-state-off, .af-accounts-echo, .af-accounts-error, .af-accounts-notice, .af-assistant-note,
+.af-hosts-empty, .af-hosts-echo, .af-hosts-error, .af-hosts-notice, .af-hosts-check-lines {
  font-size: var(--af-type-body); color: var(--af-ink);
 }
-.af-dirpicker-error, .af-accounts-error { color: var(--af-dead); }
+.af-dirpicker-error, .af-accounts-error, .af-hosts-error { color: var(--af-dead); }
 .af-config-tier-name { font-size: var(--af-type-heading); color: var(--af-ink); }
 
 .af-task-failure { color: var(--af-dead); font-size: var(--af-type-body); overflow-wrap: anywhere; }

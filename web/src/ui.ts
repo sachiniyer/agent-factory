@@ -72,6 +72,7 @@ import {
   sessionWarningText,
 } from "./status.js";
 import type { AccountsState } from "./accounts.js";
+import type { HostAddDraft, HostsState } from "./hosts.js";
 import type { QuotaState } from "./quota.js";
 import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
 import { docsShortcuts } from "./docs_shortcut.js";
@@ -370,6 +371,13 @@ export interface AppState {
    *  daemon host's session records, so merging it into `config` would be the
    *  same category error. */
   quota: QuotaState;
+  /** the Hosts section's data (#5571 W10.5): the daemon's hosts-edit
+   *  capability bit, this view's CheckHost results, the last mutation's
+   *  outcome, and which rows are mid-request. It rides beside `accounts`
+   *  rather than inside `config`: the section's rows are DERIVED from the
+   *  `hosts`/`default_host` entries (the parse lives in hosts.ts), so keeping
+   *  them in `config` would double-store one fact. */
+  hosts: HostsState;
   /** the persisted theme preference (redesign PR1): System follows the OS, Light/Dark
    *  force a mode. The config view's Theme picker sets it; theme.ts stamps data-theme on <html>
    *  and re-themes the live terminals. */
@@ -493,6 +501,16 @@ export interface Actions {
    *  daemon host and opens its pane here (#3384/#3385). af never reads, stores or
    *  forwards the credential — it points one variable at a directory. */
   openAccountLogin(agent: string, name: string): void;
+  /** POST /v1/CheckHost for one saved host, or every one when `name` is ""
+   *  (#5571 W10.5) — `af hosts check`. The result lands in `hosts.checks`. */
+  hostCheck(name: string): void;
+  /** One atomic hosts_edit add — the same per-entry write `af hosts add` rides
+   *  (#5571 W10.5) — plus the `default_host` write and the probe when the draft
+   *  asks for them. */
+  hostAdd(draft: HostAddDraft): void;
+  /** One atomic hosts_edit remove (#5571 W10.5); `clearDefault` is only ever
+   *  true when the removed host is the default. */
+  hostRemove(name: string, clearDefault: boolean): void;
   /** Renames the tab with the stable IDENTITY `id` (tabIdentity) to `name` (#1813):
    *  the commit of the bar's inline edit. Only offered for a RENAMEABLE tab (web /
    *  process — see isRenameableTab); index.ts resolves the identity to the tab's
@@ -1436,6 +1454,11 @@ export class AppShell {
         register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
         login: (agent: string, name: string) => this.actions.openAccountLogin(agent, name),
       },
+      hosts: {
+        check: (name: string) => this.actions.hostCheck(name),
+        add: (draft: HostAddDraft) => this.actions.hostAdd(draft),
+        remove: (name: string, clearDefault: boolean) => this.actions.hostRemove(name, clearDefault),
+      },
       setTheme: (choice: ThemeChoice) => this.actions.setTheme(choice),
       disconnect: () => this.actions.disconnect(),
     });
@@ -1647,7 +1670,7 @@ export class AppShell {
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
     // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice, state.hosts);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;

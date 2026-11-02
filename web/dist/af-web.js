@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "cefc4f5207c6";
+var CLIENT_VERSION = "88795ca96023";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7457,6 +7457,32 @@ async function getConfig(token2) {
 }
 async function setConfigValue(key, value, token2) {
   return af("SetConfigValue", { key, value }, token2);
+}
+async function editHosts(edit, token2) {
+  return af(
+    "SetConfigValue",
+    { key: "hosts", hosts_edit: edit },
+    token2
+  );
+}
+async function checkHost(name, token2) {
+  return af("CheckHost", { host: name }, token2);
+}
+async function daemonHealth(token2) {
+  const headers = {
+    [CLIENT_VERSION_HEADER]: CLIENT_VERSION
+  };
+  if (token2 !== "") {
+    headers.Authorization = `Bearer ${token2}`;
+  }
+  try {
+    const resp = await fetch("/v1/health", { headers });
+    if (!resp.ok) return null;
+    const env = await resp.json();
+    return env?.data ?? null;
+  } catch {
+    return null;
+  }
 }
 async function explainConfig(key, token2) {
   return af("ExplainConfig", { key }, token2);
@@ -8462,6 +8488,292 @@ function renderQuotaSection(state) {
   return section3;
 }
 
+// src/hosts.ts
+function emptyHostsState() {
+  return { editable: null, checks: {}, status: null, busy: [] };
+}
+var HOST_INPUT_ATTR = "data-host-input";
+function hostRows(entries) {
+  let raw = "{}";
+  let defaultName = "";
+  for (const e of entries) {
+    if (e.key === "hosts") raw = e.value;
+    if (e.key === "default_host") defaultName = e.value;
+  }
+  let table;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { rows: [], defaultName, parseError: `hosts is ${raw}, not a table of entries` };
+    }
+    table = parsed;
+  } catch (err) {
+    return { rows: [], defaultName, parseError: `hosts could not be read: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const rows = Object.keys(table).sort().map((name) => ({ name, entry: table[name], isDefault: name === defaultName }));
+  return { rows, defaultName, parseError: "" };
+}
+function hostKeyPostures(entries) {
+  for (const e of entries) {
+    if (e.key === "ssh.host_key_verification") {
+      return e.enum ?? [];
+    }
+  }
+  return [];
+}
+function describeHost(entry) {
+  let s = entry.host ?? "";
+  if (entry.user) s = `${entry.user}@${s}`;
+  if (entry.port) s = `${s}:${entry.port}`;
+  return s;
+}
+function sameHostEntry(a, b) {
+  if (a === void 0) {
+    return false;
+  }
+  return a.host === b.host && (a.user ?? "") === (b.user ?? "") && (a.port ?? 0) === (b.port ?? 0) && (a.identity_file ?? "") === (b.identity_file ?? "") && (a.workspace_root ?? "") === (b.workspace_root ?? "") && (a.host_key_verification ?? "") === (b.host_key_verification ?? "") && (a.use_ssh_config ?? false) === (b.use_ssh_config ?? false);
+}
+function hostCheckLines(r) {
+  const out = [];
+  if (!r.probed) {
+    out.push(`another probe is already running (cached state: ${r.readiness}); rerun in a moment`);
+  } else if (!r.reachable) {
+    out.push(`could not be probed${r.error ? `: ${r.error}` : ""}`);
+    out.push("fix: make ssh to it succeed from the daemon host \u2014 bring the tailnet or VPN up, load the key, trust the host key \u2014 then check it again. af opens no tunnel and edits no ssh config.");
+  } else if ((r.problems ?? []).length > 0) {
+    out.push("cannot run a session yet");
+    for (const p of r.problems ?? []) out.push(`fix: ${p}`);
+    out.push("then check it again");
+  } else if (!r.complete) {
+    out.push(`unknown: the host answered but not with a recognisable git, tmux and gh report${r.readiness ? `; cached state: ${r.readiness}` : ""}`);
+    out.push("fix: check that a non-interactive ssh prints no banner or extra output for a plain command, then check it again");
+  } else {
+    out.push("ready (git, tmux and gh answered)");
+  }
+  for (const w of r.warnings ?? []) out.push(`note: ${w}`);
+  return out;
+}
+function hostsEditRefusal(version) {
+  const v = version !== void 0 && version !== "" ? ` (${version})` : "";
+  return `the running daemon${v} cannot apply a host-list edit atomically; run \`af daemon restart\` to upgrade it, then retry (nothing was written)`;
+}
+function renderHostsSection(entries, state, actions2, disclosure = { open: false }) {
+  const section3 = h("section", { class: "af-hosts" });
+  section3.setAttribute("aria-label", "Hosts");
+  const { rows, parseError } = hostRows(entries);
+  const busy = (name) => state.busy.includes(name) || state.busy.includes("");
+  const checkAllBtn = h(
+    "button",
+    { type: "button", class: "af-ghost af-hosts-check-all" },
+    "Check all"
+  );
+  checkAllBtn.disabled = state.busy.length > 0;
+  checkAllBtn.addEventListener("click", () => actions2.check(""));
+  const head = h(
+    "div",
+    { class: "af-hosts-head" },
+    h("span", { class: "af-hosts-title" }, "Hosts"),
+    h("span", { class: "af-view-count" }, String(rows.length)),
+    checkAllBtn
+  );
+  section3.append(
+    head,
+    h(
+      "p",
+      { class: "af-hosts-note" },
+      "The ssh hosts a sandbox session can run on \xB7 you own connectivity \u2014 af opens no tunnel and edits no ssh config."
+    )
+  );
+  if (parseError !== "") {
+    section3.append(
+      h("p", { class: "af-hosts-error", role: "alert" }, `The host table could not be read: ${parseError}`)
+    );
+    return section3;
+  }
+  if (state.editable !== true) {
+    const reason = state.editable === false ? "This daemon is older than atomic host-list edits; adding or removing a host here is refused rather than risk writing an empty host table. `af hosts` on the host itself works, or upgrade the daemon." : "The daemon's capabilities could not be read; adding or removing a host here is refused until they can. Check the connection and reopen this view.";
+    section3.append(h("p", { class: "af-hosts-notice" }, reason));
+  }
+  const list = h("div", { class: "af-hosts-list" });
+  for (const row of rows) {
+    list.append(renderHostRow(row, state, actions2, busy(row.name)));
+  }
+  section3.append(list);
+  if (state.editable === true) {
+    const add = h("details", { class: "af-host-disclosure" });
+    add.open = disclosure.open;
+    add.addEventListener("toggle", () => {
+      disclosure.open = add.open;
+    });
+    add.append(
+      h("summary", {}, "Add host"),
+      renderAddForm(entries, state.status, actions2)
+    );
+    section3.append(add);
+    if (rows.length === 0 && !disclosure.open) {
+      add.hidden = true;
+      const empty = recoveryScreen({
+        condition: "No hosts saved",
+        action: "Add host",
+        run: () => {
+          empty.remove();
+          add.hidden = false;
+          add.open = true;
+          disclosure.open = true;
+          add.querySelector(`input[${HOST_INPUT_ATTR}="name"]`)?.focus();
+        }
+      });
+      section3.prepend(empty);
+    }
+  } else if (rows.length === 0) {
+    section3.append(h("p", { class: "af-hosts-empty" }, "No hosts saved."));
+  }
+  if (state.status !== null) {
+    const formShowsIt = state.status.name === "" && state.editable === true && disclosure.open;
+    const orphaned = state.status.name !== "" && !rows.some((r) => r.name === state.status.name);
+    if (orphaned || state.status.name === "" && !formShowsIt) {
+      section3.append(statusBlock(state.status));
+    }
+  }
+  return section3;
+}
+function renderHostRow(row, state, actions2, isBusy) {
+  const el2 = h("div", { class: "af-hosts-row" });
+  el2.setAttribute("data-host", row.name);
+  el2.append(
+    h(
+      "div",
+      { class: "af-hosts-label" },
+      h("span", { class: "af-hosts-name" }, row.name),
+      h("span", { class: "af-hosts-desc" }, describeHost(row.entry)),
+      row.isDefault ? h("span", { class: "af-hosts-default" }, "default") : ""
+    )
+  );
+  const buttons = h("div", { class: "af-hosts-verbs" });
+  const checkBtn = h(
+    "button",
+    { type: "button", class: "af-ghost af-hosts-check" },
+    "Check"
+  );
+  checkBtn.disabled = isBusy;
+  checkBtn.addEventListener("click", () => actions2.check(row.name));
+  buttons.append(checkBtn);
+  if (state.editable === true) {
+    const removeBtn = h(
+      "button",
+      { type: "button", class: "af-ghost af-hosts-remove" },
+      row.isDefault ? "Remove and clear the default" : "Remove"
+    );
+    removeBtn.disabled = isBusy;
+    removeBtn.addEventListener("click", () => actions2.remove(row.name, row.isDefault));
+    buttons.append(removeBtn);
+  }
+  el2.append(buttons);
+  const check = state.checks[row.name];
+  if (check !== void 0 && sameHostEntry(check.entry, row.entry)) {
+    el2.append(h("div", { class: "af-hosts-check-lines" }, ...hostCheckLines(check.result).map((line) => h("div", {}, line))));
+  }
+  if (state.status !== null && state.status.name === row.name) {
+    el2.append(statusBlock(state.status));
+  }
+  return el2;
+}
+function renderAddForm(entries, status, actions2) {
+  const form = h("div", { class: "af-hosts-row af-hosts-addform" });
+  const text = (key, label, placeholder, type = "text") => {
+    const input = h("input", { type, class: "af-input", placeholder });
+    input.setAttribute("aria-label", `New host ${label}`);
+    input.setAttribute(HOST_INPUT_ATTR, key);
+    return { el: field(label, input), input };
+  };
+  const name = text("name", "Name", "what --host takes");
+  const host = text("host", "Host", "hostname or address \u2014 no user@, no :port");
+  const user = text("user", "User", "ssh login, optional");
+  const port = text("port", "Port", "22");
+  const identityFile = text("identity_file", "Identity file", "absolute path, optional");
+  const workspaceRoot = text("workspace_root", "Workspace root", "absolute path, optional");
+  const postures = hostKeyPostures(entries);
+  let hkvControl;
+  let hkvValue;
+  if (postures.length > 0) {
+    const sel = h("select", { class: "af-input" });
+    sel.setAttribute("aria-label", "New host Host key verification");
+    sel.setAttribute(HOST_INPUT_ATTR, "host_key_verification");
+    sel.append(h("option", { value: "" }, "Global default"));
+    for (const p of postures) sel.append(h("option", { value: p }, p));
+    hkvControl = field("Host key verification", sel);
+    hkvValue = () => sel.value;
+  } else {
+    const t = text("host_key_verification", "Host key verification", "strict | accept-new | insecure, optional");
+    hkvControl = t.el;
+    hkvValue = () => t.input.value.trim();
+  }
+  const sshConfig = h("input", { type: "checkbox" });
+  sshConfig.setAttribute("aria-label", "New host Use ssh_config");
+  sshConfig.setAttribute(HOST_INPUT_ATTR, "use_ssh_config");
+  sshConfig.addEventListener("change", () => {
+    const overridden = hkvControl.querySelector("input, select");
+    if (overridden instanceof HTMLInputElement || overridden instanceof HTMLSelectElement) {
+      overridden.disabled = sshConfig.checked;
+    }
+  });
+  const sshConfigField = field("Use your ssh_config for this host", sshConfig);
+  const makeDefault = h("input", { type: "checkbox" });
+  makeDefault.setAttribute("aria-label", "New host Set as default");
+  makeDefault.setAttribute(HOST_INPUT_ATTR, "make_default");
+  const makeDefaultField = field("Make this the default host", makeDefault);
+  const submit = () => {
+    const draft = {
+      name: name.input.value.trim(),
+      host: host.input.value.trim(),
+      user: user.input.value.trim(),
+      port: port.input.value.trim(),
+      identityFile: identityFile.input.value.trim(),
+      workspaceRoot: workspaceRoot.input.value.trim(),
+      hostKeyVerification: sshConfig.checked ? "" : hkvValue(),
+      useSSHConfig: sshConfig.checked,
+      makeDefault: makeDefault.checked
+    };
+    if (draft.name === "" || draft.host === "") {
+      return;
+    }
+    actions2.add(draft);
+  };
+  const button2 = h("button", { type: "button", class: "af-ghost af-hosts-add" }, "Add host");
+  button2.addEventListener("click", submit);
+  name.input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  });
+  host.input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  });
+  form.append(
+    name.el,
+    host.el,
+    user.el,
+    port.el,
+    identityFile.el,
+    workspaceRoot.el,
+    hkvControl,
+    sshConfigField,
+    makeDefaultField,
+    h("div", { class: "af-hosts-addrow" }, button2)
+  );
+  if (status !== null && status.name === "") {
+    form.append(statusBlock(status));
+  }
+  return form;
+}
+function statusBlock(status) {
+  return status.error ? h("div", { class: "af-hosts-error", role: "alert" }, status.message) : h("div", { class: "af-hosts-echo" }, status.message);
+}
+
 // src/scrollkeep.ts
 function listToken(parts) {
   return parts.map((p) => p ?? "none").join("\0");
@@ -8571,11 +8883,18 @@ var ConfigPane = class {
   el;
   entries = [];
   registration = { open: false, agent: "" };
+  /** The Hosts section's add-form disclosure state (#5571 W10.5). */
+  hostDisclosure = { open: false };
   path = "";
   status = null;
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   accounts = emptyAccountsState();
+  /** The Hosts section's data (#5571 W10.5): the daemon's hosts-edit capability
+   *  bit, this view's probe results, and the last mutation's outcome. It
+   *  manages config keys (`hosts`, `default_host`) but is not itself a key, so
+   *  it rides beside `accounts` rather than inside `entries`. */
+  hosts = emptyHostsState();
   /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
    *  Accounts. Same "not config" rule: see quota.ts. */
   quota = emptyQuotaState();
@@ -8607,12 +8926,13 @@ var ConfigPane = class {
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
+  lastHosts = null;
   lastQuota = null;
   lastTheme = null;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts, quota, theme = this.theme) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota && this.lastTheme === theme) {
+  update(entries, path, status, accounts, quota, theme = this.theme, hosts = this.hosts) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota && this.lastTheme === theme && this.lastHosts === hosts) {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
@@ -8627,12 +8947,14 @@ var ConfigPane = class {
     this.lastAccounts = accounts;
     this.lastQuota = quota;
     this.lastTheme = theme;
+    this.lastHosts = hosts;
     this.theme = theme;
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
     this.quota = quota;
+    this.hosts = hosts;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -8675,10 +8997,19 @@ var ConfigPane = class {
     const saveFocusedKey = active instanceof HTMLButtonElement && active.closest(".af-config-list") !== null && active.classList.contains("af-config-save") ? active.closest(".af-config-control")?.querySelector("input")?.getAttribute("aria-label") ?? null : null;
     const accountsLoginFocusedKey = active instanceof HTMLButtonElement && active.classList.contains("af-accounts-login") ? active.closest("[data-account]")?.getAttribute("data-account") ?? null : null;
     const accountsAddFocusedAgent = active instanceof HTMLButtonElement && active.classList.contains("af-accounts-add") ? active.closest(".af-accounts-register")?.querySelector(`input[${ACCOUNT_INPUT_ATTR}]`)?.getAttribute(ACCOUNT_INPUT_ATTR) ?? null : null;
+    const hostDrafts = this.readHostDrafts();
+    const focusedHostField = active instanceof HTMLInputElement || active instanceof HTMLSelectElement ? active.getAttribute(HOST_INPUT_ATTR) : null;
+    const hostCaret = focusedHostField !== null && active instanceof HTMLInputElement && (active.type === "text" || active.type === "number") ? { start: active.selectionStart, end: active.selectionEnd } : null;
+    const hostSummaryFocused = active === this.el.querySelector(".af-host-disclosure summary");
+    const focusedHostButton = active instanceof HTMLButtonElement && (active.classList.contains("af-hosts-check") || active.classList.contains("af-hosts-remove") || active.classList.contains("af-hosts-add") || active.classList.contains("af-hosts-check-all")) ? {
+      cls: ["af-hosts-check", "af-hosts-remove", "af-hosts-add", "af-hosts-check-all"].find((c) => active.classList.contains(c)),
+      host: active.closest("[data-host]")?.getAttribute("data-host") ?? null
+    } : null;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
     this.restoreAccountDrafts(accountDrafts);
+    this.restoreHostDrafts(hostDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
@@ -8719,6 +9050,17 @@ var ConfigPane = class {
       )?.focus({ preventScroll: true });
     } else if (accountsAddFocusedAgent !== null) {
       this.accountInput(accountsAddFocusedAgent)?.closest(".af-accounts-register")?.querySelector(".af-accounts-add")?.focus({ preventScroll: true });
+    } else if (hostSummaryFocused) {
+      this.el.querySelector(".af-host-disclosure summary")?.focus({ preventScroll: true });
+    } else if (focusedHostField !== null) {
+      const field2 = this.hostInput(focusedHostField);
+      field2?.focus({ preventScroll: true });
+      if (field2 instanceof HTMLInputElement && hostCaret?.start != null && (field2.type === "text" || field2.type === "number")) {
+        field2.setSelectionRange(hostCaret.start, hostCaret.end ?? hostCaret.start);
+      }
+    } else if (focusedHostButton !== null) {
+      const scope = focusedHostButton.host !== null ? `[data-host="${CSS.escape(focusedHostButton.host)}"] ` : "";
+      this.el.querySelector(`${scope}button.${focusedHostButton.cls}`)?.focus({ preventScroll: true });
     }
   }
   /** Every register field's current text, keyed by agent. */
@@ -8746,6 +9088,38 @@ var ConfigPane = class {
   accountInput(agent) {
     return this.el.querySelector(
       `input[${ACCOUNT_INPUT_ATTR}="${CSS.escape(agent)}"]`
+    );
+  }
+  /** Every add-form field's current value, keyed by HOST_INPUT_ATTR. Checkboxes
+   *  record their checked flag rather than a value; selects record the chosen
+   *  option. Skipping EMPTY text fields would lose a deliberate blank, so they
+   *  are recorded unconditionally — the restore re-applies "" harmlessly. */
+  readHostDrafts() {
+    const drafts2 = /* @__PURE__ */ new Map();
+    for (const field2 of this.el.querySelectorAll(`[${HOST_INPUT_ATTR}]`)) {
+      const key = field2.getAttribute(HOST_INPUT_ATTR);
+      if (key === null) continue;
+      const checked = field2 instanceof HTMLInputElement && field2.type === "checkbox" ? field2.checked : false;
+      drafts2.set(key, { value: field2.value, checked });
+    }
+    return drafts2;
+  }
+  /** Puts them back on the freshly rendered fields. A field that is gone — the
+   *  capability gate closed the form mid-draft — simply drops its draft. */
+  restoreHostDrafts(drafts2) {
+    for (const [key, draft] of drafts2) {
+      const field2 = this.hostInput(key);
+      if (field2 === null) continue;
+      if (field2 instanceof HTMLInputElement && field2.type === "checkbox") {
+        field2.checked = draft.checked;
+      } else {
+        field2.value = draft.value;
+      }
+    }
+  }
+  hostInput(key) {
+    return this.el.querySelector(
+      `[${HOST_INPUT_ATTR}="${CSS.escape(key)}"]`
     );
   }
   render() {
@@ -8806,6 +9180,7 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
+      renderHostsSection(this.entries, this.hosts, this.actions.hosts, this.hostDisclosure),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
       renderQuotaSection(this.quota)
     );
@@ -22293,6 +22668,11 @@ var AppShell = class {
         register: (agent, name) => this.actions.registerAccount(agent, name),
         login: (agent, name) => this.actions.openAccountLogin(agent, name)
       },
+      hosts: {
+        check: (name) => this.actions.hostCheck(name),
+        add: (draft) => this.actions.hostAdd(draft),
+        remove: (name, clearDefault) => this.actions.hostRemove(name, clearDefault)
+      },
       setTheme: (choice) => this.actions.setTheme(choice),
       disconnect: () => this.actions.disconnect()
     });
@@ -22643,7 +23023,7 @@ var AppShell = class {
     const backlogTab = this.viewTabs.get("backlog");
     if (backlogTab) backlogTab.title = questions > 0 ? `Backlog \xB7 ${questions === 1 ? "1 question" : `${questions} questions`} \xB7 Opens the inbox` : "";
     if (state.backlog) this.backlogPane.update(state.backlog, state.selectedProject, state.sessions);
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice, state.hosts);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -24586,6 +24966,7 @@ var store = new Store({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  hosts: emptyHostsState(),
   quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
@@ -24888,7 +25269,16 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
     tabError: null,
     mutationError: void 0,
     tasks: [],
-    registeredProjects: []
+    registeredProjects: [],
+    // The hosts-edit capability bit belongs to the connection just torn down —
+    // the next daemon may not honour hosts_edit at all, and a stale `true`
+    // would arm the send that writes an empty hosts table on it. `busy` goes
+    // with it: an in-flight edit's finally is fenced off by the generation
+    // bump, so it would never lift the row's buttons itself. So do the earned
+    // results: a verdict was probed against THIS connection's host table, and
+    // the rows index checks by name alone — a stale "ready" would sit beside a
+    // different destination the next daemon saved under the same name.
+    hosts: { ...store.get().hosts, editable: null, checks: {}, status: null, busy: [] }
   });
 }
 function tabIdsOf(list, id) {
@@ -25048,6 +25438,7 @@ function switchView(view) {
     refreshConfig();
     refreshAccounts();
     refreshQuota();
+    refreshHostsCapability();
   }
 }
 function setStatusFilter(kind, on) {
@@ -25994,6 +26385,210 @@ var quotaRefetcher = createFencedRefetcher({
 function refreshQuota() {
   quotaRefetcher.refresh();
 }
+var hostsCapabilityRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: daemonHealth,
+  commit: (resp) => {
+    store.set({
+      hosts: {
+        ...store.get().hosts,
+        editable: resp === null ? null : resp.config_hosts_edit === true
+      }
+    });
+  }
+});
+function refreshHostsCapability() {
+  hostsCapabilityRefetcher.refresh();
+}
+function setHostStatus(name, message, error, check = false) {
+  store.set({ hosts: { ...store.get().hosts, status: { name, message, error, check } } });
+}
+function setHostBusy(name, on) {
+  const hosts = store.get().hosts;
+  const busy = on ? [.../* @__PURE__ */ new Set([...hosts.busy, name])] : hosts.busy.filter((n) => n !== name);
+  store.set({ hosts: { ...hosts, busy } });
+}
+function doHostCheck(name) {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  const requestGeneration = connectionGeneration;
+  const probed = {};
+  for (const row of hostRows(store.get().config).rows) {
+    probed[row.name] = row.entry;
+  }
+  setHostBusy(name, true);
+  void checkHost(name, tok).then((resp) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      return;
+    }
+    const hosts = store.get().hosts;
+    const checks = { ...hosts.checks };
+    for (const r of resp.hosts ?? []) {
+      checks[r.name] = { entry: probed[r.name], result: r };
+    }
+    if ((resp.hosts ?? []).length === 0) {
+      store.set({
+        hosts: {
+          ...hosts,
+          checks,
+          status: { name, message: "no hosts saved; add one below", error: false, check: true }
+        }
+      });
+      return;
+    }
+    store.set({
+      hosts: {
+        ...hosts,
+        checks,
+        // A retry that answered retires the error the failed try left — this
+        // host's, or any check error when every host was just reprobed. An
+        // add or remove refusal is not a check outcome; it stays.
+        status: hosts.status?.check === true && hosts.status.error && (name === "" || hosts.status.name === name) ? null : hosts.status
+      }
+    });
+  }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      return;
+    }
+    setHostStatus(name, errorText(err), true, true);
+  }).finally(() => {
+    if (requestGeneration === connectionGeneration) {
+      setHostBusy(name, false);
+    }
+  });
+}
+async function hostsHealthNow(tok) {
+  const requestGeneration = connectionGeneration;
+  const resp = await daemonHealth(tok);
+  if (requestGeneration === connectionGeneration && token === tok && resp?.config_hosts_edit !== true) {
+    store.set({ hosts: { ...store.get().hosts, editable: false } });
+  }
+  return resp;
+}
+function doHostAdd(draft) {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  let port;
+  if (draft.port !== "") {
+    const n = Number(draft.port);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      setHostStatus("", "the port must be a number from 1 to 65535", true);
+      return;
+    }
+    port = n;
+  }
+  const requestGeneration = connectionGeneration;
+  const live = () => requestGeneration === connectionGeneration && token === tok;
+  void (async () => {
+    try {
+      const health = await hostsHealthNow(tok);
+      if (!live()) {
+        return;
+      }
+      if (health?.config_hosts_edit !== true) {
+        setHostStatus("", hostsEditRefusal(health?.version), true);
+        return;
+      }
+      await editHosts(
+        {
+          op: "add",
+          name: draft.name,
+          host: {
+            host: draft.host,
+            user: draft.user === "" ? void 0 : draft.user,
+            port,
+            identity_file: draft.identityFile === "" ? void 0 : draft.identityFile,
+            workspace_root: draft.workspaceRoot === "" ? void 0 : draft.workspaceRoot,
+            host_key_verification: draft.hostKeyVerification === "" ? void 0 : draft.hostKeyVerification,
+            use_ssh_config: draft.useSSHConfig ? true : void 0
+          }
+        },
+        tok
+      );
+      if (!live()) {
+        await refreshConfig();
+        return;
+      }
+      let madeDefault = false;
+      let defaultErr = "";
+      if (draft.makeDefault) {
+        try {
+          await setConfigValue("default_host", draft.name, tok);
+          madeDefault = true;
+        } catch (err) {
+          defaultErr = errorText(err);
+        }
+        if (!live()) {
+          await refreshConfig();
+          return;
+        }
+      }
+      const desc = [draft.user === "" ? "" : `${draft.user}@`, draft.host, port ? `:${port}` : ""].join("");
+      if (defaultErr !== "") {
+        setHostStatus("", `saved host ${draft.name} (${desc}), but could not make it the default: ${defaultErr}`, true);
+      } else {
+        setHostStatus("", `saved host ${draft.name} (${desc})${madeDefault ? " as the default" : ""}`, false);
+      }
+      await refreshConfig();
+      if (!live()) {
+        return;
+      }
+      doHostCheck(draft.name);
+    } catch (err) {
+      if (live()) {
+        setHostStatus("", errorText(err), true);
+      }
+    }
+  })();
+}
+function doHostRemove(name, clearDefault) {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  const requestGeneration = connectionGeneration;
+  setHostBusy(name, true);
+  void (async () => {
+    try {
+      const health = await hostsHealthNow(tok);
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        return;
+      }
+      if (health?.config_hosts_edit !== true) {
+        setHostStatus(name, hostsEditRefusal(health?.version), true);
+        return;
+      }
+      await editHosts({ op: "remove", name, clear_default: clearDefault }, tok);
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        await refreshConfig();
+        return;
+      }
+      const checks = { ...store.get().hosts.checks };
+      delete checks[name];
+      store.set({
+        hosts: {
+          ...store.get().hosts,
+          checks,
+          status: { name, message: `removed host ${name}${clearDefault ? " (the default was cleared)" : ""}`, error: false }
+        }
+      });
+      await refreshConfig();
+    } catch (err) {
+      if (requestGeneration !== connectionGeneration || token !== tok) {
+        return;
+      }
+      setHostStatus(name, errorText(err), true);
+    } finally {
+      if (requestGeneration === connectionGeneration) {
+        setHostBusy(name, false);
+      }
+    }
+  })();
+}
 function setAccountStatus(agent, name, message, error) {
   store.set({ accounts: { ...store.get().accounts, status: { agent, name, message, error } } });
 }
@@ -26513,6 +27108,9 @@ var actions = {
   explainConfig: explainConfigValue,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,
+  hostCheck: doHostCheck,
+  hostAdd: doHostAdd,
+  hostRemove: doHostRemove,
   switchProject,
   setStatusFilter,
   resetStatusFilter,
@@ -26592,6 +27190,7 @@ function stopStream() {
   configRefetcher.invalidate();
   accountsRefetcher.invalidate();
   quotaRefetcher.invalidate();
+  hostsCapabilityRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

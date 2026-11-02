@@ -480,6 +480,7 @@ var webTSTypes = map[string]string{
 	"task.Task":               "TaskData",
 	"task.TaskUpdate":         "TaskUpdate",
 	"task.ProjectExpectation": "ProjectExpectation",
+	"config.HostsEdit":        "HostsEdit",
 }
 
 var tsInterfaceFieldRe = regexp.MustCompile(`(?m)^\s*([A-Za-z_]\w*)\??\s*:`)
