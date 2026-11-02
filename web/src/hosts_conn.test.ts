@@ -226,6 +226,41 @@ test("a landed verdict is stored with the entry it was probed against", async ()
   );
 });
 
+// The verdict's snapshot also carries the POSTURE it was probed under
+// (#6632): the probe runs the entry's override or, without one, the global
+// ssh.host_key_verification served in config — so the snapshot asks
+// effectiveHostKeyPosture for the effective mode at request time, and the
+// render retires the pair when the current effective mode no longer matches.
+// The spy stands in for the real helper so the test sees WHAT was consulted,
+// not a copy of how it decides — the helper's own unit tests live in
+// hosts.test.ts.
+test("a landed verdict is stored with the posture it was probed under", async () => {
+  const { s, doHostCheck } = stageCheck([{ name: "box1", entry: box1Entry }]);
+  const store = s.context.store as { get: () => unknown; set(p: { hosts: HostsSnapshot }): void };
+  const config = [{ key: "ssh.host_key_verification", value: "insecure" }];
+  store.get = () => ({ authRequired: false, phase: "app", hosts: s.hostsNow(), config });
+  const consulted: { entry: unknown; entries: unknown }[] = [];
+  s.context.effectiveHostKeyPosture = (entry: unknown, entries: unknown) => {
+    consulted.push({ entry, entries });
+    return "MARKER";
+  };
+  s.context.checkHost = async () => ({ hosts: [readyVerdict] });
+  store.set({ hosts: { editable: true, checks: {}, status: null, busy: [] } });
+
+  doHostCheck("box1");
+  await tick();
+
+  const check = s.hostsNow().checks.box1 as { posture?: unknown };
+  assert.equal(consulted.length, 1, "the snapshot reads the effective posture once, at request time");
+  assert.deepEqual(consulted[0].entry, box1Entry, "it is consulted for the probed row's entry");
+  assert.equal(consulted[0].entries, config, "and the global it inherits is the served config's");
+  assert.equal(
+    check.posture,
+    "MARKER",
+    "the verdict carries the posture it was probed under — a change to what it inherited retires it",
+  );
+});
+
 test("a successful retry retires the check error its failed try left", async () => {
   const { s, doHostCheck } = stageCheck([{ name: "box1", entry: box1Entry }]);
   const store = s.context.store as { set(p: { hosts: HostsSnapshot }): void };

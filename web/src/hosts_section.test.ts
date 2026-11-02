@@ -159,6 +159,66 @@ test("a verdict renders only while the saved entry is the one that was probed", 
   assert.equal(checkLines(section).length, 0, "an entry-less verdict stays hidden");
 });
 
+// A verdict also belongs to the POSTURE it was probed under (#6632, the #6622
+// P2): the probe runs the effective host-key mode — the entry's own override,
+// else the global ssh.host_key_verification — so a "ready" earned under
+// insecure must not still show after the operator tightens the global to
+// strict. The stored `posture` is what the render compares against the row's
+// CURRENT effective posture.
+test("a verdict renders only while the posture it was probed under still holds", () => {
+  const verdict: HostCheckResult = { name: "box1", probed: true, reachable: true, complete: true, readiness: "ready" };
+  const probedEntry = { host: "box1.tailnet.ts.net", user: "ubuntu" };
+  const sshGlobal = (value: string) => entry({ key: "ssh.host_key_verification", value });
+  const checkLines = (section: FakeElement) => section.querySelectorAll(".af-hosts-check-lines");
+
+  // Probed under global insecure; the global still reads insecure: renders.
+  const check = { entry: probedEntry, posture: "insecure", result: verdict } as HostsState["checks"][string];
+  let section = renderHostsSection(
+    [...entries, sshGlobal("insecure")],
+    state({ checks: { box1: check } }),
+    actions,
+    { open: false },
+  ) as unknown as FakeElement;
+  assert.equal(checkLines(section).length, 1, "the verdict the probe earned shows while its posture holds");
+
+  // The global tightens to strict: a verdict earned under insecure retires
+  // rather than claim ready under a posture it never met.
+  section = renderHostsSection(
+    [...entries, sshGlobal("strict")],
+    state({ checks: { box1: check } }),
+    actions,
+    { open: false },
+  ) as unknown as FakeElement;
+  assert.equal(checkLines(section).length, 0, "a global posture change retires a verdict probed under the old one");
+
+  // An entry-level override insulates the row: the probe ran under the
+  // override, so a global change it never depended on leaves it standing.
+  const overrideEntry = { ...probedEntry, host_key_verification: "insecure" };
+  const overrideRows = [hostsEntry('{"box1":{"host":"box1.tailnet.ts.net","user":"ubuntu","host_key_verification":"insecure"}}')];
+  for (const global of ["insecure", "strict"]) {
+    section = renderHostsSection(
+      [...overrideRows, sshGlobal(global)],
+      state({ checks: { box1: { entry: overrideEntry, posture: "insecure", result: verdict } as HostsState["checks"][string] } }),
+      actions,
+      { open: false },
+    ) as unknown as FakeElement;
+    assert.equal(checkLines(section).length, 1, `global=${global}: an override insulates the verdict from the global`);
+  }
+
+  // And a use_ssh_config host composes no host-key options at all — its probe
+  // takes the operator's ssh_config — so its "" posture never moves with the
+  // global either.
+  const uscEntry = { host: "box1.tailnet.ts.net", use_ssh_config: true };
+  const uscRows = [hostsEntry('{"box1":{"host":"box1.tailnet.ts.net","use_ssh_config":true}}')];
+  section = renderHostsSection(
+    [...uscRows, sshGlobal("strict")],
+    state({ checks: { box1: { entry: uscEntry, posture: "", result: verdict } as HostsState["checks"][string] } }),
+    actions,
+    { open: false },
+  ) as unknown as FakeElement;
+  assert.equal(checkLines(section).length, 1, "a use_ssh_config verdict does not move with the global");
+});
+
 // A check-all probes every host: a per-host check that answered first would
 // be overwritten by the slower aggregate, and a remove mid-probe leaves a
 // verdict for a row that may not exist when the answer lands. The row verbs
