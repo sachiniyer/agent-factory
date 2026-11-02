@@ -15,7 +15,7 @@ import {
   applyMove, blocking, derivedOf, dropMove, formatID, itemByID, keyboardMove, latestRun, listRows, needsYouLabel, overlayMove, relatedIDs,
   safeHttpUrl, sources, topQueued,
 } from "./backlog_model.js";
-import { groupCounts, metaLine, overview, pausedNotice, positions, progress, segments } from "./backlog_cards.js";
+import { type Counts, NO_COUNTS, cardCounts, metaLine, pausedNotice, positions, progress, segments } from "./backlog_cards.js";
 import { PAUSED_GLYPH, groupButtons } from "./backlog_group_panel.js";
 import { inbox } from "./backlog_groups.js";
 import { InboxList } from "./backlog_inbox.js";
@@ -56,7 +56,8 @@ export const EMPTY_COPY = "No items yet · Name a group above, or ask an agent t
  *  whether it is the card's header. */
 interface CardSpot {
   pos: ReadonlyMap<number, number>;
-  head?: boolean;
+  /** The card's counts, on its header row. */
+  head?: Counts;
 }
 
 /** One group's card. It outlives renders so its "Add item…" input keeps
@@ -68,17 +69,20 @@ interface Card {
 }
 
 /** Puts `want` in `parent` in order, moving only nodes that are out of place,
- *  so a node that holds focus stays attached. */
+ *  so a node that holds focus stays attached. Children `want` drops (a run of
+ *  plain rows is rebuilt each render) go first: left in place, they would sit
+ *  between kept nodes and make a card that did not move look out of place. */
 function placeChildren(parent: HTMLElement, want: readonly HTMLElement[]): void {
+  const keep = new Set<Node>(want);
+  for (let c = parent.firstChild; c;) {
+    const next = c.nextSibling;
+    if (!keep.has(c)) c.remove();
+    c = next;
+  }
   let cur = parent.firstChild;
   for (const el of want) {
     if (cur === el) cur = cur.nextSibling;
     else parent.insertBefore(el, cur);
-  }
-  while (cur) {
-    const next = cur.nextSibling;
-    cur.remove();
-    cur = next;
   }
 }
 
@@ -475,8 +479,10 @@ export class BacklogPane {
     const typing = active?.tagName === "INPUT" && this.listEl.contains(active) ? active : null;
     this.rowEls = new Map();
     for (const id of this.cards.keys()) if (!rows.some((r) => r.item.id === id && r.depth === 0)) this.cards.delete(id);
-    placeChildren(this.listEl, segments(rows).map((seg) => seg.kind === "group" ? this.card(v, seg.head, seg.rows) : this.loose(v, seg.rows)));
-    this.overviewEl.textContent = overview(v);
+    const counts = cardCounts(v);
+    placeChildren(this.listEl, segments(rows).map((seg) => seg.kind === "group"
+      ? this.card(v, seg.head, seg.rows, counts.groups.get(seg.head.item.id) ?? NO_COUNTS) : this.loose(v, seg.rows)));
+    this.overviewEl.textContent = counts.overview;
     this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
     this.filterSlot.replaceChildren(this.filters(v));
     this.emptySlot.replaceChildren();
@@ -578,7 +584,7 @@ export class BacklogPane {
 
   /** A group as a card: a tree of its header row, progress, a paused notice
    *  and its rows, then an "Add item…" row outside the tree while it is open. */
-  private card(v: BacklogView, head: ListRow, rows: ListRow[]): HTMLElement {
+  private card(v: BacklogView, head: ListRow, rows: ListRow[], counts: Counts): HTMLElement {
     const g = head.item;
     let c = this.cards.get(g.id);
     if (!c) {
@@ -594,9 +600,9 @@ export class BacklogPane {
     c.el.classList.toggle("af-backlog-group-paused", g.paused === true);
     c.tree.setAttribute("aria-label", g.title);
     const pos = positions(rows);
-    const lines = [progress(groupCounts(v, g.id), `af-backlog-progress-${g.id}`)];
+    const lines = [progress(counts, `af-backlog-progress-${g.id}`)];
     if (g.paused && !g.archived) lines.push(pausedNotice(`af-backlog-paused-${g.id}`));
-    const headEl = this.row(v, head, { pos, head: true });
+    const headEl = this.row(v, head, { pos, head: counts });
     headEl.setAttribute("aria-describedby", lines.map((l) => l.id).join(" "));
     c.tree.replaceChildren(headEl, ...lines, ...rows.map((r) => this.row(v, r, { pos })));
     c.add.hidden = head.folded || g.archived === true;
@@ -650,7 +656,7 @@ export class BacklogPane {
     const title = h("span", { class: "af-backlog-row-title" }, it.title);
     if (spot?.head) {
       li.classList.add("af-backlog-group-head");
-      const n = groupCounts(v, it.id).needsYou;
+      const n = spot.head.needsYou;
       const tags = n > 0 ? [h("span", { class: "af-backlog-tag af-backlog-state-needs_you" }, needsYouLabel(n))] : [];
       return [title, h("span", { class: "af-backlog-id" }, formatID(it.id)),
         h("span", { class: "af-backlog-group-end" }, this.rowChip(v, it, derivedOf(v, it.id).reason ?? "", li), ...tags,

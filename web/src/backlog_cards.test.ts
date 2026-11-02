@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { type FakeDocument, FakeDataTransfer, type FakeElement, FakeEvent, installFakeDom } from "./backlog_fakedom.js";
 import { bodyEditorLoader } from "./backlog_body.js";
 import type { BacklogData } from "./backlog_data.js";
-import { groupCounts, overview, positions, progressText, segments, waitsInGroup } from "./backlog_cards.js";
+import { cardCounts, positions, progressText, segments, waitsInGroup } from "./backlog_cards.js";
 import { type BacklogView, type Item, listRows } from "./backlog_model.js";
 import { BacklogPane, type BacklogHost } from "./backlog_pane.js";
 
@@ -113,10 +113,31 @@ test("segments split groups from top-level items and keep tree order", () => {
 
 test("group counts take leaves only, and the overview leaves out archived groups", () => {
   const v = view([...tree(), item(10, { archived: true, paused: true }), item(11, { parent: 10 })], states);
-  assert.deepEqual(groupCounts(v, 1), { done: 1, total: 3, working: 1, needsYou: 1 });
-  assert.equal(progressText(groupCounts(v, 1)), "1 of 3 done · 1 working · 1 needs you");
-  assert.equal(progressText(groupCounts(v, 7)), "0 of 1 done");
-  assert.equal(overview(v), "2 groups · 6 items · 1 working · 1 needs you");
+  const c = cardCounts(v);
+  assert.deepEqual(c.groups.get(1), { done: 1, total: 3, working: 1, needsYou: 1 });
+  assert.equal(progressText(c.groups.get(1)!), "1 of 3 done · 1 working · 1 needs you");
+  assert.equal(progressText(c.groups.get(7)!), "0 of 1 done");
+  assert.equal(c.overview, "2 groups · 6 items · 1 working · 1 needs you");
+});
+
+// Codex P2 on #6582: counting each card by scanning the backlog for its
+// descendants, through linear ancestor walks, took seconds for 1,000 groups.
+// Reading the item array is the cost, so the test counts reads, not time.
+test("card counts read the backlog a bounded number of times, however many groups it has", () => {
+  const items: Item[] = [];
+  for (let g = 1; g <= 2000; g += 2) items.push(item(g), item(g + 1, { parent: g, status: "done" }));
+  let reads = 0;
+  const counted = new Proxy(items, {
+    get(t, k, r) {
+      if (typeof k === "string" && /^\d+$/.test(k)) reads++;
+      return Reflect.get(t, k, r);
+    },
+  });
+  const c = cardCounts(view(counted));
+  assert.equal(c.groups.size, 1000);
+  assert.deepEqual(c.groups.get(1999), { done: 0, total: 1, working: 0, needsYou: 0 });
+  assert.equal(c.overview, "1000 groups · 1000 items");
+  assert.ok(reads <= 4 * items.length, `${reads} reads of ${items.length} items`);
 });
 
 test("a group is a card: header, progress, rows with place and waits, and an add row", () => {
@@ -158,6 +179,26 @@ test("a paused group shows a notice and Unpause; a folded group hides its rows a
   assert.equal(folded.querySelector(".af-backlog-group-add")!.hidden, true);
   buttonNamed(folded, "Details")!.click();
   assert.ok(el(pane).querySelector(".af-backlog-panel"));
+});
+
+// Codex P2 on #6582: a run of plain rows is rebuilt each render. Left in
+// place while the new run went in before it, the old run made the card after
+// it look out of place, so the card moved, and moving detaches its focused
+// Add item input mid-composition.
+test("a card after plain rows is not moved by a rerender, so its focused input stays attached", () => {
+  const pane = mount();
+  const v = view(tree(), states);
+  pane.update(data(v), "/a", []);
+  const c7 = card(pane, 7);
+  const input = c7.querySelector(".af-backlog-group-add input")!;
+  input.focus();
+  let detached = 0;
+  const remove = c7.remove.bind(c7);
+  c7.remove = () => { detached++; remove(); };
+  pane.update(data(view(tree(), states)), "/a", []);
+  assert.equal(card(pane, 7), c7);
+  assert.equal(detached, 0);
+  assert.equal(doc.activeElement, input);
 });
 
 test("Add item makes a child of the group and keeps focus across a rerender; New group makes a top-level item", async () => {

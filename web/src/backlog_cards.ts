@@ -3,8 +3,8 @@
 // its descendants are the card's rows.
 
 import {
-  type BacklogView, type Item, type ListRow, type State,
-  archivedBy, derivedOf, formatID, isAncestor, isParent, itemByID, needsYouLabel,
+  type Backlog, type BacklogView, type Item, type ListRow, type State,
+  derivedOf, formatID, itemByID, needsYouLabel,
 } from "./backlog_model.js";
 import { PAUSED_GLYPH } from "./backlog_group_panel.js";
 import { h } from "./dom.js";
@@ -55,12 +55,65 @@ function count(view: BacklogView, items: Item[]): Counts {
   return c;
 }
 
-/** The group's leaf items, without dropped ones. Parents roll their
- *  children up, so counting them too would count work twice. */
-export function groupCounts(view: BacklogView, group: number): Counts {
-  const b = view.backlog;
-  return count(view, b.items.filter((it) => isAncestor(b, group, it.id) && !isParent(b, it.id)));
+/** Each item's top-level ancestor (itself when it has no parent) and whether
+ *  it or an item above it is archived, in one memoised pass. A parent that is
+ *  missing, or a cycle, ends the walk where backlog_model's walks end it. */
+function tops(b: Backlog): Map<number, { root: number; archived: boolean }> {
+  const byID = new Map(b.items.map((it) => [it.id, it]));
+  const out = new Map<number, { root: number; archived: boolean }>();
+  for (const start of b.items) {
+    const path: Item[] = [];
+    const seen = new Set<number>();
+    let above: { root: number; archived: boolean } | undefined;
+    for (let it: Item | undefined = start; it && !seen.has(it.id); it = it.parent ? byID.get(it.parent) : undefined) {
+      if ((above = out.get(it.id))) break;
+      seen.add(it.id);
+      path.push(it);
+    }
+    let acc = above ?? { root: path[path.length - 1].id, archived: false };
+    for (let i = path.length - 1; i >= 0; i--) {
+      acc = { root: acc.root, archived: acc.archived || path[i].archived === true };
+      out.set(path[i].id, acc);
+    }
+  }
+  return out;
 }
+
+/** What one render of the cards needs from the whole backlog:
+ *  - each group's counts over its leaf items, without dropped ones (parents
+ *    roll their children up, so counting them too would count work twice);
+ *  - the page header line: groups, items, working and needs-you, leaving out
+ *    archived groups.
+ *  It takes one pass, so a backlog of many groups does not rescan per card. */
+export function cardCounts(view: BacklogView): { groups: ReadonlyMap<number, Counts>; overview: string } {
+  const b = view.backlog;
+  const parents = new Set<number>();
+  for (const it of b.items) if (it.parent) parents.add(it.parent);
+  const top = tops(b);
+  const leaves = new Map<number, Item[]>();
+  const live: Item[] = [];
+  let groups = 0;
+  for (const it of b.items) {
+    const t = top.get(it.id);
+    if (!t) continue;
+    const parent = parents.has(it.id);
+    if (!t.archived && !it.parent && parent) groups++;
+    if (parent) continue;
+    if (!t.archived) live.push(it);
+    if (t.root === it.id) continue;
+    const list = leaves.get(t.root);
+    if (list) list.push(it);
+    else leaves.set(t.root, [it]);
+  }
+  const c = count(view, live);
+  return {
+    groups: new Map([...leaves].map(([g, items]) => [g, count(view, items)])),
+    overview: [plural(groups, "group"), plural(c.total, "item"), ...tail(c)].join(" · "),
+  };
+}
+
+/** A group with no leaf items yet. */
+export const NO_COUNTS: Counts = { done: 0, total: 0, working: 0, needsYou: 0 };
 
 const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? "" : "s"}`;
 
@@ -70,16 +123,6 @@ function tail(c: Counts): string[] {
 
 export function progressText(c: Counts): string {
   return [`${c.done} of ${c.total} done`, ...tail(c)].join(" · ");
-}
-
-/** The page header line: groups, items, working and needs-you, leaving out
- *  archived groups. */
-export function overview(view: BacklogView): string {
-  const b = view.backlog;
-  const live = b.items.filter((it) => !archivedBy(b, it.id));
-  const groups = live.filter((it) => !it.parent && isParent(b, it.id)).length;
-  const c = count(view, live.filter((it) => !isParent(b, it.id)));
-  return [plural(groups, "group"), plural(c.total, "item"), ...tail(c)].join(" · ");
 }
 
 export interface Waits {
