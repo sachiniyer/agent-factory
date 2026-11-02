@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "32acab9fd89d";
+var CLIENT_VERSION = "776e4394fd23";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8527,6 +8527,20 @@ function describeHost(entry) {
   if (entry.port) s = `${s}:${entry.port}`;
   return s;
 }
+function effectiveHostKeyPosture(entry, entries) {
+  if (entry.use_ssh_config === true) {
+    return "";
+  }
+  if (entry.host_key_verification) {
+    return entry.host_key_verification;
+  }
+  for (const e of entries) {
+    if (e.key === "ssh.host_key_verification") {
+      return e.value === "" ? "strict" : e.value;
+    }
+  }
+  return "strict";
+}
 function sameHostEntry(a, b) {
   if (a === void 0) {
     return false;
@@ -8596,7 +8610,7 @@ function renderHostsSection(entries, state, actions2, disclosure = { open: false
   }
   const list = h("div", { class: "af-hosts-list" });
   for (const row of rows) {
-    list.append(renderHostRow(row, state, actions2, busy(row.name)));
+    list.append(renderHostRow(row, entries, state, actions2, busy(row.name)));
   }
   section3.append(list);
   if (state.editable === true) {
@@ -8637,7 +8651,7 @@ function renderHostsSection(entries, state, actions2, disclosure = { open: false
   }
   return section3;
 }
-function renderHostRow(row, state, actions2, isBusy) {
+function renderHostRow(row, entries, state, actions2, isBusy) {
   const el2 = h("div", { class: "af-hosts-row" });
   el2.setAttribute("data-host", row.name);
   el2.append(
@@ -8670,7 +8684,7 @@ function renderHostRow(row, state, actions2, isBusy) {
   }
   el2.append(buttons);
   const check = state.checks[row.name];
-  if (check !== void 0 && sameHostEntry(check.entry, row.entry)) {
+  if (check !== void 0 && sameHostEntry(check.entry, row.entry) && check.posture === effectiveHostKeyPosture(row.entry, entries)) {
     el2.append(h("div", { class: "af-hosts-check-lines" }, ...hostCheckLines(check.result).map((line) => h("div", {}, line))));
   }
   if (state.status !== null && state.status.name === row.name) {
@@ -26469,9 +26483,10 @@ function doHostCheck(name) {
     return;
   }
   const requestGeneration = connectionGeneration;
+  const config = store.get().config;
   const probed = {};
-  for (const row of hostRows(store.get().config).rows) {
-    probed[row.name] = row.entry;
+  for (const row of hostRows(config).rows) {
+    probed[row.name] = { entry: row.entry, posture: effectiveHostKeyPosture(row.entry, config) };
   }
   setHostBusy(name, true);
   void checkHost(name, tok).then((resp) => {
@@ -26481,7 +26496,7 @@ function doHostCheck(name) {
     const hosts = store.get().hosts;
     const checks = { ...hosts.checks };
     for (const r of resp.hosts ?? []) {
-      checks[r.name] = { entry: probed[r.name], result: r };
+      checks[r.name] = { entry: probed[r.name]?.entry, posture: probed[r.name]?.posture ?? "", result: r };
     }
     if ((resp.hosts ?? []).length === 0) {
       store.set({

@@ -35,6 +35,8 @@ import { runInNewContext } from "node:vm";
 import test from "node:test";
 import ts from "typescript";
 
+import { effectiveHostKeyPosture } from "./hosts.js";
+
 function topLevelFunctions(source: string, names: Set<string>): string {
   const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
   return ast.statements
@@ -123,13 +125,16 @@ function tick(): Promise<void> {
 
 /** doHostCheck's collaborators as the shell would wire them: hostRows reads
  *  the last-known table (doHostCheck snapshots it at request time), checkHost
- *  is the POST, errorText the message extractor. */
+ *  is the POST, errorText the message extractor — and the posture snapshot is
+ *  computed by the REAL effectiveHostKeyPosture, the same collaborator the
+ *  production import wires. */
 function stageCheck(table: { name: string; entry: unknown }[]): {
   s: ReturnType<typeof stage>;
   doHostCheck(name: string): void;
 } {
   const s = stage(["doHostCheck", "setHostBusy", "setHostStatus"]);
   s.context.hostRows = () => ({ rows: table.map((r) => ({ name: r.name, entry: r.entry, isDefault: false })), defaultName: "", parseError: "" });
+  s.context.effectiveHostKeyPosture = effectiveHostKeyPosture;
   s.context.errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
   const doHostCheck = s.context.doHostCheck as (name: string) => void;
   return { s, doHostCheck };
@@ -223,6 +228,41 @@ test("a landed verdict is stored with the entry it was probed against", async ()
     check.entry,
     box1Entry,
     "it carries the entry snapshot from request time — the render retires it when the saved entry changes",
+  );
+});
+
+// The verdict's snapshot also carries the POSTURE it was probed under
+// (#6632): the probe runs the entry's override or, without one, the global
+// ssh.host_key_verification served in config — so the snapshot asks
+// effectiveHostKeyPosture for the effective mode at request time, and the
+// render retires the pair when the current effective mode no longer matches.
+// The spy stands in for the real helper so the test sees WHAT was consulted,
+// not a copy of how it decides — the helper's own unit tests live in
+// hosts.test.ts.
+test("a landed verdict is stored with the posture it was probed under", async () => {
+  const { s, doHostCheck } = stageCheck([{ name: "box1", entry: box1Entry }]);
+  const store = s.context.store as { get: () => unknown; set(p: { hosts: HostsSnapshot }): void };
+  const config = [{ key: "ssh.host_key_verification", value: "insecure" }];
+  store.get = () => ({ authRequired: false, phase: "app", hosts: s.hostsNow(), config });
+  const consulted: { entry: unknown; entries: unknown }[] = [];
+  s.context.effectiveHostKeyPosture = (entry: unknown, entries: unknown) => {
+    consulted.push({ entry, entries });
+    return "MARKER";
+  };
+  s.context.checkHost = async () => ({ hosts: [readyVerdict] });
+  store.set({ hosts: { editable: true, checks: {}, status: null, busy: [] } });
+
+  doHostCheck("box1");
+  await tick();
+
+  const check = s.hostsNow().checks.box1 as { posture?: unknown };
+  assert.equal(consulted.length, 1, "the snapshot reads the effective posture once, at request time");
+  assert.deepEqual(consulted[0].entry, box1Entry, "it is consulted for the probed row's entry");
+  assert.equal(consulted[0].entries, config, "and the global it inherits is the served config's");
+  assert.equal(
+    check.posture,
+    "MARKER",
+    "the verdict carries the posture it was probed under — a change to what it inherited retires it",
   );
 });
 
