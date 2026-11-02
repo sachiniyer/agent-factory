@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -63,7 +62,7 @@ func TestRunDaemon_StopsVSCodeEditorsOnWarmUpShutdown(t *testing.T) {
 	})
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- RunDaemon(config.DefaultConfig()) }()
+	go func() { runDone <- RunDaemon(tcpDisabledConfig()) }()
 
 	select {
 	case <-restoreStarted:

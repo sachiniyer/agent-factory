@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -26,7 +25,7 @@ import (
 func TestStartHTTPServer_RefusesAVanishedHomeInsteadOfRecreatingIt(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	m, err := NewManager(config.DefaultConfig())
+	m, err := NewManager(tcpDisabledConfig())
 	require.NoError(t, err)
 
 	require.NoError(t, os.RemoveAll(home))
