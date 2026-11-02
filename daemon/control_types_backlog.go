@@ -42,6 +42,8 @@ type (
 	SetBacklogOrchestratorHandoffResponse = backlog.OrchestratorResponse
 	EscalateBacklogQuestionRequest        = backlog.EscalateRequest
 	EscalateBacklogQuestionResponse       = backlog.EscalateResponse
+	OpenBacklogOrchestratorRequest        = backlog.OpenOrchestratorRequest
+	OpenBacklogOrchestratorResponse       = backlog.OpenOrchestratorResponse
 )
 
 func errUnknownBacklogMethod(method string) error {

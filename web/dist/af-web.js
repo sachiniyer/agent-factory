@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "a9f43eb5c8e1";
+var CLIENT_VERSION = "a674b292d2f7";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18936,7 +18936,8 @@ function parseBacklogView(d) {
       items: arr(b.items).map(parseItem)
     },
     states: isRecord(v.states) ? v.states : {},
-    runner
+    runner,
+    orchestrators: isRecord(v.orchestrators) ? v.orchestrators : {}
   };
 }
 function itemByID(b, id) {
@@ -18970,6 +18971,26 @@ function openQuestions(it) {
 function openQuestion(it) {
   return openQuestions(it)[0];
 }
+function rootOf(b, id) {
+  const seen = /* @__PURE__ */ new Set();
+  let it = itemByID(b, id);
+  while (it?.parent && !seen.has(it.id)) {
+    seen.add(it.id);
+    const up = itemByID(b, it.parent);
+    if (!up) break;
+    it = up;
+  }
+  return it?.id ?? id;
+}
+function withOrchestrator(b, id, q) {
+  return q.route === "orchestrator" && !!itemByID(b, rootOf(b, id))?.orchestrator;
+}
+function userQuestions(b, it) {
+  return openQuestions(it).filter((q) => !withOrchestrator(b, it.id, q));
+}
+function orchestratorQuestion(b, it) {
+  return openQuestions(it).find((q) => withOrchestrator(b, it.id, q));
+}
 function archivedBy(b, id) {
   const seen = /* @__PURE__ */ new Set();
   for (let it = itemByID(b, id); it && !seen.has(it.id); it = it.parent ? itemByID(b, it.parent) : void 0) {
@@ -18981,7 +19002,7 @@ function archivedBy(b, id) {
 function needsYouCount(views) {
   let n = 0;
   for (const v of views) {
-    for (const it of v.backlog.items) if (!archivedBy(v.backlog, it.id)) n += openQuestions(it).length;
+    for (const it of v.backlog.items) if (!archivedBy(v.backlog, it.id)) n += userQuestions(v.backlog, it).length;
   }
   return n;
 }
@@ -19034,7 +19055,7 @@ function listRows(view, opts) {
   };
   const needsBelow = (id) => (kids.get(id) ?? []).reduce((n, c) => {
     const it = itemByID(b, c);
-    return n + (it && openQuestion(it) ? 1 : 0) + needsBelow(c);
+    return n + (it && userQuestions(b, it).length > 0 ? 1 : 0) + needsBelow(c);
   }, 0);
   const rows = [];
   const walk = (parent, depth) => {
@@ -19461,6 +19482,13 @@ async function addNote(root2, id, text, token2) {
   const resp = await af("PostBacklogMessage", { repo_path: root2, id, kind: "note", text }, token2);
   return resp.message;
 }
+async function openOrchestrator(root2, id, token2) {
+  const resp = await af("OpenBacklogOrchestrator", { repo_path: root2, id }, token2);
+  return { session_id: resp?.session_id ?? "", title: resp?.title ?? "", change: resp?.change ?? "" };
+}
+async function unbindOrchestrator(root2, id, token2) {
+  await af("SetBacklogOrchestrator", { repo_path: root2, id, clear: true }, token2);
+}
 
 // src/backlog_groups.ts
 function isGroup(b, it) {
@@ -19470,9 +19498,18 @@ function inbox(view) {
   const out = [];
   for (const item of view.backlog.items) {
     if (archivedBy(view.backlog, item.id)) continue;
-    for (const question of openQuestions(item)) out.push({ item, question });
+    for (const question of userQuestions(view.backlog, item)) out.push({ item, question });
   }
   const at = (e) => Date.parse(e.question.at) || 0;
+  return out.sort((a, b) => at(a) - at(b));
+}
+function inboxNotes(view) {
+  const out = [];
+  for (const item of view.backlog.items) {
+    if (archivedBy(view.backlog, item.id)) continue;
+    for (const note of item.thread ?? []) if (note.kind === "note" && note.inbox) out.push({ item, note });
+  }
+  const at = (e) => Date.parse(e.note.at) || 0;
   return out.sort((a, b) => at(a) - at(b));
 }
 function answerEffect(it, sessions, lookup) {
@@ -19523,6 +19560,136 @@ function groupHistory(view, group) {
   return b.items.filter((it) => isAncestor(b, group, it.id) && closed(derivedOf(view, it.id).state)).sort((x, y) => at(y) - at(x));
 }
 
+// src/backlog_effort.ts
+var WITH_EFFORT_SESSION = "With effort session";
+function orchestratorOf(view, group) {
+  const o = itemByID(view.backlog, group)?.orchestrator;
+  if (!o) return void 0;
+  return view.orchestrators?.[String(group)] ?? { ...o, state: "gone", pending: 0 };
+}
+function effortLabel(view, group) {
+  return orchestratorOf(view, group) ? "Effort session" : "Start effort session";
+}
+function effortProgress(view, group) {
+  const o = orchestratorOf(view, group);
+  if (!o) return "Starting effort session\u2026";
+  if (o.state === "gone") return "Replacing effort session\u2026";
+  if (o.state === "archived" || o.state === "lost" || o.state === "dead") return "Restoring effort session\u2026";
+  return "Opening effort session\u2026";
+}
+var STATE_TEXT = {
+  live: "Live",
+  archived: "Archived",
+  lost: "Lost",
+  dead: "Dead",
+  limited: "Usage limit",
+  gone: "Gone"
+};
+function orchestratorStateText(state) {
+  return STATE_TEXT[state] ?? state;
+}
+function routedTag(view, it) {
+  if (!orchestratorQuestion(view.backlog, it)) return [];
+  if (view.states[String(it.id)]?.reason === WITH_EFFORT_SESSION) return [];
+  return [h("span", { class: "af-backlog-tag af-backlog-effort-tag" }, WITH_EFFORT_SESSION)];
+}
+var WAIT_LISTED_MS = 3e4;
+var EffortSessions = class {
+  constructor(host, rerender2) {
+    this.host = host;
+    this.rerender = rerender2;
+  }
+  busy = /* @__PURE__ */ new Map();
+  waiting = null;
+  waitTimer = null;
+  sessions = [];
+  project = null;
+  /** The selection generation: each open and each move to another project
+   *  starts a new one, and only the current one may open a session. */
+  selection = 0;
+  /** The project the pane shows. Moving to another supersedes every open in
+   *  flight and stops waiting. */
+  showProject(root2) {
+    if (root2 === this.project) return;
+    this.project = root2;
+    this.selection++;
+    this.stopWaiting();
+  }
+  sessionsChanged(sessions) {
+    this.sessions = sessions;
+    const w = this.waiting;
+    if (w && w.selection === this.selection && sessions.some((s) => s.id === w.id)) {
+      this.stopWaiting();
+      this.host.openSession(w.id);
+    }
+  }
+  stopWaiting() {
+    this.waiting = null;
+    if (this.waitTimer !== null) clearTimeout(this.waitTimer);
+    this.waitTimer = null;
+  }
+  waitFor(id, selection) {
+    this.stopWaiting();
+    this.waiting = { id, selection };
+    this.waitTimer = setTimeout(() => this.stopWaiting(), WAIT_LISTED_MS);
+  }
+  button(root2, view, group) {
+    const progress2 = this.busy.get(`${root2}
+${group.id}`);
+    const bound = !!group.orchestrator;
+    const label = progress2 ?? effortLabel(view, group.id);
+    const b = h(
+      "button",
+      { type: "button", class: "af-ghost af-backlog-effort" },
+      label,
+      ...progress2 || !bound ? [] : [icon("external-link")]
+    );
+    b.dataset.action = "effort";
+    b.disabled = progress2 !== void 0;
+    b.setAttribute("aria-label", `${label.replace(/…$/, "")} for ${formatID(group.id)}`);
+    if (progress2) b.setAttribute("aria-busy", "true");
+    b.addEventListener("click", () => void this.open(root2, view, group.id));
+    return b;
+  }
+  async open(root2, view, group) {
+    const key = `${root2}
+${group}`;
+    const token2 = this.host.token();
+    if (token2 === null || this.busy.has(key)) return;
+    const selection = ++this.selection;
+    this.stopWaiting();
+    this.busy.set(key, effortProgress(view, group));
+    this.rerender();
+    try {
+      const r = await openOrchestrator(root2, group, token2);
+      if (selection !== this.selection || this.project !== root2) return;
+      if (this.sessions.some((s) => s.id === r.session_id)) this.host.openSession(r.session_id);
+      else this.waitFor(r.session_id, selection);
+    } catch (e) {
+      this.host.notify(errorText(e));
+    } finally {
+      this.busy.delete(key);
+      this.rerender();
+      await this.host.refresh(root2);
+    }
+  }
+  async unbind(root2, group) {
+    const ok = await this.host.confirm(
+      "Unbind effort session",
+      `The session keeps running, but af stops sending it the events of ${formatID(group)}. Questions that wait for it go to the Inbox.`,
+      "Unbind"
+    );
+    const token2 = this.host.token();
+    if (!ok || token2 === null) return;
+    try {
+      await unbindOrchestrator(root2, group, token2);
+    } catch (e) {
+      this.host.notify(errorText(e));
+    }
+    await this.host.refresh(root2);
+  }
+};
+
 // src/backlog_group_panel.ts
 var PAUSED_GLYPH = "\u2016";
 function action(label, key, run) {
@@ -19551,6 +19718,32 @@ function link(view, id, it, select) {
 }
 function section(title, ...children) {
   return h("section", { class: "af-backlog-section" }, h("h3", { class: "af-backlog-section-title" }, title), ...children);
+}
+function orchestratorSection(view, group, actions2) {
+  const o = orchestratorOf(view, group.id);
+  if (!o) {
+    if (group.archived) return null;
+    return section("Orchestrator", h(
+      "div",
+      { class: "af-backlog-dep af-backlog-orchestrator" },
+      h("span", { class: "af-backlog-reason" }, "No effort session"),
+      actions2.start(view, group)
+    ));
+  }
+  const open = h("button", { type: "button", class: "af-backlog-item-link" }, o.title || o.session_id);
+  open.setAttribute("aria-label", `Open effort session ${o.title || o.session_id}`);
+  open.addEventListener("click", () => actions2.open(group.id));
+  const facts = [orchestratorStateText(o.state)];
+  if (o.pending > 0) facts.push(`${o.pending} pending event${o.pending === 1 ? "" : "s"}`);
+  const unbind = action("Unbind", "unbind-orchestrator", () => actions2.unbind(group.id));
+  unbind.setAttribute("aria-label", "Unbind effort session");
+  return section("Orchestrator", h(
+    "div",
+    { class: "af-backlog-dep af-backlog-orchestrator" },
+    open,
+    h("span", { class: "af-backlog-reason" }, facts.join(" \xB7 ")),
+    unbind
+  ));
 }
 function groupSections(view, group, select) {
   const deps = groupDependencies(view.backlog, group.id);
@@ -19812,7 +20005,8 @@ ${age}`;
       next.set(key, card);
     }
     this.cards = next;
-    const want = [...next.values()].map((c) => c.li);
+    const notes = inboxNotes(view).map(({ item, note }) => this.note(root2, item, note));
+    const want = [...[...next.values()].map((c) => c.li), ...notes];
     const have = [...this.list.children];
     if (want.length !== have.length || want.some((li, i) => li !== have[i])) this.reorder(want);
     this.empty.hidden = want.length > 0;
@@ -19840,6 +20034,31 @@ ${age}`;
     if (!keep || document.activeElement === keep) return;
     keep.focus({ preventScroll: true });
     if (sel && typeof keep.setSelectionRange === "function") keep.setSelectionRange(sel.start, sel.end, sel.dir);
+  }
+  /** A read-only note card. Its signature names the project, as a question
+   *  card's key does, and lets an unchanged note keep its node. */
+  note(root2, item, note) {
+    const label = `${formatID(item.id)} ${item.title}`;
+    const sig = `note\0${root2}\0${item.id}:${note.id}
+${label}
+${note.text}
+${note.at}
+${item.pr ?? ""}`;
+    const kept = [...this.list.children].find((li2) => li2.dataset.sig === sig);
+    if (kept) return kept;
+    const open = h("button", { type: "button", class: "af-backlog-item-link" }, label);
+    open.addEventListener("click", () => this.actions.select(item.id));
+    const pr = safeHttpUrl2(item.pr);
+    const text = h("p", { class: "af-backlog-inbox-note-text" }, note.text);
+    const li = h(
+      "li",
+      { class: "af-backlog-inbox-card af-backlog-inbox-note" },
+      h("div", { class: "af-backlog-inbox-head" }, open, h("span", { class: "af-backlog-reason" }, `Noted ${formatTime(note.at)}`)),
+      text,
+      ...pr ? [h("a", { class: "af-backlog-row-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, "Pull request", icon("external-link"))] : []
+    );
+    li.dataset.sig = sig;
+    return li;
   }
   card(root2, id) {
     const head = h("div", { class: "af-backlog-inbox-head" });
@@ -20351,8 +20570,9 @@ ${this.note.value}` : text;
     this.body.setText(it.body ?? "");
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
-    const q = openQuestion(it);
-    this.question.set(q, q ? answerEffectText(answerEffect(it, sessions, (id) => this.lookups.get(id))) : "");
+    const q = userQuestions(view.backlog, it)[0] ?? orchestratorQuestion(view.backlog, it);
+    const effect = q ? answerEffectText(answerEffect(it, sessions, (id) => this.lookups.get(id))) : "";
+    this.question.set(q, q && withOrchestrator(view.backlog, it.id, q) ? `${WITH_EFFORT_SESSION} \xB7 ${effect}` : effect);
     const card = this.sessionCard(view, it);
     this.card.hidden = card.length === 0;
     this.card.replaceChildren(...card);
@@ -20360,7 +20580,11 @@ ${this.note.value}` : text;
     const below = [this.waitsSection(view, it)];
     const children = this.childrenSection(view, it);
     if (children) below.push(children);
-    if (isGroup(view.backlog, it)) below.push(...groupSections(view, it, this.actions.select));
+    if (isGroup(view.backlog, it)) {
+      const orch = orchestratorSection(view, it, this.actions.orchestrator);
+      if (orch) below.push(orch);
+      below.push(...groupSections(view, it, this.actions.select));
+    }
     if (it.source?.proposal) below.push(h("p", { class: "af-backlog-source" }, icon("file-text"), `From proposal ${it.source.proposal}`));
     this.below.replaceChildren(...below);
     this.threadList.replaceChildren(...(it.thread ?? []).map((m) => h(
@@ -21110,6 +21334,7 @@ var BacklogPane = class {
       return token2 === null ? Promise.reject(new Error("not signed in")) : previewSession(id, PREVIEW_LINES, token2);
     });
     this.popover = new PreviewPopover(this.previews);
+    this.effort = new EffortSessions(host, () => this.render());
     this.inboxList = new InboxList({
       answer: (root2, id, qid, text) => this.answer(root2, id, qid, text),
       select: (id) => this.select(id),
@@ -21145,6 +21370,7 @@ var BacklogPane = class {
   showArchived = false;
   inboxOn = false;
   inboxList;
+  effort;
   folded = /* @__PURE__ */ new Set();
   // A reorder shown before the daemon has it. It stays until data from a refresh
   // started after the move committed arrives; gen is Infinity until then.
@@ -21191,6 +21417,8 @@ var BacklogPane = class {
   // The item whose "Blocks n" was clicked: the rows it blocks stay picked.
   pinned = null;
   update(data, root2, sessions) {
+    this.effort.showProject(root2);
+    this.effort.sessionsChanged(sessions);
     if (data === this.data && root2 === this.root) {
       if (sessions === this.sessions) return;
       const before = this.runSig(this.sessions);
@@ -21661,11 +21889,11 @@ ${id}`;
           ...tags,
           ...this.groupTags(it),
           ...this.rowTail(v, it),
-          ...this.headActions(it)
+          ...this.headActions(v, it)
         )
       ];
     }
-    const tail2 = [this.rowChip(v, it, row.reason, li), ...this.groupTags(it), ...this.rowTail(v, it)];
+    const tail2 = [this.rowChip(v, it, row.reason, li), ...routedTag(v, it), ...this.groupTags(it), ...this.rowTail(v, it)];
     if (!spot) return [h("span", { class: "af-backlog-id" }, formatID(it.id)), title, ...tail2];
     li.classList.add("af-backlog-group-row");
     return [
@@ -21674,15 +21902,13 @@ ${id}`;
       h("span", { class: "af-backlog-group-end" }, ...tail2)
     ];
   }
-  /** Pause or Unpause, or Unarchive, and the group panel. Archive stays in the
-   *  panel. */
-  headActions(it) {
+  /** The effort session button, Pause or Unpause, or Unarchive, and the group
+   *  panel. Archive stays in the panel. An archived group with no effort
+   *  session offers none. */
+  headActions(v, it) {
     const root2 = this.root ?? "";
-    const out = groupButtons(
-      it,
-      false,
-      (id, c) => this.write(root2, (t) => updateItem(root2, id, c, t))
-    );
+    const out = it.archived && !it.orchestrator ? [] : [this.effort.button(root2, v, it)];
+    out.push(...groupButtons(it, false, (id, c) => this.write(root2, (t) => updateItem(root2, id, c, t))));
     const open = h("button", { type: "button", class: "af-ghost" }, "Details");
     open.setAttribute("aria-label", `Open ${formatID(it.id)}`);
     open.addEventListener("click", () => this.select(it.id));
@@ -21939,7 +22165,15 @@ ${id}`;
       archiveSession: (id) => this.host.archiveSession(id),
       restoreSession: (id) => this.host.restoreSession(id),
       loadSessions: (ids) => this.host.loadSessions(ids),
-      group: (id, c) => this.write(root2, (t) => updateItem(root2, id, c, t))
+      group: (id, c) => this.write(root2, (t) => updateItem(root2, id, c, t)),
+      orchestrator: {
+        open: (id) => {
+          const v = this.view();
+          if (v && here()) void this.effort.open(root2, v, id);
+        },
+        unbind: (id) => void this.effort.unbind(root2, id),
+        start: (v, g) => this.effort.button(root2, v, g)
+      }
     };
   }
 };
@@ -24560,20 +24794,21 @@ function parseProposalChange(ev) {
 // src/backlog_data.ts
 var EMPTY_BACKLOG_DATA = { views: /* @__PURE__ */ new Map(), errors: /* @__PURE__ */ new Map(), budget: null, usage: null, generation: 0 };
 var DEBOUNCE_MS = 150;
-function runSessionIds(data) {
+function backlogSessionIds(data) {
   const ids = /* @__PURE__ */ new Set();
   for (const view of data.views.values()) {
     for (const it of view.backlog.items) {
       for (const run of it.runs ?? []) if (run.session_id) ids.add(run.session_id);
+      if (it.orchestrator?.session_id) ids.add(it.orchestrator.session_id);
     }
   }
   return ids;
 }
 var SESSION_EVENTS = /* @__PURE__ */ new Set(["session.updated", "session.killed", "session.archived", "session.restored"]);
-function backlogEventAction(type, sessionId, runSessions) {
+function backlogEventAction(type, sessionId, backlogSessions) {
   if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
   if (type === "backlog.spend") return "spend";
-  if (SESSION_EVENTS.has(type) && sessionId && runSessions?.has(sessionId)) return "refresh";
+  if (SESSION_EVENTS.has(type) && sessionId && backlogSessions?.has(sessionId)) return "refresh";
   return null;
 }
 var BacklogLoader = class {
@@ -27001,7 +27236,7 @@ function onEvent(ev) {
     if (status) publishProposalPush(status);
     return;
   }
-  const backlogAction = backlogEventAction(ev.type, ev.data?.id, runSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
+  const backlogAction = backlogEventAction(ev.type, ev.data?.id, backlogSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
   if (backlogAction === "spend") {
     backlogLoader.applySpend(ev.data);
     return;

@@ -164,7 +164,7 @@ test("unmeterable runs follow the newest source that names them", async () => {
   assert.deepEqual(state.usage?.unmeterable, { s8: "new" });
 });
 
-import { backlogEventAction, runSessionIds } from "./backlog_data.js";
+import { backlogEventAction, backlogSessionIds } from "./backlog_data.js";
 
 test("every backlog.changed frame is a full re-read, whatever its ids say", () => {
   // The frame's ids are not an input: a parent's derived state moves unnamed, and an
@@ -186,14 +186,31 @@ test("a lifecycle event for a session an item run points at is a refresh; any ot
   assert.equal(backlogEventAction("session.killed", "s-run"), null);
 });
 
-test("runSessionIds collects every run's session across projects", () => {
+test("backlogSessionIds collects every run's session across projects", () => {
   const run = (session_id: string) => ({ session_id });
   const mk = (...items: unknown[]) => ({ backlog: { items } }) as never;
-  const ids = runSessionIds({
+  const ids = backlogSessionIds({
     views: new Map([["/a", mk({ runs: [run("s1"), run("")] }, { runs: undefined })], ["/b", mk({ runs: [run("s2")] })]]),
     errors: new Map(), budget: null, usage: null, generation: 1,
   });
   assert.deepEqual([...ids].sort(), ["s1", "s2"]);
+});
+
+// The Orchestrator row's state (live, archived, dead, usage limit) is read from
+// the session by GetBacklog, so the orchestrator's own lifecycle events must
+// re-read the backlog, or the row goes stale (Codex P2 on #6627).
+test("a lifecycle event for a group's bound orchestrator is a refresh", () => {
+  const mk = (...items: unknown[]) => ({ backlog: { items } }) as never;
+  const orch = (session_id: string) => ({ session_id, title: "effort", bound_at: "" });
+  const ids = backlogSessionIds({
+    views: new Map([["/a", mk({ id: 1, orchestrator: orch("o1") }, { id: 2, parent: 1, runs: [{ session_id: "s1" }] }, { id: 3, orchestrator: null })],
+      ["/b", mk({ id: 1, orchestrator: orch("o2") })]]),
+    errors: new Map(), budget: null, usage: null, generation: 1,
+  });
+  assert.deepEqual([...ids].sort(), ["o1", "o2", "s1"]);
+  for (const type of ["session.killed", "session.archived", "session.restored", "session.updated"]) {
+    assert.equal(backlogEventAction(type, "o1", ids), "refresh", type);
+  }
 });
 
 test("refresh settles true only when the named project's read succeeded", async () => {

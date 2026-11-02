@@ -45,7 +45,7 @@
 #     property against launchd). Assertion 2 no longer blocks it: #1920 shipped
 #     the daemon-reported version and lc_daemon_version now asks the daemon,
 #     falling back to /proc only when it does not answer. What still blocks the
-#     macos-latest leg is daemon DISCOVERY — lc_daemon_pids matches a daemon by
+#     macos-15 leg is daemon DISCOVERY — lc_daemon_pids matches a daemon by
 #     reading /proc/<pid>/cmdline and /proc/<pid>/environ, which macOS has no
 #     equivalent of, and assertions 1/3 plus teardown are built on it. Turning
 #     the leg on means porting that scan first, not just this one read.
