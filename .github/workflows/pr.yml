@@ -282,6 +282,13 @@ jobs:
       - name: Test stale-external-pr helper
         run: node --test .github/scripts/stale-external-pr.test.js
 
+      # The arm64 macOS legs pin macos-15 while GitHub migrates its floating
+      # arm64 label to macOS 26 — a starved-capacity queue was cancelling legs
+      # that ran zero steps (#6631). The pin has teeth only in a required
+      # check, so it lives here with the other workflow-shape tests.
+      - name: Test the macOS image pin
+        run: node --test .github/scripts/macos-image-pin.test.js
+
       # The container harness's own disk hygiene (#2133): cleanup must run on a
       # FAILING run, and every prune must be scoped to artifacts the harness
       # built. It went green for months while filling a 2TB box, so "the suite
