@@ -384,6 +384,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"SetBacklogOrchestrator":        blockedDuringProbation,
 	"SetBacklogOrchestratorHandoff": blockedDuringProbation,
 	"EscalateBacklogQuestion":       blockedDuringProbation,
+	"DismissBacklogNote":            blockedDuringProbation,
 	"OpenBacklogOrchestrator":       blockedDuringProbation,
 	"SetBudget":                     blockedDuringProbation,
 	"StartBacklogItem":              blockedDuringProbation,

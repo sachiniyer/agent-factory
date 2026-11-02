@@ -42,6 +42,8 @@ type (
 	SetBacklogOrchestratorHandoffResponse = backlog.OrchestratorResponse
 	EscalateBacklogQuestionRequest        = backlog.EscalateRequest
 	EscalateBacklogQuestionResponse       = backlog.EscalateResponse
+	DismissBacklogNoteRequest             = backlog.DismissNoteRequest
+	DismissBacklogNoteResponse            = backlog.DismissNoteResponse
 	OpenBacklogOrchestratorRequest        = backlog.OpenOrchestratorRequest
 	OpenBacklogOrchestratorResponse       = backlog.OpenOrchestratorResponse
 )

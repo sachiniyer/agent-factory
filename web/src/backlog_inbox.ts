@@ -11,6 +11,13 @@ import type { SessionData } from "./types.js";
 
 export const EMPTY_INBOX = "No questions";
 
+/** A note's time to the second, so two notes on one item get different Dismiss labels. */
+function noteTime(at: string): string {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "an unknown time";
+  return date.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" });
+}
+
 /** A question's text, the asking agent's handoff in full, what an answer
  *  does, and the answer box. */
 export class QuestionBox {
@@ -74,7 +81,11 @@ export class QuestionBox {
 export interface InboxActions {
   /** Answers in root, the project the card was built for, never the one shown now. */
   answer(root: string, id: number, questionId: number, text: string): Promise<boolean>;
+  /** Dismisses in root, the project the card was built for, as answer does. */
+  dismiss(root: string, id: number, noteId: number): Promise<boolean>;
   select(id: number): void;
+  /** Focuses the Inbox filter chip, when a dismiss leaves no card to focus. */
+  focusInbox(): void;
   /** Reads sessions the page has not loaded into the session list; rejects when it cannot tell. */
   loadSessions(ids: string[]): Promise<void>;
 }
@@ -89,7 +100,7 @@ interface Card {
  *  does, answer box. Cards are kept by project, item and question: another
  *  project's item and question ids can be the same, and its card must not
  *  inherit this one's draft. Inbox notes, such as an effort session's done
- *  note, follow as read-only cards. */
+ *  note, follow with a Dismiss button. */
 export class InboxList {
   readonly el = h("div", { class: "af-backlog-inbox" });
   private readonly list = h("ul", { class: "af-backlog-inbox-list" });
@@ -161,8 +172,8 @@ export class InboxList {
     if (sel && typeof keep.setSelectionRange === "function") keep.setSelectionRange(sel.start, sel.end, sel.dir);
   }
 
-  /** A read-only note card. Its signature names the project, as a question
-   *  card's key does, and lets an unchanged note keep its node. */
+  /** A note card with a Dismiss button. Its signature names the project, as a
+   *  question card's key does, and lets an unchanged note keep its node. */
   private note(root: string, item: Item, note: Message): HTMLElement {
     const label = `${formatID(item.id)} ${item.title}`;
     const sig = `note\u0000${root}\u0000${item.id}:${note.id}\n${label}\n${note.text}\n${note.at}\n${item.pr ?? ""}`;
@@ -172,11 +183,39 @@ export class InboxList {
     open.addEventListener("click", () => this.actions.select(item.id));
     const pr = safeHttpUrl(item.pr);
     const text = h("p", { class: "af-backlog-inbox-note-text" }, note.text);
+    const dismiss = h("button", { type: "button" }, "Dismiss");
+    dismiss.setAttribute("aria-label", `Dismiss note on ${formatID(item.id)} from ${noteTime(note.at)}`);
     const li = h("li", { class: "af-backlog-inbox-card af-backlog-inbox-note" },
       h("div", { class: "af-backlog-inbox-head" }, open, h("span", { class: "af-backlog-reason" }, `Noted ${formatTime(note.at)}`)), text,
-      ...(pr ? [h("a", { class: "af-backlog-row-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, "Pull request", icon("external-link"))] : []));
+      h("div", { class: "af-backlog-inbox-note-actions" },
+        ...(pr ? [h("a", { class: "af-backlog-row-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, "Pull request", icon("external-link"))] : []),
+        dismiss));
     li.dataset.sig = sig;
+    dismiss.addEventListener("click", () => this.dismiss(root, item.id, note.id, li, dismiss));
     return li;
+  }
+
+  /** Dismisses a card's note in root, the project the card was built for. A refusal
+   *  enables the button again; the pane says why. Once the note is dismissed, focus
+   *  that was on the button moves to the next card, else the previous one, else the
+   *  Inbox chip, unless the Inbox now shows another project or is closed. */
+  private dismiss(root: string, id: number, noteId: number, li: HTMLElement, button: HTMLButtonElement): void {
+    if (button.disabled) return;
+    button.disabled = true;
+    const next = li.nextElementSibling as HTMLElement | null;
+    const prev = li.previousElementSibling as HTMLElement | null;
+    void this.actions.dismiss(root, id, noteId).then((ok) => {
+      if (!ok) {
+        button.disabled = false;
+        return;
+      }
+      const active = document.activeElement;
+      if (active !== button && active !== document.body && active !== null) return;
+      if (this.last?.[0] !== root || !this.el.isConnected) return;
+      const target = [next, prev].find((c) => c !== null && this.list.contains(c))?.querySelector("button");
+      if (target) target.focus();
+      else this.actions.focusInbox();
+    });
   }
 
   private card(root: string, id: number): Card {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -9,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sachiniyer/agent-factory/backlog"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -18,7 +20,8 @@ var backlogInboxCmd = &cobra.Command{
 	Long: "Print every open question on every item of the project, oldest first, with the " +
 		"agent's handoff notes when it left any, then the notes an effort session left when it " +
 		"marked an item done. Questions that wait for a group's effort session and items in " +
-		"archived groups are left out. Answer with \"af backlog answer <id> <text>\". With " +
+		"archived groups are left out. Answer with \"af backlog answer <id> <text>\"; dismiss a " +
+		"note with \"af backlog dismiss <id> <note-id>\". With " +
 		"--json, print the questions as JSON in the {data,error} envelope.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -62,7 +65,7 @@ func formatBacklogInbox(inbox []backlog.InboxEntry, notes []backlog.InboxNote, n
 		sb.WriteString("\nNotes\n")
 	}
 	for _, n := range notes {
-		fmt.Fprintf(&sb, "%s  %s  · %s ago\n", backlog.FormatID(n.ID), terminalSafe(n.Title), inboxAge(now.Sub(n.Note.At)))
+		fmt.Fprintf(&sb, "%s  %s  · note %d · %s ago\n", backlog.FormatID(n.ID), terminalSafe(n.Title), n.Note.ID, inboxAge(now.Sub(n.Note.At)))
 		for _, line := range strings.Split(terminalSafe(n.Note.Text), "\n") {
 			fmt.Fprintf(&sb, "  %s\n", line)
 		}
@@ -93,6 +96,41 @@ func inboxAge(d time.Duration) string {
 	return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 }
 
+var backlogDismissCmd = &cobra.Command{
+	Use:   "dismiss <id> <note-id>",
+	Short: "Take a note out of the Inbox",
+	Long: "Take an Inbox note, such as the one an effort session leaves when it marks an item " +
+		"done, out of the Inbox. The note stays in the item's thread. \"af backlog inbox\" " +
+		"prints each note's id.",
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runBacklog(func() (any, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("af backlog dismiss needs an item id and a note id; \"af backlog inbox\" prints both")
+			}
+			id, err := backlog.ParseID(args[0])
+			if err != nil {
+				return nil, err
+			}
+			noteID, err := strconv.Atoi(strings.TrimSpace(args[1]))
+			if err != nil || noteID <= 0 {
+				return nil, fmt.Errorf("invalid note id %q — use the number \"af backlog inbox\" prints after \"note\"", args[1])
+			}
+			t, err := backlogProject()
+			if err != nil {
+				return nil, err
+			}
+			var resp daemon.DismissBacklogNoteResponse
+			if err := callBacklogRoute("DismissBacklogNote", daemon.DismissBacklogNoteRequest{
+				RepoID: t.repoID, RepoPath: t.repoPath, ID: id, NoteID: noteID}, &resp); err != nil {
+				return nil, err
+			}
+			return &resp, nil
+		})
+	},
+}
+
 func init() {
 	BacklogCmd.AddCommand(backlogInboxCmd)
+	BacklogCmd.AddCommand(backlogDismissCmd)
 }

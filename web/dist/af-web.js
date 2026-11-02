@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "88795ca96023";
+var CLIENT_VERSION = "32acab9fd89d";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19468,6 +19468,9 @@ async function addNote(root2, id, text, token2) {
   const resp = await af("PostBacklogMessage", { repo_path: root2, id, kind: "note", text }, token2);
   return resp.message;
 }
+async function dismissNote(root2, id, noteId, token2) {
+  await af("DismissBacklogNote", { repo_path: root2, id, note_id: noteId }, token2);
+}
 async function openOrchestrator(root2, id, token2) {
   const resp = await af("OpenBacklogOrchestrator", { repo_path: root2, id }, token2);
   return { session_id: resp?.session_id ?? "", title: resp?.title ?? "", change: resp?.change ?? "" };
@@ -19894,6 +19897,11 @@ function pausedNotice(id) {
 
 // src/backlog_inbox.ts
 var EMPTY_INBOX = "No questions";
+function noteTime(at) {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "an unknown time";
+  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" });
+}
 var QuestionBox = class {
   constructor(id, submit) {
     this.submit = submit;
@@ -20021,8 +20029,8 @@ ${age}`;
     keep.focus({ preventScroll: true });
     if (sel && typeof keep.setSelectionRange === "function") keep.setSelectionRange(sel.start, sel.end, sel.dir);
   }
-  /** A read-only note card. Its signature names the project, as a question
-   *  card's key does, and lets an unchanged note keep its node. */
+  /** A note card with a Dismiss button. Its signature names the project, as a
+   *  question card's key does, and lets an unchanged note keep its node. */
   note(root2, item, note) {
     const label = `${formatID(item.id)} ${item.title}`;
     const sig = `note\0${root2}\0${item.id}:${note.id}
@@ -20036,15 +20044,45 @@ ${item.pr ?? ""}`;
     open.addEventListener("click", () => this.actions.select(item.id));
     const pr = safeHttpUrl2(item.pr);
     const text = h("p", { class: "af-backlog-inbox-note-text" }, note.text);
+    const dismiss = h("button", { type: "button" }, "Dismiss");
+    dismiss.setAttribute("aria-label", `Dismiss note on ${formatID(item.id)} from ${noteTime(note.at)}`);
     const li = h(
       "li",
       { class: "af-backlog-inbox-card af-backlog-inbox-note" },
       h("div", { class: "af-backlog-inbox-head" }, open, h("span", { class: "af-backlog-reason" }, `Noted ${formatTime(note.at)}`)),
       text,
-      ...pr ? [h("a", { class: "af-backlog-row-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, "Pull request", icon("external-link"))] : []
+      h(
+        "div",
+        { class: "af-backlog-inbox-note-actions" },
+        ...pr ? [h("a", { class: "af-backlog-row-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, "Pull request", icon("external-link"))] : [],
+        dismiss
+      )
     );
     li.dataset.sig = sig;
+    dismiss.addEventListener("click", () => this.dismiss(root2, item.id, note.id, li, dismiss));
     return li;
+  }
+  /** Dismisses a card's note in root, the project the card was built for. A refusal
+   *  enables the button again; the pane says why. Once the note is dismissed, focus
+   *  that was on the button moves to the next card, else the previous one, else the
+   *  Inbox chip, unless the Inbox now shows another project or is closed. */
+  dismiss(root2, id, noteId, li, button2) {
+    if (button2.disabled) return;
+    button2.disabled = true;
+    const next = li.nextElementSibling;
+    const prev = li.previousElementSibling;
+    void this.actions.dismiss(root2, id, noteId).then((ok) => {
+      if (!ok) {
+        button2.disabled = false;
+        return;
+      }
+      const active = document.activeElement;
+      if (active !== button2 && active !== document.body && active !== null) return;
+      if (this.last?.[0] !== root2 || !this.el.isConnected) return;
+      const target = [next, prev].find((c) => c !== null && this.list.contains(c))?.querySelector("button");
+      if (target) target.focus();
+      else this.actions.focusInbox();
+    });
   }
   card(root2, id) {
     const head = h("div", { class: "af-backlog-inbox-head" });
@@ -21323,8 +21361,10 @@ var BacklogPane = class {
     this.effort = new EffortSessions(host, () => this.render());
     this.inboxList = new InboxList({
       answer: (root2, id, qid, text) => this.answer(root2, id, qid, text),
+      dismiss: (root2, id, noteId) => this.dismiss(root2, id, noteId),
       select: (id) => this.select(id),
-      loadSessions: (ids) => this.host.loadSessions(ids)
+      loadSessions: (ids) => this.host.loadSessions(ids),
+      focusInbox: () => this.filterSlot.querySelector("button")?.focus()
     });
     this.newGroup = entryField("New group\u2026", "New group title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
     this.headSlot.append(h(
@@ -21578,6 +21618,19 @@ ${id}`;
       return false;
     }
   }
+  async dismiss(root2, id, noteId) {
+    const token2 = this.host.token();
+    if (token2 === null) return false;
+    try {
+      await dismissNote(root2, id, noteId, token2);
+      void this.host.refresh(root2);
+      return true;
+    } catch (e) {
+      this.host.notify(errorText(e));
+      void this.host.refresh(root2);
+      return false;
+    }
+  }
   runnerActions() {
     return {
       setRunner: (on) => this.mutate((t) => setSettings(this.root ?? "", { runner: on }, t)),
@@ -21682,7 +21735,9 @@ ${id}`;
     placeChildren(this.listEl, segments(rows).map((seg) => seg.kind === "group" ? this.card(v, seg.head, seg.rows, counts.groups.get(seg.head.item.id) ?? NO_COUNTS) : this.loose(v, seg.rows)));
     this.overviewEl.textContent = counts.overview;
     this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
+    const focusedChip = [...this.filterSlot.querySelectorAll("button")].findIndex((b) => b === document.activeElement);
     this.filterSlot.replaceChildren(this.filters(v));
+    if (focusedChip >= 0) this.filterSlot.querySelectorAll("button")[focusedChip]?.focus();
     this.emptySlot.replaceChildren();
     if (this.inboxOn) {
       this.popover.hide();

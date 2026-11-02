@@ -5151,7 +5151,15 @@ textarea[class] {
 .af-backlog-inbox-note .af-backlog-row-pr {
   align-items: center;
   gap: var(--af-space-1);
+}
+.af-backlog-inbox-note-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
   margin-top: var(--af-space-1);
+}
+.af-backlog-inbox-note-actions button {
+  margin-left: auto;
 }
 .af-backlog-inbox-head {
   display: flex;

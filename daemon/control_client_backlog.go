@@ -14,5 +14,5 @@ var backlogMethods = map[string]bool{
 	"SetBacklogItemStatus": true, "DeleteBacklogItem": true, "PostBacklogMessage": true,
 	"SetBacklogSettings": true, "GetBudget": true, "SetBudget": true, "StartBacklogItem": true,
 	"RunBacklog": true, "SetBacklogOrchestrator": true, "SetBacklogOrchestratorHandoff": true,
-	"EscalateBacklogQuestion": true, "OpenBacklogOrchestrator": true,
+	"EscalateBacklogQuestion": true, "DismissBacklogNote": true, "OpenBacklogOrchestrator": true,
 }

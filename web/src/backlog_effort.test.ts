@@ -14,6 +14,7 @@ let dom: ReturnType<typeof installFakeDom>;
 let doc: FakeDocument;
 let calls: { method: string; body: Record<string, unknown> }[];
 let replies: Record<string, unknown>;
+let refusals: Record<string, string>;
 let hold: Promise<void> | null;
 const realFetch = globalThis.fetch;
 const realLoad = bodyEditorLoader.load;
@@ -23,11 +24,13 @@ beforeEach(() => {
   doc = dom.doc;
   calls = [];
   replies = {};
+  refusals = {};
   hold = null;
   (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit) => {
     const method = url.replace("/v1/", "");
     calls.push({ method, body: JSON.parse(String(init.body)) as Record<string, unknown> });
     if (hold) await hold;
+    if (refusals[method]) return new Response(JSON.stringify({ data: null, error: { message: refusals[method] } }), { status: 400 });
     return new Response(JSON.stringify({ data: replies[method] ?? {}, error: null }), { status: 200 });
   };
   bodyEditorLoader.load = async () => ({
@@ -213,6 +216,80 @@ test("the Inbox shows an effort session's done note with its pull request", asyn
   assert.match(card.textContent ?? "", /marked this done/);
   assert.equal(card.querySelector("a")?.href, "https://example.test/pr/1");
   assert.equal(el(pane).querySelector(".af-backlog-empty")?.hidden, true);
+});
+
+const doneNote = (id: number, at: string): Message => ({ id, kind: "note", author: "agent:o1", text: `done ${id}`, at, inbox: true });
+
+function inboxWithNotes(h: ReturnType<typeof host>, notes: Message[], d?: BacklogData): BacklogPane {
+  const pane = mount(h);
+  pane.update(d ?? data(view([item(1, { orchestrator: orch }), item(2, { parent: 1, status: "done", thread: notes })])), "/a", []);
+  el(pane).querySelectorAll("button").find((b) => b.textContent?.startsWith("Inbox"))!.click();
+  return pane;
+}
+
+const dismissButtons = (pane: BacklogPane) => el(pane).querySelectorAll("button").filter((b) => b.textContent === "Dismiss");
+
+test("Dismiss sends DismissBacklogNote and moves focus to the next note card", async () => {
+  const pane = inboxWithNotes(host(), [doneNote(1, "2000-01-02T00:00:00Z"), doneNote(2, "2000-01-02T01:00:00Z")]);
+  const [first, second] = dismissButtons(pane);
+  assert.notEqual(first.getAttribute("aria-label"), second.getAttribute("aria-label"));
+  assert.match(first.getAttribute("aria-label") ?? "", /^Dismiss note on B-2 from /);
+  first.focus();
+  first.click();
+  assert.equal(first.disabled, true);
+  await settle();
+  assert.deepEqual(calls.find((c) => c.method === "DismissBacklogNote")?.body, { repo_path: "/a", id: 2, note_id: 1 });
+  const cards = el(pane).querySelectorAll(".af-backlog-inbox-note");
+  assert.equal(doc.activeElement, cards[1].querySelector("button"));
+});
+
+test("Dismiss on the last note card moves focus to the previous card", async () => {
+  const pane = inboxWithNotes(host(), [doneNote(1, "2000-01-02T00:00:00Z"), doneNote(2, "2000-01-02T01:00:00Z")]);
+  const second = dismissButtons(pane)[1];
+  second.focus();
+  second.click();
+  await settle();
+  assert.equal(doc.activeElement, el(pane).querySelectorAll(".af-backlog-inbox-note")[0].querySelector("button"));
+});
+
+test("Dismiss on the only card moves focus to the Inbox chip", async () => {
+  const pane = inboxWithNotes(host(), [doneNote(1, "2000-01-02T00:00:00Z")]);
+  const only = dismissButtons(pane)[0];
+  only.focus();
+  only.click();
+  await settle();
+  assert.match(doc.activeElement.textContent ?? "", /^Inbox/);
+  pane.update(data(view([item(1, { orchestrator: orch }), item(2, { parent: 1, status: "done" })])), "/a", []);
+  assert.match(doc.activeElement.textContent ?? "", /^Inbox/, "a re-render keeps the focused chip");
+});
+
+test("a failed Dismiss says why and enables the button again", async () => {
+  const h = host();
+  const pane = inboxWithNotes(h, [doneNote(1, "2000-01-02T00:00:00Z")]);
+  refusals.DismissBacklogNote = "message 1 on B-2 is not a note in the Inbox";
+  const only = dismissButtons(pane)[0];
+  only.click();
+  await settle();
+  assert.equal(only.disabled, false);
+  assert.deepEqual(h.notes, ["message 1 on B-2 is not a note in the Inbox"]);
+});
+
+test("a Dismiss that lands after a move to another project dismisses in the card's project and moves no focus", async () => {
+  const notes = [doneNote(1, "2000-01-02T00:00:00Z")];
+  const d = data(view([item(1, { orchestrator: orch }), item(2, { parent: 1, status: "done", thread: notes })]));
+  const both: BacklogData = { ...d, views: new Map([...d.views, ["/b", view([])]]) };
+  const pane = inboxWithNotes(host(), notes, both);
+  let release = (): void => {};
+  hold = new Promise((r) => { release = r; });
+  const only = dismissButtons(pane)[0];
+  only.focus();
+  only.click();
+  await settle();
+  pane.update(both, "/b", []);
+  release();
+  await settle();
+  assert.deepEqual(calls.find((c) => c.method === "DismissBacklogNote")?.body, { repo_path: "/a", id: 2, note_id: 1 });
+  assert.equal(doc.activeElement === doc.body, true, `focus moved to ${doc.activeElement.textContent}`);
 });
 
 async function startUnlisted(h: ReturnType<typeof host>): Promise<{ pane: BacklogPane; d: BacklogData }> {

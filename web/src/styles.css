@@ -5676,7 +5676,9 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 .af-backlog-inbox-list { padding: var(--af-space-2) 0; }
 .af-backlog-inbox-card .af-backlog-question { margin-bottom: 0; }
 .af-backlog-inbox-note-text { margin: 0; overflow-wrap: anywhere; }
-.af-backlog-inbox-note .af-backlog-row-pr { align-items: center; gap: var(--af-space-1); margin-top: var(--af-space-1); }
+.af-backlog-inbox-note .af-backlog-row-pr { align-items: center; gap: var(--af-space-1); }
+.af-backlog-inbox-note-actions { display: flex; align-items: center; gap: var(--af-space-2); margin-top: var(--af-space-1); }
+.af-backlog-inbox-note-actions button { margin-left: auto; }
 
 .af-backlog-inbox-head {
   display: flex;

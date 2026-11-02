@@ -684,6 +684,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/DismissBacklogNote",
+		Description: "Take an Inbox note, such as an effort session's done note, out of the Inbox. The note stays in the item's thread.",
+		requestType: reflect.TypeOf(DismissBacklogNoteRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DismissBacklogNote) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/OpenBacklogOrchestrator",
 		Description: "Name the session to open for a group's orchestrator: an archived, lost or dead one is restored first, a killed or missing one is replaced by a new session bound in its place, and a group with none gets a new session bound to it. Returns the session's id and title, and change: restored, replaced, started, or empty when the session was live.",
 		requestType: reflect.TypeOf(OpenBacklogOrchestratorRequest{}),

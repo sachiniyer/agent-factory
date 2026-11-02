@@ -145,6 +145,11 @@ export async function addNote(root: string, id: number, text: string, token: str
   return resp.message;
 }
 
+/** Takes an Inbox note out of the Inbox; it stays in the item's thread. */
+export async function dismissNote(root: string, id: number, noteId: number, token: string): Promise<void> {
+  await af<unknown>("DismissBacklogNote", { repo_path: root, id, note_id: noteId }, token);
+}
+
 export interface OpenedOrchestrator {
   session_id: string;
   title: string;

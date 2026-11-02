@@ -7,7 +7,7 @@
 
 import { errorText, isMutationOutcomeUncertain } from "./api.js";
 import {
-  type BudgetReply, addItem, addNote, answerQuestion, deleteItem, backlogRoutes, moveItem, runNext, setBudget, setItemStatus, setSettings, startItem, updateItem,
+  type BudgetReply, addItem, addNote, answerQuestion, deleteItem, dismissNote, backlogRoutes, moveItem, runNext, setBudget, setItemStatus, setSettings, startItem, updateItem,
 } from "./backlog_api.js";
 import type { BacklogData } from "./backlog_data.js";
 import {
@@ -184,8 +184,10 @@ export class BacklogPane {
     this.effort = new EffortSessions(host, () => this.render());
     this.inboxList = new InboxList({
       answer: (root, id, qid, text) => this.answer(root, id, qid, text),
+      dismiss: (root, id, noteId) => this.dismiss(root, id, noteId),
       select: (id) => this.select(id),
       loadSessions: (ids) => this.host.loadSessions(ids),
+      focusInbox: () => this.filterSlot.querySelector<HTMLElement>("button")?.focus(),
     });
     this.newGroup = entryField("New group…", "New group title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
     this.headSlot.append(h("div", { class: "af-backlog-top" },
@@ -388,6 +390,20 @@ export class BacklogPane {
     }
   }
 
+  private async dismiss(root: string, id: number, noteId: number): Promise<boolean> {
+    const token = this.host.token();
+    if (token === null) return false;
+    try {
+      await dismissNote(root, id, noteId, token);
+      void this.host.refresh(root);
+      return true;
+    } catch (e) {
+      this.host.notify(errorText(e));
+      void this.host.refresh(root);
+      return false;
+    }
+  }
+
   private runnerActions() {
     return {
       setRunner: (on: boolean) => this.mutate((t) => setSettings(this.root ?? "", { runner: on }, t)),
@@ -503,7 +519,10 @@ export class BacklogPane {
       ? this.card(v, seg.head, seg.rows, counts.groups.get(seg.head.item.id) ?? NO_COUNTS) : this.loose(v, seg.rows)));
     this.overviewEl.textContent = counts.overview;
     this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
+    // The chips are rebuilt on every render: a chip that had focus gets it back.
+    const focusedChip = [...this.filterSlot.querySelectorAll("button")].findIndex((b) => b === document.activeElement);
     this.filterSlot.replaceChildren(this.filters(v));
+    if (focusedChip >= 0) this.filterSlot.querySelectorAll<HTMLElement>("button")[focusedChip]?.focus();
     this.emptySlot.replaceChildren();
     if (this.inboxOn) {
       this.popover.hide();

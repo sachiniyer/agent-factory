@@ -22,6 +22,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af backlog ask`](#af-backlog-ask) — From an item session, ask the user a question
 - [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
 - [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
+- [`af backlog dismiss`](#af-backlog-dismiss) — Take a note out of the Inbox
 - [`af backlog done`](#af-backlog-done) — Mark an item done after review, or, from an item session, send it to review
 - [`af backlog draft`](#af-backlog-draft) — Put a queued or in-review item back to draft
 - [`af backlog drop`](#af-backlog-drop) — Mark an item dropped
@@ -513,6 +514,7 @@ af backlog
 - [`af backlog ask`](#af-backlog-ask) — From an item session, ask the user a question
 - [`af backlog budget`](#af-backlog-budget) — Show or change the global budget
 - [`af backlog delete`](#af-backlog-delete) — Delete a draft that has no runs and no thread
+- [`af backlog dismiss`](#af-backlog-dismiss) — Take a note out of the Inbox
 - [`af backlog done`](#af-backlog-done) — Mark an item done after review, or, from an item session, send it to review
 - [`af backlog draft`](#af-backlog-draft) — Put a queued or in-review item back to draft
 - [`af backlog drop`](#af-backlog-drop) — Mark an item dropped
@@ -704,6 +706,25 @@ af backlog delete <id>
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af backlog dismiss
+
+Take a note out of the Inbox
+
+Take an Inbox note, such as the one an effort session leaves when it marks an item done, out of the Inbox. The note stays in the item's thread. "af backlog inbox" prints each note's id.
+
+```
+af backlog dismiss <id> <note-id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af backlog done
 
 Mark an item done after review, or, from an item session, send it to review
@@ -828,7 +849,7 @@ af backlog escalate <id> [--note <text>] [flags]
 
 Print the project's open questions, oldest first
 
-Print every open question on every item of the project, oldest first, with the agent's handoff notes when it left any, then the notes an effort session left when it marked an item done. Questions that wait for a group's effort session and items in archived groups are left out. Answer with "af backlog answer <id> <text>". With --json, print the questions as JSON in the {data,error} envelope.
+Print every open question on every item of the project, oldest first, with the agent's handoff notes when it left any, then the notes an effort session left when it marked an item done. Questions that wait for a group's effort session and items in archived groups are left out. Answer with "af backlog answer <id> <text>"; dismiss a note with "af backlog dismiss <id> <note-id>". With --json, print the questions as JSON in the {data,error} envelope.
 
 ```
 af backlog inbox

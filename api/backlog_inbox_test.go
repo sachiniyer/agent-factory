@@ -107,9 +107,9 @@ func TestBacklogAskThen(t *testing.T) {
 func TestFormatBacklogInboxNotes(t *testing.T) {
 	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
 	got := formatBacklogInbox(nil, []backlog.InboxNote{
-		{ID: 4, Title: "api", Note: backlog.Message{Text: "The effort session marked this done · https://x/pull/1", At: now.Add(-2 * time.Minute)}},
+		{ID: 4, Title: "api", Note: backlog.Message{ID: 3, Text: "The effort session marked this done · https://x/pull/1", At: now.Add(-2 * time.Minute)}},
 	}, now)
-	want := "No questions\n\nNotes\nB-4  api  · 2m ago\n  The effort session marked this done · https://x/pull/1\n"
+	want := "No questions\n\nNotes\nB-4  api  · note 3 · 2m ago\n  The effort session marked this done · https://x/pull/1\n"
 	if got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
