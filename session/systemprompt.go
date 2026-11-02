@@ -185,7 +185,7 @@ const afUsageBacklogInside = `Backlog items: when af started your session for a 
 // (an "effort"). It is inside-only: binding and --self resolve the calling
 // session. Its event list is pinned to backlog's Event kinds by
 // TestOrchestratorUsageNamesEveryEventKind.
-const afUsageOrchestratorInside = `Effort orchestrator: a session can orchestrate one backlog group (a top-level item with children, an "effort"). Bind only when the user asks you to own or run the effort:
+const afUsageOrchestratorInside = `Effort orchestrator: a session can orchestrate one backlog group (a top-level item with children, an "effort"). Bind when the user asks you to own, run, manage or drive the effort, and only then:
   af backlog add --file <path or -> --orchestrate [--replace]  Add the batch and bind this session to its top-level parent; the batch must sit under one group
   af backlog orchestrate <group> --self [--replace]     Bind this session to an existing group; --replace takes it over from the session that has it
   af backlog orchestrate <group> --clear               Unbind; the questions waiting for you go to the user
