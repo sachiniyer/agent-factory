@@ -148,7 +148,7 @@ definitive refusal, not an uncertain outcome.
 |--------|---------|
 | `200 OK` | Success. `data` holds the response payload; `error` is `null`. |
 | `400 Bad Request` | The request body was not valid JSON, or it carried a field this daemon does not recognize (see [Unknown fields](#unknown-fields)). |
-| `404 Not Found` | Unknown route (e.g. `POST /v1/Nope`). |
+| `404 Not Found` | Unknown route (e.g. `POST /v1/Nope`), or an id-keyed tab RPC (`CloseTab`/`RenameTab`/`ReorderTab`) whose `tab_id` no longer resolves — refused rather than falling back; `error.code` is `tab_gone`. |
 | `405 Method Not Allowed` | Wrong verb — RPC routes are POST-only; `/v1/health` is GET-only. |
 | `409 Conflict` | `POST /v1/RebindProject` and `POST /v1/RebindProjectGuarded`: part of the request's expected pair no longer matches the project's record — `expected_root` against the recorded root, `expected_checkout_id` against the recorded checkout marker (which a same-path reclone or repair rotates) — because another rebind or re-clone landed first. `error.code` is `project_rebound`. See [Rebinding a project](#rebinding-a-project). |
 | `409 Conflict` | `SaveProposalDoc`: the save conflicts with a newer edit and nothing was committed. `error.code` is `proposal_conflict`, and `data` is not `null` — it holds `{ours, theirs, base, head}` (see `docs/dev/proposals/proposal-mode/api.md`). |
