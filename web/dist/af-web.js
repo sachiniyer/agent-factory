@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "87d5f8a5fdff";
+var CLIENT_VERSION = "1db829d056fc";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -14877,6 +14877,12 @@ var SplitView = class {
   // One ResizeObserver-detected host resize is one refit, however many entries
   // the observer batches.
   refitQueued = false;
+  // Set when focusPane lands on a leaf the fit hid: the queued reconcile
+  // un-hides it, and the keyboard handoff (refocus) must happen AFTER that,
+  // not at the call site — pane.term.focus() on a display:none container
+  // silently no-ops, leaving the highlight and the keyboard on different
+  // panes (#6562). Consumed by the refit's run().
+  pendingRefocus = false;
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
   layoutGen = 0;
@@ -15234,6 +15240,7 @@ var SplitView = class {
     this.builtTree = null;
     this.displayTree = null;
     this.builtRootEl = null;
+    this.pendingRefocus = false;
   }
   /** Coalesces ResizeObserver entries into at most one refit per frame: the
    *  report follows so a resize that hid or restored panes updates the strip's
@@ -15247,6 +15254,10 @@ var SplitView = class {
       this.refitQueued = false;
       this.reconcile();
       this.report();
+      if (this.pendingRefocus) {
+        this.pendingRefocus = false;
+        this.refocus();
+      }
     };
     if (typeof requestAnimationFrame === "function") {
       requestAnimationFrame(run);
@@ -16022,6 +16033,7 @@ var SplitView = class {
     this.layoutGen++;
     this.applyFocusClass();
     if (this.displayTree && !findLeaf(this.displayTree, leafId)) {
+      this.pendingRefocus = true;
       this.scheduleRefit();
     }
     const pane = this.panes.get(leafId);

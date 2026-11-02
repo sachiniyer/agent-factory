@@ -420,6 +420,13 @@ export class SplitView {
   // the observer batches.
   private refitQueued = false;
 
+  // Set when focusPane lands on a leaf the fit hid: the queued reconcile
+  // un-hides it, and the keyboard handoff (refocus) must happen AFTER that,
+  // not at the call site — pane.term.focus() on a display:none container
+  // silently no-ops, leaving the highlight and the keyboard on different
+  // panes (#6562). Consumed by the refit's run().
+  private pendingRefocus = false;
+
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
   private layoutGen = 0;
@@ -917,6 +924,7 @@ export class SplitView {
     this.builtTree = null;
     this.displayTree = null;
     this.builtRootEl = null;
+    this.pendingRefocus = false;
   }
 
   /** Coalesces ResizeObserver entries into at most one refit per frame: the
@@ -931,6 +939,12 @@ export class SplitView {
       this.refitQueued = false;
       this.reconcile();
       this.report();
+      // The keyboard handoff that could not land before the refit (#6562):
+      // the focused pane is rendered now, so focus() can finally take.
+      if (this.pendingRefocus) {
+        this.pendingRefocus = false;
+        this.refocus();
+      }
     };
     if (typeof requestAnimationFrame === "function") {
       requestAnimationFrame(run);
@@ -2175,7 +2189,11 @@ export class SplitView {
     // protected-leaf rule mounts it again — focus must always land on something
     // rendered. Not via commit(): the tree is untouched, and reconcile is far
     // more than a focus move needs when the focused pane is already visible.
+    // The refocus() the caller is about to run cannot land yet (#6562): the
+    // pane's textarea is not rendered, so focus() no-ops and the keyboard
+    // would stay wherever it was — the intent is consumed after the refit.
     if (this.displayTree && !findLeaf(this.displayTree, leafId)) {
+      this.pendingRefocus = true;
       this.scheduleRefit();
     }
     // The focused pane's status becomes the header status.
