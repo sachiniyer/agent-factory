@@ -380,7 +380,7 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
     },
     { staleRows, staleCols },
   );
-  await page.evaluate(
+  const atRepeat = await page.evaluate(
     ([n, a, l]) => {
       const w = window as unknown as {
         __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
@@ -389,6 +389,13 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
     },
     [staleRows, atSeed + 2, `${staleRows}-row repeat`],
   );
+  // The probe's echo does not prove the PANE processed the repeat — each
+  // subscription consumes the broadcast independently, and the emulator was
+  // already on the host grid from the unpark flush, so a poll now could pass
+  // on pre-repeat state. The reclaim is observable on the wire: a >60 echo
+  // AFTER the repeat can only be the pane re-asserting its host fit. On
+  // master none ever comes — the yield writes nothing.
+  await waitEchoGT(60, atRepeat + 1, "post-repeat reclaim");
   await expect
     .poll(rows, {
       message: "the activation must re-assert its host fit against the peer's first real answer",
