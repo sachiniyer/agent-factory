@@ -1636,6 +1636,37 @@ body[data-project-color] [data-af-theme="dark"] {
   position: relative;
 }
 
+/* The overflow cue (#6408): which strip edges still hide tabs, told by a fade —
+ * a clipped tab then reads as "there is more" instead of a word cut mid-glyph.
+ * The classes follow scrollLeft/scrollWidth/clientWidth (ui.ts syncTabOverflow);
+ * the "+N more" count is the later P18 redesign (#6436), deliberately not here. */
+.af-tabbar.af-tabbar-more-left {
+  -webkit-mask-image: linear-gradient(to right, transparent, var(--af-ink) calc(var(--af-space-3) * 1.5));
+  mask-image: linear-gradient(to right, transparent, var(--af-ink) calc(var(--af-space-3) * 1.5));
+}
+
+.af-tabbar.af-tabbar-more-right {
+  -webkit-mask-image: linear-gradient(to left, transparent, var(--af-ink) calc(var(--af-space-3) * 1.5));
+  mask-image: linear-gradient(to left, transparent, var(--af-ink) calc(var(--af-space-3) * 1.5));
+}
+
+.af-tabbar.af-tabbar-more-left.af-tabbar-more-right {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--af-ink) calc(var(--af-space-3) * 1.5),
+    var(--af-ink) calc(100% - var(--af-space-3) * 1.5),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--af-ink) calc(var(--af-space-3) * 1.5),
+    var(--af-ink) calc(100% - var(--af-space-3) * 1.5),
+    transparent
+  );
+}
+
 .af-tab {
   display: inline-flex;
   align-items: center;
