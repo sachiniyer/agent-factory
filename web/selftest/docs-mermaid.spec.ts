@@ -103,12 +103,10 @@ test("docs mermaid: click callbacks, javascript: links and HTML labels render in
     dialogs.push(d.message());
     void d.dismiss();
   });
-  const external: string[] = [];
-  page.on("request", (r) => {
-    const u = new URL(r.url());
-    const origin = u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
-    if (origin !== null && origin !== new URL(page.url()).origin) external.push(r.url());
-  });
+  // Requests are collected raw: during openDocs' own goto, page.url() is
+  // still about:blank, so the page origin is only known at assertion time.
+  const requests: string[] = [];
+  page.on("request", (r) => requests.push(r.url()));
   const hostile = `%%{init: {"themeVariables": {"fontFamily": "x; background: url(https://mmd.invalid/pixel.png);"}}}%%
 flowchart LR
   A["<img src=x onerror=globalThis.__pwned=1>"] --> B["<b>normal</b>"]
@@ -138,6 +136,11 @@ flowchart LR
   }
   expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
   expect(dialogs, "no dialog may come out of a diagram").toEqual([]);
+  const pageOrigin = new URL(page.url()).origin;
+  const external = requests.filter((u) => {
+    const url = new URL(u);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.origin !== pageOrigin;
+  });
   expect(external, "a diagram may not reach outside this origin").toEqual([]);
   await expect(pane.locator(".cm-content")).toContainText("End.");
 });
