@@ -280,7 +280,7 @@ you have seen it fail.
   (`state = running` and `pid = N` in the `gui/<uid>` domain af restarts) rather
   than a re-invented one. **Assertion 2 is no longer the blocker** — it asks the
   daemon for its version and only falls back to `/proc/<pid>/exe`. What still
-  blocks the `macos-latest` leg is daemon **discovery**: `lc_daemon_pids`
+  blocks the `macos-15` leg is daemon **discovery**: `lc_daemon_pids`
   identifies a daemon by reading `/proc/<pid>/cmdline` and `/proc/<pid>/environ`
   (the check that proves a pid serves *this* throwaway home before the harness
   signals it), and assertions 1 and 3 plus teardown are built on it. Porting

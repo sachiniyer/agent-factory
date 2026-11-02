@@ -55,7 +55,8 @@ versions, `$TMPDIR` length). Paste the whole output.
 ## In CI
 
 `.github/workflows/mac-e2e.yml` runs the same script on every push to `master`
-and on `workflow_dispatch`, on `macos-latest` (arm64), `macos-15-intel`, and
+and on `workflow_dispatch`, on `macos-15` (arm64 — pinned while GitHub's
+floating arm64 label migrates, #6631), `macos-15-intel`, and
 `ubuntu-24.04` (not a Mac: it catches defects in the script itself). It also
 installs the latest release with `install.sh` and checks its architecture and
 signature, and probes whether a launchd user agent can be registered on the

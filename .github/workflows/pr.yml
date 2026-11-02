@@ -875,7 +875,10 @@ jobs:
     # an output, so a probe still skips this through the unmet need.
     needs: [web-selftest-scope]
     if: needs.web-selftest-scope.outputs.heavy == 'true'
-    runs-on: macos-latest
+    # Pinned to the explicit arm64 image while the floating arm64 label
+    # migrates to macOS 26 (#6631); the pin test in Lint holds it until the
+    # revisit.
+    runs-on: macos-15
     # macOS runner minutes bill at 10x Linux; a hung PTY/daemon test must not burn
     # a six-hour default. Sized from the go test budget below: see there.
     timeout-minutes: 45

@@ -112,7 +112,7 @@ const perMessageAttestation = false
 // LOCAL_PEERPID is the peer socket's last_pid, not "who connected": the kernel
 // overwrites it on every bind, listen, accept, read/write and kqueue attach on
 // that socket, and a connection still in the listen queue inherits the
-// LISTENER's last_pid. Measured on macos-latest and macos-15-intel. A value read
+// LISTENER's last_pid. Measured on macos-15 and macos-15-intel. A value read
 // at connect therefore names whoever last touched the listener (the creator that
 // re-listens before exec'ing into af, #6179), not whoever will answer, and
 // judging a message on it reopens the fork-then-exec attack.
