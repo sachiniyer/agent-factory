@@ -51,6 +51,10 @@ class FakeNode {
   get textContent(): string {
     return "";
   }
+  get nextSibling(): FakeNode | null {
+    const sibs = this.parentNode?.childNodes ?? [];
+    return sibs[sibs.indexOf(this) + 1] ?? null;
+  }
   remove(): void {
     this.parentNode?.removeChild(this);
   }
@@ -133,6 +137,7 @@ export class FakeElement extends FakeNode {
   hidden = false;
   type = "";
   title = "";
+  id = "";
   placeholder = "";
   href = "";
   target = "";
@@ -232,6 +237,12 @@ export class FakeElement extends FakeNode {
       node.parentNode = this;
       this.childNodes.push(node);
     }
+  }
+  insertBefore(node: FakeNode, ref: FakeNode | null): void {
+    if (ref === null) return this.append(node);
+    node.remove();
+    node.parentNode = this;
+    this.childNodes.splice(this.childNodes.indexOf(ref), 0, node);
   }
   replaceChildren(...nodes: (FakeNode | string)[]): void {
     for (const c of [...this.childNodes]) this.removeChild(c);
