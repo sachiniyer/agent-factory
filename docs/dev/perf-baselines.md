@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1275573.000 | 1275573.000–1275573.000 | 0.000 | 1339351.650 |
-| gzip_bytes | 291218.000 | 291218.000–291218.000 | 0.000 | 305778.900 |
+| raw_bytes | 1337606.000 | 1337606.000–1337606.000 | 0.000 | 1404486.300 |
+| gzip_bytes | 306612.000 | 306612.000–306612.000 | 0.000 | 321942.600 |
 | lazy_raw_bytes | 371003.000 | 371003.000–371003.000 | 0.000 | 389553.150 |
 | lazy_gzip_bytes | 120125.000 | 120125.000–120125.000 | 0.000 | 126131.250 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
@@ -134,6 +134,10 @@ only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
 were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
 `report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
 so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,149,376 raw and 260,459 gzip bytes over `web/dist` without `lazy/`. Both are inside the existing shell budgets (raw 1,182,374; gzip 268,549), so those baselines are not moved. Lazy bundle: 371,003 raw / 120,125 gzip.
+
+### Bundle refresh provenance (#6582)
+
+Master's committed bundle at `250fd7d06d` is 1,323,696 raw / 303,520 gzip over `web/dist/**.{js,css}` (gzip level 9). That is already within 2,259 gzip bytes of the 305,778.9 budget the #6298 refresh set, after the Backlog slices merged since. The effort cards port (Refs #6284, fork `f733c567f0`: group cards, progress and meta lines, New group and Add item, and the sticky item panel, with their CSS) takes it to 1,337,606 raw / 306,612 gzip, +13,910 raw / +3,092 gzip. The lazy Docs editor is unchanged (371,254 / 120,177 on both trees). Moving the Backlog view into the lazy chunk would not fit: that chunk has about 6 KB of gzip headroom, and the view is several times that. Comments do not ship (esbuild strips them), so the growth is feature code. Both shell entries are moved. Each is the deterministic byte sum from `bundleBytes` in `scripts/perf/check.mjs` (the function `report.mjs` calls) over the PR's rebuilt `web/dist`, three identical samples, margin baseline x 0.05. Every timing and layout-shift baseline is unchanged. Not recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6298)
 

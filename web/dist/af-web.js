@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "c2b2b6839136";
+var CLIENT_VERSION = "5ac781c76a6d";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19155,23 +19155,59 @@ function count(view, items) {
   }
   return c;
 }
-function groupCounts(view, group) {
-  const b = view.backlog;
-  return count(view, b.items.filter((it) => isAncestor(b, group, it.id) && !isParent(b, it.id)));
+function tops(b) {
+  const byID = new Map(b.items.map((it) => [it.id, it]));
+  const out = /* @__PURE__ */ new Map();
+  for (const start2 of b.items) {
+    const path = [];
+    const seen = /* @__PURE__ */ new Set();
+    let above;
+    for (let it = start2; it && !seen.has(it.id); it = it.parent ? byID.get(it.parent) : void 0) {
+      if (above = out.get(it.id)) break;
+      seen.add(it.id);
+      path.push(it);
+    }
+    let acc = above ?? { root: path[path.length - 1].id, archived: false };
+    for (let i = path.length - 1; i >= 0; i--) {
+      acc = { root: acc.root, archived: acc.archived || path[i].archived === true };
+      out.set(path[i].id, acc);
+    }
+  }
+  return out;
 }
+function cardCounts(view) {
+  const b = view.backlog;
+  const parents = /* @__PURE__ */ new Set();
+  for (const it of b.items) if (it.parent) parents.add(it.parent);
+  const top = tops(b);
+  const leaves2 = /* @__PURE__ */ new Map();
+  const live = [];
+  let groups = 0;
+  for (const it of b.items) {
+    const t = top.get(it.id);
+    if (!t) continue;
+    const parent = parents.has(it.id);
+    if (!t.archived && !it.parent && parent) groups++;
+    if (parent) continue;
+    if (!t.archived) live.push(it);
+    if (t.root === it.id) continue;
+    const list = leaves2.get(t.root);
+    if (list) list.push(it);
+    else leaves2.set(t.root, [it]);
+  }
+  const c = count(view, live);
+  return {
+    groups: new Map([...leaves2].map(([g, items]) => [g, count(view, items)])),
+    overview: [plural(groups, "group"), plural(c.total, "item"), ...tail(c)].join(" \xB7 ")
+  };
+}
+var NO_COUNTS = { done: 0, total: 0, working: 0, needsYou: 0 };
 var plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
 function tail(c) {
   return [...c.working > 0 ? [`${c.working} working`] : [], ...c.needsYou > 0 ? [needsYouLabel(c.needsYou)] : []];
 }
 function progressText(c) {
   return [`${c.done} of ${c.total} done`, ...tail(c)].join(" \xB7 ");
-}
-function overview(view) {
-  const b = view.backlog;
-  const live = b.items.filter((it) => !archivedBy(b, it.id));
-  const groups = live.filter((it) => !it.parent && isParent(b, it.id)).length;
-  const c = count(view, live.filter((it) => !isParent(b, it.id)));
-  return [plural(groups, "group"), plural(c.total, "item"), ...tail(c)].join(" \xB7 ");
 }
 function waitsInGroup(view, it, pos) {
   const out = { open: 0, dropped: 0, after: [] };
@@ -20586,15 +20622,16 @@ var RunnerBar = class {
 var DRAG_TYPE = "application/x-af-backlog-item";
 var EMPTY_COPY = "No items yet \xB7 Name a group above, or ask an agent to make items from a proposal.";
 function placeChildren(parent, want) {
+  const keep = new Set(want);
+  for (let c = parent.firstChild; c; ) {
+    const next = c.nextSibling;
+    if (!keep.has(c)) c.remove();
+    c = next;
+  }
   let cur = parent.firstChild;
   for (const el2 of want) {
     if (cur === el2) cur = cur.nextSibling;
     else parent.insertBefore(el2, cur);
-  }
-  while (cur) {
-    const next = cur.nextSibling;
-    cur.remove();
-    cur = next;
   }
 }
 function stillStarting(it, derived, inFlight, sessions) {
@@ -20970,8 +21007,9 @@ ${id}`;
     const typing = active?.tagName === "INPUT" && this.listEl.contains(active) ? active : null;
     this.rowEls = /* @__PURE__ */ new Map();
     for (const id of this.cards.keys()) if (!rows.some((r) => r.item.id === id && r.depth === 0)) this.cards.delete(id);
-    placeChildren(this.listEl, segments(rows).map((seg) => seg.kind === "group" ? this.card(v, seg.head, seg.rows) : this.loose(v, seg.rows)));
-    this.overviewEl.textContent = overview(v);
+    const counts = cardCounts(v);
+    placeChildren(this.listEl, segments(rows).map((seg) => seg.kind === "group" ? this.card(v, seg.head, seg.rows, counts.groups.get(seg.head.item.id) ?? NO_COUNTS) : this.loose(v, seg.rows)));
+    this.overviewEl.textContent = counts.overview;
     this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
     this.filterSlot.replaceChildren(this.filters(v));
     this.emptySlot.replaceChildren();
@@ -21077,7 +21115,7 @@ ${id}`;
   }
   /** A group as a card: a tree of its header row, progress, a paused notice
    *  and its rows, then an "Add item…" row outside the tree while it is open. */
-  card(v, head, rows) {
+  card(v, head, rows, counts) {
     const g = head.item;
     let c = this.cards.get(g.id);
     if (!c) {
@@ -21096,9 +21134,9 @@ ${id}`;
     c.el.classList.toggle("af-backlog-group-paused", g.paused === true);
     c.tree.setAttribute("aria-label", g.title);
     const pos = positions(rows);
-    const lines = [progress(groupCounts(v, g.id), `af-backlog-progress-${g.id}`)];
+    const lines = [progress(counts, `af-backlog-progress-${g.id}`)];
     if (g.paused && !g.archived) lines.push(pausedNotice(`af-backlog-paused-${g.id}`));
-    const headEl = this.row(v, head, { pos, head: true });
+    const headEl = this.row(v, head, { pos, head: counts });
     headEl.setAttribute("aria-describedby", lines.map((l) => l.id).join(" "));
     c.tree.replaceChildren(headEl, ...lines, ...rows.map((r) => this.row(v, r, { pos })));
     c.add.hidden = head.folded || g.archived === true;
@@ -21152,7 +21190,7 @@ ${id}`;
     const title = h("span", { class: "af-backlog-row-title" }, it.title);
     if (spot?.head) {
       li.classList.add("af-backlog-group-head");
-      const n = groupCounts(v, it.id).needsYou;
+      const n = spot.head.needsYou;
       const tags = n > 0 ? [h("span", { class: "af-backlog-tag af-backlog-state-needs_you" }, needsYouLabel(n))] : [];
       return [
         title,
