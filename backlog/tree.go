@@ -86,9 +86,10 @@ func (b *Backlog) Move(id int, to Move, now time.Time) error {
 	return b.move(id, to, now, true)
 }
 
-// move is Move; checkCycles false leaves the dependency check to the caller,
-// for a batch that applies many moves and validates the finished graph once.
-func (b *Backlog) move(id int, to Move, now time.Time, checkCycles bool) error {
+// move is Move; check false leaves the end-state checks (no dependency cycle,
+// and every orchestrated item still a top-level parent) to the caller, for a
+// batch that applies many moves and validates the finished backlog once.
+func (b *Backlog) move(id int, to Move, now time.Time, check bool) error {
 	if to.count() != 1 {
 		return errors.New("move needs exactly one of --before, --after, --top, --bottom, --into")
 	}
@@ -157,8 +158,11 @@ func (b *Backlog) move(id int, to Move, now time.Time, checkCycles bool) error {
 			p.UpdatedAt = now
 		}
 	}
-	if checkCycles {
+	if check {
 		if err := c.checkCycles(); err != nil {
+			return err
+		}
+		if err := c.checkOrchestrators(); err != nil {
 			return err
 		}
 	}

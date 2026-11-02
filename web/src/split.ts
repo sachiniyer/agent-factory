@@ -34,11 +34,16 @@ import {
   type TabDropResult,
   type Edge,
   findLeaf,
+  fitToSize,
   focusSuccessorAfterDrop,
   type LayoutNode,
   type LeafNode,
   leafCount,
   leaves,
+  minSubtreeSize,
+  PANE_DIVIDER_PX,
+  PANE_MIN_HEIGHT_PX,
+  PANE_MIN_WIDTH_PX,
   remapByIdentity,
   replaceTab,
   resolveDragTab,
@@ -394,6 +399,27 @@ export class SplitView {
   // reads back (ratio) is what it wrote during that same drag.
   private builtTree: LayoutNode | null = null;
 
+  // The tree after the pane-minimum fit (#6429): the layout the DOM is asked to
+  // show, equal to `tree` minus whichever leaves the host cannot give
+  // PANE_MIN_WIDTH_PX/PANE_MIN_HEIGHT_PX. `tree` itself is untouched — the
+  // hidden panes keep their terminals and come back the moment the host grows,
+  // the same way the TUI keeps its pane bindings across a "too narrow" span.
+  // null until the first fit, in which case the full tree is the display one.
+  private displayTree: LayoutNode | null = null;
+
+  // The ".af-split-narrow" notice shown while the fit hides panes — the visible,
+  // deliberate half of the degradation. Created lazily on the first hide.
+  private narrowEl: HTMLElement | null = null;
+
+  // The root element the current DOM was built from — the element buildNode
+  // returned for this.tree's root. syncFitHidden walks it in parallel with the
+  // tree to hide/show nodes in place (#6555).
+  private builtRootEl: HTMLElement | null = null;
+
+  // One ResizeObserver-detected host resize is one refit, however many entries
+  // the observer batches.
+  private refitQueued = false;
+
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
   private layoutGen = 0;
@@ -444,7 +470,17 @@ export class SplitView {
     private readonly host: HTMLElement,
     private readonly cb: SplitCallbacks,
     private readonly narrow: () => boolean = phoneWidth,
-  ) {}
+  ) {
+    // A host resize is the only fit input that never arrives through a commit or
+    // a session update — the window shrinking under a fixed layout is exactly
+    // the #6429 sliver case. The guard is for the node unit tests, which stage a
+    // host-less SplitView and never drive reconcile(). The observer watches only
+    // the host box, and the fit mutates children, never the host, so the
+    // callback cannot retrigger itself.
+    if (this.host && typeof ResizeObserver === "function") {
+      new ResizeObserver(() => this.scheduleRefit()).observe(this.host);
+    }
+  }
 
   /**
    * Shows `sessionId`'s layout, building/rebuilding terminals as needed. Called on
@@ -720,6 +756,12 @@ export class SplitView {
     if (!this.tree) {
       return;
     }
+    // Cycle the FULL tree, not just the visible leaves: a pane the fit hid
+    // (#6429) is not gone — focusing it makes it the protected leaf, and the
+    // next reconcile un-hides it (the same way the TUI restores a pane when
+    // focus moves to it). Cycling only the visible set would strand focus on
+    // narrow hosts, and on the phone-collapse layout it would break Alt+j/k
+    // entirely — exactly one pane is ever mounted there.
     const ids = leaves(this.tree).map((l) => l.id);
     if (ids.length <= 1) {
       this.refocus();
@@ -873,6 +915,104 @@ export class SplitView {
     this.termHoldsFocus = false;
     // The DOM is gone, so the next reconcile must build it whatever the tree says.
     this.builtTree = null;
+    this.displayTree = null;
+    this.builtRootEl = null;
+  }
+
+  /** Coalesces ResizeObserver entries into at most one refit per frame: the
+   *  report follows so a resize that hid or restored panes updates the strip's
+   *  shown-tabs mirror the same pass. */
+  private scheduleRefit(): void {
+    if (this.refitQueued) {
+      return;
+    }
+    this.refitQueued = true;
+    const run = (): void => {
+      this.refitQueued = false;
+      this.reconcile();
+      this.report();
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(run);
+    } else {
+      setTimeout(run, 0);
+    }
+  }
+
+  /** Applies the fit's hide/show state to the BUILT DOM in place (#6555). The
+   *  wrappers always mirror the full retained tree, so a leaf the fit dropped is
+   *  still mounted — it just gets display:none, and a split whose every leaf is
+   *  hidden collapses whole, divider included. Nothing is detached or reparented:
+   *  re-inserting an <iframe> would destroy its browsing context, so Web/VS Code
+   *  panes keep their document across any number of refits. The DOM children of a
+   *  split wrap are exactly [a, divider, b] — the shape buildNode appends — so the
+   *  walk mirrors the tree node-for-node. */
+  private syncFitHidden(fit: { tree: LayoutNode; hidden: string[] }): void {
+    if (!this.tree || !this.builtRootEl) {
+      return;
+    }
+    const hiddenIds = new Set(fit.hidden);
+    const walk = (node: LayoutNode, el: HTMLElement): boolean => {
+      if (node.kind === "leaf") {
+        const hidden = hiddenIds.has(node.id);
+        el.classList.toggle("af-pane-hidden", hidden);
+        return hidden;
+      }
+      const aEl = el.children[0] as HTMLElement | undefined;
+      const divider = el.children[1] as HTMLElement | undefined;
+      const bEl = el.children[2] as HTMLElement | undefined;
+      if (!aEl || !divider || !bEl) {
+        return false;
+      }
+      const hiddenA = walk(node.a, aEl);
+      const hiddenB = walk(node.b, bEl);
+      const hidden = hiddenA && hiddenB;
+      // A fully-hidden side drops out of flex with display:none — but the
+      // visible sibling must not keep its "ratio 1 0" basis: when the sum of
+      // a container's flex-grows is under 1 each item claims only grow × the
+      // free space rather than a normalized share, so a lone 0.5 would leave
+      // the pane visibly shrunk with half the wrap unallocated. Give the whole
+      // side to whichever child survived. Writes are guarded — assigning
+      // style.flex records a DOM mutation even when the value is unchanged.
+      const wantA = hiddenB ? "1 1 0" : `${node.ratio} 1 0`;
+      const wantB = hiddenA ? "1 1 0" : `${1 - node.ratio} 1 0`;
+      if (aEl.style.flex !== wantA) {
+        aEl.style.flex = wantA;
+      }
+      if (bEl.style.flex !== wantB) {
+        bEl.style.flex = wantB;
+      }
+      el.classList.toggle("af-split-hidden", hidden);
+      divider.classList.toggle("af-divider-hidden", hiddenA || hiddenB);
+      return hidden;
+    };
+    walk(this.tree, this.builtRootEl);
+  }
+
+  /** Keeps the ".af-split-narrow" notice in step with the fit on EVERY pass
+   *  (#6556): the hidden count can change while the visible tree does not (a
+   *  split opened into an already-narrow host, a hidden leaf closed), and a
+   *  refit never rebuilds — so the notice mounts, unmounts, and rewrites its
+   *  count here rather than inside the rebuild gate. The text write is guarded:
+   *  assigning textContent records a DOM mutation even when nothing changed. */
+  private syncNarrowNotice(fit: { hidden: string[] }): void {
+    if (!this.builtRootEl) {
+      return;
+    }
+    if (fit.hidden.length === 0) {
+      this.narrowEl?.remove();
+      return;
+    }
+    if (!this.narrowEl) {
+      this.narrowEl = el("div", "af-split-narrow");
+    }
+    const text = `${fit.hidden.length} pane${fit.hidden.length === 1 ? "" : "s"} hidden — too narrow; resize or close a pane`;
+    if (this.narrowEl.textContent !== text) {
+      this.narrowEl.textContent = text;
+    }
+    if (this.narrowEl.parentElement !== this.host) {
+      this.host.prepend(this.narrowEl);
+    }
   }
 
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
@@ -932,6 +1072,21 @@ export class SplitView {
       this.focusedId = successor ?? desired[0]?.id ?? null;
     }
 
+    // Fit the layout to the host (#6429): leaves the floors cannot hold drop
+    // out of the DISPLAY tree only — their panes and terminals stay live so
+    // output keeps streaming into them, and a host that grows back restores
+    // the exact layout, the same bindings the TUI keeps under "too narrow".
+    // An unmeasurable host (display:none session view, or the null a unit test
+    // stages) skips the fit and shows everything, as it always has.
+    const hostW = this.host ? this.host.clientWidth : 0;
+    const hostH = this.host ? this.host.clientHeight : 0;
+    const fit =
+      hostW > 0 && hostH > 0
+        ? fitToSize(this.tree, hostW, hostH, this.focusedId)
+        : { tree: this.tree, hidden: [] as string[] };
+    this.displayTree = fit.tree;
+    const visible = leaves(fit.tree);
+
     // Rebuild the split wrappers, inserting the persistent containers. Containers now
     // in the live DOM have real dimensions for the FitAddon.
     //
@@ -939,14 +1094,22 @@ export class SplitView {
     // screen would detach every live pane and silently rewind its xterm viewport to
     // the top, killing wheel-scroll on a session.updated that touched nothing this
     // pane shows (a tab created in another window, #1812/#1815) — see builtTree.
+    // The DOM mirrors the full retained tree, never the fit's display tree (#6555):
+    // a mere resize crossing the hidden/visible threshold must not reparent pane
+    // containers at all — re-inserting an <iframe> destroys its browsing context,
+    // reloading Web/VS Code panes and losing their state. Hide/restore is applied
+    // as CSS on the live tree by syncFitHidden below.
     if (!sameLayout(this.tree, this.builtTree)) {
       const rootEl = this.buildNode(this.tree);
       rootEl.style.flex = "1 1 0";
       this.host.replaceChildren(rootEl);
       this.builtTree = this.tree;
+      this.builtRootEl = rootEl;
     }
+    this.syncFitHidden(fit);
+    this.syncNarrowNotice(fit);
 
-    const multi = desired.length > 1;
+    const multi = visible.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
 
     // Whether the FOCUSED pane's terminal/iframe was torn down and rebuilt this
@@ -1741,10 +1904,22 @@ export class SplitView {
       divider.setPointerCapture(e.pointerId);
       document.body.classList.add(node.dir === "row" ? "af-resizing-col" : "af-resizing-row");
       const rect = parent.getBoundingClientRect();
+      // The floors are px, not fractions (#6429): a drag may shrink a side down
+      // to its usable minimum — covering every leaf inside the subtree — but
+      // never into a sliver. The wrapper's own box is fixed for the drag's life
+      // (flex moves its children, not it), so the rect captured here stays valid.
+      const leafMin = node.dir === "row" ? PANE_MIN_WIDTH_PX : PANE_MIN_HEIGHT_PX;
+      const minA = minSubtreeSize(node.a, node.dir, leafMin, PANE_DIVIDER_PX);
+      const minB = minSubtreeSize(node.b, node.dir, leafMin, PANE_DIVIDER_PX);
+      const span = Math.max(1, (node.dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_PX);
+      const lo = minA / span;
+      const hi = 1 - minB / span;
       const onMove = (ev: PointerEvent) => {
-        const ratio =
-          node.dir === "row" ? (ev.clientX - rect.left) / rect.width : (ev.clientY - rect.top) / rect.height;
-        const clamped = Math.min(0.9, Math.max(0.1, ratio));
+        const pos = node.dir === "row" ? ev.clientX - rect.left : ev.clientY - rect.top;
+        const want = pos / span;
+        // When even the minimums cannot coexist (the host shrank mid-gesture),
+        // the drag cannot go anywhere legal — hold the last valid ratio.
+        const clamped = lo <= hi ? Math.min(Math.min(hi, 0.9), Math.max(Math.max(lo, 0.1), want)) : node.ratio;
         // Mutate the live node's ratio (the tree is not in the store, so an in-place
         // update is fine) and reflect it immediately; the terminals' ResizeObservers
         // re-fit on their own as the flex basis changes.
@@ -1996,6 +2171,13 @@ export class SplitView {
     // that already holds focus must not invalidate an in-flight close.
     this.layoutGen++;
     this.applyFocusClass();
+    // Focus just moved to a leaf the fit hid (#6429): queue a refit so the
+    // protected-leaf rule mounts it again — focus must always land on something
+    // rendered. Not via commit(): the tree is untouched, and reconcile is far
+    // more than a focus move needs when the focused pane is already visible.
+    if (this.displayTree && !findLeaf(this.displayTree, leafId)) {
+      this.scheduleRefit();
+    }
     // The focused pane's status becomes the header status.
     const pane = this.panes.get(leafId);
     if (pane) {
@@ -2096,12 +2278,16 @@ export class SplitView {
     // (focusPane), so this is the one funnel that sees every way the focused tab can
     // change (#1901 Codex).
     this.syncFocusedTabId();
-    const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
+    // shown/open count the panes actually on screen (#6429): a leaf the fit
+    // hid keeps its terminal but is neither shown nor answerable from its own
+    // pane — its tab answers through the strip like any unpinned tab.
+    const display = this.displayTree ?? this.tree;
+    const shownTabs = display ? leaves(display).map((l) => l.tab) : [];
     // A tab counts as answerable only while its pane's stream is open: a
     // connecting/reconnecting pane shows the Connecting placeholder, not the
     // agent's question, so attention acknowledgement keys off openTabs.
-    const openTabs = this.tree
-      ? leaves(this.tree)
+    const openTabs = display
+      ? leaves(display)
           .filter((l) => this.panes.get(l.id)?.status === "open")
           .map((l) => l.tab)
       : [];

@@ -40,21 +40,66 @@ export function quietSession(name: string, opts: { perTest?: boolean } = {}) {
       // already gone
     }
   };
+  // Half of the same-name fence (#4217): `af sessions kill` returns before the
+  // daemon finishes tearing the record down, so the NEXT create can land while
+  // the old record still holds this title. Kill whatever the name holds, then
+  // wait until the Snapshot plane shows ZERO records with it before creating.
+  const waitGone = async (request: APIRequestContext) => {
+    await expect
+      .poll(
+        async () => {
+          const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+          return snapshot.data.instances.filter((s: { title: string }) => s.title === name).length;
+        },
+        { timeout: 15_000, message: `no stale ${name} record may survive teardown` },
+      )
+      .toBe(0);
+  };
   if (opts.perTest) {
-    test.beforeEach(create);
+    // The measured race is per-test churn: afterEach's kill can still be
+    // tearing down when the next test's create lands, and a title-match id()
+    // then binds the DYING session (attention.spec.ts:137 — the rail row
+    // vanished mid-test). Kill, wait for the name to be actually gone, create.
+    test.beforeEach(async ({ request }) => {
+      kill();
+      await waitGone(request);
+      create();
+    });
     test.afterEach(kill);
   } else {
-    test.beforeAll(create);
+    test.beforeAll(() => {
+      kill();
+      create();
+    });
     test.afterAll(kill);
   }
 
   return {
     name,
     async id(request: APIRequestContext) {
-      const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
-      const session = snapshot.data.instances.find((s: { title: string }) => s.title === name);
+      // Fence for the same-name create/kill race (#4217): `af sessions kill`
+      // returns before the daemon finishes tearing the record down, so an OLD
+      // record can still carry this title when the fresh one lands — and a
+      // title match then binds the DYING session, which vanishes mid-test
+      // (attention.spec.ts:137's empty-animation flake was the whole rail row
+      // disappearing under it). Wait for the name to resolve to EXACTLY ONE
+      // record, then bind that one: a lingering duplicate retries until the
+      // teardown completes, and a record that never dies times out loudly
+      // instead of silently binding the wrong session.
+      let session: { id: string } | undefined;
+      await expect
+        .poll(
+          async () => {
+            const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
+            const matches = snapshot.data.instances.filter((s: { title: string; id: string }) => s.title === name);
+            session = matches.length === 1 ? (matches[0] as { id: string }) : undefined;
+            return matches.length;
+          },
+          { timeout: 15_000, message: `exactly one ${name} session must exist` },
+        )
+        .toBe(1);
       expect(session?.id, `seeded session ${name}`).toBeTruthy();
-      return session.id as string;
+      return session!.id;
     },
     // Attached and showing the agent's one and only output. The quiet agent emits
     // nothing further, so this is a real condition, not a settle wait.

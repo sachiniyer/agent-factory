@@ -41,7 +41,7 @@ async function carrySessionActionsToPhone(
 async function splitTabToRight(page: Page, index: number): Promise<void> {
   await page.evaluate((tabIndex) => {
     const tab = document.querySelector<HTMLElement>(`.af-tab[data-tab-index="${tabIndex}"]`);
-    const pane = document.querySelector<HTMLElement>(".af-term-host .af-pane");
+    const pane = document.querySelector<HTMLElement>(".af-term-host .af-pane:not(.af-pane-hidden)");
     if (!tab || !pane) throw new Error("drag source or target pane not found");
     const transfer = new DataTransfer();
     tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: transfer }));
@@ -272,7 +272,7 @@ test("phone touch pane drop dismisses carried Session actions before recompositi
   });
   await expect(page.locator("body")).toHaveClass(/af-dragging-tab/, { timeout: 2_000 });
   await page.locator(".af-tabbar").evaluate((bar, { pointerId, from }) => {
-    const pane = document.querySelector<HTMLElement>(".af-term-host .af-pane");
+    const pane = document.querySelector<HTMLElement>(".af-term-host .af-pane:not(.af-pane-hidden)");
     if (!pane) throw new Error("focused pane not found");
     const r = pane.getBoundingClientRect();
     const x = r.left + r.width / 2;

@@ -182,6 +182,9 @@ func (b *Backlog) AddBatch(in Batch, now time.Time) (map[string]int, error) {
 	if err := c.checkCycles(); err != nil {
 		return nil, err
 	}
+	if err := c.checkOrchestrators(); err != nil {
+		return nil, err
+	}
 	*b = *c
 	return ids, nil
 }

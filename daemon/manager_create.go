@@ -208,6 +208,16 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// and replacement paths cannot differ on it.
 		SandboxCredentials: newSandboxCredentials(m, pending.ID),
 	}
+	// Bind the exact worktree path the create is about to place onto the task's
+	// durable fire marker (#6259): the local backend invokes this the instant
+	// before `git worktree add` runs, so a daemon killed between the worktree
+	// add and the record commit leaves a leftover whose path the marker already
+	// proves. No-op when the create carries no fire marker.
+	if fireTask != "" {
+		launchOpts.BeforeWorktreeCreate = func(wtPath string) {
+			noteTaskFireWorktree(fireTask, wtPath)
+		}
+	}
 	// The backend/target selection comes from the one resolver validation used.
 	req.applyBackendSelection(&launchOpts)
 	// Journal the attempt BEFORE session.NewInstance can spawn anything (#6301):

@@ -1636,6 +1636,37 @@ body[data-project-color] [data-af-theme="dark"] {
   position: relative;
 }
 
+/* The overflow cue (#6408): which strip edges still hide tabs, told by a fade —
+ * a clipped tab then reads as "there is more" instead of a word cut mid-glyph.
+ * The classes follow scrollLeft/scrollWidth/clientWidth (ui.ts syncTabOverflow);
+ * the "+N more" count is the later P18 redesign (#6436), deliberately not here. */
+.af-tabbar.af-tabbar-more-left {
+  -webkit-mask-image: linear-gradient(to right, transparent, var(--af-ink) calc(var(--af-space-3) * 1.5));
+  mask-image: linear-gradient(to right, transparent, var(--af-ink) calc(var(--af-space-3) * 1.5));
+}
+
+.af-tabbar.af-tabbar-more-right {
+  -webkit-mask-image: linear-gradient(to left, transparent, var(--af-ink) calc(var(--af-space-3) * 1.5));
+  mask-image: linear-gradient(to left, transparent, var(--af-ink) calc(var(--af-space-3) * 1.5));
+}
+
+.af-tabbar.af-tabbar-more-left.af-tabbar-more-right {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--af-ink) calc(var(--af-space-3) * 1.5),
+    var(--af-ink) calc(100% - var(--af-space-3) * 1.5),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--af-ink) calc(var(--af-space-3) * 1.5),
+    var(--af-ink) calc(100% - var(--af-space-3) * 1.5),
+    transparent
+  );
+}
+
 .af-tab {
   display: inline-flex;
   align-items: center;
@@ -1842,6 +1873,9 @@ body[data-project-color] [data-af-theme="dark"] {
   flex: 1;
   min-height: 0;
   display: flex;
+  /* Column so the .af-split-narrow notice stacks above the split root when a
+   * degraded layout has to say panes are hidden (#6429). */
+  flex-direction: column;
   background: var(--af-surface);
   overflow: hidden;
 }
@@ -1874,6 +1908,31 @@ body[data-project-color] [data-af-theme="dark"] {
 
 .af-split-column {
   flex-direction: column;
+}
+
+/* The visible half of the pane-minimum degradation (#6429): when the host cannot
+ * give every pane its floor, split.ts hides the leaves that do not fit and says
+ * so here — the TUI's "too narrow" status line ported to the strip — rather than
+ * rendering slivers. A plain notice: no animation, no interactivity. */
+.af-split-narrow {
+  flex: 0 0 auto;
+  padding: var(--af-space-1) var(--af-space-3);
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  background: var(--af-surface-raised);
+  border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  text-align: center;
+}
+
+/* The in-place half of the pane-minimum degradation (#6555): a leaf the fit
+ * dropped — or a split whose every leaf it dropped — stays mounted (detaching
+ * an <iframe> would destroy its browsing context and lose Web/VS Code state)
+ * but leaves flex layout entirely, so the visible siblings fill the space.
+ * !important so a pane's own display:flex cannot win. */
+.af-pane-hidden,
+.af-split-hidden,
+.af-divider-hidden {
+  display: none !important;
 }
 
 /* The drag handle between two split children. A thin hit target with a hover accent;
@@ -5276,4 +5335,53 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   min-height: 0;
   font-size: var(--af-type-caption);
   line-height: 1.5;
+}
+
+.af-backlog-tag {
+  font-size: var(--af-type-caption);
+  font-weight: 600;
+  color: var(--af-ink-muted);
+  white-space: nowrap;
+}
+
+.af-backlog-handoff-wrap[hidden], .af-backlog-effect[hidden] { display: none; }
+
+.af-backlog-handoff {
+  margin: var(--af-space-1) 0 0;
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  border-radius: var(--af-radius-control);
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-caption);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.af-backlog-effect { margin: var(--af-space-1) 0; }
+
+.af-backlog-inbox-list, .af-backlog-deps, .af-backlog-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+}
+
+.af-backlog-inbox-list { padding: var(--af-space-2) 0; }
+.af-backlog-inbox-card .af-backlog-question { margin-bottom: 0; }
+
+.af-backlog-inbox-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--af-space-2);
+  padding-bottom: var(--af-space-1);
+}
+
+.af-backlog-dep, .af-backlog-dep-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--af-space-1);
 }

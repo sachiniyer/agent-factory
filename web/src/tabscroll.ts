@@ -29,6 +29,19 @@ export function scrollDeltaToReveal(barLeft: number, barRight: number, tabLeft: 
   return 0;
 }
 
+/** Which edges of a horizontally scrolling strip still have content off-screen
+ *  — the overflow cue (#6408). `left` means the user has scrolled away from the
+ *  start, so leading tabs hide behind the left edge; `right` means scrollWidth
+ *  runs past the visible right edge. The same 1px slack as scrollDeltaToReveal
+ *  keeps fractional scroll geometry from flickering the cue at the exact ends. */
+export function tabOverflowFlags(scrollLeft: number, clientWidth: number, scrollWidth: number): { left: boolean; right: boolean } {
+  const slack = 1;
+  return {
+    left: scrollLeft > slack,
+    right: scrollLeft + clientWidth < scrollWidth - slack,
+  };
+}
+
 /** Whether the render must reveal the active tab: only when the (session, active
  *  index) pair differs from the last one revealed. A re-render with the same active
  *  tab — a roster event, a rename, the user scrolling the strip away — must NOT undo
