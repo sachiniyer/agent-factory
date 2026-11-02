@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "5b91e67a6f11";
+var CLIENT_VERSION = "2da4fe1b1851";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -14216,6 +14216,63 @@ function setRatio(root2, splitId, ratio) {
   };
   return rec(root2);
 }
+var PANE_MIN_WIDTH_PX = 320;
+var PANE_MIN_HEIGHT_PX = 80;
+var PANE_DIVIDER_PX = 4;
+function minSubtreeSize(node, dir, leafMinPx, dividerPx) {
+  if (node.kind === "leaf") {
+    return leafMinPx;
+  }
+  const a = minSubtreeSize(node.a, dir, leafMinPx, dividerPx);
+  const b = minSubtreeSize(node.b, dir, leafMinPx, dividerPx);
+  return node.dir === dir ? a + dividerPx + b : Math.max(a, b);
+}
+function leafSizes(root2, w, h2, dividerPx) {
+  const out = /* @__PURE__ */ new Map();
+  const walk = (node, nw, nh) => {
+    if (node.kind === "leaf") {
+      out.set(node.id, { w: nw, h: nh });
+      return;
+    }
+    if (node.dir === "row") {
+      const content = Math.max(0, nw - dividerPx);
+      walk(node.a, content * node.ratio, nh);
+      walk(node.b, content * (1 - node.ratio), nh);
+    } else {
+      const content = Math.max(0, nh - dividerPx);
+      walk(node.a, nw, content * node.ratio);
+      walk(node.b, nw, content * (1 - node.ratio));
+    }
+  };
+  walk(root2, w, h2);
+  return out;
+}
+function fitToSize(root2, w, h2, protectedId) {
+  let tree = root2;
+  const hidden = [];
+  for (; ; ) {
+    const sizes2 = leafSizes(tree, w, h2, PANE_DIVIDER_PX);
+    const ids = leaves(tree).map((l) => l.id);
+    const violators = new Set(
+      [...sizes2].filter(([, s]) => s.w < PANE_MIN_WIDTH_PX || s.h < PANE_MIN_HEIGHT_PX).map(([id]) => id)
+    );
+    if (violators.size === 0 || ids.length <= 1) {
+      break;
+    }
+    const droppable = [...ids].reverse().filter((id) => id !== protectedId);
+    const drop = droppable.find((id) => violators.has(id)) ?? droppable[0];
+    if (drop === void 0) {
+      break;
+    }
+    const next = closeLeaf(tree, drop);
+    if (next === null) {
+      break;
+    }
+    tree = next;
+    hidden.push(drop);
+  }
+  return { tree, hidden };
+}
 function validate(root2, tabCount) {
   const max = Math.max(0, tabCount - 1);
   const clamped = mapAllLeaves(root2, (leaf) => leaf.tab > max ? { ...leaf, tab: max } : leaf);
@@ -14744,6 +14801,9 @@ var SplitView = class {
     this.host = host;
     this.cb = cb;
     this.narrow = narrow;
+    if (this.host && typeof ResizeObserver === "function") {
+      new ResizeObserver(() => this.scheduleRefit()).observe(this.host);
+    }
   }
   // Retained layout per session id (in-memory; a nice-to-have to persist across
   // reload is out of scope for v1). Keyed by the stable session id.
@@ -14800,6 +14860,19 @@ var SplitView = class {
   // a divider resolves its split by ID when it persists, and the only state it
   // reads back (ratio) is what it wrote during that same drag.
   builtTree = null;
+  // The tree after the pane-minimum fit (#6429): the layout the DOM is asked to
+  // show, equal to `tree` minus whichever leaves the host cannot give
+  // PANE_MIN_WIDTH_PX/PANE_MIN_HEIGHT_PX. `tree` itself is untouched — the
+  // hidden panes keep their terminals and come back the moment the host grows,
+  // the same way the TUI keeps its pane bindings across a "too narrow" span.
+  // null until the first fit, in which case the full tree is the display one.
+  displayTree = null;
+  // The ".af-split-narrow" notice shown while the fit hides panes — the visible,
+  // deliberate half of the degradation. Created lazily on the first hide.
+  narrowEl = null;
+  // One ResizeObserver-detected host resize is one refit, however many entries
+  // the observer batches.
+  refitQueued = false;
   // Counts explicit layout/focus mutations, for the stale-async guard — see
   // layoutGeneration(), which is the documented contract.
   layoutGen = 0;
@@ -15155,6 +15228,26 @@ var SplitView = class {
     this.focusedId = null;
     this.termHoldsFocus = false;
     this.builtTree = null;
+    this.displayTree = null;
+  }
+  /** Coalesces ResizeObserver entries into at most one refit per frame: the
+   *  report follows so a resize that hid or restored panes updates the strip's
+   *  shown-tabs mirror the same pass. */
+  scheduleRefit() {
+    if (this.refitQueued) {
+      return;
+    }
+    this.refitQueued = true;
+    const run = () => {
+      this.refitQueued = false;
+      this.reconcile();
+      this.report();
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(run);
+    } else {
+      setTimeout(run, 0);
+    }
   }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
    *  (re)creates terminals whose tab changed, rebuilds the split wrappers (reusing
@@ -15185,13 +15278,26 @@ var SplitView = class {
       const successor = this.focusedId && this.builtTree ? focusSuccessorAfterDrop(this.builtTree, this.focusedId, wanted) : null;
       this.focusedId = successor ?? desired[0]?.id ?? null;
     }
-    if (!sameLayout(this.tree, this.builtTree)) {
-      const rootEl = this.buildNode(this.tree);
+    const hostW = this.host ? this.host.clientWidth : 0;
+    const hostH = this.host ? this.host.clientHeight : 0;
+    const fit = hostW > 0 && hostH > 0 ? fitToSize(this.tree, hostW, hostH, this.focusedId) : { tree: this.tree, hidden: [] };
+    this.displayTree = fit.tree;
+    const visible = leaves(fit.tree);
+    if (!sameLayout(fit.tree, this.builtTree)) {
+      const rootEl = this.buildNode(fit.tree);
       rootEl.style.flex = "1 1 0";
-      this.host.replaceChildren(rootEl);
-      this.builtTree = this.tree;
+      if (fit.hidden.length > 0) {
+        if (!this.narrowEl) {
+          this.narrowEl = el("div", "af-split-narrow");
+        }
+        this.narrowEl.textContent = `${fit.hidden.length} pane${fit.hidden.length === 1 ? "" : "s"} hidden \u2014 too narrow; resize or close a pane`;
+        this.host.replaceChildren(this.narrowEl, rootEl);
+      } else {
+        this.host.replaceChildren(rootEl);
+      }
+      this.builtTree = fit.tree;
     }
-    const multi = desired.length > 1;
+    const multi = visible.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
     let focusedRebuilt = false;
     for (const leaf of desired) {
@@ -15632,9 +15738,16 @@ var SplitView = class {
       divider.setPointerCapture(e.pointerId);
       document.body.classList.add(node.dir === "row" ? "af-resizing-col" : "af-resizing-row");
       const rect = parent.getBoundingClientRect();
+      const leafMin = node.dir === "row" ? PANE_MIN_WIDTH_PX : PANE_MIN_HEIGHT_PX;
+      const minA = minSubtreeSize(node.a, node.dir, leafMin, PANE_DIVIDER_PX);
+      const minB = minSubtreeSize(node.b, node.dir, leafMin, PANE_DIVIDER_PX);
+      const span = Math.max(1, (node.dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_PX);
+      const lo = minA / span;
+      const hi = 1 - minB / span;
       const onMove = (ev) => {
-        const ratio = node.dir === "row" ? (ev.clientX - rect.left) / rect.width : (ev.clientY - rect.top) / rect.height;
-        const clamped = Math.min(0.9, Math.max(0.1, ratio));
+        const pos = node.dir === "row" ? ev.clientX - rect.left : ev.clientY - rect.top;
+        const want = pos / span;
+        const clamped = lo <= hi ? Math.min(Math.min(hi, 0.9), Math.max(Math.max(lo, 0.1), want)) : node.ratio;
         node.ratio = clamped;
         aEl.style.flex = `${clamped} 1 0`;
         bEl.style.flex = `${1 - clamped} 1 0`;
@@ -15841,6 +15954,9 @@ var SplitView = class {
     this.focusedId = leafId;
     this.layoutGen++;
     this.applyFocusClass();
+    if (this.displayTree && !findLeaf(this.displayTree, leafId)) {
+      this.scheduleRefit();
+    }
     const pane = this.panes.get(leafId);
     if (pane) {
       this.cb.onStatus(pane.status, pane.status === "reconnecting" ? pane.retryAt : void 0);
@@ -15925,8 +16041,9 @@ var SplitView = class {
    *  changed — never on a no-op, so writing the store from it can't loop. */
   report() {
     this.syncFocusedTabId();
-    const shownTabs = this.tree ? leaves(this.tree).map((l) => l.tab) : [];
-    const openTabs = this.tree ? leaves(this.tree).filter((l) => this.panes.get(l.id)?.status === "open").map((l) => l.tab) : [];
+    const display = this.displayTree ?? this.tree;
+    const shownTabs = display ? leaves(display).map((l) => l.tab) : [];
+    const openTabs = display ? leaves(display).filter((l) => this.panes.get(l.id)?.status === "open").map((l) => l.tab) : [];
     const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0 : 0;
     const paneCount = shownTabs.length;
     const shownKey = `${shownTabs.join(",")}|${openTabs.join(",")}`;

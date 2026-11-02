@@ -1842,6 +1842,9 @@ body[data-project-color] [data-af-theme="dark"] {
   flex: 1;
   min-height: 0;
   display: flex;
+  /* Column so the .af-split-narrow notice stacks above the split root when a
+   * degraded layout has to say panes are hidden (#6429). */
+  flex-direction: column;
   background: var(--af-surface);
   overflow: hidden;
 }
@@ -1874,6 +1877,20 @@ body[data-project-color] [data-af-theme="dark"] {
 
 .af-split-column {
   flex-direction: column;
+}
+
+/* The visible half of the pane-minimum degradation (#6429): when the host cannot
+ * give every pane its floor, split.ts hides the leaves that do not fit and says
+ * so here — the TUI's "too narrow" status line ported to the strip — rather than
+ * rendering slivers. A plain notice: no animation, no interactivity. */
+.af-split-narrow {
+  flex: 0 0 auto;
+  padding: var(--af-space-1) var(--af-space-3);
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  background: var(--af-surface-raised);
+  border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  text-align: center;
 }
 
 /* The drag handle between two split children. A thin hit target with a hover accent;
