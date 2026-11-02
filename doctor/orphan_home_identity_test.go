@@ -62,6 +62,7 @@ func TestOrphanedProcessKill_SameHomeSymlinkSpelling_Armed(t *testing.T) {
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-dead-symlink-home",
 		tmux.EnvMarkerHome:    canonical,
+		"AGENT_FACTORY_HOME":  canonical,
 		// The orphan's session lived on doctor's ambient server (the inherited
 		// TMUX socket matches), so the record-absent kill arm corroborates its
 		// death and arms the kill — isolating the under-kill fix (symlinked
@@ -121,6 +122,7 @@ func TestOrphanedProcessKill_SameHomeCaseInsensitiveNotForeign_Armed(t *testing.
 	orphan := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-dead-case-home",
 		tmux.EnvMarkerHome:    markerHome,
+		"AGENT_FACTORY_HOME":  ourHome,
 		// The orphan's session lived on doctor's ambient server (the inherited
 		// TMUX socket matches), so the record-absent kill arm corroborates its
 		// death and arms the kill — isolating the os.SameFile arm of the under-
