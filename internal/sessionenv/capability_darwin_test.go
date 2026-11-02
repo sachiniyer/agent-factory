@@ -113,7 +113,7 @@ func TestDarwin_TheBrokerHoldsTheConnectionUntilTheClientCloses(t *testing.T) {
 }
 
 // LOCAL_PEERPID names the last process to use the peer socket, not the
-// connector (measured on macos-latest and macos-15-intel). The first message is
+// connector (measured on macos-15 and macos-15-intel). The first message is
 // attributed to the identity read at connect; a later one is read afresh, so a
 // descriptor handed to another process after connect is not attributed to the
 // connector.
