@@ -35,6 +35,11 @@ type (
 	StartBacklogItemResponse     = backlog.StartResponse
 	RunBacklogRequest            = backlog.RunRequest
 	RunBacklogResponse           = backlog.RunResponse
+
+	SetBacklogOrchestratorRequest         = backlog.SetOrchestratorRequest
+	SetBacklogOrchestratorResponse        = backlog.OrchestratorResponse
+	SetBacklogOrchestratorHandoffRequest  = backlog.SetOrchestratorHandoffRequest
+	SetBacklogOrchestratorHandoffResponse = backlog.OrchestratorResponse
 )
 
 func errUnknownBacklogMethod(method string) error {

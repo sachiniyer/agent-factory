@@ -30,6 +30,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af backlog list`](#af-backlog-list) — Print the backlog in order, as a tree, with each item's state
 - [`af backlog move`](#af-backlog-move) — Reorder an item; its children move with it
 - [`af backlog note`](#af-backlog-note) — Add a note to an item's thread
+- [`af backlog orchestrate`](#af-backlog-orchestrate) — Bind this session as a group's orchestrator, or unbind it
 - [`af backlog pause`](#af-backlog-pause) — Stop the runner from starting items in a parent
 - [`af backlog queue`](#af-backlog-queue) — Make an item eligible for the runner
 - [`af backlog reopen`](#af-backlog-reopen) — Reopen a done or dropped item as a draft
@@ -519,6 +520,7 @@ af backlog
 - [`af backlog list`](#af-backlog-list) — Print the backlog in order, as a tree, with each item's state
 - [`af backlog move`](#af-backlog-move) — Reorder an item; its children move with it
 - [`af backlog note`](#af-backlog-note) — Add a note to an item's thread
+- [`af backlog orchestrate`](#af-backlog-orchestrate) — Bind this session as a group's orchestrator, or unbind it
 - [`af backlog pause`](#af-backlog-pause) — Stop the runner from starting items in a parent
 - [`af backlog queue`](#af-backlog-queue) — Make an item eligible for the runner
 - [`af backlog reopen`](#af-backlog-reopen) — Reopen a done or dropped item as a draft
@@ -550,6 +552,8 @@ Add a draft item, or add and update many items from JSON
 
 Add one draft item, at the bottom of its parent by default. With --file, add or update many items at once from JSON: {"proposal": "<slug>", "items": [{"key", "title", "body", "parent", "waits_on", "program", "sequential"}]}. key is local to the file; parent and waits_on take a key or an item id. With proposal set, an item with the same proposal and key as an existing one is updated, not added again. The batch is all or nothing and prints each key's id. From an item session, add takes only a title and --parent: the agent files work it found as a draft, and af notes on the new item's thread which item's agent added it.
 
+With --orchestrate, also bind the session this runs in as the orchestrator of the one top-level parent the batch is under. An item session cannot orchestrate. A group another session orchestrates is refused unless --replace.
+
 ```
 af backlog add <title> | add --file <path or -> [flags]
 ```
@@ -562,8 +566,10 @@ af backlog add <title> | add --file <path or -> [flags]
 | `--before` | `string` | Place the item above this sibling `id` |
 | `--body` | `string` | Item body in markdown; - reads stdin |
 | `--file` | `string` | Add or update many items from this JSON `file`; - reads stdin |
+| `--orchestrate` |  | With --file, bind the session this runs in as the orchestrator of the batch's top-level parent |
 | `--parent` | `string` | Add the item as a child of this `id` |
 | `--program` | `string` | Program to run the item with (default: the project's default) |
+| `--replace` |  | With --orchestrate, take the group over from the session that orchestrates it |
 | `--waits-on` | `string` | Comma-separated item `ids` this item waits on |
 
 **Global flags**
@@ -881,6 +887,36 @@ af backlog note <id> <text> | note --self <text> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--self` |  | Note on the item of the session this runs in |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload; a text tree for list) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af backlog orchestrate
+
+Bind this session as a group's orchestrator, or unbind it
+
+With a group and --self, bind the session this runs in as the orchestrator of the group, a top-level parent. A session orchestrates at most one group, and an item session cannot orchestrate. A group another session orchestrates is refused unless --replace; the new session keeps its handoff notes. With --clear, unbind the group.
+
+--handoff-file stores notes for a session that replaces this one as orchestrator (at most 8 KB), read from a file or from stdin with -. Without a group it updates the notes of the group this session orchestrates.
+
+```
+af backlog orchestrate <group> --self [--replace] | <group> --clear | --self --handoff-file <path|-> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--clear` |  | Unbind the group's orchestrator |
+| `--handoff-file` | `string` | With --self, a `path` to notes for a session that replaces this one, or - for stdin |
+| `--replace` |  | With --self, take the group over from the session that orchestrates it |
+| `--self` |  | Bind the session this runs in |
 
 **Global flags**
 
