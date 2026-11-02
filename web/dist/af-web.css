@@ -1326,6 +1326,46 @@ body[data-project-color] [data-af-theme=dark] {
   scrollbar-width: thin;
   position: relative;
 }
+.af-tabbar.af-tabbar-more-left {
+  -webkit-mask-image:
+    linear-gradient(
+      to right,
+      transparent,
+      var(--af-ink) calc(var(--af-space-3) * 1.5));
+  mask-image:
+    linear-gradient(
+      to right,
+      transparent,
+      var(--af-ink) calc(var(--af-space-3) * 1.5));
+}
+.af-tabbar.af-tabbar-more-right {
+  -webkit-mask-image:
+    linear-gradient(
+      to left,
+      transparent,
+      var(--af-ink) calc(var(--af-space-3) * 1.5));
+  mask-image:
+    linear-gradient(
+      to left,
+      transparent,
+      var(--af-ink) calc(var(--af-space-3) * 1.5));
+}
+.af-tabbar.af-tabbar-more-left.af-tabbar-more-right {
+  -webkit-mask-image:
+    linear-gradient(
+      to right,
+      transparent,
+      var(--af-ink) calc(var(--af-space-3) * 1.5),
+      var(--af-ink) calc(100% - var(--af-space-3) * 1.5),
+      transparent);
+  mask-image:
+    linear-gradient(
+      to right,
+      transparent,
+      var(--af-ink) calc(var(--af-space-3) * 1.5),
+      var(--af-ink) calc(100% - var(--af-space-3) * 1.5),
+      transparent);
+}
 .af-tab {
   display: inline-flex;
   align-items: center;
