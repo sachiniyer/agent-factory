@@ -75,8 +75,9 @@ test("#6563: a touch user can still close a pane when the fit shows only one", a
   await hideButton.click();
 
   // The leaf collapses out of the retained tree: one pane, no notice, and the
-  // closed pane's tab is back to being a strip-only tab (still in the bar).
+  // closed pane's tab is back to being a strip-only tab (still in the bar) —
+  // a pane close removes the leaf, never the roster entry.
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
   await expect(page.locator(".af-split-narrow")).toHaveCount(0);
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(base + 1);
+  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(base + 2);
 });
