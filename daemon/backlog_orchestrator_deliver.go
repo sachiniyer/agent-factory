@@ -302,15 +302,22 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 		}
 	}()
 	data, err := createBacklogSession(m, ctx, create)
-	if err == nil && data.ID == "" {
+	delivered := d.Events
+	switch {
+	case err != nil && isMutationCommitted(err) && data.ID != "":
+		// The create kept a session whose startup it could not confirm (Codex P2
+		// on #6571): it may be running, so it is bound rather than replaced by a
+		// second one, unstarted so the next delivery sends the start prompt. A
+		// session that never came up fails those deliveries, and they escalate.
+		m.warn().Printf("orchestrator replacement %q for %s: %v; binding it, since it may be running", data.Title, backlog.FormatID(d.Group), err)
+		delivered = nil
+	case err == nil && data.ID == "":
 		err = errors.New("the daemon created no session")
-	}
-	if err != nil {
+		fallthrough
+	case err != nil:
 		m.orchDeliveryFailed(stop, repoID, d, "af could not start a replacement session: "+err.Error())
 		return
-	}
-	delivered := d.Events
-	if data.LastPromptDeliveryStatus == session.PromptNotDelivered {
+	case data.LastPromptDeliveryStatus == session.PromptNotDelivered:
 		// The replacement exists, but its first prompt, with the events, was
 		// proven not to reach the agent: bind it and keep the events, which the
 		// next pass sends to the now-live session.

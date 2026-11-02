@@ -511,3 +511,35 @@ func TestOrchestratorRestoredWithoutItsConversationKeepsTheStartPromptPending(t 
 	require.Empty(t, o.Unstarted)
 	require.Empty(t, o.Events)
 }
+
+// TestOrchestratorReplacementWithAnUncertainCreateIsBound: a create that
+// commits a session it could not confirm returns it with a committed error.
+// That session may be running, so it is bound, unstarted, and no second
+// replacement is started (Codex P2 on #6571).
+func TestOrchestratorReplacementWithAnUncertainCreateIsBound(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	m.mu.Lock()
+	delete(m.instances, daemonInstanceKey(repoID, "planner"))
+	m.mu.Unlock()
+	creates := 0
+	prev := createBacklogSession
+	createBacklogSession = func(m *Manager, _ context.Context, _ CreateSessionRequest) (session.InstanceData, error) {
+		creates++
+		m.mu.Lock()
+		m.instances[daemonInstanceKey(repoID, "effort B-2 Effort")] = &session.Instance{ID: "n1", Title: "effort B-2 Effort", Program: "claude", CreatedAt: time.Now()}
+		m.mu.Unlock()
+		return session.InstanceData{ID: "n1", Title: "effort B-2 Effort"}, &mutationCommittedError{err: errors.New("its startup outcome could not be determined safely")}
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+	stubBacklogSend(t, m, repoID)
+
+	runOrchDelivery(t, m, repoID, time.Now())
+	o := orchOf(t, repoID)
+	require.Equal(t, "n1", o.SessionID, "the session the create kept is bound")
+	require.Equal(t, backlog.OrchUnstartedReplaced, o.Unstarted)
+	require.Nil(t, o.Replacing)
+	require.Empty(t, o.Failures)
+
+	runOrchDelivery(t, m, repoID, time.Now())
+	require.Equal(t, 1, creates, "no second replacement")
+}
