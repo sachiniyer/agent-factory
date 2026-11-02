@@ -86,6 +86,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"ssh.host_key_verification":      EffectAppliedLive,
 	"sandbox.ssh":                    EffectAppliedLive,
 	"sandbox.binary":                 EffectAppliedLive,
+	"sandbox.push_credentials":       EffectAppliedLive,
 	"hosts":                          EffectAppliedLive,
 	"default_host":                   EffectAppliedLive,
 	// The network listener keys apply live since #2480 PR2: require_token /

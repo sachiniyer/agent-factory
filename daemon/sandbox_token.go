@@ -63,6 +63,10 @@ type sandboxTokenRegistry struct {
 	// credential without scanning. A session holds at most one at a time; a
 	// re-provision replaces it, which implicitly revokes the old one.
 	bySession map[string]string
+	// refBySession is the ref each session's current credential derives from:
+	// the callback identity its runtime's own tunnel carries, which the gate
+	// requires of every request the credential presents (carriedByOwnForward).
+	refBySession map[string]string
 }
 
 // mint issues a fresh credential for sessionID, replacing and thereby revoking
@@ -114,12 +118,24 @@ func (r *sandboxTokenRegistry) adopt(sessionID, ref string, ensureKey bool) (str
 	if r.bySecret == nil {
 		r.bySecret, r.bySession = map[string]string{}, map[string]string{}
 	}
+	if r.refBySession == nil {
+		r.refBySession = map[string]string{}
+	}
 	if previous, ok := r.bySession[sessionID]; ok {
 		delete(r.bySecret, previous)
 	}
 	r.bySecret[secret] = sessionID
 	r.bySession[sessionID] = secret
+	r.refBySession[sessionID] = ref
 	return secret, nil
+}
+
+// refFor is the ref sessionID's current credential derives from; empty when it
+// holds none.
+func (r *sandboxTokenRegistry) refFor(sessionID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.refBySession[sessionID]
 }
 
 // sessionFor returns the session a presented credential belongs to.
@@ -139,6 +155,18 @@ func (r *sandboxTokenRegistry) sessionFor(secret string) (string, bool) {
 	return sessionID, ok
 }
 
+// stillGrants reports whether secret is still sessionID's credential: false once
+// the session's teardown, archive or replacement revoked or replaced it. A route
+// that does slow work after the gate admitted a request re-checks the very
+// credential it was admitted with (push_credential.go).
+func (r *sandboxTokenRegistry) stillGrants(sessionID, secret string) bool {
+	if sessionID == "" || secret == "" {
+		return false
+	}
+	owner, ok := r.sessionFor(secret)
+	return ok && owner == sessionID
+}
+
 // revoke drops the credential a session holds. Idempotent: a session that never
 // had one, or whose credential was already replaced, is a no-op success, because
 // every teardown path calls this and none of them should fail for it.
@@ -151,6 +179,7 @@ func (r *sandboxTokenRegistry) revoke(sessionID string) {
 	}
 	delete(r.bySecret, secret)
 	delete(r.bySession, sessionID)
+	delete(r.refBySession, sessionID)
 }
 
 // revokeAll drops every outstanding sandbox credential and reports how many it
@@ -168,7 +197,7 @@ func (r *sandboxTokenRegistry) revokeAll() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n := len(r.bySession)
-	r.bySecret, r.bySession = nil, nil
+	r.bySecret, r.bySession, r.refBySession = nil, nil, nil
 	// Advanced on every CALL, not only when something was dropped. A sweep that
 	// finds the registry empty still means an invalidating event happened, and the
 	// mint racing it has not registered its token yet — exactly the case a count

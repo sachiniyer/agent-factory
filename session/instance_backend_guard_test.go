@@ -43,6 +43,14 @@ import (
 //     (remoteClient == nil). The daemon's handoff-recovery gate (#5634) calls
 //     it to refuse retrying a mission on a client-less row before a readiness
 //     wait would burn against the deadRemoteAgentServer sentinel.
+//   - PushCredentialPlacement — reads i.backend and its runtime handle under one
+//     i.mu.RLock (#5571 W7.8), because a teardown clears that handle under i.mu;
+//     reading the backend through currentBackend() and then the handle unlocked
+//     is exactly the race the security review of #6433 found.
+//   - RuntimeMachine — the same handle, under the same lock, for the same reason:
+//     the host-sharing rule reads every live session's machine (#5571 W7.8).
+//   - recordReprovisionPlacement — reads the backend kind under one
+//     i.mu.RLock, then records the planned placement with no lock held.
 //
 // owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
 // backend pointer its caller already read under i.mu as an argument and never
@@ -72,6 +80,9 @@ var backendReadersUnderLock = map[string]bool{
 	"FromInstanceDataWithContext":   true, // the same constructor body; FromInstanceData delegates to it (#6446)
 	"ReattachSandbox":               true,
 	"RemoteRuntimeUnbound":          true,
+	"PushCredentialPlacement":       true,
+	"RuntimeMachine":                true,
+	"recordReprovisionPlacement":    true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.

@@ -123,6 +123,11 @@ type CreateSessionRequest struct {
 	// caller spawn arbitrary commands and proxy targets under a new session.
 	restoreTabs []session.TabData
 
+	// createdBySandbox is the session whose sandbox callback credential asked for
+	// this create (#5571 W7.8). Unexported, so no client can send or forge it: the
+	// scoped create stamps it from the credential that admitted the request.
+	createdBySandbox string
+
 	// replacesReapedRecord marks the create as a HEAL rather than a new session
 	// (#2629), so the launch can mark a root that did not come back on its prior
 	// conversation. It is separate from the two carries above because the heal

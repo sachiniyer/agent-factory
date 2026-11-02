@@ -26,6 +26,10 @@ import (
 //   - classWithheld: every FREE-FORM daemon string (a path, a message, a tmux name,
 //     a name derived from caller text) and anything that can embed caller text. It
 //     is omitted from sandbox responses; the typed projection removes it.
+//   - classCredential: the one value a route exists to hand its OWN session — the
+//     push credential (#5571 W7.8). It comes back verbatim: scrubbing a token for
+//     layout strings could only corrupt it, and nothing in it describes the host.
+//     A test confines this class to GitCredentialResponse.
 //
 // Classification follows the value's ORIGIN, not its container: a value a sandbox
 // can write is caller text wherever it is read back. A daemon-composed string that
@@ -50,6 +54,7 @@ const (
 	classDaemon stringClass = iota + 1
 	classCaller
 	classWithheld
+	classCredential
 )
 
 // fieldSpec is one classified field. vocab is required for classDaemon: the closed
@@ -109,6 +114,12 @@ var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 	// its title, which the sandbox itself supplied. The reason a caller sets is never
 	// echoed, and the projected row drops attention entirely.
 	reflect.TypeFor[SetAttentionResponse](): {"id": closedVocab("session id"), "title": callerText},
+	// The push credential goes back to the session that asked for it, for its own
+	// origin only (push_credential.go); the username is GitHub's fixed one.
+	reflect.TypeFor[GitCredentialResponse](): {
+		"username": closedVocab("GitHub's fixed token username"),
+		"password": fieldSpec{class: classCredential},
+	},
 }
 
 // sandboxRunStatusHeads is the closed vocabulary of a task run status's head (the
@@ -146,6 +157,7 @@ var sandboxResponseTypes = map[string]reflect.Type{
 	"/v1/ListTasks":      reflect.TypeFor[ListTasksResponse](),
 	"/v1/AddTask":        reflect.TypeFor[AddTaskResponse](),
 	"/v1/RemoveTask":     reflect.TypeFor[RemoveTaskResponse](),
+	"/v1/GitCredential":  reflect.TypeFor[GitCredentialResponse](),
 }
 
 // jsonField is one JSON-visible field of a struct type, with the struct type that

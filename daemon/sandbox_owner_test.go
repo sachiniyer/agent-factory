@@ -75,11 +75,18 @@ func TestAuthGate_BindsTheCredentialToItsOwningSession(t *testing.T) {
 		expectedToken: func() (string, error) { return "operator-token", nil },
 		sandboxTokens: &registry,
 	}
+	forwards := installOwnForwards(t, &registry)
 	request := func(token string) *http.Request {
 		r := mustRequest(t, http.MethodPost, "/v1/Snapshot")
 		r.Header.Set("Authorization", "Bearer "+token)
-		return r
+		return forwards.carry(r)
 	}
+
+	// A's credential through B's forward is no one's (#5571 W7.8).
+	wrong := mustRequest(t, http.MethodPost, "/v1/Snapshot")
+	wrong.Header.Set("Authorization", "Bearer "+secretA)
+	_, ok := gate.authorize(forwards.through(wrong, "sess-b"))
+	require.False(t, ok, "a credential sent through another session's forward")
 
 	owner, ok := gate.authorize(request(secretA))
 	require.True(t, ok)
@@ -134,13 +141,14 @@ func TestSnapshot_SandboxCredentialSeesOnlyItsOwnProject(t *testing.T) {
 		sandboxTokens: &manager.sandboxTokens,
 	}, nil)
 
+	forwards := installOwnForwards(t, &manager.sandboxTokens)
 	snapshotAs := func(token string) SnapshotResponse {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, "/v1/Snapshot", strings.NewReader(`{}`))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		gated.ServeHTTP(rec, req)
+		gated.ServeHTTP(rec, forwards.carry(req))
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		var env struct {
 			Data SnapshotResponse `json:"data"`

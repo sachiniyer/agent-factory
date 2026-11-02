@@ -125,7 +125,34 @@ func reapRefusalSuggestionFor(repoID string, instance *session.Instance) string 
 // drift, or replace an executable force-reap with an unnecessarily destructive
 // kill (#4195).
 func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *session.Instance, reapGuidance string) error {
+	// This push is af's own decision, not the user's, so it must not start
+	// succeeding just because the host can now get push credentials (#5571 W7.8,
+	// the owner's answer to Q4): the credential route refuses this row while the
+	// push runs. Only a CONFIRMED success lifts the fence. Any other ending — a
+	// timeout, a lost reply, a refusal, a daemon restart — may leave the
+	// in-sandbox archive running (it takes no context, and its git steps have no
+	// deadline), so the row stays fenced for as long as its current callback
+	// credential lives: until a replacement runtime gets a new one, or the
+	// session ends. The fence is persisted BEFORE the push starts; if it cannot
+	// be, the push does not run.
+	// Fenced against the runtime's callback IDENTITY, not the token the registry
+	// happens to hold right now: a row the daemon has no token for yet (one not
+	// reattached since a restart) is fenced all the same, and the token it gets
+	// re-derived later is still fenced.
+	var callbackRef string
+	if placement, ok := instancePushPlacement(instance); ok {
+		callbackRef = placement.CallbackRef
+	}
+	endFence, ferr := m.pushCreds.beginAutoPush(instance.ID, callbackRef, m.callbackRefSnapshot)
+	if ferr != nil {
+		return fmt.Errorf(
+			"refusing to replace the sandbox for %q: the record that keeps push credentials away from af's own "+
+				"preserve-push could not be written (%w), so the push that would make its work durable did not run. "+
+				"It stays recoverable. Recovery guidance: %s",
+			instance.Title, ferr, reapGuidance)
+	}
 	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
+	endFence(err == nil)
 	if err != nil {
 		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its
 		// push fails. The session stays Lost and the retry loop keeps trying, which

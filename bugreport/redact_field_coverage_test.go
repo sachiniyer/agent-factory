@@ -85,6 +85,9 @@ const guardContainerLen = 9 * guardUnitLen
 var verbatimInstanceFields = map[string]string{
 	"ID":     "minted instance id, never derived from user text",
 	"TaskID": "minted task id (#1892), never derived from user text",
+	// The creating session's own minted instance id (#5571 W7.8): the same kind
+	// of value as ID above, stamped by the daemon from the admitting credential.
+	"CreatedBySandbox": "minted instance id of the creating session, never derived from user text",
 	// The durable on_complete obligation (#4162) records WHOSE teardown is
 	// owed — the same minted task id the TaskID row above already carries
 	// verbatim — and WHEN the obligation was filed; no user text reaches it.

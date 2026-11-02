@@ -49,6 +49,11 @@ func newListedFixture(t *testing.T, hosts map[string]config.HostConfig) listedFi
 func (f listedFixture) create(t *testing.T, opts InstanceOptions) (*Instance, error) {
 	t.Helper()
 	opts.Title, opts.Path, opts.Program = "acct-offbox", f.repo, tmux.ProgramClaude
+	if opts.SandboxCredentials == nil {
+		// The daemon's recorder: a placement the operator didn't choose (a repo
+		// target) is recorded before it provisions (#5571 W7.8).
+		opts.SandboxCredentials = &recorder{}
+	}
 	return NewInstance(opts)
 }
 
@@ -142,7 +147,7 @@ func TestReprovisionCarriesThePersistedAccountOnlyOnAListedHost(t *testing.T) {
 		return &Instance{
 			Title: "s", Path: f.repo, Branch: "root/s", Host: host, Program: tmux.ProgramClaude,
 			Account: "work", backend: newInertSandboxBackend("ssh"),
-			runtimeTeardown: func() error { return nil },
+			runtimeTeardown: func() error { return nil }, sandboxCreds: &recorder{},
 		}
 	}
 
@@ -165,7 +170,7 @@ func TestRestoreRefusesWhenThePersistedAccountCannotBeCarried(t *testing.T) {
 	i := &Instance{
 		Title: "s", Path: f.repo, Branch: "root/s", Host: "box1", Program: tmux.ProgramClaude,
 		Account: "work", backend: newInertSandboxBackend("ssh"),
-		runtimeTeardown: func() error { reaped = true; return nil },
+		runtimeTeardown: func() error { reaped = true; return nil }, sandboxCreds: &recorder{},
 	}
 
 	// The host is no longer listed (the operator removed it from the global config).
@@ -186,7 +191,7 @@ func TestRestoreRefusesWhenThePersistedAccountIsGone(t *testing.T) {
 	i := &Instance{
 		Title: "s", Path: f.repo, Branch: "root/s", Host: "box1", Program: tmux.ProgramClaude,
 		Account: "work", backend: newInertSandboxBackend("ssh"),
-		runtimeTeardown: func() error { reaped = true; return nil },
+		runtimeTeardown: func() error { reaped = true; return nil }, sandboxCreds: &recorder{},
 	}
 	require.NoError(t, os.RemoveAll(f.accountDir)) // the account was removed from the registry
 
@@ -288,7 +293,7 @@ func TestRestoreRefusesAChangedUnprovenCommandBeforeReaping(t *testing.T) {
 	i := &Instance{
 		Title: "s", Path: f.repo, Branch: "root/s", Host: "box1", Program: tmux.ProgramClaude,
 		Account: "work", backend: newInertSandboxBackend("ssh"),
-		runtimeTeardown: func() error { reaped = true; return nil },
+		runtimeTeardown: func() error { reaped = true; return nil }, sandboxCreds: &recorder{},
 	}
 	err := i.reprovisionRemote()
 	require.Error(t, err)

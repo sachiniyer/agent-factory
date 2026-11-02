@@ -56,6 +56,14 @@ type HostConfig struct {
 	// backend = "ssh" does. When on, af still pins the connection to one machine,
 	// but host-key checking is ssh's own, exactly as for sandbox.ssh.
 	UseSSHConfig bool `json:"use_ssh_config,omitempty" toml:"use_ssh_config,omitempty"`
+	// PushCredentials opts this host into push credentials (#5571 W7.8): a
+	// session placed here can `git push` its origin and run `gh` as the operator.
+	// The token is the daemon box's own GitHub login, fetched by the session over
+	// its scoped af callback each time git or gh asks, and never stored on the
+	// host. Off by default, so listing a host never starts sending the operator's
+	// GitHub authority to it by itself; the daemon reads it live on every request,
+	// so turning it off stops the next answer.
+	PushCredentials bool `json:"push_credentials,omitempty" toml:"push_credentials,omitempty"`
 }
 
 const maxHostNameLen = 62 // after the first character

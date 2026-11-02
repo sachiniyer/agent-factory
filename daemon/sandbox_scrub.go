@@ -191,7 +191,7 @@ func scrubSandboxValue(v any, t reflect.Type, caller bool) any {
 			if f, ok := fields[k]; ok {
 				childType = f.typ
 				switch sandboxStringClasses[f.owner][k].class {
-				case classCaller:
+				case classCaller, classCredential:
 					childCaller = true
 				case classWithheld:
 					if s, isStr := child.(string); isStr && s != "" && k == "warning" {
