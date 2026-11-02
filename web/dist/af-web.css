@@ -1549,6 +1549,11 @@ body[data-project-color] [data-af-theme=dark] {
   border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
   text-align: center;
 }
+.af-pane-hidden,
+.af-split-hidden,
+.af-divider-hidden {
+  display: none !important;
+}
 .af-divider {
   flex: 0 0 auto;
   background: var(--af-border);
