@@ -28,6 +28,16 @@ func lsRemoteBranch(originURL, branch string, timeout time.Duration) (out []byte
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err = cmd.Output()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// git itself exited 0 — a non-zero exit surfaces as an *exec.ExitError,
+		// not ErrWaitDelay — and only a descendant (e.g. a transport/credential
+		// helper that inherited the capture pipe) held it open past
+		// dockerWaitDelay. The ref line is already complete in out, so this is
+		// not a failure: treating it as one would discard a healthy ls-remote
+		// answer and refuse a session restore whose branch is on origin
+		// (#1967 convention, same guard as originRemoteURL and dockerExec).
+		err = nil
+	}
 	if err == nil {
 		return out, true, nil
 	}
