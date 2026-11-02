@@ -189,7 +189,7 @@ func (b *Backlog) BeginOrchReplace(group int, sessionID, titleBase string, now t
 // OrchEscalationQuestion is the question af asks on a group when it cannot
 // reach the group's orchestrator.
 func OrchEscalationQuestion(title, reason string) string {
-	return fmt.Sprintf("af could not wake the effort session %q %d times in %d minutes (last: %s). Its events wait. Check the session, then answer here to try again.",
+	return fmt.Sprintf("af could not wake the effort session %q %d times in %d minutes (last: %s). Nothing is lost: af keeps what it has to send. Check the session, then answer here to try again.",
 		title, OrchMaxFailures, int(OrchFailureWindow/time.Minute), reason)
 }
 
