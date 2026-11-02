@@ -780,6 +780,9 @@ var httpRoutes = []HTTPRoute{
 //     daemon refuses before its legacy mutation can run.
 //   - Preview is the daemon-sole-capturer render path, an implementation detail of
 //     how the TUI draws, not something a user scripts.
+//   - WorkspaceFacts is the off-box kill confirmation's workspace measurement,
+//     an implementation detail of how the TUI warns what a kill destroys, not
+//     something a user scripts.
 //   - Pause/ResumeStatusPoll are attach-coordination infra (best-effort poll
 //     leases, #1160) that no CLI user should call.
 //
