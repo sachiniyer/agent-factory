@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "04ad6812b6de";
+var CLIENT_VERSION = "3406b1e0e889";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -23767,9 +23767,13 @@ var BacklogLoader = class {
   }
   /** The newest refresh started so far, settled with whether each project's read landed in a committed snapshot. */
   tail = Promise.resolve(/* @__PURE__ */ new Map());
+  /** How many refreshes have started reading: a refresh a reset made stale, with none
+   *  started after it, is the tail itself and has nothing newer to wait for. */
+  refreshesStarted = 0;
   async run() {
     const token2 = this.opts.token();
     if (token2 === null) return /* @__PURE__ */ new Map();
+    const mine = ++this.refreshesStarted;
     const gen = ++this.generation;
     const budgetGen = ++this.budgetGeneration;
     const spendGen = this.spendGeneration;
@@ -23779,7 +23783,7 @@ var BacklogLoader = class {
       getBudget(token2).catch(() => null)
     ]);
     if (this.opts.token() !== token2) return /* @__PURE__ */ new Map();
-    if (gen !== this.generation) return this.tail;
+    if (gen !== this.generation) return this.refreshesStarted === mine ? /* @__PURE__ */ new Map() : this.tail;
     const ok = new Map(results.map((r) => [r.root, r.view !== null]));
     const cur = this.opts.current();
     const prev = cur.views;

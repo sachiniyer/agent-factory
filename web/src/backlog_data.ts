@@ -93,9 +93,14 @@ export class BacklogLoader {
   /** The newest refresh started so far, settled with whether each project's read landed in a committed snapshot. */
   private tail: Promise<Map<string, boolean>> = Promise.resolve(new Map());
 
+  /** How many refreshes have started reading: a refresh a reset made stale, with none
+   *  started after it, is the tail itself and has nothing newer to wait for. */
+  private refreshesStarted = 0;
+
   private async run(): Promise<Map<string, boolean>> {
     const token = this.opts.token();
     if (token === null) return new Map();
+    const mine = ++this.refreshesStarted;
     const gen = ++this.generation;
     const budgetGen = ++this.budgetGeneration;
     const spendGen = this.spendGeneration;
@@ -108,7 +113,9 @@ export class BacklogLoader {
     ]);
     if (this.opts.token() !== token) return new Map();
     // A newer refresh commits instead; this one is acknowledged only by what that one reads.
-    if (gen !== this.generation) return this.tail;
+    // A reset with no newer refresh leaves nothing to wait for: waiting on the tail would
+    // be waiting on this refresh itself (a promise chaining cycle).
+    if (gen !== this.generation) return this.refreshesStarted === mine ? new Map() : this.tail;
     const ok = new Map(results.map((r) => [r.root, r.view !== null] as [string, boolean]));
     const cur = this.opts.current();
     const prev = cur.views;
