@@ -346,6 +346,9 @@ type Instance struct {
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
+	// runtimeReplacedAt is when this process last retired the idle evidence
+	// for a new runtime; in memory only.
+	runtimeReplacedAt time.Time
 	// taskRunPromptAttemptAt is the task run's OWN prompt boundary (#5219),
 	// scoped apart from lastPromptAttemptAt: a manual send while the run is
 	// active must not re-arm a delivery window the agent already satisfied.

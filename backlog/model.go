@@ -143,6 +143,9 @@ type RunRef struct {
 	// window's start, or when af last stopped the run at the cap.
 	CapReset int64   `json:"cap_reset,omitempty"`
 	CapBase  float64 `json:"cap_base,omitempty"`
+	// StalledAt is when af last told the group's orchestrator this run
+	// stalled; only work after it starts a new idle period.
+	StalledAt time.Time `json:"stalled_at,omitzero"`
 }
 
 type Meter struct {
@@ -178,6 +181,9 @@ type Message struct {
 	// schema v2 fields that later slices fill in (Refs #6284).
 	Then    string `json:"then,omitempty"`
 	Handoff string `json:"handoff,omitempty"`
+	// Route is where a question goes: RouteOrchestrator, RouteUser, or ""
+	// for the user.
+	Route string `json:"route,omitempty"`
 }
 
 type Settings struct {
