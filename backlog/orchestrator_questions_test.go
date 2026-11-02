@@ -1,9 +1,11 @@
 package backlog
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAskRoutesToOrchestrator(t *testing.T) {
@@ -248,7 +250,7 @@ func TestEscalateStrandedMovedBetweenGroups(t *testing.T) {
 			t.Fatalf("%s: no attention text", route)
 		}
 		prev = b.clone()
-		if _, err := b.Answer(2, 0, "this one", t0); err != nil {
+		if _, err := b.Answer(2, 0, "this one", "", t0); err != nil {
 			t.Fatal(err)
 		}
 		if got := b.queueOrchChanges(prev, t0); got != nil {
@@ -372,5 +374,157 @@ func TestAnswerKeepsTheWaitWhileARoutedQuestionIsOpen(t *testing.T) {
 	}
 	if h.attention["s2"] != "" || h.attentionID["s2"] != second {
 		t.Fatalf("after the answer: attention %q #%d; want no text and #%d, the routed question still open", h.attention["s2"], h.attentionID["s2"], second)
+	}
+}
+
+// An answer from the group's orchestrator is its agent's, and the prompt
+// delivered to the item's session says the effort session answered. Any other
+// caller, and an orchestrator answering outside its own group, answers as the
+// user.
+func TestAnswerFromOrchestrator(t *testing.T) {
+	for _, tc := range []struct {
+		id              int
+		session, caller string
+		author, prompt  string
+	}{
+		{2, "s2", "o", "agent:o", `The effort session answered your question on B-2 ("which?"): postgres`},
+		{2, "s2", "x", AuthorUser, `The user answered your question on B-2 ("which?"): postgres`},
+		{2, "s2", "", AuthorUser, `The user answered your question on B-2 ("which?"): postgres`},
+		{6, "s6", "o", AuthorUser, `The user answered your question on B-6 ("which?"): postgres`},
+	} {
+		b := eventsGroup(t)
+		if _, err := b.Ask(tc.id, tc.session, Question{Text: "which?"}, t0); err != nil {
+			t.Fatal(err)
+		}
+		out, err := b.Answer(tc.id, 0, "postgres", tc.caller, t0)
+		if err != nil || out.Answer.Author != tc.author {
+			t.Fatalf("B-%d by %q: %+v %v", tc.id, tc.caller, out.Answer, err)
+		}
+		if p := b.PendingAnswers(); len(p) != 1 || p[0].Prompt != tc.prompt {
+			t.Fatalf("B-%d by %q: %+v", tc.id, tc.caller, p)
+		}
+	}
+}
+
+// The service carries the caller to both answer paths: the prompt delivered to
+// a live session, and the host's new run for a gone one.
+func TestServiceAnswerFromOrchestrator(t *testing.T) {
+	s, h := orchService(t)
+	h.target = TargetLive
+	mustAdd(t, s, ItemInput{Key: "g", Title: "G"}, ItemInput{Key: "a", Title: "A", Parent: Ref{Key: "g"}})
+	if _, err := Update(repoID, func(b *Backlog) error {
+		it := b.Item(2)
+		it.Status = StatusRunning
+		it.Runs = []RunRef{{SessionID: "s2", State: RunStarted}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetOrchestrator(SetOrchestratorRequest{RepoID: repoID, ID: 1, SessionID: "o1"}); err != nil {
+		t.Fatal(err)
+	}
+	ask := func(text string) {
+		t.Helper()
+		if _, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 2, Kind: KindQuestion, Text: text, SessionID: "s2"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ask("which db?")
+	out, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 2, Kind: KindAnswer, Text: "postgres", CallerSessionID: "o1"})
+	if err != nil || out.Message.Author != "agent:o1" {
+		t.Fatalf("%+v %v", out, err)
+	}
+	if len(h.delivered) != 1 || h.delivered[0].Prompt != `The effort session answered your question on B-2 ("which db?"): postgres` {
+		t.Fatalf("delivered %+v", h.delivered)
+	}
+	ask("which port?")
+	h.target = TargetGone
+	if _, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 2, Kind: KindAnswer, Text: "5432", CallerSessionID: "o1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.answerRuns) != 1 || h.answerRuns[0].CallerSessionID != "o1" {
+		t.Fatalf("answer runs %+v", h.answerRuns)
+	}
+}
+
+// A new run that carries the orchestrator's answer to a routed question says
+// the effort session was asked and answered.
+func TestAnswerRunFromOrchestrator(t *testing.T) {
+	b := eventsGroup(t)
+	if _, err := b.Ask(2, "s2", Question{Text: "which?"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	out, err := b.BeginAnswerRun(2, 0, "s2", "postgres", "o", t0)
+	if err != nil || out.Answer.Author != "agent:o" {
+		t.Fatalf("%+v %v", out.Answer, err)
+	}
+	p := b.StartPrompt(b.Item(2), "", PrevRun{})
+	for _, want := range []string{"asked the effort session a question", "The effort session's answer:\n\n```markdown\npostgres\n```\n"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("no %q in\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "The user's answer") || strings.Contains(p, "asked the user") {
+		t.Fatalf("names the user:\n%s", p)
+	}
+}
+
+// An escalated question went to the user; when the orchestrator answers it
+// anyway, the new run says the user was asked and the effort session answered.
+func TestAnswerRunEscalatedFromOrchestrator(t *testing.T) {
+	b := eventsGroup(t)
+	if _, err := b.Ask(2, "s2", Question{Text: "which?"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Escalate(2, "", "o", t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.BeginAnswerRun(2, 0, "s2", "postgres", "o", t0); err != nil {
+		t.Fatal(err)
+	}
+	p := b.StartPrompt(b.Item(2), "", PrevRun{})
+	for _, want := range []string{"asked the user a question", "The effort session's answer:"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("no %q in\n%s", want, p)
+		}
+	}
+}
+
+// A run that carries the user's answer to an escalated question and the effort
+// session's answer to a routed one names who was asked and who answered each.
+func TestAnswerRunMixedAnswerers(t *testing.T) {
+	b := eventsGroup(t)
+	q, err := b.Ask(2, "s2", Question{Text: "which db?"}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := q.ID
+	if _, err := b.Escalate(2, "", "o", t0); err != nil {
+		t.Fatal(err)
+	}
+	if q, err = b.Ask(2, "s2", Question{Text: "which port?"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	second := q.ID
+	run, err := b.BeginAnswerRun(2, first, "s2", "postgres", "", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.FinishStart(2, run.Plan.Run.StartedAt, "", "", "", errors.New("no worktree"), t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.BeginAnswerRun(2, second, "", "5432", "o", t0.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	p := b.StartPrompt(b.Item(2), "", PrevRun{})
+	for _, want := range []string{
+		"asked the user and the effort session questions, and is gone now.",
+		"The questions the previous agent asked, each with its answer:\n",
+		"Answer 1, from the user:\n\n```markdown\npostgres\n```\n",
+		"Answer 2, from the effort session:\n\n```markdown\n5432\n```\n",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("no %q in\n%s", want, p)
+		}
 	}
 }

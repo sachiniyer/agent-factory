@@ -15,7 +15,7 @@ import { waitsOnBlock } from "./backlog_cycle.js";
 import type { ItemUpdate } from "./backlog_api.js";
 import {
   ACTION_LABELS, type BacklogView, type Item, type ItemAction, type MoveTarget, type RunRef, STATE_GLYPHS, STATE_LABELS, type Status,
-  childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, latestRun, neededBy, orchestratorQuestion, safeHttpUrl,
+  authorLabel, childrenOf, derivedOf, formatID, isAncestor, isParent, itemActions, itemByID, latestRun, neededBy, orchestratorQuestion, safeHttpUrl,
   userQuestions, withOrchestrator,
 } from "./backlog_model.js";
 import { WITH_EFFORT_SESSION } from "./backlog_effort.js";
@@ -295,7 +295,7 @@ export class ItemPanel {
     this.below.replaceChildren(...below);
     this.threadList.replaceChildren(...(it.thread ?? []).map((m) => h("li", { class: `af-backlog-msg af-backlog-msg-${m.kind}` },
       h("div", { class: "af-backlog-msg-meta" }, [m.kind === "note" ? "Note" : m.kind === "question" ? "Question" : "Answer",
-        m.author === "user" ? "you" : m.author.startsWith("agent:") ? "agent" : m.author, formatTime(m.at),
+        authorLabel(view.backlog, it.id, m.author), formatTime(m.at),
         ...(m.closed ? [m.closed === "answered in session" ? "Answered in session" : `Closed · ${m.closed}`] : [])].join(" · ")),
       h("div", { class: "af-backlog-msg-text" }, m.text))));
     restore();

@@ -24,7 +24,8 @@ func (b *Backlog) ItemPrompt(it *Item, proposalDir string) string {
 // StartPrompt is the first prompt of the item's latest run. A run that carries
 // kept answers gets, between the work description and the rules, af's facts
 // about the previous run, the asking agent's handoffs, and each question with
-// its answer, all fenced. Any other run gets the ItemPrompt.
+// its answer, all fenced, naming who was asked and who answered: the user or
+// the group's effort session. Any other run gets the ItemPrompt.
 func (b *Backlog) StartPrompt(it *Item, proposalDir string, prev PrevRun) string {
 	type pair struct{ q, a *Message }
 	var pairs []pair
@@ -46,7 +47,18 @@ func (b *Backlog) StartPrompt(it *Item, proposalDir string, prev PrevRun) string
 	if len(pairs) > 1 {
 		asked = "questions"
 	}
-	fmt.Fprintf(&sb, "An earlier session worked on this item, asked the user %s, and is gone now. This session continues its work.\n", asked)
+	// Who was asked and who answered: the user, the group's effort session, or
+	// both, in the order the questions came.
+	var askedWho, answeredBy []string
+	for _, p := range pairs {
+		if w := p.q.asked(); !slices.Contains(askedWho, w) {
+			askedWho = append(askedWho, w)
+		}
+		if w := p.a.answerer(); !slices.Contains(answeredBy, w) {
+			answeredBy = append(answeredBy, w)
+		}
+	}
+	fmt.Fprintf(&sb, "An earlier session worked on this item, asked %s %s, and is gone now. This session continues its work.\n", strings.Join(askedWho, " and "), asked)
 	if facts := prev.facts(); len(facts) > 0 {
 		sb.WriteString("\nFacts from af:\n")
 		for _, f := range facts {
@@ -69,14 +81,22 @@ func (b *Backlog) StartPrompt(it *Item, proposalDir string, prev PrevRun) string
 	if len(pairs) == 1 {
 		sb.WriteString("\nThe question the previous agent asked:\n\n")
 		writeFenced(&sb, pairs[0].q.Text)
-		sb.WriteString("\nThe user's answer:\n\n")
+		fmt.Fprintf(&sb, "\n%s's answer:\n\n", capitalize(pairs[0].a.answerer()))
 		writeFenced(&sb, pairs[0].a.Text)
 	} else {
-		sb.WriteString("\nThe questions the previous agent asked, each with the user's answer:\n")
+		if len(answeredBy) == 1 {
+			fmt.Fprintf(&sb, "\nThe questions the previous agent asked, each with %s's answer:\n", answeredBy[0])
+		} else {
+			sb.WriteString("\nThe questions the previous agent asked, each with its answer:\n")
+		}
 		for i, p := range pairs {
 			fmt.Fprintf(&sb, "\nQuestion %d:\n\n", i+1)
 			writeFenced(&sb, p.q.Text)
-			fmt.Fprintf(&sb, "\nAnswer %d:\n\n", i+1)
+			if len(answeredBy) == 1 {
+				fmt.Fprintf(&sb, "\nAnswer %d:\n\n", i+1)
+			} else {
+				fmt.Fprintf(&sb, "\nAnswer %d, from %s:\n\n", i+1, p.a.answerer())
+			}
 			writeFenced(&sb, p.a.Text)
 		}
 	}

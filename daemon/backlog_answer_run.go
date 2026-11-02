@@ -24,7 +24,7 @@ func (m *Manager) startAnswerRun(ref backlog.ProjectRef, req backlog.AnswerRunRe
 		return backlog.Message{}, err
 	}
 	// A dry run on the loaded copy refuses early, before origin is asked.
-	if _, err := b.BeginAnswerRun(req.ID, req.QuestionID, req.SessionID, req.Text, svc.Now()); err != nil {
+	if _, err := b.BeginAnswerRun(req.ID, req.QuestionID, req.SessionID, req.Text, req.CallerSessionID, svc.Now()); err != nil {
 		return backlog.Message{}, err
 	}
 	root, err := backlogStartRoot(ref.ID, req.RepoPath)
@@ -40,7 +40,7 @@ func (m *Manager) startAnswerRun(ref backlog.ProjectRef, req backlog.AnswerRunRe
 	m.backlog.reserve(ref.ID)
 	_, err = svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
 		var err error
-		if out, err = b.BeginAnswerRun(req.ID, req.QuestionID, req.SessionID, req.Text, svc.Now()); err != nil {
+		if out, err = b.BeginAnswerRun(req.ID, req.QuestionID, req.SessionID, req.Text, req.CallerSessionID, svc.Now()); err != nil {
 			return nil, err
 		}
 		create, err = backlogCreateRequest(ref.ID, b, req.ID, root, prev)

@@ -97,19 +97,28 @@ func (t *backlogTarget) selfItem() (string, *backlog.Item, error) {
 // landed, not a plain session. Outside an af_ name no row was ever coming, so
 // the same miss still reads as "not an item session".
 func inItemSession() (*session.InstanceData, error) {
+	s, err := guardSelfSession()
+	if err != nil || s == nil {
+		return nil, err
+	}
+	in, err := itemSession(s)
+	if err != nil || !in {
+		return nil, err
+	}
+	return s, nil
+}
+
+// guardSelfSession is the session this command runs in, for the item-session
+// guards, or nil when it runs outside one. A "session row not found" inside an
+// af_-named tmux session is an error rather than "outside one" (#6586; see
+// inItemSession).
+func guardSelfSession() (*session.InstanceData, error) {
 	s, err := backlogSelfSession()
 	if err != nil {
 		if errors.Is(err, errSelfNotFound) && insideAfTmuxSession() {
 			return nil, backlogUnresolvedSelfSessionErr(err)
 		}
 		return nil, nil
-	}
-	if s == nil {
-		return nil, nil
-	}
-	in, err := itemSession(s)
-	if err != nil || !in {
-		return nil, err
 	}
 	return s, nil
 }
@@ -280,12 +289,12 @@ func refuseFromItemSession(command string) error {
 
 // callerSession is the id of the af session this command runs in, or "" when
 // it runs outside one, from one self-session lookup. An item session is
-// refused as in refuseFromItemSession, by the same fail-closed check
-// (itemSession).
+// refused as in refuseFromItemSession, by the same fail-closed checks
+// (guardSelfSession, itemSession).
 func callerSession(command string) (string, error) {
-	s, err := backlogSelfSession()
+	s, err := guardSelfSession()
 	if err != nil || s == nil {
-		return "", nil
+		return "", err
 	}
 	in, err := itemSession(s)
 	if err != nil {
@@ -541,7 +550,10 @@ var backlogAnswerCmd = &cobra.Command{
 	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
-			if err := refuseFromItemSession("answer"); err != nil {
+			// The calling session goes with the answer: when it orchestrates the
+			// item's group, the item's agent hears the effort session answered.
+			caller, err := callerSession("answer")
+			if err != nil {
 				return nil, err
 			}
 			id, err := backlog.ParseID(args[0])
@@ -553,7 +565,8 @@ var backlogAnswerCmd = &cobra.Command{
 				return nil, err
 			}
 			return postBacklogMessage(daemon.PostBacklogMessageRequest{RepoID: t.repoID, RepoPath: t.repoPath,
-				ID: id, Kind: backlog.KindAnswer, Text: strings.Join(args[1:], " "), QuestionID: backlogAnswerQuestion})
+				ID: id, Kind: backlog.KindAnswer, Text: strings.Join(args[1:], " "), QuestionID: backlogAnswerQuestion,
+				CallerSessionID: caller})
 		})
 	},
 }

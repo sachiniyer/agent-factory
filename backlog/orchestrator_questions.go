@@ -82,17 +82,35 @@ func (b *Backlog) Escalate(id int, note, callerSessionID string, now time.Time) 
 		}
 		return nil, fmt.Errorf("%s has no open question to escalate", FormatID(id))
 	}
-	author := AuthorUser
-	if o := b.orchestratorFor(id); callerSessionID != "" && o.SessionID == callerSessionID {
-		author = "agent:" + callerSessionID
-	}
 	q.Route = RouteUser
 	it.UpdatedAt = now
 	out := *q
 	if note = strings.TrimSpace(note); note != "" {
-		it.appendMessage(Message{Kind: KindNote, Author: author, Text: note}, now)
+		it.appendMessage(Message{Kind: KindNote, Author: b.callerAuthor(id, callerSessionID), Text: note}, now)
 	}
 	return &out, nil
+}
+
+// callerAuthor is the author of what callerSessionID writes on item id: that
+// session's agent when it orchestrates the item's group, and the user
+// otherwise, as when the caller runs outside an af session.
+func (b *Backlog) callerAuthor(id int, callerSessionID string) string {
+	if o := b.orchestratorFor(id); o != nil && callerSessionID != "" && o.SessionID == callerSessionID {
+		return "agent:" + callerSessionID
+	}
+	return AuthorUser
+}
+
+// answeredByAgent is whether the answer that closed question questionID came
+// from an agent, which for an answer is the group's orchestrator
+// (callerAuthor).
+func (it *Item) answeredByAgent(questionID int) bool {
+	for _, m := range it.Thread {
+		if m.closesQuestion() && m.Answers == questionID {
+			return m.byAgent()
+		}
+	}
+	return false
 }
 
 // escalateStranded sends to the user the open questions an orchestrator no

@@ -103,6 +103,45 @@ func TestAnAnswerToAGoneSessionStartsANewRun(t *testing.T) {
 	}
 }
 
+// An answer from the effort session of the item's group to a question whose
+// session is gone is the effort session's, and the new run's first prompt says
+// the effort session answered.
+func TestAnEffortSessionAnswerToAGoneSessionNamesItInTheNewRun(t *testing.T) {
+	m, repoID, repoPath := goneAsker(t)
+	prompts := captureCreates(t, nil)
+	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		g, err := b.Add(backlog.NewItem{Title: "Effort"}, time.Now())
+		if err != nil {
+			return err
+		}
+		group := g.ID
+		b.Item(1).Parent = group
+		return b.BindOrchestrator(group, backlog.Orchestrator{SessionID: "o1", Title: "planner", Program: "claude"}, time.Now())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := m.backlogService().PostMessage(backlog.PostMessageRequest{RepoPath: repoPath, ID: 1, Kind: backlog.KindAnswer,
+		Text: "Postgres", CallerSessionID: "o1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Message.Author != "agent:o1" || out.Message.Delivery != backlog.DeliveryNewRun {
+		t.Fatalf("answer %+v, want the effort session's, kept for a new run", out.Message)
+	}
+	m.backgroundMutationWG.Wait()
+	if len(*prompts) != 1 {
+		t.Fatalf("creates %d, want 1", len(*prompts))
+	}
+	for _, want := range []string{
+		"An earlier session worked on this item, asked the user a question, and is gone now.",
+		"The effort session's answer:\n\n```markdown\nPostgres\n```",
+	} {
+		if !strings.Contains((*prompts)[0], want) {
+			t.Errorf("the new run's prompt lacks %q:\n%s", want, (*prompts)[0])
+		}
+	}
+}
+
 // A failed start keeps the answer and its question open, says how to send it,
 // and "af backlog start" sends it to the next session.
 func TestAFailedAnswerRunKeepsTheAnswerForTheNextStart(t *testing.T) {

@@ -244,3 +244,46 @@ func TestBacklogEscalateAndOrchestratorDone(t *testing.T) {
 		t.Fatalf("no done note: %q %v", out, err)
 	}
 }
+
+// af backlog answer sends the calling session: the group's orchestrator answers
+// as its agent, from one self-session lookup, and an item session is refused.
+func TestBacklogAnswerFromOrchestrator(t *testing.T) {
+	stubBacklogDaemon(t)
+	orchestrator := &session.InstanceData{ID: "o1", Title: "planner"}
+	withOrchestratorSessions(t, orchestrator)
+	if _, err := runBacklogCmd(t, "add", "--file", writeBatch(t), "--orchestrate"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := backlogProject()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backlog.Update(p.repoID, func(b *backlog.Backlog) error {
+		it := b.Item(2)
+		it.Status = backlog.StatusRunning
+		it.Runs = []backlog.RunRef{{SessionID: "s1", Title: "B-2 a", State: backlog.RunStarted}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	item := &session.InstanceData{ID: "s1", Title: "B-2 a", BacklogItem: 2}
+	backlogSelfSession = func() (*session.InstanceData, error) { return item, nil }
+	if _, err := runBacklogCmd(t, "ask", "--self", "which db?"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runBacklogCmd(t, "answer", "B-2", "postgres"); err == nil || !strings.Contains(err.Error(), "item sessions cannot run") {
+		t.Fatal(err)
+	}
+	whoami := 0
+	backlogSelfSession = func() (*session.InstanceData, error) { whoami++; return orchestrator, nil }
+	out, err := runBacklogCmd(t, "answer", "B-2", "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := decodeOut[backlog.Message](t, out); a.Kind != backlog.KindAnswer || a.Author != "agent:o1" {
+		t.Fatalf("%+v", a)
+	}
+	if whoami != 1 {
+		t.Fatalf("answer resolved the session %d times", whoami)
+	}
+}

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   type Backlog, type BacklogView, type Item, type ListOptions, type State,
-  applyMove, canStartNow, dropMove, itemActions, keyboardMove, listRows, needsYouByRoot, needsYouCount, needsYouLabel, neededBy, openQuestion, parseBacklogView, safeHttpUrl,
+  applyMove, authorLabel, canStartNow, dropMove, itemActions, keyboardMove, listRows, needsYouByRoot, needsYouCount, needsYouLabel, neededBy, openQuestion, parseBacklogView, safeHttpUrl,
   sessionItems, sessionItemsSig, sources, topQueued,
 } from "./backlog_model.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
@@ -270,4 +270,14 @@ test("a rebound project's chips are redrawn: the signature includes the root", (
   const at = (root: string): string => sessionItemsSig(sessionItems(new Map([[root, view(b)]])));
   assert.notEqual(at("/old"), at("/new"));
   assert.equal(at("/old"), at("/old"));
+});
+
+test("authorLabel names the group's orchestrator the effort session", () => {
+  const b = backlog(item(1, { orchestrator: { session_id: "o1", title: "planner", bound_at: "" } }), item(2, { parent: 1 }), item(3));
+  assert.equal(authorLabel(b, 2, "agent:o1"), "effort session");
+  assert.equal(authorLabel(b, 1, "agent:o1"), "effort session");
+  assert.equal(authorLabel(b, 2, "agent:s2"), "agent");
+  assert.equal(authorLabel(b, 3, "agent:o1"), "agent");
+  assert.equal(authorLabel(b, 2, "user"), "you");
+  assert.equal(authorLabel(b, 2, "af"), "af");
 });

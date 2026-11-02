@@ -97,13 +97,31 @@ func TestQueueOrchChangesEscalationAnswered(t *testing.T) {
 	}
 	q.Route = RouteUser
 	prev := b.clone()
-	if _, err := b.Answer(2, 0, "this one", t0); err != nil {
+	if _, err := b.Answer(2, 0, "this one", "", t0); err != nil {
 		t.Fatal(err)
 	}
 	b.queueOrchChanges(prev, t0)
 	want := []OrchEvent{{Kind: EventEscalationAnswered, Item: 2, Message: 1}}
 	if got := kinds(b, 1); !reflect.DeepEqual(got, want) {
 		t.Fatalf("events %+v", got)
+	}
+}
+
+// The orchestrator that answers a question it escalated is not told the
+// question was answered: it answered it.
+func TestQueueOrchChangesEscalationAnsweredByOrchestrator(t *testing.T) {
+	b := eventsGroup(t)
+	q, err := b.Ask(2, "s2", Question{Text: "which?"}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.Route = RouteUser
+	prev := b.clone()
+	if _, err := b.Answer(2, 0, "this one", b.Item(1).Orchestrator.SessionID, t0); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.queueOrchChanges(prev, t0); got != nil {
+		t.Fatalf("queued on %v: %+v", got, kinds(b, 1))
 	}
 }
 
@@ -115,7 +133,7 @@ func TestQueueOrchChangesRoutedAnswerIsNotEscalation(t *testing.T) {
 	}
 	q.Route = RouteOrchestrator
 	prev := b.clone()
-	if _, err := b.Answer(2, 0, "this one", t0); err != nil {
+	if _, err := b.Answer(2, 0, "this one", "", t0); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.queueOrchChanges(prev, t0); got != nil {

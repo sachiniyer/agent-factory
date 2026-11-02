@@ -5,15 +5,18 @@ import (
 	"fmt"
 )
 
-// PostMessage adds a note, an agent's question, or the user's answer to an
-// item's thread. A question sets the session's attention; an answer is
-// delivered to the session.
+// PostMessage adds a note, an agent's question, or an answer from the user or
+// the group's effort session to an item's thread. A question sets the session's
+// attention; an answer is delivered to the session.
 func (s *Service) PostMessage(req PostMessageRequest) (*MessageResponse, error) {
 	if req.Kind != KindQuestion && req.Handoff != "" {
 		return nil, errors.New("a handoff goes with a question")
 	}
 	if req.Kind != KindQuestion && req.Then != "" {
 		return nil, errors.New("then goes with a question")
+	}
+	if req.Kind != KindAnswer && req.CallerSessionID != "" {
+		return nil, errors.New("caller_session_id goes with an answer")
 	}
 	switch req.Kind {
 	case KindNote, KindQuestion, KindAnswer:
@@ -84,7 +87,7 @@ func (s *Service) ask(p *project, req PostMessageRequest) (*MessageResponse, err
 
 func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, error) {
 	if req.SessionID != "" {
-		return nil, errors.New("an answer comes from the user; it cannot carry session_id")
+		return nil, errors.New("an answer comes from the user or the group's effort session; it cannot carry session_id — the effort session goes in caller_session_id")
 	}
 	b, err := Load(p.id)
 	if err != nil {
@@ -111,7 +114,7 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 		// No session can take the answer: the host keeps it and starts a new run
 		// whose first prompt carries it. A done or dropped item refuses.
 		msg, err := s.host.StartAnswerRun(p.id, AnswerRunRequest{RepoPath: req.RepoPath, SessionID: sessionID,
-			ID: req.ID, QuestionID: req.QuestionID, Text: req.Text})
+			ID: req.ID, QuestionID: req.QuestionID, Text: req.Text, CallerSessionID: req.CallerSessionID})
 		if err != nil {
 			return nil, p.named(err)
 		}
@@ -134,7 +137,7 @@ func (s *Service) answer(p *project, req PostMessageRequest) (*MessageResponse, 
 		if current != sessionID {
 			return nil, fmt.Errorf("%s changed while answering; retry", FormatID(req.ID))
 		}
-		if out, err = b.Answer(req.ID, req.QuestionID, req.Text, s.now()); err != nil {
+		if out, err = b.Answer(req.ID, req.QuestionID, req.Text, req.CallerSessionID, s.now()); err != nil {
 			return nil, err
 		}
 		if out.SessionID != sessionID {
@@ -166,7 +169,7 @@ func (s *Service) answerGroup(p *project, req PostMessageRequest) (*MessageRespo
 	var out Answered
 	_, err := s.update(p, func(b *Backlog) ([]int, error) {
 		var err error
-		if out, err = b.AnswerInThread(req.ID, req.QuestionID, req.Text, s.now()); err != nil {
+		if out, err = b.AnswerInThread(req.ID, req.QuestionID, req.Text, req.CallerSessionID, s.now()); err != nil {
 			return nil, err
 		}
 		if o := b.Item(req.ID).Orchestrator; o != nil {

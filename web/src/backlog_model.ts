@@ -284,6 +284,16 @@ export function withOrchestrator(b: Backlog, id: number, q: Message): boolean {
   return q.route === "orchestrator" && !!itemByID(b, rootOf(b, id))?.orchestrator;
 }
 
+/** Who wrote a message on item id, for its thread: "you", "af", "effort
+ *  session" for the agent of the group's orchestrator, and "agent" for any
+ *  other agent. */
+export function authorLabel(b: Backlog, id: number, author: string): string {
+  if (author === "user") return "you";
+  if (!author.startsWith("agent:")) return author;
+  const o = itemByID(b, rootOf(b, id))?.orchestrator;
+  return o?.session_id && author === `agent:${o.session_id}` ? "effort session" : "agent";
+}
+
 /** The item's open questions that are with the user, oldest first. */
 export function userQuestions(b: Backlog, it: Item): Message[] {
   return openQuestions(it).filter((q) => !withOrchestrator(b, it.id, q));

@@ -226,7 +226,7 @@ func TestBacklogRedeliversPendingAnswer(t *testing.T) {
 	m, repoID, inst := askedItem(t)
 	sent := stubBacklogSend(t, m, repoID)
 	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
-		if _, err := b.Answer(1, 0, "Postgres", daemonProcessStart.Add(-time.Minute)); err != nil {
+		if _, err := b.Answer(1, 0, "Postgres", "", daemonProcessStart.Add(-time.Minute)); err != nil {
 			return err
 		}
 		return nil
@@ -651,7 +651,7 @@ func TestAnswerIsNotSentToASupersededSession(t *testing.T) {
 	sent := stubBacklogSend(t, m, repoID)
 	var pa backlog.PendingAnswer
 	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
-		out, err := b.Answer(1, 0, "Postgres", time.Now())
+		out, err := b.Answer(1, 0, "Postgres", "", time.Now())
 		if err != nil {
 			return err
 		}
@@ -682,7 +682,7 @@ func TestRecoveryDoesNotRedeliverAnAnswerIntoAReplacementRun(t *testing.T) {
 	m, repoID, inst := askedItem(t)
 	sent := stubBacklogSend(t, m, repoID)
 	if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
-		if _, err := b.Answer(1, 0, "Postgres", daemonProcessStart.Add(-time.Minute)); err != nil {
+		if _, err := b.Answer(1, 0, "Postgres", "", daemonProcessStart.Add(-time.Minute)); err != nil {
 			return err
 		}
 		b.Item(1).Runs = append(b.Item(1).Runs, backlog.RunRef{State: backlog.RunStarted, SessionID: inst.ID, Title: inst.Title})

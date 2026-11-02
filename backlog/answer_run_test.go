@@ -26,7 +26,7 @@ func goneAsker(t *testing.T, now time.Time) *Backlog {
 func TestBeginAnswerRunKeepsTheAnswerAndStartsARun(t *testing.T) {
 	now := time.Now()
 	b := goneAsker(t, now)
-	out, err := b.BeginAnswerRun(2, 0, "s1", "  Postgres  ", now)
+	out, err := b.BeginAnswerRun(2, 0, "s1", "  Postgres  ", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,21 +52,21 @@ func TestBeginAnswerRunRefusals(t *testing.T) {
 	now := time.Now()
 	b := goneAsker(t, now)
 	b.Item(2).Status = StatusDone
-	if _, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now); err == nil || !strings.Contains(err.Error(), `B-2 is done; reopen it with "af backlog reopen 2"`) {
+	if _, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", "", now); err == nil || !strings.Contains(err.Error(), `B-2 is done; reopen it with "af backlog reopen 2"`) {
 		t.Fatalf("done: %v", err)
 	}
 	b = goneAsker(t, now)
-	if _, err := b.BeginAnswerRun(2, 0, "s1", "  ", now); err == nil || err.Error() != "an answer needs text" {
+	if _, err := b.BeginAnswerRun(2, 0, "s1", "  ", "", now); err == nil || err.Error() != "an answer needs text" {
 		t.Fatalf("blank: %v", err)
 	}
-	if _, err := b.BeginAnswerRun(2, 99, "s1", "Postgres", now); err == nil || !strings.Contains(err.Error(), "no open question 99") {
+	if _, err := b.BeginAnswerRun(2, 99, "s1", "Postgres", "", now); err == nil || !strings.Contains(err.Error(), "no open question 99") {
 		t.Fatalf("unknown question: %v", err)
 	}
-	if _, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now); err != nil {
+	if _, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", "", now); err != nil {
 		t.Fatal(err)
 	}
 	// A second answer while the first one's run is starting waits for it.
-	if _, err := b.BeginAnswerRun(2, 0, "", "SQLite", now); err == nil || !strings.Contains(err.Error(), "is starting a new session") {
+	if _, err := b.BeginAnswerRun(2, 0, "", "SQLite", "", now); err == nil || !strings.Contains(err.Error(), "is starting a new session") {
 		t.Fatalf("starting: %v", err)
 	}
 }
@@ -76,7 +76,7 @@ func TestBeginAnswerRunRefusals(t *testing.T) {
 func TestFinishStartSendsTheKeptAnswer(t *testing.T) {
 	now := time.Now()
 	b := goneAsker(t, now)
-	out, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now)
+	out, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestFinishStartSendsTheKeptAnswer(t *testing.T) {
 func TestAFailedAnswerRunKeepsTheAnswerForTheNextStart(t *testing.T) {
 	now := time.Now()
 	b := goneAsker(t, now)
-	first, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now)
+	first, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestAFailedAnswerRunKeepsTheAnswerForTheNextStart(t *testing.T) {
 	}
 	// The latest run failed with no session, so the service finds no session to
 	// answer and names none.
-	second, err := b.BeginAnswerRun(2, 0, "", "SQLite", now.Add(2*time.Second))
+	second, err := b.BeginAnswerRun(2, 0, "", "SQLite", "", now.Add(2*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestAFailedAnswerRunKeepsTheAnswerForTheNextStart(t *testing.T) {
 func TestAdoptStartingSendsTheKeptAnswer(t *testing.T) {
 	now := time.Now()
 	b := goneAsker(t, now)
-	out, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now)
+	out, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestAdoptStartingSendsTheKeptAnswer(t *testing.T) {
 func TestRecoverStartsRecordsTheBranch(t *testing.T) {
 	now := time.Now()
 	b := goneAsker(t, now)
-	if _, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now.Add(-time.Minute)); err != nil {
+	if _, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", "", now.Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	b.RecoverStarts([]ItemSession{{ID: "s2", Title: "B-2 A", Branch: "af/b-2-a-2", Item: 2, CreatedAt: now}}, now, now)
@@ -172,7 +172,7 @@ func TestRecoverStartsRecordsTheBranch(t *testing.T) {
 func TestStartPromptCarriesTheAnswer(t *testing.T) {
 	now := time.Now()
 	b := goneAsker(t, now)
-	if _, err := b.BeginAnswerRun(2, 0, "s1", "Postgres. Not ``` SQLite.", now); err != nil {
+	if _, err := b.BeginAnswerRun(2, 0, "s1", "Postgres. Not ``` SQLite.", "", now); err != nil {
 		t.Fatal(err)
 	}
 	it := b.Item(2)
@@ -240,7 +240,7 @@ func TestWithHandoff(t *testing.T) {
 func TestPendingAnswersCarryTheHandoff(t *testing.T) {
 	now := time.Now()
 	b := goneAsker(t, now)
-	if _, err := b.Answer(2, 0, "Postgres", now); err != nil {
+	if _, err := b.Answer(2, 0, "Postgres", "", now); err != nil {
 		t.Fatal(err)
 	}
 	if p := b.PendingAnswers(); len(p) != 1 || p[0].Handoff != "Schema drafted in db/schema.sql." {
@@ -259,7 +259,7 @@ func TestAnAnswerRunCarriesEveryKeptAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now)
+	first, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestAnAnswerRunCarriesEveryKeptAnswer(t *testing.T) {
 	// The second answer names its question, as the web's answer box does: the
 	// oldest open question is still the first, whose kept answer a bare answer
 	// would replace.
-	second, err := b.BeginAnswerRun(2, region.ID, "", "eu-west-1", now.Add(time.Second))
+	second, err := b.BeginAnswerRun(2, region.ID, "", "eu-west-1", "", now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestAnAnswerRunCarriesEveryKeptAnswer(t *testing.T) {
 func TestFinishUncertainStartLinksTheRunAndRefusesASecondStart(t *testing.T) {
 	now := time.Now()
 	b := goneAsker(t, now)
-	out, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", now)
+	out, err := b.BeginAnswerRun(2, 0, "s1", "Postgres", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}

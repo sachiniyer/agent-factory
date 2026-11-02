@@ -206,3 +206,16 @@ func TestServiceThenGoesWithAQuestion(t *testing.T) {
 		t.Fatalf("%+v %v", out, err)
 	}
 }
+
+// caller_session_id names who answers; on a note or a question it is refused.
+func TestServiceCallerSessionGoesWithAnAnswer(t *testing.T) {
+	s, _ := newTestService(t)
+	mustAdd(t, s, ItemInput{Key: "a", Title: "A"})
+	withRun(t, 1, StatusRunning)
+	for _, kind := range []string{KindNote, KindQuestion} {
+		if _, err := s.PostMessage(PostMessageRequest{RepoID: repoID, ID: 1, Kind: kind, Text: "x", SessionID: "s1",
+			CallerSessionID: "o"}); err == nil || err.Error() != "caller_session_id goes with an answer" {
+			t.Fatalf("%s with caller_session_id: %v", kind, err)
+		}
+	}
+}

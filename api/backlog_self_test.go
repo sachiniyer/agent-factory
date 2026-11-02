@@ -629,7 +629,9 @@ func TestItemSessionGuardFailsClosedOnPersistentSelfMiss(t *testing.T) {
 	backlogSelfSession = func() (*session.InstanceData, error) { return nil, errSelfNotFound }
 	currentTmuxName = func() (string, error) { return "af_orphan", nil }
 	*methods = nil
-	for _, args := range [][]string{{"queue", "1"}, {"runner", "on"}} {
+	// done <id>, escalate and answer send the calling session too (callerSession);
+	// they refuse the same way.
+	for _, args := range [][]string{{"queue", "1"}, {"runner", "on"}, {"done", "1"}, {"escalate", "1"}, {"answer", "1", "yes"}} {
 		if _, err := runBacklogCmd(t, args...); err == nil ||
 			!strings.Contains(err.Error(), "cannot resolve this session to check for an item session") {
 			t.Fatalf("af backlog %v: a persistent self-miss inside af_ must refuse; got %v", args, err)

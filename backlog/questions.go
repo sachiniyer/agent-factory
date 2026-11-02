@@ -8,8 +8,9 @@ import (
 )
 
 // AnswerPrompt is what af delivers to the item's session with an answer. It names
-// the question the answer is for, so two open questions answered in turn read
-// differently to the agent.
+// who answered, the user or the group's effort session, and the question the
+// answer is for, so two open questions answered in turn read differently to the
+// agent.
 func AnswerPrompt(it *Item, answer Message) string {
 	question := ""
 	for _, m := range it.Thread {
@@ -20,10 +21,31 @@ func AnswerPrompt(it *Item, answer Message) string {
 			}
 		}
 	}
+	who := capitalize(answer.answerer())
 	if question == "" {
-		return fmt.Sprintf("The user answered your question on %s: %s", FormatID(it.ID), answer.Text)
+		return fmt.Sprintf("%s answered your question on %s: %s", who, FormatID(it.ID), answer.Text)
 	}
-	return fmt.Sprintf("The user answered your question on %s (%q): %s", FormatID(it.ID), question, answer.Text)
+	return fmt.Sprintf("%s answered your question on %s (%q): %s", who, FormatID(it.ID), question, answer.Text)
+}
+
+// answerer names who wrote answer m, for the item's agent.
+func (m Message) answerer() string {
+	if m.byAgent() {
+		return "the effort session"
+	}
+	return "the user"
+}
+
+// byAgent is whether an agent wrote m. An answer is an agent's only when the
+// group's orchestrator wrote it (callerAuthor).
+func (m Message) byAgent() bool { return strings.HasPrefix(m.Author, "agent:") }
+
+// asked names who question m went to, for the item's agent.
+func (m Message) asked() string {
+	if m.Route == RouteOrchestrator {
+		return "the effort session"
+	}
+	return "the user"
 }
 
 // WithHandoff adds the asking agent's handoff to an answer prompt, for a
@@ -53,8 +75,9 @@ type AnswerRun struct {
 // session of the latest started run that the caller found gone, or "" when
 // that run never had one: if the latest run changed since, the answer is
 // refused for a retry, which sees the new run. A done or dropped item refuses.
-// On error b is unchanged.
-func (b *Backlog) BeginAnswerRun(id, questionID int, gone, text string, now time.Time) (AnswerRun, error) {
+// callerSessionID is the session that answers, as in Answer. On error b is
+// unchanged.
+func (b *Backlog) BeginAnswerRun(id, questionID int, gone, text, callerSessionID string, now time.Time) (AnswerRun, error) {
 	c := b.clone()
 	it, err := c.get(id)
 	if err != nil {
@@ -88,7 +111,7 @@ func (b *Backlog) BeginAnswerRun(id, questionID int, gone, text string, now time
 			m.Delivery = DeliverySuperseded
 		}
 	}
-	answer := *it.appendMessage(Message{Kind: KindAnswer, Author: AuthorUser, Text: text, Answers: q.ID, Delivery: DeliveryNewRun}, now)
+	answer := *it.appendMessage(Message{Kind: KindAnswer, Author: c.callerAuthor(id, callerSessionID), Text: text, Answers: q.ID, Delivery: DeliveryNewRun}, now)
 	plan, err := c.BeginStart(id, StartedByUser, nil, now)
 	if err != nil {
 		return AnswerRun{}, err
@@ -158,23 +181,26 @@ type Answered struct {
 	Next *Message
 }
 
-// Answer appends the user's answer to question questionID, or to the oldest
-// open question when questionID is 0, and closes it. An open item is set
-// running and the answer is pending delivery to its session; the status it
-// replaced is kept on the answer for AnswerFailed. On error b is unchanged.
-// An answer whose session is gone goes through BeginAnswerRun instead.
-func (b *Backlog) Answer(id, questionID int, text string, now time.Time) (Answered, error) {
-	return b.answer(id, questionID, text, true, now)
+// Answer appends an answer to question questionID, or to the oldest open
+// question when questionID is 0, and closes it. callerSessionID is the session
+// that answers, or "" outside one: the answer is that session's when it
+// orchestrates the item's group, and the user's otherwise (callerAuthor). An
+// open item is set running and the answer is pending delivery to its session;
+// the status it replaced is kept on the answer for AnswerFailed. On error b is
+// unchanged. An answer whose session is gone goes through BeginAnswerRun
+// instead.
+func (b *Backlog) Answer(id, questionID int, text, callerSessionID string, now time.Time) (Answered, error) {
+	return b.answer(id, questionID, text, callerSessionID, true, now)
 }
 
-// AnswerInThread records the user's answer and closes its question without a
-// delivery: for a question af asked on a group, which has no session to take an
-// answer. The item's status is left as it was.
-func (b *Backlog) AnswerInThread(id, questionID int, text string, now time.Time) (Answered, error) {
-	return b.answer(id, questionID, text, false, now)
+// AnswerInThread records an answer, authored as Answer authors it, and closes
+// its question without a delivery: for a question af asked on a group, which
+// has no session to take an answer. The item's status is left as it was.
+func (b *Backlog) AnswerInThread(id, questionID int, text, callerSessionID string, now time.Time) (Answered, error) {
+	return b.answer(id, questionID, text, callerSessionID, false, now)
 }
 
-func (b *Backlog) answer(id, questionID int, text string, deliver bool, now time.Time) (Answered, error) {
+func (b *Backlog) answer(id, questionID int, text, callerSessionID string, deliver bool, now time.Time) (Answered, error) {
 	it, err := b.get(id)
 	if err != nil {
 		return Answered{}, err
@@ -188,7 +214,7 @@ func (b *Backlog) answer(id, questionID int, text string, deliver bool, now time
 		return Answered{}, err
 	}
 	q.Closed = ClosedAnswered
-	answer := Message{Kind: KindAnswer, Author: AuthorUser, Text: text, Answers: q.ID}
+	answer := Message{Kind: KindAnswer, Author: b.callerAuthor(id, callerSessionID), Text: text, Answers: q.ID}
 	if deliver && it.Status.Open() {
 		// The status to give back if delivery fails is the one before the OLDEST
 		// pending answer: a second answer accepted while the first is pending would

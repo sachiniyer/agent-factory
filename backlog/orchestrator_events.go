@@ -31,8 +31,9 @@ func (b *Backlog) HasOrchestrator() bool {
 // queueOrchChanges compares b with prev, the same backlog before a write, and
 // queues the events the write caused on the orchestrated groups: an agent's
 // new question, an item that moved to review or got a new PR there, an escalated question the user
-// answered, and a group whose children are all done or dropped. It returns
-// the groups it queued on.
+// answered, and a group whose children are all done or dropped. An escalated
+// question the orchestrator answered itself queues nothing: it knows. It
+// returns the groups it queued on.
 func (b *Backlog) queueOrchChanges(prev *Backlog, now time.Time) []int {
 	if !b.HasOrchestrator() {
 		return nil
@@ -65,7 +66,7 @@ func (b *Backlog) queueOrchChanges(prev *Backlog, now time.Time) []int {
 			if was == nil || !was.questionOpen(m.ID) {
 				continue
 			}
-			if m.Route == RouteUser && (m.Closed == ClosedAnswered || m.Closed == ClosedAnsweredInSession) {
+			if m.Route == RouteUser && (m.Closed == ClosedAnswered || m.Closed == ClosedAnsweredInSession) && !it.answeredByAgent(m.ID) {
 				queue(OrchEvent{Kind: EventEscalationAnswered, Item: it.ID, Message: m.ID})
 			}
 		}

@@ -124,6 +124,10 @@ type PostMessageRequest struct {
 	// Handoff goes with a question: the asking agent's notes for a later run
 	// of the item (at most MaxHandoffBytes).
 	Handoff string `json:"handoff,omitempty"`
+	// CallerSessionID goes with an answer: the af session it comes from, if
+	// any. When it orchestrates the item's group, the answer is that session's,
+	// and the item's agent is told the effort session answered.
+	CallerSessionID string `json:"caller_session_id,omitempty"`
 }
 
 type MessageResponse struct {
