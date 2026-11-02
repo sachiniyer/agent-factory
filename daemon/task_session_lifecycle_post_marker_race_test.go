@@ -117,8 +117,9 @@ func TestTaskSessionLifecycle_PostMarkerDischargePersistFailureRefusesDeliveryAn
 	// in-memory-only retry a unclean exit is about to lose (and that would race
 	// the marker restore above, writing the restored marker back to disk).
 	manager.mu.Lock()
-	assert.Empty(t, manager.settleOwed, "the discharge path records no in-memory retry — its only retry is the caller's")
+	settleOwedLen := len(manager.settleOwed)
 	manager.mu.Unlock()
+	assert.Empty(t, settleOwedLen, "the discharge path records no in-memory retry — its only retry is the caller's")
 
 	// The user re-attempts the delivery once the transient error clears: the
 	// retry must succeed and durably clear the marker.
@@ -204,9 +205,11 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetriesTheClearedRow(t
 	// and persist a FRESH cleared row, not a stale snapshot that re-checkpoints
 	// the restored marker.
 	manager.mu.Lock()
-	assert.NotEmpty(t, manager.dischargeOwed, "the failed stand-down clear recorded a discharge retry")
-	assert.Empty(t, manager.settleOwed, "the discharge retry lives outside the generic settlement retry map a checkpoint would retire")
+	dischargeOwed1Len := len(manager.dischargeOwed)
+	settleOwed2Len := len(manager.settleOwed)
 	manager.mu.Unlock()
+	assert.NotEmpty(t, dischargeOwed1Len, "the failed stand-down clear recorded a discharge retry")
+	assert.Empty(t, settleOwed2Len, "the discharge retry lives outside the generic settlement retry map a checkpoint would retire")
 
 	// Storage recovers. THE FIX: the next poll's FlushOwedSettlements re-runs the
 	// discharge and persists a FRESH row with the marker cleared — discharging the
@@ -226,8 +229,9 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetriesTheClearedRow(t
 	// The retry is retired once the discharge's cleared write lands, and the
 	// in-memory marker is cleared with it so a later checkpoint cannot re-set it.
 	manager.mu.Lock()
-	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the cleared row is durable")
+	dischargeOwedLen := len(manager.dischargeOwed)
 	manager.mu.Unlock()
+	assert.Empty(t, dischargeOwedLen, "the retry is retired once the cleared row is durable")
 	require.Nil(t, inst.OwedOnComplete(),
 		"the in-memory marker is cleared once the durable discharge lands")
 }
@@ -653,8 +657,9 @@ func TestTaskSessionLifecycle_PostMarkerConcurrentDeliverySharesDischargeResult(
 	// No settleOwed retry was recorded: the discharge path's only retry is the
 	// caller's, shared here just as it is in the single-caller case.
 	manager.mu.Lock()
-	assert.Empty(t, manager.settleOwed, "the discharge path records no in-memory retry even when its result is shared")
+	settleOwedLen := len(manager.settleOwed)
 	manager.mu.Unlock()
+	assert.Empty(t, settleOwedLen, "the discharge path records no in-memory retry even when its result is shared")
 
 	// Once the persist can land, a re-attempt succeeds and clears the durable
 	// marker.
@@ -880,8 +885,9 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetrySurvivesStatusChe
 	require.NotNil(t, inst.OwedOnComplete(),
 		"the in-memory marker is restored after the failed stand-down clear")
 	manager.mu.Lock()
-	require.NotEmpty(t, manager.dischargeOwed, "the failed stand-down recorded a discharge retry")
+	owed := len(manager.dischargeOwed)
 	manager.mu.Unlock()
+	require.NotEmpty(t, owed, "the failed stand-down recorded a discharge retry")
 
 	// Simulate the status checkpoint finding 8 names: it persists the
 	// marker-restored live row (durableChanged) and ret the generic settlement
@@ -894,10 +900,12 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetrySurvivesStatusChe
 	// the generic settlement retry's retirement — even though disk again carries
 	// the marker the checkpoint just re-wrote.
 	manager.mu.Lock()
-	assert.NotEmpty(t, manager.dischargeOwed,
-		"the discharge retry survives a status checkpoint that ret the generic settlement retry")
-	assert.Empty(t, manager.settleOwed, "the generic settlement retry was retired; the discharge retry was not")
+	dischargeOwed1Len := len(manager.dischargeOwed)
+	settleOwed2Len := len(manager.settleOwed)
 	manager.mu.Unlock()
+	assert.NotEmpty(t, dischargeOwed1Len,
+		"the discharge retry survives a status checkpoint that ret the generic settlement retry")
+	assert.Empty(t, settleOwed2Len, "the generic settlement retry was retired; the discharge retry was not")
 
 	raw, err := config.LoadRepoInstances(repo.ID)
 	require.NoError(t, err)
@@ -922,8 +930,9 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetrySurvivesStatusChe
 	require.Nil(t, inst.OwedOnComplete(),
 		"the in-memory marker is cleared with the durable discharge")
 	manager.mu.Lock()
-	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the discharge lands")
+	dischargeOwedLen := len(manager.dischargeOwed)
 	manager.mu.Unlock()
+	assert.Empty(t, dischargeOwedLen, "the retry is retired once the discharge lands")
 }
 
 // TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryPreservesLaterTabMutation
@@ -966,8 +975,9 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryPreservesLaterTab
 	manager.dischargeOwedTaskLifecycle(repo.ID, inst.ID, inst.Title)
 	require.NotNil(t, inst.OwedOnComplete(), "the in-memory marker is restored after the failed stand-down clear")
 	manager.mu.Lock()
-	require.NotEmpty(t, manager.dischargeOwed, "the failed stand-down recorded a discharge retry")
+	owed := len(manager.dischargeOwed)
 	manager.mu.Unlock()
+	require.NotEmpty(t, owed, "the failed stand-down recorded a discharge retry")
 
 	// Before the flush, the user adds a web tab — exactly the create/rename/reorder
 	// path finding 9 names — and that newer full row is persisted the way the tab
@@ -992,8 +1002,9 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryPreservesLaterTab
 	assert.Nil(t, rows[0].PendingOnComplete, "the retry cleared the durable marker")
 	require.Nil(t, inst.OwedOnComplete(), "the in-memory marker is cleared with the durable discharge")
 	manager.mu.Lock()
-	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the discharge lands")
+	dischargeOwedLen := len(manager.dischargeOwed)
 	manager.mu.Unlock()
+	assert.Empty(t, dischargeOwedLen, "the retry is retired once the discharge lands")
 }
 
 // TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryFlushedBeforeShutdownCheckpoint
@@ -1041,8 +1052,9 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryFlushedBeforeShut
 	require.NotNil(t, inst.OwedOnComplete(),
 		"the in-memory marker is restored after the failed stand-down clear")
 	manager.mu.Lock()
-	require.NotEmpty(t, manager.dischargeOwed, "the failed stand-down recorded a discharge retry")
+	owed := len(manager.dischargeOwed)
 	manager.mu.Unlock()
+	require.NotEmpty(t, owed, "the failed stand-down recorded a discharge retry")
 
 	// Storage recovers before the daemon shuts down, so the shutdown flush can
 	// land the clear the poll never got to run.
@@ -1063,6 +1075,7 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryFlushedBeforeShut
 	require.Nil(t, inst.OwedOnComplete(),
 		"the in-memory marker is cleared once the shutdown flush lands the discharge")
 	manager.mu.Lock()
-	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the discharge lands at shutdown")
+	dischargeOwedLen := len(manager.dischargeOwed)
 	manager.mu.Unlock()
+	assert.Empty(t, dischargeOwedLen, "the retry is retired once the discharge lands at shutdown")
 }

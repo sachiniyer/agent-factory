@@ -134,13 +134,15 @@ func TestWebListenerRetryIsSerializedWithConfigApply(t *testing.T) {
 	attempts := calls.Load()
 	wl.retryFailedBinds()
 	time.Sleep(150 * time.Millisecond) // many backoff ticks (5-20ms each)
-	require.Equal(t, attempts, calls.Load(),
-		"the retry must not bind while a config apply holds configApplyMu")
+	callsDuringApply := calls.Load()
 
 	off := *m.Config()
 	off.ListenAddr = ""
 	m.storeLivePosture(&off)
 	m.configApplyMu.Unlock()
+
+	require.Equal(t, attempts, callsDuringApply,
+		"the retry must not bind while a config apply holds configApplyMu")
 
 	require.Eventually(t, func() bool { return !m.lifecycle.snapshot().listeners.BindRetrying },
 		5*time.Second, 5*time.Millisecond)

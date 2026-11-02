@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
 	"github.com/stretchr/testify/assert"
@@ -271,10 +272,14 @@ func TestReserveCreate_ArchivedBranchMovesWithTheRename(t *testing.T) {
 
 	manager.mu.Lock()
 	diskData, lerr := loadRepoInstanceData(repoID)
-	require.NoError(t, lerr)
-	renamed, err := manager.renameArchivedForReuseLocked(repoID, repoPath, "foo", "claude", runtimeNamespaceLocalTmux, &diskData)
+	var renamed *session.InstanceData
+	var rerr error
+	if lerr == nil {
+		renamed, rerr = manager.renameArchivedForReuseLocked(repoID, repoPath, "foo", "claude", runtimeNamespaceLocalTmux, &diskData)
+	}
 	manager.mu.Unlock()
-	require.NoError(t, err)
+	require.NoError(t, lerr)
+	require.NoError(t, rerr)
 	require.NotNil(t, renamed, "the rename must have run for this test to say anything")
 
 	held, herr = sessiongit.BranchesHeldByWorktrees(repoPath)

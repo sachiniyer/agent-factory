@@ -6250,26 +6250,26 @@ function currentXtermTheme() {
 
 // src/recovery.ts
 function recoveryScreen(state) {
-  const action = h("button", { type: "button", class: "af-recovery-action" }, state.action);
-  action.addEventListener("click", state.run);
+  const action2 = h("button", { type: "button", class: "af-recovery-action" }, state.action);
+  action2.addEventListener("click", state.run);
   const screen = h(
     "section",
     { class: "af-recovery" },
     h("h1", { class: state.failed ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.condition),
     ...state.detail ? [h("p", { class: "af-recovery-detail" }, state.detail)] : [],
-    action
+    action2
   );
   scopeRecovery(screen);
   if (state.failed) screen.setAttribute("role", "alert");
   return screen;
 }
-function mutationNotice(condition, detail, action, failed = true) {
+function mutationNotice(condition, detail, action2, failed = true) {
   return scopeRecovery(h(
     "div",
     { class: "af-recovery af-recovery-notice", role: "alert" },
     h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
     h("p", { class: "af-recovery-detail" }, detail),
-    h("p", { class: "af-recovery-next" }, action)
+    h("p", { class: "af-recovery-next" }, action2)
   ));
 }
 function scopeRecovery(element) {
@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "63d26b0ecb3e";
+var CLIENT_VERSION = "1397aa9e6be2";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7302,9 +7302,9 @@ async function listDirectory(path, token2) {
   const resp = await af("ListDirectory", { path }, token2);
   return { ...resp, entries: resp.entries ?? [] };
 }
-function requireSessionID(id, action) {
+function requireSessionID(id, action2) {
   if (id === "") {
-    throw new ApiError(0, `cannot ${action}: this session has no stable id to target safely`);
+    throw new ApiError(0, `cannot ${action2}: this session has no stable id to target safely`);
   }
 }
 async function createTab(id, title, token2) {
@@ -7425,9 +7425,9 @@ async function listTasks(token2) {
   const resp = await af("ListTasks", {}, token2);
   return resp.tasks ?? [];
 }
-function requireTaskID(id, action) {
+function requireTaskID(id, action2) {
   if (id === "") {
-    throw new ApiError(0, `cannot ${action}: this task has no stable id to target safely`);
+    throw new ApiError(0, `cannot ${action2}: this task has no stable id to target safely`);
   }
 }
 async function addTask(task, token2) {
@@ -8044,7 +8044,7 @@ function terminalChrome(opts) {
   const menu = actionsDisclosure("More session actions");
   menu.trigger.replaceChildren(icon("ellipsis"));
   menu.trigger.title = "More session actions";
-  const action = (label, className, run) => {
+  const action2 = (label, className, run) => {
     const button2 = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
     button2.addEventListener("click", () => {
       menu.close();
@@ -8085,24 +8085,24 @@ function terminalChrome(opts) {
   tabs.setAttribute("aria-label", "Session tabs");
   const actions2 = h("div", { class: "af-term-actions" });
   actions2.hidden = true;
-  const retry = action("Retry limit", "", opts.retry);
+  const retry = action2("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
-  const deliver = action("Mark delivered", "", opts.markDelivered);
+  const deliver = action2("Mark delivered", "", opts.markDelivered);
   deliver.title = "Retire the pending handoff mission without resending \u2014 the pane already shows it landed";
   deliver.hidden = true;
-  const handoff = action("Handoff", "", opts.handoff);
+  const handoff = action2("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
-  const copy = action("Copy link", "af-copy-link", opts.copyLink);
+  const copy = action2("Copy link", "af-copy-link", opts.copyLink);
   copy.title = "Copy link to this session";
-  const fontDecrease = action("A\u2212", "af-term-zoom", () => opts.fontSizeStep?.(-1));
+  const fontDecrease = action2("A\u2212", "af-term-zoom", () => opts.fontSizeStep?.(-1));
   fontDecrease.title = "Decrease terminal text size";
   fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
-  const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
+  const fontIncrease = action2("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
   fontIncrease.title = "Increase terminal text size";
   fontIncrease.setAttribute("aria-label", "Increase terminal text size");
   const tabUnavailable = h("span", { class: "af-tab-new-unavailable" });
   tabUnavailable.hidden = true;
-  const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
+  const closePane = action2("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
   const attention = attentionChip(opts.clearAttention);
@@ -8264,11 +8264,11 @@ function emptyAccountsState() {
 var ACCOUNT_INPUT_ATTR = "data-account-input";
 var ACCOUNTS_NOTE = "Sign in with the agent\u2019s login flow. Follow the URL in the pane.";
 function renderAccountsSection(state, actions2, registration = { open: false, agent: "" }) {
-  const section2 = h("section", { class: "af-accounts" });
-  section2.setAttribute("aria-label", "Accounts");
+  const section3 = h("section", { class: "af-accounts" });
+  section3.setAttribute("aria-label", "Accounts");
   if (state.loaded === false && !state.error) {
-    section2.append(h("p", {}, "Connecting\u2026"));
-    return section2;
+    section3.append(h("p", {}, "Connecting\u2026"));
+    return section3;
   }
   const head = h(
     "div",
@@ -8276,22 +8276,22 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
     h("span", { class: "af-accounts-title" }, "Accounts"),
     h("span", { class: "af-view-count" }, String(state.entries.length))
   );
-  section2.append(head, h("p", { class: "af-accounts-note" }, ACCOUNTS_NOTE));
+  section3.append(head, h("p", { class: "af-accounts-note" }, ACCOUNTS_NOTE));
   if (state.error !== "") {
-    section2.append(
+    section3.append(
       h("p", { class: "af-accounts-error", role: "alert" }, `Accounts could not be read: ${state.error}`)
     );
-    return section2;
+    return section3;
   }
   if (state.agents.length === 0) {
-    section2.append(
+    section3.append(
       h(
         "p",
         { class: "af-accounts-empty" },
         "No agents support accounts."
       )
     );
-    return section2;
+    return section3;
   }
   const list = h("div", { class: "af-accounts-list" });
   for (const agent of state.agents) {
@@ -8321,7 +8321,7 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
   agentSelect.addEventListener("change", sync);
   sync();
   add.append(h("summary", {}, "Add account"), h("label", { class: "af-modal-field" }, "Agent", agentSelect), ...forms);
-  section2.append(list, add);
+  section3.append(list, add);
   if (state.entries.length === 0 && !registration.open) {
     add.hidden = true;
     const empty = recoveryScreen({ condition: "No accounts", action: "Add account", run: () => {
@@ -8331,9 +8331,9 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
       registration.open = true;
       add.querySelector(".af-accounts-register:not([hidden]) input")?.focus();
     } });
-    section2.prepend(empty);
+    section3.prepend(empty);
   }
-  return section2;
+  return section3;
 }
 function renderAccountRow(entry, status, actions2) {
   const row = h("div", { class: "af-accounts-row" });
@@ -8415,11 +8415,11 @@ function emptyQuotaState() {
 }
 var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
 function renderQuotaSection(state) {
-  const section2 = h("section", { class: "af-quota" });
-  section2.setAttribute("aria-label", "Usage");
+  const section3 = h("section", { class: "af-quota" });
+  section3.setAttribute("aria-label", "Usage");
   if (state.loaded === false && !state.error) {
-    section2.append(h("p", {}, "Connecting\u2026"));
-    return section2;
+    section3.append(h("p", {}, "Connecting\u2026"));
+    return section3;
   }
   const head = h(
     "div",
@@ -8427,21 +8427,21 @@ function renderQuotaSection(state) {
     h("span", { class: "af-quota-title" }, "Usage"),
     h("span", { class: "af-view-count" }, String(state.agents.length))
   );
-  section2.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
+  section3.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
   if (state.error !== "") {
-    section2.append(
+    section3.append(
       h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`)
     );
-    return section2;
+    return section3;
   }
   for (const warning of state.warnings) {
-    section2.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
+    section3.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
   }
   if (state.agents.length === 0) {
-    section2.append(
+    section3.append(
       h("p", { class: "af-quota-empty" }, "No agent CLIs are configured, so there is nothing to report.")
     );
-    return section2;
+    return section3;
   }
   const list = h("div", { class: "af-quota-list" });
   for (const agent of state.agents) {
@@ -8458,8 +8458,8 @@ function renderQuotaSection(state) {
     );
     list.append(row, h("p", { class: "af-quota-detail" }, agent.detail));
   }
-  section2.append(list);
-  return section2;
+  section3.append(list);
+  return section3;
 }
 
 // src/scrollkeep.ts
@@ -8901,9 +8901,9 @@ var ConfigPane = class {
    *  a layer did. Rendered only while the row's key trigger is open, so a closed
    *  row carries no trace chrome. */
   renderExplainSection(e) {
-    const section2 = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
-    section2.append(this.renderExplainBody());
-    return section2;
+    const section3 = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
+    section3.append(this.renderExplainBody());
+    return section3;
   }
   toggleExplain(key) {
     if (this.explainKey === key) {
@@ -9552,11 +9552,11 @@ var TerminalSoftInput = class {
     this.send(input.data);
   };
   /** Queue custom input after xterm's already-scheduled composition finalizer. */
-  deferAfterPendingComposition(action) {
+  deferAfterPendingComposition(action2) {
     if (!this.pending.length && !this.postCompositionTimers.size) return false;
     const release = setTimeout(() => {
       this.postCompositionTimers.delete(release);
-      action();
+      action2();
     }, 0);
     this.postCompositionTimers.add(release);
     return true;
@@ -12280,7 +12280,7 @@ var AttachTerminal = class {
    *  attached TUI's claim, or another window's, and re-open the window #1638
    *  closed. Ceasing to renew costs at most one lease of extra hold and cannot
    *  revoke anyone else's protection — see delivery_hold.ts. */
-  dispatchHold(action) {
+  dispatchHold(action2) {
     if (!this.midLine.holding) {
       this.stopMidLineTimer();
     } else if (this.midLineTimer === null) {
@@ -12288,8 +12288,8 @@ var AttachTerminal = class {
         this.dispatchHold(this.midLine.tick(holdClockMs()));
       }, 500);
     }
-    if (action === "pause") {
-      this.cb.onDeliveryHold?.(action);
+    if (action2 === "pause") {
+      this.cb.onDeliveryHold?.(action2);
     }
   }
   stopMidLineTimer() {
@@ -12357,7 +12357,7 @@ function loginWithoutPaneCopy(login) {
 }
 function openAccountLogin(opts) {
   const { token: token2, mountHost, login, onClosed } = opts;
-  let closed = false;
+  let closed2 = false;
   let term = null;
   const status = h("span", { class: "af-assistant-status" }, "Connecting\u2026");
   status.setAttribute("role", "status");
@@ -12384,10 +12384,10 @@ function openAccountLogin(opts) {
   panel.setAttribute("aria-label", `Log in to ${title}`);
   const overlay = h("div", { class: "af-assistant-overlay" }, panel);
   function close() {
-    if (closed) {
+    if (closed2) {
       return;
     }
-    closed = true;
+    closed2 = true;
     term?.dispose();
     term = null;
     overlay.remove();
@@ -12410,7 +12410,7 @@ function openAccountLogin(opts) {
   mountHost.append(overlay);
   term = new AttachTerminal(termHost2, token2, accountLoginStreamEndpoint(login.agent, login.name), {
     onStatus: (s) => {
-      if (!closed) {
+      if (!closed2) {
         status.textContent = loginTerminalStatusCopy(s, login);
       }
     },
@@ -12460,7 +12460,7 @@ function spawnFailureCopy(e) {
 }
 function openConfigAssistant(opts) {
   const { token: token2, mountHost, onClosed } = opts;
-  let closed = false;
+  let closed2 = false;
   let term = null;
   const status = h("span", { class: "af-assistant-status" }, "Starting\u2026");
   status.setAttribute("role", "status");
@@ -12516,10 +12516,10 @@ function openConfigAssistant(opts) {
     }
   }
   function close() {
-    if (closed) {
+    if (closed2) {
       return;
     }
-    closed = true;
+    closed2 = true;
     document.removeEventListener("keydown", onKeydown2);
     if (term) {
       term.dispose();
@@ -12536,13 +12536,13 @@ function openConfigAssistant(opts) {
         await spawnConfigAssistant(token2);
         return;
       } catch (e) {
-        if (closed) {
+        if (closed2) {
           throw CLOSED;
         }
         const httpStatus = e instanceof ApiError ? e.status : -1;
         if (httpStatus === 409 && attempt < SPAWN_RETRY_LIMIT) {
           await delay(SPAWN_RETRY_DELAY_MS);
-          if (closed) {
+          if (closed2) {
             throw CLOSED;
           }
           continue;
@@ -12552,12 +12552,12 @@ function openConfigAssistant(opts) {
     }
   }
   function attach() {
-    if (closed) {
+    if (closed2) {
       return;
     }
     term = new AttachTerminal(termHost2, token2, configAssistantStreamEndpoint(), {
       onStatus: (s) => {
-        if (!closed) {
+        if (!closed2) {
           setStatus(terminalStatusText(s));
         }
       },
@@ -12569,7 +12569,7 @@ function openConfigAssistant(opts) {
     term.focus();
   }
   void spawn().then(() => attach()).catch((e) => {
-    if (e === CLOSED || closed) {
+    if (e === CLOSED || closed2) {
       return;
     }
     const copy = spawnFailureCopy(e);
@@ -15371,7 +15371,7 @@ var SplitView = class {
             // auxiliary shell has nothing to collide with — and pausing the
             // session-wide lease for it would defer a delivery aimed at a different
             // PTY, postponing a cron run to its next tick for no reason.
-            ...leaf.tab === 0 ? { onDeliveryHold: (action) => this.holdDeliveries(action) } : {}
+            ...leaf.tab === 0 ? { onDeliveryHold: (action2) => this.holdDeliveries(action2) } : {}
           }
         );
       } else if (moved) {
@@ -15988,8 +15988,8 @@ var SplitView = class {
    *  Best-effort by the same contract the TUI's heartbeat states: a failed RPC is
    *  swallowed, and the worst case is that a delivery lands mid-line as it does
    *  today. Reporting it would be noise about a degraded nicety, mid-keystroke. */
-  holdDeliveries(action) {
-    if (action !== "pause") {
+  holdDeliveries(action2) {
+    if (action2 !== "pause") {
       return;
     }
     const sessionID = this.sessionId;
@@ -18100,16 +18100,16 @@ function prefersReducedMotion() {
 }
 function paintFavicon() {
   const tile = appliedColor ?? DEFAULT_FAVICON_COLOR;
-  for (const link of document.querySelectorAll('link[rel="icon"]')) {
-    if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
-    const size = Number.parseInt(link.sizes.value, 10) || 32;
-    const key = `${link.type}|${size}|${blinkInverted}`;
+  for (const link2 of document.querySelectorAll('link[rel="icon"]')) {
+    if (link2.dataset.afDefaultHref === void 0) link2.dataset.afDefaultHref = link2.getAttribute("href") ?? "";
+    const size = Number.parseInt(link2.sizes.value, 10) || 32;
+    const key = `${link2.type}|${size}|${blinkInverted}`;
     let href = faviconHrefs.get(key);
     if (href === void 0) {
-      href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile, blinkInverted) : projectFaviconPng(tile, blinkInverted, size);
+      href = link2.type === "image/svg+xml" ? projectFaviconDataUrl(tile, blinkInverted) : projectFaviconPng(tile, blinkInverted, size);
       faviconHrefs.set(key, href);
     }
-    link.setAttribute("href", href ?? link.dataset.afDefaultHref);
+    link2.setAttribute("href", href ?? link2.dataset.afDefaultHref);
   }
 }
 function applyProjectColor(root2, color, surfaces) {
@@ -18413,17 +18413,30 @@ function isAncestor(b, anc, id) {
 function derivedOf(view, id) {
   return view.states[String(id)] ?? { state: "draft" };
 }
-function openQuestion(it) {
+function openQuestions(it) {
   const last = it.runs?.[it.runs.length - 1];
-  if (last?.state === "starting" && last.answers?.length) return void 0;
+  if (last?.state === "starting" && last.answers?.length) return [];
   const thread = it.thread ?? [];
   const closes = (m) => m.kind === "answer" && !!m.answers && m.delivery !== "new_run" && m.delivery !== "superseded";
   const answered = new Set(thread.filter(closes).map((m) => m.answers));
-  return thread.find((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
+  return thread.filter((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
+}
+function openQuestion(it) {
+  return openQuestions(it)[0];
+}
+function archivedBy(b, id) {
+  const seen = /* @__PURE__ */ new Set();
+  for (let it = itemByID(b, id); it && !seen.has(it.id); it = it.parent ? itemByID(b, it.parent) : void 0) {
+    if (it.archived) return it.id;
+    seen.add(it.id);
+  }
+  return 0;
 }
 function needsYouCount(views) {
   let n = 0;
-  for (const v of views) n += v.backlog.items.filter((it) => openQuestion(it)).length;
+  for (const v of views) {
+    for (const it of v.backlog.items) if (!archivedBy(v.backlog, it.id)) n += openQuestions(it).length;
+  }
   return n;
 }
 function needsYouByRoot(views) {
@@ -18484,6 +18497,7 @@ function listRows(view, opts) {
       if (!item) continue;
       const derived = derivedOf(view, id);
       if (!opts.showDone && closedState(derived.state)) continue;
+      if (!opts.showArchived && item.archived) continue;
       if (!matches(id)) continue;
       const hasKids = (kids.get(id) ?? []).length > 0;
       const folded = hasKids && opts.folded.has(id);
@@ -18874,7 +18888,9 @@ async function updateItem(root2, id, update, token2) {
     title: update.title,
     body: update.body,
     waits_on: update.waits_on,
-    sequential: update.sequential
+    sequential: update.sequential,
+    paused: update.paused,
+    archived: update.archived
   }, token2);
   return resp.item;
 }
@@ -18899,6 +18915,258 @@ async function addNote(root2, id, text, token2) {
   const resp = await af("PostBacklogMessage", { repo_path: root2, id, kind: "note", text }, token2);
   return resp.message;
 }
+
+// src/backlog_groups.ts
+function isGroup(b, it) {
+  return !it.parent && isParent(b, it.id);
+}
+function inbox(view) {
+  const out = [];
+  for (const item of view.backlog.items) {
+    if (archivedBy(view.backlog, item.id)) continue;
+    for (const question of openQuestions(item)) out.push({ item, question });
+  }
+  const at = (e) => Date.parse(e.question.at) || 0;
+  return out.sort((a, b) => at(a) - at(b));
+}
+function answerEffect(it, sessions, lookup) {
+  const run = latestRun(it);
+  if (run?.state !== "started" || !run.session_id) return "new_run";
+  const s = sessions.find((x) => x.id === run.session_id);
+  if (!s && lookup) {
+    const l = lookup(run.session_id);
+    if (l === "failed") return "unknown";
+    if (l !== "done") return "checking";
+  }
+  if (!s || s.user_killed === true || (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Killing) return "new_run";
+  if (isArchived(s)) return "restore";
+  const kind = rowKind(s);
+  return kind === "lost" || kind === "dead" ? "restore" : "live";
+}
+function answerEffectText(effect) {
+  switch (effect) {
+    case "restore":
+      return "Restores the session";
+    case "new_run":
+      return "Starts a new run with the previous agent's notes";
+    case "checking":
+      return "Checking the session\u2026";
+    case "unknown":
+      return "Can't tell yet whether the session is there";
+    default:
+      return "Goes to the session";
+  }
+}
+function inGroup(b, group, id) {
+  return id === group || isAncestor(b, group, id);
+}
+function groupDependencies(b, group) {
+  const out = [];
+  for (const from of b.items) {
+    if (!inGroup(b, group, from.id)) continue;
+    for (const toID of from.waits_on ?? []) {
+      out.push({ from, to: itemByID(b, toID), toID, inside: inGroup(b, group, toID) });
+    }
+  }
+  return out;
+}
+var closed = (s) => s === "done" || s === "dropped";
+function groupHistory(view, group) {
+  const b = view.backlog;
+  const at = (it) => Date.parse(it.updated_at) || 0;
+  return b.items.filter((it) => isAncestor(b, group, it.id) && closed(derivedOf(view, it.id).state)).sort((x, y) => at(y) - at(x));
+}
+
+// src/backlog_group_panel.ts
+var PAUSED_GLYPH = "\u2016";
+function action(label, key, run) {
+  const b = h("button", { type: "button", class: "af-ghost" }, label);
+  b.dataset.action = key;
+  b.addEventListener("click", run);
+  return b;
+}
+function groupButtons(it, group, change) {
+  if (it.archived) return [action("Unarchive", "unarchive", () => change(it.id, { archived: false }))];
+  const out = [it.paused ? action("Unpause", "unpause", () => change(it.id, { paused: false })) : action("Pause", "pause", () => change(it.id, { paused: true }))];
+  if (group) out.push(action("Archive", "archive", () => change(it.id, { archived: true })));
+  return out;
+}
+function link(view, id, it, select) {
+  if (!it) return h("span", { class: "af-backlog-reason" }, `${formatID(id)} (missing)`);
+  const d = derivedOf(view, id);
+  const b = h("button", { type: "button", class: "af-backlog-item-link" }, `${formatID(id)} ${it.title}`);
+  b.addEventListener("click", () => select(id));
+  return h(
+    "span",
+    { class: "af-backlog-dep-end" },
+    b,
+    h("span", { class: `af-backlog-reason af-backlog-state-${d.state}` }, `(${STATE_LABELS[d.state]})`)
+  );
+}
+function section(title, ...children) {
+  return h("section", { class: "af-backlog-section" }, h("h3", { class: "af-backlog-section-title" }, title), ...children);
+}
+function groupSections(view, group, select) {
+  const deps = groupDependencies(view.backlog, group.id);
+  const depList = deps.length === 0 ? h("p", { class: "af-backlog-reason" }, "No dependencies") : h("ul", { class: "af-backlog-deps" }, ...deps.map((d) => h(
+    "li",
+    { class: "af-backlog-dep" },
+    link(view, d.from.id, d.from, select),
+    h("span", { class: "af-backlog-reason" }, "waits on"),
+    link(view, d.toID, d.to, select),
+    ...d.inside ? [] : [h("span", { class: "af-backlog-reason" }, "\xB7 outside the group")]
+  )));
+  const done2 = groupHistory(view, group.id);
+  const history2 = done2.length === 0 ? h("p", { class: "af-backlog-reason" }, "Nothing done or dropped yet") : h("ul", { class: "af-backlog-history" }, ...done2.map((it) => {
+    const d = derivedOf(view, it.id);
+    const b = h("button", { type: "button", class: "af-backlog-item-link" }, `${formatID(it.id)} ${it.title}`);
+    b.addEventListener("click", () => select(it.id));
+    return h(
+      "li",
+      { class: "af-backlog-dep" },
+      b,
+      h("span", { class: `af-backlog-chip af-backlog-state-${d.state}` }, h("span", { class: "af-backlog-glyph", ariaHidden: "true" }, STATE_GLYPHS[d.state]), STATE_LABELS[d.state]),
+      h("span", { class: "af-backlog-reason" }, formatTime(it.updated_at))
+    );
+  }));
+  return [section("Dependencies", depList), section("History", history2)];
+}
+
+// src/backlog_inbox.ts
+var EMPTY_INBOX = "No questions";
+var QuestionBox = class {
+  constructor(id, submit) {
+    this.submit = submit;
+    this.answer = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: `Answer ${formatID(id)}\u2026` });
+    this.answer.setAttribute("aria-label", "Answer");
+    this.send = h("button", { type: "button", class: "af-primary" }, "Send answer");
+    this.send.addEventListener("click", () => this.sendAnswer());
+    this.answer.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) {
+        e.preventDefault();
+        this.sendAnswer();
+      }
+    });
+    this.handoffWrap = h(
+      "div",
+      { class: "af-backlog-handoff-wrap", hidden: true },
+      h("div", { class: "af-backlog-label" }, "Notes from the agent"),
+      this.handoff
+    );
+    this.el = h(
+      "div",
+      { class: "af-backlog-question", role: "group", hidden: true },
+      h("div", { class: "af-backlog-question-text" }, icon("circle-question"), this.text),
+      this.handoffWrap,
+      this.effect,
+      h("div", { class: "af-backlog-note-row" }, this.answer, this.send)
+    );
+    this.el.setAttribute("aria-label", "Open question");
+  }
+  el;
+  text = h("span", {});
+  handoff = h("pre", { class: "af-backlog-handoff" });
+  handoffWrap;
+  effect = h("p", { class: "af-backlog-reason af-backlog-effect" });
+  answer;
+  send;
+  qid = 0;
+  get questionId() {
+    return this.qid;
+  }
+  set(q, effect = "") {
+    this.el.hidden = !q;
+    if ((q?.id ?? 0) !== this.qid) this.answer.value = "";
+    this.qid = q?.id ?? 0;
+    this.text.textContent = q ? q.author === "af" ? `af asks: ${q.text}` : q.text : "";
+    const notes = q?.handoff?.trim() ?? "";
+    this.handoffWrap.hidden = notes === "";
+    this.handoff.textContent = notes;
+    this.effect.hidden = effect === "";
+    this.effect.textContent = effect;
+  }
+  sendAnswer() {
+    const text = this.answer.value.trim();
+    const qid = this.qid;
+    if (!text || !qid || this.send.disabled) return;
+    this.send.disabled = true;
+    void this.submit(qid, text).then((ok) => {
+      this.send.disabled = false;
+      if (ok && this.qid === qid && this.answer.value.trim() === text) this.answer.value = "";
+    });
+  }
+};
+var InboxList = class {
+  constructor(actions2) {
+    this.actions = actions2;
+    this.list.setAttribute("aria-label", "Inbox");
+    this.el.append(this.list, this.empty);
+  }
+  el = h("div", { class: "af-backlog-inbox" });
+  list = h("ul", { class: "af-backlog-inbox-list" });
+  empty = h("p", { class: "af-backlog-empty" }, EMPTY_INBOX);
+  cards = /* @__PURE__ */ new Map();
+  // Run sessions the page did not hold, by id: asked for, answered, or unanswerable.
+  lookups = /* @__PURE__ */ new Map();
+  last = null;
+  render(root2, view, sessions) {
+    this.last = [root2, view, sessions];
+    const entries = inbox(view);
+    this.lookUpMissing(entries.map((e) => e.item), sessions);
+    const next = /* @__PURE__ */ new Map();
+    for (const { item, question } of entries) {
+      const key = `${root2}\0${item.id}:${question.id}`;
+      const card = this.cards.get(key) ?? this.card(root2, item.id);
+      const label = `${formatID(item.id)} ${item.title}`;
+      const age = `Asked ${formatTime(question.at)}`;
+      if (card.head.dataset.sig !== `${label}
+${age}`) {
+        card.head.dataset.sig = `${label}
+${age}`;
+        const open = h("button", { type: "button", class: "af-backlog-item-link" }, label);
+        open.addEventListener("click", () => this.actions.select(item.id));
+        card.head.replaceChildren(open, h("span", { class: "af-backlog-reason" }, age));
+      }
+      card.box.set(question, answerEffectText(answerEffect(item, sessions, (id) => this.lookups.get(id))));
+      next.set(key, card);
+    }
+    this.cards = next;
+    const want = [...next.values()].map((c) => c.li);
+    const have = [...this.list.children];
+    if (want.length !== have.length || want.some((li, i) => li !== have[i])) this.reorder(want);
+    this.empty.hidden = want.length > 0;
+  }
+  /** An absent run session is not proof it is gone: a page holds only live sessions
+   *  until it asks. Ask the daemon for each once, then draw again (Codex P2 on #6548). */
+  lookUpMissing(items, sessions) {
+    const missing = [...new Set(items.map((it) => it.runs?.at(-1)).filter((r) => r?.state === "started" && !!r.session_id).map((r) => r.session_id))].filter((id) => !this.lookups.has(id) && !sessions.some((s) => s.id === id));
+    if (missing.length === 0) return;
+    for (const id of missing) this.lookups.set(id, "pending");
+    const settle = (state) => {
+      for (const id of missing) this.lookups.set(id, state);
+      if (this.last) this.render(...this.last);
+    };
+    this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
+  }
+  /** Puts the cards in order. replaceChildren detaches every card, and a detached
+   *  answer box loses focus and its selection: a card that survives gets both back,
+   *  so a question arriving or leaving never takes the typing away (Codex P2 on #6548). */
+  reorder(want) {
+    const active = document.activeElement;
+    const keep = active && this.list.contains(active) && want.some((li) => li.contains(active)) ? active : null;
+    const sel = keep && typeof keep.selectionStart === "number" ? { start: keep.selectionStart, end: keep.selectionEnd ?? keep.selectionStart, dir: keep.selectionDirection ?? "none" } : null;
+    this.list.replaceChildren(...want);
+    if (!keep || document.activeElement === keep) return;
+    keep.focus({ preventScroll: true });
+    if (sel && typeof keep.setSelectionRange === "function") keep.setSelectionRange(sel.start, sel.end, sel.dir);
+  }
+  card(root2, id) {
+    const head = h("div", { class: "af-backlog-inbox-head" });
+    const box = new QuestionBox(id, (qid, text) => this.actions.answer(root2, id, qid, text));
+    const li = h("li", { class: "af-backlog-inbox-card" }, head, box.el);
+    return { li, head, box };
+  }
+};
 
 // src/backlog_serial.ts
 var SerialQueue = class {
@@ -19183,12 +19451,13 @@ var ACTION_STATUS = {
   drop: "dropped",
   reopen: "draft"
 };
-function stateChip(view, id, reason = derivedOf(view, id).reason ?? "", link) {
+function stateChip(view, id, reason = derivedOf(view, id).reason ?? "", link2) {
   const d = derivedOf(view, id);
+  if (reason.startsWith(`${STATE_LABELS[d.state]} \xB7 `)) reason = reason.slice(STATE_LABELS[d.state].length + 1);
   const glyph = h("span", { class: "af-backlog-glyph", ariaHidden: "true" }, STATE_GLYPHS[d.state]);
   let chip;
-  if (link) {
-    const label = `${STATE_LABELS[d.state]}${link.extra}`;
+  if (link2) {
+    const label = `${STATE_LABELS[d.state]}${link2.extra}`;
     chip = h(
       "button",
       { type: "button", class: `af-backlog-chip af-backlog-chip-link af-backlog-state-${d.state}`, tabIndex: -1 },
@@ -19199,15 +19468,15 @@ function stateChip(view, id, reason = derivedOf(view, id).reason ?? "", link) {
     chip.setAttribute("aria-label", `${label} \xB7 Open session`);
     chip.addEventListener("click", (e) => {
       e.stopPropagation();
-      link.open();
+      link2.open();
     });
-    link.decorate?.(chip);
+    link2.decorate?.(chip);
   } else {
     chip = h("span", { class: `af-backlog-chip af-backlog-state-${d.state}` }, glyph, STATE_LABELS[d.state]);
   }
   return reason ? h("span", { class: "af-backlog-state" }, chip, h("span", { class: "af-backlog-reason" }, reason)) : chip;
 }
-function section(title, ...children) {
+function section2(title, ...children) {
   return h("section", { class: "af-backlog-section" }, h("h3", { class: "af-backlog-section-title" }, title), ...children);
 }
 function button(label, run, cls = "af-ghost") {
@@ -19282,22 +19551,7 @@ ${this.note.value}` : text;
       });
     });
     this.head = h("div", { class: "af-backlog-panel-state", tabIndex: -1 });
-    this.answer = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: `Answer ${formatID(id)}\u2026` });
-    this.answer.setAttribute("aria-label", "Answer");
-    this.sendAnswer = button("Send answer", () => this.submitAnswer(), "af-primary");
-    this.answer.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) {
-        e.preventDefault();
-        this.submitAnswer();
-      }
-    });
-    this.question = h(
-      "div",
-      { class: "af-backlog-question", role: "group", hidden: true },
-      h("div", { class: "af-backlog-question-text" }, icon("circle-question"), this.questionText),
-      h("div", { class: "af-backlog-note-row" }, this.answer, this.sendAnswer)
-    );
-    this.question.setAttribute("aria-label", "Open question");
+    this.question = new QuestionBox(id, (qid, text) => actions2.answer(id, qid, text));
     this.above = h("div", { class: "af-backlog-panel-rest" });
     this.below = h("div", { class: "af-backlog-panel-rest" });
     this.threadList = h("ol", { class: "af-backlog-thread" });
@@ -19319,11 +19573,11 @@ ${this.note.value}` : text;
       top,
       this.head,
       this.card,
-      this.question,
+      this.question.el,
       this.above,
-      section("Body", this.body.el),
+      section2("Body", this.body.el),
       this.below,
-      section("Thread", this.threadList, h("div", { class: "af-backlog-note-row" }, this.note, addNote2))
+      section2("Thread", this.threadList, h("div", { class: "af-backlog-note-row" }, this.note, addNote2))
     );
     this.el.setAttribute("aria-label", `Item ${formatID(id)}`);
     this.el.addEventListener("keydown", (e) => {
@@ -19340,10 +19594,6 @@ ${this.note.value}` : text;
   card = h("section", { class: "af-backlog-card", hidden: true });
   earlierOpen = false;
   question;
-  questionText = h("span", {});
-  answer;
-  sendAnswer;
-  questionId = 0;
   above;
   below;
   threadList;
@@ -19407,16 +19657,6 @@ ${this.note.value}` : text;
   item() {
     return this.view ? itemByID(this.view.backlog, this.id) : void 0;
   }
-  submitAnswer() {
-    const text = this.answer.value.trim();
-    const qid = this.questionId;
-    if (!text || !qid || this.sendAnswer.disabled) return;
-    this.sendAnswer.disabled = true;
-    void this.actions.answer(this.id, qid, text).then((ok) => {
-      this.sendAnswer.disabled = false;
-      if (ok && this.questionId === qid && this.answer.value.trim() === text) this.answer.value = "";
-    });
-  }
   render(view, sessions, usage = null) {
     this.view = view;
     this.sessions = sessions;
@@ -19431,10 +19671,7 @@ ${this.note.value}` : text;
     const restore = this.keepField();
     this.head.replaceChildren(stateChip(view, it.id));
     const q = openQuestion(it);
-    this.question.hidden = !q;
-    if ((q?.id ?? 0) !== this.questionId) this.answer.value = "";
-    this.questionId = q?.id ?? 0;
-    this.questionText.textContent = q ? q.author === "af" ? `af asks: ${q.text}` : q.text : "";
+    this.question.set(q, q ? answerEffectText(answerEffect(it, sessions, (id) => this.lookups.get(id))) : "");
     const card = this.sessionCard(view, it);
     this.card.hidden = card.length === 0;
     this.card.replaceChildren(...card);
@@ -19442,6 +19679,7 @@ ${this.note.value}` : text;
     const below = [this.waitsSection(view, it)];
     const children = this.childrenSection(view, it);
     if (children) below.push(children);
+    if (isGroup(view.backlog, it)) below.push(...groupSections(view, it, this.actions.select));
     if (it.source?.proposal) below.push(h("p", { class: "af-backlog-source" }, icon("file-text"), `From proposal ${it.source.proposal}`));
     this.below.replaceChildren(...below);
     this.threadList.replaceChildren(...(it.thread ?? []).map((m) => h(
@@ -19471,11 +19709,11 @@ ${this.note.value}` : text;
     const text = active.textContent;
     const field2 = tag === "INPUT" || tag === "SELECT";
     const value = field2 ? active.value : "";
-    const action = active.dataset.action;
+    const action2 = active.dataset.action;
     return () => {
-      const next = action ? this.above.querySelector(`[data-action="${action}"]`) : [...box.querySelectorAll(tag.toLowerCase())].find((el2) => el2.getAttribute("aria-label") === label && (field2 || el2.textContent === text));
+      const next = action2 ? this.above.querySelector(`[data-action="${action2}"]`) : [...box.querySelectorAll(tag.toLowerCase())].find((el2) => el2.getAttribute("aria-label") === label && (field2 || el2.textContent === text));
       if (!next) {
-        if (action) (this.above.querySelector("[data-action]") ?? this.head).focus({ preventScroll: true });
+        if (action2) (this.above.querySelector("[data-action]") ?? this.head).focus({ preventScroll: true });
         return;
       }
       if (field2) next.value = value;
@@ -19495,6 +19733,7 @@ ${this.note.value}` : text;
       b.dataset.action = a;
       row.append(b);
     }
+    if (isParent(view.backlog, it.id) || it.archived) row.append(...groupButtons(it, isGroup(view.backlog, it), this.actions.group));
     row.append(this.moveMenu(view, it));
     return row;
   }
@@ -19568,7 +19807,7 @@ ${this.note.value}` : text;
         ...needed.map((n) => this.itemLink(n))
       ));
     }
-    return section("Waits on", ...parts);
+    return section2("Waits on", ...parts);
   }
   picker(view, it) {
     const b = view.backlog;
@@ -19632,7 +19871,7 @@ ${this.note.value}` : text;
       parts.push(h("label", { class: "af-backlog-switch" }, sw, "Run children in order"));
     }
     parts.push(entryField("Add child\u2026", `Add a child to ${formatID(it.id)}`, (title) => this.actions.addChild(it.id, title)));
-    return section("Children", ...parts);
+    return section2("Children", ...parts);
   }
   /** The latest run: its preview, branch and PR, its session actions, Start
    *  again, and the earlier runs folded. Empty when the item has no run or PR. */
@@ -20172,6 +20411,11 @@ var BacklogPane = class {
       return token2 === null ? Promise.reject(new Error("not signed in")) : previewSession(id, PREVIEW_LINES, token2);
     });
     this.popover = new PreviewPopover(this.previews);
+    this.inboxList = new InboxList({
+      answer: (root2, id, qid, text) => this.answer(root2, id, qid, text),
+      select: (id) => this.select(id),
+      loadSessions: (ids) => this.host.loadSessions(ids)
+    });
     this.headSlot.append(this.runner.el);
     this.newItem = entryField("New item\u2026", "New item title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
     const listWrap = h(
@@ -20201,6 +20445,9 @@ var BacklogPane = class {
   filter = "all";
   source = null;
   showDone = false;
+  showArchived = false;
+  inboxOn = false;
+  inboxList;
   folded = /* @__PURE__ */ new Set();
   // A reorder shown before the daemon has it. It stays until data from a refresh
   // started after the move committed arrives; gen is Infinity until then.
@@ -20260,6 +20507,7 @@ var BacklogPane = class {
       this.pinned = null;
       this.hoverId = null;
       this.source = null;
+      this.inboxOn = false;
       this.cursor = null;
       this.folded.clear();
     }
@@ -20276,7 +20524,8 @@ var BacklogPane = class {
     const chips = items.map((x) => {
       const sid = latestRun(x)?.session_id;
       const s = sid ? sessions.find((y) => y.id === sid) : void 0;
-      return s ? [s.id, isArchived(s)] : null;
+      const kind = s ? rowKind(s) : "";
+      return s ? [s.id, isArchived(s), kind === "lost" || kind === "dead"] : null;
     });
     return JSON.stringify([chips, (it?.runs ?? []).map((r) => {
       const s = sessions.find((x) => x.id === r.session_id);
@@ -20293,6 +20542,11 @@ var BacklogPane = class {
     this.selected = id;
     this.cursor = id;
     this.focusPanel = true;
+    this.render();
+  }
+  /** Shows the Inbox filter: the nav badge links here. */
+  showInbox() {
+    this.inboxOn = true;
     this.render();
   }
   view() {
@@ -20502,7 +20756,7 @@ ${id}`;
     if (this.pinned !== null && !itemByID(v.backlog, this.pinned)) this.pinned = null;
     const focusedRow = document.activeElement?.closest(".af-backlog-row");
     if (focusedRow && this.focusId === null && this.listSlot.contains(focusedRow)) this.focusId = Number(focusedRow.dataset.itemId);
-    const rows = listRows(v, { filter: this.filter, showDone: this.showDone, folded: this.folded, source: this.source });
+    const rows = this.inboxOn ? [] : listRows(v, this.listOptions());
     const shown = (id) => id !== null && rows.some((r) => r.item.id === id);
     this.cursor = [this.focusId, this.cursor, this.selected].find(shown) ?? rows[0]?.item.id ?? null;
     const list = h("ul", { class: "af-backlog-list", role: "tree" });
@@ -20511,11 +20765,17 @@ ${id}`;
     for (const row of rows) list.append(this.row(v, row));
     this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
     this.filterSlot.replaceChildren(this.filters(v));
-    this.listSlot.replaceChildren(list);
-    this.popover.rebind(list);
     this.emptySlot.replaceChildren();
-    if (v.backlog.items.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, EMPTY_COPY));
-    else if (rows.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, "No items match this filter"));
+    if (this.inboxOn) {
+      this.popover.hide();
+      this.inboxList.render(this.root ?? "", v, this.sessions);
+      if (this.listSlot.firstChild !== this.inboxList.el) this.listSlot.replaceChildren(this.inboxList.el);
+    } else {
+      this.listSlot.replaceChildren(list);
+      this.popover.rebind(list);
+    }
+    if (!this.inboxOn && v.backlog.items.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, EMPTY_COPY));
+    else if (!this.inboxOn && rows.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, "No items match this filter"));
     if (this.selected !== null) {
       if (this.panel?.id !== this.selected) {
         this.closePanel();
@@ -20570,17 +20830,29 @@ ${id}`;
       });
       return b;
     };
-    for (const f of FILTERS) row.append(chip(f.label, this.filter === f.filter, () => {
+    row.append(chip(`Inbox (${inbox(v).length})`, this.inboxOn, () => {
+      this.inboxOn = !this.inboxOn;
+    }));
+    const list = (click) => () => {
+      this.inboxOn = false;
+      click();
+    };
+    for (const f of FILTERS) row.append(chip(f.label, !this.inboxOn && this.filter === f.filter, list(() => {
       this.filter = f.filter;
-    }));
+    })));
     for (const s of sources(v.backlog)) {
-      row.append(chip(`From ${s}`, this.source === s, () => {
+      row.append(chip(`From ${s}`, !this.inboxOn && this.source === s, list(() => {
         this.source = this.source === s ? null : s;
-      }));
+      })));
     }
-    row.append(chip("Show done", this.showDone, () => {
+    row.append(chip("Show done", this.showDone, list(() => {
       this.showDone = !this.showDone;
-    }));
+    })));
+    if (this.showArchived || v.backlog.items.some((it) => it.archived)) {
+      row.append(chip("Show archived", this.showArchived, list(() => {
+        this.showArchived = !this.showArchived;
+      })));
+    }
     return row;
   }
   row(v, row) {
@@ -20610,6 +20882,7 @@ ${id}`;
       h("span", { class: "af-backlog-id" }, formatID(it.id)),
       h("span", { class: "af-backlog-row-title" }, it.title),
       this.rowChip(v, it, row.reason, li),
+      ...this.groupTags(it),
       ...this.rowTail(v, it)
     );
     const keys = [[".af-backlog-chip-link", "o"], [".af-backlog-blocks", "b"], [".af-backlog-row-pr", "p"]].filter(([sel]) => li.querySelector(sel)).map(([, k]) => k);
@@ -20654,6 +20927,14 @@ ${id}`;
         else this.popover.attach(el2, sid, heading, li);
       }
     });
+  }
+  groupTags(it) {
+    const out = [];
+    if (it.paused) {
+      out.push(h("span", { class: "af-backlog-tag af-backlog-paused" }, h("span", { ariaHidden: "true" }, PAUSED_GLYPH), " Paused"));
+    }
+    if (it.archived) out.push(h("span", { class: "af-backlog-tag" }, "Archived"));
+    return out;
   }
   /** "Blocks n" and the PR link at the row's end. */
   rowTail(v, it) {
@@ -20709,7 +20990,7 @@ ${id}`;
         this.folded.delete(p);
       }
     }
-    const shown = new Set(listRows(v, { filter: this.filter, showDone: this.showDone, folded: this.folded, source: this.source }).map((r) => r.item.id));
+    const shown = new Set(listRows(v, this.listOptions()).map((r) => r.item.id));
     if (blocked.some((x) => !shown.has(x.id))) {
       this.filter = "all";
       this.source = null;
@@ -20717,6 +20998,9 @@ ${id}`;
     this.pinned = id;
     this.focusId = blocked[0].id;
     this.render();
+  }
+  listOptions() {
+    return { filter: this.filter, showDone: this.showDone, folded: this.folded, source: this.source, showArchived: this.showArchived };
   }
   setCursor(id) {
     this.cursor = id;
@@ -20867,7 +21151,8 @@ ${id}`;
       openSession: (id) => this.host.openSession(id),
       archiveSession: (id) => this.host.archiveSession(id),
       restoreSession: (id) => this.host.restoreSession(id),
-      loadSessions: (ids) => this.host.loadSessions(ids)
+      loadSessions: (ids) => this.host.loadSessions(ids),
+      group: (id, c) => this.write(root2, (t) => updateItem(root2, id, c, t))
     };
   }
 };
@@ -20925,11 +21210,11 @@ function retryActionForSession(s) {
   }
   return null;
 }
-function patchRetryButton(button2, action) {
-  button2.hidden = action === null;
-  if (action) {
-    button2.textContent = action.label;
-    button2.title = action.title;
+function patchRetryButton(button2, action2) {
+  button2.hidden = action2 === null;
+  if (action2) {
+    button2.textContent = action2.label;
+    button2.title = action2.title;
   }
 }
 function markDeliveredActionForSession(s) {
@@ -21205,6 +21490,9 @@ var AppShell = class {
     this.viewTabs = tabs;
     this.viewNav = viewNav;
     tabs.get("backlog")?.append(this.backlogBadge);
+    tabs.get("backlog")?.addEventListener("click", () => {
+      if (!this.backlogBadge.hidden) this.backlogPane.showInbox();
+    });
     this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "\u2014");
     const switchGlyph = icon("folder-git", "af-project-glyph");
     const switchCaret = icon("chevron-down", "af-project-caret");
@@ -21626,9 +21914,9 @@ var AppShell = class {
    *  whether it bubbled: Create and lifecycle controls stop at different DOM nodes,
    *  while both must expose the modal they open. Filter actions bypass this helper
    *  because their result remains inside the rail. */
-  runRailExit(action) {
+  runRailExit(action2) {
     this.setNav(false);
-    action();
+    action2();
   }
   toggleNav() {
     this.setNav(!this.navOpen);
@@ -21718,7 +22006,10 @@ var AppShell = class {
         this.needsYouChanged = true;
       }
     }
-    setNeedsYouBadge(this.backlogBadge, state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0);
+    const questions = state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0;
+    setNeedsYouBadge(this.backlogBadge, questions);
+    const backlogTab = this.viewTabs.get("backlog");
+    if (backlogTab) backlogTab.title = questions > 0 ? `Backlog \xB7 ${questions === 1 ? "1 question" : `${questions} questions`} \xB7 Opens the inbox` : "";
     if (state.backlog) this.backlogPane.update(state.backlog, state.selectedProject, state.sessions);
     this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice);
     const sessionsChanged = this.lastSessions !== state.sessions;
@@ -22039,10 +22330,10 @@ var AppShell = class {
   }
   /** Applies the daemon-projected verb, icon, and target-qualified accessible name
    *  in one place so render and same-selection live patching cannot drift. */
-  patchLifecycleButton(btn, action, sessionTitle, surface2 = "rail") {
-    const verb = action === "restore" ? "Restore session" : "Archive session";
+  patchLifecycleButton(btn, action2, sessionTitle, surface2 = "rail") {
+    const verb = action2 === "restore" ? "Restore session" : "Archive session";
     const label = `${verb} \u201C${sessionTitle}\u201D`;
-    btn.dataset.action = action;
+    btn.dataset.action = action2;
     if (surface2 === "rail") {
       btn.textContent = verb.replace(" session", "");
     } else {
@@ -24212,8 +24503,8 @@ function openModal(m, focusCard = false, explicitInvoker) {
           return;
         }
         if (!row && header?.isConnected) {
-          const action2 = actionLabel ? header.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-          const target2 = canFocus(action2) ? action2 : header.querySelector(".af-term-more");
+          const action3 = actionLabel ? header.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+          const target2 = canFocus(action3) ? action3 : header.querySelector(".af-term-more");
           if (canFocus(target2)) {
             target2.focus({ preventScroll: true });
             return;
@@ -24227,8 +24518,8 @@ function openModal(m, focusCard = false, explicitInvoker) {
         }
         focusRail();
         const menu = sessionId ? root?.querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
-        const action = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-        const target = canFocus(action) ? action : menu?.querySelector("button");
+        const action2 = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+        const target = canFocus(action2) ? action2 : menu?.querySelector("button");
         if (canFocus(target)) target.focus({ preventScroll: true });
         else {
           const rail = root?.querySelector(".af-rail");
@@ -24325,14 +24616,14 @@ function newSession() {
     })
   );
 }
-function openConfirm(action, session, invoker = captureModalInvoker()) {
-  if (action === "restore" && pendingRestores.has(session.id)) return;
+function openConfirm(action2, session, invoker = captureModalInvoker()) {
+  if (action2 === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
   const dialogGeneration = ++modalGeneration;
-  const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
-  const hasRootAcknowledgment = action === "kill" && session.is_root === true;
+  const immediateRestore = action2 === "restore" && !restoreRequiresConfirmation(session);
+  const hasRootAcknowledgment = action2 === "kill" && session.is_root === true;
   const refreshRootConsent = (latest) => {
-    if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
+    if (action2 === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
       openConfirm("kill", { ...session, title: latest.title, is_root: true }, invoker);
       return true;
     }
@@ -24352,23 +24643,23 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
       return;
     }
     const latest = store.get().sessions.find((s) => s.id === target.id);
-    if (action === "kill" && !latest) {
+    if (action2 === "kill" && !latest) {
       modal.setError("This session is no longer available to delete.");
       return;
     }
     if (refreshRootConsent(latest)) return;
-    if (action === "restore" && pendingRestores.has(target.id)) return;
+    if (action2 === "restore" && pendingRestores.has(target.id)) return;
     const m = modal;
-    const requestGeneration = action === "restore" ? connectionGeneration : 0;
-    const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
-    const captureArchiveSuccess = action === "archive" ? pendingRestores.captureArchiveSuccess(target.id) : null;
-    if (action !== "restore" && !mutation) return;
+    const requestGeneration = action2 === "restore" ? connectionGeneration : 0;
+    const mutation = action2 === "restore" ? null : optimisticSessions.begin(action2, latest ?? session);
+    const captureArchiveSuccess = action2 === "archive" ? pendingRestores.captureArchiveSuccess(target.id) : null;
+    if (action2 !== "restore" && !mutation) return;
     m.setBusy(true);
     if (mutation) {
       closeModal();
       applySessions(optimisticSessions.project());
     }
-    const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : pendingRestores.run(
+    const run = action2 === "kill" ? killSession(target.id, target.title, tok) : action2 === "archive" ? archiveSession(target.id, target.title, tok) : pendingRestores.run(
       target.id,
       (daemonBootId) => restoreSession(
         target.id,
@@ -24380,7 +24671,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
     );
     if (!run) return;
     void run.then(() => {
-      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+      if (action2 === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
         return;
       }
       if (mutation) {
@@ -24392,7 +24683,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
         if (modal === m) closeModal();
       }
     }).catch((e) => {
-      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+      if (action2 === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
         if (token !== null && store.get().phase === "app") requestResync();
         else pendingRestoreResync = true;
         return;
@@ -24405,7 +24696,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
         applySessions(optimisticSessions.project());
         requestResync();
         if (outcome !== "reverted") {
-          surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
+          surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action2 === "kill" ? "Delete session" : action2} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
           return;
         }
         m.setBusy(false);
@@ -24423,7 +24714,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
       if (isMutationOutcomeUncertain(e)) {
         if (modal === m) closeModal();
         requestResync();
-        surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+        surfaceMutationError(new Error(`The ${action2 === "kill" ? "Delete session" : action2} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
         return;
       }
       const showRefusal = () => {
@@ -24431,7 +24722,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
         m.setError(errorText(e));
         if (immediateRestore && modal !== m) surfaceMutationError(e);
       };
-      if (action === "restore") {
+      if (action2 === "restore") {
         void pendingRestores.waitForRefusalResync(target.id).then(() => {
           if (requestGeneration !== connectionGeneration || token !== tok) return;
           showRefusal();
@@ -24443,7 +24734,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
     mountConfirmation(
       confirmModal({
         keptBranch,
-        action,
+        action: action2,
         sessionTitle: target.title,
         immediateRestore,
         isRoot: hasRootAcknowledgment,
@@ -24457,7 +24748,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
     );
     if (immediateRestore) onConfirm();
   };
-  if (action === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
+  if (action2 === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
     const ticket = createSelectionIntent.snapshot();
     const generation = connectionGeneration;
     void fetchKeptBranch(target.id, target.title, token ?? "").then((kept) => {
@@ -25941,7 +26232,7 @@ function onKeydown(e) {
   const selected = selectedSessionData();
   const actionableSelected = selected && isOpenableSession(selected) ? selected : null;
   const focus = state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
-  const action = decideKey(
+  const action2 = decideKey(
     e.key,
     {
       focus,
@@ -25968,17 +26259,17 @@ function onKeydown(e) {
     },
     { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey, meta: e.metaKey }
   );
-  if (action.kind === "none") {
+  if (action2.kind === "none") {
     return;
   }
   e.preventDefault();
   e.stopPropagation();
-  switch (action.kind) {
+  switch (action2.kind) {
     case "closeModal":
       closeModal();
       break;
     case "select":
-      moveSelection(action.id);
+      moveSelection(action2.id);
       break;
     case "attach":
       focusTerminal();
@@ -25987,13 +26278,13 @@ function onKeydown(e) {
       focusRail();
       break;
     case "switchTab":
-      if (shell) shell.switchTab(action.index);
-      else switchTab(action.index);
+      if (shell) shell.switchTab(action2.index);
+      else switchTab(action2.index);
       break;
     case "newTab":
       if (!e.repeat) {
         tabShortcutRepeat.arm(e.code);
-        createSessionTab(action.tabKind);
+        createSessionTab(action2.tabKind);
       }
       break;
     case "closeTab":
@@ -26001,11 +26292,11 @@ function onKeydown(e) {
       else closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
-      if (shell) shell.switchView(action.view);
-      else switchView(action.view);
+      if (shell) shell.switchView(action2.view);
+      else switchView(action2.view);
       break;
     case "cyclePane":
-      splitView.cyclePane(action.delta);
+      splitView.cyclePane(action2.delta);
       break;
     case "closePane":
       splitView.closeFocusedPane();

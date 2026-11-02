@@ -102,6 +102,8 @@ export interface ItemUpdate {
   body?: string;
   waits_on?: number[];
   sequential?: boolean;
+  paused?: boolean;
+  archived?: boolean;
 }
 
 export async function updateItem(root: string, id: number, update: ItemUpdate, token: string): Promise<Item> {
@@ -112,6 +114,8 @@ export async function updateItem(root: string, id: number, update: ItemUpdate, t
     body: update.body,
     waits_on: update.waits_on,
     sequential: update.sequential,
+    paused: update.paused,
+    archived: update.archived,
   }, token);
   return resp.item;
 }

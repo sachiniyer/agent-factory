@@ -95,11 +95,13 @@ func TestManager_RefreshLocked_KeepsSkippedRepoWhoseFileParsesButAllRowsFail(t *
 	cs := &controlServer{manager: m}
 
 	m.mu.Lock()
-	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(m.skippedRepos),
-		"startup must seed the skip set with the corrupted repo")
-	require.NotNil(t, m.instances[daemonInstanceKey("valid-r", "ok")],
-		"the healthy repo's session loads at startup")
+	skipped := skippedRepoIDs(m.skippedRepos)
+	validInst := m.instances[daemonInstanceKey("valid-r", "ok")]
 	m.mu.Unlock()
+	require.Equal(t, []string{"corrupt-r"}, skipped,
+		"startup must seed the skip set with the corrupted repo")
+	require.NotNil(t, validInst,
+		"the healthy repo's session loads at startup")
 
 	// Repair corrupt-r to valid JSON whose row will fail to materialize. The
 	// row has a stable ID so it reaches fromInstanceDataForRefresh directly.
@@ -111,14 +113,18 @@ func TestManager_RefreshLocked_KeepsSkippedRepoWhoseFileParsesButAllRowsFail(t *
 	failingFromInstanceForRefreshFor(t, "stuck")
 
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked(), "a parses-but-zero-rows poll must not error")
-	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, m.skippedRepos,
-		"a repo whose file parses but yields no loadable rows stays skipped, carrying the rows-failed reason and count instead of the stale corrupted one (it is not a repaired snapshot)")
-	require.Nil(t, m.instances[daemonInstanceKey("corrupt-r", "stuck")],
-		"the unloadable row contributes no instance")
-	require.NotNil(t, m.instances[daemonInstanceKey("valid-r", "ok")],
-		"the unrelated healthy repo survives the poll")
+	refreshErr := m.refreshLocked()
+	skippedSet := m.skippedRepos
+	stuckInst2 := m.instances[daemonInstanceKey("corrupt-r", "stuck")]
+	validInst2 := m.instances[daemonInstanceKey("valid-r", "ok")]
 	m.mu.Unlock()
+	require.NoError(t, refreshErr, "a parses-but-zero-rows poll must not error")
+	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, skippedSet,
+		"a repo whose file parses but yields no loadable rows stays skippedSet, carrying the rows-failed reason and count instead of the stale corrupted one (it is not a repaired snapshot)")
+	require.Nil(t, stuckInst2,
+		"the unloadable row contributes no instance")
+	require.NotNil(t, validInst2,
+		"the unrelated healthy repo survives the poll")
 
 	// Wire surface: the Snapshot RPC carries the repo in SkippedRepos with
 	// empty Instances, so listSessionsRequest refuses instead of returning []
@@ -129,7 +135,7 @@ func TestManager_RefreshLocked_KeepsSkippedRepoWhoseFileParsesButAllRowsFail(t *
 	require.NoError(t, cs.Snapshot(SnapshotRequest{RepoID: "corrupt-r"}, &resp))
 	require.Empty(t, resp.Instances, "the repo has no loadable sessions this poll")
 	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(resp.SkippedRepos),
-		"the Snapshot RPC surfaces the repo as skipped so a CLI list can refuse")
+		"the Snapshot RPC surfaces the repo as skippedSet so a CLI list can refuse")
 }
 
 // TestManager_RefreshLocked_ParsesButZeroRowsStaysSkippedAcrossPolls pins the
@@ -184,10 +190,12 @@ func TestManager_RefreshLocked_SelfHealsWhenRowsMaterializeAgain(t *testing.T) {
 	// First poll: every row fails -> repo stays skipped.
 	failingFromInstanceForRefreshFor(t, "stuck")
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(m.skippedRepos),
-		"all rows failing keeps the repo skipped")
+	refreshErr := m.refreshLocked()
+	skipped := skippedRepoIDs(m.skippedRepos)
 	m.mu.Unlock()
+	require.NoError(t, refreshErr)
+	require.Equal(t, []string{"corrupt-r"}, skipped,
+		"all rows failing keeps the repo skipped")
 
 	// Restore the real (stubbed-success) materializer for the next poll by
 	// re-seeding the success seam over the failing one.
@@ -300,11 +308,13 @@ func TestStartup_ParsesButUnloadableRepoWithheldFromSnapshotWire_MatchesMaster(t
 	// startup orphan sweep defers and spares its live container), but the
 	// startupRowsFailedRepos set withholds it from the wire.
 	m.mu.Lock()
-	require.Equal(t, []SkippedRepo{{RepoID: "stuck-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
-		m.skippedRepos, "the internal skip set carries the parses-but-unloadable repo so the sweep defers")
-	require.True(t, m.startupRowsFailedRepos["stuck-r"],
-		"the fresh startup rows-failure is tracked so the wire withholds it")
+	skipped := m.skippedRepos
+	rowsFailed := m.startupRowsFailedRepos["stuck-r"]
 	m.mu.Unlock()
+	require.Equal(t, []SkippedRepo{{RepoID: "stuck-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
+		skipped, "the internal skip set carries the parses-but-unloadable repo so the sweep defers")
+	require.True(t, rowsFailed,
+		"the fresh startup rows-failure is tracked so the wire withholds it")
 
 	// All-repo Snapshot: the healthy session is served, and the parses-but-
 	// unloadable repo is NOT named in SkippedRepos — the wire matches master
@@ -354,11 +364,13 @@ func TestStartup_RowsFailedThenCorrupt_SurfacesOnWire(t *testing.T) {
 	// is a fresh rows-failure seeded into startupRowsFailedRepos and withheld
 	// from the wire (master behavior).
 	m.mu.Lock()
-	require.Equal(t, []SkippedRepo{{RepoID: "stuck-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
-		m.skippedRepos, "startup seeds the rows-failed skip entry")
-	require.True(t, m.startupRowsFailedRepos["stuck-r"],
-		"the fresh startup rows-failure is tracked so the wire withholds it")
+	skipped := m.skippedRepos
+	rowsFailed := m.startupRowsFailedRepos["stuck-r"]
 	m.mu.Unlock()
+	require.Equal(t, []SkippedRepo{{RepoID: "stuck-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}},
+		skipped, "startup seeds the rows-failed skip entry")
+	require.True(t, rowsFailed,
+		"the fresh startup rows-failure is tracked so the wire withholds it")
 
 	var resp SnapshotResponse
 	require.NoError(t, cs.Snapshot(SnapshotRequest{}, &resp))
@@ -370,10 +382,13 @@ func TestStartup_RowsFailedThenCorrupt_SurfacesOnWire(t *testing.T) {
 	// in startupRowsFailedRepos.
 	seedCorruptedRepo(t, "stuck-r")
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.Equal(t, SkippedRepoReasonCorruptedInstancesJSON, m.skippedRepos[0].Reason,
-		"the polling path rewrites the skip entry's reason to the file's current state")
+	refreshErr := m.refreshLocked()
+	skippedSet := m.skippedRepos
 	m.mu.Unlock()
+	require.NoError(t, refreshErr)
+	require.NotEmpty(t, skippedSet)
+	require.Equal(t, SkippedRepoReasonCorruptedInstancesJSON, skippedSet[0].Reason,
+		"the polling path rewrites the skip entry's reason to the file's current state")
 
 	resp = SnapshotResponse{}
 	require.NoError(t, cs.Snapshot(SnapshotRequest{}, &resp))
@@ -397,7 +412,7 @@ func TestStartup_RowsFailedThenCorrupt_SurfacesOnWire(t *testing.T) {
 // row fresh; both rows count toward `materialized`, so `materialized ==
 // len(data)` and the repo self-heals. Pre-fix, the re-hydrated row took a
 // `continue` that did NOT increment `materialized`, so `materialized(1) <
-// len(data)(2)` retracted reread on every poll and the repo stayed skipped
+// len(data)(2)` retracted reread on every poll and the repo stayed skippedSet
 // forever while m.instances held every row — `af sessions list/get/whoami`
 // refused a now-complete snapshot until a daemon restart or an in-band repair of
 // instances.json to [].
@@ -428,12 +443,16 @@ func TestManager_RefreshLocked_SelfHealsWhenRehydratedRowCountsTowardMaterialize
 	// exists to prevent).
 	failingFromInstanceForRefreshFor(t, "stuck")
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, m.skippedRepos,
-		"poll 1 (partial failure): repo stays skipped with the rows-failed reason and count")
-	require.NotNil(t, m.instances[daemonInstanceKey("corrupt-r", "ok")], "poll 1: the loadable row is in memory")
-	require.Nil(t, m.instances[daemonInstanceKey("corrupt-r", "stuck")], "poll 1: the unloadable row is absent from memory")
+	refreshErr := m.refreshLocked()
+	skipped := m.skippedRepos
+	okInst := m.instances[daemonInstanceKey("corrupt-r", "ok")]
+	stuckInst := m.instances[daemonInstanceKey("corrupt-r", "stuck")]
 	m.mu.Unlock()
+	require.NoError(t, refreshErr)
+	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, skipped,
+		"poll 1 (partial failure): repo stays skipped with the rows-failed reason and count")
+	require.NotNil(t, okInst, "poll 1: the loadable row is in memory")
+	require.Nil(t, stuckInst, "poll 1: the unloadable row is absent from memory")
 
 	// Poll 2: fromInstanceDataForRefresh succeeds for every row. `ok` re-hydrates
 	// from m.instances; `stuck` materializes fresh. Counting the re-hydrated row
@@ -441,11 +460,15 @@ func TestManager_RefreshLocked_SelfHealsWhenRehydratedRowCountsTowardMaterialize
 	// reread and drop the repo from the skip set.
 	stubFromInstanceForRefresh(t)
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.NotNil(t, m.instances[daemonInstanceKey("corrupt-r", "ok")])
-	require.NotNil(t, m.instances[daemonInstanceKey("corrupt-r", "stuck")], "poll 2: the recovered row re-materializes")
-	require.Empty(t, m.skippedRepos, "poll 2: a now-complete snapshot self-heals out of the skip set")
+	refreshErr2 := m.refreshLocked()
+	okInst2 := m.instances[daemonInstanceKey("corrupt-r", "ok")]
+	stuckInst2 := m.instances[daemonInstanceKey("corrupt-r", "stuck")]
+	skippedSet := m.skippedRepos
 	m.mu.Unlock()
+	require.NoError(t, refreshErr2)
+	require.NotNil(t, okInst2)
+	require.NotNil(t, stuckInst2, "poll 2: the recovered row re-materializes")
+	require.Empty(t, skippedSet, "poll 2: a now-complete snapshot self-heals out of the skip set")
 
 	// Wire surface: the Snapshot RPC serves the complete snapshot and carries
 	// no SkippedRepos, so `af sessions list/get/whoami --repo <r>` stop refusing.
@@ -460,7 +483,7 @@ func TestManager_RefreshLocked_SelfHealsWhenRehydratedRowCountsTowardMaterialize
 
 // TestManager_RefreshLocked_DroppedLegacyIDRowStaysSkipped pins the case the
 // self-heal fix must PRESERVE: a row that is silently DROPPED (never enters
-// `next`) keeps the repo skipped, because its snapshot is genuinely incomplete.
+// `next`) keeps the repo skippedSet, because its snapshot is genuinely incomplete.
 // Here persistLegacyInstanceID fails with no prior in-memory instance, so the
 // row is dropped via the ghost + continue branch (materialized stays 0); the
 // drop branch now counts it as a failed row (`failedRows++`, #4998), so
@@ -538,12 +561,17 @@ func TestManager_RefreshLocked_ReplacedIDRowDoesNotCountTowardMaterialized(t *te
 
 	failingFromInstanceForRefreshFor(t, "stuck")
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, m.skippedRepos,
-		"poll 1 (partial failure): repo stays skipped with the rows-failed reason and count")
-	require.Equal(t, "id-ok-1", m.instances[daemonInstanceKey("corrupt-r", "ok")].ID, "poll 1: the loadable row is in memory under its on-disk id")
-	require.Nil(t, m.instances[daemonInstanceKey("corrupt-r", "stuck")], "poll 1: the unloadable row is absent from memory")
+	refreshErr := m.refreshLocked()
+	skipped := m.skippedRepos
+	okInst := m.instances[daemonInstanceKey("corrupt-r", "ok")]
+	stuckInst := m.instances[daemonInstanceKey("corrupt-r", "stuck")]
 	m.mu.Unlock()
+	require.NoError(t, refreshErr)
+	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, skipped,
+		"poll 1 (partial failure): repo stays skipped with the rows-failed reason and count")
+	require.NotNil(t, okInst, "poll 1: the loadable row is in memory")
+	require.Equal(t, "id-ok-1", okInst.ID, "poll 1: the loadable row is in memory under its on-disk id")
+	require.Nil(t, stuckInst, "poll 1: the unloadable row is absent from memory")
 
 	// Poll 2: every row is now loadable, but `ok` has been replaced on disk by a
 	// same-titled session with a NEW stable id (id-ok-2). The re-hydrate path
@@ -560,13 +588,18 @@ func TestManager_RefreshLocked_ReplacedIDRowDoesNotCountTowardMaterialized(t *te
 	require.NoError(t, config.SaveRepoInstances("corrupt-r", replacedJSON))
 
 	m.mu.Lock()
-	require.NoError(t, m.refreshLocked())
-	require.NotEmpty(t, m.skippedRepos,
-		"poll 2: a same-title/different-id replacement row is not a true re-hydration, so the repo stays skipped")
-	require.Equal(t, "id-ok-1", m.instances[daemonInstanceKey("corrupt-r", "ok")].ID,
-		"poll 2: the stale in-memory id is retained, not the replaced on-disk id")
-	require.NotNil(t, m.instances[daemonInstanceKey("corrupt-r", "stuck")], "poll 2: the recovered row re-materializes")
+	refreshErr2 := m.refreshLocked()
+	skipped2 := m.skippedRepos
+	okInst2 := m.instances[daemonInstanceKey("corrupt-r", "ok")]
+	stuckInst2 := m.instances[daemonInstanceKey("corrupt-r", "stuck")]
 	m.mu.Unlock()
+	require.NoError(t, refreshErr2)
+	require.NotEmpty(t, skipped2,
+		"poll 2: a same-title/different-id replacement row is not a true re-hydration, so the repo stays skipped")
+	require.NotNil(t, okInst2)
+	require.Equal(t, "id-ok-1", okInst2.ID,
+		"poll 2: the stale in-memory id is retained, not the replaced on-disk id")
+	require.NotNil(t, stuckInst2, "poll 2: the recovered row re-materializes")
 
 	// Wire surface: the Snapshot RPC still refuses the partial (stale-id)
 	// snapshot, so `af sessions list/get/whoami --repo <r>` do not serve it as

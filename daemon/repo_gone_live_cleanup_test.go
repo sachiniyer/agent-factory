@@ -92,8 +92,9 @@ func TestKillSession_LiveCleanupSettlesDurablyBeforeTailFailure(t *testing.T) {
 		Backend: &session.LocalBackend{},
 		afterKill: func() {
 			manager.vscode.mu.Lock()
-			require.True(t, manager.vscode.reserveReconcileLocked(key))
+			reserved := manager.vscode.reserveReconcileLocked(key)
 			manager.vscode.mu.Unlock()
+			require.True(t, reserved)
 		},
 	})
 	_, err = manager.KillSession(KillSessionRequest{Title: "live-tail", RepoID: repoID})
