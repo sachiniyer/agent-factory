@@ -511,10 +511,9 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	}
 	releaseObservationFence := func() {}
 	releaseLimitFence := func() {}
-	// Automated deliveries (tasks, and the backlog's answers and continues) take the
-	// authoritative usage-limit fence; a manual send-prompt may be answering the
-	// limit picker itself.
-	automated := req.TaskOrigin || req.BacklogOrigin
+	// Automated deliveries (task spawns) take the authoritative usage-limit
+	// fence; a manual send-prompt may be answering the limit picker itself.
+	automated := req.TaskOrigin
 	if automated {
 		// The per-instance fence lets any older pane snapshot publish its derived
 		// liveness before this check. The manager fence orders the final read with
@@ -539,10 +538,6 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 	// is in flight is asking a question the user never saw, and the keyed clear
 	// must leave it alone.
 	answered := instance.Attention()
-	// The backlog question this prompt answers, captured the same way (and from
-	// memory, so a dismissed chip still names it): a user's send-prompt is the
-	// same answer as a line typed in the pane.
-	seenQ := m.backlogSeenQuestion(instance)
 	// Liveness cannot express "owed a stale-pane teardown": a committed retry
 	// restores LiveRunning/LiveReady for its owner, and the pane this would
 	// reach may still be bound to the deleted inode. The durable flag is the
@@ -583,16 +578,13 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
-	if !req.TaskOrigin && !req.BacklogOrigin && status != session.PromptNotDelivered {
+	if !req.TaskOrigin && status != session.PromptNotDelivered {
 		// A delivered prompt is the user's answer, same as a keystroke into the
 		// pane — and the only answer a client with no PTY input can send. Task
 		// deliveries are automation, not the user, and PromptNotDelivered (which
 		// returns nil) means the answer never arrived.
 		if answered != nil {
 			m.queueAttentionClear(instance, answered.SetAt)
-		}
-		if !seenQ.empty() {
-			m.noteBacklogSubmitted(instance, seenQ)
 		}
 	}
 	return status, nil

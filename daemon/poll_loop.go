@@ -42,15 +42,6 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// and the TUI renders it from Snapshot instead of computing its own.
 			manager.RefreshStatuses()
 
-			// Once per daemon, after the first refresh: settle backlog runs a
-			// restart left starting. It runs on its own tracked goroutine.
-			manager.RecoverBacklogStarts()
-
-			// Start queued backlog items and stop runs over the cap per run, at
-			// most every 5 s. The pass runs on its own goroutine; starts go
-			// through the async start path.
-			manager.RunBacklogs()
-
 			// Always-ensure the root agent for repos opted in via root_agents
 			// (#1106). Runs after RefreshStatuses so a root whose tmux died is
 			// marked Dead and its heal STARTED in the same tick; the loop body
@@ -124,10 +115,6 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// Send proposal edits to idle agents (proposal push). A delivery runs
 			// on its own goroutine, so it never holds this loop.
 			manager.pushProposals()
-
-			// Meter Claude transcripts for backlog spend every 30 s. The pass
-			// runs on its own goroutine.
-			manager.MeterBacklog()
 
 			// Handle stop before ticker.
 			select {
