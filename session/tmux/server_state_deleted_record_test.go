@@ -35,12 +35,10 @@ func materializeSocket(t *testing.T, dir, name string) string {
 	return path
 }
 
-// resetLastServerState clears the in-memory lastServerState under the mutex so
-// a test starts from a known lineage.
+// resetLastServerState replays a new process: the in-memory lastServerState
+// and the latched generation verdicts both start empty.
 func resetLastServerState() {
-	serverStateMu.Lock()
-	lastServerState = ServerState{}
-	serverStateMu.Unlock()
+	ResetServerStateLineageForTest()
 }
 
 func removeRecord(t *testing.T, home string) {

@@ -194,6 +194,12 @@ func TestRecordServerState_RestartDeletedRecord_EvidenceSources(t *testing.T) {
 		{"unreadable instances.json", func(t *testing.T, home, _ string) {
 			writeRepoInstancesFile(t, home, "a1b2c3d4", "{not json")
 		}},
+		// {"schema_version":1} is NOT a decodable empty store — the instances
+		// member is absent, which decodeInstancesEnvelope rejects. Treating
+		// it as empty would read an undecodable file as "no sessions ever".
+		{"envelope missing the instances member", func(t *testing.T, home, _ string) {
+			writeRepoInstancesFile(t, home, "a1b2c3d4", `{"schema_version":1}`)
+		}},
 		{"corrupt server-death marker", func(t *testing.T, home, _ string) {
 			p := filepath.Join(home, serverDeathFileName)
 			if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
@@ -292,6 +298,55 @@ func TestRecordServerState_RestartDeletedRecord_NoEvidence_WritesCompleteHistory
 			if len(st.PriorSockets) != 0 {
 				t.Fatalf("a first-ever record has no prior sockets: got %v", st.PriorSockets)
 			}
+		})
+	}
+}
+
+// TestRecordServerState_GenerationVerdictLatchedBeforeResidueErased pins the
+// overwrite ordering: this generation's own bootstrap can erase the residue
+// the verdict was read from — the dedicated-server wrapper rewrites
+// tmux-server-death.json when its tmux exits. ensureDedicatedServer latches
+// the verdict before it can launch that wrapper, so a record written after
+// the erase still sees the earlier generation.
+func TestRecordServerState_GenerationVerdictLatchedBeforeResidueErased(t *testing.T) {
+	erases := []struct {
+		name  string
+		erase func(t *testing.T, home, socket string)
+	}{
+		// The reported shape: gen2's crashed bootstrap rewrites the marker
+		// with a fresh-mtime file naming gen2's own socket — the read after
+		// it would see only this generation's death.
+		{"death marker overwritten by own bootstrap", func(t *testing.T, home, socket string) {
+			plantServerDeathMarker(t, home, socket)
+		}},
+		// Same class from the delete side: a sweep that removes residue
+		// before the first record write must not clear the verdict either.
+		{"death marker deleted after the verdict", func(t *testing.T, home, _ string) {
+			if err := os.Remove(filepath.Join(home, serverDeathFileName)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range erases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			sockDir := t.TempDir()
+			resetLastServerState()
+
+			gen1 := materializeSocket(t, sockDir, "gen1")
+			gen2 := materializeSocket(t, sockDir, "gen2")
+
+			// An earlier generation left only a death marker. The daemon's
+			// bootstrap entrypoint latches the verdict before it can spawn
+			// the wrapper whose exit would rewrite it.
+			writeServerDeathMarker(t, home, gen1)
+			if !priorDaemonGenerationEvidence(home) {
+				t.Fatal("a prior-generation death marker must read as evidence at bootstrap entry")
+			}
+			tc.erase(t, home, gen2)
+
+			recordServerState(home, ServerState{Mode: ServerModeFallback, Socket: gen2, Reason: "bootstrap died", At: time.Now()})
+			readBackTruncation(t, home)
 		})
 	}
 }

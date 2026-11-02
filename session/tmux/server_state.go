@@ -269,6 +269,30 @@ var processStartedAt = time.Now()
 // outlived — only that a generation existed whose lineage is now lost. That
 // is precisely the fact the truncated admission exists to record.
 func priorDaemonGenerationEvidence(home string) bool {
+	generationEvidence.Lock()
+	defer generationEvidence.Unlock()
+	if v, ok := generationEvidence.byHome[home]; ok {
+		return v
+	}
+	v := evaluatePriorDaemonGenerationEvidence(home)
+	generationEvidence.byHome[home] = v
+	return v
+}
+
+// generationEvidence latches the prior-generation verdict per home the first
+// time this process evaluates it. The latch is load-bearing, not a cache for
+// speed: ensureDedicatedServer evaluates eagerly before it can launch the
+// dedicated-server wrapper, because this generation's own writes — the
+// wrapper's death marker overwriting tmux-server-death.json on exit, a sweep
+// deleting stale pending-create markers — would otherwise erase the residue
+// before a record write could read it (#6610). Residue can only appear
+// before the generation starts, so a latched verdict never goes stale.
+var generationEvidence = struct {
+	sync.Mutex
+	byHome map[string]bool
+}{byHome: map[string]bool{}}
+
+func evaluatePriorDaemonGenerationEvidence(home string) bool {
 	if priorGenerationInstanceRows(home) {
 		return true
 	}
@@ -300,7 +324,9 @@ func priorDaemonGenerationEvidence(home string) bool {
 	// server's wrapper at exit (#5429). One predating this process proves a
 	// server generation already ran; one written since is this generation's
 	// own bootstrap crash — that server held no sessions yet, so it is not
-	// evidence of a lost lineage.
+	// evidence of a lost lineage. That crash also overwrites the marker it
+	// replaces, which is why this read is latched at bootstrap entry rather
+	// than re-run after it.
 	if info, err := os.Stat(filepath.Join(home, serverDeathFileName)); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return true
@@ -365,12 +391,26 @@ func instanceRowsPresent(data []byte) bool {
 		return len(rows) > 0
 	}
 	var envelope struct {
-		Instances []json.RawMessage `json:"instances"`
+		SchemaVersion int             `json:"schema_version"`
+		Instances     json.RawMessage `json:"instances"`
 	}
 	if err := json.Unmarshal(trimmed, &envelope); err != nil {
 		return true
 	}
-	return len(envelope.Instances) > 0
+	// Only a shape decodeInstancesEnvelope accepts can read as "no rows":
+	// schema_version 1 carrying an explicitly present, decodable instances
+	// array. An envelope missing either member — {"schema_version":1} alone —
+	// or naming a version this binary cannot decode is a shape it cannot
+	// disprove, and the version mismatch is itself proof a different af
+	// generation ran (#6610).
+	if envelope.SchemaVersion != 1 || len(envelope.Instances) == 0 {
+		return true
+	}
+	var rows []json.RawMessage
+	if err := json.Unmarshal(envelope.Instances, &rows); err != nil {
+		return true
+	}
+	return len(rows) > 0
 }
 
 // RecordServerStateForTest invokes recordServerState so tests outside this
@@ -381,13 +421,16 @@ func RecordServerStateForTest(home string, st ServerState) {
 	recordServerState(home, st)
 }
 
-// ResetServerStateLineageForTest clears the in-memory lastServerState under
-// the mutex, replaying the "new process, empty lineage" state a restarted
-// daemon begins with.
+// ResetServerStateLineageForTest clears the in-memory lastServerState and
+// the latched generation verdicts under the mutex, replaying the "new
+// process, empty lineage" state a restarted daemon begins with.
 func ResetServerStateLineageForTest() {
 	serverStateMu.Lock()
 	lastServerState = ServerState{}
 	serverStateMu.Unlock()
+	generationEvidence.Lock()
+	generationEvidence.byHome = map[string]bool{}
+	generationEvidence.Unlock()
 }
 
 // ReadServerState returns the daemon's last recorded tmux server decision.
