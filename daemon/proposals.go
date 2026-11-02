@@ -9,6 +9,12 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// routeServices holds the service behind the proposal routes; proposals also
+// runs the poll-time doc scan.
+type routeServices struct {
+	proposals proposalState
+}
+
 // proposalState holds the manager's proposal service. It is created on first
 // use, so a Manager built as a literal in tests needs no setup.
 type proposalState struct {
