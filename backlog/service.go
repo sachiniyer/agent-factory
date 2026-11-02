@@ -398,9 +398,10 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		} else if req.PR != "" {
 			return nil, errors.New("pr goes with session_id: only the agent's done sets it")
 		}
-		wasDone := false
+		wasDone, wasReview := false, false
 		if it := b.Item(req.ID); it != nil {
 			wasDone = it.Status == StatusDone
+			wasReview = it.Status == StatusReview
 		}
 		changed, err := b.SetStatus(req.ID, req.Status, by, runActive, s.now())
 		if err != nil {
@@ -411,6 +412,13 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		}
 		if req.Status == StatusDone && !wasDone {
 			b.noteOrchestratorDone(req.ID, req.CallerSessionID, s.now())
+		}
+		// queueOrchChanges sees no change on a repeated done --self with the
+		// same PR, but the agent pushed again and the orchestrator must look.
+		if by == ActorAgent && wasReview {
+			if g := b.QueueOrchEvent(OrchEvent{Kind: EventReview, Item: req.ID}, s.now()); g != 0 && !slices.Contains(changed, g) {
+				changed = append(changed, g)
+			}
 		}
 		still := b.questionSessions()
 		for id, sessionID := range asked {

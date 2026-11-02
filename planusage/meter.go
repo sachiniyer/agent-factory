@@ -40,6 +40,14 @@ type AccountMeter struct {
 	// Seen holds the keys of the messages counted, so a message copied into
 	// another transcript counts once.
 	Seen map[string]int64 `json:"seen,omitempty"`
+	// PlainCost holds, for the keys in Seen whose cost this af counted as the
+	// user's spend rather than backlog spend, the cost it counted. A later copy
+	// of one, read under a backlog path within its spans, moves exactly that
+	// cost to backlog spend and drops the key: the copy scanned first need not
+	// be the backlog's own, as when a user forks a backlog conversation
+	// (#6618). A key with no entry never moves, so state written before this
+	// field, or by an older af, keeps the attribution it has. Pruned with Seen.
+	PlainCost map[string]float64 `json:"plain_cost,omitempty"`
 	// Unpriced lists the models seen with no price; their messages are not
 	// counted.
 	Unpriced []string `json:"unpriced,omitempty"`
@@ -437,7 +445,7 @@ func (s *MeterState) ScanAll(sources map[string][]string, backlog []BacklogPath,
 			}
 			return false
 		}
-		res, err := ReadTranscript(c.path, mark, ReadOptions{Overrides: overrides, SkipBad: true, SkipUnpriced: true, Seen: a.Seen, Foreign: foreign})
+		res, err := ReadTranscript(c.path, mark, ReadOptions{Overrides: overrides, SkipBad: true, SkipUnpriced: true, Seen: a.Seen, Foreign: foreign, Dups: true})
 		if err != nil && res.Mark == mark {
 			continue
 		}
@@ -460,8 +468,15 @@ func (s *MeterState) ScanAll(sources map[string][]string, backlog []BacklogPath,
 			b.All += e.Cost
 			if inSpans(e.At, spans) {
 				b.Backlog += e.Cost
+			} else {
+				a.notePlain(e.Key, e.Cost)
 			}
 			a.Buckets[key] = b
+		}
+		for _, d := range res.Dups {
+			if a.moveToBacklog(d, spans) {
+				changed = true
+			}
 		}
 		if res.Mark != a.Files[c.path] || !known {
 			a.Files[c.path] = res.Mark
@@ -486,8 +501,51 @@ func (s *MeterState) ScanAll(sources map[string][]string, backlog []BacklogPath,
 		if PruneSeen(a.Seen, now) {
 			changed = true
 		}
+		for k := range a.PlainCost {
+			if _, ok := a.Seen[k]; !ok {
+				delete(a.PlainCost, k)
+				changed = true
+			}
+		}
 	}
 	return changed
+}
+
+// notePlain records the cost counted as the user's spend for key.
+func (a *AccountMeter) notePlain(key string, cost float64) {
+	if key == "" {
+		return
+	}
+	if a.PlainCost == nil {
+		a.PlainCost = map[string]float64{}
+	}
+	a.PlainCost[key] = cost
+}
+
+// moveToBacklog moves the cost counted for d's message to backlog spend when
+// d, a copy of a message this account counted as the user's spend, is under a
+// backlog path within its spans: the message's first copy scanned was outside
+// the backlog's paths (#6618). The cost moved is the one counted, not d's at
+// today's prices, within the bucket it was counted in, and backlog spend never
+// exceeds that bucket's total. A message with no recorded cost does not move.
+func (a *AccountMeter) moveToBacklog(d Entry, spans []BacklogPath) bool {
+	cost, ok := a.PlainCost[d.Key]
+	if !ok || !inSpans(d.At, spans) {
+		return false
+	}
+	counted, ok := a.Seen[d.Key]
+	if !ok || counted == 0 {
+		return false
+	}
+	bk := time.Unix(counted, 0).Truncate(BucketSpan).Unix()
+	b, ok := a.Buckets[bk]
+	if !ok {
+		return false
+	}
+	b.Backlog = min(b.Backlog+cost, b.All)
+	a.Buckets[bk] = b
+	delete(a.PlainCost, d.Key)
+	return true
 }
 
 // anyPriced reports whether any of the comma-joined models now has a price.

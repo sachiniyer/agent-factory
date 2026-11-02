@@ -249,7 +249,7 @@ func TestRunDaemon_BindsSocketBeforeRestoreCompletes(t *testing.T) {
 	})
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- RunDaemon(config.DefaultConfig()) }()
+	go func() { runDone <- RunDaemon(tcpDisabledConfig()) }()
 
 	// The socket must come up while the restore is still blocked. Generous
 	// deadline for CI; on a healthy box this completes in a few milliseconds.

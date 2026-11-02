@@ -890,6 +890,7 @@ func TestRunDaemonEnsuresRootAgent(t *testing.T) {
 
 	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
 	cfg.DaemonPollInterval = 50
+	cfg.ListenAddr = "" // the TCP listener is not under test — never the fixed default (#6625)
 
 	done := make(chan error, 1)
 	go func() { done <- RunDaemon(cfg) }()
