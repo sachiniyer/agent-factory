@@ -45,8 +45,10 @@ type Orchestrator struct {
 	// instructions and the handoff), and why: OrchUnstartedReplaced for a
 	// replacement af started whose first prompt was proven not delivered, or
 	// that af adopted after a restart; OrchUnstartedRestarted for a session af
-	// restored without its agent conversation. Every delivery sends the start
-	// prompt while it is set, and only a confirmed one clears it.
+	// restored without its agent conversation; OrchUnstartedNew for a session
+	// the user started for a group with none, whose first prompt was proven not
+	// delivered. Every delivery sends the start prompt while it is set, and
+	// only a confirmed one clears it.
 	Unstarted string `json:"unstarted,omitempty"`
 	// Replacing records a replacement af began to start for the gone session,
 	// written before the create, so a daemon that stops before binding it
@@ -57,10 +59,13 @@ type Orchestrator struct {
 	Stay bool `json:"stay,omitempty"`
 }
 
-// Why an orchestrator has not had its start prompt (Orchestrator.Unstarted).
+// Why an orchestrator has not had its start prompt (Orchestrator.Unstarted),
+// which is also why a start prompt says the session started: OrchStartPrompt
+// takes one of these.
 const (
 	OrchUnstartedReplaced  = "replaced"
 	OrchUnstartedRestarted = "restarted"
+	OrchUnstartedNew       = "new"
 )
 
 // OrchReplacing is a replacement af began to start: its session's title base,

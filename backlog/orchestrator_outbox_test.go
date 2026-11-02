@@ -190,16 +190,23 @@ func TestOrchPrompts(t *testing.T) {
 		}
 	}
 
-	p = b.OrchStartPrompt(1, "/p/effort", true, events[:1])
+	p = b.OrchStartPrompt(1, "/p/effort", OrchUnstartedReplaced, events[:1])
 	for _, want := range []string{"You orchestrate backlog effort B-1: Effort", "proposal in /p/effort",
 		"af started this session to replace it", "Merge B-2 first.", "--handoff-file", "the agent asked a question"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("start prompt lacks %q:\n%s", want, p)
 		}
 	}
-	if p = b.OrchStartPrompt(1, "", false, nil); !strings.Contains(p, "restarted without its earlier conversation") ||
+	if p = b.OrchStartPrompt(1, "", OrchUnstartedRestarted, nil); !strings.Contains(p, "restarted without its earlier conversation") ||
 		strings.Contains(p, "Events in") || strings.Contains(p, "proposal in") {
 		t.Errorf("restart prompt:\n%s", p)
+	}
+	if p = b.OrchStartPrompt(1, "", OrchUnstartedNew, nil); !strings.Contains(p, "started this session from the web") ||
+		strings.Contains(p, "restarted") || strings.Contains(p, "replace it") {
+		t.Errorf("new prompt:\n%s", p)
+	}
+	if p = b.OrchStartPrompt(1, "", "", nil); !strings.Contains(p, "restarted without its earlier conversation") {
+		t.Errorf("a kind af does not know reads as a restart:\n%s", p)
 	}
 }
 

@@ -1927,15 +1927,15 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "partial",
+        "pointer": "web/src/backlog_effort.ts EffortSessions (card header Effort session / Start effort session, group panel Orchestrator row Unbind) → web/src/backlog_api.ts openOrchestrator/unbindOrchestrator → POST /v1/OpenBacklogOrchestrator, SetBacklogOrchestrator clear"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/backlog_orchestrate.go backlogOrchestrateCmd, api/backlog.go backlogAddCmd --orchestrate, backlogShowCmd orchestrator block → POST /v1/SetBacklogOrchestrator, SetBacklogOrchestratorHandoff, AddBacklogItems orchestrator, GetBacklog orchestrators (daemon/backlog_orchestrator.go)"
       },
       "verdict": "deliberate",
-      "notes": "Effort orchestrator PR 2 adds binding only: the routes, the CLI and the orchestrator block on GetBacklog. PR 6 adds --stay (SetBacklogOrchestratorHandoff stay), which keeps the orchestrator live after its turn instead of archiving it. A binding is made by the agent of the session that orchestrates (whoami), so it starts on the CLI. Effort orchestrator PR 8 adds the web Effort session button and group panel row. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+      "notes": "Effort orchestrator PR 2 adds binding only: the routes, the CLI and the orchestrator block on GetBacklog. PR 6 adds --stay (SetBacklogOrchestratorHandoff stay), which keeps the orchestrator live after its turn instead of archiving it. A binding is made by the agent of the session that orchestrates (whoami), so it starts on the CLI. Effort orchestrator PR 8 adds the web Effort session button, which opens the group's session (restoring or replacing it) or starts and binds a new one through OpenBacklogOrchestrator, and the group panel's Orchestrator row with Unbind. The web has no session of its own to bind, hand off from or keep live, so --self, --replace, --handoff-file and --stay stay on the CLI; OpenBacklogOrchestrator is the web's way to get a session, and on the CLI af sessions restore and af backlog orchestrate cover it. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     },
     {
       "id": "backlog.escalate",
@@ -2100,6 +2100,7 @@
       "POST /v1/SetBacklogOrchestrator": "backlog.orchestrator",
       "POST /v1/SetBacklogOrchestratorHandoff": "backlog.orchestrator",
       "POST /v1/EscalateBacklogQuestion": "backlog.escalate",
+      "POST /v1/OpenBacklogOrchestrator": "backlog.orchestrator",
       "GET /v1/health": "-",
       "POST /v1/AddProposalDoc": "proposal.docs",
       "POST /v1/RemoveProposalDoc": "proposal.docs",
@@ -2231,6 +2232,8 @@
       "SetBacklogSettings": "backlog.runner",
       "RunBacklog": "backlog.runner",
       "StartBacklogItem": "backlog.sessions",
+      "OpenBacklogOrchestrator": "backlog.orchestrator",
+      "SetBacklogOrchestrator": "backlog.orchestrator",
       "SetAttention": "session.attention",
       "AccountLogin": "session.account-login",
       "ListAccounts": "session.accounts",
@@ -3251,6 +3254,25 @@
         },
         "caller_session_id": {
           "ok": "Set only by af backlog done run inside a session, so an effort session that marks an item done leaves an Inbox note; the web has no session of its own."
+        }
+      },
+      "SetBacklogOrchestrator": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
+        },
+        "session_id": {
+          "ok": "The web only unbinds (clear: true). Binding names the caller's own session, which an agent does with af backlog orchestrate --self; the web starts and binds a session through OpenBacklogOrchestrator instead."
+        },
+        "replace": {
+          "ok": "Taking a group over belongs to binding a session, which the web does not do; af backlog orchestrate --self --replace covers it."
+        },
+        "handoff": {
+          "ok": "Handoff notes are the orchestrating agent's own, set with af backlog orchestrate --self --handoff-file; the web has no session of its own."
+        }
+      },
+      "OpenBacklogOrchestrator": {
+        "repo_id": {
+          "ok": "The web names a project by repo_path, the root it scopes every view by; the daemon resolves it to the repo id."
         }
       },
       "StartBacklogItem": {
