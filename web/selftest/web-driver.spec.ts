@@ -11858,8 +11858,18 @@ test("#1813: renaming from the UI repaints the tab bar AND an open pane, live", 
   await row(page, SESSION_ORDER).click();
   // Put alpha in its own pane, so the rename has an open pane header to repaint —
   // the case reconcile() used to miss entirely (it set a pane's label only when the
-  // pane was created or rebound, and a rename does neither).
-  await dragTabToPane(page, "alpha", "right");
+  // pane was created or rebound, and a rename does neither). Reload first for a
+  // single-pane start (the retained trees are in-memory): under #6429's pane
+  // minimum, an inherited three-leaf layout can legitimately hide a leaf — and a
+  // drop onto a pane's own tab opens the COMPANION tab, not a copy, which is how
+  // a hidden beta sliver replaced the alpha pane this assertion reads.
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await assertRealRailFixture(page);
+  await row(page, SESSION_ORDER).click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await tabByLabel(page, "alpha").click();
+  await dragTabToPane(page, "Agent", "right");
   await expect(page.locator(".af-term-host .af-pane-label")).toContainText(["alpha"]);
 
   await renameTabViaUI(page, "alpha", "storefront");

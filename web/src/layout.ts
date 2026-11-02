@@ -358,6 +358,110 @@ export function setRatio(root: LayoutNode, splitId: string, ratio: number): Layo
   return rec(root);
 }
 
+// --- Pane minimums (#6429) ----------------------------------------------------
+//
+// The web port of the TUI's pane floor: ui/layout/grid.go gives every workspace
+// pane at least PaneMinWidth = 40 terminal columns and, when the terminal cannot
+// give that to every open pane, hides the least-recently-focused ones with a
+// "too narrow" status rather than drawing slivers. The web tree is richer — it
+// nests row AND column splits, so "does it fit" is per-leaf, not per-pane-count —
+// but the contract is the same: no rendered pane under the floor, and overflow
+// degrades visibly (split.ts names the hidden count) instead of clipping.
+
+/** The TUI's 40-column pane floor in px. One column is ~8px at the client's
+ *  default terminal pitch, so a pane narrower than this cannot even show the
+ *  TUI's smallest usable terminal. */
+export const PANE_MIN_WIDTH_PX = 320;
+
+/** The floor on the axis a column split squeezes. The TUI splits horizontally
+ *  only, so there is no number to port; ~4 terminal rows keeps a stacked pane's
+ *  scrollback readable and its header usable. */
+export const PANE_MIN_HEIGHT_PX = 80;
+
+/** Divider thickness along its split's axis (styles.css --af-space-1). */
+export const PANE_DIVIDER_PX = 4;
+
+/** The smallest size `node` may take along `dir` while every leaf inside it still
+ *  meets its floor. Along the split's own axis the two children must coexist, so
+ *  their floors sum (plus the divider); across it they overlap, so the larger
+ *  floor governs. */
+export function minSubtreeSize(node: LayoutNode, dir: SplitDir, leafMinPx: number, dividerPx: number): number {
+  if (node.kind === "leaf") {
+    return leafMinPx;
+  }
+  const a = minSubtreeSize(node.a, dir, leafMinPx, dividerPx);
+  const b = minSubtreeSize(node.b, dir, leafMinPx, dividerPx);
+  return node.dir === dir ? a + dividerPx + b : Math.max(a, b);
+}
+
+/** The rendered size of every leaf if `root` were tiled into `w`×`h` px: splits
+ *  divide along their axis by ratio, each reserving `dividerPx` for its handle. */
+export function leafSizes(root: LayoutNode, w: number, h: number, dividerPx: number): Map<string, { w: number; h: number }> {
+  const out = new Map<string, { w: number; h: number }>();
+  const walk = (node: LayoutNode, nw: number, nh: number): void => {
+    if (node.kind === "leaf") {
+      out.set(node.id, { w: nw, h: nh });
+      return;
+    }
+    if (node.dir === "row") {
+      const content = Math.max(0, nw - dividerPx);
+      walk(node.a, content * node.ratio, nh);
+      walk(node.b, content * (1 - node.ratio), nh);
+    } else {
+      const content = Math.max(0, nh - dividerPx);
+      walk(node.a, nw, content * node.ratio);
+      walk(node.b, nw, content * (1 - node.ratio));
+    }
+  };
+  walk(root, w, h);
+  return out;
+}
+
+/** The layout as it may actually be drawn inside `w`×`h` px: hides leaves until
+ *  every remaining one clears the floors on both axes — or only one is left,
+ *  which always shows (a single pane is exempt, like the TUI's pre-split pane A).
+ *
+ *  `protectedId` is the focused leaf: it is the last to hide, so the user's
+ *  attention is never the thing that disappears. Other leaves hide in reverse
+ *  visual order (rightmost/bottommost first), preferring violators — a sliver
+ *  was unreadable anyway — and falling back to healthy leaves only when hiding
+ *  one is the only way to give the protected leaf its floor.
+ *
+ *  The returned tree shares structure with `root` where leaves survive; the
+ *  dropped ids come back as `hidden` so the caller can say how many panes the
+ *  layout wanted but could not fit. */
+export function fitToSize(
+  root: LayoutNode,
+  w: number,
+  h: number,
+  protectedId: string | null,
+): { tree: LayoutNode; hidden: string[] } {
+  let tree = root;
+  const hidden: string[] = [];
+  for (;;) {
+    const sizes = leafSizes(tree, w, h, PANE_DIVIDER_PX);
+    const ids = leaves(tree).map((l) => l.id);
+    const violators = new Set(
+      [...sizes].filter(([, s]) => s.w < PANE_MIN_WIDTH_PX || s.h < PANE_MIN_HEIGHT_PX).map(([id]) => id),
+    );
+    if (violators.size === 0 || ids.length <= 1) {
+      break;
+    }
+    const droppable = [...ids].reverse().filter((id) => id !== protectedId);
+    const drop = droppable.find((id) => violators.has(id)) ?? droppable[0];
+    if (drop === undefined) {
+      break; // only the protected leaf remains
+    }
+    const next = closeLeaf(tree, drop);
+    if (next === null) {
+      break; // defensive: a leaf that closeLeaf refuses was the last one
+    }
+    tree = next;
+    hidden.push(drop);
+  }
+  return { tree, hidden };
+}
+
 /**
  * Reconciles a layout against the session's current tab list: clamps every leaf's
  * tab into [0, tabCount-1] (a tab closed elsewhere would otherwise stream a
