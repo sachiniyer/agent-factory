@@ -372,10 +372,22 @@ export class AttachTerminal {
   // an authoritative echo that matches is a no-op.
   private lastRows = 0;
   private lastCols = 0;
-  // The foreign authoritative grid this pane last re-contested, and when. A
-  // repeat of the same foreign grid inside FOREIGN_ECHO_YIELD_MS is an
-  // insistent writer and wins unchallenged; anything else gets one reclaim.
-  private contestedEcho: { rows: number; cols: number; at: number } | null = null;
+  // When this pane last re-contested each foreign authoritative grid. A repeat
+  // of the same foreign grid inside FOREIGN_ECHO_YIELD_MS is an insistent
+  // writer and wins unchallenged; anything else gets one reclaim. The history
+  // is per-grid, not last-only: alternating peers (three visible clients
+  // fitting the shared PTY to different hosts) would otherwise overwrite each
+  // other's contest record and reclaim every echo — an indefinite resize
+  // ping-pong. Entries older than the window are pruned on each use.
+  private contestedEchoes = new Map<string, number>();
+  // Whether this connection has consumed its subscribe admission — the FIRST
+  // foreign-sized echo after (re)connect. The broker replays the current
+  // authority to every fresh subscriber, so that echo is the grid the world
+  // already had, not a contested answer to a claim this pane had not yet made.
+  // Recording it would let the peer's FIRST real answer to our claim read as
+  // a repeat inside the yield window — the activation would stand down to the
+  // grid it was meant to take (#6635, the #2347 recurrence).
+  private admittedEcho = false;
   // A peer resize can temporarily collapse this client's scrollback (for example,
   // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
   // not a one-time distance from the bottom: output can keep arriving while this
@@ -1424,6 +1436,11 @@ export class AttachTerminal {
     }
     ws.binaryType = "arraybuffer";
     this.ws = ws;
+    // A new socket is a new contest epoch: the first foreign-sized echo on it
+    // is the subscribe admission, and sighting history from the dead
+    // connection cannot say whether a grid is being insisted on now.
+    this.contestedEchoes.clear();
+    this.admittedEcho = false;
 
     ws.onopen = () => {
       this.retry = 0;
@@ -1932,13 +1949,31 @@ export class AttachTerminal {
       // visible host re-asserts its own fit once per foreign grid; the same
       // foreign grid echoed again inside the yield window is an insistent
       // writer and last-resize-wins lets it prevail rather than ping-pong.
+      //
+      // Except the FIRST foreign-sized echo on this connection: that is the
+      // subscribe admission — the broker's replay of the authority the PTY
+      // already had, delivered before our claim could possibly be on the
+      // wire. It earns the same refit, but it is no sighting of a contested
+      // write: counting it makes the peer's first real answer to our claim
+      // look like a repeat, and the activation yields to the grid it was
+      // meant to take (#6635).
       if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
-        const now = Date.now();
-        const contested = this.contestedEcho;
-        if (contested == null || contested.rows !== rows || contested.cols !== cols ||
-            now - contested.at >= FOREIGN_ECHO_YIELD_MS) {
-          this.contestedEcho = { rows, cols, at: now };
+        if (!this.admittedEcho) {
+          this.admittedEcho = true;
           this.scheduleVisibleFit();
+        } else {
+          const now = Date.now();
+          const key = `${rows}x${cols}`;
+          const last = this.contestedEchoes.get(key);
+          if (last === undefined || now - last >= FOREIGN_ECHO_YIELD_MS) {
+            for (const [k, at] of this.contestedEchoes) {
+              if (now - at >= FOREIGN_ECHO_YIELD_MS) {
+                this.contestedEchoes.delete(k);
+              }
+            }
+            this.contestedEchoes.set(key, now);
+            this.scheduleVisibleFit();
+          }
         }
       }
     }

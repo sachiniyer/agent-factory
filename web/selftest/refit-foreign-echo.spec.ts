@@ -13,9 +13,95 @@
 // PRE-growth grid back — the exact bytes a stale peer sends (OpResize 0x02,
 // two big-endian uint16s). The pane must apply the echo (the foreign grid is
 // authoritative) and then re-assert its own host fit without any user signal.
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 const session = process.env.AF_WEB_SESSION_ORDER ?? "probe-order";
+
+// Park the page the way a REAL hidden tab behaves, which is also how the
+// production detector sees it: rAF callbacks are deferred, not dropped —
+// they queue while the page is unpainted and all fire on the first frame
+// after it is visible again. Observers are stubbed the same way (their
+// callbacks come from the same rendering steps), or headless Chromium's
+// live deliveries would un-park the flag through a signal the scenario
+// could never see. Same helper hidden-client-resize.spec.ts carries.
+const park = (page: Page): Promise<void> =>
+  page.evaluate(() => {
+    const w = window as unknown as {
+      __afRealRaf?: typeof requestAnimationFrame;
+      __afRealCancel?: typeof cancelAnimationFrame;
+      __afDeferred?: Map<number, FrameRequestCallback>;
+      __afNextRafId?: number;
+      __afRealIO?: typeof IntersectionObserver;
+      __afRealRO?: typeof ResizeObserver;
+    };
+    if (w.__afRealRaf) {
+      return;
+    }
+    w.__afRealRaf = window.requestAnimationFrame;
+    w.__afRealCancel = window.cancelAnimationFrame;
+    w.__afRealIO = window.IntersectionObserver;
+    w.__afRealRO = window.ResizeObserver;
+    w.__afDeferred = new Map();
+    w.__afNextRafId = 1;
+    window.requestAnimationFrame = (cb: FrameRequestCallback) => {
+      const id = w.__afNextRafId as number;
+      w.__afNextRafId = id + 1;
+      (w.__afDeferred as Map<number, FrameRequestCallback>).set(id, cb);
+      return id;
+    };
+    window.cancelAnimationFrame = (id: number) => {
+      (w.__afDeferred as Map<number, FrameRequestCallback>).delete(id);
+    };
+    const deadObserver = class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): unknown[] {
+        return [];
+      }
+      get root(): null {
+        return null;
+      }
+      get rootMargin(): string {
+        return "0px";
+      }
+      get thresholds(): readonly number[] {
+        return [0];
+      }
+    };
+    window.IntersectionObserver = deadObserver as unknown as typeof IntersectionObserver;
+    window.ResizeObserver = deadObserver as unknown as typeof ResizeObserver;
+  });
+
+// Un-hide: restore the real scheduling surface, then replay every deferred
+// callback in registration order — exactly what a browser does when a
+// hidden tab becomes visible.
+const unpark = (page: Page): Promise<void> =>
+  page.evaluate(() => {
+    const w = window as unknown as {
+      __afRealRaf?: typeof requestAnimationFrame;
+      __afRealCancel?: typeof cancelAnimationFrame;
+      __afDeferred?: Map<number, FrameRequestCallback>;
+      __afRealIO?: typeof IntersectionObserver;
+      __afRealRO?: typeof ResizeObserver;
+    };
+    if (w.__afRealRaf) {
+      window.requestAnimationFrame = w.__afRealRaf;
+      window.cancelAnimationFrame = w.__afRealCancel as typeof cancelAnimationFrame;
+      window.IntersectionObserver = w.__afRealIO as typeof IntersectionObserver;
+      window.ResizeObserver = w.__afRealRO as typeof ResizeObserver;
+      delete w.__afRealRaf;
+      delete w.__afRealCancel;
+      delete w.__afRealIO;
+      delete w.__afRealRO;
+    }
+    const deferred = w.__afDeferred ? [...w.__afDeferred.values()] : [];
+    w.__afDeferred?.clear();
+    const now = performance.now();
+    for (const cb of deferred) {
+      cb(now);
+    }
+  });
 
 test("#6215 a stale authoritative resize cannot strand the active terminal's grid", async ({ page, request }) => {
   const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
@@ -125,4 +211,195 @@ test("#6215 a stale authoritative resize cannot strand the active terminal's gri
 
   // And the emulator shows it: the re-asserted fit has taken the grid back.
   await expect.poll(rows, { timeout: 8000 }).toBe(grown);
+});
+
+// #6635 (the #2347 flake's post-#6628 signature): activating a terminal while a
+// peer owns the shared PTY must leave the grid at the NEW host's fit. The yield
+// window exists to bound a genuinely insistent peer — one that re-writes its
+// grid AFTER the pane's claim is on the wire. The broker itself marks the one
+// echo that is NOT such a write: a fresh subscriber's first resize echo is a
+// replay of the current authority (ptybroker_sub.go — `resizeSeen = resizeGen
+// - 1`), the grid the world already had, not a contested answer to a claim the
+// pane had not yet made. Recording it as a contest lets the peer's FIRST real
+// answer masquerade as a repeat inside the yield window — the activation then
+// stands down to the grid it was meant to take. That is the real failure: the
+// second client stayed at the first's 34 rows while the spec polled for >60.
+//
+// The strand is hard to pin because master's last-only contested record is
+// overwritten by EVERY differing echo — including the pane's OWN claim echo
+// when it lands while the emulator sits on the foreign grid. The flake needed
+// the pane's scheduled refit to beat that echo — an ordering the spec cannot
+// control directly. What CAN be controlled: whether the pane may write at
+// all. A parked page withholds every wire write (sendResize refuses while
+// rAF starves), and connectAfterInitialFit is not gated on visibility — a
+// parked page still connects. So this spec lets the pane's FIRST connect
+// happen while parked:
+//
+//   1. the probe seeds 34x100 on the agent tab before any pane exists;
+//   2. the page is parked (rAF deferred — the real parked state);
+//   3. the pane attaches: its initial fit delivers by the 250ms timer,
+//      marks the page parked, and connects. On open the force-send
+//      withholds; the subscribe replay carries 34x100 — the contested
+//      sighting on master, admission on the fix — and the parked refit it
+//      schedules withholds its claim too, leaving it owed;
+//   4. unpark flushes the owed claim; that echo lands while the emulator
+//      already shows the host grid — a no-op that cannot touch the record;
+//   5. the probe writes 34x100 once more: the peer's first real answer.
+//      On master the replay primed the window so the repeat yields — the
+//      emulator stands down onto 34 rows. On the fix the repeat is the
+//      pane's first contested sighting and it re-asserts the host fit.
+test("#6635 an activation answers a peer's first real write — the subscribe replay is not a contest", async ({
+  page,
+  request,
+}) => {
+  const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const selected = snap.data.instances.find((s: { title: string }) => s.title === session);
+  expect(selected?.id).toBeTruthy();
+
+  // A tall viewport so the pane's own fit claims a grid clearly distinct from
+  // the foreign one the probe writes (>60 rows, the #2347 desktop shape).
+  await page.setViewportSize({ width: 1280, height: 2000 });
+  await page.goto("/");
+  await page.locator("#app[data-af-resync-settled]").waitFor();
+  // Fonts settle before the pane attaches — its first fit must already be
+  // the final grid, or a font-metric change writes a second claim whose
+  // echo re-contests the pane and masks the yield this spec pins.
+  await page.evaluate(
+    () =>
+      document.fonts.ready.then(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+      ),
+  );
+
+  // A raw subscriber on the agent tab's stream (?tab=0 binds the same broker
+  // the pane's ?tab_id= attach lands on). It seeds the foreign grid BEFORE
+  // the pane can possibly subscribe, then serves as the ordering probe:
+  // every resize the broker applies is broadcast back to it, in broker
+  // order — the same probe trick the #6215 spec uses. The grid must differ
+  // from xterm's 24x80 default AND from the pane's own fit: a replay that
+  // matches the emulator's size is a no-op and primes nothing — that is why
+  // the real failure's 34 rows is the signature here.
+  const staleRows = 34;
+  const staleCols = 100;
+  const atSeed = await page.evaluate(
+    async ({ sessionId, staleRows, staleCols }) => {
+      const w = window as unknown as {
+        __echoes: number[];
+        __probe: WebSocket;
+        __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+      };
+      w.__echoes = [];
+      const ws = new WebSocket(
+        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}` +
+          `/v1/sessions/${encodeURIComponent(sessionId)}/stream?access_token=&tab=0`,
+      );
+      ws.binaryType = "arraybuffer";
+      ws.onmessage = (ev) => {
+        if (typeof ev.data !== "string") {
+          return;
+        }
+        try {
+          const msg = JSON.parse(ev.data) as { type?: string; rows?: number };
+          if (msg.type === "resize" && typeof msg.rows === "number") {
+            w.__echoes.push(msg.rows);
+          }
+        } catch {
+          // not a control frame
+        }
+      };
+      w.__waitRows = (pred, after, label) =>
+        new Promise<number>((resolve, reject) => {
+          const timer = setTimeout(
+            () =>
+              reject(new Error(`no ${label} resize echo within 10s (saw ${w.__echoes.join(",")})`)),
+            10_000,
+          );
+          const poll = setInterval(() => {
+            const at = w.__echoes.findIndex((r, i) => i >= after && pred(r));
+            if (at >= 0) {
+              clearTimeout(timer);
+              clearInterval(poll);
+              resolve(at);
+            }
+          }, 20);
+        });
+      w.__probe = ws;
+      await new Promise<void>((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = () => reject(new Error("probe stream failed to open"));
+      });
+      // OpResize 0x02 + rows,cols as big-endian uint16s — the foreign grid,
+      // in place before the pane can possibly subscribe.
+      ws.send(new Uint8Array([0x02, staleRows >> 8, staleRows & 0xff, 0, staleCols]));
+      return w.__waitRows((r) => r === staleRows, 0, `${staleRows}-row seed`);
+    },
+    { sessionId: selected.id, staleRows, staleCols },
+  );
+
+  // Park BEFORE the pane exists. Its mount fits through the starved-frame
+  // timer twin, which marks the page parked and connects anyway; from then
+  // on every wire write withholds. The pane can never stamp an echo of its
+  // own between the replay and the peer's answer — the interposition that
+  // kept the flake rare is removed by construction, not luck.
+  await park(page);
+  await page.evaluate((sessionId) => {
+    window.location.hash = `#/session/${encodeURIComponent(sessionId)}`;
+  }, selected.id);
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open", {
+    timeout: 15_000,
+  });
+  // The replay primes {34x100} on master; the parked page's refit withholds
+  // the claim and arms the wake probe. Give that parked fit its timer.
+  await page.waitForTimeout(500);
+  const rows = () => page.locator(".af-term-host .xterm-rows > div").count();
+  const waitEchoGT = (min: number, after: number, label: string) =>
+    page.evaluate(
+      ([n, a, l]) => {
+        const w = window as unknown as {
+          __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+        };
+        return w.__waitRows((r) => r > n, a, l);
+      },
+      [min, after, label],
+    );
+
+  // Un-hide: the deferred frames replay, the owed claim writes, and its
+  // echo lands while the emulator already shows the host grid — a no-op
+  // that cannot overwrite the replay's contested record.
+  await unpark(page);
+  await waitEchoGT(60, atSeed + 1, "unpark claim flush");
+
+  // The peer's first real answer, inside the replay-primed window. Its own
+  // echo proves the pane has SEEN it — what the emulator does next is the
+  // pane's reply, not an echo still in flight. On master the emulator
+  // stands down onto 34 rows; on the fix it takes the host grid back.
+  await page.evaluate(
+    ({ staleRows, staleCols }) => {
+      const w = window as unknown as { __probe: WebSocket };
+      w.__probe.send(new Uint8Array([0x02, staleRows >> 8, staleRows & 0xff, 0, staleCols]));
+    },
+    { staleRows, staleCols },
+  );
+  const atRepeat = await page.evaluate(
+    ([n, a, l]) => {
+      const w = window as unknown as {
+        __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+      };
+      return w.__waitRows((r) => r === n, a, l);
+    },
+    [staleRows, atSeed + 2, `${staleRows}-row repeat`],
+  );
+  // The probe's echo does not prove the PANE processed the repeat — each
+  // subscription consumes the broadcast independently, and the emulator was
+  // already on the host grid from the unpark flush, so a poll now could pass
+  // on pre-repeat state. The reclaim is observable on the wire: a >60 echo
+  // AFTER the repeat can only be the pane re-asserting its host fit. On
+  // master none ever comes — the yield writes nothing.
+  await waitEchoGT(60, atRepeat + 1, "post-repeat reclaim");
+  await expect
+    .poll(rows, {
+      message: "the activation must re-assert its host fit against the peer's first real answer",
+      timeout: 10_000,
+    })
+    .toBeGreaterThan(60);
 });

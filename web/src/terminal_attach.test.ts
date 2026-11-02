@@ -20,6 +20,7 @@ function stage() {
   const terminal = Object.assign(Object.create(AttachTerminal.prototype), {
     container: host, term, fit, stopped: false, initialConnectStarted: false,
     pendingViewport: null, lastRows: 0, lastCols: 0, parked: false,
+    contestedEchoes: new Map<string, number>(), admittedEcho: true,
     visibleFitFrame: null, visibleFitTimer: null, visibleFitAttempts: 0, resizeTimer: null,
     // The real sendResize runs so its dedupe and hidden-page write guard are
     // exercised; only the socket write is stubbed.
@@ -626,6 +627,69 @@ test("the same foreign grid after the yield window is a fresh contest — one st
     assert.deepEqual([term.rows, term.cols], [40, 120]);
   } finally {
     Date.now = priorNow;
+    win.restore();
+  }
+});
+
+// #6635 (the #2347 recurrence): a freshly attached pane's FIRST foreign echo is
+// the broker's subscribe replay — the grid the world already had, not a live
+// peer answering a claim the pane has not yet made. Recording it as a contest
+// primed the yield window, so the peer's first real answer to the pane's claim
+// read as a repeat and won unchallenged: the activation stood down to the grid
+// it was meant to take. The admission echo must earn the refit without seeding
+// the contest record.
+test("the subscribe admission echo is not a contested sighting — the activation answers the peer's first real write", async () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls, terminal } = stageEchoed();
+    // A pane whose socket just opened: nothing has been admitted yet.
+    Object.assign(terminal, { admittedEcho: false });
+    // The broker's replayed authority lands: the emulator takes it and the
+    // activation refit is owed — but no contest is recorded.
+    echo(24, 80);
+    win.runFrame();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize"], "the admission echo still earns the host's claim");
+    assert.deepEqual([term.rows, term.cols], [40, 120]);
+    // The peer's FIRST real answer to that claim is a brand-new contest, not a
+    // repeat: the activation re-asserts instead of yielding to the replayed
+    // grid (on master this echo was consumed by the primed window and nothing
+    // left the wire — the stranded-34 failure).
+    echo(24, 80);
+    win.runFrame();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"]);
+    // Only NOW is a same-grid repeat insistence: it wins unchallenged.
+    echo(24, 80);
+    assert.deepEqual([term.rows, term.cols], [24, 80], "the emulator still follows the authoritative echo");
+    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "an insistent peer still wins");
+  } finally {
+    win.restore();
+  }
+});
+
+test("alternating foreign grids cannot bypass the yield window — contest history is per-grid", async () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls } = stageEchoed();
+    // Three visible clients fitting the same PTY to different hosts: a
+    // last-only contest record is overwritten by each intervening grid, so
+    // every echoed grid looks new and every echo earns a reclaim — an
+    // indefinite resize ping-pong (Codex P2 on #6628).
+    echo(24, 80);
+    win.runFrame();
+    await Promise.resolve();
+    echo(30, 90);
+    win.runFrame();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "each new foreign grid gets one reclaim");
+    // A repeat of EITHER grid inside its own window is the same insistent
+    // writer — it wins unchallenged, whichever order the echoes arrive in.
+    echo(24, 80);
+    echo(30, 90);
+    assert.deepEqual([term.rows, term.cols], [30, 90], "the emulator still follows the authoritative echo");
+    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "no further reclaims leave the wire");
+  } finally {
     win.restore();
   }
 });
