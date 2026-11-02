@@ -202,6 +202,15 @@ func checkTmuxEnvironment(report *Report) {
 }
 
 func checkAgentBinaries(cfg *config.Config, report *Report) {
+	// Anchor relative program_overrides to the session's launch directory (the
+	// repo the doctor is inside), mirroring the daemon-side #5779 fix that
+	// passes repo.WorkspacePath() to preflight.LocalSessionPrereqsAt. The doctor
+	// used the cwd-fallback CheckCommand instead, so a relative override flipped
+	// between PASS and FAIL purely on where `af doctor` was invoked. Outside any
+	// repo the launch directory cannot be determined, so today's CheckCommand is
+	// kept and any failure is reported with an honest message instead of
+	// install/reinstall guidance (#6487).
+	workspace, repoErr := currentRepoRoot()
 	header := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
 		command := agent
@@ -210,7 +219,7 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 			command = config.ResolveProgram(cfg, agent)
 			configured = cfg.DefaultProgram == agent || strings.TrimSpace(cfg.ProgramOverrides[agent]) != ""
 		}
-		check, err := preflight.CheckCommand(command)
+		check, err, outsideRepo := checkProgramCommand(workspace, repoErr, command)
 		if err == nil {
 			header = append(header, agent+"=present")
 			report.Pass(sectionEnvironment, agent, fmt.Sprintf("%q resolves to %s", command, check.Path))
@@ -219,6 +228,9 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 		header = append(header, agent+"=missing")
 		detail := fmt.Sprintf("%q is not runnable: %v", command, err)
 		remediation := preflight.ProgramError(agent, command, err).Error()
+		if outsideRepo {
+			remediation = noAnchorMessage(command)
+		}
 		if configured {
 			report.Fail(sectionEnvironment, agent, detail, remediation)
 		} else {
