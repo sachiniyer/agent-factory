@@ -431,7 +431,7 @@ func TestHTTP_SharedCore_MatchesRPCTwin(t *testing.T) {
 // also asserts the socket is torn down on close.
 func TestHTTP_UnixSocket_EndToEnd(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	m, err := NewManager(config.DefaultConfig())
+	m, err := NewManager(tcpDisabledConfig()) // the unix socket is the whole surface under test
 	require.NoError(t, err)
 	require.NoError(t, task.AddTask(enabledCronTask("eeee1001", "")))
 

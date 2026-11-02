@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -46,7 +45,7 @@ func TestRunDaemon_ExitsWhenHomeDeleted(t *testing.T) {
 	runDone := make(chan error, 1)
 	runExited := make(chan struct{})
 	go func() {
-		runDone <- RunDaemon(config.DefaultConfig())
+		runDone <- RunDaemon(tcpDisabledConfig())
 		close(runExited)
 	}()
 

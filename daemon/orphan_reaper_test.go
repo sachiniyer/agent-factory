@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -38,7 +37,7 @@ func TestRunDaemonReachesReadyWhileOrphanSweepIsBlocked(t *testing.T) {
 	t.Cleanup(func() { sweepOrphanContainers = previousSweep })
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- RunDaemon(config.DefaultConfig()) }()
+	go func() { runDone <- RunDaemon(tcpDisabledConfig()) }()
 
 	// Ready with the sweep still blocked (or not yet started).
 	waitForDaemonPhase(t, DaemonPhaseReady)

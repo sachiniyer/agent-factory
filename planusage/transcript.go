@@ -39,6 +39,9 @@ type FileMark struct {
 
 // Entry is the cost of one assistant message.
 type Entry struct {
+	// Key identifies the message across transcript copies; empty when the
+	// message has no id.
+	Key  string
 	At   time.Time
 	Cost float64
 }
@@ -64,6 +67,12 @@ type ReadOptions struct {
 	// Within, when set, reads past the messages outside every one of its spans
 	// without counting them.
 	Within []Span
+	// Dups, when set, makes ReadTranscript report each message it reads past
+	// because Seen already holds its key, within Within, in ReadResult.Dups,
+	// with its key and time and no cost. The account scan uses them to move a
+	// message to backlog spend when its first copy scanned was not under a
+	// backlog path (#6618).
+	Dups bool
 }
 
 // Span is a stretch of time, from From until Until; a zero bound is open.
@@ -100,6 +109,9 @@ type ReadResult struct {
 	Skipped []string
 	// Bad is set when reading stopped at a line that could not be parsed.
 	Bad bool
+	// Dups lists the copies of already counted messages read past, when
+	// ReadOptions.Dups is set: Key and At only. They are not counted.
+	Dups []Entry
 }
 
 // Cost sums the entries.
@@ -233,6 +245,15 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 		if msg.ID != "" {
 			key = messageKey(msg.ID, l.RequestID)
 			if _, dup := seen[key]; dup {
+				if opts.Dups {
+					at := l.Timestamp
+					if at.IsZero() {
+						at = info.ModTime()
+					}
+					if within(at, opts.Within) {
+						res.Dups = append(res.Dups, Entry{Key: key, At: at})
+					}
+				}
 				res.Mark.Offset = next
 				continue
 			}
@@ -264,7 +285,7 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 			res.Mark.Offset = next
 			continue
 		}
-		res.Entries = append(res.Entries, Entry{At: at, Cost: msg.Usage.cost(pr)})
+		res.Entries = append(res.Entries, Entry{Key: key, At: at, Cost: msg.Usage.cost(pr)})
 		if key != "" {
 			seen[key] = at.Unix()
 			res.Mark.Last = key

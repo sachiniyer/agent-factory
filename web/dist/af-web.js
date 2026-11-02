@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "6beb4ff01d18";
+var CLIENT_VERSION = "cefc4f5207c6";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -10878,6 +10878,7 @@ var BACKOFF_MAX_MS = 1e4;
 var RESIZE_DEBOUNCE_MS = 120;
 var VISIBLE_FIT_TIMER_MS = 250;
 var VISIBLE_FIT_MAX_ATTEMPTS = 60;
+var FOREIGN_ECHO_YIELD_MS = 1500;
 var TOUCH_PRESS_MAX_ROWS = 32;
 function terminalFontSize(phone) {
   return terminalFontSizeFor(phone);
@@ -11130,6 +11131,10 @@ var AttachTerminal = class {
   // an authoritative echo that matches is a no-op.
   lastRows = 0;
   lastCols = 0;
+  // The foreign authoritative grid this pane last re-contested, and when. A
+  // repeat of the same foreign grid inside FOREIGN_ECHO_YIELD_MS is an
+  // insistent writer and wins unchallenged; anything else gets one reclaim.
+  contestedEcho = null;
   // A peer resize can temporarily collapse this client's scrollback (for example,
   // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
   // not a one-time distance from the bottom: output can keep arriving while this
@@ -11767,7 +11772,9 @@ var AttachTerminal = class {
       this.everOpened = true;
       this.exited = false;
       this.cb.onStatus("open");
-      this.sendResize(this.term.rows, this.term.cols, true);
+      if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
+        this.sendResize(this.term.rows, this.term.cols, true);
+      }
       this.flushPendingInput();
     };
     ws.onmessage = (e) => this.onMessage(e.data);
@@ -12170,6 +12177,14 @@ var AttachTerminal = class {
       try {
         this.term.resize(cols, rows);
       } catch {
+      }
+      if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
+        const now = Date.now();
+        const contested = this.contestedEcho;
+        if (contested == null || contested.rows !== rows || contested.cols !== cols || now - contested.at >= FOREIGN_ECHO_YIELD_MS) {
+          this.contestedEcho = { rows, cols, at: now };
+          this.scheduleVisibleFit();
+        }
       }
     }
   }

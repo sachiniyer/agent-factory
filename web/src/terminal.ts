@@ -132,6 +132,15 @@ const VISIBLE_FIT_TIMER_MS = 250;
  *  and the intersection observer owns its retry — this covers only a host that
  *  HAS geometry whose measurement failed transiently. */
 const VISIBLE_FIT_MAX_ATTEMPTS = 60;
+
+/** A foreign authoritative echo that repeats the same grid inside this window is
+ *  an insistent writer — a live peer whose host genuinely disagrees, or the
+ *  broker re-adopting a pane's tmux-measured size on every repaint capture.
+ *  Last-resize-wins lets it prevail rather than ping-ponging resize frames
+ *  between clients forever. The same grid repeated after the window is a fresh
+ *  contest: one stale write must not strand an active pane's grid for good. */
+const FOREIGN_ECHO_YIELD_MS = 1500;
+
 // How many wrapped rows either side of the pressed one a long press will read. It
 // bounds work done synchronously in touchstart for EVERY touch; see snapshotPress.
 const TOUCH_PRESS_MAX_ROWS = 32;
@@ -363,6 +372,10 @@ export class AttachTerminal {
   // an authoritative echo that matches is a no-op.
   private lastRows = 0;
   private lastCols = 0;
+  // The foreign authoritative grid this pane last re-contested, and when. A
+  // repeat of the same foreign grid inside FOREIGN_ECHO_YIELD_MS is an
+  // insistent writer and wins unchallenged; anything else gets one reclaim.
+  private contestedEcho: { rows: number; cols: number; at: number } | null = null;
   // A peer resize can temporarily collapse this client's scrollback (for example,
   // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
   // not a one-time distance from the bottom: output can keep arriving while this
@@ -1419,7 +1432,14 @@ export class AttachTerminal {
       this.cb.onStatus("open");
       // Push our current size on (re)connect so a server that came up after us, or
       // a resize we did while disconnected, is reflected. The echo reconciles it.
-      this.sendResize(this.term.rows, this.term.cols, true);
+      // Only a pane with a measurable host owns a grid to assert: a session-first
+      // sibling hidden under CSS carries a stale emulator size, and force-sending
+      // it would revert the ACTIVE pane's grid through the broker's
+      // last-resize-wins echo (#6215). Its ordinary activation refit claims the
+      // grid when it becomes visible again.
+      if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
+        this.sendResize(this.term.rows, this.term.cols, true);
+      }
       // …then hand over anything typed before this socket existed. After the size
       // so a full-screen program sizes itself before the keystrokes arrive.
       this.flushPendingInput();
@@ -1902,6 +1922,24 @@ export class AttachTerminal {
         this.term.resize(cols, rows);
       } catch {
         // ignore an out-of-range size from a racing peer
+      }
+      // A foreign write just took the grid off this host's fit: a hidden
+      // sibling's reconnect force-send, the broker re-adopting the pane's
+      // tmux-measured size, an old belief replayed to a fresh subscriber. Left
+      // alone it strands this emulator on the wrong grid until an unrelated
+      // signal happens to refit it — the #6215 strand, where a taller phone
+      // viewport's fresh grid was silently reverted to the pre-growth one. The
+      // visible host re-asserts its own fit once per foreign grid; the same
+      // foreign grid echoed again inside the yield window is an insistent
+      // writer and last-resize-wins lets it prevail rather than ping-pong.
+      if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
+        const now = Date.now();
+        const contested = this.contestedEcho;
+        if (contested == null || contested.rows !== rows || contested.cols !== cols ||
+            now - contested.at >= FOREIGN_ECHO_YIELD_MS) {
+          this.contestedEcho = { rows, cols, at: now };
+          this.scheduleVisibleFit();
+        }
       }
     }
   }

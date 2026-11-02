@@ -521,3 +521,111 @@ test("a resize event during a pending retry is not swallowed: the retry reads th
     win.restore();
   }
 });
+
+// #6215: an authoritative echo carrying a grid no live client asked for — a
+// hidden sibling's reconnect force-send, the broker re-adopting the pane's
+// tmux-measured size, a stale belief replayed to a fresh subscriber — reverts
+// the emulator and, left alone, strands the active pane on the wrong grid
+// until an unrelated signal refits it. A staged terminal with a real buffer
+// face exercises the whole echo→reclaim→send path.
+function stageEchoed() {
+  const staged = stage();
+  const { terminal, term } = staged;
+  Object.assign(term, {
+    resize: (cols: number, rows: number) => Object.assign(term, { rows, cols }),
+    buffer: { active: { viewportY: 0, baseY: 0 } },
+    registerMarker: () => ({ dispose() {} }),
+    scrollToLine: () => {},
+    viewportY: 0,
+    baseY: 0,
+  });
+  // Settled on this host's grid and already connected: the last-known size is
+  // ours, not a peer's.
+  Object.assign(terminal, { initialConnectStarted: true });
+  terminal.lastRows = 40;
+  terminal.lastCols = 120;
+  Object.assign(term, { rows: 40, cols: 120 });
+  return {
+    ...staged,
+    echo: (rows: number, cols: number) =>
+      (terminal as unknown as { applyEchoedSize(r: number, c: number): void })
+        .applyEchoedSize(rows, cols),
+  };
+}
+
+test("a foreign authoritative echo on the active pane re-asserts the host's grid", async () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls } = stageEchoed();
+    // A stale 24x80 write reverts the emulator — the #6215 strand's start.
+    echo(24, 80);
+    assert.deepEqual([term.rows, term.cols], [24, 80]);
+    // The reclaim is armed through the ordinary scheduled-fit pair.
+    win.runFrame();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize"]);
+    assert.deepEqual([term.rows, term.cols], [40, 120], "the host's grid is back");
+  } finally {
+    win.restore();
+  }
+});
+
+test("the same foreign grid repeated inside the yield window is an insistent writer — it wins", async () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls, terminal } = stageEchoed();
+    echo(24, 80);
+    win.runFrame();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize"]);
+    // The foreign writer immediately re-asserts the same grid: the reclaim
+    // loses to last-resize-wins rather than ping-ponging between clients.
+    echo(24, 80);
+    assert.deepEqual([term.rows, term.cols], [24, 80], "the emulator still follows the authoritative echo");
+    assert.deepEqual(calls, ["fit", "resize"], "no second reclaim leaves the wire");
+    assert.equal(terminal.visibleFitFrame, null);
+    assert.equal(terminal.visibleFitTimer, null);
+  } finally {
+    win.restore();
+  }
+});
+
+test("a foreign echo on a hidden pane follows the grid but schedules no reclaim", () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, host, terminal } = stageEchoed();
+    host.clientWidth = 0; // a session-first sibling hidden under CSS
+    echo(24, 80);
+    assert.deepEqual([term.rows, term.cols], [24, 80]);
+    assert.equal(terminal.visibleFitFrame, null);
+    assert.equal(terminal.visibleFitTimer, null);
+    assert.equal(win.frames.size, 0);
+    assert.equal(win.timers.size, 0);
+  } finally {
+    win.restore();
+  }
+});
+
+test("the same foreign grid after the yield window is a fresh contest — one stale write cannot strand the pane for good", async () => {
+  const win = stubWindow();
+  const priorNow = Date.now;
+  let now = 10_000;
+  Date.now = () => now;
+  try {
+    const { echo, term, calls } = stageEchoed();
+    echo(24, 80);
+    win.runFrame();
+    await Promise.resolve();
+    echo(24, 80); // insistent: yielded, the pane stays on the foreign grid
+    now += 1600;
+    Object.assign(term, { rows: 40, cols: 120 }); // our own fit converged meanwhile
+    echo(24, 80);
+    win.runFrame();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"]);
+    assert.deepEqual([term.rows, term.cols], [40, 120]);
+  } finally {
+    Date.now = priorNow;
+    win.restore();
+  }
+});

@@ -91,7 +91,7 @@ func TestRunDaemon_SecondStartFailsFastWithoutTouchingRuntimeFiles(t *testing.T)
 	}
 
 	// Second start.
-	runErr := RunDaemon(config.DefaultConfig())
+	runErr := RunDaemon(tcpDisabledConfig())
 	if runErr == nil {
 		t.Fatal("second RunDaemon returned nil; expected it to refuse to start")
 	}

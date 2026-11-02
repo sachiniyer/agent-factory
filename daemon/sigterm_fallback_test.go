@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -94,7 +93,7 @@ func TestRunDaemonPIDFileLifecycle(t *testing.T) {
 		t.Fatalf("PID file already exists before daemon start, stat err=%v", err)
 	}
 
-	cfg := config.DefaultConfig()
+	cfg := tcpDisabledConfig()
 	cfg.DaemonPollInterval = 50
 
 	done := make(chan error, 1)
