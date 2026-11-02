@@ -636,9 +636,10 @@ func TestWebListenerDifferentPortBindFailureKeepsSameHandle(t *testing.T) {
 	require.Contains(t, failed, "network.listen_addr")
 
 	wl.mu.Lock()
-	require.Same(t, before, wl.webHandle,
-		"a different-port failure must leave the old listener untouched — no release-then-bind bounce")
+	after := wl.webHandle
 	wl.mu.Unlock()
+	require.Same(t, before, after,
+		"a different-port failure must leave the old listener untouched — no release-then-bind bounce")
 	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"))
 	require.Equal(t, oldAddr, m.lifecycle.snapshot().listeners.TCPBoundAddr)
 }
@@ -678,9 +679,10 @@ func TestWebListenerSamePortDistinctAddressKeepsSameHandle(t *testing.T) {
 	require.Contains(t, failed, "network.listen_addr")
 
 	wl.mu.Lock()
-	require.Same(t, before, wl.webHandle,
-		"a same-port failure our listener did not cause must leave it untouched — no release-then-bind bounce")
+	after := wl.webHandle
 	wl.mu.Unlock()
+	require.Same(t, before, after,
+		"a same-port failure our listener did not cause must leave it untouched — no release-then-bind bounce")
 	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"))
 	require.Equal(t, oldAddr, m.lifecycle.snapshot().listeners.TCPBoundAddr)
 }
@@ -804,9 +806,10 @@ func TestWebListenerSamePortWideningBlockedBySiblingKeepsHandle(t *testing.T) {
 	require.Contains(t, failed, "network.listen_addr")
 
 	wl.mu.Lock()
-	require.Same(t, before, wl.webHandle,
-		"when the sibling also blocks the wildcard, releasing ours cannot help — the handle must not bounce")
+	after := wl.webHandle
 	wl.mu.Unlock()
+	require.Same(t, before, after,
+		"when the sibling also blocks the wildcard, releasing ours cannot help — the handle must not bounce")
 	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"))
 	require.Equal(t, oldAddr, m.lifecycle.snapshot().listeners.TCPBoundAddr)
 }
@@ -852,9 +855,10 @@ func TestWebListenerIPv4WildcardRequestSeesIPv6Sibling(t *testing.T) {
 	require.Contains(t, failed, "network.listen_addr")
 
 	wl.mu.Lock()
-	require.Same(t, before, wl.webHandle,
-		"a requested 0.0.0.0 binds dual-stack and still collides with the [::1] sibling — releasing ours cannot help")
+	after := wl.webHandle
 	wl.mu.Unlock()
+	require.Same(t, before, after,
+		"a requested 0.0.0.0 binds dual-stack and still collides with the [::1] sibling — releasing ours cannot help")
 	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"))
 	require.Equal(t, oldAddr, m.lifecycle.snapshot().listeners.TCPBoundAddr)
 }
@@ -1022,9 +1026,10 @@ func TestWebListenerTwoWaySwapAppliesLive(t *testing.T) {
 	require.Equal(t, webTarget, wl.webConfigAddress())
 
 	wl.mu.Lock()
-	require.Equal(t, "127.0.0.1:"+port, wl.previewConfigAddr)
-	require.Equal(t, "127.0.0.1:"+port, wl.previewBoundAddr)
+	previewConfigAddr, previewBoundAddr := wl.previewConfigAddr, wl.previewBoundAddr
 	wl.mu.Unlock()
+	require.Equal(t, "127.0.0.1:"+port, previewConfigAddr)
+	require.Equal(t, "127.0.0.1:"+port, previewBoundAddr)
 	require.Equal(t, http.StatusOK,
 		getStatus(t, m.lifecycle.snapshot().listeners.TCPBoundAddr, "/v1/health"))
 }
@@ -1084,13 +1089,15 @@ func TestWebListenerTwoWaySwapRestoresPairWhenSecondHalfFails(t *testing.T) {
 	require.Contains(t, failed, "network.preview_listen_addr")
 
 	wl.mu.Lock()
-	require.NotNil(t, wl.previewHandle,
-		"undoing the control move frees the preview listener's home — it must come back")
-	require.Equal(t, oldPreviewConfig, wl.previewConfigAddr)
-	require.Equal(t, oldAddr, wl.webBoundAddr,
-		"the control listener must be restored to the address it was moved off")
-	require.NotNil(t, wl.webHandle)
+	previewHandle, previewConfigAddr := wl.previewHandle, wl.previewConfigAddr
+	webBoundAddr, webHandle := wl.webBoundAddr, wl.webHandle
 	wl.mu.Unlock()
+	require.NotNil(t, previewHandle,
+		"undoing the control move frees the preview listener's home — it must come back")
+	require.Equal(t, oldPreviewConfig, previewConfigAddr)
+	require.Equal(t, oldAddr, webBoundAddr,
+		"the control listener must be restored to the address it was moved off")
+	require.NotNil(t, webHandle)
 	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"))
 }
 
@@ -1134,11 +1141,12 @@ func TestWebListenerMutualDeclineIsNotASwap(t *testing.T) {
 	require.Contains(t, failed, "network.preview_listen_addr")
 
 	wl.mu.Lock()
-	require.Same(t, beforeWeb, wl.webHandle,
-		"the requests overlap each other — releasing both can only strand a listener")
-	require.Same(t, beforePreview, wl.previewHandle,
-		"the requests overlap each other — releasing both can only strand a listener")
+	webHandle, previewHandle := wl.webHandle, wl.previewHandle
 	wl.mu.Unlock()
+	require.Same(t, beforeWeb, webHandle,
+		"the requests overlap each other — releasing both can only strand a listener")
+	require.Same(t, beforePreview, previewHandle,
+		"the requests overlap each other — releasing both can only strand a listener")
 	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"))
 }
 

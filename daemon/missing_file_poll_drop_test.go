@@ -328,12 +328,14 @@ func TestManager_RefreshLocked_MissingFilePreservesTaskRunSlotAgainstCap(t *test
 	// "an instance exists" check (which a freshly materialized one would satisfy).
 	manager.mu.Lock()
 	liveInst := manager.instances[key]
-	require.NotNil(t, liveInst, "precondition: created task session must be in m.instances")
-	require.Equal(t, 1, manager.countTaskRunsLocked(repo.ID, "task1"),
-		"precondition: the cap is full with one in-flight run")
-	require.True(t, isAtConcurrencyLimitErr(manager.admitTaskRunLocked(repo.ID, "task1", limit)),
-		"precondition: a second run must be refused at the limit")
+	runs := manager.countTaskRunsLocked(repo.ID, "task1")
+	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", limit)
 	manager.mu.Unlock()
+	require.NotNil(t, liveInst, "precondition: created task session must be in m.instances")
+	require.Equal(t, 1, runs,
+		"precondition: the cap is full with one in-flight run")
+	require.True(t, isAtConcurrencyLimitErr(admitErr),
+		"precondition: a second run must be refused at the limit")
 
 	// An external actor deletes exactly the repo's instances.json (directory kept).
 	path, err := config.RepoInstancesPath(repo.ID)
@@ -342,15 +344,19 @@ func TestManager_RefreshLocked_MissingFilePreservesTaskRunSlotAgainstCap(t *test
 
 	// The polling refresh rebuilds m.instances from (now missing) disk.
 	manager.mu.Lock()
-	require.NoError(t, manager.refreshLocked())
+	refreshErr := manager.refreshLocked()
+	after := manager.instances[key]
+	runsAfter := manager.countTaskRunsLocked(repo.ID, "task1")
+	admitErrAfter := manager.admitTaskRunLocked(repo.ID, "task1", limit)
+	manager.mu.Unlock()
+	require.NoError(t, refreshErr)
 	// The live session is the SAME instance — preserved, not dropped and
 	// re-materialized into a fresh identity.
-	require.Same(t, liveInst, manager.instances[key],
+	require.Same(t, liveInst, after,
 		"a missing instances.json must preserve the repo's live in-memory session; refreshLocked replaced m.instances wholesale")
 	// Its in-flight run is still counted against the cap.
-	require.Equal(t, 1, manager.countTaskRunsLocked(repo.ID, "task1"),
+	require.Equal(t, 1, runsAfter,
 		"the preserved session's run must still count against max_concurrent_runs; without preservation the count drops to 0 and the cap over-admits")
-	require.True(t, isAtConcurrencyLimitErr(manager.admitTaskRunLocked(repo.ID, "task1", limit)),
+	require.True(t, isAtConcurrencyLimitErr(admitErrAfter),
 		"a saturated cap must still refuse a replacement run after the file vanishes; admitting one would exceed max_concurrent_runs while the original is still in flight")
-	manager.mu.Unlock()
 }

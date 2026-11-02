@@ -246,10 +246,12 @@ func TestManager_RefreshLocked_DoesNotAddMidlifeCorruptionToSkipSet(t *testing.T
 	require.NoError(t, err)
 
 	m.mu.Lock()
-	require.Empty(t, m.skippedRepos, "a clean startup seeds no skipped repos")
-	require.NotNil(t, m.instances[daemonInstanceKey("repo-a", "a-sess")],
-		"the healthy repo's session loads at startup")
+	skipped := m.skippedRepos
+	aSess := m.instances[daemonInstanceKey("repo-a", "a-sess")]
 	m.mu.Unlock()
+	require.Empty(t, skipped, "a clean startup seeds no skipped repos")
+	require.NotNil(t, aSess,
+		"the healthy repo's session loads at startup")
 
 	// Corrupt repo-a's instances.json MID-LIFE, after the daemon is already up.
 	seedCorruptedRepo(t, "repo-a")

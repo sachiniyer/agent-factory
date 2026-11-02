@@ -66,10 +66,12 @@ func TestRestoreLostSessionsSkipsContendedWorktreeAdmission(t *testing.T) {
 	admission.Lock()
 
 	manager.RestoreLostSessions()
-	assert.Zero(t, backend.recoverCalls(), "the operational poll must not rebuild while create owns admission")
-	assert.Equal(t, session.Lost, inst.GetStatus())
+	recoverCalls := backend.recoverCalls()
+	status := inst.GetStatus()
 
 	admission.Unlock()
+	assert.Zero(t, recoverCalls, "the operational poll must not rebuild while create owns admission")
+	assert.Equal(t, session.Lost, status)
 	manager.RestoreLostSessions()
 	assert.Equal(t, 1, backend.recoverCalls(), "a later poll may recover once admission is free")
 }
